@@ -144,14 +144,6 @@ ScopedCollectionFilter CollectionShardingRuntime::getOwnershipFilter(
                                        optReceivedShardVersion,
                                        supportNonVersionedOperations);
 
-    if (!supportNonVersionedOperations) {
-        tassert(7032301,
-                "For sharded collections getOwnershipFilter cannot be relied on without a valid "
-                "shard version",
-                !ShardVersion::isPlacementVersionIgnored(*optReceivedShardVersion) ||
-                    !metadata->get().allowMigrations() || !metadata->get().isSharded());
-    }
-
     return {std::move(metadata)};
 }
 
@@ -190,7 +182,7 @@ ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
                                              : ShardVersionPlacementIgnoredNoIndexes(),
                         boost::none /* wantedVersion */,
                         ShardingState::get(_serviceContext)->shardId()),
-        str::stream() << "sharding status of collection " << _nss.ns()
+        str::stream() << "sharding status of collection " << _nss.toStringForErrorMsg()
                       << " is not currently available for description and needs to be recovered "
                       << "from the config server",
         optMetadata);
@@ -255,7 +247,8 @@ boost::optional<SharedSemiFuture<void>> CollectionShardingRuntime::getCriticalSe
 void CollectionShardingRuntime::setFilteringMetadata(OperationContext* opCtx,
                                                      CollectionMetadata newMetadata) {
     tassert(7032302,
-            str::stream() << "Namespace " << _nss.ns() << " must never be sharded.",
+            str::stream() << "Namespace " << _nss.toStringForErrorMsg()
+                          << " must never be sharded.",
             !newMetadata.isSharded() || !_nss.isNamespaceAlwaysUnsharded());
 
     stdx::lock_guard lk(_metadataManagerLock);
@@ -365,7 +358,10 @@ Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
             // (Ignore FCV check): This feature doesn't have any upgrade/downgrade concerns. The
             // feature flag is used to turn on new range deleter on startup.
             if (feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCVUnsafe()) {
-                return RangeDeleterService::get(opCtx)->getOverlappingRangeDeletionsFuture(
+                const auto rangeDeleterService = RangeDeleterService::get(opCtx);
+                rangeDeleterService->getRangeDeleterServiceInitializationFuture().get(opCtx);
+
+                return rangeDeleterService->getOverlappingRangeDeletionsFuture(
                     self->_metadataManager->getCollectionUuid(), orphanRange);
             } else {
                 return self->_metadataManager->trackOrphanedDataCleanup(orphanRange);
@@ -402,8 +398,9 @@ Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
             // collection could either never exist or get dropped directly from the shard after the
             // range deletion task got scheduled.
             if (result != ErrorCodes::RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist) {
-                return result.withContext(str::stream() << "Failed to delete orphaned " << nss.ns()
-                                                        << " range " << orphanRange.toString());
+                return result.withContext(str::stream() << "Failed to delete orphaned "
+                                                        << nss.toStringForErrorMsg() << " range "
+                                                        << orphanRange.toString());
             }
         }
     }
@@ -479,7 +476,7 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
                                 opCtx->lockState()->isWriteLocked()
                                     ? StaleConfigInfo::OperationType::kWrite
                                     : StaleConfigInfo::OperationType::kRead),
-                str::stream() << "The critical section for " << _nss.ns()
+                str::stream() << "The critical section for " << _nss.toStringForErrorMsg()
                               << " is acquired with reason: " << reason,
                 !criticalSectionSignal);
     }
@@ -489,7 +486,7 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
                             receivedShardVersion,
                             boost::none /* wantedVersion */,
                             ShardingState::get(opCtx)->shardId()),
-            str::stream() << "sharding status of collection " << _nss.ns()
+            str::stream() << "sharding status of collection " << _nss.toStringForErrorMsg()
                           << " is not currently known and needs to be recovered",
             optCurrentMetadata);
 
@@ -522,21 +519,23 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
         _nss, receivedShardVersion, wantedShardVersion, ShardingState::get(opCtx)->shardId());
 
     uassert(std::move(sci),
-            str::stream() << "timestamp mismatch detected for " << _nss.ns(),
+            str::stream() << "timestamp mismatch detected for " << _nss.toStringForErrorMsg(),
             isPlacementVersionIgnored ||
                 wantedPlacementVersion.isSameCollection(receivedPlacementVersion));
 
     if (isPlacementVersionIgnored ||
         (!wantedPlacementVersion.isSet() && receivedPlacementVersion.isSet())) {
         uasserted(std::move(sci),
-                  str::stream() << "this shard no longer contains chunks for " << _nss.ns() << ", "
+                  str::stream() << "this shard no longer contains chunks for "
+                                << _nss.toStringForErrorMsg() << ", "
                                 << "the collection may have been dropped");
     }
 
     if (isPlacementVersionIgnored ||
         (wantedPlacementVersion.isSet() && !receivedPlacementVersion.isSet())) {
         uasserted(std::move(sci),
-                  str::stream() << "this shard contains chunks for " << _nss.ns() << ", "
+                  str::stream() << "this shard contains chunks for " << _nss.toStringForErrorMsg()
+                                << ", "
                                 << "but the client expects unsharded collection");
     }
 
@@ -545,12 +544,14 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
         // Could be > or < - wanted is > if this is the source of a migration, wanted < if this is
         // the target of a migration
         uasserted(std::move(sci),
-                  str::stream() << "placement version mismatch detected for " << _nss.ns());
+                  str::stream() << "placement version mismatch detected for "
+                                << _nss.toStringForErrorMsg());
     }
 
     if (indexFeatureFlag && wantedIndexVersion != receivedIndexVersion) {
         uasserted(std::move(sci),
-                  str::stream() << "index version mismatch detected for " << _nss.ns());
+                  str::stream() << "index version mismatch detected for "
+                                << _nss.toStringForErrorMsg());
     }
 
     // Those are all the reasons the versions can mismatch
@@ -772,7 +773,7 @@ void CollectionShardingRuntime::_checkCritSecForIndexMetadata(OperationContext* 
                             opCtx->lockState()->isWriteLocked()
                                 ? StaleConfigInfo::OperationType::kWrite
                                 : StaleConfigInfo::OperationType::kRead),
-            str::stream() << "The critical section for " << _nss.ns()
+            str::stream() << "The critical section for " << _nss.toStringForErrorMsg()
                           << " is acquired with reason: " << reason,
             !criticalSectionSignal);
 }

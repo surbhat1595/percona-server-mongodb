@@ -60,6 +60,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_recovery.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/storage/disk_space_util.h"
 #include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/storage/encryption_hooks.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
@@ -144,7 +145,8 @@ bool shouldBuildIndexesOnEmptyCollectionSinglePhased(OperationContext* opCtx,
                                                      const CollectionPtr& collection,
                                                      IndexBuildProtocol protocol) {
     const auto& nss = collection->ns();
-    invariant(opCtx->lockState()->isCollectionLockedForMode(nss, MODE_X), str::stream() << nss);
+    invariant(opCtx->lockState()->isCollectionLockedForMode(nss, MODE_X),
+              str::stream() << nss.toStringForErrorMsg());
 
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
 
@@ -500,6 +502,28 @@ IndexBuildsCoordinator* IndexBuildsCoordinator::get(OperationContext* OperationC
     return get(OperationContext->getServiceContext());
 }
 
+Status IndexBuildsCoordinator::checkDiskSpaceSufficientToStartIndexBuild(OperationContext* opCtx) {
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    const bool filesNotAllInSameDirectory =
+        storageEngine->isUsingDirectoryPerDb() || storageEngine->isUsingDirectoryForIndexes();
+    if (filesNotAllInSameDirectory) {
+        LOGV2(7333300,
+              "Index build: skipping available disk space check before starting index build as "
+              "storage engine stores data files in different directories");
+        return Status::OK();
+    }
+
+    const auto availableBytes = getAvailableDiskSpaceBytesInDbPath();
+    const int64_t requiredBytes = gIndexBuildMinAvailableDiskSpaceMB.load() * 1024 * 1024;
+    if (availableBytes <= requiredBytes) {
+        return Status(
+            ErrorCodes::OutOfDiskSpace,
+            fmt::format("available disk space of {} bytes is less than required minimum of {}",
+                        availableBytes,
+                        requiredBytes));
+    }
+    return Status::OK();
+}
 
 std::unique_ptr<DiskSpaceMonitor::Action>
 IndexBuildsCoordinator::makeKillIndexBuildOnLowDiskSpaceAction() {
@@ -971,6 +995,9 @@ void IndexBuildsCoordinator::abortAllIndexBuildsDueToDiskSpace(OperationContext*
         if (forceSelfAbortIndexBuild(opCtx, replState, abortStatus)) {
             // Increase metrics only if the build was actually aborted by the above call.
             indexBuildsSSS.killedDueToInsufficientDiskSpace.addAndFetch(1);
+            LOGV2(7333601,
+                  "Index build: aborted due to insufficient disk space",
+                  "buildUUID"_attr = replState->buildUUID);
         }
     }
 }
@@ -1923,7 +1950,7 @@ void IndexBuildsCoordinator::assertNoBgOpInProgForDb(const DatabaseName& dbName)
     uassert(ErrorCodes::BackgroundOperationInProgressForDatabase,
             fmt::format("cannot perform operation: an index build is currently running for "
                         "database {}. Found index build: {}",
-                        dbName.toString(),
+                        dbName.toStringForErrorMsg(),
                         firstIndexBuildUUID->toString()),
             indexBuilds.empty());
 }
@@ -2186,7 +2213,7 @@ IndexBuildsCoordinator::_filterSpecsAndRegisterBuild(OperationContext* opCtx,
         if (replCoord->getSettings().usingReplSets() &&
             replCoord->canAcceptWritesFor(opCtx, nssOrUuid)) {
             uassert(ErrorCodes::NamespaceNotFound,
-                    str::stream() << "drop-pending collection: " << nss,
+                    str::stream() << "drop-pending collection: " << nss.toStringForErrorMsg(),
                     !nss.isDropPendingNamespace());
         }
 
@@ -2533,6 +2560,11 @@ void IndexBuildsCoordinator::_cleanUpAfterFailure(OperationContext* opCtx,
             // waiting on index builds to finish because the index build state has not been updated
             // properly.
 
+            if (status.code() == ErrorCodes::DataCorruptionDetected) {
+                indexBuildsSSS.failedDueToDataCorruption.addAndFetch(1);
+                LOGV2(7333600, "Index build: data corruption detected", "status"_attr = status);
+            }
+
             if (IndexBuildProtocol::kSinglePhase == replState->protocol) {
                 _cleanUpSinglePhaseAfterNonShutdownFailure(
                     opCtx, collection, replState, indexBuildOptions, status);
@@ -2652,7 +2684,8 @@ void IndexBuildsCoordinator::_cleanUpTwoPhaseAfterNonShutdownFailure(
                         fassert(51101,
                                 status.withContext(str::stream()
                                                    << "Index build: " << replState->buildUUID
-                                                   << "; Database: " << replState->dbName));
+                                                   << "; Database: "
+                                                   << replState->dbName.toStringForErrorMsg()));
                     }
                 }
 
@@ -3372,10 +3405,12 @@ int IndexBuildsCoordinator::getNumIndexesTotal(OperationContext* opCtx,
     const auto& nss = collection->ns();
     invariant(opCtx->lockState()->isLocked(),
               str::stream() << "Unable to get index count because collection was not locked"
-                            << nss);
+                            << nss.toStringForErrorMsg());
 
     auto indexCatalog = collection->getIndexCatalog();
-    invariant(indexCatalog, str::stream() << "Collection is missing index catalog: " << nss);
+    invariant(indexCatalog,
+              str::stream() << "Collection is missing index catalog: "
+                            << nss.toStringForErrorMsg());
 
     return indexCatalog->numIndexesTotal();
 }

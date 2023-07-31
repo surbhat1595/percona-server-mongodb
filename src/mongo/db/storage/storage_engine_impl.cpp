@@ -48,7 +48,6 @@
 #include "mongo/db/storage/deferred_drop_record_store.h"
 #include "mongo/db/storage/durable_catalog_impl.h"
 #include "mongo/db/storage/durable_history_pin.h"
-#include "mongo/db/storage/historical_ident_tracker.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/storage_repair_observer.h"
@@ -106,11 +105,6 @@ StorageEngineImpl::StorageEngineImpl(OperationContext* opCtx,
       _minOfCheckpointAndOldestTimestampListener(
           TimestampMonitor::TimestampType::kMinOfCheckpointAndOldest,
           [this](Timestamp timestamp) { _onMinOfCheckpointAndOldestTimestampChanged(timestamp); }),
-      _historicalIdentTimestampListener(
-          TimestampMonitor::TimestampType::kCheckpoint,
-          [serviceContext = opCtx->getServiceContext()](Timestamp timestamp) {
-              HistoricalIdentTracker::get(serviceContext).removeEntriesOlderThan(timestamp);
-          }),
       _collectionCatalogCleanupTimestampListener(
           TimestampMonitor::TimestampType::kOldest,
           [serviceContext = opCtx->getServiceContext()](Timestamp timestamp) {
@@ -357,9 +351,9 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
 
                     if (_options.forRepair) {
                         StorageRepairObserver::get(getGlobalServiceContext())
-                            ->invalidatingModification(str::stream()
-                                                       << "Collection " << entry.nss.ns()
-                                                       << " dropped: " << status.reason());
+                            ->invalidatingModification(
+                                str::stream() << "Collection " << entry.nss.toStringForErrorMsg()
+                                              << " dropped: " << status.reason());
                     }
                     wuow.commit();
                     continue;
@@ -431,7 +425,8 @@ void StorageEngineImpl::_initCollection(OperationContext* opCtx,
                                         Timestamp minValidTs) {
     auto md = _catalog->getMetaData(opCtx, catalogId);
     uassert(ErrorCodes::MustDowngrade,
-            str::stream() << "Collection does not have UUID in KVCatalog. Collection: " << nss,
+            str::stream() << "Collection does not have UUID in KVCatalog. Collection: "
+                          << nss.toStringForErrorMsg(),
             md->options.uuid);
 
     auto ident = _catalog->getEntry(catalogId).ident;
@@ -448,7 +443,6 @@ void StorageEngineImpl::_initCollection(OperationContext* opCtx,
 
     auto collectionFactory = Collection::Factory::get(getGlobalServiceContext());
     auto collection = collectionFactory->make(opCtx, nss, catalogId, md, std::move(rs));
-    collection->setMinimumVisibleSnapshot(minVisibleTs);
 
     CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
         catalog.registerCollection(
@@ -495,8 +489,9 @@ Status StorageEngineImpl::_recoverOrphanedCollection(OperationContext* opCtx,
     }
     if (dataModified) {
         StorageRepairObserver::get(getGlobalServiceContext())
-            ->invalidatingModification(str::stream() << "Collection " << collectionName
-                                                     << " recovered: " << status.reason());
+            ->invalidatingModification(str::stream()
+                                       << "Collection " << collectionName.toStringForErrorMsg()
+                                       << " recovered: " << status.reason());
     }
     wuow.commit();
     return Status::OK();
@@ -673,11 +668,7 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
         }
 
         const auto& toRemove = it;
-        // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-        Timestamp identDropTs =
-            feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()
-            ? stableTs
-            : Timestamp::min();
+        const Timestamp identDropTs = stableTs;
         LOGV2(22251, "Dropping unknown ident", "ident"_attr = toRemove, "ts"_attr = identDropTs);
         if (!identDropTs.isNull()) {
             addDropPendingIdent(identDropTs, std::make_shared<Ident>(toRemove), /*onDrop=*/nullptr);
@@ -704,8 +695,9 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
         for (const DurableCatalog::EntryIdentifier& entry : catalogEntries) {
             if (engineIdents.find(entry.ident) == engineIdents.end()) {
                 return {ErrorCodes::UnrecoverableRollbackError,
-                        str::stream() << "Expected collection does not exist. Collection: "
-                                      << entry.nss.ns() << " Ident: " << entry.ident};
+                        str::stream()
+                            << "Expected collection does not exist. Collection: "
+                            << entry.nss.toStringForErrorMsg() << " Ident: " << entry.ident};
             }
         }
     }
@@ -835,7 +827,7 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
 
         for (auto&& indexName : indexesToDrop) {
             invariant(metaData->eraseIndex(indexName),
-                      str::stream() << "Index is missing. Collection: " << nss.ns()
+                      str::stream() << "Index is missing. Collection: " << nss.toStringForErrorMsg()
                                     << " Index: " << indexName);
         }
         if (indexesToDrop.size() > 0) {
@@ -903,7 +895,6 @@ void StorageEngineImpl::startTimestampMonitor() {
         _engine.get(), getGlobalServiceContext()->getPeriodicRunner());
 
     _timestampMonitor->addListener(&_minOfCheckpointAndOldestTimestampListener);
-    _timestampMonitor->addListener(&_historicalIdentTimestampListener);
     _timestampMonitor->addListener(&_collectionCatalogCleanupTimestampListener);
 }
 
@@ -1060,8 +1051,8 @@ Status StorageEngineImpl::repairRecordStore(OperationContext* opCtx,
     }
 
     if (dataModified) {
-        repairObserver->invalidatingModification(str::stream() << "Collection " << nss << ": "
-                                                               << status.reason());
+        repairObserver->invalidatingModification(
+            str::stream() << "Collection " << nss.toStringForErrorMsg() << ": " << status.reason());
     }
 
     // After repairing, re-initialize the collection with a valid RecordStore.
@@ -1259,7 +1250,22 @@ void StorageEngineImpl::checkpoint(OperationContext* opCtx) {
 void StorageEngineImpl::_onMinOfCheckpointAndOldestTimestampChanged(const Timestamp& timestamp) {
     // No drop-pending idents present if getEarliestDropTimestamp() returns boost::none.
     if (auto earliestDropTimestamp = _dropPendingIdentReaper.getEarliestDropTimestamp()) {
-        if (timestamp >= *earliestDropTimestamp) {
+
+        auto checkpoint = _engine->getCheckpointTimestamp();
+        auto oldest = _engine->getOldestTimestamp();
+
+        // We won't try to drop anything unless we know it is both safe to drop (older than the
+        // oldest timestamp) and present in a checkpoint for non-ephemeral storage engines.
+        // Otherwise, the drop will fail, and we'll keep attempting a drop for each new `timestamp`.
+        // Note that this is not required for correctness and is only done to avoid unnecessary work
+        // and spamming the logs when we actually have nothing to do. Additionally, these values may
+        // have both advanced since `timestamp` was calculated, but this is not expected to be
+        // common and does not affect correctness.
+        // For ephemeral storage engines, we can always drop immediately.
+        const bool safeToDrop = oldest >= *earliestDropTimestamp;
+        const bool canDropWithoutTransientErrors =
+            isEphemeral() || checkpoint >= *earliestDropTimestamp;
+        if (safeToDrop && canDropWithoutTransientErrors) {
             LOGV2(22260,
                   "Removing drop-pending idents with drop timestamps before timestamp",
                   "timestamp"_attr = timestamp);

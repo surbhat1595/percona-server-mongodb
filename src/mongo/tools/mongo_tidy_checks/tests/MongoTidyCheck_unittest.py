@@ -131,6 +131,25 @@ class MongoTidyTests(unittest.TestCase):
 
         self.run_clang_tidy()
 
+    def test_MongoCxx20BannedIncludesCheck(self):
+
+        self.write_config(
+            textwrap.dedent("""\
+                    Checks: '-*,mongo-cxx20-banned-includes-check'
+                    WarningsAsErrors: '*'
+                    HeaderFilterRegex: '(mongo/.*)'
+                    """))
+
+        self.expected_output = [
+            "Use of prohibited <syncstream> header.",
+            "Use of prohibited <ranges> header.",
+            "Use of prohibited <barrier> header.",
+            "Use of prohibited <latch> header.",
+            "Use of prohibited <semaphore> header.",
+        ]
+
+        self.run_clang_tidy()
+
     def test_MongoStdOptionalCheck(self):
 
         self.write_config(
@@ -181,7 +200,7 @@ class MongoTidyTests(unittest.TestCase):
         ]
 
         self.run_clang_tidy()
-        
+
     def test_MongoStdAtomicCheck(self):
 
         self.write_config(
@@ -224,6 +243,20 @@ class MongoTidyTests(unittest.TestCase):
 
         self.expected_output = [
             "error: Illegal use of the bare assert function, use a function from assert_util.h instead",
+        ]
+
+        self.run_clang_tidy()
+
+    def test_MongoFCVConstantCheck(self):
+
+        self.write_config(
+            textwrap.dedent("""\
+                Checks: '-*,mongo-fcv-constant-check'
+                WarningsAsErrors: '*'
+                """))
+
+        self.expected_output = [
+            "error: Illegal use of FCV constant in FCV comparison check functions. FCV gating should be done through feature flags instead.",
         ]
 
         self.run_clang_tidy()

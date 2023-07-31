@@ -7,7 +7,6 @@ selector:
   - jstests/sharding/**/libs/**/*.js
   exclude_with_any_tags:
   - catalog_shard_incompatible
-  - temporary_catalog_shard_incompatible
 
 executor:
   archive:
@@ -18,7 +17,4 @@ executor:
       global_vars:
         TestData:
           catalogShard: true
-          # TODO (SERVER-74534): Enable the metadata consistency check when it will work with
-          # co-located configsvr.
-          skipCheckMetadataConsistency: true
       nodb: ''

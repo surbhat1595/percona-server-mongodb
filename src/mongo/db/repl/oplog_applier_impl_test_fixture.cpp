@@ -422,7 +422,8 @@ StatusWith<BSONObj> CollectionReader::next() {
     auto state = _exec->getNext(&obj, nullptr);
     if (state == PlanExecutor::IS_EOF) {
         return {ErrorCodes::CollectionIsEmpty,
-                str::stream() << "no more documents in " << _collToScan.getNss()};
+                str::stream() << "no more documents in "
+                              << _collToScan.getNss().toStringForErrorMsg()};
     }
 
     // PlanExecutors that do not yield should only return ADVANCED or EOF.
@@ -522,7 +523,7 @@ void createDatabase(OperationContext* opCtx, StringData dbName) {
     Lock::GlobalWrite globalLock(opCtx);
     bool justCreated;
     auto databaseHolder = DatabaseHolder::get(opCtx);
-    const DatabaseName tenantDbName(boost::none, dbName);
+    const DatabaseName tenantDbName = DatabaseName::createDatabaseName_forTest(boost::none, dbName);
     auto db = databaseHolder->openDb(opCtx, tenantDbName, &justCreated);
     ASSERT_TRUE(db);
     ASSERT_TRUE(justCreated);

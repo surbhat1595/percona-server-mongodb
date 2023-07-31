@@ -84,7 +84,7 @@ boost::optional<UUID> getCollectionUUID(OperationContext* opCtx,
     }
 
     uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "Collection " << nss << " doesn't exist.",
+            str::stream() << "Collection " << nss.toStringForErrorMsg() << " doesn't exist.",
             collPtr);
 
     return collPtr->uuid();
@@ -141,7 +141,8 @@ void RenameCollectionCoordinator::checkIfOptionsConflict(const BSONObj& doc) con
     const auto& otherReq = otherDoc.getRenameCollectionRequest().toBSON();
 
     uassert(ErrorCodes::ConflictingOperationInProgress,
-            str::stream() << "Another rename collection for namespace " << originalNss()
+            str::stream() << "Another rename collection for namespace "
+                          << originalNss().toStringForErrorMsg()
                           << " is being executed with different parameters: " << selfReq,
             SimpleBSONObjComparator::kInstance.evaluate(selfReq == otherReq));
 }
@@ -205,15 +206,17 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                                 .expectedUUID(_doc.getExpectedSourceUUID())};
 
                         uassert(ErrorCodes::CommandNotSupportedOnView,
-                                str::stream() << "Can't rename source collection `" << fromNss
-                                              << "` because it is a view.",
+                                str::stream()
+                                    << "Can't rename source collection `"
+                                    << fromNss.toStringForErrorMsg() << "` because it is a view.",
                                 !CollectionCatalog::get(opCtx)->lookupView(opCtx, fromNss));
 
                         checkCollectionUUIDMismatch(
                             opCtx, fromNss, *coll, _doc.getExpectedSourceUUID());
 
                         uassert(ErrorCodes::NamespaceNotFound,
-                                str::stream() << "Collection " << fromNss << " doesn't exist.",
+                                str::stream() << "Collection " << fromNss.toStringForErrorMsg()
+                                              << " doesn't exist.",
                                 coll.getCollection());
 
                         uassert(ErrorCodes::IllegalOperation,
@@ -231,7 +234,7 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                         uassert(ErrorCodes::CommandFailed,
                                 str::stream() << "Source and destination collections must be on "
                                                  "the same database because "
-                                              << fromNss << " is sharded.",
+                                              << fromNss.toStringForErrorMsg() << " is sharded.",
                                 fromNss.db() == toNss.db());
                         _doc.setOptShardedCollInfo(optSourceCollType);
                     } else if (fromNss.db() != toNss.db()) {
@@ -264,7 +267,8 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
 
                         // Make sure the target namespace is not a view
                         uassert(ErrorCodes::NamespaceExists,
-                                str::stream() << "a view already exists with that name: " << toNss,
+                                str::stream() << "a view already exists with that name: "
+                                              << toNss.toStringForErrorMsg(),
                                 !CollectionCatalog::get(opCtx)->lookupView(opCtx, toNss));
 
                         if (CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx,
@@ -360,7 +364,7 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                 // - Locally rename source to target
                 ShardsvrRenameCollectionParticipant renameCollParticipantRequest(
                     fromNss, _doc.getSourceUUID().value());
-                renameCollParticipantRequest.setDbName(fromNss.db());
+                renameCollParticipantRequest.setDbName(fromNss.dbName());
                 renameCollParticipantRequest.setTargetUUID(_doc.getTargetUUID());
                 renameCollParticipantRequest.setRenameCollectionRequest(_request);
                 const auto cmdObj = CommandHelpers::appendMajorityWriteConcern(
@@ -451,7 +455,7 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                 // - Unblock CRUD on participants for both source and destination collections
                 ShardsvrRenameCollectionUnblockParticipant unblockParticipantRequest(
                     fromNss, _doc.getSourceUUID().value());
-                unblockParticipantRequest.setDbName(fromNss.db());
+                unblockParticipantRequest.setDbName(fromNss.dbName());
                 unblockParticipantRequest.setRenameCollectionRequest(_request);
                 auto const cmdObj = CommandHelpers::appendMajorityWriteConcern(
                     unblockParticipantRequest.toBSON({}));
@@ -463,40 +467,26 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                 sharding_ddl_util::sendAuthenticatedCommandToShards(
                     opCtx, fromNss.db(), cmdObj.addFields(osi.toBSON()), participants, **executor);
             }))
-        .then(_buildPhaseHandler(
-            Phase::kSetResponse,
-            [this, anchor = shared_from_this()] {
-                auto opCtxHolder = cc().makeOperationContext();
-                auto* opCtx = opCtxHolder.get();
-                getForwardableOpMetadata().setOn(opCtx);
+        .then(_buildPhaseHandler(Phase::kSetResponse, [this, anchor = shared_from_this()] {
+            auto opCtxHolder = cc().makeOperationContext();
+            auto* opCtx = opCtxHolder.get();
+            getForwardableOpMetadata().setOn(opCtx);
 
-                // Retrieve the new collection version
-                const auto catalog = Grid::get(opCtx)->catalogCache();
-                const auto cri = uassertStatusOK(
-                    catalog->getCollectionRoutingInfoWithRefresh(opCtx, _request.getTo()));
-                _response = RenameCollectionResponse(
-                    cri.cm.isSharded() ? cri.getCollectionVersion() : ShardVersion::UNSHARDED());
+            // Retrieve the new collection version
+            const auto catalog = Grid::get(opCtx)->catalogCache();
+            const auto cri = uassertStatusOK(
+                catalog->getCollectionRoutingInfoWithRefresh(opCtx, _request.getTo()));
+            _response = RenameCollectionResponse(cri.cm.isSharded() ? cri.getCollectionVersion()
+                                                                    : ShardVersion::UNSHARDED());
 
-                ShardingLogging::get(opCtx)->logChange(
-                    opCtx,
-                    "renameCollection.end",
-                    nss().ns(),
-                    BSON("source" << nss().toString() << "destination"
-                                  << _request.getTo().toString()),
-                    ShardingCatalogClient::kMajorityWriteConcern);
-                LOGV2(5460504, "Collection renamed", logAttrs(nss()));
-            }))
-        .onError([this, anchor = shared_from_this()](const Status& status) {
-            if (!status.isA<ErrorCategory::NotPrimaryError>() &&
-                !status.isA<ErrorCategory::ShutdownError>()) {
-                LOGV2_ERROR(5460505,
-                            "Error running rename collection",
-                            logAttrs(nss()),
-                            "error"_attr = redact(status));
-            }
-
-            return status;
-        });
+            ShardingLogging::get(opCtx)->logChange(
+                opCtx,
+                "renameCollection.end",
+                nss().ns(),
+                BSON("source" << nss().toString() << "destination" << _request.getTo().toString()),
+                ShardingCatalogClient::kMajorityWriteConcern);
+            LOGV2(5460504, "Collection renamed", logAttrs(nss()));
+        }));
 }
 
 }  // namespace mongo

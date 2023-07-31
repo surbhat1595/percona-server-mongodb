@@ -183,10 +183,10 @@ void rethrowPartialIndexQueryBadValueWithContext(const DBException& ex) {
             ex.toStatus(),
             str::stream()
                 << "Failed to find partial index for "
-                << NamespaceString::kSessionTransactionsTableNamespace.ns()
+                << NamespaceString::kSessionTransactionsTableNamespace.toStringForErrorMsg()
                 << ". Please create an index directly on this replica set with the specification: "
                 << MongoDSessionCatalog::getConfigTxnPartialIndexSpec() << " or drop the "
-                << NamespaceString::kSessionTransactionsTableNamespace.ns()
+                << NamespaceString::kSessionTransactionsTableNamespace.toStringForErrorMsg()
                 << " collection and step up a new primary.");
     }
 }
@@ -396,21 +396,23 @@ void updateSessionEntry(OperationContext* opCtx,
     AutoGetCollection collection(
         opCtx, NamespaceString::kSessionTransactionsTableNamespace, MODE_IX);
 
-    uassert(40527,
-            str::stream() << "Unable to persist transaction state because the session transaction "
-                             "collection is missing. This indicates that the "
-                          << NamespaceString::kSessionTransactionsTableNamespace.ns()
-                          << " collection has been manually deleted.",
-            collection.getCollection());
+    uassert(
+        40527,
+        str::stream() << "Unable to persist transaction state because the session transaction "
+                         "collection is missing. This indicates that the "
+                      << NamespaceString::kSessionTransactionsTableNamespace.toStringForErrorMsg()
+                      << " collection has been manually deleted.",
+        collection.getCollection());
 
     WriteUnitOfWork wuow(opCtx);
 
     auto idIndex = collection->getIndexCatalog()->findIdIndex(opCtx);
 
-    uassert(40672,
-            str::stream() << "Failed to fetch _id index for "
-                          << NamespaceString::kSessionTransactionsTableNamespace.ns(),
-            idIndex);
+    uassert(
+        40672,
+        str::stream() << "Failed to fetch _id index for "
+                      << NamespaceString::kSessionTransactionsTableNamespace.toStringForErrorMsg(),
+        idIndex);
 
     auto indexAccess =
         collection->getIndexCatalog()->getEntry(idIndex)->accessMethod()->asSortedData();
@@ -442,11 +444,13 @@ void updateSessionEntry(OperationContext* opCtx,
     auto originalDoc = originalRecordData.toBson();
 
     const auto parentLsidFieldName = SessionTxnRecord::kParentSessionIdFieldName;
-    uassert(5875700,
-            str::stream() << "Cannot modify the '" << parentLsidFieldName << "' field of "
-                          << NamespaceString::kSessionTransactionsTableNamespace << " entries",
-            updateMod.getObjectField(parentLsidFieldName)
-                    .woCompare(originalDoc.getObjectField(parentLsidFieldName)) == 0);
+    uassert(
+        5875700,
+        str::stream() << "Cannot modify the '" << parentLsidFieldName << "' field of "
+                      << NamespaceString::kSessionTransactionsTableNamespace.toStringForErrorMsg()
+                      << " entries",
+        updateMod.getObjectField(parentLsidFieldName)
+                .woCompare(originalDoc.getObjectField(parentLsidFieldName)) == 0);
 
     invariant(collection->getDefaultCollator() == nullptr);
     boost::intrusive_ptr<ExpressionContext> expCtx(
@@ -473,7 +477,8 @@ void updateSessionEntry(OperationContext* opCtx,
                                         Snapshotted<BSONObj>(startingSnapshotId, originalDoc),
                                         updateMod,
                                         collection_internal::kUpdateNoIndexes,
-                                        nullptr,
+                                        nullptr /* indexesAffected */,
+                                        nullptr /* opDebug */,
                                         &args);
 
     wuow.commit();
@@ -1087,10 +1092,6 @@ TransactionParticipant::Participant::onConflictingInternalTransactionCompletion(
 
 void TransactionParticipant::Participant::_setReadSnapshot(OperationContext* opCtx,
                                                            repl::ReadConcernArgs readConcernArgs) {
-    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-    bool pitLookupFeatureEnabled =
-        feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe();
-
     if (readConcernArgs.getArgsAtClusterTime()) {
         // Read concern code should have already set the timestamp on the recovery unit.
         const auto readTimestamp = readConcernArgs.getArgsAtClusterTime()->asTimestamp();
@@ -1119,42 +1120,25 @@ void TransactionParticipant::Participant::_setReadSnapshot(OperationContext* opC
         // Using 'kNoTimestamp' ensures that transactions with mode 'local' are always able to read
         // writes from earlier transactions with mode 'local' on the same connection.
         opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
-        // Catalog conflicting timestamps must be set on primaries performing transactions.
-        // However, secondaries performing oplog application must avoid setting
-        // _catalogConflictTimestamp. Currently, only oplog application on secondaries can run
-        // inside a transaction, thus `writesAreReplicated` is a suitable proxy to single out
-        // transactions on primaries.
-        if (!pitLookupFeatureEnabled && opCtx->writesAreReplicated()) {
-            // Since this snapshot may reflect oplog holes, record the most visible timestamp before
-            // opening a storage transaction. This timestamp will be used later to detect any
-            // changes in the catalog after a storage transaction is opened.
-            opCtx->recoveryUnit()->setCatalogConflictingTimestamp(
-                opCtx->getServiceContext()->getStorageEngine()->getAllDurableTimestamp());
-        }
     }
 
-
-    if (pitLookupFeatureEnabled) {
-        // Allocate the snapshot together with a consistent CollectionCatalog instance. As we have
-        // no critical section we use optimistic concurrency control and check that there was no
-        // write to the CollectionCatalog while we allocated the storage snapshot. Stash the catalog
-        // instance so collection lookups within this transaction are consistent with the snapshot.
-        auto catalog = CollectionCatalog::get(opCtx);
-        while (true) {
-            opCtx->recoveryUnit()->preallocateSnapshot();
-            auto after = CollectionCatalog::get(opCtx);
-            if (catalog == after) {
-                // Catalog did not change, break out of the retry loop and use this instance
-                break;
-            }
-            // Catalog change detected, reallocate the snapshot and try again.
-            opCtx->recoveryUnit()->abandonSnapshot();
-            catalog = std::move(after);
-        }
-        CollectionCatalog::stash(opCtx, std::move(catalog));
-    } else {
+    // Allocate the snapshot together with a consistent CollectionCatalog instance. As we have no
+    // critical section we use optimistic concurrency control and check that there was no write to
+    // the CollectionCatalog while we allocated the storage snapshot. Stash the catalog instance so
+    // collection lookups within this transaction are consistent with the snapshot.
+    auto catalog = CollectionCatalog::get(opCtx);
+    while (true) {
         opCtx->recoveryUnit()->preallocateSnapshot();
+        auto after = CollectionCatalog::get(opCtx);
+        if (catalog == after) {
+            // Catalog did not change, break out of the retry loop and use this instance
+            break;
+        }
+        // Catalog change detected, reallocate the snapshot and try again.
+        opCtx->recoveryUnit()->abandonSnapshot();
+        catalog = std::move(after);
     }
+    CollectionCatalog::stash(opCtx, std::move(catalog));
 }
 
 TransactionParticipant::OplogSlotReserver::OplogSlotReserver(OperationContext* opCtx,
@@ -1620,8 +1604,7 @@ Timestamp TransactionParticipant::Participant::prepareTransaction(
             // This shouldn't cause deadlocks with other prepared txns, because the acquisition
             // of RSTL lock inside abortTransaction will be no-op since we already have it.
             // This abortGuard gets dismissed before we release the RSTL while transitioning to
-            // prepared.
-            // TODO (SERVER-71610): Fix to be interruptible or document exception.
+            // the prepared state.
             UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
             abortTransaction(opCtx);
         } catch (...) {
@@ -1653,7 +1636,7 @@ Timestamp TransactionParticipant::Participant::prepareTransaction(
         uassert(ErrorCodes::OperationNotSupportedInTransaction,
                 str::stream() << "prepareTransaction failed because one of the transaction "
                                  "operations was done against a temporary collection '"
-                              << collection->ns() << "'.",
+                              << collection->ns().toStringForErrorMsg() << "'.",
                 !collection->isTemporary());
     }
 
@@ -1907,8 +1890,8 @@ void TransactionParticipant::Participant::commitPreparedTransaction(
         // We can no longer uassert without terminating.
         unlockGuard.dismiss();
 
-        // Once entering "committing with prepare" we cannot throw an exception.
-        // TODO (SERVER-71610): Fix to be interruptible or document exception.
+        // Once entering "committing with prepare" we cannot throw an exception,
+        // and therefore our lock acquisitions cannot be interruptible.
         UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
 
         // On secondary, we generate a fake empty oplog slot, since it's not used by opObserver.
@@ -3147,6 +3130,7 @@ void TransactionParticipant::Participant::_refreshActiveTransactionParticipantsF
                                 << parentTxnParticipant._sessionId() << " to be "
                                 << *activeRetryableWriteTxnNumber << " found a "
                                 << NamespaceString::kSessionTransactionsTableNamespace
+                                       .toStringForErrorMsg()
                                 << " entry for an internal transaction for retryable writes with "
                                 << "transaction number " << *childLsid.getTxnNumber(),
                             *childLsid.getTxnNumber() == *activeRetryableWriteTxnNumber);

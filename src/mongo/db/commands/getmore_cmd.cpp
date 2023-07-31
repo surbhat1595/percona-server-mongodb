@@ -56,6 +56,7 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/speculative_majority_read_info.h"
+#include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
@@ -164,13 +165,14 @@ void validateAuthorization(const OperationContext* opCtx, const ClientCursor& cu
  */
 void validateNamespace(const NamespaceString& commandNss, const ClientCursor& cursor) {
     uassert(ErrorCodes::Unauthorized,
-            str::stream() << "Requested getMore on namespace '" << commandNss.ns()
-                          << "', but cursor belongs to a different namespace " << cursor.nss().ns(),
+            str::stream() << "Requested getMore on namespace '" << commandNss.toStringForErrorMsg()
+                          << "', but cursor belongs to a different namespace "
+                          << cursor.nss().toStringForErrorMsg(),
             commandNss == cursor.nss());
 
     if (commandNss.isOplog() && MONGO_unlikely(rsStopGetMoreCmd.shouldFail())) {
         uasserted(ErrorCodes::CommandFailed,
-                  str::stream() << "getMore on " << commandNss.ns()
+                  str::stream() << "getMore on " << commandNss.toStringForErrorMsg()
                                 << " rejected due to active fail point rsStopGetMoreCmd");
     }
 }
@@ -325,7 +327,7 @@ public:
             NamespaceString nss(NamespaceStringUtil::parseNamespaceFromRequest(
                 _cmd.getDbName(), _cmd.getCollection()));
             uassert(ErrorCodes::InvalidNamespace,
-                    str::stream() << "Invalid namespace for getMore: " << nss.ns(),
+                    str::stream() << "Invalid namespace for getMore: " << nss.toStringForErrorMsg(),
                     nss.isValid());
         }
 
@@ -585,6 +587,12 @@ public:
 
                 // Update the genericCursor stored in curOp with the new cursor stats.
                 curOp->setGenericCursor_inlock(cursorPin->toGenericCursor());
+            }
+
+            // If this is a change stream cursor, check whether the tenant has migrated elsewhere.
+            if (cursorPin->getExecutor()->getPostBatchResumeToken()["_data"]) {
+                tenant_migration_access_blocker::assertCanGetMoreChangeStream(opCtx,
+                                                                              _cmd.getDbName());
             }
 
             // If the 'failGetMoreAfterCursorCheckout' failpoint is enabled, throw an exception with

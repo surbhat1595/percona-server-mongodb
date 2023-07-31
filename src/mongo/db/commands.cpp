@@ -278,9 +278,9 @@ std::string CommandHelpers::parseNsFullyQualified(const BSONObj& cmdObj) {
             first.canonicalType() == canonicalizeBSONType(mongo::String));
     const NamespaceString nss(first.valueStringData());
     uassert(ErrorCodes::InvalidNamespace,
-            str::stream() << "Invalid namespace specified '" << nss.ns() << "'",
+            str::stream() << "Invalid namespace specified '" << nss.toStringForErrorMsg() << "'",
             nss.isValid());
-    return nss.ns();
+    return nss.ns().toString();
 }
 
 NamespaceString CommandHelpers::parseNsCollectionRequired(const DatabaseName& dbName,
@@ -314,14 +314,14 @@ NamespaceStringOrUUID CommandHelpers::parseNsOrUUID(const DatabaseName& dbName,
         // Ensure collection identifier is not a Command
         const NamespaceString nss(parseNsCollectionRequired(dbName, cmdObj));
         uassert(ErrorCodes::InvalidNamespace,
-                str::stream() << "Invalid collection name specified '" << nss.ns(),
+                str::stream() << "Invalid collection name specified '" << nss.toStringForErrorMsg(),
                 !(nss.ns().find('$') != std::string::npos && nss.ns() != "local.oplog.$main"));
         return nss;
     }
 }
 
 std::string CommandHelpers::parseNsFromCommand(StringData dbname, const BSONObj& cmdObj) {
-    return parseNsFromCommand({boost::none, dbname}, cmdObj).ns();
+    return parseNsFromCommand({boost::none, dbname}, cmdObj).ns().toString();
 }
 
 NamespaceString CommandHelpers::parseNsFromCommand(const DatabaseName& dbName,
@@ -333,7 +333,7 @@ NamespaceString CommandHelpers::parseNsFromCommand(const DatabaseName& dbName,
                                                           cmdObj.firstElement().valueStringData());
 }
 
-ResourcePattern CommandHelpers::resourcePatternForNamespace(const std::string& ns) {
+ResourcePattern CommandHelpers::resourcePatternForNamespace(StringData ns) {
     if (!NamespaceString::validCollectionComponent(ns)) {
         return ResourcePattern::forDatabaseName(ns);
     }
@@ -573,7 +573,7 @@ void CommandHelpers::canUseTransactions(const NamespaceString& nss,
             dbName.db() != DatabaseName::kLocal.db());
 
     uassert(ErrorCodes::OperationNotSupportedInTransaction,
-            str::stream() << "Cannot run command against the '" << nss
+            str::stream() << "Cannot run command against the '" << nss.toStringForErrorMsg()
                           << "' collection in a transaction.",
             !nss.isSystemDotProfile());
 
@@ -640,8 +640,17 @@ bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
         return false;  // only activate failpoint on connection with a certain appName
     }
 
-    if (data.hasField("namespace") && (nss != NamespaceString(data.getStringField("namespace")))) {
-        return false;
+    if (data.hasField("namespace")) {
+        if (data.hasField("$tenant")) {
+            const auto tenantId = TenantId::parseFromBSON(data.getField("$tenant"));
+            const auto fpNss =
+                NamespaceStringUtil::deserialize(tenantId, data.getStringField("namespace"));
+            if (nss != fpNss) {
+                return false;
+            }
+        } else if (nss != NamespaceString(data.getStringField("namespace"))) {
+            return false;
+        }
     }
 
     if (!(data.hasField("failInternalCommands") && data.getBoolField("failInternalCommands")) &&

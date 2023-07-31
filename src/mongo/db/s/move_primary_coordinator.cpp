@@ -179,7 +179,7 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
                     uasserted(
                         7120202,
                         "movePrimary operation on database {} failed cloning data to recipient {}"_format(
-                            _dbName.toString(), toShardId.toString()));
+                            _dbName.toStringForErrorMsg(), toShardId.toString()));
                 }
 
                 LOGV2(7120201,
@@ -233,14 +233,13 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
                                      auto* opCtx = opCtxHolder.get();
                                      getForwardableOpMetadata().setOn(opCtx);
 
-                                     _updateSession(opCtx);
                                      if (!_firstExecution) {
                                          // Perform a noop write on the recipient in order to
                                          // advance the txnNumber for this coordinator's logical
                                          // session. This prevents requests with older txnNumbers
                                          // from being processed.
                                          _performNoopRetryableWriteOnAllShardsAndConfigsvr(
-                                             opCtx, getCurrentSession(), **executor);
+                                             opCtx, getNewSession(opCtx), **executor);
                                      }
 
                                      blockReads(opCtx);
@@ -286,14 +285,13 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
                                      auto* opCtx = opCtxHolder.get();
                                      getForwardableOpMetadata().setOn(opCtx);
 
-                                     _updateSession(opCtx);
                                      if (!_firstExecution) {
                                          // Perform a noop write on the recipient in order to
                                          // advance the txnNumber for this coordinator's logical
                                          // session. This prevents requests with older txnNumbers
                                          // from being processed.
                                          _performNoopRetryableWriteOnAllShardsAndConfigsvr(
-                                             opCtx, getCurrentSession(), **executor);
+                                             opCtx, getNewSession(opCtx), **executor);
                                      }
 
                                      unblockReadsAndWrites(opCtx);
@@ -399,9 +397,8 @@ ExecutorFuture<void> MovePrimaryCoordinator::_cleanupOnAbort(
             auto* opCtx = opCtxHolder.get();
             getForwardableOpMetadata().setOn(opCtx);
 
-            _updateSession(opCtx);
             _performNoopRetryableWriteOnAllShardsAndConfigsvr(
-                opCtx, getCurrentSession(), **executor);
+                opCtx, getNewSession(opCtx), **executor);
 
             if (useOnlineCloner()) {
                 cleanupOnAbortWithOnlineCloner(opCtx, token, status);
@@ -564,7 +561,7 @@ void MovePrimaryCoordinator::assertNoOrphanedDataOnRecipient(
 
     for (const auto& nss : collectionsToClone) {
         uassert(ErrorCodes::NamespaceExists,
-                "Found orphaned collection {} on recipient {}"_format(nss.toString(),
+                "Found orphaned collection {} on recipient {}"_format(nss.toStringForErrorMsg(),
                                                                       toShardId.toString()),
                 !std::binary_search(allCollections.cbegin(), allCollections.cend(), nss));
     };
@@ -592,14 +589,14 @@ std::vector<NamespaceString> MovePrimaryCoordinator::cloneDataToRecipient(
     const auto cloneResponse =
         toShard->runCommand(opCtx,
                             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                            DatabaseName::kAdmin.db(),
+                            DatabaseName::kAdmin.db().toString(),
                             cloneCommand,
                             Shard::RetryPolicy::kNoRetry);
 
     uassertStatusOKWithContext(
         Shard::CommandResponse::getEffectiveStatus(cloneResponse),
         "movePrimary operation on database {} failed to clone data to recipient {}"_format(
-            _dbName.toString(), toShardId.toString()));
+            _dbName.toStringForErrorMsg(), toShardId.toString()));
 
     const auto clonedCollections = [&] {
         std::vector<NamespaceString> colls;
@@ -641,14 +638,14 @@ void MovePrimaryCoordinator::commitMetadataToConfig(
     const auto commitResponse =
         config->runCommandWithFixedRetryAttempts(opCtx,
                                                  ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                                 DatabaseName::kAdmin.db(),
+                                                 DatabaseName::kAdmin.db().toString(),
                                                  commitCommand,
                                                  Shard::RetryPolicy::kIdempotent);
 
     uassertStatusOKWithContext(
         Shard::CommandResponse::getEffectiveStatus(commitResponse),
         "movePrimary operation on database {} failed to commit metadata changes"_format(
-            _dbName.toString()));
+            _dbName.toStringForErrorMsg()));
 }
 
 void MovePrimaryCoordinator::assertChangedMetadataOnConfig(
@@ -667,7 +664,7 @@ void MovePrimaryCoordinator::assertChangedMetadataOnConfig(
         const auto databases = std::move(findResponse.docs);
         uassert(ErrorCodes::IncompatibleShardingMetadata,
                 "Tried to find version for database {}, but found no databases"_format(
-                    _dbName.toString()),
+                    _dbName.toStringForErrorMsg()),
                 !databases.empty());
 
         return DatabaseType::parse(IDLParserContext("DatabaseType"), databases.front());
@@ -722,15 +719,14 @@ void MovePrimaryCoordinator::dropOrphanedDataOnRecipient(
         return;
     }
 
-    // Make a copy of this container since `_updateSession` changes the coordinator document.
+    // Make a copy of this container since `getNewSession` changes the coordinator document.
     const auto collectionsToClone = *_doc.getCollectionsToClone();
     for (const auto& nss : collectionsToClone) {
-        _updateSession(opCtx);
         sharding_ddl_util::sendDropCollectionParticipantCommandToShards(opCtx,
                                                                         nss,
                                                                         {_doc.getToShardId()},
                                                                         **executor,
-                                                                        getCurrentSession(),
+                                                                        getNewSession(opCtx),
                                                                         false /* fromMigrate */);
     }
 }
@@ -762,14 +758,14 @@ void MovePrimaryCoordinator::unblockReadsAndWrites(OperationContext* opCtx) cons
         opCtx, NamespaceString(_dbName), _csReason, ShardingCatalogClient::kLocalWriteConcern);
 }
 
-void MovePrimaryCoordinator::enterCriticalSectionOnRecipient(OperationContext* opCtx) const {
+void MovePrimaryCoordinator::enterCriticalSectionOnRecipient(OperationContext* opCtx) {
     const auto enterCriticalSectionCommand = [&] {
         ShardsvrMovePrimaryEnterCriticalSection request(_dbName);
         request.setDbName(DatabaseName::kAdmin);
         request.setReason(_csReason);
 
         auto command = CommandHelpers::appendMajorityWriteConcern(request.toBSON({}));
-        return command.addFields(getCurrentSession().toBSON());
+        return command.addFields(getNewSession(opCtx).toBSON());
     }();
 
     const auto& toShardId = _doc.getToShardId();
@@ -789,17 +785,17 @@ void MovePrimaryCoordinator::enterCriticalSectionOnRecipient(OperationContext* o
     uassertStatusOKWithContext(
         Shard::CommandResponse::getEffectiveStatus(enterCriticalSectionResponse),
         "movePrimary operation on database {} failed to block read/write operations on recipient {}"_format(
-            _dbName.toString(), toShardId.toString()));
+            _dbName.toStringForErrorMsg(), toShardId.toString()));
 }
 
-void MovePrimaryCoordinator::exitCriticalSectionOnRecipient(OperationContext* opCtx) const {
+void MovePrimaryCoordinator::exitCriticalSectionOnRecipient(OperationContext* opCtx) {
     const auto exitCriticalSectionCommand = [&] {
         ShardsvrMovePrimaryExitCriticalSection request(_dbName);
         request.setDbName(DatabaseName::kAdmin);
         request.setReason(_csReason);
 
         auto command = CommandHelpers::appendMajorityWriteConcern(request.toBSON({}));
-        return command.addFields(getCurrentSession().toBSON());
+        return command.addFields(getNewSession(opCtx).toBSON());
     }();
 
     const auto& toShardId = _doc.getToShardId();
@@ -819,7 +815,7 @@ void MovePrimaryCoordinator::exitCriticalSectionOnRecipient(OperationContext* op
     uassertStatusOKWithContext(
         Shard::CommandResponse::getEffectiveStatus(exitCriticalSectionResponse),
         "movePrimary operation on database {} failed to unblock read/write operations on recipient {}"_format(
-            _dbName.toString(), toShardId.toString()));
+            _dbName.toStringForErrorMsg(), toShardId.toString()));
 }
 
 }  // namespace mongo

@@ -130,8 +130,11 @@ void removeDatabaseFromConfigAndUpdatePlacementHistory(
     auto wc = WriteConcernOptions{WriteConcernOptions::kMajority,
                                   WriteConcernOptions::SyncMode::UNSET,
                                   WriteConcernOptions::kNoTimeout};
+    // This always runs in the shard role so should use a cluster transaction to guarantee targeting
+    // the config server.
+    bool useClusterTransaction = true;
     sharding_ddl_util::runTransactionOnShardingCatalog(
-        opCtx, std::move(transactionChain), wc, osi, executor);
+        opCtx, std::move(transactionChain), wc, osi, useClusterTransaction, executor);
 }
 
 // TODO SERVER-73627: Remove once 7.0 becomes last LTS
@@ -230,8 +233,19 @@ void DropDatabaseCoordinator::_dropShardedCollection(
     }
 
     _updateSession(opCtx);
+
+    // This always runs in the shard role so should use a cluster transaction to guarantee
+    // targeting the config server.
+    bool useClusterTransaction = true;
     sharding_ddl_util::removeCollAndChunksMetadataFromConfig(
-        opCtx, coll, ShardingCatalogClient::kMajorityWriteConcern, getCurrentSession(), **executor);
+        opCtx,
+        Grid::get(opCtx)->shardRegistry()->getConfigShard(),
+        Grid::get(opCtx)->catalogClient(),
+        coll,
+        ShardingCatalogClient::kMajorityWriteConcern,
+        getCurrentSession(),
+        useClusterTransaction,
+        **executor);
 
     _updateSession(opCtx);
     sharding_ddl_util::removeTagsMetadataFromConfig(opCtx, nss, getCurrentSession());
@@ -407,7 +421,7 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                     }
 
                     auto dropDatabaseParticipantCmd = ShardsvrDropDatabaseParticipant();
-                    dropDatabaseParticipantCmd.setDbName(_dbName);
+                    dropDatabaseParticipantCmd.setDbName(DatabaseName{_dbName});
                     const auto cmdObj = CommandHelpers::appendMajorityWriteConcern(
                         dropDatabaseParticipantCmd.toBSON({}));
 
@@ -494,7 +508,7 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                 FlushDatabaseCacheUpdatesWithWriteConcern flushDbCacheUpdatesCmd(
                     _dbName.toString());
                 flushDbCacheUpdatesCmd.setSyncFromConfig(true);
-                flushDbCacheUpdatesCmd.setDbName(_dbName);
+                flushDbCacheUpdatesCmd.setDbName(DatabaseName{_dbName});
 
                 IgnoreAPIParametersBlock ignoreApiParametersBlock{opCtx};
                 sharding_ddl_util::sendAuthenticatedCommandToShards(
@@ -507,16 +521,6 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
 
             ShardingLogging::get(opCtx)->logChange(opCtx, "dropDatabase", _dbName);
             LOGV2(5494506, "Database dropped", "db"_attr = _dbName);
-        })
-        .onError([this, anchor = shared_from_this()](const Status& status) {
-            if (!status.isA<ErrorCategory::NotPrimaryError>() &&
-                !status.isA<ErrorCategory::ShutdownError>()) {
-                LOGV2_ERROR(5494507,
-                            "Error running drop database",
-                            "db"_attr = _dbName,
-                            "error"_attr = redact(status));
-            }
-            return status;
         });
 }
 

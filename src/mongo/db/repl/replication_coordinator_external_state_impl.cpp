@@ -542,7 +542,7 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
 
     // Create the pre-images collection if it doesn't exist yet in the non-serverless environment.
     if (!change_stream_serverless_helpers::isChangeCollectionsModeActive()) {
-        ChangeStreamPreImagesCollectionManager::createPreImagesCollection(
+        ChangeStreamPreImagesCollectionManager::get(opCtx).createPreImagesCollection(
             opCtx, boost::none /* tenantId */);
     }
 
@@ -779,13 +779,13 @@ StatusWith<OpTimeAndWallTime> ReplicationCoordinatorExternalStateImpl::loadLastO
         BSONObj oplogEntry;
 
         if (!writeConflictRetry(
-                opCtx, "Load last opTime", NamespaceString::kRsOplogNamespace.ns().c_str(), [&] {
+                opCtx, "Load last opTime", NamespaceString::kRsOplogNamespace.ns(), [&] {
                     return Helpers::getLast(opCtx, NamespaceString::kRsOplogNamespace, oplogEntry);
                 })) {
-            return StatusWith<OpTimeAndWallTime>(ErrorCodes::NoMatchingDocument,
-                                                 str::stream()
-                                                     << "Did not find any entries in "
-                                                     << NamespaceString::kRsOplogNamespace.ns());
+            return StatusWith<OpTimeAndWallTime>(
+                ErrorCodes::NoMatchingDocument,
+                str::stream() << "Did not find any entries in "
+                              << NamespaceString::kRsOplogNamespace.toStringForErrorMsg());
         }
 
         return OpTimeAndWallTime::parseOpTimeAndWallTimeFromOplogEntry(oplogEntry);
@@ -1013,7 +1013,8 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
         // (Ignore FCV check): TODO(SERVER-75389): add why FCV is ignored here.
         if (mongo::feature_flags::gGlobalIndexesShardingCatalog.isEnabledAndIgnoreFCVUnsafe()) {
             // Create indexes in config.shard.indexes if needed.
-            indexStatus = sharding_util::createShardingIndexCatalogIndexes(opCtx);
+            indexStatus = sharding_util::createShardingIndexCatalogIndexes(
+                opCtx, NamespaceString::kShardIndexCatalogNamespace);
             if (!indexStatus.isOK()) {
                 // If the node is shutting down or it lost quorum just as it was becoming primary,
                 // don't run the sharding onStepUp machinery. The onStepDown counterpart to these
@@ -1025,10 +1026,11 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
                 }
                 fassertFailedWithStatus(
                     6280501,
-                    indexStatus.withContext(str::stream()
-                                            << "Failed to create index on "
-                                            << NamespaceString::kShardIndexCatalogNamespace
-                                            << " on shard's first transition to primary"));
+                    indexStatus.withContext(
+                        str::stream()
+                        << "Failed to create index on "
+                        << NamespaceString::kShardIndexCatalogNamespace.toStringForErrorMsg()
+                        << " on shard's first transition to primary"));
             }
 
             // Create indexes in config.shard.collections if needed.
@@ -1044,10 +1046,11 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
                 }
                 fassertFailedWithStatus(
                     6711907,
-                    indexStatus.withContext(str::stream()
-                                            << "Failed to create index on "
-                                            << NamespaceString::kShardCollectionCatalogNamespace
-                                            << " on shard's first transition to primary"));
+                    indexStatus.withContext(
+                        str::stream()
+                        << "Failed to create index on "
+                        << NamespaceString::kShardCollectionCatalogNamespace.toStringForErrorMsg()
+                        << " on shard's first transition to primary"));
             }
         }
     }

@@ -40,6 +40,7 @@ enums:
         values:
             kCollectionUUIDMismatch: "CollectionUUIDMismatch"
             kCorruptedChunkShardKey: "CorruptedChunkShardKey"
+            kCorruptedZoneShardKey: "CorruptedZoneShardKey"
             kHiddenShardedCollection: "HiddenShardedCollection"
             kInconsistentIndex: "InconsistentIndex"
             kMisplacedCollection: "MisplacedCollection"
@@ -49,6 +50,7 @@ enums:
             kRoutingTableMissingMinKey: "RoutingTableMissingMinKey"
             kRoutingTableRangeGap: "RoutingTableRangeGap"
             kRoutingTableRangeOverlap: "RoutingTableRangeOverlap"
+            kZonesRangeOverlap: "ZonesRangeOverlap"
 
     MetadataInconsistencyDescription:
         description: "Description of each metadata inconsistency."
@@ -56,6 +58,7 @@ enums:
         values:
             kCollectionUUIDMismatch: "Found collection on non primary shard with mismatching UUID"
             kCorruptedChunkShardKey: "Found chunk with a shard key pattern violation"
+            kCorruptedZoneShardKey: "Found zone with a shard key pattern violation"
             kHiddenShardedCollection: "Found sharded collection but relative database does not exist"
             kInconsistentIndex: "Found an index of a sharded collection that is inconsistent between different shards"
             kMisplacedCollection: "Unsharded collection found on shard different from database primary shard"
@@ -65,6 +68,7 @@ enums:
             kRoutingTableMissingMinKey: "Routing table has a gap because first chunk does not start from MinKey"
             kRoutingTableRangeGap: "Found a gap between two consecutive chunks"
             kRoutingTableRangeOverlap: "Found two overlapping consecutive chunks"
+            kZonesRangeOverlap: "Found two overlapping zones"
 
     MetadataConsistencyCommandLevel:
         description: "Level mode of the metadata consistency command."
@@ -79,7 +83,8 @@ structs:
         description: "Details about a misplaced collection inconsistency."
         strict: false
         fields:
-            ns:
+            namespace:
+                cpp_name: nss
                 type: namespacestring
                 description: "The namespace of the collection that is misplaced."
             shard:
@@ -93,7 +98,8 @@ structs:
         description: "Details about a UUID mismatch inconsistency."
         strict: false
         fields:
-            ns:
+            namespace:
+                cpp_name: nss
                 type: namespacestring
                 description: "The namespace of the collection that has a UUID mismatch."
             shard:
@@ -110,7 +116,8 @@ structs:
         description: "Details about a missing shard key index inconsistency."
         strict: false
         fields:
-            ns:
+            namespace:
+                cpp_name: nss
                 type: namespacestring
                 description: "The namespace of the collection that is missing a shard key index."
             shard:
@@ -124,7 +131,8 @@ structs:
         description: "Details about a routing table range overlap inconsistency."
         strict: false
         fields:
-            ns:
+            namespace:
+                cpp_name: nss
                 type: namespacestring
                 description: "The namespace of the collection."
             collectionUUID:
@@ -141,7 +149,8 @@ structs:
         description: "Details about a routing table range gap inconsistency."
         strict: false
         fields:
-            ns:
+            namespace:
+                cpp_name: nss
                 type: namespacestring
                 description: "The namespace of the collection."
             collectionUUID:
@@ -158,7 +167,8 @@ structs:
         description: "Details about a routing table missing min key inconsistency."
         strict: false
         fields:
-            ns:
+            namespace:
+                cpp_name: nss
                 type: namespacestring
                 description: "The namespace of the collection."
             collectionUUID:
@@ -175,7 +185,8 @@ structs:
         description: "Details about a routing table missing max key inconsistency."
         strict: false
         fields:
-            ns:
+            namespace:
+                cpp_name: nss
                 type: namespacestring
                 description: "The namespace of the collection."
             collectionUUID:
@@ -192,7 +203,8 @@ structs:
         description: "Details about a corrupted chunk shard key inconsistency."
         strict: false
         fields:
-            ns:
+            namespace:
+                cpp_name: nss
                 type: namespacestring
                 description: "The namespace of the collection."
             collectionUUID:
@@ -205,11 +217,30 @@ structs:
                 type: object
                 description: "The shard key pattern of the collection."
 
+    CorruptedZoneShardKeyDetails:
+        description: "Details about a corrupted zone shard key inconsistency."
+        strict: false
+        fields:
+            namespace:
+                cpp_name: nss
+                type: namespacestring
+                description: "The namespace of the collection."
+            collectionUUID:
+                type: uuid
+                description: "The UUID of the collection."
+            zone:
+                type: object
+                description: "The zone with a corrupted shard key."
+            shardKeyPattern:
+                type: object
+                description: "The shard key pattern of the collection."
+
     HiddenShardedCollectionDetails:
         description: "Details about a hidden sharded collection inconsistency."
         strict: false
         fields:
-            ns:
+            namespace:
+                cpp_name: nss
                 type: namespacestring
                 description: "The namespace of the collection that is hidden."
             collection:
@@ -220,7 +251,8 @@ structs:
         description: "Details about index inconsistency."
         strict: false
         fields:
-            ns:
+            namespace:
+                cpp_name: nss
                 type: namespacestring
                 description: "The namespace of the affected collection."
             info:
@@ -231,12 +263,31 @@ structs:
         description: "Details about a missing routing table inconsistency."
         strict: false
         fields:
-            ns:
+            namespace:
+                cpp_name: nss
                 type: namespacestring
                 description: "The namespace of the collection that has no routing table."
             collectionUUID:
                 type: uuid
                 description: "The UUID of the collection."
+
+    ZonesRangeOverlapDetails:
+        description: "Details about a zones range overlap inconsistency."
+        strict: false
+        fields:
+            namespace:
+                cpp_name: nss
+                type: namespacestring
+                description: "The namespace of the collection."
+            collectionUUID:
+                type: uuid
+                description: "The UUID of the collection."
+            zoneA:
+                type: object
+                description: "The first zone that overlaps with the second zone."
+            zoneB:
+                type: object
+                description: "The second zone that overlaps with the first zone."
 
     MetadataInconsistencyItem:
         description: "Object representing a single metadata inconsistency found in a specific shard"

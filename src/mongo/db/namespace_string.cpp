@@ -235,6 +235,11 @@ NamespaceString NamespaceString::makeMovePrimaryCollectionsToCloneNSS(const UUID
                            "movePrimaryCollectionsToClone." + migrationId.toString());
 }
 
+NamespaceString NamespaceString::makeMovePrimaryTempCollectionsPrefix(const UUID& migrationId) {
+    return NamespaceString(DatabaseName::kConfig,
+                           "movePrimaryRecipient." + migrationId.toString() + ".willBeDeleted.");
+}
+
 NamespaceString NamespaceString::makePreImageCollectionNSS(
     const boost::optional<TenantId>& tenantId) {
     return NamespaceString{tenantId, DatabaseName::kConfig.db(), kPreImagesCollectionName};
@@ -357,11 +362,12 @@ bool NamespaceString::isNamespaceAlwaysUnsharded() const {
     if (db() == DatabaseName::kConfig.db())
         return *this != NamespaceString::kLogicalSessionsNamespace;
 
-    if (isSystemDotProfile())
-        return true;
-
-    if (isSystemDotViews())
-        return true;
+    if (isSystem()) {
+        // Only some system collections (<DB>.system.<COLL>) can be sharded,
+        // all the others are always unsharded.
+        // This list does not contain 'config.system.sessions' because we already check it above
+        return !isTemporaryReshardingCollection() && !isTimeseriesBucketsCollection();
+    }
 
     return false;
 }
@@ -462,12 +468,20 @@ Status NamespaceStringOrUUID::isNssValid() const {
 
     // _nss is set and not valid.
     return {ErrorCodes::InvalidNamespace,
-            str::stream() << "Namespace " << _nss << " is not a valid collection name"};
+            str::stream() << "Namespace " << _nss->toStringForErrorMsg()
+                          << " is not a valid collection name"};
 }
 
 std::string NamespaceStringOrUUID::toString() const {
     if (_nss)
         return _nss->toString();
+    else
+        return _uuid->toString();
+}
+
+std::string NamespaceStringOrUUID::toStringForErrorMsg() const {
+    if (_nss)
+        return _nss->toStringForErrorMsg();
     else
         return _uuid->toString();
 }

@@ -1239,6 +1239,7 @@ env.Library(
         'resumable_index_builds_idl',
         'server_base',
         'shard_role',
+        'storage/disk_space_util',
         'storage/encryption_hooks',
         'storage/storage_util',
         'storage/two_phase_index_build_knobs_idl',
@@ -1447,7 +1448,9 @@ env.Library(
     ],
 )
 
-env.Library(
+execEnv = env.Clone()
+execEnv.InjectThirdParty(libraries=['snappy'])
+execEnv.Library(
     target='query_exec',
     source=[
         'clientcursor.cpp',
@@ -1462,7 +1465,6 @@ env.Library(
         'exec/count.cpp',
         'exec/count_scan.cpp',
         'exec/delete_stage.cpp',
-        'exec/disk_use_options.idl',
         'exec/distinct_scan.cpp',
         'exec/eof.cpp',
         'exec/fetch.cpp',
@@ -1571,6 +1573,7 @@ env.Library(
         'curop_failpoint_helpers',
         'cursor_server_params',
         'dbdirectclient',
+        'disk_use_options_idl',
         'exec/projection_executor',
         'exec/sbe/query_sbe_stages',
         'exec/sbe/query_sbe_storage',
@@ -1615,7 +1618,9 @@ env.Library(
         '$BUILD_DIR/mongo/db/query/ce/query_ce_histogram',
         '$BUILD_DIR/mongo/db/query/ce/query_ce_sampling',
         '$BUILD_DIR/mongo/db/query/optimizer/optimizer',
+        '$BUILD_DIR/mongo/db/repl/wait_for_majority_service',
         '$BUILD_DIR/mongo/db/session/kill_sessions',
+        '$BUILD_DIR/mongo/db/sorter/sorter_idl',
         '$BUILD_DIR/mongo/db/sorter/sorter_stats',
         '$BUILD_DIR/mongo/db/stats/resource_consumption_metrics',
         '$BUILD_DIR/mongo/db/storage/record_store_base',
@@ -1626,6 +1631,15 @@ env.Library(
         'timeseries/timeseries_conversion_util',
         'working_set_common',
         'write_stage_common',
+    ],
+)
+
+env.Library(
+    target='disk_use_options_idl',
+    source=['exec/disk_use_options.idl'],
+    LIBDEPS_PRIVATE=[
+        'query/query_knobs',
+        'server_base',
     ],
 )
 
@@ -1713,6 +1727,7 @@ env.Library(
         'query/collation/collator_interface',
         'query/datetime/date_time_support',
         'query/query_knobs',
+        'serialization_options',
         'stats/counters',
         'update/pattern_cmp',
     ],
@@ -1722,6 +1737,19 @@ env.Library(
         'service_context',
         'vector_clock',
     ],
+)
+
+env.Library(
+    target='serialization_options',
+    source=[
+        'query/serialization_options.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/exec/document_value/document_value',
+        '$BUILD_DIR/mongo/db/pipeline/field_path',
+    ],
+    LIBDEPS_PRIVATE=[],
 )
 
 env.Library(
@@ -2449,6 +2477,7 @@ env.Library(
         'catalog/health_log',
         'catalog/health_log_interface',
         'commands/mongod',
+        'commands/mongod_fsync',
         'commands/test_commands',
         'concurrency/flow_control_ticketholder',
         'concurrency/lock_manager',
@@ -2503,6 +2532,7 @@ env.Library(
         'storage/storage_control',
         'storage/storage_engine_common',
         'system_index',
+        'timeseries/timeseries_op_observer',
         'ttl_d',
         'vector_clock',
     ],

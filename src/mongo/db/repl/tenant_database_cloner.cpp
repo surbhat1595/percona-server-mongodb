@@ -304,7 +304,7 @@ void TenantDatabaseCloner::postStage() {
         _stats.collectionStats.reserve(_collections.size());
         for (const auto& coll : _collections) {
             _stats.collectionStats.emplace_back();
-            _stats.collectionStats.back().ns = coll.first.ns();
+            _stats.collectionStats.back().ns = coll.first.ns().toString();
         }
     }
     for (const auto& coll : _collections) {
@@ -335,8 +335,9 @@ void TenantDatabaseCloner::postStage() {
                         logAttrs(sourceNss),
                         "error"_attr = collStatus.toString(),
                         "tenantId"_attr = _tenantId);
-            auto message = collStatus.withContext(str::stream() << "Error cloning collection '"
-                                                                << sourceNss.toString() << "'");
+            auto message =
+                collStatus.withContext(str::stream() << "Error cloning collection '"
+                                                     << sourceNss.toStringForErrorMsg() << "'");
             setSyncFailedStatus(collStatus.withReason(message.toString()));
         }
         {

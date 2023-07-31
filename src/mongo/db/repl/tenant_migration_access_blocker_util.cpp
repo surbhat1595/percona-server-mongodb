@@ -302,7 +302,7 @@ void validateNssIsBeingMigrated(const boost::optional<TenantId>& tenantId,
     if (!tenantId) {
         uassert(ErrorCodes::InvalidTenantId,
                 str::stream() << "Failed to extract a valid tenant from namespace '"
-                              << nss.toStringWithTenantId() << "'.",
+                              << nss.toStringForErrorMsg() << "'.",
                 nss.isOnInternalDb());
         return;
     }
@@ -311,12 +311,12 @@ void validateNssIsBeingMigrated(const boost::optional<TenantId>& tenantId,
                     .getTenantMigrationAccessBlockerForTenantId(
                         *tenantId, TenantMigrationAccessBlocker::BlockerType::kRecipient);
     uassert(ErrorCodes::InvalidTenantId,
-            str::stream() << "The collection '" << nss.toStringWithTenantId()
+            str::stream() << "The collection '" << nss.toStringForErrorMsg()
                           << "' does not belong to a tenant being migrated.",
             mtab);
 
     uassert(ErrorCodes::InvalidTenantId,
-            str::stream() << "The collection '" << nss.toStringWithTenantId()
+            str::stream() << "The collection '" << nss.toStringForErrorMsg()
                           << "' is not being migrated in migration " << migrationId,
             mtab->getMigrationId() == migrationId);
 }
@@ -529,6 +529,17 @@ Status checkIfCanBuildIndex(OperationContext* opCtx, const DatabaseName& dbName)
     return Status::OK();
 }
 
+void assertCanGetMoreChangeStream(OperationContext* opCtx, const DatabaseName& dbName) {
+    // We only block change stream getMores on the donor.
+    auto mtab = TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
+                    .getTenantMigrationAccessBlockerForDbName(dbName, MtabType::kDonor);
+    if (mtab) {
+        auto status = mtab->checkIfCanGetMoreChangeStream();
+        mtab->recordTenantMigrationError(status);
+        uassertStatusOK(status);
+    }
+}
+
 bool hasActiveTenantMigration(OperationContext* opCtx, const DatabaseName& dbName) {
     if (dbName.db().empty()) {
         return false;
@@ -714,7 +725,7 @@ boost::optional<std::string> extractTenantFromDatabaseName(const DatabaseName& d
         return boost::none;
     }
 
-    return dbName.db().substr(0, pos);
+    return dbName.db().substr(0, pos).toString();
 }
 
 }  // namespace tenant_migration_access_blocker

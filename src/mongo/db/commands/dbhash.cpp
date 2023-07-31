@@ -244,12 +244,7 @@ public:
         Lock::GlobalLock globalLock(opCtx, MODE_IS);
 
         // The CollectionCatalog to use for lock-free reads with point-in-time catalog lookups.
-        std::shared_ptr<const CollectionCatalog> catalog;
-        // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-        if (feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
-            // Make sure we get a CollectionCatalog in sync with our snapshot.
-            catalog = getConsistentCatalogAndSnapshot(opCtx);
-        }
+        std::shared_ptr<const CollectionCatalog> catalog = getConsistentCatalogAndSnapshot(opCtx);
 
         boost::optional<AutoGetDb> autoDb;
         if (isPointInTimeRead) {
@@ -276,7 +271,8 @@ public:
             auto collNss = collection->ns();
 
             uassert(ErrorCodes::BadValue,
-                    str::stream() << "weird fullCollectionName [" << collNss.toString() << "]",
+                    str::stream() << "weird fullCollectionName [" << collNss.toStringForErrorMsg()
+                                  << "]",
                     collNss.size() - 1 > dbName.db().size());
 
             if (repl::ReplicationCoordinator::isOplogDisabledForNS(collNss)) {
@@ -315,56 +311,50 @@ public:
             return true;
         };
 
-        // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-        if (feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
-            for (auto it = catalog->begin(opCtx, dbName); it != catalog->end(opCtx); ++it) {
-                UUID uuid = it.uuid();
+        for (auto it = catalog->begin(opCtx, dbName); it != catalog->end(opCtx); ++it) {
+            UUID uuid = it.uuid();
 
-                // The namespace must be found as the UUID is fetched from the same
-                // CollectionCatalog instance.
-                boost::optional<NamespaceString> nss = catalog->lookupNSSByUUID(opCtx, uuid);
-                invariant(nss);
+            // The namespace must be found as the UUID is fetched from the same
+            // CollectionCatalog instance.
+            boost::optional<NamespaceString> nss = catalog->lookupNSSByUUID(opCtx, uuid);
+            invariant(nss);
 
-                const Collection* coll = nullptr;
-                if (nss->isGlobalIndex()) {
-                    // TODO SERVER-74209: Reading earlier than the minimum valid snapshot is not
-                    // supported for global indexes. It appears that the primary and secondaries
-                    // apply operations differently resulting in hash mismatches. This requires
-                    // further investigation. In the meantime, global indexes use the behaviour
-                    // prior to point-in-time lookups.
-                    coll = *it;
+            const Collection* coll = nullptr;
+            if (nss->isGlobalIndex()) {
+                // TODO SERVER-74209: Reading earlier than the minimum valid snapshot is not
+                // supported for global indexes. It appears that the primary and secondaries apply
+                // operations differently resulting in hash mismatches. This requires further
+                // investigation. In the meantime, global indexes use the behaviour prior to
+                // point-in-time lookups.
+                coll = *it;
 
-                    if (auto readTimestamp =
-                            opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx)) {
-                        auto minSnapshot = coll->getMinimumValidSnapshot();
-                        uassert(ErrorCodes::SnapshotUnavailable,
-                                str::stream()
-                                    << "Unable to read from a snapshot due to pending collection"
-                                       " catalog changes; please retry the operation. Snapshot"
-                                       " timestamp is "
-                                    << readTimestamp->toString()
-                                    << ". Collection minimum timestamp is "
-                                    << minSnapshot->toString(),
-                                !minSnapshot || *readTimestamp >= *minSnapshot);
-                    }
-                } else {
-                    // TODO:SERVER-75848 Make this lock-free
-                    Lock::CollectionLock clk(opCtx, *nss, MODE_IS);
-                    coll = catalog->establishConsistentCollection(
-                        opCtx,
-                        {dbName, uuid},
-                        opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx));
-
-                    if (!coll) {
-                        // The collection did not exist at the read timestamp with the given UUID.
-                        continue;
-                    }
+                if (auto readTimestamp =
+                        opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx)) {
+                    auto minSnapshot = coll->getMinimumValidSnapshot();
+                    uassert(ErrorCodes::SnapshotUnavailable,
+                            str::stream()
+                                << "Unable to read from a snapshot due to pending collection"
+                                   " catalog changes; please retry the operation. Snapshot"
+                                   " timestamp is "
+                                << readTimestamp->toString() << ". Collection minimum timestamp is "
+                                << minSnapshot->toString(),
+                            !minSnapshot || *readTimestamp >= *minSnapshot);
                 }
+            } else {
+                // TODO:SERVER-75848 Make this lock-free
+                Lock::CollectionLock clk(opCtx, *nss, MODE_IS);
+                coll = catalog->establishConsistentCollection(
+                    opCtx,
+                    {dbName, uuid},
+                    opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx));
 
-                (void)checkAndHashCollection(coll);
+                if (!coll) {
+                    // The collection did not exist at the read timestamp with the given UUID.
+                    continue;
+                }
             }
-        } else {
-            catalog::forEachCollectionFromDb(opCtx, dbName, MODE_IS, checkAndHashCollection);
+
+            (void)checkAndHashCollection(coll);
         }
 
         BSONObjBuilder bb(result.subobjStart("collections"));
@@ -413,18 +403,6 @@ private:
             // reading from the consistent snapshot doesn't overlap with any catalog operations on
             // the collection.
             invariant(opCtx->lockState()->isCollectionLockedForMode(collection->ns(), MODE_IS));
-
-            auto minSnapshot = collection->getMinimumVisibleSnapshot();
-            auto mySnapshot = opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx);
-            invariant(mySnapshot);
-
-            uassert(ErrorCodes::SnapshotUnavailable,
-                    str::stream() << "Unable to read from a snapshot due to pending collection"
-                                     " catalog changes; please retry the operation. Snapshot"
-                                     " timestamp is "
-                                  << mySnapshot->toString() << ". Collection minimum timestamp is "
-                                  << minSnapshot->toString(),
-                    !minSnapshot || *mySnapshot >= *minSnapshot);
         } else {
             invariant(opCtx->lockState()->isDbLockedForMode(collection->ns().dbName(), MODE_S));
         }

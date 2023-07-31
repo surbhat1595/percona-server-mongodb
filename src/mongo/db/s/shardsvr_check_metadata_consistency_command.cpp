@@ -125,10 +125,12 @@ public:
 
     private:
         Response _runClusterLevel(OperationContext* opCtx, const NamespaceString& nss) {
-            uassert(
-                ErrorCodes::InvalidNamespace,
-                "cluster level mode must be run against the 'admin' database with {aggregate: 1}",
-                nss.isCollectionlessCursorNamespace());
+            uassert(ErrorCodes::InvalidNamespace,
+                    str::stream() << Request::kCommandName
+                                  << " command on admin database can only be run without "
+                                     "collection name. Found unexpected collection name: "
+                                  << nss.coll(),
+                    nss.isCollectionlessCursorNamespace());
 
             std::vector<RemoteCursor> cursors;
 
@@ -175,19 +177,24 @@ public:
             std::vector<std::pair<ShardId, BSONObj>> requests;
 
             // Shard requests
+            const auto shardOpKey = UUID::gen();
             ShardsvrCheckMetadataConsistencyParticipant participantRequest{nss};
             participantRequest.setCommonFields(request().getCommonFields());
             participantRequest.setPrimaryShardId(ShardingState::get(opCtx)->shardId());
             participantRequest.setCursor(request().getCursor());
             const auto participants = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
+            auto participantRequestWithOpKey =
+                appendOpKey(shardOpKey, participantRequest.toBSON({}));
             for (const auto& shardId : participants) {
-                requests.emplace_back(shardId, participantRequest.toBSON({}));
+                requests.emplace_back(shardId, participantRequestWithOpKey.getOwned());
             }
 
             // Config server request
+            const auto configOpKey = UUID::gen();
             ConfigsvrCheckMetadataConsistency configRequest{nss};
             participantRequest.setCursor(request().getCursor());
-            requests.emplace_back(ShardId::kConfigServerId, configRequest.toBSON({}));
+            requests.emplace_back(ShardId::kConfigServerId,
+                                  appendOpKey(configOpKey, configRequest.toBSON({})));
 
             // Take a DDL lock on the database
             static constexpr StringData kLockReason{"checkMetadataConsistency"_sd};
@@ -203,7 +210,8 @@ public:
                                     ReadPreferenceSetting(ReadPreference::PrimaryOnly),
                                     requests,
                                     false /* allowPartialResults */,
-                                    Shard::RetryPolicy::kIdempotentOrCursorInvalidated);
+                                    Shard::RetryPolicy::kIdempotentOrCursorInvalidated,
+                                    {shardOpKey, configOpKey});
         }
 
         CursorInitialReply _mergeCursors(OperationContext* opCtx,

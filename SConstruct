@@ -615,8 +615,8 @@ add_option(
 
 add_option(
     "cxx-std",
-    choices=["17", "20"],
-    default="17",
+    choices=["20"],
+    default="20",
     help="Select the C++ language standard to build with",
 )
 
@@ -2048,6 +2048,7 @@ if env.get('ENABLE_OOM_RETRY'):
             env['OOM_RETRY_MESSAGES'] = [
                 'LNK1102: out of memory',
                 'C1060: compiler is out of heap space',
+                'c1xx : fatal error C1063: INTERNAL COMPILER ERROR',
                 'LNK1171: unable to load mspdbcore.dll',
                 "LNK1201: error writing to program database ''",
             ]
@@ -3891,37 +3892,18 @@ def doConfigure(myenv):
         conf.Finish()
 
     if myenv.ToolchainIs('msvc'):
-        if get_option('cxx-std') == "17":
-            myenv.AppendUnique(CCFLAGS=['/std:c++17',
-                                        '/Zc:lambda'])  # /Zc:lambda is implied by /std:c++20
-        elif get_option('cxx-std') == "20":
+        if get_option('cxx-std') == "20":
             myenv.AppendUnique(CCFLAGS=['/std:c++20'])
     else:
-        if get_option('cxx-std') == "17":
-            if not myenv.AddToCXXFLAGSIfSupported('-std=c++17'):
-                myenv.ConfError('Compiler does not honor -std=c++17')
-        elif get_option('cxx-std') == "20":
+        if get_option('cxx-std') == "20":
             if not myenv.AddToCXXFLAGSIfSupported('-std=c++20'):
                 myenv.ConfError('Compiler does not honor -std=c++20')
 
         if not myenv.AddToCFLAGSIfSupported('-std=c11'):
-            myenv.ConfError("C++17 mode selected for C++ files, but can't enable C11 for C files")
+            myenv.ConfError("C++20 mode selected for C++ files, but can't enable C11 for C files")
 
     if using_system_version_of_cxx_libraries():
-        print('WARNING: System versions of C++ libraries must be compiled with C++17 support')
-
-    def CheckCxx17(context):
-        test_body = """
-        #if __cplusplus < 201703L
-        #error
-        #endif
-        namespace NestedNamespaceDecls::AreACXX17Feature {};
-        """
-
-        context.Message('Checking for C++17... ')
-        ret = context.TryCompile(textwrap.dedent(test_body), ".cpp")
-        context.Result(ret)
-        return ret
+        print('WARNING: System versions of C++ libraries must be compiled with C++20 support')
 
     def CheckCxx20(context):
         test_body = """
@@ -3941,15 +3923,12 @@ def doConfigure(myenv):
         myenv,
         help=False,
         custom_tests={
-            'CheckCxx17': CheckCxx17,
             'CheckCxx20': CheckCxx20,
         },
     )
 
-    if get_option('cxx-std') == "17" and not conf.CheckCxx17():
-        myenv.ConfError('C++17 support is required to build MongoDB')
-    elif get_option('cxx-std') == "20" and not conf.CheckCxx20():
-        myenv.ConfError('C++20 support was not detected')
+    if get_option('cxx-std') == "20" and not conf.CheckCxx20():
+        myenv.ConfError('C++20 support is required to build MongoDB')
 
     conf.Finish()
 
@@ -6458,6 +6437,41 @@ if env.get('UNITTESTS_COMPILE_CONCURRENCY'):
         builders={'Object': c_suffixes, 'SharedObject': c_suffixes},
         source_file_regex=r"^.*_test\.cpp$",
     )
+
+first_half_flag = False
+
+
+def half_source_emitter(target, source, env):
+    global first_half_flag
+    if first_half_flag:
+        first_half_flag = False
+        if not 'conftest' in str(target[0]) and not str(source[0]).endswith('_test.cpp'):
+            env.Alias('compile_first_half_non_test_source', target)
+    else:
+        first_half_flag = True
+    return target, source
+
+
+# Cribbed from Tool/cc.py and Tool/c++.py. It would be better if
+# we could obtain this from SCons.
+_CSuffixes = [".c"]
+if not SCons.Util.case_sensitive_suffixes(".c", ".C"):
+    _CSuffixes.append(".C")
+
+_CXXSuffixes = [".cpp", ".cc", ".cxx", ".c++", ".C++"]
+if SCons.Util.case_sensitive_suffixes(".c", ".C"):
+    _CXXSuffixes.append(".C")
+
+for object_builder in SCons.Tool.createObjBuilders(env):
+    emitterdict = object_builder.builder.emitter
+    for suffix in emitterdict.keys():
+        if not suffix in _CSuffixes + _CXXSuffixes:
+            continue
+        base = emitterdict[suffix]
+        emitterdict[suffix] = SCons.Builder.ListEmitter([
+            base,
+            half_source_emitter,
+        ])
 
 # Keep this late in the game so that we can investigate attributes set by all the tools that have run.
 if has_option("cache"):

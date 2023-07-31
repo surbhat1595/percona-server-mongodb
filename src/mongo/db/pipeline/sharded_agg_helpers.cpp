@@ -201,9 +201,6 @@ std::vector<RemoteCursor> establishShardCursors(
     invariant(cri || mustRunOnAllShards);
 
     if (targetEveryShardServer) {
-        uassert(7355703,
-                "Cannot target all hosts if the pipeline is not run on all shards.",
-                mustRunOnAllShards);
         if (MONGO_unlikely(shardedAggregateHangBeforeEstablishingShardCursors.shouldFail())) {
             LOGV2(
                 7355704,
@@ -1192,7 +1189,7 @@ DispatchShardPipelineResults dispatchShardPipeline(
             // shards, and should participate in the shard version protocol.
             invariant(executionNsRoutingInfo);
             shardResults =
-                scatterGatherVersionedTargetByRoutingTable(opCtx,
+                scatterGatherVersionedTargetByRoutingTable(expCtx,
                                                            expCtx->ns.db(),
                                                            expCtx->ns,
                                                            *executionNsRoutingInfo,

@@ -84,7 +84,7 @@ std::shared_ptr<RoutingTableHistory> createUpdatedRoutingTableHistory(
         tassert(7032310,
                 fmt::format("allowMigrations field of collection '{}' changed without changing the "
                             "collection placement version {}. Old value: {}, new value: {}",
-                            nss.toString(),
+                            nss.toStringForErrorMsg(),
                             existingHistory->optRt->getVersion().toString(),
                             existingHistory->optRt->allowMigrations(),
                             collectionAndChunks.allowMigrations),
@@ -95,7 +95,7 @@ std::shared_ptr<RoutingTableHistory> createUpdatedRoutingTableHistory(
         tassert(7032311,
                 fmt::format("reshardingFields field of collection '{}' changed without changing "
                             "the collection placement version {}. Old value: {}, new value: {}",
-                            nss.toString(),
+                            nss.toStringForErrorMsg(),
                             existingHistory->optRt->getVersion().toString(),
                             oldReshardingFields->toBSON().toString(),
                             newReshardingFields->toBSON().toString()),
@@ -409,6 +409,11 @@ StatusWith<CollectionRoutingInfo> CatalogCache::getCollectionRoutingInfoAt(
     OperationContext* opCtx, const NamespaceString& nss, Timestamp atClusterTime) {
     try {
         auto cm = uassertStatusOK(_getCollectionPlacementInfoAt(opCtx, nss, atClusterTime));
+        if (!cm.isSharded()) {
+            // If the collection is unsharded, it cannot have global indexes so there is no need to
+            // fetch the index information.
+            return CollectionRoutingInfo{std::move(cm), boost::none};
+        }
         auto sii = _getCollectionIndexInfoAt(opCtx, nss);
         return retryUntilConsistentRoutingInfo(opCtx, nss, std::move(cm), std::move(sii));
     } catch (const DBException& ex) {
@@ -422,7 +427,23 @@ StatusWith<CollectionRoutingInfo> CatalogCache::getCollectionRoutingInfo(Operati
     try {
         auto cm =
             uassertStatusOK(_getCollectionPlacementInfoAt(opCtx, nss, boost::none, allowLocks));
+        if (!cm.isSharded()) {
+            // If the collection is unsharded, it cannot have global indexes so there is no need to
+            // fetch the index information.
+            return CollectionRoutingInfo{std::move(cm), boost::none};
+        }
         auto sii = _getCollectionIndexInfoAt(opCtx, nss, allowLocks);
+        return retryUntilConsistentRoutingInfo(opCtx, nss, std::move(cm), std::move(sii));
+    } catch (const DBException& ex) {
+        return ex.toStatus();
+    }
+}
+
+StatusWith<CollectionRoutingInfo> CatalogCache::_getCollectionRoutingInfoWithoutOptimization(
+    OperationContext* opCtx, const NamespaceString& nss) {
+    try {
+        auto cm = uassertStatusOK(_getCollectionPlacementInfoAt(opCtx, nss, boost::none));
+        auto sii = _getCollectionIndexInfoAt(opCtx, nss);
         return retryUntilConsistentRoutingInfo(opCtx, nss, std::move(cm), std::move(sii));
     } catch (const DBException& ex) {
         return ex.toStatus();
@@ -541,7 +562,7 @@ StatusWith<CollectionRoutingInfo> CatalogCache::getCollectionRoutingInfoWithRefr
     try {
         _triggerPlacementVersionRefresh(opCtx, nss);
         _triggerIndexVersionRefresh(opCtx, nss);
-        return getCollectionRoutingInfo(opCtx, nss, false);
+        return _getCollectionRoutingInfoWithoutOptimization(opCtx, nss);
     } catch (const DBException& ex) {
         return ex.toStatus();
     }
@@ -561,7 +582,7 @@ StatusWith<CollectionRoutingInfo> CatalogCache::getCollectionRoutingInfoWithInde
     OperationContext* opCtx, const NamespaceString& nss) {
     try {
         _triggerIndexVersionRefresh(opCtx, nss);
-        return getCollectionRoutingInfo(opCtx, nss, false);
+        return _getCollectionRoutingInfoWithoutOptimization(opCtx, nss);
     } catch (const DBException& ex) {
         return ex.toStatus();
     }
@@ -571,7 +592,8 @@ CollectionRoutingInfo CatalogCache::getShardedCollectionRoutingInfo(OperationCon
                                                                     const NamespaceString& nss) {
     auto cri = uassertStatusOK(getCollectionRoutingInfo(opCtx, nss));
     uassert(ErrorCodes::NamespaceNotSharded,
-            str::stream() << "Expected collection " << nss << " to be sharded",
+            str::stream() << "Expected collection " << nss.toStringForErrorMsg()
+                          << " to be sharded",
             cri.cm.isSharded());
     return cri;
 }
@@ -581,7 +603,8 @@ StatusWith<CollectionRoutingInfo> CatalogCache::getShardedCollectionRoutingInfoW
     try {
         auto cri = uassertStatusOK(getCollectionRoutingInfoWithRefresh(opCtx, nss));
         uassert(ErrorCodes::NamespaceNotSharded,
-                str::stream() << "Expected collection " << nss << " to be sharded",
+                str::stream() << "Expected collection " << nss.toStringForErrorMsg()
+                              << " to be sharded",
                 cri.cm.isSharded());
         return cri;
     } catch (const DBException& ex) {
@@ -594,7 +617,8 @@ StatusWith<CollectionRoutingInfo> CatalogCache::getShardedCollectionRoutingInfoW
     try {
         auto cri = uassertStatusOK(getCollectionRoutingInfoWithPlacementRefresh(opCtx, nss));
         uassert(ErrorCodes::NamespaceNotSharded,
-                str::stream() << "Expected collection " << nss << " to be sharded",
+                str::stream() << "Expected collection " << nss.toStringForErrorMsg()
+                              << " to be sharded",
                 cri.cm.isSharded());
         return cri;
     } catch (const DBException& ex) {
@@ -885,7 +909,7 @@ CatalogCache::CollectionCache::LookupResult CatalogCache::CollectionCache::_look
         newRoutingHistory->getAllShardIds(&shardIds);
         for (const auto& shardId : shardIds) {
             uassertStatusOKWithContext(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, shardId),
-                                       str::stream() << "Collection " << nss
+                                       str::stream() << "Collection " << nss.toStringForErrorMsg()
                                                      << " references shard which does not exist");
         }
 

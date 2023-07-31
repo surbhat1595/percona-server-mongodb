@@ -1,11 +1,9 @@
 /*
  * Tests to validate the correct behaviour of checkMetadataConsistency command.
  *
- * TODO SERVER-74445: Fix cluster level checkMetadataConsistency command with a catalog shard.
  * @tags: [
  *    featureFlagCheckMetadataConsistency,
  *    requires_fcv_70,
- *    catalog_shard_incompatible,
  * ]
  */
 
@@ -218,7 +216,8 @@ function getNewDb() {
     inconsistencies = mongos.getDB("admin").checkMetadataConsistency().toArray();
     assert.eq(1, inconsistencies.length, tojson(inconsistencies));
     assert.eq("HiddenShardedCollection", inconsistencies[0].type, tojson(inconsistencies[0]));
-    assert.eq(coll1.getFullName(), inconsistencies[0].details.ns, tojson(inconsistencies[0]));
+    assert.eq(
+        coll1.getFullName(), inconsistencies[0].details.namespace, tojson(inconsistencies[0]));
 
     // Remove db2 so that coll2 also became hidden
     assert.commandWorked(configDatabasesColl.deleteOne({_id: db2.getName()}));
@@ -226,9 +225,11 @@ function getNewDb() {
     inconsistencies = mongos.getDB("admin").checkMetadataConsistency().toArray();
     assert.eq(2, inconsistencies.length, tojson(inconsistencies));
     assert.eq("HiddenShardedCollection", inconsistencies[0].type, tojson(inconsistencies[0]));
-    assert.eq(coll1.getFullName(), inconsistencies[0].details.ns, tojson(inconsistencies[0]));
+    assert.eq(
+        coll1.getFullName(), inconsistencies[0].details.namespace, tojson(inconsistencies[0]));
     assert.eq("HiddenShardedCollection", inconsistencies[1].type, tojson(inconsistencies[1]));
-    assert.eq(coll2.getFullName(), inconsistencies[1].details.ns, tojson(inconsistencies[1]));
+    assert.eq(
+        coll2.getFullName(), inconsistencies[1].details.namespace, tojson(inconsistencies[1]));
 
     // Restore db1 and db2 configuration to ensure the correct behavior of dropDatabase operations
     assert.commandWorked(configDatabasesColl.insertMany([db1ConfigEntry, db2ConfigEntry]));
@@ -236,6 +237,49 @@ function getNewDb() {
     // Clean up the database to pass the hooks that detect inconsistencies
     db1.dropDatabase();
     db2.dropDatabase();
+    inconsistencies = mongos.getDB("admin").checkMetadataConsistency().toArray();
+    assert.eq(0, inconsistencies.length, tojson(inconsistencies));
+})();
+
+(function testRoutingTableInconsistency() {
+    const db = getNewDb();
+    const kSourceCollName = "coll";
+    const ns = db[kSourceCollName].getFullName();
+
+    st.shardColl(db[kSourceCollName], {skey: 1});
+
+    // Insert a RoutingTableRangeOverlap inconsistency
+    const collUuid = st.config.collections.findOne({_id: ns}).uuid;
+    assert.commandWorked(st.config.chunks.updateOne({uuid: collUuid}, {$set: {max: {skey: 10}}}));
+
+    // Insert a ZonesRangeOverlap inconsistency
+    let entry = {
+        _id: {ns: ns, min: {"skey": -100}},
+        ns: ns,
+        min: {"skey": -100},
+        max: {"skey": 100},
+        tag: "a",
+    };
+    assert.commandWorked(st.config.tags.insert(entry));
+    entry = {
+        _id: {ns: ns, min: {"skey": 50}},
+        ns: ns,
+        min: {"skey": 50},
+        max: {"skey": 150},
+        tag: "a",
+    };
+    assert.commandWorked(st.config.tags.insert(entry));
+
+    // Database level mode command
+    let inconsistencies = db.checkMetadataConsistency().toArray();
+    assert.eq(2, inconsistencies.length, tojson(inconsistencies));
+    assert(inconsistencies.some(object => object.type === "RoutingTableRangeOverlap"),
+           tojson(inconsistencies));
+    assert(inconsistencies.some(object => object.type === "ZonesRangeOverlap"),
+           tojson(inconsistencies));
+
+    // Clean up the database to pass the hooks that detect inconsistencies
+    db.dropDatabase();
     inconsistencies = mongos.getDB("admin").checkMetadataConsistency().toArray();
     assert.eq(0, inconsistencies.length, tojson(inconsistencies));
 })();

@@ -50,8 +50,6 @@
 namespace mongo {
 namespace {
 
-MONGO_FAIL_POINT_DEFINE(hangBeforeAutoGetCollectionLockFreeShardedStateAccess);
-
 /**
  * Performs some sanity checks on the collection and database.
  */
@@ -63,12 +61,14 @@ void verifyDbAndCollection(OperationContext* opCtx,
                            Database* db,
                            bool verifyWriteEligible) {
     invariant(!nsOrUUID.uuid() || coll,
-              str::stream() << "Collection for " << resolvedNss.ns()
-                            << " disappeared after successfully resolving " << nsOrUUID.toString());
+              str::stream() << "Collection for " << resolvedNss.toStringForErrorMsg()
+                            << " disappeared after successfully resolving "
+                            << nsOrUUID.toStringForErrorMsg());
 
     invariant(!nsOrUUID.uuid() || db,
-              str::stream() << "Database for " << resolvedNss.ns()
-                            << " disappeared after successfully resolving " << nsOrUUID.toString());
+              str::stream() << "Database for " << resolvedNss.toStringForErrorMsg()
+                            << " disappeared after successfully resolving "
+                            << nsOrUUID.toStringForErrorMsg());
 
     // In most cases we expect modifications for system.views to upgrade MODE_IX to MODE_X before
     // taking the lock. One exception is a query by UUID of system.views in a transaction. Usual
@@ -84,45 +84,25 @@ void verifyDbAndCollection(OperationContext* opCtx,
     }
 
     // Verify that we are using the latest instance if we intend to perform writes.
-    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-    if (feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe() &&
-        verifyWriteEligible) {
+    if (verifyWriteEligible) {
         auto latest = CollectionCatalog::latest(opCtx);
         if (!latest->containsCollection(opCtx, coll)) {
-            throwWriteConflictException(str::stream()
-                                        << "Unable to write to collection '" << coll->ns()
-                                        << "' due to catalog changes; please "
-                                           "retry the operation");
+            throwWriteConflictException(str::stream() << "Unable to write to collection '"
+                                                      << coll->ns().toStringForErrorMsg()
+                                                      << "' due to catalog changes; please "
+                                                         "retry the operation");
         }
         if (opCtx->recoveryUnit()->isActive()) {
             const auto mySnapshot = opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx);
             if (mySnapshot && *mySnapshot < coll->getMinimumValidSnapshot()) {
                 throwWriteConflictException(str::stream()
-                                            << "Unable to write to collection '" << coll->ns()
+                                            << "Unable to write to collection '"
+                                            << coll->ns().toStringForErrorMsg()
                                             << "' due to snapshot timestamp " << *mySnapshot
                                             << " being older than collection minimum "
                                             << *coll->getMinimumValidSnapshot()
                                             << "; please retry the operation");
             }
-        }
-    }
-
-    // If we are in a transaction, we cannot yield and wait when there are pending catalog
-    // changes. Instead, we must return an error in such situations. We ignore this restriction
-    // for the oplog, since it never has pending catalog changes.
-    if (opCtx->inMultiDocumentTransaction() && resolvedNss != NamespaceString::kRsOplogNamespace) {
-        if (auto minSnapshot = coll->getMinimumVisibleSnapshot()) {
-            auto mySnapshot =
-                opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx).get_value_or(
-                    opCtx->recoveryUnit()->getCatalogConflictingTimestamp());
-
-            uassert(
-                ErrorCodes::SnapshotUnavailable,
-                str::stream() << "Unable to read from a snapshot due to pending collection catalog "
-                                 "changes; please retry the operation. Snapshot timestamp is "
-                              << mySnapshot.toString() << ". Collection minimum is "
-                              << minSnapshot->toString(),
-                mySnapshot.isNull() || mySnapshot >= minSnapshot.value());
         }
     }
 }
@@ -132,8 +112,9 @@ void verifyDbAndCollection(OperationContext* opCtx,
 AutoGetDb::AutoGetDb(OperationContext* opCtx,
                      const DatabaseName& dbName,
                      LockMode mode,
+                     boost::optional<LockMode> tenantLockMode,
                      Date_t deadline)
-    : AutoGetDb(opCtx, dbName, mode, deadline, [] {
+    : AutoGetDb(opCtx, dbName, mode, tenantLockMode, deadline, [] {
           Lock::GlobalLockSkipOptions options;
           return options;
       }()) {}
@@ -141,9 +122,12 @@ AutoGetDb::AutoGetDb(OperationContext* opCtx,
 AutoGetDb::AutoGetDb(OperationContext* opCtx,
                      const DatabaseName& dbName,
                      LockMode mode,
+                     boost::optional<LockMode> tenantLockMode,
                      Date_t deadline,
                      Lock::DBLockSkipOptions options)
-    : _dbName(dbName), _dbLock(opCtx, dbName, mode, deadline, std::move(options)), _db([&] {
+    : _dbName(dbName),
+      _dbLock(opCtx, dbName, mode, deadline, std::move(options), tenantLockMode),
+      _db([&] {
           auto databaseHolder = DatabaseHolder::get(opCtx);
           return databaseHolder->getDb(opCtx, dbName);
       }()) {
@@ -198,9 +182,16 @@ AutoGetDb AutoGetDb::createForAutoGetCollection(
     return AutoGetDb(opCtx,
                      nsOrUUID.nss() ? nsOrUUID.nss()->dbName() : *nsOrUUID.dbName(),
                      isSharedLockMode(modeColl) ? MODE_IS : MODE_IX,
+                     boost::none /* tenantLockMode */,
                      deadline,
                      std::move(dbLockOptions));
 }
+
+AutoGetDb::AutoGetDb(OperationContext* opCtx,
+                     const DatabaseName& dbName,
+                     LockMode mode,
+                     Date_t deadline)
+    : AutoGetDb(opCtx, dbName, mode, boost::none, deadline) {}
 
 Database* AutoGetDb::ensureDbExists(OperationContext* opCtx) {
     if (_db) {
@@ -365,13 +356,13 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
         // namespace were a view, the collection UUID mismatch check would have failed above.
         if ((_view = catalog->lookupView(opCtx, _resolvedNss))) {
             uassert(ErrorCodes::CommandNotSupportedOnView,
-                    str::stream() << "Taking " << _resolvedNss.ns()
+                    str::stream() << "Taking " << _resolvedNss.toStringForErrorMsg()
                                   << " lock for timeseries is not allowed",
                     viewMode == auto_get_collection::ViewMode::kViewsPermitted ||
                         !_view->timeseries());
 
             uassert(ErrorCodes::CommandNotSupportedOnView,
-                    str::stream() << "Namespace " << _resolvedNss.ns()
+                    str::stream() << "Namespace " << _resolvedNss.toStringForErrorMsg()
                                   << " is a view, not a collection",
                     viewMode == auto_get_collection::ViewMode::kViewsPermitted);
 
@@ -379,7 +370,7 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
                                     *receivedShardVersion,
                                     ShardVersion::UNSHARDED() /* wantedVersion */,
                                     ShardingState::get(opCtx)->shardId()),
-                    str::stream() << "Namespace " << _resolvedNss
+                    str::stream() << "Namespace " << _resolvedNss.toStringForErrorMsg()
                                   << " is a view therefore the shard "
                                   << "version attached to the request must be unset or UNSHARDED",
                     !receivedShardVersion || *receivedShardVersion == ShardVersion::UNSHARDED());
@@ -404,7 +395,8 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
                             *receivedShardVersion,
                             boost::none /* wantedVersion */,
                             ShardingState::get(opCtx)->shardId()),
-            str::stream() << "No metadata for namespace " << _resolvedNss << " therefore the shard "
+            str::stream() << "No metadata for namespace " << _resolvedNss.toStringForErrorMsg()
+                          << " therefore the shard "
                           << "version attached to the request must be unset, UNSHARDED or IGNORED",
             !receivedShardVersion || *receivedShardVersion == ShardVersion::UNSHARDED() ||
                 ShardVersion::isPlacementVersionIgnored(*receivedShardVersion));
@@ -436,107 +428,6 @@ Collection* AutoGetCollection::getWritableCollection(OperationContext* opCtx) {
         _coll = CollectionPtr(_writableColl);
     }
     return _writableColl;
-}
-
-AutoGetCollectionLockFree::AutoGetCollectionLockFree(OperationContext* opCtx,
-                                                     const NamespaceStringOrUUID& nsOrUUID,
-                                                     RestoreFromYieldFn restoreFromYield,
-                                                     Options options)
-    : _lockFreeReadsBlock(opCtx),
-      _globalLock(opCtx, MODE_IS, options._deadline, Lock::InterruptBehavior::kThrow, [] {
-          Lock::GlobalLockSkipOptions options;
-          options.skipRSTLLock = true;
-          return options;
-      }()) {
-
-    auto& viewMode = options._viewMode;
-
-    // Wait for a configured amount of time after acquiring locks if the failpoint is enabled
-    catalog_helper::setAutoGetCollectionWaitFailpointExecute(
-        [&](const BSONObj& data) { sleepFor(Milliseconds(data["waitForMillis"].numberInt())); });
-
-    auto catalog = CollectionCatalog::get(opCtx);
-    _resolvedNss = catalog->resolveNamespaceStringOrUUID(opCtx, nsOrUUID);
-    _collection = catalog->lookupCollectionByNamespaceForRead_DONT_USE(opCtx, _resolvedNss);
-
-    // When we restore from yield on this CollectionPtr we will update _collection above and use its
-    // new pointer in the CollectionPtr
-    _collectionPtr = CollectionPtr(_collection.get());
-    _collectionPtr.makeYieldable(
-        opCtx,
-        [this, restoreFromYield = std::move(restoreFromYield)](OperationContext* opCtx, UUID uuid) {
-            restoreFromYield(_collection, opCtx, uuid);
-            return _collection.get();
-        });
-
-    // Check that the sharding database version matches our read.
-    // Note: this must always be checked, regardless of whether the collection exists, so that the
-    // dbVersion of this node or the caller gets updated quickly in case either is stale.
-    DatabaseShardingState::assertMatchingDbVersion(opCtx, _resolvedNss.db());
-
-    checkCollectionUUIDMismatch(opCtx, _resolvedNss, _collectionPtr, options._expectedUUID);
-
-    hangBeforeAutoGetCollectionLockFreeShardedStateAccess.executeIf(
-        [&](auto&) { hangBeforeAutoGetCollectionLockFreeShardedStateAccess.pauseWhileSet(opCtx); },
-        [&](const BSONObj& data) {
-            return opCtx->getLogicalSessionId() &&
-                opCtx->getLogicalSessionId()->getId() == UUID::fromCDR(data["lsid"].uuid());
-        });
-
-    if (_collection) {
-        // Fetch and store the sharding collection description data needed for use during the
-        // operation. The shardVersion will be checked later if the shard filtering metadata is
-        // fetched, ensuring both that the collection description info fetched here and the routing
-        // table are consistent with the read request's shardVersion.
-        auto scopedCss = CollectionShardingState::acquire(opCtx, _collection->ns());
-        auto collDesc = scopedCss->getCollectionDescription(opCtx);
-        if (collDesc.isSharded()) {
-            _collectionPtr.setShardKeyPattern(collDesc.getKeyPattern());
-        }
-
-        // If the collection exists, there is no need to check for views.
-        return;
-    }
-
-    invariant(!options._expectedUUID);
-    _view = catalog->lookupView(opCtx, _resolvedNss);
-    uassert(ErrorCodes::CommandNotSupportedOnView,
-            str::stream() << "Taking " << _resolvedNss.ns()
-                          << " lock for timeseries is not allowed",
-            !_view || viewMode == auto_get_collection::ViewMode::kViewsPermitted ||
-                !_view->timeseries());
-    uassert(ErrorCodes::CommandNotSupportedOnView,
-            str::stream() << "Namespace " << _resolvedNss.ns() << " is a view, not a collection",
-            !_view || viewMode == auto_get_collection::ViewMode::kViewsPermitted);
-    if (_view) {
-        // We are about to succeed setup as a view. No LockFree state was setup so do not mark the
-        // OperationContext as LFR.
-        _lockFreeReadsBlock.reset();
-    }
-}
-
-AutoGetCollectionMaybeLockFree::AutoGetCollectionMaybeLockFree(
-    OperationContext* opCtx,
-    const NamespaceStringOrUUID& nsOrUUID,
-    LockMode modeColl,
-    auto_get_collection::ViewMode viewMode,
-    Date_t deadline) {
-    if (opCtx->isLockFreeReadsOp()) {
-        _autoGetLockFree.emplace(
-            opCtx,
-            nsOrUUID,
-            [](std::shared_ptr<const Collection>& collection, OperationContext* opCtx, UUID uuid) {
-                LOGV2_FATAL(5342700,
-                            "This is a nested lock helper and there was an attempt to "
-                            "yield locks, which should be impossible");
-            },
-            AutoGetCollectionLockFree::Options{}.viewMode(viewMode).deadline(deadline));
-    } else {
-        _autoGet.emplace(opCtx,
-                         nsOrUUID,
-                         modeColl,
-                         AutoGetCollection::Options{}.viewMode(viewMode).deadline(deadline));
-    }
 }
 
 struct CollectionWriter::SharedImpl {
@@ -714,39 +605,45 @@ AutoGetOplog::AutoGetOplog(OperationContext* opCtx, OplogAccessMode mode, Date_t
     _oplog.makeYieldable(opCtx, LockedCollectionYieldRestore(opCtx, _oplog));
 }
 
-
 AutoGetChangeCollection::AutoGetChangeCollection(OperationContext* opCtx,
                                                  AutoGetChangeCollection::AccessMode mode,
-                                                 boost::optional<TenantId> tenantId,
+                                                 const TenantId& tenantId,
                                                  Date_t deadline) {
-    if (mode == AccessMode::kWriteInOplogContext) {
-        // The global lock must already be held.
-        invariant(opCtx->lockState()->isWriteLocked());
+    const auto changeCollectionNamespaceString = NamespaceString::makeChangeCollectionNSS(tenantId);
+    if (AccessMode::kRead == mode || AccessMode::kWrite == mode) {
+        // Treat this as a regular AutoGetCollection.
+        _coll.emplace(opCtx,
+                      changeCollectionNamespaceString,
+                      mode == AccessMode::kRead ? MODE_IS : MODE_IX,
+                      AutoGetCollection::Options{}.deadline(deadline));
+        return;
     }
+    tassert(6671506, "Invalid lock mode", AccessMode::kWriteInOplogContext == mode);
 
-    if (mode != AccessMode::kRead) {
-        // TODO SERVER-66715 avoid taking 'AutoGetCollection' and remove
-        // 'AllowLockAcquisitionOnTimestampedUnitOfWork'.
-        _allowLockAcquisitionTsWuow.emplace(opCtx->lockState());
-    }
-
-    _coll.emplace(opCtx,
-                  NamespaceString::makeChangeCollectionNSS(tenantId),
-                  mode == AccessMode::kRead ? MODE_IS : MODE_IX,
-                  AutoGetCollection::Options{}.deadline(deadline));
+    // When writing to the change collection as part of normal operation, we avoid taking any new
+    // locks. The caller must already have the tenant lock that protects the tenant specific change
+    // stream collection from being dropped. That's sufficient for acquiring a raw collection
+    // pointer.
+    tassert(6671500,
+            str::stream() << "Lock not held in IX mode for the tenant " << tenantId,
+            opCtx->lockState()->isLockHeldForMode(
+                ResourceId(ResourceType::RESOURCE_TENANT, tenantId), LockMode::MODE_IX));
+    auto changeCollectionPtr = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
+        opCtx, changeCollectionNamespaceString);
+    _changeCollection = CollectionPtr(changeCollectionPtr);
+    _changeCollection.makeYieldable(opCtx, LockedCollectionYieldRestore(opCtx, _changeCollection));
 }
 
 const Collection* AutoGetChangeCollection::operator->() const {
-    return _coll ? _coll->getCollection().get() : nullptr;
+    return (**this).get();
 }
 
 const CollectionPtr& AutoGetChangeCollection::operator*() const {
-    return _coll->getCollection();
+    return (_coll) ? *(*_coll) : _changeCollection;
 }
 
 AutoGetChangeCollection::operator bool() const {
-    return _coll && _coll->getCollection().get();
+    return static_cast<bool>(**this);
 }
-
 
 }  // namespace mongo

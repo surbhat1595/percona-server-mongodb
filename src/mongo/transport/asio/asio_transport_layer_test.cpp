@@ -79,6 +79,17 @@ using SetsockoptPtr = char*;
 using SetsockoptPtr = void*;
 #endif
 
+std::string loadFile(std::string filename) try {
+    std::ifstream f;
+    f.exceptions(f.exceptions() | std::ios::failbit);
+    f.open(filename);
+    return {std::istreambuf_iterator<char>{f}, std::istreambuf_iterator<char>{}};
+} catch (const std::ifstream::failure& ex) {
+    auto ec = lastSystemError();
+    FAIL("Failed to load file: \"{}\": {}: {}"_format(filename, ex.what(), errorMessage(ec)));
+    MONGO_UNREACHABLE;
+}
+
 class JoinThread : public stdx::thread {
 public:
     using stdx::thread::thread;
@@ -625,15 +636,17 @@ TEST(AsioTransportLayer, EgressConnectionResetByPeerDuringSessionCtor) {
 
     // `fp` pauses the `AsioSession` constructor immediately prior to its
     // `setsockopt` sequence, to allow time for the peer reset to propagate.
-    FailPoint& fp = transport::asioTransportLayerSessionPauseBeforeSetSocketOption;
+    auto fp = std::make_unique<FailPointEnableBlock>(
+        "asioTransportLayerSessionPauseBeforeSetSocketOption");
 
     Acceptor server(ioContext);
     server.setOnAccept([&](std::shared_ptr<Acceptor::Connection> conn) {
+        LOGV2(7598701, "waiting for the client to reach the fail-point");
+        (*fp)->waitForTimesEntered(fp->initialTimesEntered() + 1);
         LOGV2(6101604, "handling a connection by resetting it");
         conn->socket.set_option(asio::socket_base::linger(true, 0));
         conn->socket.close();
-        sleepFor(Seconds{1});
-        fp.setMode(FailPoint::off);
+        fp.reset();
     });
     JoinThread ioThread{[&] {
         ioContext.run();
@@ -642,7 +655,6 @@ TEST(AsioTransportLayer, EgressConnectionResetByPeerDuringSessionCtor) {
         ioContext.stop();
     };
 
-    fp.setMode(FailPoint::alwaysOn);
     LOGV2(6101602, "Connecting", "port"_attr = server.port());
     using namespace unittest::match;
     // On MacOS, calling `setsockopt` on a peer-reset connection yields an
@@ -835,11 +847,7 @@ TEST_F(AsioTransportLayerWithServiceContextTest, ShutdownDuringSSLHandshake) {
     conn.setSoTimeout(1);  // 1 second timeout
 
     TransientSSLParams params;
-    params.sslClusterPEMPayload = [] {
-        std::ifstream input("jstests/libs/client.pem");
-        std::string str((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-        return str;
-    }();
+    params.sslClusterPEMPayload = loadFile("jstests/libs/client.pem");
     params.targetedClusterConnectionString = ConnectionString::forLocal();
 
     auto status = conn.connectSocketOnly({"localhost", port}, std::move(params));

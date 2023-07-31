@@ -29,6 +29,7 @@
 
 #include "mongo/db/ops/parsed_update.h"
 
+#include "mongo/db/exec/disk_use_options_gen.h"
 #include "mongo/db/ops/parsed_update_array_filters.h"
 #include "mongo/db/ops/update_request.h"
 #include "mongo/db/ops/write_ops_gen.h"
@@ -49,6 +50,7 @@ ParsedUpdate::ParsedUpdate(OperationContext* opCtx,
           _request->getNamespaceString(),
           _request->getLegacyRuntimeConstants(),
           _request->getLetParameters(),
+          allowDiskUseByDefault.load(),  // allowDiskUse
           true,  // mayDbProfile. We pass 'true' here conservatively. In the future we may
           // change this.
           request->explain())),
@@ -58,6 +60,7 @@ ParsedUpdate::ParsedUpdate(OperationContext* opCtx,
     if (forgoOpCounterIncrements) {
         _expCtx->enabledCounters = false;
     }
+    _expCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
 }
 
 Status ParsedUpdate::parseRequest() {
@@ -107,6 +110,11 @@ Status ParsedUpdate::parseRequest() {
     // it isn't required for query execution.
     parseUpdate();
     Status status = parseQuery();
+
+    // After parsing to detect if $$USER_ROLES is referenced in the query, set the value of
+    // $$USER_ROLES for the update.
+    _expCtx->setUserRoles();
+
     if (!status.isOK())
         return status;
     return Status::OK();

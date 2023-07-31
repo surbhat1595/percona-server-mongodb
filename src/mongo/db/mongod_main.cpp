@@ -68,6 +68,7 @@
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/feature_compatibility_version_gen.h"
+#include "mongo/db/commands/fsync.h"
 #include "mongo/db/commands/shutdown.h"
 #include "mongo/db/commands/test_commands.h"
 #include "mongo/db/commands/test_commands_enabled.h"
@@ -190,6 +191,7 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/system_index.h"
+#include "mongo/db/timeseries/timeseries_op_observer.h"
 #include "mongo/db/transaction/internal_transactions_reap_service.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
@@ -1321,6 +1323,7 @@ void setUpObservers(ServiceContext* serviceContext) {
         }
     }
 
+    opObserverRegistry->addObserver(std::make_unique<TimeSeriesOpObserver>());
     opObserverRegistry->addObserver(std::make_unique<AuthOpObserver>());
     opObserverRegistry->addObserver(
         std::make_unique<repl::PrimaryOnlyServiceOpObserver>(serviceContext));
@@ -1370,6 +1373,14 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     if (MONGO_unlikely(hangBeforeShutdown.shouldFail())) {
         LOGV2(4944800, "Hanging before shutdown due to hangBeforeShutdown failpoint");
         hangBeforeShutdown.pauseWhileSet();
+    }
+
+    // Before doing anything else, ensure fsync is inactive or make it release its GlobalRead lock.
+    {
+        stdx::unique_lock<Latch> stateLock(fsyncStateMutex);
+        if (globalFsyncLockThread) {
+            globalFsyncLockThread->shutdown(stateLock);
+        }
     }
 
     // If we don't have shutdownArgs, we're shutting down from a signal, or other clean shutdown

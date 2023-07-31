@@ -441,6 +441,16 @@ boost::optional<DurableCatalogEntry> DurableCatalogImpl::getParsedCatalogEntry(
                                _parseMetaData(obj["md"])};
 }
 
+DurableCatalogEntry DurableCatalogImpl::getParsedCatalogEntry(OperationContext* opCtx,
+                                                              const RecordId& catalogId,
+                                                              const BSONObj& obj) const {
+    BSONElement idxIdent = obj["idxIdent"];
+    return DurableCatalogEntry{catalogId,
+                               obj["ident"].String(),
+                               idxIdent.eoo() ? BSONObj() : idxIdent.Obj().getOwned(),
+                               _parseMetaData(obj["md"])};
+}
+
 std::shared_ptr<BSONCollectionCatalogEntry::MetaData> DurableCatalogImpl::getMetaData(
     OperationContext* opCtx, const RecordId& catalogId) const {
     BSONObj obj = _findEntry(opCtx, catalogId);
@@ -662,8 +672,8 @@ StatusWith<std::pair<RecordId, std::unique_ptr<RecordStore>>> DurableCatalogImpl
     invariant(nss.coll().size() > 0);
 
     if (CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss)) {
-        throwWriteConflictException(str::stream()
-                                    << "Namespace '" << nss.ns() << "' is already in use.");
+        throwWriteConflictException(str::stream() << "Namespace '" << nss.toStringForErrorMsg()
+                                                  << "' is already in use.");
     }
 
     StatusWith<EntryIdentifier> swEntry = _addEntry(opCtx, nss, options);
@@ -729,7 +739,7 @@ StatusWith<DurableCatalog::ImportResult> DurableCatalogImpl::importCollection(
     invariant(nss.coll().size() > 0);
 
     uassert(ErrorCodes::NamespaceExists,
-            str::stream() << "Collection already exists. NS: " << nss.ns(),
+            str::stream() << "Collection already exists. NS: " << nss.toStringForErrorMsg(),
             !CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss));
 
     BSONCollectionCatalogEntry::MetaData md;

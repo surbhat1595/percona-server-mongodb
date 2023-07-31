@@ -120,11 +120,11 @@ public:
      */
     static Status isValidNormalized(const MatchExpression* root);
 
-    NamespaceString nss() const {
+    const NamespaceString& nss() const {
         invariant(_findCommand->getNamespaceOrUUID().nss());
         return *_findCommand->getNamespaceOrUUID().nss();
     }
-    std::string ns() const {
+    StringData ns() const {
         return nss().ns();
     }
 
@@ -197,8 +197,15 @@ public:
     void setCollator(std::unique_ptr<CollatorInterface> collator);
 
     // Debugging
-    std::string toString() const;
-    std::string toStringShort() const;
+    std::string toString(bool forErrMsg = false) const;
+    std::string toStringShort(bool forErrMsg = false) const;
+
+    std::string toStringForErrorMsg() const {
+        return toString(true);
+    }
+    std::string toStringShortForErrorMsg() const {
+        return toStringShort(true);
+    }
 
     /**
      * Returns a count of 'type' nodes in expression tree.

@@ -127,6 +127,16 @@ public:
     };
 
     /**
+     * Constructs an ExpressionContext to be used for find command parsing and evaluation.
+     */
+    ExpressionContext(OperationContext* opCtx,
+                      const FindCommandRequest& findCmd,
+                      std::unique_ptr<CollatorInterface> collator,
+                      bool mayDbProfile,
+                      boost::optional<ExplainOptions::Verbosity> verbosity = boost::none,
+                      bool allowDiskUseByDefault = false);
+
+    /**
      * Constructs an ExpressionContext to be used for Pipeline parsing and evaluation.
      * 'resolvedNamespaces' maps collection names (not full namespaces) to ResolvedNamespaces.
      */
@@ -171,6 +181,7 @@ public:
                       const NamespaceString& ns,
                       const boost::optional<LegacyRuntimeConstants>& runtimeConstants = boost::none,
                       const boost::optional<BSONObj>& letParameters = boost::none,
+                      bool allowDiskUse = false,
                       bool mayDbProfile = true,
                       boost::optional<ExplainOptions::Verbosity> explain = boost::none);
 
@@ -419,6 +430,27 @@ public:
      */
     void setUserRoles();
 
+    /**
+     * Record that we have seen the given system variable in the query.
+     */
+    void setSystemVarReferencedInQuery(Variables::Id var) {
+        tassert(7612600,
+                "Cannot track references to user-defined variables.",
+                !Variables::isUserDefinedVariable(var));
+        _varsReferencedInQuery.insert(var);
+    }
+
+    /**
+     * Returns true if the given system variable is referenced in the query and false otherwise.
+     */
+    bool isSystemVarReferencedInQuery(Variables::Id var) const {
+        tassert(
+            7612601,
+            "Cannot access whether a variable is referenced to or not for a user-defined variable.",
+            !Variables::isUserDefinedVariable(var));
+        return _varsReferencedInQuery.count(var);
+    }
+
     // The explain verbosity requested by the user, or boost::none if no explain was requested.
     boost::optional<ExplainOptions::Verbosity> explain;
 
@@ -537,11 +569,6 @@ public:
         return _requiresTimeseriesExtendedRangeSupport;
     }
 
-    // Returns true if the resolved collation of the context is simple.
-    bool isResolvedCollationSimple() const {
-        return getCollatorBSON().woCompare(CollationSpec::kSimpleSpec) == 0;
-    }
-
     // Forces the plan cache to be used even if there's only one solution available. Queries that
     // are ineligible will still not be cached.
     bool forcePlanCache = false;
@@ -575,6 +602,10 @@ protected:
 private:
     boost::optional<ExpressionCounters> _expressionCounters = boost::none;
     bool _gotTemporarilyUnavailableException = false;
+
+    // We use this set to indicate whether or not a system variable was referenced in the query that
+    // is being executed (if the variable was referenced, it is an element of this set).
+    stdx::unordered_set<Variables::Id> _varsReferencedInQuery;
 };
 
 }  // namespace mongo

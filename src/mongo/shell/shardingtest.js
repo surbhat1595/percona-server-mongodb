@@ -512,10 +512,7 @@ var ShardingTest = function(params) {
     };
 
     this.stop = function(opts = {}) {
-        // TODO SERVER-74534: Enable metadata consistency check on catalog shard deployment
-        if (!isCatalogShardMode) {
-            this.checkMetadataConsistency();
-        }
+        this.checkMetadataConsistency();
         this.checkUUIDsConsistentAcrossCluster();
         this.checkIndexesConsistentAcrossCluster();
         this.checkOrphansAreDeleted();
@@ -1192,7 +1189,8 @@ var ShardingTest = function(params) {
     var numShards = otherParams.hasOwnProperty('shards') ? otherParams.shards : 2;
     var mongosVerboseLevel = otherParams.hasOwnProperty('verbose') ? otherParams.verbose : 1;
     var numMongos = otherParams.hasOwnProperty('mongos') ? otherParams.mongos : 1;
-    const usedDefaultNumConfigs = !otherParams.hasOwnProperty('config');
+    const usedDefaultNumConfigs =
+        !otherParams.hasOwnProperty('config') || otherParams.config === undefined;
     var numConfigs = otherParams.hasOwnProperty('config') ? otherParams.config : 3;
 
     let isCatalogShardMode =
@@ -1378,7 +1376,9 @@ var ShardingTest = function(params) {
                 rsDefaults = Object.merge(rsDefaults, otherParams.rsOptions);
                 rsDefaults.nodes = rsDefaults.nodes || otherParams.numReplicas;
             } else {
-                if (jsTestOptions().shardMixedBinVersions) {
+                // Our documented upgrade/downgrade paths let us assume config server nodes will
+                // always be fully upgraded before shard nodes, so skip a config shard.
+                if (jsTestOptions().shardMixedBinVersions && !setIsConfigSvr) {
                     if (!otherParams.shardOptions) {
                         otherParams.shardOptions = {};
                     }

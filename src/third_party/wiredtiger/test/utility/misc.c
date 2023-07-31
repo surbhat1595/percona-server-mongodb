@@ -303,7 +303,7 @@ testutil_copy_data(const char *dir)
 void
 testutil_copy_data_opt(const char *dir, const char *readonly_prefix)
 {
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__linux__)
     struct dirent *e;
     char to_copy[2048];
     char to_link[2048];
@@ -411,7 +411,18 @@ testutil_verify_src_backup(WT_CONNECTION *conn, const char *backup, const char *
      * that exist in the system.
      */
     if (srcid == NULL) {
-        testutil_check(session->open_cursor(session, "backup:query_id", NULL, buf, &cursor));
+        /*
+         * Even if expected, we may not find any backup IDs depending on scheduling of backups,
+         * checkpoints and killing of a process. So backup IDs may not have been saved to disk. If
+         * opening the backup query cursor gets EINVAL there is nothing to do.
+         */
+        ret = session->open_cursor(session, "backup:query_id", NULL, buf, &cursor);
+        if (ret != 0) {
+            if (ret == EINVAL)
+                goto done;
+            else
+                testutil_check(ret);
+        }
         i = 0;
         while ((ret = cursor->next(cursor)) == 0) {
             testutil_check(cursor->get_key(cursor, &idstr));
@@ -472,6 +483,7 @@ testutil_verify_src_backup(WT_CONNECTION *conn, const char *backup, const char *
         if (srcid == NULL)
             free(id[j]);
     }
+done:
     testutil_check(session->close(session, NULL));
 }
 

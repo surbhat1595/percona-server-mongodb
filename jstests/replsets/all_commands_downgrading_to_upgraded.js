@@ -29,6 +29,7 @@ const isAnInternalCommand = "internal command";
 const isDeprecated = "deprecated command";
 const commandIsDisabledOnLastLTS = "skip command on downgrading fcv";
 const requiresParallelShell = "requires parallel shell";
+const cannotRunWhileDowngrading = "cannot run command while downgrading";
 
 const allCommands = {
     _addShard: {skip: isAnInternalCommand},
@@ -144,7 +145,11 @@ const allCommands = {
     _shardsvrParticipantBlock: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistency: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: isAnInternalCommand},
-    _startStreamProcessor: {skip: isAnInternalCommand},
+    streams_startStreamProcessor: {skip: isAnInternalCommand},
+    streams_startStreamSample: {skip: isAnInternalCommand},
+    streams_stopStreamProcessor: {skip: isAnInternalCommand},
+    streams_getMoreStreamSample: {skip: isAnInternalCommand},
+    streams_testOnlyInsert: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
     abortReshardCollection: {
@@ -365,6 +370,7 @@ const allCommands = {
         // operation.
         skip: "requires additional setup through a failed resharding operation",
     },
+    cleanupStructuredEncryptionData: {skip: "requires additional encrypted collection setup"},
     clearJumboFlag: {
         isShardedOnly: true,
         fullScenario: function(conn, fixture) {
@@ -1091,13 +1097,7 @@ const allCommands = {
         },
     },
     movePrimary: {
-        isShardedOnly: true,
-        fullScenario: function(conn, fixture) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(conn.getDB('admin').runCommand(
-                {movePrimary: dbName, to: fixture.shard0.shardName}));
-            assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
-        }
+        skip: cannotRunWhileDowngrading,
     },
     moveRange: {
         isShardedOnly: true,

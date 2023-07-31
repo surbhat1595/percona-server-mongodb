@@ -198,7 +198,8 @@ public:
         }
 
         int numEntries = 0;
-        for (auto it = catalog.begin(opCtx.get(), DatabaseName(boost::none, "resourceDb"));
+        for (auto it = catalog.begin(
+                 opCtx.get(), DatabaseName::createDatabaseName_forTest(boost::none, "resourceDb"));
              it != catalog.end(opCtx.get());
              it++) {
             auto coll = *it;
@@ -213,7 +214,8 @@ public:
 
     void tearDown() {
         std::vector<UUID> collectionsToDeregister;
-        for (auto it = catalog.begin(opCtx.get(), DatabaseName(boost::none, "resourceDb"));
+        for (auto it = catalog.begin(
+                 opCtx.get(), DatabaseName::createDatabaseName_forTest(boost::none, "resourceDb"));
              it != catalog.end(opCtx.get());
              ++it) {
             auto coll = *it;
@@ -230,7 +232,8 @@ public:
         }
 
         int numEntries = 0;
-        for (auto it = catalog.begin(opCtx.get(), DatabaseName(boost::none, "resourceDb"));
+        for (auto it = catalog.begin(
+                 opCtx.get(), DatabaseName::createDatabaseName_forTest(boost::none, "resourceDb"));
              it != catalog.end(opCtx.get());
              it++) {
             numEntries++;
@@ -248,7 +251,7 @@ protected:
 TEST_F(CollectionCatalogResourceTest, RemoveAllResources) {
     catalog.deregisterAllCollectionsAndViews(getServiceContext());
 
-    const DatabaseName dbName = DatabaseName(boost::none, "resourceDb");
+    const DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "resourceDb");
     auto rid = ResourceId(RESOURCE_DATABASE, dbName);
     ASSERT_EQ(boost::none, ResourceCatalog::get(getServiceContext()).name(rid));
 
@@ -261,7 +264,7 @@ TEST_F(CollectionCatalogResourceTest, RemoveAllResources) {
 }
 
 TEST_F(CollectionCatalogResourceTest, LookupDatabaseResource) {
-    const DatabaseName dbName = DatabaseName(boost::none, "resourceDb");
+    const DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "resourceDb");
     auto rid = ResourceId(RESOURCE_DATABASE, dbName);
     auto ridStr = ResourceCatalog::get(getServiceContext()).name(rid);
 
@@ -270,7 +273,7 @@ TEST_F(CollectionCatalogResourceTest, LookupDatabaseResource) {
 }
 
 TEST_F(CollectionCatalogResourceTest, LookupMissingDatabaseResource) {
-    const DatabaseName dbName = DatabaseName(boost::none, "missingDb");
+    const DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "missingDb");
     auto rid = ResourceId(RESOURCE_DATABASE, dbName);
     ASSERT(!ResourceCatalog::get(getServiceContext()).name(rid));
 }
@@ -304,18 +307,19 @@ TEST_F(CollectionCatalogResourceTest, RemoveCollection) {
 // Create an iterator over the CollectionCatalog and assert that all collections are present.
 // Iteration ends when the end of the catalog is reached.
 TEST_F(CollectionCatalogIterationTest, EndAtEndOfCatalog) {
-    checkCollections(DatabaseName(boost::none, "foo"));
+    checkCollections(DatabaseName::createDatabaseName_forTest(boost::none, "foo"));
 }
 
 // Create an iterator over the CollectionCatalog and test that all collections are present.
 // Iteration ends
 // when the end of a database-specific section of the catalog is reached.
 TEST_F(CollectionCatalogIterationTest, EndAtEndOfSection) {
-    checkCollections(DatabaseName(boost::none, "bar"));
+    checkCollections(DatabaseName::createDatabaseName_forTest(boost::none, "bar"));
 }
 
 TEST_F(CollectionCatalogIterationTest, GetUUIDWontRepositionEvenIfEntryIsDropped) {
-    auto it = catalog.begin(opCtx.get(), DatabaseName(boost::none, "bar"));
+    auto it =
+        catalog.begin(opCtx.get(), DatabaseName::createDatabaseName_forTest(boost::none, "bar"));
     auto collsIt = collsIterator("bar");
     auto uuid = collsIt->first;
     catalog.deregisterCollection(opCtx.get(), uuid, /*isDropPending=*/false, boost::none);
@@ -396,7 +400,7 @@ TEST_F(CollectionCatalogTest, OnDropCollection) {
 
 TEST_F(CollectionCatalogTest, RenameCollection) {
     auto uuid = UUID::gen();
-    NamespaceString oldNss = NamespaceString::createNamespaceString_forTest(nss.db(), "oldcol");
+    NamespaceString oldNss = NamespaceString::createNamespaceString_forTest(nss.dbName(), "oldcol");
     std::shared_ptr<Collection> collShared = std::make_shared<CollectionMock>(uuid, oldNss);
     auto collection = collShared.get();
     catalog.registerCollection(opCtx.get(), uuid, std::move(collShared), boost::none);
@@ -551,11 +555,12 @@ TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNames) {
     std::sort(res.begin(), res.end());
     ASSERT(res == dCollList);
 
-    std::vector<DatabaseName> dbNames = {DatabaseName(boost::none, "dbA"),
-                                         DatabaseName(boost::none, "dbB"),
-                                         DatabaseName(boost::none, "dbC"),
-                                         DatabaseName(boost::none, "dbD"),
-                                         DatabaseName(boost::none, "testdb")};
+    std::vector<DatabaseName> dbNames = {
+        DatabaseName::createDatabaseName_forTest(boost::none, "dbA"),
+        DatabaseName::createDatabaseName_forTest(boost::none, "dbB"),
+        DatabaseName::createDatabaseName_forTest(boost::none, "dbC"),
+        DatabaseName::createDatabaseName_forTest(boost::none, "dbD"),
+        DatabaseName::createDatabaseName_forTest(boost::none, "testdb")};
     ASSERT(catalog.getAllDbNames() == dbNames);
 
     catalog.deregisterAllCollectionsAndViews(getServiceContext());
@@ -577,10 +582,13 @@ TEST_F(CollectionCatalogTest, GetAllDbNamesForTenant) {
     }
 
     std::vector<DatabaseName> dbNamesForTid1 = {
-        DatabaseName(tid1, "dbA"), DatabaseName(tid1, "dbB"), DatabaseName(tid1, "dbC")};
+        DatabaseName::createDatabaseName_forTest(tid1, "dbA"),
+        DatabaseName::createDatabaseName_forTest(tid1, "dbB"),
+        DatabaseName::createDatabaseName_forTest(tid1, "dbC")};
     ASSERT(catalog.getAllDbNamesForTenant(tid1) == dbNamesForTid1);
 
-    std::vector<DatabaseName> dbNamesForTid2 = {DatabaseName(tid2, "dbB")};
+    std::vector<DatabaseName> dbNamesForTid2 = {
+        DatabaseName::createDatabaseName_forTest(tid2, "dbB")};
     ASSERT(catalog.getAllDbNamesForTenant(tid2) == dbNamesForTid2);
 
     catalog.deregisterAllCollectionsAndViews(getServiceContext());
@@ -588,8 +596,10 @@ TEST_F(CollectionCatalogTest, GetAllDbNamesForTenant) {
 
 // Test setting and fetching the profile level for a database.
 TEST_F(CollectionCatalogTest, DatabaseProfileLevel) {
-    DatabaseName testDBNameFirst(boost::none, "testdbfirst");
-    DatabaseName testDBNameSecond(boost::none, "testdbsecond");
+    DatabaseName testDBNameFirst =
+        DatabaseName::createDatabaseName_forTest(boost::none, "testdbfirst");
+    DatabaseName testDBNameSecond =
+        DatabaseName::createDatabaseName_forTest(boost::none, "testdbsecond");
 
     // Requesting a profile level that is not in the _databaseProfileLevel map should return the
     // default server-wide setting
@@ -631,13 +641,15 @@ TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNamesWithUncommitt
     invisibleCollA->setCommitted(false);
 
     Lock::DBLock dbLock(opCtx.get(), aColl.dbName(), MODE_S);
-    auto res = catalog.getAllCollectionNamesFromDb(opCtx.get(), DatabaseName(boost::none, "dbA"));
+    auto res = catalog.getAllCollectionNamesFromDb(
+        opCtx.get(), DatabaseName::createDatabaseName_forTest(boost::none, "dbA"));
     ASSERT(res.empty());
 
-    std::vector<DatabaseName> dbNames = {DatabaseName(boost::none, "dbB"),
-                                         DatabaseName(boost::none, "dbC"),
-                                         DatabaseName(boost::none, "dbD"),
-                                         DatabaseName(boost::none, "testdb")};
+    std::vector<DatabaseName> dbNames = {
+        DatabaseName::createDatabaseName_forTest(boost::none, "dbB"),
+        DatabaseName::createDatabaseName_forTest(boost::none, "dbC"),
+        DatabaseName::createDatabaseName_forTest(boost::none, "dbD"),
+        DatabaseName::createDatabaseName_forTest(boost::none, "testdb")};
     ASSERT(catalog.getAllDbNames() == dbNames);
 
     // One dbName with both visible and invisible collections is still visible.
@@ -655,7 +667,8 @@ TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNamesWithUncommitt
         invisibleCollD->setCommitted(false);
 
         Lock::DBLock dbLock(opCtx.get(), d1Coll.dbName(), MODE_S);
-        res = catalog.getAllCollectionNamesFromDb(opCtx.get(), DatabaseName(boost::none, "dbD"));
+        res = catalog.getAllCollectionNamesFromDb(
+            opCtx.get(), DatabaseName::createDatabaseName_forTest(boost::none, "dbD"));
         std::sort(res.begin(), res.end());
         ASSERT(res == dCollList);
 
@@ -674,7 +687,8 @@ TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNamesWithUncommitt
         invisibleColl->setCommitted(false);
     }
 
-    std::vector<DatabaseName> dbList = {DatabaseName(boost::none, "testdb")};
+    std::vector<DatabaseName> dbList = {
+        DatabaseName::createDatabaseName_forTest(boost::none, "testdb")};
     ASSERT(catalog.getAllDbNames() == dbList);
 
     catalog.deregisterAllCollectionsAndViews(getServiceContext());
@@ -712,7 +726,7 @@ TEST_F(ForEachCollectionFromDbTest, ForEachCollectionFromDb) {
     auto opCtx = operationContext();
 
     {
-        const DatabaseName dbName(boost::none, "db");
+        const DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "db");
         auto dbLock = std::make_unique<Lock::DBLock>(opCtx, dbName, MODE_IX);
         int numCollectionsTraversed = 0;
         catalog::forEachCollectionFromDb(opCtx, dbName, MODE_X, [&](const Collection* collection) {
@@ -725,7 +739,7 @@ TEST_F(ForEachCollectionFromDbTest, ForEachCollectionFromDb) {
     }
 
     {
-        const DatabaseName dbName(boost::none, "db2");
+        const DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "db2");
         auto dbLock = std::make_unique<Lock::DBLock>(opCtx, dbName, MODE_IX);
         int numCollectionsTraversed = 0;
         catalog::forEachCollectionFromDb(opCtx, dbName, MODE_IS, [&](const Collection* collection) {
@@ -738,7 +752,7 @@ TEST_F(ForEachCollectionFromDbTest, ForEachCollectionFromDb) {
     }
 
     {
-        const DatabaseName dbName(boost::none, "db3");
+        const DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "db3");
         auto dbLock = std::make_unique<Lock::DBLock>(opCtx, dbName, MODE_IX);
         int numCollectionsTraversed = 0;
         catalog::forEachCollectionFromDb(opCtx, dbName, MODE_S, [&](const Collection* collection) {
@@ -755,7 +769,7 @@ TEST_F(ForEachCollectionFromDbTest, ForEachCollectionFromDbWithPredicate) {
     auto opCtx = operationContext();
 
     {
-        const DatabaseName dbName(boost::none, "db");
+        const DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "db");
         auto dbLock = std::make_unique<Lock::DBLock>(opCtx, dbName, MODE_IX);
         int numCollectionsTraversed = 0;
         catalog::forEachCollectionFromDb(
@@ -778,7 +792,7 @@ TEST_F(ForEachCollectionFromDbTest, ForEachCollectionFromDbWithPredicate) {
     }
 
     {
-        const DatabaseName dbName(boost::none, "db");
+        const DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "db");
         auto dbLock = std::make_unique<Lock::DBLock>(opCtx, dbName, MODE_IX);
         int numCollectionsTraversed = 0;
         catalog::forEachCollectionFromDb(
@@ -1110,7 +1124,7 @@ private:
     }
 
     void _dropCollection(OperationContext* opCtx, const NamespaceString& nss, Timestamp timestamp) {
-        Lock::DBLock dbLk(opCtx, nss.db(), MODE_IX);
+        Lock::DBLock dbLk(opCtx, nss.dbName(), MODE_IX);
         Lock::CollectionLock collLk(opCtx, nss, MODE_X);
         CollectionWriter collection(opCtx, nss);
 
@@ -1146,7 +1160,7 @@ private:
                            const NamespaceString& from,
                            const NamespaceString& to,
                            Timestamp timestamp) {
-        Lock::DBLock dbLk(opCtx, from.db(), MODE_IX);
+        Lock::DBLock dbLk(opCtx, from.dbName(), MODE_IX);
         Lock::CollectionLock fromLk(opCtx, from, MODE_X);
         Lock::CollectionLock toLk(opCtx, to, MODE_X);
 
@@ -1354,16 +1368,7 @@ TEST_F(CollectionCatalogTimestampTest, MinimumValidSnapshot) {
 
     auto coll = CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespace(opCtx.get(), nss);
     ASSERT(coll);
-    ASSERT_EQ(coll->getMinimumVisibleSnapshot(), createCollectionTs);
     ASSERT_EQ(coll->getMinimumValidSnapshot(), createYIndexTs);
-
-    const IndexDescriptor* desc = coll->getIndexCatalog()->findIndexByName(opCtx.get(), "x_1");
-    const IndexCatalogEntry* entry = coll->getIndexCatalog()->getEntry(desc);
-    ASSERT_EQ(entry->getMinimumVisibleSnapshot(), createXIndexTs);
-
-    desc = coll->getIndexCatalog()->findIndexByName(opCtx.get(), "y_1");
-    entry = coll->getIndexCatalog()->getEntry(desc);
-    ASSERT_EQ(entry->getMinimumVisibleSnapshot(), createYIndexTs);
 
     dropIndex(opCtx.get(), nss, "x_1", dropIndexTs);
     dropIndex(opCtx.get(), nss, "y_1", dropIndexTs);
@@ -1371,14 +1376,10 @@ TEST_F(CollectionCatalogTimestampTest, MinimumValidSnapshot) {
     // Fetch the latest collection instance without the indexes.
     coll = CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespace(opCtx.get(), nss);
     ASSERT(coll);
-    ASSERT_EQ(coll->getMinimumVisibleSnapshot(), createCollectionTs);
     ASSERT_EQ(coll->getMinimumValidSnapshot(), dropIndexTs);
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenCollectionBeforeCreateTimestamp) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
 
@@ -1398,9 +1399,6 @@ TEST_F(CollectionCatalogTimestampTest, OpenCollectionBeforeCreateTimestamp) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollection) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createIndexTs = Timestamp(20, 20);
@@ -1439,9 +1437,6 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollection) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollectionWithIndex) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createXIndexTs = Timestamp(20, 20);
@@ -1492,9 +1487,6 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollectionWithIndex) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenLatestCollectionWithIndex) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createXIndexTs = Timestamp(20, 20);
@@ -1532,9 +1524,6 @@ TEST_F(CollectionCatalogTimestampTest, OpenLatestCollectionWithIndex) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollectionWithDropPendingIndex) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createIndexTs = Timestamp(20, 20);
@@ -1603,9 +1592,6 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollectionWithDropPendingIndex
 
 TEST_F(CollectionCatalogTimestampTest,
        OpenEarlierCollectionWithDropPendingIndexDoesNotCrashWhenCheckingMultikey) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
 
     const std::string xIndexName{"x_1"};
@@ -1689,9 +1675,6 @@ TEST_F(CollectionCatalogTimestampTest,
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenEarlierAlreadyDropPendingCollection) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString firstNss = NamespaceString::createNamespaceString_forTest("a.b");
     const NamespaceString secondNss = NamespaceString::createNamespaceString_forTest("c.d");
     const Timestamp createCollectionTs = Timestamp(10, 10);
@@ -1756,9 +1739,6 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierAlreadyDropPendingCollection) 
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionUsingDropPendingCollectionSharedState) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createIndexTs = Timestamp(20, 20);
@@ -1800,9 +1780,6 @@ TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionUsingDropPendingCollecti
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenExistingCollectionWithReaper) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp dropCollectionTs = Timestamp(20, 20);
@@ -1861,9 +1838,6 @@ TEST_F(CollectionCatalogTimestampTest, OpenExistingCollectionWithReaper) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionWithReaper) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp dropCollectionTs = Timestamp(20, 20);
@@ -1915,9 +1889,6 @@ TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionWithReaper) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenExistingCollectionAndIndexesWithReaper) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createIndexTs = Timestamp(20, 20);
@@ -2034,9 +2005,6 @@ TEST_F(CollectionCatalogTimestampTest, OpenExistingCollectionAndIndexesWithReape
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionAndIndexesWithReaper) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createIndexTs = Timestamp(20, 20);
@@ -2139,9 +2107,6 @@ TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionAndIndexesWithReaper) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCreate) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
 
     // Initialize the oldest timestamp to (1, 1)
@@ -2168,9 +2133,6 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCreate) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingDrop) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
 
     // Initialize the oldest timestamp to (1, 1)
@@ -2205,9 +2167,6 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingDrop) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingRename) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString from = NamespaceString::createNamespaceString_forTest("a.b");
     NamespaceString to = NamespaceString::createNamespaceString_forTest("a.c");
 
@@ -2261,9 +2220,6 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingRename) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingRenameDropTarget) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString from = NamespaceString::createNamespaceString_forTest("a.b");
     NamespaceString to = NamespaceString::createNamespaceString_forTest("a.c");
 
@@ -2311,9 +2267,6 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingRenameDropTarget) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingDropCreate) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
 
     // Create, drop and recreate collection on the same namespace. We have different catalogId.
@@ -2361,9 +2314,6 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingDropCreate) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupEqDrop) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
 
     // Create collection and verify we have nothing to cleanup
@@ -2408,9 +2358,6 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupEqDrop) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupGtDrop) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
 
     // Create collection and verify we have nothing to cleanup
@@ -2456,9 +2403,6 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupGtDrop) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupGtRecreate) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
 
     // Create collection and verify we have nothing to cleanup
@@ -2504,9 +2448,6 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupGtRecreate) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupMultiple) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
 
     // Create and drop multiple namespace on the same namespace
@@ -2592,9 +2533,6 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupMultiple) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupMultipleSingleCall) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
 
     // Create and drop multiple namespace on the same namespace
@@ -2635,9 +2573,6 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupMultipleSingleCall
 }
 
 TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingRollback) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString a = NamespaceString::createNamespaceString_forTest("b.a");
     NamespaceString b = NamespaceString::createNamespaceString_forTest("b.b");
     NamespaceString c = NamespaceString::createNamespaceString_forTest("b.c");
@@ -2673,9 +2608,6 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingRollback) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingInsert) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
 
     // Create a collection on the namespace
@@ -2704,9 +2636,11 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingInsert) {
         CollectionCatalog::get(opCtx.get())
             ->establishConsistentCollection(opCtx.get(), nss, Timestamp(1, 17));
         CollectionCatalog::get(opCtx.get())
-            ->establishConsistentCollection(opCtx.get(), {nss.db(), firstUUID}, Timestamp(1, 17));
+            ->establishConsistentCollection(
+                opCtx.get(), {nss.dbName(), firstUUID}, Timestamp(1, 17));
         CollectionCatalog::get(opCtx.get())
-            ->establishConsistentCollection(opCtx.get(), {nss.db(), secondUUID}, Timestamp(1, 17));
+            ->establishConsistentCollection(
+                opCtx.get(), {nss.dbName(), secondUUID}, Timestamp(1, 17));
 
         // Lookups before the inserted timestamp is still unknown
         ASSERT_EQ(lookupCatalogId(nss, firstUUID, Timestamp(1, 11)).result,
@@ -2737,9 +2671,11 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingInsert) {
         CollectionCatalog::get(opCtx.get())
             ->establishConsistentCollection(opCtx.get(), nss, Timestamp(1, 12));
         CollectionCatalog::get(opCtx.get())
-            ->establishConsistentCollection(opCtx.get(), {nss.db(), firstUUID}, Timestamp(1, 12));
+            ->establishConsistentCollection(
+                opCtx.get(), {nss.dbName(), firstUUID}, Timestamp(1, 12));
         CollectionCatalog::get(opCtx.get())
-            ->establishConsistentCollection(opCtx.get(), {nss.db(), secondUUID}, Timestamp(1, 12));
+            ->establishConsistentCollection(
+                opCtx.get(), {nss.dbName(), secondUUID}, Timestamp(1, 12));
 
         // We should now have extended the range from Timestamp(1, 17) to Timestamp(1, 12)
         ASSERT_EQ(lookupCatalogId(nss, firstUUID, Timestamp(1, 12)).result,
@@ -2769,9 +2705,11 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingInsert) {
         CollectionCatalog::get(opCtx.get())
             ->establishConsistentCollection(opCtx.get(), nss, Timestamp(1, 25));
         CollectionCatalog::get(opCtx.get())
-            ->establishConsistentCollection(opCtx.get(), {nss.db(), firstUUID}, Timestamp(1, 25));
+            ->establishConsistentCollection(
+                opCtx.get(), {nss.dbName(), firstUUID}, Timestamp(1, 25));
         CollectionCatalog::get(opCtx.get())
-            ->establishConsistentCollection(opCtx.get(), {nss.db(), secondUUID}, Timestamp(1, 25));
+            ->establishConsistentCollection(
+                opCtx.get(), {nss.dbName(), secondUUID}, Timestamp(1, 25));
 
         // Check the entries, most didn't change
         ASSERT_EQ(lookupCatalogId(nss, firstUUID, Timestamp(1, 17)).result,
@@ -2805,9 +2743,11 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingInsert) {
         CollectionCatalog::get(opCtx.get())
             ->establishConsistentCollection(opCtx.get(), nss, Timestamp(1, 26));
         CollectionCatalog::get(opCtx.get())
-            ->establishConsistentCollection(opCtx.get(), {nss.db(), firstUUID}, Timestamp(1, 26));
+            ->establishConsistentCollection(
+                opCtx.get(), {nss.dbName(), firstUUID}, Timestamp(1, 26));
         CollectionCatalog::get(opCtx.get())
-            ->establishConsistentCollection(opCtx.get(), {nss.db(), secondUUID}, Timestamp(1, 26));
+            ->establishConsistentCollection(
+                opCtx.get(), {nss.dbName(), secondUUID}, Timestamp(1, 26));
 
         // We should not have re-written the existing entry at Timestamp(1, 26)
         ASSERT_EQ(lookupCatalogId(nss, firstUUID, Timestamp(1, 17)).result,
@@ -2852,9 +2792,6 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingInsert) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingInsertUnknown) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
 
     // Simulate startup where we have a range [oldest, stable] by advancing the oldest timestamp and
@@ -2877,9 +2814,6 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingInsertUnknown) {
 }
 
 TEST_F(CollectionCatalogTimestampTest, CollectionLifetimeTiedToStorageTransactionLifetime) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createIndexTs = Timestamp(20, 20);
@@ -2964,9 +2898,6 @@ TEST_F(CollectionCatalogTimestampTest, CollectionLifetimeTiedToStorageTransactio
 }
 
 TEST_F(CollectionCatalogNoTimestampTest, CatalogIdMappingNoTimestamp) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
 
     // Create a collection on the namespace and confirm that we can lookup
@@ -2981,9 +2912,6 @@ TEST_F(CollectionCatalogNoTimestampTest, CatalogIdMappingNoTimestamp) {
 }
 
 TEST_F(CollectionCatalogNoTimestampTest, CatalogIdMappingNoTimestampRename) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString a = NamespaceString::createNamespaceString_forTest("a.a");
     NamespaceString b = NamespaceString::createNamespaceString_forTest("a.b");
 
@@ -3010,9 +2938,6 @@ TEST_F(CollectionCatalogNoTimestampTest, CatalogIdMappingNoTimestampRename) {
 }
 
 TEST_F(CollectionCatalogNoTimestampTest, CatalogIdMappingNoTimestampRenameDropTarget) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString a = NamespaceString::createNamespaceString_forTest("a.a");
     NamespaceString b = NamespaceString::createNamespaceString_forTest("a.b");
 
@@ -3043,9 +2968,6 @@ TEST_F(CollectionCatalogNoTimestampTest, CatalogIdMappingNoTimestampRenameDropTa
 }
 
 DEATH_TEST_F(CollectionCatalogTimestampTest, OpenCollectionInWriteUnitOfWork, "invariant") {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createIndexTs = Timestamp(20, 20);
@@ -3068,9 +2990,6 @@ DEATH_TEST_F(CollectionCatalogTimestampTest, OpenCollectionInWriteUnitOfWork, "i
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateCollectionAndOpenCollectionBeforeCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
 
@@ -3081,9 +3000,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateCollectionAndOpenCollecti
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateCollectionAndOpenCollectionAfterCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
 
@@ -3095,9 +3011,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateCollectionAndOpenCollecti
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentCreateCollectionAndOpenCollectionByUUIDBeforeCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     UUID uuid = UUID::gen();
@@ -3110,9 +3023,6 @@ TEST_F(CollectionCatalogTimestampTest,
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentCreateCollectionAndOpenCollectionByUUIDAfterCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     UUID uuid = UUID::gen();
@@ -3124,9 +3034,6 @@ TEST_F(CollectionCatalogTimestampTest,
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentDropCollectionAndOpenCollectionBeforeCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp dropCollectionTs = Timestamp(20, 20);
@@ -3140,9 +3047,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentDropCollectionAndOpenCollection
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentDropCollectionAndOpenCollectionAfterCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp dropCollectionTs = Timestamp(20, 20);
@@ -3157,9 +3061,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentDropCollectionAndOpenCollection
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentDropCollectionAndOpenCollectionByUUIDBeforeCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp dropCollectionTs = Timestamp(20, 20);
@@ -3176,9 +3077,6 @@ TEST_F(CollectionCatalogTimestampTest,
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentDropCollectionAndOpenCollectionByUUIDAfterCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp dropCollectionTs = Timestamp(20, 20);
@@ -3196,9 +3094,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentDropCollectionAndOpenCollection
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentRenameCollectionAndOpenCollectionWithOriginalNameBeforeCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString originalNss = NamespaceString::createNamespaceString_forTest("a.b");
     const NamespaceString newNss = NamespaceString::createNamespaceString_forTest("a.c");
     const Timestamp createCollectionTs = Timestamp(10, 10);
@@ -3214,9 +3109,6 @@ TEST_F(CollectionCatalogTimestampTest,
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentRenameCollectionAndOpenCollectionWithOriginalNameAfterCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString originalNss = NamespaceString::createNamespaceString_forTest("a.b");
     const NamespaceString newNss = NamespaceString::createNamespaceString_forTest("a.c");
     const Timestamp createCollectionTs = Timestamp(10, 10);
@@ -3246,9 +3138,6 @@ TEST_F(CollectionCatalogTimestampTest,
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentRenameCollectionAndOpenCollectionWithNewNameBeforeCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString originalNss = NamespaceString::createNamespaceString_forTest("a.b");
     const NamespaceString newNss = NamespaceString::createNamespaceString_forTest("a.c");
     const Timestamp createCollectionTs = Timestamp(10, 10);
@@ -3278,9 +3167,6 @@ TEST_F(CollectionCatalogTimestampTest,
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentRenameCollectionAndOpenCollectionWithNewNameAfterCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString originalNss = NamespaceString::createNamespaceString_forTest("a.b");
     const NamespaceString newNss = NamespaceString::createNamespaceString_forTest("a.c");
     const Timestamp createCollectionTs = Timestamp(10, 10);
@@ -3296,9 +3182,6 @@ TEST_F(CollectionCatalogTimestampTest,
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentRenameCollectionAndOpenCollectionWithUUIDBeforeCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString originalNss = NamespaceString::createNamespaceString_forTest("a.b");
     const NamespaceString newNss = NamespaceString::createNamespaceString_forTest("a.c");
     const Timestamp createCollectionTs = Timestamp(10, 10);
@@ -3323,9 +3206,6 @@ TEST_F(CollectionCatalogTimestampTest,
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentRenameCollectionAndOpenCollectionWithUUIDAfterCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString originalNss = NamespaceString::createNamespaceString_forTest("a.b");
     const NamespaceString newNss = NamespaceString::createNamespaceString_forTest("a.c");
     const Timestamp createCollectionTs = Timestamp(10, 10);
@@ -3360,9 +3240,6 @@ TEST_F(CollectionCatalogTimestampTest,
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentRenameCollectionWithDropTargetAndOpenCollectionBeforeCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString originalNss = NamespaceString::createNamespaceString_forTest("a.b");
     const NamespaceString targetNss = NamespaceString::createNamespaceString_forTest("a.c");
     const Timestamp createOriginalCollectionTs = Timestamp(10, 10);
@@ -3394,9 +3271,6 @@ TEST_F(CollectionCatalogTimestampTest,
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentRenameCollectionWithDropTargetAndOpenCollectionAfterCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString originalNss = NamespaceString::createNamespaceString_forTest("a.b");
     const NamespaceString targetNss = NamespaceString::createNamespaceString_forTest("a.c");
     const Timestamp createOriginalCollectionTs = Timestamp(10, 10);
@@ -3428,9 +3302,6 @@ TEST_F(CollectionCatalogTimestampTest,
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentRenameCollectionWithDropTargetAndOpenCollectionWithOriginalUUIDBeforeCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString originalNss = NamespaceString::createNamespaceString_forTest("a.b");
     const NamespaceString targetNss = NamespaceString::createNamespaceString_forTest("a.c");
     const Timestamp createOriginalCollectionTs = Timestamp(10, 10);
@@ -3479,9 +3350,6 @@ TEST_F(CollectionCatalogTimestampTest,
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentRenameCollectionWithDropTargetAndOpenCollectionWithOriginalUUIDAfterCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString originalNss = NamespaceString::createNamespaceString_forTest("a.b");
     const NamespaceString targetNss = NamespaceString::createNamespaceString_forTest("a.c");
     const Timestamp createOriginalCollectionTs = Timestamp(10, 10);
@@ -3524,9 +3392,6 @@ TEST_F(CollectionCatalogTimestampTest,
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentRenameCollectionWithDropTargetAndOpenCollectionWithTargetUUIDBeforeCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString originalNss = NamespaceString::createNamespaceString_forTest("a.b");
     const NamespaceString targetNss = NamespaceString::createNamespaceString_forTest("a.c");
     const Timestamp createOriginalCollectionTs = Timestamp(10, 10);
@@ -3574,9 +3439,6 @@ TEST_F(CollectionCatalogTimestampTest,
 
 TEST_F(CollectionCatalogTimestampTest,
        ConcurrentRenameCollectionWithDropTargetAndOpenCollectionWithTargetUUIDAfterCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString originalNss = NamespaceString::createNamespaceString_forTest("a.b");
     const NamespaceString targetNss = NamespaceString::createNamespaceString_forTest("a.c");
     const Timestamp createOriginalCollectionTs = Timestamp(10, 10);
@@ -3616,9 +3478,6 @@ TEST_F(CollectionCatalogTimestampTest,
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionBeforeCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createXIndexTs = Timestamp(20, 20);
@@ -3647,9 +3506,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionBef
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionAfterCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createXIndexTs = Timestamp(20, 20);
@@ -3678,9 +3534,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionAft
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionByUUIDBeforeCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createXIndexTs = Timestamp(20, 20);
@@ -3712,9 +3565,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionByU
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionByUUIDAfterCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createXIndexTs = Timestamp(20, 20);
@@ -3746,9 +3596,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionByU
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionBeforeCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createIndexTs = Timestamp(20, 20);
@@ -3775,9 +3622,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionBefor
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionAfterCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createIndexTs = Timestamp(20, 20);
@@ -3804,9 +3648,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionAfter
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionByUUIDBeforeCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createIndexTs = Timestamp(20, 20);
@@ -3836,9 +3677,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionByUUI
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionByUUIDAfterCommit) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createIndexTs = Timestamp(20, 20);
@@ -3868,9 +3706,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionByUUI
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenCollectionBetweenIndexBuildInProgressAndReady) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createIndexTs = Timestamp(20, 20);
@@ -3928,13 +3763,10 @@ TEST_F(CollectionCatalogTimestampTest, OpenCollectionBetweenIndexBuildInProgress
 }
 
 TEST_F(CollectionCatalogTimestampTest, ResolveNamespaceStringOrUUIDAtLatest) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const UUID uuid = createCollection(opCtx.get(), nss, createCollectionTs);
-    const NamespaceStringOrUUID nssOrUUID = NamespaceStringOrUUID(nss.db(), uuid);
+    const NamespaceStringOrUUID nssOrUUID = NamespaceStringOrUUID(nss.dbName(), uuid);
 
     NamespaceString resolvedNss =
         CollectionCatalog::get(opCtx.get())->resolveNamespaceStringOrUUID(opCtx.get(), nssOrUUID);
@@ -3968,9 +3800,6 @@ TEST_F(CollectionCatalogTimestampTest, MixedModeWrites) {
     // This test simulates the creation and dropping of system.profile collections. This collection
     // is created untimestamped, but dropped with a timestamp.
     // TODO SERVER-75740: Remove this test.
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagPointInTimeCatalogLookups", true);
-
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("system.profile");
 
     // Initialize the oldest timestamp.

@@ -3075,6 +3075,43 @@ export const authCommandsLib = {
           ]
         },
         {
+          testname: "cleanupStructuredEncryptionData",
+          command: {cleanupStructuredEncryptionData: "foo", cleanupTokens : {}},
+          skipSharded: true,
+          skipUnlessReplicaSet: true,
+          setup: function(db) {
+              assert.commandWorked(db.createCollection("foo", {
+                encryptedFields: {
+                    "fields": [
+                        {
+                            "path": "firstName",
+                            "keyId": UUID("11d58b8a-0c6c-4d69-a0bd-70c6d9befae9"),
+                            "bsonType": "string",
+                            "queries": {"queryType": "equality"}
+                        },
+                    ]
+                }
+              }));
+          },
+          teardown: function(db) {
+              assert.commandWorked(db.dropDatabase());
+          },
+          testcases: [
+              {
+                runOnDb: firstDbName,
+                roles: { readWrite : 1, readWriteAnyDatabase : 1, dbOwner : 1, root : 1, __system : 1 },
+                privileges:
+                    [{resource: {db: firstDbName, collection: "foo"}, actions: ["cleanupStructuredEncryptionData"]}]
+              },
+              {
+                runOnDb: secondDbName,
+                roles: { readWriteAnyDatabase : 1, root : 1, __system : 1 },
+                privileges:
+                    [{resource: {db: secondDbName, collection: "foo"}, actions: ["cleanupStructuredEncryptionData"]}]
+              }
+          ]
+        },
+        {
           testname: "connectionStatus",
           command: {connectionStatus: 1},
           testcases: [
@@ -3262,6 +3299,148 @@ export const authCommandsLib = {
           skipSharded: true,
           testcases: [
               {runOnDb: adminDbName, roles: {__system: 1}, expectFail: true},
+          ]
+        },
+        {
+          testname: "checkClusterMetadataConsistency",
+          command: {checkMetadataConsistency: 1},
+          skipUnlessSharded: true,
+          setup: function(db) {
+              assert.commandWorked(db.getSiblingDB("test").createCollection("coll"));
+          },
+          teardown: function(db) {
+              assert.commandWorked(db.getSiblingDB("test").dropDatabase());
+          },
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: {clusterManager: 1, clusterAdmin: 1, root: 1, __system: 1}
+              },
+              {
+                runOnDb: adminDbName,
+                privileges: [{resource: {cluster: true}, actions: ["checkMetadataConsistency"]}]
+              },
+              {
+                runOnDb: adminDbName,
+                privileges: [
+                    {resource: {db: "", collection: ""}, actions: ["checkMetadataConsistency"]}
+                ],
+                expectAuthzFailure: true
+              },
+              {
+                runOnDb: adminDbName,
+                privileges: [{
+                    resource: {db: adminDbName, collection: ""},
+                    actions: ["checkMetadataConsistency"]
+                }],
+                expectAuthzFailure: true
+              },
+              {
+                runOnDb: adminDbName,
+                privileges: [{
+                    resource: {db: adminDbName, collection: "coll"},
+                    actions: ["checkMetadataConsistency"]
+                }],
+                expectAuthzFailure: true
+              },
+              {
+                runOnDb: adminDbName,
+                privileges: [{resource: {cluster: true}, actions: ["allCollectionStats"]}],
+                expectAuthzFailure: true
+              }
+          ]
+        },
+        {
+          testname: "checkDatabaseMetadataConsistency",
+          command: {checkMetadataConsistency: 1},
+          skipUnlessSharded: true,
+          setup: function(db) {
+              assert.commandWorked(db.getSiblingDB("test").createCollection("coll"));
+          },
+          teardown: function(db) {
+              assert.commandWorked(db.getSiblingDB("test").dropDatabase());
+          },
+          testcases: [
+              {
+                runOnDb: "test",
+                roles: {clusterManager: 1, clusterAdmin: 1, root: 1, __system: 1}
+              },
+              {
+                runOnDb: "test",
+                privileges: [{resource: {cluster: true}, actions: ["checkMetadataConsistency"]}]
+              },
+              {
+                runOnDb: "test",
+                privileges: [
+                    {resource: {db: "", collection: ""}, actions: ["checkMetadataConsistency"]}
+                ]
+              },
+              {
+                runOnDb: "test",
+                privileges: [{
+                    resource: {db: "test", collection: ""},
+                    actions: ["checkMetadataConsistency"]
+                }]
+              },
+              {
+                runOnDb: "test",
+                privileges: [{
+                    resource: {db: "test", collection: "coll"},
+                    actions: ["checkMetadataConsistency"]
+                }],
+                expectAuthzFailure: true
+              },
+              {
+                runOnDb: "test",
+                privileges: [{resource: {cluster: true}, actions: ["allCollectionStats"]}],
+                expectAuthzFailure: true
+              }
+          ]
+        },
+        {
+          testname: "checkCollectionMetadataConsistency",
+          command: {checkMetadataConsistency: "coll"},
+          skipUnlessSharded: true,
+          setup: function(db) {
+              assert.commandWorked(db.getSiblingDB("test").createCollection("coll"));
+          },
+          teardown: function(db) {
+              assert.commandWorked(db.getSiblingDB("test").dropDatabase());
+          },
+          testcases: [
+              {
+                runOnDb: "test",
+                roles: {clusterManager: 1, clusterAdmin: 1, root: 1, __system: 1}
+              },
+              {
+                runOnDb: "test",
+                privileges: [{resource: {cluster: true}, actions: ["checkMetadataConsistency"]}]
+              },
+              {
+                runOnDb: "test",
+                privileges: [
+                    {resource: {db: "", collection: ""}, actions: ["checkMetadataConsistency"]}
+                ]
+              },
+              {
+                runOnDb: "test",
+                privileges: [{
+                    resource: {db: "test", collection: ""},
+                    actions: ["checkMetadataConsistency"]
+                }]
+              },
+              {
+                runOnDb: "test",
+                privileges: [{
+                    resource: {db: "test", collection: "coll"},
+                    actions: ["checkMetadataConsistency"]
+                }]
+              },
+              {
+                runOnDb: "test",
+                privileges: [{resource: {cluster: true}, actions: ["allCollectionStats"]}],
+                expectAuthzFailure: true
+              }
           ]
         },
         {
@@ -5510,6 +5689,36 @@ export const authCommandsLib = {
         {
           testname: "d_moveChunk",
           command: {moveChunk: "test.x", fromShard: "a", toShard: "b", min: {}, max: {}, maxChunkSizeBytes: 1024},
+          skipSharded: true,
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true
+              },
+              {runOnDb: firstDbName, roles: {}},
+              {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
+          testname: "s_moveRange",
+          command: {moveRange: "test.x", min: {x:1}, toShard:"a"},
+          skipUnlessSharded: true,
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: roles_clusterManager,
+                privileges: [{resource: {db: "test", collection: "x"}, actions: ["moveChunk"]}],
+                expectFail: true
+              },
+              {runOnDb: firstDbName, roles: {}},
+              {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
+          testname: "d_moveRange",
+          command: {_shardsvrMoveRange: "test.x", fromShard: "a", toShard: "b", min: {}, max: {}, maxChunkSizeBytes: 1024},
           skipSharded: true,
           testcases: [
               {

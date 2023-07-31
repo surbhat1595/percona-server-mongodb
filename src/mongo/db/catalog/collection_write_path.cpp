@@ -398,7 +398,7 @@ Status insertDocuments(OperationContext* opCtx,
             return Status(ErrorCodes::InternalError,
                           str::stream()
                               << "Collection::insertDocument got document without _id for ns:"
-                              << nss.toString());
+                              << nss.toStringForErrorMsg());
         }
 
         auto status = collection->checkValidationAndParseResult(opCtx, it->doc);
@@ -499,6 +499,7 @@ void updateDocument(OperationContext* opCtx,
                     const Snapshotted<BSONObj>& oldDoc,
                     const BSONObj& newDoc,
                     const BSONObj* opDiff,
+                    bool* indexesAffected,
                     OpDebug* opDebug,
                     CollectionUpdateArgs* args) {
     {
@@ -584,6 +585,9 @@ void updateDocument(OperationContext* opCtx,
                                                                     oldLocation,
                                                                     &keysInserted,
                                                                     &keysDeleted));
+        if (indexesAffected) {
+            *indexesAffected = (keysInserted > 0 || keysDeleted > 0);
+        }
 
         if (opDebug) {
             opDebug->additiveMetrics.incrementKeysInserted(keysInserted);
@@ -612,6 +616,7 @@ StatusWith<BSONObj> updateDocumentWithDamages(OperationContext* opCtx,
                                               const char* damageSource,
                                               const mutablebson::DamageVector& damages,
                                               const BSONObj* opDiff,
+                                              bool* indexesAffected,
                                               OpDebug* opDebug,
                                               CollectionUpdateArgs* args) {
     dassert(opCtx->lockState()->isCollectionLockedForMode(collection->ns(), MODE_IX));
@@ -663,6 +668,9 @@ StatusWith<BSONObj> updateDocumentWithDamages(OperationContext* opCtx,
                                                                     loc,
                                                                     &keysInserted,
                                                                     &keysDeleted));
+        if (indexesAffected) {
+            *indexesAffected = (keysInserted > 0 || keysDeleted > 0);
+        }
 
         if (opDebug) {
             opDebug->additiveMetrics.incrementKeysInserted(keysInserted);

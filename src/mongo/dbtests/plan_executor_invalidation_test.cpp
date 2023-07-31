@@ -124,12 +124,13 @@ public:
     }
 
     bool dropDatabase(const std::string& dbname) {
-        bool res = _client.dropDatabase({boost::none, dbname});
+        bool res =
+            _client.dropDatabase(DatabaseName::createDatabaseName_forTest(boost::none, dbname));
         _refreshCollection();
         return res;
     }
 
-    bool dropCollection(const std::string& ns) {
+    bool dropCollection(StringData ns) {
         bool res = _client.dropCollection(NamespaceString(ns));
         _refreshCollection();
         return res;
@@ -148,7 +149,7 @@ public:
     void renameCollection(const std::string& to) {
         BSONObj info;
         ASSERT_TRUE(_client.runCommand(
-            DatabaseName(boost::none, "admin"),
+            DatabaseName::kAdmin,
             BSON("renameCollection" << nss.ns() << "to" << to << "dropTarget" << true),
             info));
         _refreshCollection();

@@ -175,7 +175,8 @@ Status _createView(OperationContext* opCtx,
         if (opCtx->writesAreReplicated() &&
             !repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, nss)) {
             return Status(ErrorCodes::NotWritablePrimary,
-                          str::stream() << "Not primary while creating collection " << nss);
+                          str::stream() << "Not primary while creating collection "
+                                        << nss.toStringForErrorMsg());
         }
 
         CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
@@ -332,9 +333,11 @@ BSONObj _generateTimeseriesValidator(int bucketVersion, StringData timeField) {
     };
 }
 
-Status _createTimeseries(OperationContext* opCtx,
-                         const NamespaceString& ns,
-                         const CollectionOptions& optionsArg) {
+Status _createTimeseries(
+    OperationContext* opCtx,
+    const NamespaceString& ns,
+    const CollectionOptions& optionsArg,
+    enum TimeseriesCreateLevel createOpt = TimeseriesCreateLevel::kBothCollAndView) {
     // This path should only be taken when a user creates a new time-series collection on the
     // primary. Secondaries replicate individual oplog entries.
     invariant(!ns.isTimeseriesBucketsCollection());
@@ -381,7 +384,8 @@ Status _createTimeseries(OperationContext* opCtx,
                 !repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, bucketsNs)) {
                 // Report the error with the user provided namespace
                 return Status(ErrorCodes::NotWritablePrimary,
-                              str::stream() << "Not primary while creating collection " << ns);
+                              str::stream() << "Not primary while creating collection "
+                                            << ns.toStringForErrorMsg());
             }
 
             CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, bucketsNs)
@@ -444,8 +448,9 @@ Status _createTimeseries(OperationContext* opCtx,
                 }
 
                 return Status(ErrorCodes::NamespaceExists,
-                              str::stream() << "Bucket Collection already exists. NS: " << bucketsNs
-                                            << ". UUID: " << coll->uuid());
+                              str::stream()
+                                  << "Bucket Collection already exists. NS: "
+                                  << bucketsNs.toStringForErrorMsg() << ". UUID: " << coll->uuid());
             }
 
             // Create the buckets collection that will back the view.
@@ -458,8 +463,9 @@ Status _createTimeseries(OperationContext* opCtx,
             return Status::OK();
         });
 
-    // If compatible bucket collection already exists then proceed with creating view definition.
-    if (!ret.isOK() && !existingBucketCollectionIsCompatible)
+    // If compatible bucket collection already exists then proceed with creating view defintion.
+    if ((!ret.isOK() && !existingBucketCollectionIsCompatible) ||
+        createOpt == TimeseriesCreateLevel::kBucketsCollOnly)
         return ret;
 
     ret = writeConflictRetry(opCtx, "create", ns.ns(), [&]() -> Status {
@@ -483,7 +489,8 @@ Status _createTimeseries(OperationContext* opCtx,
         if (opCtx->writesAreReplicated() &&
             !repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, ns)) {
             return {ErrorCodes::NotWritablePrimary,
-                    str::stream() << "Not primary while creating collection " << ns};
+                    str::stream() << "Not primary while creating collection "
+                                  << ns.toStringForErrorMsg()};
         }
 
         CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, ns)
@@ -513,7 +520,7 @@ Status _createTimeseries(OperationContext* opCtx,
                   "failTimeseriesViewCreation fail point enabled. Failing creation of view "
                   "definition after bucket collection was created successfully.");
             return {ErrorCodes::OperationFailed,
-                    str::stream() << "Timeseries view definition " << ns
+                    str::stream() << "Timeseries view definition " << ns.toStringForErrorMsg()
                                   << " creation failed due to 'failTimeseriesViewCreation' "
                                      "fail point enabled."};
         }
@@ -527,9 +534,10 @@ Status _createTimeseries(OperationContext* opCtx,
         // Create the time-series view.
         status = db->userCreateNS(opCtx, ns, viewOptions);
         if (!status.isOK()) {
-            return status.withContext(str::stream() << "Failed to create view on " << bucketsNs
-                                                    << " for time-series collection " << ns
-                                                    << " with options " << viewOptions.toBSON());
+            return status.withContext(
+                str::stream() << "Failed to create view on " << bucketsNs.toStringForErrorMsg()
+                              << " for time-series collection " << ns.toStringForErrorMsg()
+                              << " with options " << viewOptions.toBSON());
         }
 
         wuow.commit();
@@ -546,7 +554,12 @@ Status _createCollection(
     const boost::optional<BSONObj>& idIndex,
     const boost::optional<VirtualCollectionOptions>& virtualCollectionOptions = boost::none) {
     return writeConflictRetry(opCtx, "create", nss.ns(), [&] {
-        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
+        // If a change collection is to be created, that is, the change streams are being enabled
+        // for a tenant, acquire exclusive tenant lock.
+        AutoGetDb autoDb(opCtx,
+                         nss.dbName(),
+                         MODE_IX /* database lock mode*/,
+                         boost::make_optional(nss.tenantId() && nss.isChangeCollection(), MODE_X));
         Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
         auto db = autoDb.ensureDbExists(opCtx);
 
@@ -591,7 +604,8 @@ Status _createCollection(
         if (opCtx->writesAreReplicated() &&
             !repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, nss)) {
             return Status(ErrorCodes::NotWritablePrimary,
-                          str::stream() << "Not primary while creating collection " << nss);
+                          str::stream() << "Not primary while creating collection "
+                                        << nss.toStringForErrorMsg());
         }
 
         CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
@@ -703,6 +717,19 @@ Status createCollection(OperationContext* opCtx,
 }
 }  // namespace
 
+Status createTimeseries(OperationContext* opCtx,
+                        const NamespaceString& ns,
+                        const BSONObj& options,
+                        TimeseriesCreateLevel level) {
+    StatusWith<CollectionOptions> statusWith =
+        CollectionOptions::parse(options, CollectionOptions::parseForCommand);
+    if (!statusWith.isOK()) {
+        return statusWith.getStatus();
+    }
+    auto collectionOptions = statusWith.getValue();
+    return _createTimeseries(opCtx, ns, collectionOptions, level);
+}
+
 Status createCollection(OperationContext* opCtx,
                         const DatabaseName& dbName,
                         const BSONObj& cmdObj,
@@ -781,8 +808,9 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
         auto futureColl = db ? catalog->lookupCollectionByNamespace(opCtx, newCollName) : nullptr;
         bool needsRenaming(futureColl);
         invariant(!needsRenaming || allowRenameOutOfTheWay,
-                  str::stream() << "Current collection name: " << currentName << ", UUID: " << uuid
-                                << ". Future collection name: " << newCollName);
+                  str::stream() << "Current collection name: " << currentName->toStringForErrorMsg()
+                                << ", UUID: " << uuid << ". Future collection name: "
+                                << newCollName.toStringForErrorMsg());
 
         for (int tries = 0; needsRenaming && tries < 10; ++tries) {
             auto tmpNameResult = makeUniqueCollectionName(opCtx, dbName, "tmp%%%%%.create");
@@ -791,7 +819,7 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
                                                              << "Cannot generate temporary "
                                                                 "collection namespace for applyOps "
                                                                 "create command: collection: "
-                                                             << newCollName);
+                                                             << newCollName.toStringForErrorMsg());
             }
 
             const auto& tmpName = tmpNameResult.getValue();
@@ -848,7 +876,7 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
                           str::stream() << "Cannot generate temporary "
                                            "collection namespace for applyOps "
                                            "create command: collection: "
-                                        << newCollName);
+                                        << newCollName.toStringForErrorMsg());
         }
 
         // If the collection with the requested UUID already exists, but with a different
@@ -856,7 +884,8 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
         if (catalog->lookupCollectionByUUID(opCtx, uuid)) {
             invariant(currentName);
             uassert(40655,
-                    str::stream() << "Invalid name " << newCollName << " for UUID " << uuid,
+                    str::stream() << "Invalid name " << newCollName.toStringForErrorMsg()
+                                  << " for UUID " << uuid,
                     currentName->db() == newCollName.db());
             return writeConflictRetry(opCtx, "createCollectionForApplyOps", newCollName.ns(), [&] {
                 WriteUnitOfWork wuow(opCtx);
@@ -926,7 +955,7 @@ Status createCollection(OperationContext* opCtx,
         return _createTimeseries(opCtx, ns, options);
     } else {
         uassert(ErrorCodes::OperationNotSupportedInTransaction,
-                str::stream() << "Cannot create system collection " << ns
+                str::stream() << "Cannot create system collection " << ns.toStringForErrorMsg()
                               << " within a transaction.",
                 !opCtx->inMultiDocumentTransaction() || !ns.isSystem());
         return _createCollection(opCtx, ns, options, idIndex);

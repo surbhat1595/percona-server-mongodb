@@ -208,7 +208,11 @@ SemiFuture<void> MovePrimaryRecipientService::MovePrimaryRecipient::run(
         return _abortCalled;
     }();
 
-    if (abortCalled || shouldAbort) {
+    if (shouldAbort) {
+        _internalAbort();
+    }
+
+    if (abortCalled) {
         abort();
     }
 
@@ -288,6 +292,14 @@ void MovePrimaryRecipientService::MovePrimaryRecipient::abort() {
     }
 }
 
+void MovePrimaryRecipientService::MovePrimaryRecipient::_internalAbort() {
+    {
+        stdx::lock_guard<Latch> lg(_mutex);
+        invariant(_state < MovePrimaryRecipientStateEnum::kPrepared);
+    }
+    abort();
+}
+
 void MovePrimaryRecipientService::MovePrimaryRecipient::_cloneDataFromDonor(
     OperationContext* opCtx) {
     // Enable write blocking bypass to allow cloning of catalog data even if writes are disallowed.
@@ -332,7 +344,7 @@ MovePrimaryRecipientService::MovePrimaryRecipient::_transitionToCloningStateAndC
                 "MovePrimaryRecipient encountered unrecoverable error in _transitionToCloningState",
                 "_metadata"_attr = _metadata,
                 "_error"_attr = status);
-            abort();
+            _internalAbort();
         })
         .until<Status>([](const Status& status) { return status.isOK(); })
         .on(**executor, _ctHolder->getAbortToken())
@@ -372,7 +384,7 @@ ExecutorFuture<void> MovePrimaryRecipientService::MovePrimaryRecipient::_transit
                         "_transitionToApplyingState",
                         "_metadata"_attr = _metadata,
                         "_error"_attr = status);
-            abort();
+            _internalAbort();
         })
         .until<Status>([](const Status& status) { return status.isOK(); })
         .on(**executor, _ctHolder->getAbortToken())
@@ -426,7 +438,7 @@ ExecutorFuture<void> MovePrimaryRecipientService::MovePrimaryRecipient::
                         "_transitionToBlockingStateAndAcquireCriticalSection",
                         "_metadata"_attr = _metadata,
                         "_error"_attr = status);
-            abort();
+            _internalAbort();
         })
         .until<Status>([](const Status& status) { return status.isOK(); })
         .on(**executor, _ctHolder->getAbortToken())
@@ -461,7 +473,7 @@ ExecutorFuture<void> MovePrimaryRecipientService::MovePrimaryRecipient::_transit
                         "_transitionToPreparedState",
                         "_metadata"_attr = _metadata,
                         "_error"_attr = status);
-            abort();
+            _internalAbort();
         })
         .until<Status>([](const Status& status) { return status.isOK(); })
         .on(**executor, _ctHolder->getAbortToken())
@@ -660,7 +672,8 @@ MovePrimaryRecipientService::MovePrimaryRecipient::_getCollectionsToClone(
     auto collectionsToCloneNSS = _getCollectionsToCloneNSS();
     AutoGetCollection autoColl(opCtx, collectionsToCloneNSS, MODE_IS);
     uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "Collection '" << collectionsToCloneNSS << "' did not already exist",
+            str::stream() << "Collection '" << collectionsToCloneNSS.toStringForErrorMsg()
+                          << "' did not already exist",
             autoColl);
     auto cursor = autoColl->getCursor(opCtx);
     while (auto record = cursor->next()) {
@@ -684,19 +697,36 @@ void MovePrimaryRecipientService::MovePrimaryRecipient::_cleanUpOrphanedDataOnRe
 void MovePrimaryRecipientService::MovePrimaryRecipient::_cleanUpOperationMetadata(
     OperationContext* opCtx, const std::shared_ptr<executor::ScopedTaskExecutor>& executor) {
 
-    // Drop collectionsToClone NSS
+    // Drop collectionsToClone NSS.
     resharding::data_copy::ensureCollectionDropped(opCtx, _getCollectionsToCloneNSS());
 
-    // Drop temp oplog buffer
+    // Drop temp oplog buffer.
     resharding::data_copy::ensureCollectionDropped(
         opCtx, NamespaceString::makeMovePrimaryOplogBufferNSS(getMigrationId()));
 
-    // Drop oplog applier progress document
+    // Drop oplog applier progress document.
     PersistentTaskStore<MovePrimaryOplogApplierProgress> store(
         NamespaceString::kMovePrimaryApplierProgressNamespace);
     store.remove(opCtx,
                  BSON(MovePrimaryRecipientDocument::kMigrationIdFieldName << getMigrationId()),
                  WriteConcerns::kLocalWriteConcern);
+
+    // Drop all collections with the prefix movePrimaryRecipient.<migrationId>.willBeDeleted.
+    auto catalogClient = CollectionCatalog::get(opCtx);
+    std::vector<NamespaceString> colls;
+    {
+        AutoGetDb autoDb(opCtx, DatabaseName::kConfig, MODE_S);
+        colls = catalogClient->getAllCollectionNamesFromDb(opCtx, DatabaseName::kConfig);
+    }
+    const auto& nssPrefix =
+        NamespaceString::makeMovePrimaryTempCollectionsPrefix(getMigrationId()).toString();
+    for (const auto& nss : colls) {
+        if (!nss.ns().startsWith(nssPrefix)) {
+            continue;
+        }
+        LOGV2(7621600, "MovePrimaryRecipient dropping collection", "ns"_attr = nss);
+        resharding::data_copy::ensureCollectionDropped(opCtx, nss);
+    }
 }
 
 void MovePrimaryRecipientService::MovePrimaryRecipient::_removeRecipientDocument(
@@ -791,7 +821,7 @@ MovePrimaryRecipientService::MovePrimaryRecipient::_transitionToInitializingStat
                   "MovePrimaryRecipient received unrecoverable error in "
                   "_transitionToInitializingState",
                   "error"_attr = status);
-            abort();
+            _internalAbort();
         })
         .until<Status>([](const Status& status) { return status.isOK(); })
         .on(**executor, _ctHolder->getAbortToken())
@@ -830,7 +860,7 @@ ExecutorFuture<void> MovePrimaryRecipientService::MovePrimaryRecipient::_initial
             LOGV2(7306801,
                   "Received unrecoverable error while initializing for cloning state",
                   "error"_attr = status);
-            abort();
+            _internalAbort();
         })
         .until<Status>([](const Status& status) { return status.isOK(); })
         .on(**executor, _ctHolder->getAbortToken());

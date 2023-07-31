@@ -522,12 +522,16 @@ error_codes:
     # This error code is not generated internally in mongod/s servers, but must be parsed and
     # reserve an error code. It can be returned by a remote search index management server.
     - {code: 396, name: IndexInformationTooLarge}
-    
+
     - {code: 397, name: MovePrimaryAborted}
-    
+
     - {code: 398, name: StreamTerminated, categories: [CloseConnectionError]}
 
     - {code: 399, name: MovePrimaryRecipientPastAbortableStage, categories: [InternalOnly]}
+
+    - {code: 400, name: CannotUpgrade}
+
+    - {code: 401, name: ResumeTenantChangeStream}
 
     # Error codes 4000-8999 are reserved.
 
@@ -561,4 +565,3 @@ error_codes:
 
     # Percona Server for MongoDB error codes
     - {code: 9390,name: LDAPLibraryError}
-

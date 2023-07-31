@@ -29,7 +29,6 @@
 
 
 #include "mongo/db/pipeline/dependencies.h"
-#include "mongo/platform/basic.h"
 
 #include <boost/optional.hpp>
 #include <vector>
@@ -39,8 +38,8 @@
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/catalog/clustered_collection_util.h"
-#include "mongo/db/exec/bucket_unpacker.h"
 #include "mongo/db/exec/projection_executor_utils.h"
+#include "mongo/db/exec/timeseries/bucket_unpacker.h"
 #include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/matcher/expression_algo.h"
@@ -978,14 +977,14 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
     if (!solnRoot) {
         return Status(ErrorCodes::NoQueryExecutionPlans,
                       str::stream() << "Failed to create data access plan from cache. Query: "
-                                    << query.toStringShort());
+                                    << query.toStringShortForErrorMsg());
     }
 
     auto soln = QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(solnRoot));
     if (!soln) {
         return Status(ErrorCodes::NoQueryExecutionPlans,
-                      str::stream()
-                          << "Failed to analyze plan from cache. Query: " << query.toStringShort());
+                      str::stream() << "Failed to analyze plan from cache. Query: "
+                                    << query.toStringShortForErrorMsg());
     }
 
     LOGV2_DEBUG(20966,

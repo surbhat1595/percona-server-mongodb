@@ -108,8 +108,7 @@ executor:
     hooks:
       - CheckReplDBHashInBackground
       - CheckReplDBHash
-      # TODO (SERVER-74534): Enable when this will work with co-located configsvr.
-      # - CheckMetadataConsistencyInBackground
+      - CheckMetadataConsistencyInBackground
       - ValidateCollections
     tests: true
   config:
@@ -120,8 +119,7 @@ executor:
   hooks:
   - class: CheckReplDBHashInBackground
   - class: CheckReplDBHash
-  # TODO (SERVER-74534): Enable when this will work with co-located configsvr.
-  # - class: CheckMetadataConsistencyInBackground
+  - class: CheckMetadataConsistencyInBackground
   - class: CheckOrphansDeleted
   - class: CheckRoutingTableConsistency
   - class: CheckShardFilteringMetadata
@@ -141,7 +139,6 @@ executor:
       set_parameters:
         enableTestCommands: 1
         roleGraphInvalidationIsFatal: 1
-        receiveChunkWaitForRangeDeleterTimeoutMS: 90000
         queryAnalysisWriterIntervalSecs: 1
     num_rs_nodes_per_shard: 3
     num_shards: 2

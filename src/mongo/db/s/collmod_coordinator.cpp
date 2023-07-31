@@ -93,7 +93,7 @@ void CollModCoordinator::checkIfOptionsConflict(const BSONObj& doc) const {
     const auto& otherReq = otherDoc.getCollModRequest().toBSON();
 
     uassert(ErrorCodes::ConflictingOperationInProgress,
-            str::stream() << "Another collMod for namespace " << originalNss()
+            str::stream() << "Another collMod for namespace " << originalNss().toStringForErrorMsg()
                           << " is being executed with different parameters: " << selfReq,
             SimpleBSONObjComparator::kInstance.evaluate(selfReq == otherReq));
 }
@@ -277,8 +277,7 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                 }
             }))
         .then(_buildPhaseHandler(
-            Phase::kUpdateShards,
-            [this, executor = executor, anchor = shared_from_this()] {
+            Phase::kUpdateShards, [this, executor = executor, anchor = shared_from_this()] {
                 auto opCtxHolder = cc().makeOperationContext();
                 auto* opCtx = opCtxHolder.get();
                 getForwardableOpMetadata().setOn(opCtx);
@@ -403,17 +402,7 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                     subBuilder.doneFast();
                     _result = builder.obj();
                 }
-            }))
-        .onError([this, anchor = shared_from_this()](const Status& status) {
-            if (!status.isA<ErrorCategory::NotPrimaryError>() &&
-                !status.isA<ErrorCategory::ShutdownError>()) {
-                LOGV2_ERROR(5757002,
-                            "Error running collMod",
-                            logAttrs(nss()),
-                            "error"_attr = redact(status));
-            }
-            return status;
-        });
+            }));
 }
 
 }  // namespace mongo

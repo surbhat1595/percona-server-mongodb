@@ -386,8 +386,11 @@ void insertCollectionAndPlacementEntries(OperationContext* opCtx,
                                   WriteConcernOptions::SyncMode::UNSET,
                                   WriteConcernOptions::kNoTimeout};
 
+    // This always runs in the shard role so should use a cluster transaction to guarantee targeting
+    // the config server.
+    bool useClusterTransaction = true;
     sharding_ddl_util::runTransactionOnShardingCatalog(
-        opCtx, std::move(insertionChain), wc, osi, executor);
+        opCtx, std::move(insertionChain), wc, osi, useClusterTransaction, executor);
 }
 
 void broadcastDropCollection(OperationContext* opCtx,
@@ -454,8 +457,9 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
                     _result = createCollectionResponseOpt;
                     // Launch an exception to directly jump to the end of the continuation chain
                     uasserted(ErrorCodes::RequestAlreadyFulfilled,
-                              str::stream() << "The collection" << originalNss()
-                                            << "was already sharded by a past request");
+                              str::stream()
+                                  << "The collection" << originalNss().toStringForErrorMsg()
+                                  << "was already sharded by a past request");
                 }
             }
         })
@@ -626,11 +630,6 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
 
             if (!status.isA<ErrorCategory::NotPrimaryError>() &&
                 !status.isA<ErrorCategory::ShutdownError>()) {
-                LOGV2_ERROR(5458702,
-                            "Error running create collection",
-                            logAttrs(originalNss()),
-                            "error"_attr = redact(status));
-
                 auto opCtxHolder = cc().makeOperationContext();
                 auto* opCtx = opCtxHolder.get();
 
@@ -708,7 +707,8 @@ CreateCollectionCoordinator::_checkIfCollectionAlreadyShardedWithSameOptions(
         }();
 
         uassert(ErrorCodes::AlreadyInitialized,
-                str::stream() << "sharding already enabled for collection " << originalNss(),
+                str::stream() << "sharding already enabled for collection "
+                              << originalNss().toStringForErrorMsg(),
                 requestMatchesExistingCollection);
 
         CreateCollectionResponse response(cri.getCollectionVersion());
@@ -761,7 +761,8 @@ CreateCollectionCoordinator::_checkIfCollectionAlreadyShardedWithSameOptions(
     }();
 
     uassert(ErrorCodes::AlreadyInitialized,
-            str::stream() << "sharding already enabled for collection " << bucketsNss,
+            str::stream() << "sharding already enabled for collection "
+                          << bucketsNss.toStringForErrorMsg(),
             requestMatchesExistingCollection);
 
     CreateCollectionResponse response(cri.getCollectionVersion());
@@ -772,12 +773,9 @@ CreateCollectionCoordinator::_checkIfCollectionAlreadyShardedWithSameOptions(
 void CreateCollectionCoordinator::_checkCommandArguments(OperationContext* opCtx) {
     LOGV2_DEBUG(5277902, 2, "Create collection _checkCommandArguments", logAttrs(originalNss()));
 
-    if (originalNss().dbName() == DatabaseName::kConfig) {
-        // Only allowlisted collections in config may be sharded (unless we are in test mode)
-        uassert(ErrorCodes::IllegalOperation,
-                "only special collections in the config db may be sharded",
-                originalNss() == NamespaceString::kLogicalSessionsNamespace);
-    }
+    uassert(ErrorCodes::IllegalOperation,
+            "Special collection '" + originalNss().toStringForErrorMsg() + "' cannot be sharded",
+            !originalNss().isNamespaceAlwaysUnsharded());
 
     // Ensure that hashed and unique are not both set.
     uassert(ErrorCodes::InvalidOptions,
@@ -791,20 +789,13 @@ void CreateCollectionCoordinator::_checkCommandArguments(OperationContext* opCtx
         // enabled.
         if (originalNss().isTimeseriesBucketsCollection()) {
             uassert(ErrorCodes::IllegalOperation,
-                    str::stream() << "can't shard time-series collection " << nss(),
+                    str::stream() << "can't shard time-series collection "
+                                  << nss().toStringForErrorMsg(),
                     feature_flags::gFeatureFlagShardedTimeSeries.isEnabled(
                         serverGlobalParams.featureCompatibility) ||
                         !timeseries::getTimeseriesOptions(opCtx, nss(), false));
         }
     }
-
-    // Ensure the namespace is valid.
-    uassert(ErrorCodes::IllegalOperation,
-            "can't shard system namespaces",
-            !originalNss().isSystem() ||
-                originalNss() == NamespaceString::kLogicalSessionsNamespace ||
-                originalNss().isTemporaryReshardingCollection() ||
-                originalNss().isTimeseriesBucketsCollection());
 
     if (_request.getNumInitialChunks()) {
         // Ensure numInitialChunks is within valid bounds.
@@ -866,7 +857,8 @@ TranslatedRequestParams CreateCollectionCoordinator::_translateRequestParameters
         const auto& resolvedNamespace = originalNss();
         performCheckOnCollectionUUID(resolvedNamespace);
         uassert(ErrorCodes::InvalidNamespace,
-                str::stream() << "Namespace too long. Namespace: " << resolvedNamespace
+                str::stream() << "Namespace too long. Namespace: "
+                              << resolvedNamespace.toStringForErrorMsg()
                               << " Max: " << NamespaceString::MaxNsShardedCollectionLen,
                 resolvedNamespace.size() <= NamespaceString::MaxNsShardedCollectionLen);
         return TranslatedRequestParams(
@@ -885,7 +877,8 @@ TranslatedRequestParams CreateCollectionCoordinator::_translateRequestParameters
                 serverGlobalParams.featureCompatibility));
 
     uassert(ErrorCodes::InvalidNamespace,
-            str::stream() << "Namespace too long. Namespace: " << resolvedNamespace
+            str::stream() << "Namespace too long. Namespace: "
+                          << resolvedNamespace.toStringForErrorMsg()
                           << " Max: " << NamespaceString::MaxNsShardedCollectionLen,
             resolvedNamespace.size() <= NamespaceString::MaxNsShardedCollectionLen);
 
@@ -896,7 +889,7 @@ TranslatedRequestParams CreateCollectionCoordinator::_translateRequestParameters
         }
 
         uassert(6159000,
-                str::stream() << "the collection '" << bucketsNs
+                str::stream() << "the collection '" << bucketsNs.toStringForErrorMsg()
                               << "' does not have 'timeseries' options",
                 existingBucketsColl->getTimeseriesOptions());
         return existingBucketsColl->getTimeseriesOptions();
@@ -905,7 +898,7 @@ TranslatedRequestParams CreateCollectionCoordinator::_translateRequestParameters
     if (_request.getTimeseries() && existingTimeseriesOptions) {
         uassert(5731500,
                 str::stream() << "the 'timeseries' spec provided must match that of exists '"
-                              << originalNss() << "' collection",
+                              << originalNss().toStringForErrorMsg() << "' collection",
                 timeseries::optionsAreEqual(*_request.getTimeseries(), *existingTimeseriesOptions));
     } else if (!_request.getTimeseries()) {
         _request.setTimeseries(existingTimeseriesOptions);
@@ -1055,7 +1048,7 @@ void CreateCollectionCoordinator::_createCollectionAndIndexes(
                 uasserted(ErrorCodes::NamespaceExists,
                           str::stream() << "A conflicting DDL operation was completed while trying "
                                            "to shard collection: "
-                                        << originalNss());
+                                        << originalNss().toStringForErrorMsg());
             }
         }
 
@@ -1185,17 +1178,17 @@ void CreateCollectionCoordinator::_createCollectionOnNonPrimaryShards(
         for (const auto& response : responses) {
             auto shardResponse = uassertStatusOKWithContext(
                 std::move(response.swResponse),
-                str::stream() << "Unable to create collection " << nss().ns() << " on "
-                              << response.shardId);
+                str::stream() << "Unable to create collection " << nss().toStringForErrorMsg()
+                              << " on " << response.shardId);
             auto status = getStatusFromCommandResult(shardResponse.data);
-            uassertStatusOK(status.withContext(str::stream()
-                                               << "Unable to create collection " << nss().ns()
-                                               << " on " << response.shardId));
+            uassertStatusOK(status.withContext(str::stream() << "Unable to create collection "
+                                                             << nss().toStringForErrorMsg()
+                                                             << " on " << response.shardId));
 
             auto wcStatus = getWriteConcernStatusFromCommandResult(shardResponse.data);
-            uassertStatusOK(wcStatus.withContext(str::stream()
-                                                 << "Unable to create collection " << nss().ns()
-                                                 << " on " << response.shardId));
+            uassertStatusOK(wcStatus.withContext(str::stream() << "Unable to create collection "
+                                                               << nss().toStringForErrorMsg()
+                                                               << " on " << response.shardId));
         }
     }
 }

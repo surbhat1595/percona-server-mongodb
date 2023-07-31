@@ -72,7 +72,7 @@ class UseReaderWriterGlobalThrottling {
 public:
     explicit UseReaderWriterGlobalThrottling(ServiceContext* svcCtx, int numTickets)
         : _svcCtx(svcCtx) {
-        gStorageEngineConcurrencyAdjustmentAlgorithm = "";
+        gStorageEngineConcurrencyAdjustmentAlgorithm = "fixedConcurrentTransactions";
         // TODO SERVER-72616: Remove ifdefs once PriorityTicketHolder is available cross-platform.
 #ifdef __linux__
         if constexpr (std::is_same_v<PriorityTicketHolder, TicketHolderImpl>) {
@@ -361,7 +361,8 @@ TEST_F(DConcurrencyTestFixture,
     ASSERT_EQ(lockState->getLockMode(resourceIdReplicationStateTransitionLock), MODE_IX);
 
     {
-        Lock::DBLock dbWrite(opCtx.get(), DatabaseName(boost::none, "db"), MODE_IX);
+        Lock::DBLock dbWrite(
+            opCtx.get(), DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_IX);
         ASSERT(lockState->isW());
         ASSERT(MODE_X == lockState->getLockMode(resourceIdGlobal))
             << "unexpected global lock mode " << modeName(lockState->getLockMode(resourceIdGlobal));
@@ -403,7 +404,8 @@ TEST_F(DConcurrencyTestFixture,
     ASSERT_EQ(lockState->getLockMode(resourceIdReplicationStateTransitionLock), MODE_IX);
 
     {
-        Lock::DBLock dbWrite(opCtx.get(), DatabaseName(boost::none, "db"), MODE_IX);
+        Lock::DBLock dbWrite(
+            opCtx.get(), DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_IX);
         ASSERT(lockState->isW());
         ASSERT(MODE_X == lockState->getLockMode(resourceIdGlobal))
             << "unexpected global lock mode " << modeName(lockState->getLockMode(resourceIdGlobal));
@@ -442,7 +444,8 @@ TEST_F(DConcurrencyTestFixture,
     ASSERT_EQ(lockState->getLockMode(resourceIdReplicationStateTransitionLock), MODE_IX);
 
     {
-        Lock::DBLock dbWrite(opCtx.get(), DatabaseName(boost::none, "db"), MODE_IX);
+        Lock::DBLock dbWrite(
+            opCtx.get(), DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_IX);
         ASSERT(lockState->isW());
         ASSERT(MODE_X == lockState->getLockMode(resourceIdGlobal))
             << "unexpected global lock mode " << modeName(lockState->getLockMode(resourceIdGlobal));
@@ -606,7 +609,10 @@ TEST_F(DConcurrencyTestFixture, DBLockXSetsGlobalWriteLockedOnOperationContext) 
     ASSERT_FALSE(opCtx->lockState()->wasGlobalLockTakenForWrite());
     ASSERT_FALSE(opCtx->lockState()->wasGlobalLockTaken());
 
-    { Lock::DBLock dbWrite(opCtx, DatabaseName(boost::none, "db"), MODE_X); }
+    {
+        Lock::DBLock dbWrite(
+            opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_X);
+    }
     ASSERT_TRUE(opCtx->lockState()->wasGlobalLockTakenForWrite());
     ASSERT_TRUE(opCtx->lockState()->wasGlobalLockTaken());
 }
@@ -617,9 +623,97 @@ TEST_F(DConcurrencyTestFixture, DBLockSDoesNotSetGlobalWriteLockedOnOperationCon
     ASSERT_FALSE(opCtx->lockState()->wasGlobalLockTakenForWrite());
     ASSERT_FALSE(opCtx->lockState()->wasGlobalLockTaken());
 
-    { Lock::DBLock dbRead(opCtx, DatabaseName(boost::none, "db"), MODE_S); }
+    {
+        Lock::DBLock dbRead(
+            opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_S);
+    }
     ASSERT_FALSE(opCtx->lockState()->wasGlobalLockTakenForWrite());
     ASSERT_TRUE(opCtx->lockState()->wasGlobalLockTaken());
+}
+
+TEST_F(DConcurrencyTestFixture, TenantLock) {
+    auto opCtx = makeOperationContext();
+    getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
+    TenantId tenantId{OID::gen()};
+    ResourceId tenantResourceId{ResourceType::RESOURCE_TENANT, tenantId};
+    struct TestCase {
+        LockMode globalLockMode;
+        LockMode tenantLockMode;
+    };
+    std::vector<TestCase> testCases{
+        {MODE_IX, MODE_IX}, {MODE_IX, MODE_X}, {MODE_IS, MODE_S}, {MODE_IS, MODE_IS}};
+    for (auto&& testCase : testCases) {
+        {
+            Lock::GlobalLock globalLock{opCtx.get(), testCase.globalLockMode};
+            Lock::TenantLock tenantLock{opCtx.get(), tenantId, testCase.tenantLockMode};
+            ASSERT_TRUE(
+                opCtx->lockState()->isLockHeldForMode(tenantResourceId, testCase.tenantLockMode));
+        }
+        ASSERT_FALSE(
+            opCtx->lockState()->isLockHeldForMode(tenantResourceId, testCase.tenantLockMode));
+    }
+}
+
+TEST_F(DConcurrencyTestFixture, DBLockTakesTenantLock) {
+    auto opCtx = makeOperationContext();
+    getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
+    TenantId tenantId{OID::gen()};
+    ResourceId tenantResourceId{ResourceType::RESOURCE_TENANT, tenantId};
+    struct TestCase {
+        bool tenantOwned;
+        LockMode databaseLockMode;
+        boost::optional<LockMode> tenantLockMode;
+        LockMode expectedTenantLockMode;
+    };
+
+    StringData testDatabaseName{"test"};
+    const bool tenantOwned{true};
+    const bool tenantless{false};
+    const boost::optional<LockMode> none;
+    std::vector<TestCase> testCases{
+        {tenantless, MODE_S, none, MODE_NONE},
+        {tenantless, MODE_IS, none, MODE_NONE},
+        {tenantless, MODE_X, none, MODE_NONE},
+        {tenantless, MODE_IX, none, MODE_NONE},
+        {tenantOwned, MODE_S, none, MODE_IS},
+        {tenantOwned, MODE_IS, none, MODE_IS},
+        {tenantOwned, MODE_X, none, MODE_IX},
+        {tenantOwned, MODE_IX, none, MODE_IX},
+        {tenantOwned, MODE_X, MODE_X, MODE_X},
+        {tenantOwned, MODE_IX, MODE_X, MODE_X},
+    };
+    for (auto&& testCase : testCases) {
+        {
+            Lock::DBLock dbLock(
+                opCtx.get(),
+                DatabaseName::createDatabaseName_forTest(
+                    testCase.tenantOwned ? boost::make_optional(tenantId) : boost::none,
+                    testDatabaseName),
+                testCase.databaseLockMode,
+                Date_t::max(),
+                testCase.tenantLockMode);
+            ASSERT(opCtx->lockState()->getLockMode(tenantResourceId) ==
+                   testCase.expectedTenantLockMode)
+                << " db lock mode: " << modeName(testCase.databaseLockMode)
+                << ", tenant lock mode: "
+                << (testCase.tenantLockMode ? modeName(*testCase.tenantLockMode) : "-");
+        }
+        ASSERT(opCtx->lockState()->getLockMode(tenantResourceId) == MODE_NONE)
+            << " db lock mode: " << modeName(testCase.databaseLockMode) << ", tenant lock mode: "
+            << (testCase.tenantLockMode ? modeName(*testCase.tenantLockMode) : "-");
+    }
+
+    // Verify that tenant lock survives move.
+    {
+        auto lockBuilder = [&]() {
+            return Lock::DBLock{
+                opCtx.get(),
+                DatabaseName::createDatabaseName_forTest(tenantId, testDatabaseName),
+                MODE_S};
+        };
+        Lock::DBLock dbLockCopy{lockBuilder()};
+        ASSERT(opCtx->lockState()->isLockHeldForMode(tenantResourceId, MODE_IS));
+    }
 }
 
 TEST_F(DConcurrencyTestFixture, GlobalLockXDoesNotSetGlobalWriteLockedWhenLockAcquisitionTimesOut) {
@@ -694,7 +788,10 @@ TEST_F(DConcurrencyTestFixture, DBLockSDoesNotSetGlobalLockTakenInModeConflictin
     auto opCtx = clients[0].second.get();
     ASSERT_FALSE(opCtx->lockState()->wasGlobalLockTakenInModeConflictingWithWrites());
 
-    { Lock::DBLock dbWrite(opCtx, DatabaseName(boost::none, "db"), MODE_S); }
+    {
+        Lock::DBLock dbWrite(
+            opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_S);
+    }
     ASSERT_FALSE(opCtx->lockState()->wasGlobalLockTakenInModeConflictingWithWrites());
 }
 
@@ -703,7 +800,10 @@ TEST_F(DConcurrencyTestFixture, DBLockISDoesNotSetGlobalLockTakenInModeConflicti
     auto opCtx = clients[0].second.get();
     ASSERT_FALSE(opCtx->lockState()->wasGlobalLockTakenInModeConflictingWithWrites());
 
-    { Lock::DBLock dbWrite(opCtx, DatabaseName(boost::none, "db"), MODE_IS); }
+    {
+        Lock::DBLock dbWrite(
+            opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_IS);
+    }
     ASSERT_FALSE(opCtx->lockState()->wasGlobalLockTakenInModeConflictingWithWrites());
 }
 
@@ -712,7 +812,10 @@ TEST_F(DConcurrencyTestFixture, DBLockIXSetsGlobalLockTakenInModeConflictingWith
     auto opCtx = clients[0].second.get();
     ASSERT_FALSE(opCtx->lockState()->wasGlobalLockTakenInModeConflictingWithWrites());
 
-    { Lock::DBLock dbWrite(opCtx, DatabaseName(boost::none, "db"), MODE_IX); }
+    {
+        Lock::DBLock dbWrite(
+            opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_IX);
+    }
     ASSERT_TRUE(opCtx->lockState()->wasGlobalLockTakenInModeConflictingWithWrites());
 }
 
@@ -721,7 +824,10 @@ TEST_F(DConcurrencyTestFixture, DBLockXSetsGlobalLockTakenInModeConflictingWithW
     auto opCtx = clients[0].second.get();
     ASSERT_FALSE(opCtx->lockState()->wasGlobalLockTakenInModeConflictingWithWrites());
 
-    { Lock::DBLock dbRead(opCtx, DatabaseName(boost::none, "db"), MODE_X); }
+    {
+        Lock::DBLock dbRead(
+            opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_X);
+    }
     ASSERT_TRUE(opCtx->lockState()->wasGlobalLockTakenInModeConflictingWithWrites());
 }
 
@@ -1046,7 +1152,7 @@ TEST_F(DConcurrencyTestFixture, DBLockWaitIsInterruptible) {
 
     // The main thread takes an exclusive lock, causing the spawned thread to wait when it attempts
     // to acquire a conflicting lock.
-    DatabaseName dbName(boost::none, "db");
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "db");
     Lock::DBLock dbLock(opCtx1, dbName, MODE_X);
 
     auto result = runTaskAndKill(opCtx2, [&]() {
@@ -1086,14 +1192,15 @@ TEST_F(DConcurrencyTestFixture, DBLockWaitIsNotInterruptibleWithLockGuard) {
     // The main thread takes an exclusive lock, causing the spawned thread to wait when it attempts
     // to acquire a conflicting lock.
     boost::optional<Lock::DBLock> dbLock =
-        Lock::DBLock(opCtx1, DatabaseName(boost::none, "db"), MODE_X);
+        Lock::DBLock(opCtx1, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_X);
 
     // Killing the lock wait should not interrupt it.
     auto result = runTaskAndKill(
         opCtx2,
         [&]() {
             UninterruptibleLockGuard noInterrupt(opCtx2->lockState());  // NOLINT.
-            Lock::DBLock d(opCtx2, DatabaseName(boost::none, "db"), MODE_S);
+            Lock::DBLock d(
+                opCtx2, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_S);
         },
         [&] { dbLock.reset(); });
     // Should not throw an exception.
@@ -1131,25 +1238,29 @@ TEST_F(DConcurrencyTestFixture, LockCompleteInterruptedWhenUncontested) {
 TEST_F(DConcurrencyTestFixture, DBLockTakesS) {
     auto opCtx = makeOperationContext();
     getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
-    Lock::DBLock dbRead(opCtx.get(), DatabaseName(boost::none, "db"), MODE_S);
+    Lock::DBLock dbRead(
+        opCtx.get(), DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_S);
 
-    const ResourceId resIdDb(RESOURCE_DATABASE, DatabaseName(boost::none, "db"));
+    const ResourceId resIdDb(RESOURCE_DATABASE,
+                             DatabaseName::createDatabaseName_forTest(boost::none, "db"));
     ASSERT(opCtx->lockState()->getLockMode(resIdDb) == MODE_S);
 }
 
 TEST_F(DConcurrencyTestFixture, DBLockTakesX) {
     auto opCtx = makeOperationContext();
     getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
-    Lock::DBLock dbWrite(opCtx.get(), DatabaseName(boost::none, "db"), MODE_X);
+    Lock::DBLock dbWrite(
+        opCtx.get(), DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_X);
 
-    const ResourceId resIdDb(RESOURCE_DATABASE, DatabaseName(boost::none, "db"));
+    const ResourceId resIdDb(RESOURCE_DATABASE,
+                             DatabaseName::createDatabaseName_forTest(boost::none, "db"));
     ASSERT(opCtx->lockState()->getLockMode(resIdDb) == MODE_X);
 }
 
 TEST_F(DConcurrencyTestFixture, DBLockTakesISForAdminIS) {
     auto opCtx = makeOperationContext();
     getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
-    Lock::DBLock dbRead(opCtx.get(), DatabaseName(boost::none, "admin"), MODE_IS);
+    Lock::DBLock dbRead(opCtx.get(), DatabaseName::kAdmin, MODE_IS);
 
     ASSERT(opCtx->lockState()->getLockMode(resourceIdAdminDB) == MODE_IS);
 }
@@ -1157,7 +1268,7 @@ TEST_F(DConcurrencyTestFixture, DBLockTakesISForAdminIS) {
 TEST_F(DConcurrencyTestFixture, DBLockTakesSForAdminS) {
     auto opCtx = makeOperationContext();
     getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
-    Lock::DBLock dbRead(opCtx.get(), DatabaseName(boost::none, "admin"), MODE_S);
+    Lock::DBLock dbRead(opCtx.get(), DatabaseName::kAdmin, MODE_S);
 
     ASSERT(opCtx->lockState()->getLockMode(resourceIdAdminDB) == MODE_S);
 }
@@ -1165,7 +1276,7 @@ TEST_F(DConcurrencyTestFixture, DBLockTakesSForAdminS) {
 TEST_F(DConcurrencyTestFixture, DBLockTakesIXForAdminIX) {
     auto opCtx = makeOperationContext();
     getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
-    Lock::DBLock dbWrite(opCtx.get(), DatabaseName(boost::none, "admin"), MODE_IX);
+    Lock::DBLock dbWrite(opCtx.get(), DatabaseName::kAdmin, MODE_IX);
 
     ASSERT(opCtx->lockState()->getLockMode(resourceIdAdminDB) == MODE_IX);
 }
@@ -1173,7 +1284,7 @@ TEST_F(DConcurrencyTestFixture, DBLockTakesIXForAdminIX) {
 TEST_F(DConcurrencyTestFixture, DBLockTakesXForAdminX) {
     auto opCtx = makeOperationContext();
     getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
-    Lock::DBLock dbWrite(opCtx.get(), DatabaseName(boost::none, "admin"), MODE_X);
+    Lock::DBLock dbWrite(opCtx.get(), DatabaseName::kAdmin, MODE_X);
 
     ASSERT(opCtx->lockState()->getLockMode(resourceIdAdminDB) == MODE_X);
 }
@@ -1181,7 +1292,7 @@ TEST_F(DConcurrencyTestFixture, DBLockTakesXForAdminX) {
 TEST_F(DConcurrencyTestFixture, MultipleWriteDBLocksOnSameThread) {
     auto opCtx = makeOperationContext();
     getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
-    DatabaseName dbName(boost::none, "db1");
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "db1");
     Lock::DBLock r1(opCtx.get(), dbName, MODE_X);
     Lock::DBLock r2(opCtx.get(), dbName, MODE_X);
 
@@ -1192,7 +1303,7 @@ TEST_F(DConcurrencyTestFixture, MultipleConflictingDBLocksOnSameThread) {
     auto opCtx = makeOperationContext();
     getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
     auto lockState = opCtx->lockState();
-    DatabaseName dbName(boost::none, "db1");
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "db1");
     Lock::DBLock r1(opCtx.get(), dbName, MODE_X);
     Lock::DBLock r2(opCtx.get(), dbName, MODE_S);
 
@@ -1200,32 +1311,123 @@ TEST_F(DConcurrencyTestFixture, MultipleConflictingDBLocksOnSameThread) {
     ASSERT(lockState->isDbLockedForMode(dbName, MODE_S));
 }
 
-TEST_F(DConcurrencyTestFixture, IsDbLockedForSMode) {
-    DatabaseName dbName(boost::none, "db");
-
+TEST_F(DConcurrencyTestFixture, IsDbLockedForMode_IsCollectionLockedForMode) {
     auto opCtx = makeOperationContext();
     getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
     auto lockState = opCtx->lockState();
-    Lock::DBLock dbLock(opCtx.get(), dbName, MODE_S);
 
-    ASSERT(lockState->isDbLockedForMode(dbName, MODE_IS));
-    ASSERT(!lockState->isDbLockedForMode(dbName, MODE_IX));
-    ASSERT(lockState->isDbLockedForMode(dbName, MODE_S));
-    ASSERT(!lockState->isDbLockedForMode(dbName, MODE_X));
-}
+    // Database ownership options to test.
+    enum DatabaseOwnershipOptions {
+        // Owned by a tenant and not.
+        kAll,
+        // Owned by a tenant only.
+        kTenantOwned
+    };
+    struct TestCase {
+        LockMode globalLockMode;
+        LockMode tenantLockMode;
+        DatabaseOwnershipOptions databaseOwnership;
+        LockMode databaseLockMode;
+        LockMode checkedDatabaseLockMode;
+        bool expectedResult;
+    };
 
-TEST_F(DConcurrencyTestFixture, IsDbLockedForXMode) {
-    DatabaseName dbName(boost::none, "db");
+    TenantId tenantId{OID::gen()};
+    StringData testDatabaseName{"test"};
+    std::vector<TestCase> testCases{
+        // Only global lock acquired.
+        {MODE_X, MODE_NONE, kAll, MODE_NONE, MODE_X, true},
+        {MODE_X, MODE_NONE, kAll, MODE_NONE, MODE_IX, true},
+        {MODE_X, MODE_NONE, kAll, MODE_NONE, MODE_S, true},
+        {MODE_X, MODE_NONE, kAll, MODE_NONE, MODE_IS, true},
+        {MODE_S, MODE_NONE, kAll, MODE_NONE, MODE_X, false},
+        {MODE_S, MODE_NONE, kAll, MODE_NONE, MODE_IX, false},
+        {MODE_S, MODE_NONE, kAll, MODE_NONE, MODE_S, true},
+        {MODE_S, MODE_NONE, kAll, MODE_NONE, MODE_IS, true},
+        // Global and tenant locks acquired.
+        {MODE_IX, MODE_NONE, kTenantOwned, MODE_NONE, MODE_X, false},
+        {MODE_IX, MODE_NONE, kTenantOwned, MODE_NONE, MODE_IX, false},
+        {MODE_IX, MODE_NONE, kTenantOwned, MODE_NONE, MODE_S, false},
+        {MODE_IX, MODE_NONE, kTenantOwned, MODE_NONE, MODE_IS, false},
+        {MODE_IX, MODE_X, kTenantOwned, MODE_NONE, MODE_X, true},
+        {MODE_IX, MODE_X, kTenantOwned, MODE_NONE, MODE_IX, true},
+        {MODE_IX, MODE_X, kTenantOwned, MODE_NONE, MODE_S, true},
+        {MODE_IX, MODE_X, kTenantOwned, MODE_NONE, MODE_IS, true},
+        {MODE_IS, MODE_NONE, kTenantOwned, MODE_NONE, MODE_X, false},
+        {MODE_IS, MODE_NONE, kTenantOwned, MODE_NONE, MODE_IX, false},
+        {MODE_IS, MODE_NONE, kTenantOwned, MODE_NONE, MODE_S, false},
+        {MODE_IS, MODE_NONE, kTenantOwned, MODE_NONE, MODE_IS, false},
+        {MODE_IS, MODE_S, kTenantOwned, MODE_NONE, MODE_X, false},
+        {MODE_IS, MODE_S, kTenantOwned, MODE_NONE, MODE_IX, false},
+        {MODE_IS, MODE_S, kTenantOwned, MODE_NONE, MODE_S, true},
+        {MODE_IS, MODE_S, kTenantOwned, MODE_NONE, MODE_IS, true},
+        // Global, tenant, db locks acquired.
+        {MODE_NONE, MODE_NONE, kAll, MODE_NONE, MODE_X, false},
+        {MODE_NONE, MODE_NONE, kAll, MODE_NONE, MODE_IX, false},
+        {MODE_NONE, MODE_NONE, kAll, MODE_NONE, MODE_S, false},
+        {MODE_NONE, MODE_NONE, kAll, MODE_NONE, MODE_IS, false},
+        {MODE_NONE, MODE_NONE, kAll, MODE_S, MODE_X, false},
+        {MODE_NONE, MODE_NONE, kAll, MODE_S, MODE_IX, false},
+        {MODE_NONE, MODE_NONE, kAll, MODE_S, MODE_S, true},
+        {MODE_NONE, MODE_NONE, kAll, MODE_S, MODE_IS, true},
+        {MODE_NONE, MODE_NONE, kAll, MODE_X, MODE_X, true},
+        {MODE_NONE, MODE_NONE, kAll, MODE_X, MODE_IX, true},
+        {MODE_NONE, MODE_NONE, kAll, MODE_X, MODE_S, true},
+        {MODE_NONE, MODE_NONE, kAll, MODE_X, MODE_IS, true},
+        {MODE_NONE, MODE_NONE, kAll, MODE_IX, MODE_X, false},
+        {MODE_NONE, MODE_NONE, kAll, MODE_IX, MODE_IX, true},
+        {MODE_NONE, MODE_NONE, kAll, MODE_IX, MODE_S, false},
+        {MODE_NONE, MODE_NONE, kAll, MODE_IX, MODE_IS, true},
+        {MODE_NONE, MODE_NONE, kAll, MODE_IS, MODE_X, false},
+        {MODE_NONE, MODE_NONE, kAll, MODE_IS, MODE_IX, false},
+        {MODE_NONE, MODE_NONE, kAll, MODE_IS, MODE_S, false},
+        {MODE_NONE, MODE_NONE, kAll, MODE_IS, MODE_IS, true},
+    };
+    for (auto&& testCase : testCases) {
+        {
+            for (auto&& tenantOwned : std::vector<bool>{false, true}) {
+                if (!tenantOwned && kTenantOwned == testCase.databaseOwnership) {
+                    continue;
+                }
+                const DatabaseName databaseName = DatabaseName::createDatabaseName_forTest(
+                    tenantOwned ? boost::make_optional(tenantId) : boost::none, testDatabaseName);
+                boost::optional<Lock::GlobalLock> globalLock;
+                boost::optional<Lock::TenantLock> tenantLock;
+                boost::optional<Lock::DBLock> dbLock;
 
-    auto opCtx = makeOperationContext();
-    getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
-    auto lockState = opCtx->lockState();
-    Lock::DBLock dbLock(opCtx.get(), dbName, MODE_X);
+                if (MODE_NONE != testCase.globalLockMode) {
+                    globalLock.emplace(opCtx.get(), testCase.globalLockMode);
+                }
+                if (MODE_NONE != testCase.tenantLockMode) {
+                    tenantLock.emplace(opCtx.get(), tenantId, testCase.tenantLockMode);
+                }
+                if (MODE_NONE != testCase.databaseLockMode) {
+                    dbLock.emplace(opCtx.get(), databaseName, testCase.databaseLockMode);
+                }
+                ASSERT(
+                    lockState->isDbLockedForMode(databaseName, testCase.checkedDatabaseLockMode) ==
+                    testCase.expectedResult)
+                    << " global lock mode: " << modeName(testCase.globalLockMode)
+                    << " tenant lock mode: " << modeName(testCase.tenantLockMode)
+                    << " db lock mode: " << modeName(testCase.databaseLockMode)
+                    << " tenant owned: " << tenantOwned
+                    << " checked lock mode: " << modeName(testCase.checkedDatabaseLockMode);
 
-    ASSERT(lockState->isDbLockedForMode(dbName, MODE_IS));
-    ASSERT(lockState->isDbLockedForMode(dbName, MODE_IX));
-    ASSERT(lockState->isDbLockedForMode(dbName, MODE_S));
-    ASSERT(lockState->isDbLockedForMode(dbName, MODE_X));
+                // If database is not locked with intent lock, a collection in the database is
+                // locked for the same lock mode.
+                ASSERT(testCase.databaseLockMode == MODE_IS ||
+                       testCase.databaseLockMode == MODE_IX ||
+                       lockState->isCollectionLockedForMode(
+                           NamespaceString::createNamespaceString_forTest(databaseName, "coll"),
+                           testCase.checkedDatabaseLockMode) == testCase.expectedResult)
+                    << " global lock mode: " << modeName(testCase.globalLockMode)
+                    << " tenant lock mode: " << modeName(testCase.tenantLockMode)
+                    << " db lock mode: " << modeName(testCase.databaseLockMode)
+                    << " tenant owned: " << tenantOwned
+                    << " checked lock mode: " << modeName(testCase.checkedDatabaseLockMode);
+            }
+        }
+    }
 }
 
 TEST_F(DConcurrencyTestFixture, IsCollectionLocked_DB_Locked_IS) {
@@ -1294,8 +1496,8 @@ TEST_F(DConcurrencyTestFixture, Stress) {
     AtomicWord<int> ready{0};
     std::vector<stdx::thread> threads;
 
-    DatabaseName fooDb(boost::none, "foo");
-    DatabaseName localDb(boost::none, "local");
+    DatabaseName fooDb = DatabaseName::createDatabaseName_forTest(boost::none, "foo");
+    DatabaseName localDb = DatabaseName::kLocal;
 
     for (int threadId = 0; threadId < kMaxStressThreads; threadId++) {
         threads.emplace_back([&, threadId]() {
@@ -1330,7 +1532,7 @@ TEST_F(DConcurrencyTestFixture, Stress) {
                     { Lock::DBLock r(clients[threadId].second.get(), fooDb, MODE_S); }
                     {
                         Lock::DBLock r(clients[threadId].second.get(),
-                                       DatabaseName(boost::none, "bar"),
+                                       DatabaseName::createDatabaseName_forTest(boost::none, "bar"),
                                        MODE_S);
                     }
                 } else if (i % 7 == 6) {
@@ -1359,27 +1561,24 @@ TEST_F(DConcurrencyTestFixture, Stress) {
 
                         } else if (q == 2) {
                             {
-                                Lock::DBLock x(clients[threadId].second.get(),
-                                               DatabaseName(boost::none, "admin"),
-                                               MODE_S);
+                                Lock::DBLock x(
+                                    clients[threadId].second.get(), DatabaseName::kAdmin, MODE_S);
                             }
                             {
-                                Lock::DBLock x(clients[threadId].second.get(),
-                                               DatabaseName(boost::none, "admin"),
-                                               MODE_X);
+                                Lock::DBLock x(
+                                    clients[threadId].second.get(), DatabaseName::kAdmin, MODE_X);
                             }
                         } else if (q == 3) {
                             Lock::DBLock x(clients[threadId].second.get(), fooDb, MODE_X);
-                            Lock::DBLock y(clients[threadId].second.get(),
-                                           DatabaseName(boost::none, "admin"),
-                                           MODE_S);
+                            Lock::DBLock y(
+                                clients[threadId].second.get(), DatabaseName::kAdmin, MODE_S);
                         } else if (q == 4) {
-                            Lock::DBLock x(clients[threadId].second.get(),
-                                           DatabaseName(boost::none, "foo2"),
-                                           MODE_S);
-                            Lock::DBLock y(clients[threadId].second.get(),
-                                           DatabaseName(boost::none, "admin"),
-                                           MODE_S);
+                            Lock::DBLock x(
+                                clients[threadId].second.get(),
+                                DatabaseName::createDatabaseName_forTest(boost::none, "foo2"),
+                                MODE_S);
+                            Lock::DBLock y(
+                                clients[threadId].second.get(), DatabaseName::kAdmin, MODE_S);
                         } else if (q == 5) {
                             Lock::DBLock x(clients[threadId].second.get(), fooDb, MODE_IS);
                         } else if (q == 6) {
@@ -1443,14 +1642,14 @@ TEST_F(DConcurrencyTestFixture, StressPartitioned) {
                 }
 
                 if (i % 2 == 0) {
-                    Lock::DBLock x(
-                        clients[threadId].second.get(), DatabaseName(boost::none, "foo"), MODE_IS);
+                    Lock::DBLock x(clients[threadId].second.get(),
+                                   DatabaseName::createDatabaseName_forTest(boost::none, "foo"),
+                                   MODE_IS);
                 } else {
-                    Lock::DBLock x(
-                        clients[threadId].second.get(), DatabaseName(boost::none, "foo"), MODE_IX);
-                    Lock::DBLock y(clients[threadId].second.get(),
-                                   DatabaseName(boost::none, "local"),
+                    Lock::DBLock x(clients[threadId].second.get(),
+                                   DatabaseName::createDatabaseName_forTest(boost::none, "foo"),
                                    MODE_IX);
+                    Lock::DBLock y(clients[threadId].second.get(), DatabaseName::kLocal, MODE_IX);
                 }
 
                 if (threadId == kMaxStressThreads - 1)
@@ -1742,7 +1941,7 @@ TEST_F(DConcurrencyTestFixture,
         auto opCtx1 = clientOpctxPairs[0].second.get();
         auto opCtx2 = clientOpctxPairs[1].second.get();
 
-        DatabaseName dbName{boost::none, "test"};
+        DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
 
         boost::optional<Lock::GlobalLock> globalIX = Lock::GlobalLock{opCtx1, LockMode::MODE_IX};
         boost::optional<Lock::DBLock> dbIX = Lock::DBLock{opCtx1, dbName, LockMode::MODE_IX};
@@ -1825,23 +2024,27 @@ TEST_F(DConcurrencyTestFixture, DBLockInInterruptedContextThrowsEvenWhenUncontes
     opCtx->markKilled();
 
     boost::optional<Lock::DBLock> dbWriteLock;
-    ASSERT_THROWS_CODE(dbWriteLock.emplace(opCtx, DatabaseName(boost::none, "db"), MODE_IX),
-                       AssertionException,
-                       ErrorCodes::Interrupted);
+    ASSERT_THROWS_CODE(
+        dbWriteLock.emplace(
+            opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_IX),
+        AssertionException,
+        ErrorCodes::Interrupted);
 }
 
 TEST_F(DConcurrencyTestFixture, DBLockInInterruptedContextThrowsEvenWhenAcquiringRecursively) {
     auto clients = makeKClientsWithLockers(1);
     auto opCtx = clients[0].second.get();
 
-    Lock::DBLock dbWriteLock(opCtx, DatabaseName(boost::none, "db"), MODE_X);
+    Lock::DBLock dbWriteLock(
+        opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_X);
 
     opCtx->markKilled();
 
     {
         boost::optional<Lock::DBLock> recursiveDBWriteLock;
         ASSERT_THROWS_CODE(
-            recursiveDBWriteLock.emplace(opCtx, DatabaseName(boost::none, "db"), MODE_X),
+            recursiveDBWriteLock.emplace(
+                opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_X),
             AssertionException,
             ErrorCodes::Interrupted);
     }
@@ -1853,8 +2056,10 @@ TEST_F(DConcurrencyTestFixture, DBLockInInterruptedContextRespectsUninterruptibl
 
     opCtx->markKilled();
 
-    UninterruptibleLockGuard noInterrupt(opCtx->lockState());                  // NOLINT.
-    Lock::DBLock dbWriteLock(opCtx, DatabaseName(boost::none, "db"), MODE_X);  // Does not throw.
+    UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
+    Lock::DBLock dbWriteLock(opCtx,
+                             DatabaseName::createDatabaseName_forTest(boost::none, "db"),
+                             MODE_X);  // Does not throw.
 }
 
 TEST_F(DConcurrencyTestFixture, DBLockTimeout) {
@@ -1864,7 +2069,7 @@ TEST_F(DConcurrencyTestFixture, DBLockTimeout) {
 
     const Milliseconds timeoutMillis = Milliseconds(1500);
 
-    DatabaseName testDb(boost::none, "testdb");
+    DatabaseName testDb = DatabaseName::createDatabaseName_forTest(boost::none, "testdb");
 
     Lock::DBLock L1(opctx1, testDb, MODE_X, Date_t::max());
     ASSERT(opctx1->lockState()->isDbLockedForMode(testDb, MODE_X));
@@ -1889,11 +2094,12 @@ TEST_F(DConcurrencyTestFixture, DBLockTimeoutDueToGlobalLock) {
     ASSERT(G1.isLocked());
 
     Date_t t1 = Date_t::now();
-    ASSERT_THROWS_CODE(
-        Lock::DBLock(
-            opctx2, DatabaseName(boost::none, "testdb"), MODE_X, Date_t::now() + timeoutMillis),
-        AssertionException,
-        ErrorCodes::LockTimeout);
+    ASSERT_THROWS_CODE(Lock::DBLock(opctx2,
+                                    DatabaseName::createDatabaseName_forTest(boost::none, "testdb"),
+                                    MODE_X,
+                                    Date_t::now() + timeoutMillis),
+                       AssertionException,
+                       ErrorCodes::LockTimeout);
     Date_t t2 = Date_t::now();
     ASSERT_GTE(t2 - t1 + kMaxClockJitterMillis, Milliseconds(timeoutMillis));
 }
@@ -1902,7 +2108,8 @@ TEST_F(DConcurrencyTestFixture, CollectionLockInInterruptedContextThrowsEvenWhen
     auto clients = makeKClientsWithLockers(1);
     auto opCtx = clients[0].second.get();
 
-    Lock::DBLock dbLock(opCtx, DatabaseName(boost::none, "db"), MODE_IX);
+    Lock::DBLock dbLock(
+        opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_IX);
     opCtx->markKilled();
 
     {
@@ -1920,7 +2127,8 @@ TEST_F(DConcurrencyTestFixture,
     auto clients = makeKClientsWithLockers(1);
     auto opCtx = clients[0].second.get();
 
-    Lock::DBLock dbLock(opCtx, DatabaseName(boost::none, "db"), MODE_IX);
+    Lock::DBLock dbLock(
+        opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_IX);
     Lock::CollectionLock collLock(
         opCtx, NamespaceString::createNamespaceString_forTest("db.coll"), MODE_IX);
 
@@ -1940,7 +2148,8 @@ TEST_F(DConcurrencyTestFixture, CollectionLockInInterruptedContextRespectsUninte
     auto clients = makeKClientsWithLockers(1);
     auto opCtx = clients[0].second.get();
 
-    Lock::DBLock dbLock(opCtx, DatabaseName(boost::none, "db"), MODE_IX);
+    Lock::DBLock dbLock(
+        opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_IX);
 
     opCtx->markKilled();
 
@@ -1957,7 +2166,7 @@ TEST_F(DConcurrencyTestFixture, CollectionLockTimeout) {
 
     const Milliseconds timeoutMillis = Milliseconds(1500);
 
-    DatabaseName testDb(boost::none, "testdb");
+    DatabaseName testDb = DatabaseName::createDatabaseName_forTest(boost::none, "testdb");
 
     Lock::DBLock DBL1(opctx1, testDb, MODE_IX, Date_t::max());
     ASSERT(opctx1->lockState()->isDbLockedForMode(testDb, MODE_IX));
@@ -2503,8 +2712,8 @@ TEST_F(DConcurrencyTestFixture, DifferentTenantsTakeDBLockOnConflictingNamespace
     auto tenant1 = TenantId(OID::gen());
     auto tenant2 = TenantId(OID::gen());
 
-    DatabaseName dbName1(tenant1, db);
-    DatabaseName dbName2(tenant2, db);
+    DatabaseName dbName1 = DatabaseName::createDatabaseName_forTest(tenant1, db);
+    DatabaseName dbName2 = DatabaseName::createDatabaseName_forTest(tenant2, db);
 
     Lock::DBLock r1(opCtx1, dbName1, MODE_X);
     Lock::DBLock r2(opCtx2, dbName2, MODE_X);
@@ -2519,7 +2728,7 @@ TEST_F(DConcurrencyTestFixture, ConflictingTenantDBLockThrows) {
     auto opCtx2 = clients[1].second.get();
 
     auto db = "db1";
-    DatabaseName dbName1(TenantId(OID::gen()), db);
+    DatabaseName dbName1 = DatabaseName::createDatabaseName_forTest(TenantId(OID::gen()), db);
 
     Lock::DBLock r1(opCtx1, dbName1, MODE_X);
     ASSERT(opCtx1->lockState()->isDbLockedForMode(dbName1, MODE_X));

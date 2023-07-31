@@ -134,7 +134,7 @@ Database* DatabaseHolderImpl::openDb(OperationContext* opCtx,
     auto duplicates = _getNamesWithConflictingCasing_inlock(dbName);
     uassert(ErrorCodes::DatabaseDifferCase,
             str::stream() << "db already exists with different case already have: ["
-                          << (*duplicates.cbegin()) << "] trying to create ["
+                          << (*duplicates.cbegin()).toStringForErrorMsg() << "] trying to create ["
                           << dbName.toStringForErrorMsg() << "]",
             duplicates.empty());
 
@@ -188,7 +188,8 @@ void DatabaseHolderImpl::dropDb(OperationContext* opCtx, Database* db) {
         // It is the caller's responsibility to ensure that no index builds are active in the
         // database.
         invariant(!coll->getIndexCatalog()->haveAnyIndexesInProgress(),
-                  str::stream() << "An index is building on collection '" << coll->ns() << "'.");
+                  str::stream() << "An index is building on collection '"
+                                << coll->ns().toStringForErrorMsg() << "'.");
     }
 
     audit::logDropDatabase(opCtx->getClient(), name.toString());

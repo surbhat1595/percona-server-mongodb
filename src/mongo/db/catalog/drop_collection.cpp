@@ -76,7 +76,8 @@ Status _checkUUIDAndReplState(OperationContext* opCtx,
     if (opCtx->writesAreReplicated() &&
         !repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, nss)) {
         return Status(ErrorCodes::NotWritablePrimary,
-                      str::stream() << "Not primary while dropping collection " << nss);
+                      str::stream()
+                          << "Not primary while dropping collection " << nss.toStringForErrorMsg());
     }
 
     return Status::OK();
@@ -165,7 +166,8 @@ Status _dropView(OperationContext* opCtx,
     if (opCtx->writesAreReplicated() &&
         !repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, collectionName)) {
         return Status(ErrorCodes::NotWritablePrimary,
-                      str::stream() << "Not primary while dropping collection " << collectionName);
+                      str::stream() << "Not primary while dropping collection "
+                                    << collectionName.toStringForErrorMsg());
     }
 
     WriteUnitOfWork wunit(opCtx);
@@ -369,7 +371,14 @@ Status _dropCollection(OperationContext* opCtx,
 
     try {
         return writeConflictRetry(opCtx, "drop", collectionName.ns(), [&] {
-            AutoGetDb autoDb(opCtx, collectionName.dbName(), MODE_IX);
+            // If a change collection is to be dropped, that is, the change streams are being
+            // disabled for a tenant, acquire exclusive tenant lock.
+            AutoGetDb autoDb(opCtx,
+                             collectionName.dbName(),
+                             MODE_IX /* database lock mode*/,
+                             boost::make_optional(collectionName.tenantId() &&
+                                                      collectionName.isChangeCollection(),
+                                                  MODE_X));
             auto db = autoDb.getDb();
             if (!db) {
                 return expectedUUID

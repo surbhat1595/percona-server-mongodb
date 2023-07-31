@@ -732,6 +732,7 @@ enum class Builtin : uint8_t {
     generateSortKey,
     generateCheapSortKey,
     sortKeyComponentVectorGetElement,
+    sortKeyComponentVectorToArray,
 
     makeBsonObj,
     tsSecond,
@@ -1096,8 +1097,6 @@ private:
                                                                value::Value operandValue);
     FastTuple<bool, value::TypeTags, value::Value> genericFloor(value::TypeTags operandTag,
                                                                 value::Value operandValue);
-    FastTuple<bool, value::TypeTags, value::Value> genericTrunc(value::TypeTags operandTag,
-                                                                value::Value operandValue);
     FastTuple<bool, value::TypeTags, value::Value> genericExp(value::TypeTags operandTag,
                                                               value::Value operandValue);
     FastTuple<bool, value::TypeTags, value::Value> genericLn(value::TypeTags operandTag,
@@ -1106,6 +1105,8 @@ private:
                                                                 value::Value operandValue);
     FastTuple<bool, value::TypeTags, value::Value> genericSqrt(value::TypeTags operandTag,
                                                                value::Value operandValue);
+    FastTuple<bool, value::TypeTags, value::Value> genericRoundTrunc(
+        std::string funcName, Decimal128::RoundingMode roundingMode, ArityType arity);
     std::pair<value::TypeTags, value::Value> genericNot(value::TypeTags tag, value::Value value);
     std::pair<value::TypeTags, value::Value> genericIsMember(value::TypeTags lhsTag,
                                                              value::Value lhsVal,
@@ -1522,6 +1523,8 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinGenerateSortKey(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinGenerateCheapSortKey(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSortKeyComponentVectorGetElement(
+        ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinSortKeyComponentVectorToArray(
         ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinMakeBsonObj(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinTsSecond(ArityType arity);

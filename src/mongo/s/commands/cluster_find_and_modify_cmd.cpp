@@ -42,6 +42,7 @@
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/ops/write_ops_gen.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/executor/task_executor_pool.h"
@@ -520,8 +521,17 @@ bool FindAndModifyCmd::run(OperationContext* opCtx,
         const BSONObj query = cmdObjForShard.getObjectField("query");
         const bool isUpsert = cmdObjForShard.getBoolField("upsert");
         const BSONObj collation = getCollation(cmdObjForShard);
-        if (write_without_shard_key::useTwoPhaseProtocol(
-                opCtx, nss, false /* isUpdateOrDelete */, isUpsert, query, collation)) {
+        const auto letParams = getLet(cmdObjForShard);
+        const auto runtimeConstants = getLegacyRuntimeConstants(cmdObjForShard);
+        if (write_without_shard_key::useTwoPhaseProtocol(opCtx,
+                                                         nss,
+                                                         false /* isUpdateOrDelete */,
+                                                         isUpsert,
+                                                         query,
+                                                         collation,
+                                                         letParams,
+                                                         runtimeConstants)) {
+            findAndModifyNonTargetedShardedCount.increment(1);
             auto allowShardKeyUpdatesWithoutFullShardKeyInQuery =
                 opCtx->isRetryableWrite() || opCtx->inMultiDocumentTransaction();
 
@@ -551,15 +561,15 @@ bool FindAndModifyCmd::run(OperationContext* opCtx,
                                            &result);
             }
         } else {
-            const auto let = getLet(cmdObjForShard);
-            const auto rc = getLegacyRuntimeConstants(cmdObjForShard);
-            const BSONObj shardKey =
-                getShardKey(opCtx, cm, nss, query, collation, boost::none, let, rc);
+            findAndModifyTargetedShardedCount.increment(1);
+            const BSONObj shardKey = getShardKey(
+                opCtx, cm, nss, query, collation, boost::none, letParams, runtimeConstants);
             // For now, set bypassIsFieldHashedCheck to be true in order to skip the
             // isFieldHashedCheck in the special case where _id is hashed and used as the shard
             // key. This means that we always assume that a findAndModify request using _id is
             // targetable to a single shard.
             auto chunk = cm.findIntersectingChunk(shardKey, collation, true);
+
             _runCommand(opCtx,
                         chunk.getShardId(),
                         cri.getShardVersion(chunk.getShardId()),
@@ -571,6 +581,7 @@ bool FindAndModifyCmd::run(OperationContext* opCtx,
                         &result);
         }
     } else {
+        findAndModifyUnshardedCount.increment(1);
         _runCommand(opCtx,
                     cm.dbPrimary(),
                     boost::make_optional(!cm.dbVersion().isFixed(), ShardVersion::UNSHARDED()),
@@ -787,7 +798,10 @@ void FindAndModifyCmd::_handleWouldChangeOwningShardErrorRetryableWriteLegacy(
                                                          false /* isUpdateOrDelete */,
                                                          cmdObj.getBoolField("upsert"),
                                                          cmdObj.getObjectField("query"),
-                                                         getCollation(cmdObj))) {
+                                                         getCollation(cmdObj),
+                                                         getLet(cmdObj),
+                                                         getLegacyRuntimeConstants(cmdObj))) {
+            findAndModifyNonTargetedShardedCount.increment(1);
             _runCommandWithoutShardKey(opCtx,
                                        nss,
                                        stripWriteConcern(cmdObj),
@@ -796,6 +810,7 @@ void FindAndModifyCmd::_handleWouldChangeOwningShardErrorRetryableWriteLegacy(
                                        result);
 
         } else {
+            findAndModifyTargetedShardedCount.increment(1);
             _runCommand(opCtx,
                         shardId,
                         shardVersion,

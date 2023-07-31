@@ -29,6 +29,8 @@
 
 #include "MongoAssertCheck.h"
 #include "MongoCctypeCheck.h"
+#include "MongoCxx20BannedIncludesCheck.h"
+#include "MongoFCVConstantCheck.h"
 #include "MongoHeaderBracketCheck.h"
 #include "MongoMutexCheck.h"
 #include "MongoStdAtomicCheck.h"
@@ -52,12 +54,15 @@ public:
             "mongo-uninterruptible-lock-guard-check");
         CheckFactories.registerCheck<MongoHeaderBracketCheck>("mongo-header-bracket-check");
         CheckFactories.registerCheck<MongoCctypeCheck>("mongo-cctype-check");
+        CheckFactories.registerCheck<MongoCxx20BannedIncludesCheck>(
+            "mongo-cxx20-banned-includes-check");
         CheckFactories.registerCheck<MongoStdOptionalCheck>("mongo-std-optional-check");
         CheckFactories.registerCheck<MongoVolatileCheck>("mongo-volatile-check");
         CheckFactories.registerCheck<MongoTraceCheck>("mongo-trace-check");
         CheckFactories.registerCheck<MongoStdAtomicCheck>("mongo-std-atomic-check");
         CheckFactories.registerCheck<MongoMutexCheck>("mongo-mutex-check");
         CheckFactories.registerCheck<MongoAssertCheck>("mongo-assert-check");
+        CheckFactories.registerCheck<MongoFCVConstantCheck>("mongo-fcv-constant-check");
     }
 };
 

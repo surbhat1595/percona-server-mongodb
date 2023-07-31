@@ -30,6 +30,7 @@ global:
     cpp_namespace: "mongo"
     cpp_includes:
         - "mongo/bson/bson_depth.h"
+        - "mongo/db/storage/storage_options.h"
 
 server_parameters:
     notablescan:
@@ -204,11 +205,6 @@ feature_flags:
         cpp_varname: feature_flags::gExtendValidateCommand
         default: true
         version: 6.2
-    featureFlagPointInTimeCatalogLookups:
-        description: "Support reads when in-memory catalog is out-of-sync with storage transaction"
-        cpp_varname: feature_flags::gPointInTimeCatalogLookups
-        default: true
-        version: 7.0
     featureFlagInternalWritesAreReplicatedTransactionally:
         description: Feature flag to enable internal writes to use the transactionally replicated WriteUnitOfWork API by default.
         cpp_varname: gFeatureFlagInternalWritesAreReplicatedTransactionally

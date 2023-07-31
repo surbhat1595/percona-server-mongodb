@@ -200,7 +200,8 @@ void DatabaseShardingState::assertIsPrimaryShardForDb(OperationContext* opCtx,
                                                       const DatabaseName& dbName) {
     if (dbName == DatabaseName::kConfig || dbName == DatabaseName::kAdmin) {
         uassert(7393700,
-                "The config server is the primary shard for database: {}"_format(dbName.toString()),
+                "The config server is the primary shard for database: {}"_format(
+                    dbName.toStringForErrorMsg()),
                 serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
         return;
     }
@@ -300,6 +301,12 @@ void DatabaseShardingState::_cancelDbMetadataRefresh() {
     if (_dbMetadataRefresh) {
         _dbMetadataRefresh->cancellationSource.cancel();
     }
+}
+
+boost::optional<bool> DatabaseShardingState::_isPrimaryShardForDb(OperationContext* opCtx) const {
+    return _dbInfo
+        ? boost::optional<bool>(_dbInfo->getPrimary() == ShardingState::get(opCtx)->shardId())
+        : boost::none;
 }
 
 }  // namespace mongo

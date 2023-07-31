@@ -393,6 +393,7 @@ pipelineEnv.Library(
         '$BUILD_DIR/mongo/db/storage/encryption_hooks',
         '$BUILD_DIR/mongo/db/storage/index_entry_comparison',
         '$BUILD_DIR/mongo/db/storage/storage_options',
+        '$BUILD_DIR/mongo/db/timeseries/catalog_helper',
         '$BUILD_DIR/mongo/db/update/update_document_diff',
         '$BUILD_DIR/mongo/db/views/resolved_view',
         '$BUILD_DIR/mongo/s/is_mongos',
@@ -406,6 +407,7 @@ pipelineEnv.Library(
         'granularity_rounder',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/catalog/collection_catalog',
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
         '$BUILD_DIR/mongo/db/dbdirectclient',
         '$BUILD_DIR/mongo/db/fts/base_fts',
@@ -497,6 +499,7 @@ env.Library(
         'document_source_merge.idl',
         'document_source_merge_modes.idl',
         'document_source_merge_spec.cpp',
+        'document_source_out.idl',
         'document_source_parsing_validators.cpp',
         'document_source_replace_root.idl',
         'document_source_set_window_fields.idl',
@@ -509,7 +512,9 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
+        '$BUILD_DIR/mongo/db/serialization_options',
         '$BUILD_DIR/mongo/db/storage/key_string',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/s/common_s',
         'runtime_constants_idl',
@@ -606,9 +611,11 @@ env.CppUnitTest(
         'document_source_change_stream_add_post_image_test.cpp',
         'document_source_change_stream_test.cpp',
         'document_source_check_resume_token_test.cpp',
+        'document_source_coll_stats_test.cpp',
         'document_source_count_test.cpp',
         'document_source_current_op_test.cpp',
         'document_source_densify_test.cpp',
+        'document_source_documents_test.cpp',
         'document_source_exchange_test.cpp',
         'document_source_facet_test.cpp',
         'document_source_find_and_modify_image_lookup_test.cpp',
@@ -777,6 +784,15 @@ env.Benchmark(
         'percentile_algo_bm_fixture.cpp',
     ],
     LIBDEPS=[
+        'accumulator',
+    ],
+)
+
+env.Benchmark(
+    target='window_function_percentile_bm',
+    source=['window_function/window_function_percentile_bm_fixture.cpp'],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/query/query_test_service_context',
         'accumulator',
     ],
 )

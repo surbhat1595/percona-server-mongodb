@@ -70,7 +70,6 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/storage/execution_context.h"
-#include "mongo/db/storage/historical_ident_tracker.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
@@ -269,8 +268,8 @@ void IndexCatalogImpl::init(OperationContext* opCtx,
                 // single-phase index builds are dropped during startup and rollback.
                 auto buildUUID = collection->getIndexBuildUUID(indexName);
                 invariant(buildUUID,
-                          str::stream()
-                              << "collection: " << collection->ns() << "index:" << indexName);
+                          str::stream() << "collection: " << collection->ns().toStringForErrorMsg()
+                                        << "index:" << indexName);
             }
 
             // We intentionally do not drop or rebuild unfinished two-phase index builds before
@@ -284,28 +283,19 @@ void IndexCatalogImpl::init(OperationContext* opCtx,
                 auto flags = CreateIndexEntryFlags::kInitFromDisk | CreateIndexEntryFlags::kFrozen;
                 IndexCatalogEntry* entry =
                     createIndexEntry(opCtx, collection, std::move(descriptor), flags);
-                fassert(31433, !entry->isReady(opCtx));
+                fassert(31433, !entry->isReady());
             } else {
                 // Initializing with unfinished indexes may occur during rollback or startup.
                 auto flags = CreateIndexEntryFlags::kInitFromDisk;
                 IndexCatalogEntry* entry =
                     createIndexEntry(opCtx, collection, std::move(descriptor), flags);
-                fassert(4505500, !entry->isReady(opCtx));
+                fassert(4505500, !entry->isReady());
             }
         } else {
             auto flags = CreateIndexEntryFlags::kInitFromDisk | CreateIndexEntryFlags::kIsReady;
             IndexCatalogEntry* entry =
                 createIndexEntry(opCtx, collection, std::move(descriptor), flags);
-            fassert(17340, entry->isReady(opCtx));
-            // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-            if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe() &&
-                recoveryTs && !entry->descriptor()->isIdIndex()) {
-                // When initializing indexes from disk, we conservatively set the
-                // minimumVisibleSnapshot to non _id indexes to the recovery timestamp. The _id
-                // index is left visible. It's assumed if the collection is visible, it's _id is
-                // valid to be used.
-                entry->setMinimumVisibleSnapshot(recoveryTs.value());
-            }
+            fassert(17340, entry->isReady());
         }
     }
 
@@ -654,7 +644,8 @@ StatusWith<BSONObj> IndexCatalogImpl::createIndexOnEmptyCollection(OperationCont
     invariant(collection->uuid() == collection->uuid());
     CollectionCatalog::get(opCtx)->invariantHasExclusiveAccessToCollection(opCtx, collection->ns());
     invariant(collection->isEmpty(opCtx),
-              str::stream() << "Collection must be empty. Collection: " << collection->ns()
+              str::stream() << "Collection must be empty. Collection: "
+                            << collection->ns().toStringForErrorMsg()
                             << " UUID: " << collection->uuid()
                             << " Count (from size storer): " << collection->numRecords(opCtx));
 
@@ -1191,8 +1182,8 @@ Status IndexCatalogImpl::_doesSpecConflictWithExisting(OperationContext* opCtx,
     }
 
     if (numIndexesTotal() >= kMaxNumIndexesAllowed) {
-        string s = str::stream() << "add index fails, too many indexes for " << collection->ns()
-                                 << " key:" << key;
+        string s = str::stream() << "add index fails, too many indexes for "
+                                 << collection->ns().toStringForErrorMsg() << " key:" << key;
         LOGV2(20354,
               "Exceeded maximum number of indexes",
               logAttrs(collection->ns()),
@@ -1325,7 +1316,7 @@ Status IndexCatalogImpl::dropIndex(OperationContext* opCtx,
     if (!entry)
         return Status(ErrorCodes::InternalError, "cannot find index to delete");
 
-    if (!entry->isReady(opCtx))
+    if (!entry->isReady())
         return Status(ErrorCodes::InternalError, "cannot delete not ready index");
 
     return dropIndexEntry(opCtx, collection, entry);
@@ -1403,7 +1394,7 @@ Status IndexCatalogImpl::dropUnfinishedIndex(OperationContext* opCtx,
     if (!entry)
         return Status(ErrorCodes::InternalError, "cannot find index to delete");
 
-    if (entry->isReady(opCtx))
+    if (entry->isReady())
         return Status(ErrorCodes::InternalError, "expected unfinished index, but it is ready");
 
     return dropIndexEntry(opCtx, collection, entry);
@@ -1421,12 +1412,7 @@ public:
           _entry(std::move(entry)),
           _collectionDecorations(collectionDecorations) {}
 
-    void commit(OperationContext* opCtx, boost::optional<Timestamp> commitTime) final {
-        if (commitTime) {
-            HistoricalIdentTracker::get(opCtx).recordDrop(
-                _entry->getIdent(), _nss, _uuid, commitTime.value());
-        }
-
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) final {
         _entry->setDropped();
     }
 
@@ -1675,7 +1661,7 @@ const IndexDescriptor* IndexCatalogImpl::refreshEntry(OperationContext* opCtx,
     // to the CollectionIndexUsageTrackerDecoration (shared state among Collection instances).
     auto newDesc = std::make_unique<IndexDescriptor>(_getAccessMethodName(keyPattern), spec);
     auto newEntry = createIndexEntry(opCtx, collection, std::move(newDesc), flags);
-    invariant(newEntry->isReady(opCtx));
+    invariant(newEntry->isReady());
     auto desc = newEntry->descriptor();
     CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
         .registerIndex(desc->indexName(),
@@ -1684,13 +1670,6 @@ const IndexDescriptor* IndexCatalogImpl::refreshEntry(OperationContext* opCtx,
 
     // Last rebuild index data for CollectionQueryInfo for this Collection.
     CollectionQueryInfo::get(collection).rebuildIndexData(opCtx, CollectionPtr(collection));
-
-    opCtx->recoveryUnit()->onCommit(
-        [newEntry](OperationContext*, boost::optional<Timestamp> commitTime) {
-            if (commitTime) {
-                newEntry->setMinimumVisibleSnapshot(*commitTime);
-            }
-        });
 
     // Return the new descriptor.
     return newEntry->descriptor();
@@ -1867,9 +1846,9 @@ Status IndexCatalogImpl::indexRecords(OperationContext* opCtx,
                                        IndexCatalog::InclusionPolicy::kUnfinished);
         if (!idx) {
             return Status(ErrorCodes::IndexNotFound,
-                          str::stream()
-                              << "Could not find index " << newPath.indexName << " in "
-                              << coll->ns() << " (" << coll->uuid() << ") to set to multikey.");
+                          str::stream() << "Could not find index " << newPath.indexName << " in "
+                                        << coll->ns().toStringForErrorMsg() << " (" << coll->uuid()
+                                        << ") to set to multikey.");
         }
         setMultikeyPaths(opCtx, coll, idx, newPath.multikeyMetadataKeys, newPath.multikeyPaths);
     }
@@ -1949,7 +1928,7 @@ void IndexCatalogImpl::unindexRecord(OperationContext* opCtx,
         IndexCatalogEntry* entry = it->get();
 
         // If it's a background index, we DO NOT want to log anything.
-        bool logIfError = entry->isReady(opCtx) ? !noWarn : false;
+        bool logIfError = entry->isReady() ? !noWarn : false;
         _unindexRecord(
             opCtx, collection, entry, obj, loc, logIfError, keysDeletedOut, checkRecordId);
     }

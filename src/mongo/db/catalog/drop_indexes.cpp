@@ -66,9 +66,11 @@ Status checkView(OperationContext* opCtx,
     if (!collection) {
         if (CollectionCatalog::get(opCtx)->lookupView(opCtx, nss)) {
             return Status(ErrorCodes::CommandNotSupportedOnView,
-                          str::stream() << "Cannot drop indexes on view " << nss);
+                          str::stream()
+                              << "Cannot drop indexes on view " << nss.toStringForErrorMsg());
         }
-        return Status(ErrorCodes::NamespaceNotFound, str::stream() << "ns not found " << nss);
+        return Status(ErrorCodes::NamespaceNotFound,
+                      str::stream() << "ns not found " << nss.toStringForErrorMsg());
     }
     return Status::OK();
 }
@@ -92,9 +94,10 @@ Status checkReplState(OperationContext* opCtx,
     const auto& nss = collection->ns();
     if (isPrimary && nss.isDropPendingNamespace()) {
         return Status(ErrorCodes::NamespaceNotFound,
-                      str::stream() << "Cannot drop indexes on drop-pending namespace " << nss
-                                    << " in database " << dbAndUUID.dbName()->toStringForErrorMsg()
-                                    << " with uuid " << dbAndUUID.uuid());
+                      str::stream() << "Cannot drop indexes on drop-pending namespace "
+                                    << nss.toStringForErrorMsg() << " in database "
+                                    << dbAndUUID.dbName()->toStringForErrorMsg() << " with uuid "
+                                    << dbAndUUID.uuid());
     }
 
     return Status::OK();
@@ -235,14 +238,14 @@ Status dropIndexByDescriptor(OperationContext* opCtx,
     // exist in standalone mode.
     auto entry = indexCatalog->getEntry(desc);
     if (entry->isFrozen()) {
-        invariant(!entry->isReady(opCtx));
+        invariant(!entry->isReady());
         invariant(getReplSetMemberInStandaloneMode(opCtx->getServiceContext()));
         // Return here. No need to fall through to op observer on standalone.
         return indexCatalog->dropUnfinishedIndex(opCtx, collection, desc);
     }
 
     // Do not allow dropping unfinished indexes that are not frozen.
-    if (!entry->isReady(opCtx)) {
+    if (!entry->isReady()) {
         return Status(ErrorCodes::IndexNotFound,
                       str::stream()
                           << "can't drop unfinished index with name: " << desc->indexName());
@@ -378,7 +381,7 @@ void assertNoMovePrimaryInProgress(OperationContext* opCtx, const NamespaceStrin
                 LOGV2(4976500, "assertNoMovePrimaryInProgress", logAttrs(nss));
 
                 uasserted(ErrorCodes::MovePrimaryInProgress,
-                          "movePrimary is in progress for namespace " + nss.toString());
+                          "movePrimary is in progress for namespace " + nss.toStringForErrorMsg());
             }
         }
     } catch (const DBException& ex) {
@@ -473,9 +476,10 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
 
         if (!*collection) {
             uasserted(ErrorCodes::NamespaceNotFound,
-                      str::stream() << "Collection '" << nss << "' with UUID " << dbAndUUID.uuid()
-                                    << " in database " << dbAndUUID.dbName()->toStringForErrorMsg()
-                                    << " does not exist.");
+                      str::stream()
+                          << "Collection '" << nss.toStringForErrorMsg() << "' with UUID "
+                          << dbAndUUID.uuid() << " in database "
+                          << dbAndUUID.dbName()->toStringForErrorMsg() << " does not exist.");
         }
 
         // The collection could have been renamed when we dropped locks.

@@ -160,6 +160,7 @@ class Test:
     python_command: str = dataclasses.field(default="", repr=False)
     packages_urls: List[str] = dataclasses.field(default_factory=list)
     packages_paths: List[Path] = dataclasses.field(default_factory=list)
+    attempts: int = dataclasses.field(default=0)
 
     def __post_init__(self) -> None:
         assert OS_DOCKER_LOOKUP[self.os_name] is not None
@@ -361,6 +362,8 @@ parser = argparse.ArgumentParser(
     'Test packages on various hosts. This will spin up docker containers and test the installs.')
 parser.add_argument("--arch", type=str, help="Arch of packages to test",
                     choices=["auto"] + list(arches), default="auto")
+parser.add_argument("-r", "--retries", type=int, help="Number of times to retry failed tests",
+                    default=3)
 subparsers = parser.add_subparsers(dest="command")
 release_test_parser = subparsers.add_parser("release")
 release_test_parser.add_argument(
@@ -531,16 +534,36 @@ else:
 
 report = Report(results=[], failures=0)
 with futures.ThreadPoolExecutor() as tpe:
-    test_futures = [tpe.submit(run_test, test, docker_client) for test in tests]
-    completed_tests = 0  # pylint: disable=invalid-name
-    for f in futures.as_completed(test_futures):
-        completed_tests += 1
-        test_result = f.result()
-        if test_result["exit_code"] != 0:
-            report["failures"] += 1
+    test_futures = {tpe.submit(run_test, test, docker_client): test for test in tests}
+    completed_tests: int = 0
+    retried_tests: int = 0
+    total_tests: int = len(tests)
+    while len(test_futures.keys()) > 0:
+        finished_futures, active_futures = futures.wait(test_futures.keys(), timeout=None,
+                                                        return_when="FIRST_COMPLETED")
+        for f in finished_futures:
+            completed_test = test_futures.pop(f)
+            test_result = f.result()
+            if test_result["exit_code"] != 0:
+                if completed_test.attempts < args.retries:
+                    retried_tests += 1
+                    completed_test.attempts += 1
+                    test_futures[tpe.submit(run_test, completed_test,
+                                            docker_client)] = completed_test
+                    continue
+                report["failures"] += 1
 
-        report["results"].append(test_result)
-        logging.info("Completed %s/%s tests", completed_tests, len(test_futures))
+            completed_tests += 1
+            report["results"].append(test_result)
+
+        logging.info(
+            "Completed %s tests, retried %s tests, total %s tests, %s tests are in progress.",
+            completed_tests, retried_tests, total_tests, len(test_futures))
+
+        # We are printing here to help diagnose hangs
+        # This adds a bit of logging so we are only going to log running tests after a test completes
+        for active_test in test_futures.values():
+            logging.info("Test in progress: %s", active_test)
 
 with open("report.json", "w") as fh:
     json.dump(report, fh)

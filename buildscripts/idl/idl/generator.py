@@ -773,8 +773,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         self._writer.write_line(
             common.template_args('// Map: fieldName -> ${should_forward_name}',
                                  should_forward_name=field_list_info.get_should_forward_name()))
-        self._writer.write_line(
-            "static const stdx::unordered_map<std::string, bool> _genericFields;")
+        self._writer.write_line("static const StaticImmortal<StringMap<bool>> _genericFields;")
         self.write_empty_line()
 
     def gen_known_fields_declaration(self):
@@ -1078,6 +1077,10 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         # file.
         if any(command.api_version for command in spec.commands):
             header_list.append('mongo/db/commands.h')
+
+        # Include serialization options only if there is a struct which is part of a query shape.
+        if any(struct.query_shape_component for struct in spec.structs):
+            header_list.append('mongo/db/query/serialization_options.h')
 
         header_list.sort()
 
@@ -1759,14 +1762,14 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         defn = field_list_info.get_has_field_method().get_definition()
         with self._block('%s {' % (defn, ), '}'):
             self._writer.write_line(
-                'return _genericFields.find(fieldName.toString()) != _genericFields.end();')
+                'return _genericFields->find(fieldName) != _genericFields->end();')
 
         self._writer.write_empty_line()
 
         defn = field_list_info.get_should_forward_method().get_definition()
         with self._block('%s {' % (defn, ), '}'):
-            self._writer.write_line('auto it = _genericFields.find(fieldName.toString());')
-            self._writer.write_line('return (it == _genericFields.end() || it->second);')
+            self._writer.write_line('auto it = _genericFields->find(fieldName);')
+            self._writer.write_line('return (it == _genericFields->end() || it->second);')
 
         self._writer.write_empty_line()
 
@@ -2155,7 +2158,19 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                     expression = bson_cpp_type.gen_serializer_expression(
                         self._writer, _access_member(field))
                     template_params['expression'] = expression
-                    self._writer.write_template('builder->append(${field_name}, ${expression});')
+                    if not field.should_serialize_query_shape:
+                        self._writer.write_template(
+                            'builder->append(${field_name}, ${expression});')
+                    elif field.query_shape_literal:
+                        self._writer.write_template(
+                            'options.serializeLiteralValue(${expression}).serializeForIDL(${field_name}, builder);'
+                        )
+                    elif field.query_shape_anonymize:
+                        self._writer.write_template(
+                            'builder->append(${field_name}, options.serializeFieldPathFromString(${expression}));'
+                        )
+                    else:
+                        assert False
 
             elif field.type.bson_serialization_type[0] == 'any':
                 # Any types are special
@@ -2227,18 +2242,29 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             if field.chained:
                 # Just directly call the serializer for chained structs without opening up a nested
                 # document.
-                self._writer.write_template('${access_member}.serialize(builder);')
+                if not field.should_serialize_query_shape:
+                    self._writer.write_template('${access_member}.serialize(builder);')
+                else:
+                    self._writer.write_template('${access_member}.serialize(builder, options);')
+
             elif field.type.is_array:
                 self._writer.write_template(
                     'BSONArrayBuilder arrayBuilder(builder->subarrayStart(${field_name}));')
                 with self._block('for (const auto& item : ${access_member}) {', '}'):
                     self._writer.write_line(
                         'BSONObjBuilder subObjBuilder(arrayBuilder.subobjStart());')
-                    self._writer.write_line('item.serialize(&subObjBuilder);')
+                    if not field.should_serialize_query_shape:
+                        self._writer.write_line('item.serialize(&subObjBuilder);')
+                    else:
+                        self._writer.write_line('item.serialize(&subObjBuilder, options);')
             else:
                 self._writer.write_template(
                     'BSONObjBuilder subObjBuilder(builder->subobjStart(${field_name}));')
-                self._writer.write_template('${access_member}.serialize(&subObjBuilder);')
+                if not field.should_serialize_query_shape:
+                    self._writer.write_template('${access_member}.serialize(&subObjBuilder);')
+                else:
+                    self._writer.write_template(
+                        '${access_member}.serialize(&subObjBuilder, options);')
 
     def _gen_serializer_method_array_variant(self, field):
         template_params = {
@@ -2276,7 +2302,10 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                 template_params[
                     'cpp_type'] = 'std::vector<' + variant_type.cpp_type + '>' if variant_type.is_array else variant_type.cpp_type
 
-                with self._block('[%s](const ${cpp_type}& value) {' % builder, '},'):
+                template_params['param_opt'] = ""
+                if field.should_serialize_query_shape:
+                    template_params['param_opt'] = ', options'
+                with self._block('[%s${param_opt}](const ${cpp_type}& value) {' % builder, '},'):
                     bson_cpp_type = cpp_types.get_bson_cpp_type(variant_type)
                     if field.type.is_variant and field.type.is_array:
                         self._writer.write_template('value.serialize(%s);' % builder)
@@ -2284,11 +2313,33 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                         assert not field.type.is_array
                         expression = bson_cpp_type.gen_serializer_expression(self._writer, 'value')
                         template_params['expression'] = expression
-                        self._writer.write_template(
-                            'builder->append(${field_name}, ${expression});')
+                        if not field.should_serialize_query_shape:
+                            self._writer.write_template(
+                                'builder->append(${field_name}, ${expression});')
+                        elif field.query_shape_literal:
+                            self._writer.write_template(
+                                'options.serializeLiteralValue(${expression}).serializeForIDL(${field_name}, builder);'
+                            )
+                        elif field.query_shape_anonymize:
+                            self._writer.write_template(
+                                'builder->append(${field_name}, options.serializeFieldPathFromString(${expression}));'
+                            )
+                        else:
+                            assert False
                     else:
-                        self._writer.write_template(
-                            'idl::idlSerialize(builder, ${field_name}, value);')
+                        if not field.should_serialize_query_shape:
+                            self._writer.write_template(
+                                'idl::idlSerialize(builder, ${field_name}, value);')
+                        elif field.query_shape_literal:
+                            self._writer.write_template(
+                                'options.serializeLiteralValue(value).serializeForIDL(${field_name}, builder);'
+                            )
+                        elif field.query_shape_anonymize:
+                            self._writer.write_template(
+                                'idl::idlSerialize(builder, ${field_name}, options.serializeFieldPathFromString(value));'
+                            )
+                        else:
+                            assert False
 
     def _gen_serializer_method_common(self, field):
         # type: (ast.Field) -> None
@@ -2320,11 +2371,22 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                     else:
                         self._gen_serializer_method_variant(field)
                 else:
-                    # Generate default serialization using BSONObjBuilder::append
-                    # Note: BSONObjBuilder::append has overrides for std::vector also
-                    self._writer.write_line(
-                        'builder->append(%s, %s);' % (_get_field_constant_name(field),
-                                                      _access_member(field)))
+                    # Generate default serialization
+                    # Note: BSONObjBuilder::append, which all three branches use, has overrides for std::vector also
+                    if not field.should_serialize_query_shape:
+                        self._writer.write_line(
+                            'builder->append(%s, %s);' % (_get_field_constant_name(field),
+                                                          _access_member(field)))
+                    elif field.query_shape_literal:
+                        self._writer.write_line(
+                            'options.serializeLiteralValue(%s).serializeForIDL(%s, builder);' %
+                            (_access_member(field), _get_field_constant_name(field)))
+                    elif field.query_shape_anonymize:
+                        self._writer.write_line(
+                            'builder->append(%s, options.serializeFieldPathFromString(%s));' %
+                            (_get_field_constant_name(field), _access_member(field)))
+                    else:
+                        assert False
             else:
                 self._gen_serializer_method_struct(field)
 
@@ -2603,8 +2665,8 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             common.template_args('// Map: fieldName -> ${should_forward_name}',
                                  should_forward_name=field_list_info.get_should_forward_name()))
         block_name = common.template_args(
-            'const stdx::unordered_map<std::string, bool> ${klass}::_genericFields {', klass=klass)
-        with self._block(block_name, "};"):
+            'const StaticImmortal<StringMap<bool>> ${klass}::_genericFields {{', klass=klass)
+        with self._block(block_name, "}};"):
             sorted_entries = sorted(struct.fields, key=lambda f: f.name)
             for entry in sorted_entries:
                 self._writer.write_line(
@@ -2964,10 +3026,15 @@ class _CppSourceFileWriter(_CppFileWriterBase):
 
         # Generate mongo includes third
         header_list = [
-            'mongo/bson/bsonobjbuilder.h', 'mongo/db/auth/authorization_contract.h',
-            'mongo/db/commands.h', 'mongo/idl/command_generic_argument.h',
-            'mongo/util/overloaded_visitor.h'
+            'mongo/util/overloaded_visitor.h',
+            'mongo/util/string_map.h',
         ]
+
+        if spec.commands:
+            header_list.append('mongo/db/auth/authorization_contract.h')
+            header_list.append('mongo/idl/command_generic_argument.h')
+        elif len([s for s in spec.structs if s.is_command_reply]) > 0:
+            header_list.append('mongo/idl/command_generic_argument.h')
 
         if spec.server_parameters:
             header_list.append('mongo/db/server_parameter.h')

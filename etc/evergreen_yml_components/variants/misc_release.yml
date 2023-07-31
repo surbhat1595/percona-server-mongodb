@@ -235,8 +235,8 @@ buildvariants:
   - name: .change_streams
   - name: .change_stream_fuzzer
   - name: .misc_js
-  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
-  - name: .concurrency .large !.ubsan !.no_txns !.debug_only
+  - name: .concurrency !.large !.ubsan !.no_txns
+  - name: .concurrency .large !.ubsan !.no_txns
     distros:
     - amazon2-arm64-large
   - name: .config_fuzzer !.large
@@ -394,8 +394,8 @@ buildvariants:
   - name: .change_streams
   - name: .change_stream_fuzzer
   - name: .misc_js
-  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
-  - name: .concurrency .large !.ubsan !.no_txns !.debug_only
+  - name: .concurrency !.large !.ubsan !.no_txns
+  - name: .concurrency .large !.ubsan !.no_txns
     distros:
     - amazon2022-large
   - name: config_fuzzer_concurrency
@@ -551,8 +551,8 @@ buildvariants:
   - name: .change_streams
   - name: .change_stream_fuzzer
   - name: .misc_js
-  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
-  - name: .concurrency .large !.ubsan !.no_txns !.debug_only
+  - name: .concurrency !.large !.ubsan !.no_txns
+  - name: .concurrency .large !.ubsan !.no_txns
     distros:
     - amazon2022-arm64-large
   - name: .config_fuzzer !.large
@@ -1080,8 +1080,8 @@ buildvariants:
   - name: .change_streams
   - name: .change_stream_fuzzer
   - name: .misc_js
-  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
-  - name: .concurrency .large !.ubsan !.no_txns !.debug_only
+  - name: .concurrency !.large !.ubsan !.no_txns
+  - name: .concurrency .large !.ubsan !.no_txns
     distros:
     - rhel80-medium
   - name: disk_wiredtiger
@@ -2474,9 +2474,7 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: windows
     push_arch: x86_64
-    multiversion_platform: windows_x86_64-2008plus-ssl
-    multiversion_platform_42_or_later: windows_x86_64-2012plus
-    multiversion_platform_44_or_later: windows
+    multiversion_platform: windows
     multiversion_edition: base
     content_type: application/zip
     compile_flags: >-
@@ -2502,7 +2500,7 @@ buildvariants:
   - name: .misc_js
     # Some concurrency workloads require a lot of memory, so we use machines
     # with more RAM for these suites.
-  - name: .concurrency !.ubsan !.no_txns !.kill_terminate !.common !.debug_only
+  - name: .concurrency !.ubsan !.no_txns !.kill_terminate !.common
     distros:
     - windows-vsCurrent-large
   - name: .concurrency .common
@@ -2577,7 +2575,7 @@ buildvariants:
   - name: .misc_js
     # Some concurrency workloads require a lot of memory, so we use machines
     # with more RAM for these suites.
-  - name: .concurrency !.ubsan !.no_txns !.kill_terminate !.common !.debug_only
+  - name: .concurrency !.ubsan !.no_txns !.kill_terminate !.common
     distros:
     - windows-vsCurrent-large
   - name: .concurrency .common
@@ -2633,7 +2631,7 @@ buildvariants:
   - name: .causally_consistent !.sharding
   - name: .change_streams
   - name: .misc_js
-  - name: .concurrency !.ubsan !.no_txns !.debug_only !.kill_terminate
+  - name: .concurrency !.ubsan !.no_txns !.kill_terminate
   - name: disk_wiredtiger
   - name: free_monitoring
   - name: initial_sync_fuzzer_gen
@@ -2688,7 +2686,7 @@ buildvariants:
   - name: .causally_consistent !.sharding
   - name: .change_streams
   - name: .misc_js
-  - name: .concurrency !.ubsan !.no_txns !.debug_only !.kill_terminate
+  - name: .concurrency !.ubsan !.no_txns !.kill_terminate
   - name: disk_wiredtiger
   - name: free_monitoring
   - name: initial_sync_fuzzer_gen

@@ -289,7 +289,7 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                     metadata().getDatabaseVersion() /* databaseVersion */);
 
                 // Check under the dbLock if this is still the primary shard for the database
-                DatabaseShardingState::assertIsPrimaryShardForDb(opCtx, originalNss().db());
+                DatabaseShardingState::assertIsPrimaryShardForDb(opCtx, originalNss().dbName());
             };
         })
         .then([this, executor, token, anchor = shared_from_this()] {
@@ -416,6 +416,13 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
 
             if (cleanup()) {
                 try {
+                    if (!completionStatus.isOK()) {
+                        LOGV2_ERROR(7524000,
+                                    "Failed sharding DDL coordinator",
+                                    "coordinatorId"_attr = _coordId,
+                                    "reason"_attr = redact(completionStatus));
+                    }
+
                     LOGV2(5565601,
                           "Releasing sharding DDL coordinator",
                           "coordinatorId"_attr = _coordId);

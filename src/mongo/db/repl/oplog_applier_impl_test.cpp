@@ -284,8 +284,8 @@ TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
 
 TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentCollectionAndDocExist) {
     // Setup the pre-images collection.
-    ChangeStreamPreImagesCollectionManager::createPreImagesCollection(_opCtx.get(),
-                                                                      boost::none /* tenantId */);
+    ChangeStreamPreImagesCollectionManager::get(_opCtx.get())
+        .createPreImagesCollection(_opCtx.get(), boost::none /* tenantId */);
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     createCollection(
         _opCtx.get(), nss, createRecordChangeStreamPreAndPostImagesCollectionOptions());
@@ -407,8 +407,8 @@ TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
 
 TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentCollectionLockedByUUID) {
     // Setup the pre-images collection.
-    ChangeStreamPreImagesCollectionManager::createPreImagesCollection(_opCtx.get(),
-                                                                      boost::none /* tenantId */);
+    ChangeStreamPreImagesCollectionManager::get(_opCtx.get())
+        .createPreImagesCollection(_opCtx.get(), boost::none /* tenantId */);
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     CollectionOptions options = createRecordChangeStreamPreAndPostImagesCollectionOptions();
     options.uuid = kUuid;
@@ -426,8 +426,8 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentCollec
 
 TEST_F(OplogApplierImplTest, applyOplogEntryToRecordChangeStreamPreImages) {
     // Setup the pre-images collection.
-    ChangeStreamPreImagesCollectionManager::createPreImagesCollection(_opCtx.get(),
-                                                                      boost::none /* tenantId */);
+    ChangeStreamPreImagesCollectionManager::get(_opCtx.get())
+        .createPreImagesCollection(_opCtx.get(), boost::none /* tenantId */);
 
     // Create the collection.
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
@@ -453,14 +453,11 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToRecordChangeStreamPreImages) {
         }
     };
     generateTestCasesForOperations(OplogApplication::Mode::kSecondary, {}, true);
-    generateTestCasesForOperations(OplogApplication::Mode::kUnstableRecovering, {}, true);
-    generateTestCasesForOperations(OplogApplication::Mode::kStableRecovering, {}, true);
+    generateTestCasesForOperations(OplogApplication::Mode::kRecovering, {}, true);
     generateTestCasesForOperations(OplogApplication::Mode::kInitialSync, {}, false);
     const auto kFromMigrate{true};
     generateTestCasesForOperations(OplogApplication::Mode::kSecondary, kFromMigrate, false);
-    generateTestCasesForOperations(
-        OplogApplication::Mode::kUnstableRecovering, kFromMigrate, false);
-    generateTestCasesForOperations(OplogApplication::Mode::kStableRecovering, kFromMigrate, false);
+    generateTestCasesForOperations(OplogApplication::Mode::kRecovering, kFromMigrate, false);
     generateTestCasesForOperations(OplogApplication::Mode::kInitialSync, kFromMigrate, false);
 
     int docId{0};
@@ -1157,7 +1154,8 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentIncorr
 TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentIncludesTenantId) {
     // Setup the pre-images collection.
     const TenantId tid(OID::gen());
-    ChangeStreamPreImagesCollectionManager::createPreImagesCollection(_opCtx.get(), tid);
+    ChangeStreamPreImagesCollectionManager::get(_opCtx.get())
+        .createPreImagesCollection(_opCtx.get(), tid);
     setServerParameter("multitenancySupport", true);
     setServerParameter("featureFlagRequireTenantID", true);
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest(tid, "test.t");
@@ -1356,7 +1354,8 @@ protected:
                     // and there's no guarantee of the order.
                     _insertedDocs[nss].insert(docs.begin(), docs.end());
                 } else
-                    FAIL("Unexpected insert") << " into " << nss << " first doc: " << docs.front();
+                    FAIL("Unexpected insert")
+                        << " into " << nss.toStringForErrorMsg() << " first doc: " << docs.front();
             };
 
         _writerPool = makeReplWriterPool();
@@ -1473,7 +1472,7 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyUnpreparedTransactionAllAt
         ReplicationCoordinator::get(_opCtx.get()),
         getConsistencyMarkers(),
         getStorageInterface(),
-        repl::OplogApplier::Options(repl::OplogApplication::Mode::kStableRecovering),
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kRecovering),
         _writerPool.get());
 
     // Apply both inserts and the commit in a single batch.  We expect no oplog entries to
@@ -1712,7 +1711,7 @@ protected:
                 // there's no guarantee of the order.
                 (_docs[collNss]).push_back(BSON("create" << collNss.coll()));
             } else
-                FAIL("Unexpected create") << " on " << collNss;
+                FAIL("Unexpected create") << " on " << collNss.toStringForErrorMsg();
         };
 
         _opObserver->onInsertsFn = [&](OperationContext*,
@@ -1727,7 +1726,8 @@ protected:
                 // and there's no guarantee of the order.
                 (_docs[nss]).insert(_docs[nss].end(), docs.begin(), docs.end());
             } else
-                FAIL("Unexpected insert") << " into " << nss << " first doc: " << docs.front();
+                FAIL("Unexpected insert")
+                    << " into " << nss.toStringForErrorMsg() << " first doc: " << docs.front();
         };
 
         _writerPool = makeReplWriterPool();
@@ -2168,7 +2168,7 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyPreparedTransactionReco
         ReplicationCoordinator::get(_opCtx.get()),
         getConsistencyMarkers(),
         getStorageInterface(),
-        repl::OplogApplier::Options(repl::OplogApplication::Mode::kStableRecovering),
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kRecovering),
         _writerPool.get());
 
     // Apply a batch with the insert operations.  This should have no effect, because this is
@@ -2423,7 +2423,7 @@ TEST_F(MultiOplogEntryPreparedTransactionTest,
         ReplicationCoordinator::get(_opCtx.get()),
         getConsistencyMarkers(),
         getStorageInterface(),
-        repl::OplogApplier::Options(repl::OplogApplication::Mode::kStableRecovering),
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kRecovering),
         _writerPool.get());
 
     const auto expectedStartOpTime = _singlePrepareApplyOp->getOpTime();
@@ -2537,7 +2537,7 @@ protected:
                 // and there's no guarantee of the order.
                 _deletedDocs[nss]++;
             } else
-                FAIL("Unexpected delete") << " from " << nss;
+                FAIL("Unexpected delete") << " from " << nss.toStringForErrorMsg();
         };
     }
 

@@ -66,11 +66,11 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store_oplog_truncate_markers.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_session_data.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
-#include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/stacktrace.h"
 #include "mongo/util/str.h"
@@ -191,7 +191,9 @@ WiredTigerRecordStore::OplogTruncateMarkers::createOplogTruncateMarkers(Operatio
         minBytesPerTruncateMarker,
         [](const Record& record) {
             BSONObj obj = record.data.toBson();
-            auto wallTime = obj.hasField("wall") ? obj["wall"].Date() : obj["ts"].timestampTime();
+            auto wallTime = obj.hasField(repl::DurableOplogEntry::kWallClockTimeFieldName)
+                ? obj[repl::DurableOplogEntry::kWallClockTimeFieldName].Date()
+                : obj[repl::DurableOplogEntry::kTimestampFieldName].timestampTime();
             return RecordIdAndWallTime(record.id, wallTime);
         },
         numTruncateMarkersToKeep);
@@ -537,7 +539,7 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
     }
 
     if (_oplogMaxSize) {
-        invariant(_isOplog, str::stream() << "Namespace " << params.nss);
+        invariant(_isOplog, str::stream() << "Namespace " << params.nss.toStringForErrorMsg());
     }
 
     Status versionStatus = WiredTigerUtil::checkApplicationMetadataFormatVersion(
@@ -598,7 +600,7 @@ std::string WiredTigerRecordStore::ns(OperationContext* opCtx) const {
     if (!nss)
         return "";
 
-    return nss->ns();
+    return nss->ns().toString();
 }
 
 void WiredTigerRecordStore::checkSize(OperationContext* opCtx) {
@@ -1035,7 +1037,7 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
     if (_oplogTruncateMarkers) {
         auto wall = [&] {
             BSONObj obj = highestIdRecord.data.toBson();
-            BSONElement ele = obj["wall"];
+            BSONElement ele = obj[repl::DurableOplogEntry::kWallClockTimeFieldName];
             if (!ele) {
                 // This shouldn't happen in normal cases, but this is needed because some tests do
                 // not add wall clock times. Note that, with this addition, it's possible that the
@@ -1438,7 +1440,18 @@ Status WiredTigerRecordStore::doCompact(OperationContext* opCtx) {
     if (!cache->isEphemeral()) {
         WT_SESSION* s = WiredTigerRecoveryUnit::get(opCtx)->getSession()->getSession();
         opCtx->recoveryUnit()->abandonSnapshot();
+
+        // Set a pointer on the WT_SESSION to the opCtx, so that WT::compact can use a callback to
+        // check for interrupts.
+        SessionDataRAII sessionRaii(s, opCtx);
+
         int ret = s->compact(s, getURI().c_str(), "timeout=0");
+        if (ret == WT_ERROR && !opCtx->checkForInterruptNoAssert().isOK()) {
+            return Status(ErrorCodes::Interrupted,
+                          str::stream()
+                              << "Storage compaction interrupted on " << getURI().c_str());
+        }
+
         if (MONGO_unlikely(WTCompactRecordStoreEBUSY.shouldFail())) {
             ret = EBUSY;
         }

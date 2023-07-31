@@ -160,7 +160,7 @@ ShardsvrDropIndexesCommand::Invocation::Response ShardsvrDropIndexesCommand::Inv
     auto dbDDLLock = ddlLockManager->lock(opCtx, ns().db(), lockReason, lockTimeout);
 
     // Check under the dbLock if this is still the primary shard for the database
-    DatabaseShardingState::assertIsPrimaryShardForDb(opCtx, ns().db());
+    DatabaseShardingState::assertIsPrimaryShardForDb(opCtx, ns().dbName());
 
     auto resolvedNs = ns();
     auto dropIdxBSON = dropIdxCmd.toBSON({});
@@ -201,8 +201,10 @@ ShardsvrDropIndexesCommand::Invocation::Response ShardsvrDropIndexesCommand::Inv
                         CommandHelpers::filterCommandRequestForPassthrough(cmdToBeSent)),
                     ReadPreferenceSetting::get(opCtx),
                     Shard::RetryPolicy::kNotIdempotent,
-                    BSONObj() /* query */,
-                    BSONObj() /* collation */);
+                    BSONObj() /*query*/,
+                    BSONObj() /*collation*/,
+                    boost::none /*letParameters*/,
+                    boost::none /*runtimeConstants*/);
 
             // Append responses we've received from previous retries of this operation due to a
             // stale config error.

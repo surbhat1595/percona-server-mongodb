@@ -73,6 +73,7 @@
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/query_analysis_writer.h"
+#include "mongo/db/shard_role.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/server_write_concern_metrics.h"
 #include "mongo/db/stats/top.h"
@@ -356,7 +357,7 @@ void insertDocuments(OperationContext* opCtx,
 Status checkIfTransactionOnCappedColl(OperationContext* opCtx, const CollectionPtr& collection) {
     if (opCtx->inMultiDocumentTransaction() && collection->isCapped()) {
         return {ErrorCodes::OperationNotSupportedInTransaction,
-                str::stream() << "Collection '" << collection->ns()
+                str::stream() << "Collection '" << collection->ns().toStringForErrorMsg()
                               << "' is a capped collection. Writes in transactions are not allowed "
                                  "on capped collections."};
     }
@@ -366,7 +367,7 @@ Status checkIfTransactionOnCappedColl(OperationContext* opCtx, const CollectionP
 void assertTimeseriesBucketsCollectionNotFound(const NamespaceString& ns) {
     uasserted(ErrorCodes::NamespaceNotFound,
               str::stream() << "Buckets collection not found for time-series collection "
-                            << ns.getTimeseriesViewNamespace());
+                            << ns.getTimeseriesViewNamespace().toStringForErrorMsg());
 }
 
 template <typename T>
@@ -750,7 +751,7 @@ UpdateResult writeConflictRetryUpsert(OperationContext* opCtx,
     if (collection && collection->isCapped()) {
         uassert(
             ErrorCodes::OperationNotSupportedInTransaction,
-            str::stream() << "Collection '" << collection->ns()
+            str::stream() << "Collection '" << collection->ns().toStringForErrorMsg()
                           << "' is a capped collection. Writes in transactions are not allowed on "
                              "capped collections.",
             !inTransaction);
@@ -810,10 +811,14 @@ long long writeConflictRetryRemove(OperationContext* opCtx,
 
     invariant(deleteRequest);
 
-    ParsedDelete parsedDelete(opCtx, deleteRequest);
-    uassertStatusOK(parsedDelete.parseRequest());
+    const auto collection = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nsString, AcquisitionPrerequisites::kWrite),
+        MODE_IX);
+    const auto& collectionPtr = collection.getCollectionPtr();
 
-    AutoGetCollection collection(opCtx, nsString, MODE_IX);
+    ParsedDelete parsedDelete(opCtx, deleteRequest, collectionPtr);
+    uassertStatusOK(parsedDelete.parseRequest());
 
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -823,17 +828,17 @@ long long writeConflictRetryRemove(OperationContext* opCtx,
 
     assertCanWrite_inlock(opCtx, nsString);
 
-    if (collection && collection->isCapped()) {
+    if (collectionPtr && collectionPtr->isCapped()) {
         uassert(
             ErrorCodes::OperationNotSupportedInTransaction,
-            str::stream() << "Collection '" << collection->ns()
+            str::stream() << "Collection '" << collection.nss().toStringForErrorMsg()
                           << "' is a capped collection. Writes in transactions are not allowed on "
                              "capped collections.",
             !inTransaction);
     }
 
-    const auto exec = uassertStatusOK(getExecutorDelete(
-        opDebug, &collection.getCollection(), &parsedDelete, boost::none /* verbosity */));
+    const auto exec = uassertStatusOK(
+        getExecutorDelete(opDebug, &collection, &parsedDelete, boost::none /* verbosity */));
 
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -847,7 +852,7 @@ long long writeConflictRetryRemove(OperationContext* opCtx,
 
     PlanSummaryStats summaryStats;
     exec->getPlanExplainer().getSummaryStats(&summaryStats);
-    if (const auto& coll = collection.getCollection()) {
+    if (const auto& coll = collectionPtr) {
         CollectionQueryInfo::get(coll).notifyOfQuery(opCtx, coll, summaryStats);
     }
     opDebug->setPlanSummaryMetrics(summaryStats);
@@ -1094,38 +1099,41 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
         uasserted(ErrorCodes::InternalError, "failAllUpdates failpoint active!");
     }
 
-    boost::optional<AutoGetCollection> collection;
-    while (true) {
-        collection.emplace(opCtx,
-                           ns,
-                           fixLockModeForSystemDotViewsChanges(ns, MODE_IX),
-                           AutoGetCollection::Options{}.expectedUUID(opCollectionUUID));
-        if (*collection) {
-            break;
+    const ScopedCollectionAcquisition collection = [&]() {
+        const auto acquisitionRequest = CollectionAcquisitionRequest::fromOpCtx(
+            opCtx, ns, AcquisitionPrerequisites::kWrite, opCollectionUUID);
+        while (true) {
+            {
+                auto acquisition = acquireCollection(
+                    opCtx, acquisitionRequest, fixLockModeForSystemDotViewsChanges(ns, MODE_IX));
+                if (acquisition.exists()) {
+                    return acquisition;
+                }
+
+                if (source == OperationSource::kTimeseriesInsert ||
+                    source == OperationSource::kTimeseriesUpdate) {
+                    assertTimeseriesBucketsCollectionNotFound(ns);
+                }
+
+                // If this is an upsert, which is an insert, we must have a collection.
+                // An update on a non-existent collection is okay and handled later.
+                if (!updateRequest->isUpsert()) {
+                    // Inexistent collection.
+                    return acquisition;
+                }
+            }
+            makeCollection(opCtx, ns);
         }
-
-        if (source == OperationSource::kTimeseriesInsert ||
-            source == OperationSource::kTimeseriesUpdate) {
-            assertTimeseriesBucketsCollectionNotFound(ns);
-        }
-
-        // If this is an upsert, which is an insert, we must have a collection.
-        // An update on a non-existent collection is okay and handled later.
-        if (!updateRequest->isUpsert())
-            break;
-
-        collection.reset();  // unlock.
-        makeCollection(opCtx, ns);
-    }
+    }();
 
     UpdateStageParams::DocumentCounter documentCounter = nullptr;
 
     if (source == OperationSource::kTimeseriesUpdate) {
         uassert(ErrorCodes::NamespaceNotFound,
                 "Could not find time-series buckets collection for update",
-                collection);
+                collection.getCollectionPtr());
 
-        auto timeseriesOptions = collection->getCollection()->getTimeseriesOptions();
+        auto timeseriesOptions = collection.getCollectionPtr()->getTimeseriesOptions();
         uassert(ErrorCodes::InvalidOptions,
                 "Time-series buckets collection is missing time-series options",
                 timeseriesOptions);
@@ -1159,7 +1167,7 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
             timeseries::numMeasurementsForBucketCounter(timeseriesOptions->getTimeField());
     }
 
-    if (const auto& coll = collection->getCollection()) {
+    if (const auto& coll = collection.getCollectionPtr()) {
         // Transactions are not allowed to operate on capped collections.
         uassertStatusOK(checkIfTransactionOnCappedColl(opCtx, coll));
     }
@@ -1173,19 +1181,18 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
 
     auto& curOp = *CurOp::get(opCtx);
 
-    if (collection->getDb()) {
+    if (DatabaseHolder::get(opCtx)->getDb(opCtx, ns.dbName())) {
         curOp.raiseDbProfileLevel(
             CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(ns.dbName()));
     }
 
     assertCanWrite_inlock(opCtx, ns);
 
-    auto exec = uassertStatusOK(
-        getExecutorUpdate(&curOp.debug(),
-                          collection ? &collection->getCollection() : &CollectionPtr::null,
-                          &parsedUpdate,
-                          boost::none /* verbosity */,
-                          std::move(documentCounter)));
+    auto exec = uassertStatusOK(getExecutorUpdate(&curOp.debug(),
+                                                  &collection,
+                                                  &parsedUpdate,
+                                                  boost::none /* verbosity */,
+                                                  std::move(documentCounter)));
 
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -1197,7 +1204,7 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
     PlanSummaryStats summary;
     auto&& explainer = exec->getPlanExplainer();
     explainer.getSummaryStats(&summary);
-    if (const auto& coll = collection->getCollection()) {
+    if (const auto& coll = collection.getCollectionPtr()) {
         CollectionQueryInfo::get(coll).notifyOfQuery(opCtx, coll, summary);
     }
 
@@ -1499,18 +1506,18 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
         uasserted(ErrorCodes::InternalError, "failAllRemoves failpoint active!");
     }
 
-    AutoGetCollection collection(opCtx,
-                                 ns,
-                                 fixLockModeForSystemDotViewsChanges(ns, MODE_IX),
-                                 AutoGetCollection::Options{}.expectedUUID(opCollectionUUID));
+    auto acquisitionRequest = CollectionAcquisitionRequest::fromOpCtx(
+        opCtx, ns, AcquisitionPrerequisites::kWrite, opCollectionUUID);
+    const auto collection = acquireCollection(
+        opCtx, acquisitionRequest, fixLockModeForSystemDotViewsChanges(ns, MODE_IX));
 
     DeleteStageParams::DocumentCounter documentCounter = nullptr;
 
     if (source == OperationSource::kTimeseriesDelete) {
         uassert(ErrorCodes::NamespaceNotFound,
                 "Could not find time-series buckets collection for write",
-                *collection);
-        auto timeseriesOptions = collection->getTimeseriesOptions();
+                collection.getCollectionPtr());
+        auto timeseriesOptions = collection.getCollectionPtr()->getTimeseriesOptions();
         uassert(ErrorCodes::InvalidOptions,
                 "Time-series buckets collection is missing time-series options",
                 timeseriesOptions);
@@ -1544,12 +1551,11 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
 
     ParsedDelete parsedDelete(opCtx,
                               &request,
-                              source == OperationSource::kTimeseriesDelete && collection
-                                  ? collection->getTimeseriesOptions()
-                                  : boost::none);
+                              collection.getCollectionPtr(),
+                              source == OperationSource::kTimeseriesDelete);
     uassertStatusOK(parsedDelete.parseRequest());
 
-    if (collection.getDb()) {
+    if (DatabaseHolder::get(opCtx)->getDb(opCtx, ns.dbName())) {
         curOp.raiseDbProfileLevel(
             CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(ns.dbName()));
     }
@@ -1560,7 +1566,7 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
         &hangWithLockDuringBatchRemove, opCtx, "hangWithLockDuringBatchRemove");
 
     auto exec = uassertStatusOK(getExecutorDelete(&curOp.debug(),
-                                                  &collection.getCollection(),
+                                                  &collection,
                                                   &parsedDelete,
                                                   boost::none /* verbosity */,
                                                   std::move(documentCounter)));
@@ -1576,7 +1582,7 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     PlanSummaryStats summary;
     auto&& explainer = exec->getPlanExplainer();
     explainer.getSummaryStats(&summary);
-    if (const auto& coll = collection.getCollection()) {
+    if (const auto& coll = collection.getCollectionPtr()) {
         CollectionQueryInfo::get(coll).notifyOfQuery(opCtx, coll, summary);
     }
     curOp.debug().setPlanSummaryMetrics(summary);
@@ -1835,8 +1841,15 @@ Status performAtomicTimeseriesWrites(
                     opCtx->recoveryUnit()->setTimestamp(args.oplogSlots[0].getTimestamp()));
         }
 
-        collection_internal::updateDocument(
-            opCtx, *coll, recordId, original, updated, diffOnIndexes, &curOp->debug(), &args);
+        collection_internal::updateDocument(opCtx,
+                                            *coll,
+                                            recordId,
+                                            original,
+                                            updated,
+                                            diffOnIndexes,
+                                            nullptr /*indexesAffected*/,
+                                            &curOp->debug(),
+                                            &args);
         if (slot) {
             if (participant) {
                 // Manually sets the timestamp so that the "prevOpTime" field in the oplog entry is
@@ -2120,7 +2133,8 @@ TimeseriesSingleWriteResult getTimeseriesSingleWriteResult(
     write_ops_exec::WriteResult&& reply, const write_ops::InsertCommandRequest& request) {
     invariant(reply.results.size() == 1,
               str::stream() << "Unexpected number of results (" << reply.results.size()
-                            << ") for insert on time-series collection " << ns(request));
+                            << ") for insert on time-series collection "
+                            << ns(request).toStringForErrorMsg());
 
     return {std::move(reply.results[0]), reply.canContinue};
 }
@@ -3035,7 +3049,7 @@ write_ops::InsertCommandReply performTimeseriesWrites(
     uassert(ErrorCodes::OperationNotSupportedInTransaction,
             str::stream() << "Cannot insert into a time-series collection in a multi-document "
                              "transaction: "
-                          << ns(request),
+                          << ns(request).toStringForErrorMsg(),
             !opCtx->inMultiDocumentTransaction());
 
     {

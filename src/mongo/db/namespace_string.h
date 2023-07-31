@@ -48,7 +48,6 @@
 
 namespace mongo {
 class NamespaceStringUtil;
-class IDLParserContext;
 
 class NamespaceString {
 public:
@@ -111,6 +110,9 @@ public:
         decltype(auto) toString() const {
             return _get().toString();
         }
+        decltype(auto) toStringForErrorMsg() const {
+            return _get().toStringForErrorMsg();
+        }
 
         friend std::ostream& operator<<(std::ostream& stream, const ConstantProxy& nss) {
             return stream << nss.toString();
@@ -138,9 +140,6 @@ public:
     constexpr static size_t MaxNsShardedCollectionLen = 235;  // 255 - len(ChunkType::ShardNSPrefix)
 
     // Reserved system namespaces
-
-    // The $external database used by X.509, LDAP, etc...
-    static constexpr StringData kExternalDb = "$external"_sd;
 
     // Name for the system views collection
     static constexpr StringData kSystemDotViewsCollectionName = "system.views"_sd;
@@ -351,6 +350,11 @@ public:
     static NamespaceString makeMovePrimaryCollectionsToCloneNSS(const UUID& migrationId);
 
     /**
+     * Constructs the NamespaceString prefix for temporary movePrimary recipient collections.
+     */
+    static NamespaceString makeMovePrimaryTempCollectionsPrefix(const UUID& migrationId);
+
+    /**
      * Constructs the oplog buffer NamespaceString for the given UUID and donor shardId.
      */
     static NamespaceString makeReshardingLocalOplogBufferNSS(const UUID& existingUUID,
@@ -416,29 +420,27 @@ public:
             : StringData(_ns.c_str() + _dotIndex + 1, _ns.size() - 1 - _dotIndex);
     }
 
-    const std::string& ns() const {
-        return _ns;
+    StringData ns() const {
+        return StringData{_ns};
     }
 
-    const std::string& toString() const {
-        return ns();
+    std::string toString() const {
+        return ns().toString();
     }
 
     std::string toStringWithTenantId() const {
-        if (auto tenantId = _dbName.tenantId())
+        if (auto tenantId = _dbName.tenantId()) {
             return str::stream() << *tenantId << '_' << ns();
+        }
 
-        return ns();
+        return ns().toString();
     }
 
     /**
      * This function should only be used when logging a NamespaceString in an error message.
      */
     std::string toStringForErrorMsg() const {
-        if (auto tenantId = _dbName.tenantId())
-            return str::stream() << *tenantId << '_' << ns();
-
-        return ns();
+        return toStringWithTenantId();
     }
 
     /**
@@ -446,10 +448,11 @@ public:
      * It is called anytime a NamespaceString is logged by logAttrs or otherwise.
      */
     friend std::string toStringForLogging(const NamespaceString& nss) {
-        if (auto tenantId = nss.tenantId())
-            return str::stream() << *tenantId << '_' << nss.ns();
+        if (auto tenantId = nss.tenantId()) {
+            return str::stream() << *tenantId << '_' << nss.ns().toString();
+        }
 
-        return nss.ns();
+        return nss.ns().toString();
     }
 
     size_t size() const {
@@ -793,9 +796,6 @@ public:
 
 private:
     friend NamespaceStringUtil;
-    // TODO SERVER-74897 IDLParserContext should no longer be a friend once IDL generated commands
-    // call into NamespaceStringUtil directly to construct NamespaceStrings.
-    friend IDLParserContext;
 
     /**
      * In order to construct NamespaceString objects, use NamespaceStringUtil. The functions
@@ -851,7 +851,7 @@ private:
 
 
     std::tuple<const boost::optional<TenantId>&, const std::string&> _lens() const {
-        return std::tie(tenantId(), ns());
+        return std::tie(tenantId(), _ns);
     }
 
     DatabaseName _dbName;
@@ -897,7 +897,7 @@ public:
      * TODO SERVER-66887 remove this function for better clarity once call sites have been changed
      */
     std::string dbname() const {
-        return _dbname ? _dbname->db() : "";
+        return _dbname ? _dbname->db().toString() : "";
     }
 
     const boost::optional<DatabaseName>& dbName() const {
@@ -922,6 +922,8 @@ public:
     Status isNssValid() const;
 
     std::string toString() const;
+
+    std::string toStringForErrorMsg() const;
 
     void serialize(BSONObjBuilder* builder, StringData fieldName) const;
 

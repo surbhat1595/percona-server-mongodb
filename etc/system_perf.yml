@@ -1866,7 +1866,7 @@ buildvariants:
 
   - name: linux-standalone.2022-11
     display_name: Linux Standalone 2022-11
-    cron: "0 0 * * 2,4,6"  # Tuesday, Thursday and Saturday at 00:00
+    cron: &linux-standalone-cron "0 0 * * 2,4,6"  # Tuesday, Thursday and Saturday at 00:00
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2042,9 +2042,8 @@ buildvariants:
 
   - name: linux-standalone-telemetry
     display_name: Linux Standalone 2022-11 (Telemetry)
-    # Run it twice a day.
-    # Will make it less frequent when perf is finished.
-    cron: "0 3,15 * * 0,1,2,3,4,5,6"
+    # Match the baseline non-telemetry cron
+    cron: *linux-standalone-cron
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2067,92 +2066,6 @@ buildvariants:
       - name: ycsb_60GB.long
       - name: crud_workloads_majority
       - name: tpcc
-
-  - name: linux-1-node-replSet-telemetry
-    display_name: Linux 1-Node ReplSet 2022-11 (Telemetry)
-    # Run it twice a day.
-    # Will make it less frequent when perf is finished.
-    cron: "0 3,15 * * 0,1,2,3,4,5,6"
-    modules: *modules
-    expansions:
-      mongodb_setup_release: 2022-11
-      mongodb_setup: single-replica-telemetry
-      infrastructure_provisioning_release: 2022-11
-      infrastructure_provisioning: single
-      workload_setup: 2022-11
-      platform: linux
-      project_dir: *project_dir
-      authentication: enabled
-      storageEngine: wiredTiger
-      compile_variant: "-arm64"
-    run_on:
-      - "rhel70-perf-single"
-    depends_on: *_compile_amazon_linux2_arm64
-    tasks:
-      - name: schedule_patch_auto_tasks
-      - name: schedule_variant_auto_tasks
-      - name: ycsb_60GB
-      - name: ycsb_60GB.long
-      - name: crud_workloads_majority
-      - name: mixed_workloads
-      - name: tpcc
-
-  - name: linux-3-node-replSet-telemetry
-    display_name: Linux 3-Node ReplSet 2022-11 (Telemetry)
-    # Run it twice a day.
-    # Will make it less frequent when perf is finished.
-    cron: "0 3,15 * * 0,1,2,3,4,5,6"
-    modules: *modules
-    expansions:
-      mongodb_setup_release: 2022-11
-      mongodb_setup: replica-telemetry
-      infrastructure_provisioning_release: 2022-11
-      infrastructure_provisioning: replica
-      workload_setup: 2022-11
-      platform: linux
-      project_dir: *project_dir
-      authentication: enabled
-      storageEngine: wiredTiger
-      compile_variant: "-arm64"
-    run_on:
-      - "rhel70-perf-replset"
-    depends_on: *_compile_amazon_linux2_arm64
-    tasks:
-      - name: schedule_patch_auto_tasks
-      - name: schedule_variant_auto_tasks
-      - name: ycsb_60GB
-      - name: ycsb_60GB.long
-      - name: crud_workloads_majority
-      - name: crud_workloads_w1
-      - name: mixed_workloads
-      - name: tpcc
-
-  - name: linux-3-shard-telemetry
-    display_name: Linux 3-Shard Cluster 2022-11 (Telemetry)
-    # Run it twice a day.
-    # Will make it less frequent when perf is finished.
-    cron: "0 3,15 * * 0,1,2,3,4,5,6"
-    modules: *modules
-    expansions:
-      mongodb_setup_release: 2022-11
-      mongodb_setup: shard-telemetry
-      infrastructure_provisioning_release: 2022-11
-      infrastructure_provisioning: shard
-      workload_setup: 2022-11
-      platform: linux
-      project_dir: *project_dir
-      authentication: enabled
-      storageEngine: wiredTiger
-      compile_variant: "-arm64"
-    run_on:
-      - "rhel70-perf-shard"
-    depends_on: *_compile_amazon_linux2_arm64
-    tasks:
-      - name: schedule_patch_auto_tasks
-      - name: schedule_variant_auto_tasks
-      - name: crud_workloads_majority
-      - name: crud_workloads_w1
-      - name: mixed_workloads
 
   - name: linux-1-node-replSet-all-feature-flags.2022-11
     display_name: Linux 1-Node ReplSet (all feature flags) 2022-11
@@ -2180,7 +2093,7 @@ buildvariants:
 
   - name: linux-1-node-replSet.2022-11
     display_name: Linux 1-Node ReplSet 2022-11
-    cron: "0 0 * * 4"  # 00:00 on Thursday
+    cron: &linux-1-node-repl-cron "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2294,6 +2207,33 @@ buildvariants:
       - "rhel70-perf-single"
     depends_on: *_compile_amazon_linux2_arm64
     tasks: *audit-tasks
+
+  - name: linux-1-node-replSet-telemetry
+    display_name: Linux 1-Node ReplSet 2022-11 (Telemetry)
+    cron: *linux-1-node-repl-cron
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: single-replica-telemetry
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: single
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+      compile_variant: "-arm64"
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon_linux2_arm64
+    tasks:
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: ycsb_60GB
+      - name: ycsb_60GB.long
+      - name: crud_workloads_majority
+      - name: mixed_workloads
+      - name: tpcc
 
   - name: linux-shard-lite-fle.2022-11
     display_name: Linux Shard Lite FLE 2022-11
@@ -2471,7 +2411,7 @@ buildvariants:
 
   - name: linux-3-shard.2022-11
     display_name: Linux 3-Shard Cluster 2022-11
-    cron: "0 0 * * 4"  # 00:00 on Thursday
+    cron: &linux-3-shard-cron "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2508,6 +2448,31 @@ buildvariants:
       - name: tsbs_query_finance_sharded
       - name: tsbs_query_sharded_balancer
       - name: tsbs_query_finance_sharded_balancer
+
+  - name: linux-3-shard-telemetry
+    display_name: Linux 3-Shard Cluster 2022-11 (Telemetry)
+    cron: *linux-3-shard-cron
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: shard-telemetry
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: shard
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+      compile_variant: "-arm64"
+    run_on:
+      - "rhel70-perf-shard"
+    depends_on: *_compile_amazon_linux2_arm64
+    tasks:
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: crud_workloads_majority
+      - name: crud_workloads_w1
+      - name: mixed_workloads
 
   - name: linux-shard-lite-audit.2022-11
     display_name: Linux Shard Lite Cluster Audit 2022-11
@@ -2679,7 +2644,7 @@ buildvariants:
 
   - name: linux-3-node-replSet.2022-11
     display_name: Linux 3-Node ReplSet 2022-11
-    cron: "0 0 * * 1,2,3,4,5,6"  # Everyday except Sunday at 00:00
+    cron: &linux-3-node-cron "0 0 * * 1,2,3,4,5,6"  # Everyday except Sunday at 00:00
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3124,10 +3089,38 @@ buildvariants:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
 
+  - name: linux-3-node-replSet-telemetry
+    display_name: Linux 3-Node ReplSet 2022-11 (Telemetry)
+    cron: *linux-3-node-cron
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: replica-telemetry
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: replica
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+      compile_variant: "-arm64"
+    run_on:
+      - "rhel70-perf-replset"
+    depends_on: *_compile_amazon_linux2_arm64
+    tasks:
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: ycsb_60GB
+      - name: ycsb_60GB.long
+      - name: crud_workloads_majority
+      - name: crud_workloads_w1
+      - name: mixed_workloads
+      - name: tpcc
+
   - &linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-arm.2023-01
     display_name: MicroBenchmarks Arm Standalone inMemory.2023-01
-    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     modules: *modules
     expansions: &standalone-arm-expansions
       mongodb_setup_release: 2022-11
@@ -3142,7 +3135,7 @@ buildvariants:
       project_dir: *project_dir
       compile_variant: "-arm64"
     run_on:
-    - "rhel70-perf-single"
+    - "rhel70-perf-microbenchmarks"
     depends_on: *_compile_amazon_linux2_arm64
     tasks:
     - name: big_collection
@@ -3176,7 +3169,7 @@ buildvariants:
   - &linux-microbenchmarks-repl-arm
     name: linux-microbenchmarks-repl-arm.2023-01
     display_name: MicroBenchmarks Arm 1-Node ReplSet inMemory.2023-01
-    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     modules: *modules
     expansions: &repl-arm-expansions
       mongodb_setup_release: 2022-11
@@ -3191,7 +3184,7 @@ buildvariants:
       project_dir: *project_dir
       compile_variant: "-arm64"
     run_on:
-    - "rhel70-perf-single"
+    - "rhel70-perf-microbenchmarks"
     depends_on: *_compile_amazon_linux2_arm64
     tasks:
     - name: genny_scale_InsertRemove
@@ -3205,7 +3198,7 @@ buildvariants:
   - <<: *linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-all-feature-flags-arm.2023-01
     display_name: MicroBenchmarks Arm Standalone inMemory (all feature flags).2023-01
-    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     expansions:
       <<: *standalone-arm-expansions
       mongodb_setup: mongo-perf-standalone-all-feature-flags.2023-02
@@ -3266,7 +3259,7 @@ buildvariants:
   - <<: *linux-microbenchmarks-repl-arm
     name: linux-microbenchmarks-repl-all-feature-flags-arm.2023-01
     display_name: MicroBenchmarks Arm 1-Node ReplSet inMemory (all feature flags).2023-01
-    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     expansions:
       <<: *repl-arm-expansions
       mongodb_setup: mongo-perf-replica-all-feature-flags.2023-02
@@ -3278,13 +3271,13 @@ buildvariants:
     <<: *linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-intel.2023-01
     display_name: MicroBenchmarks Intel Standalone inMemory.2023-01
-    cron: "0 */12 * * *" # Every 12 hours starting at midnight
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     expansions: &standalone-intel-expansions
       <<: *standalone-arm-expansions
       infrastructure_provisioning: workload_client_mongod_combined_intel.2023-01
       compile_variant: ""
     run_on:
-    - "rhel70-perf-single"
+    - "rhel70-perf-microbenchmarks"
     depends_on: *_compile_amazon2
     # yaml does not nicely merge arrays, so DO NOT ADD INDIVIDUAL TASKS HERE.
     # Add tasks to the anchor that this variant references
@@ -3294,13 +3287,13 @@ buildvariants:
     <<: *linux-microbenchmarks-repl-arm
     name: linux-microbenchmarks-repl-intel.2023-01
     display_name: MicroBenchmarks Intel 1-Node ReplSet inMemory.2023-01
-    cron: "0 */12 * * *" # Every 12 hours starting at midnight
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     expansions: &repl-intel-expansions
       <<: *repl-arm-expansions
       infrastructure_provisioning: workload_client_mongod_combined_intel.2023-01
       compile_variant: ""
     run_on:
-    - "rhel70-perf-single"
+    - "rhel70-perf-microbenchmarks"
     depends_on: *_compile_amazon2
     # yaml does not nicely merge arrays, so DO NOT ADD INDIVIDUAL TASKS HERE.
     # Add tasks to the anchor that this variant references
@@ -3309,7 +3302,7 @@ buildvariants:
   - <<: *linux-microbenchmarks-standalone-intel
     name: linux-microbenchmarks-standalone-all-feature-flags.2023-01
     display_name: MicroBenchmarks Intel Standalone inMemory (all feature flags).2023-01
-    cron: "0 */12 * * *" # Every 12 hours starting at midnight
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     expansions:
       <<: *standalone-intel-expansions
       mongodb_setup: mongo-perf-standalone-all-feature-flags.2023-02
@@ -3345,7 +3338,7 @@ buildvariants:
   - <<: *linux-microbenchmarks-repl-intel
     name: linux-microbenchmarks-repl-all-feature-flags.2023-01
     display_name: MicroBenchmarks Intel 1-Node ReplSet inMemory (all feature flags).2023-01
-    cron: "0 */12 * * *" # Every 12 hours starting at midnight
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     expansions:
       <<: *repl-intel-expansions
       mongodb_setup: mongo-perf-replica-all-feature-flags.2023-02

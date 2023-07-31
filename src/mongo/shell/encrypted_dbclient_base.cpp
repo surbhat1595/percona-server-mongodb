@@ -548,7 +548,7 @@ boost::optional<EncryptedFieldConfig> EncryptedDBClientBase::getEncryptedFieldCo
     const NamespaceString& nss) {
     auto collsList = _conn->getCollectionInfos(nss.dbName(), BSON("name" << nss.coll()));
     uassert(ErrorCodes::BadValue,
-            str::stream() << "Namespace not found: " << nss.toString(),
+            str::stream() << "Namespace not found: " << nss.toStringForErrorMsg(),
             !collsList.empty());
     auto info = collsList.front();
     auto opts = info.getField("options");
@@ -607,9 +607,10 @@ void EncryptedDBClientBase::cleanup(JSContext* cx, JS::CallArgs args) {
     builder.append("cleanupTokens",
                    efc ? FLEClientCrypto::generateCompactionTokens(*efc, this) : BSONObj());
 
-    // TODO SERVER-72937: Add call to cleanup function
-    mozjs::ValueReader(cx, args.rval()).fromBSON(BSONObj(), nullptr, false);
-    return;
+    BSONObj reply;
+    runCommand(nss.dbName(), builder.obj(), reply, 0);
+    reply = reply.getOwned();
+    mozjs::ValueReader(cx, args.rval()).fromBSON(reply, nullptr, false);
 }
 
 void EncryptedDBClientBase::trace(JSTracer* trc) {

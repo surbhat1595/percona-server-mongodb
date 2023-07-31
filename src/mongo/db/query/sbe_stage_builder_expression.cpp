@@ -820,7 +820,36 @@ public:
     }
 
     void visit(const ExpressionArray* expr) final {
-        unsupportedExpression(expr->getOpName());
+        auto arity = expr->getChildren().size();
+        _context->ensureArity(arity);
+
+        if (arity == 0) {
+            auto [emptyArrTag, emptyArrVal] = sbe::value::makeNewArray();
+            pushABT(makeABTConstant(emptyArrTag, emptyArrVal));
+            return;
+        }
+
+        std::vector<std::pair<optimizer::ProjectionName, optimizer::ABT>> binds;
+        for (size_t idx = 0; idx < arity; ++idx) {
+            binds.emplace_back(makeLocalVariableName(_context->state.frameId(), 0),
+                               _context->popABTExpr());
+        }
+        std::reverse(std::begin(binds), std::end(binds));
+
+        optimizer::ABTVector argVars;
+        for (auto& bind : binds) {
+            argVars.push_back(makeFillEmptyNull(makeVariable(bind.first)));
+        }
+
+        auto arrayExpr = optimizer::make<optimizer::FunctionCall>("newArray", std::move(argVars));
+
+        for (auto it = binds.begin(); it != binds.end(); it++) {
+            arrayExpr = optimizer::make<optimizer::Let>(
+                it->first, std::move(it->second), std::move(arrayExpr));
+        }
+
+        pushABT(std::move(arrayExpr));
+        return;
     }
     void visit(const ExpressionArrayElemAt* expr) final {
         unsupportedExpression(expr->getOpName());
@@ -2852,42 +2881,7 @@ public:
         unsupportedExpression(expr->getOpName());
     }
     void visit(const ExpressionRound* expr) final {
-        invariant(expr->getChildren().size() == 1 || expr->getChildren().size() == 2);
-        const bool hasPlaceArg = expr->getChildren().size() == 2;
-        _context->ensureArity(expr->getChildren().size());
-
-        auto inputNumName = makeLocalVariableName(_context->state.frameId(), 0);
-        auto inputPlaceName = makeLocalVariableName(_context->state.frameId(), 0);
-
-        // We always need to validate the number parameter, since it will always exist.
-        std::vector<ABTCaseValuePair> inputValidationCases{
-            generateABTReturnNullIfNullOrMissing(makeVariable(inputNumName)),
-            ABTCaseValuePair{
-                generateABTNonNumericCheck(inputNumName),
-                makeABTFail(ErrorCodes::Error{5155300}, "$round only supports numeric types")}};
-        // Only add these cases if we have a "place" argument.
-        if (hasPlaceArg) {
-            inputValidationCases.emplace_back(
-                generateABTReturnNullIfNullOrMissing(makeVariable(inputPlaceName)));
-            inputValidationCases.emplace_back(
-                generateInvalidRoundPlaceArgCheck(inputPlaceName),
-                makeABTFail(ErrorCodes::Error{5155301},
-                            "$round requires \"place\" argument to be "
-                            "an integer between -20 and 100"));
-        }
-
-        auto roundExpr = buildABTMultiBranchConditionalFromCaseValuePairs(
-            std::move(inputValidationCases),
-            makeABTFunction("round"_sd, makeVariable(inputNumName), makeVariable(inputPlaceName)));
-
-        // "place" argument defaults to 0.
-        auto placeABT = hasPlaceArg ? _context->popABTExpr() : optimizer::Constant::int32(0);
-        auto inputABT = _context->popABTExpr();
-        pushABT(optimizer::make<optimizer::Let>(
-            std::move(inputNumName),
-            std::move(inputABT),
-            optimizer::make<optimizer::Let>(
-                std::move(inputPlaceName), std::move(placeABT), std::move(roundExpr))));
+        visitRoundTruncExpression(expr);
     }
     void visit(const ExpressionSplit* expr) final {
         invariant(expr->getChildren().size() == 2);
@@ -3034,7 +3028,7 @@ public:
         unsupportedExpression("$trim");
     }
     void visit(const ExpressionTrunc* expr) final {
-        unsupportedExpression(expr->getOpName());
+        visitRoundTruncExpression(expr);
     }
     void visit(const ExpressionType* expr) final {
         unsupportedExpression(expr->getOpName());
@@ -3274,6 +3268,56 @@ public:
     }
 
 private:
+    /**
+     * Shared logic for $round and $trunc expressions
+     */
+    template <typename ExprType>
+    void visitRoundTruncExpression(const ExprType* expr) {
+        const std::string opName(expr->getOpName());
+        invariant(opName == "$round" || opName == "$trunc");
+
+        const auto& children = expr->getChildren();
+        invariant(children.size() == 1 || children.size() == 2);
+        const bool hasPlaceArg = (children.size() == 2);
+        _context->ensureArity(children.size());
+
+        auto inputNumName = makeLocalVariableName(_context->state.frameId(), 0);
+        auto inputPlaceName = makeLocalVariableName(_context->state.frameId(), 0);
+
+        // We always need to validate the number parameter, since it will always exist.
+        std::vector<ABTCaseValuePair> inputValidationCases{
+            generateABTReturnNullIfNullOrMissing(makeVariable(inputNumName)),
+            ABTCaseValuePair{
+                generateABTNonNumericCheck(inputNumName),
+                makeABTFail(ErrorCodes::Error{5155300}, opName + " only supports numeric types")}};
+        // Only add these cases if we have a "place" argument.
+        if (hasPlaceArg) {
+            inputValidationCases.emplace_back(
+                generateABTReturnNullIfNullOrMissing(makeVariable(inputPlaceName)));
+            inputValidationCases.emplace_back(generateInvalidRoundPlaceArgCheck(inputPlaceName),
+                                              makeABTFail(ErrorCodes::Error{5155301},
+                                                          opName +
+                                                              " requires \"place\" argument to be "
+                                                              "an integer between -20 and 100"));
+        }
+
+        optimizer::ABT abtExpr = buildABTMultiBranchConditionalFromCaseValuePairs(
+            std::move(inputValidationCases),
+            makeABTFunction((opName == "$round" ? "round"_sd : "trunc"_sd),
+                            makeVariable(inputNumName),
+                            makeVariable(inputPlaceName)));
+
+        // "place" argument defaults to 0.
+        optimizer::ABT placeABT =
+            hasPlaceArg ? _context->popABTExpr() : optimizer::Constant::int32(0);
+        optimizer::ABT inputABT = _context->popABTExpr();
+        pushABT(optimizer::make<optimizer::Let>(
+            std::move(inputNumName),
+            std::move(inputABT),
+            optimizer::make<optimizer::Let>(
+                std::move(inputPlaceName), std::move(placeABT), std::move(abtExpr))));
+    }
+
     /**
      * Shared logic for $and, $or. Converts each child into an EExpression that evaluates to Boolean
      * true or false, based on MQL rules for $and and $or branches, and then chains the branches

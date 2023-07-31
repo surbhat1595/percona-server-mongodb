@@ -506,11 +506,11 @@ public:
                                    const BSONObj& expectedDoc) {
         OneOffRead oor(_opCtx, ts);
         if (expectedDoc.isEmpty()) {
-            ASSERT_EQ(0, itCount(coll))
-                << "Should not find any documents in " << coll->ns() << " at ts: " << ts;
+            ASSERT_EQ(0, itCount(coll)) << "Should not find any documents in "
+                                        << coll->ns().toStringForErrorMsg() << " at ts: " << ts;
         } else {
-            ASSERT_EQ(1, itCount(coll))
-                << "Should find one document in " << coll->ns() << " at ts: " << ts;
+            ASSERT_EQ(1, itCount(coll)) << "Should find one document in "
+                                        << coll->ns().toStringForErrorMsg() << " at ts: " << ts;
             auto doc = findOne(coll);
             ASSERT_EQ(0, SimpleBSONObjComparator::kInstance.compare(doc, expectedDoc))
                 << "Doc: " << doc.toString() << " Expected: " << expectedDoc.toString();
@@ -525,11 +525,12 @@ public:
         BSONObj doc;
         bool found = Helpers::findOne(_opCtx, coll, query, doc);
         if (!expectedDoc) {
-            ASSERT_FALSE(found) << "Should not find any documents in " << coll->ns() << " matching "
-                                << query << " at ts: " << ts;
+            ASSERT_FALSE(found) << "Should not find any documents in "
+                                << coll->ns().toStringForErrorMsg() << " matching " << query
+                                << " at ts: " << ts;
         } else {
-            ASSERT(found) << "Should find document in " << coll->ns() << " matching " << query
-                          << " at ts: " << ts;
+            ASSERT(found) << "Should find document in " << coll->ns().toStringForErrorMsg()
+                          << " matching " << query << " at ts: " << ts;
             ASSERT_BSONOBJ_EQ(doc, *expectedDoc);
         }
     }
@@ -593,10 +594,11 @@ public:
         auto found = std::find(idents.begin(), idents.end(), expectedIdent);
 
         if (shouldExpect) {
-            ASSERT(found != idents.end()) << nss.ns() << " was not found at " << ts.toString();
+            ASSERT(found != idents.end())
+                << nss.toStringForErrorMsg() << " was not found at " << ts.toString();
         } else {
-            ASSERT(found == idents.end()) << nss.ns() << " was found at " << ts.toString()
-                                          << " when it should not have been.";
+            ASSERT(found == idents.end()) << nss.toStringForErrorMsg() << " was found at "
+                                          << ts.toString() << " when it should not have been.";
         }
     }
 
@@ -1135,7 +1137,7 @@ TEST_F(StorageTimestampTest, SecondaryCreateTwoCollections) {
 
     BSONObjBuilder resultBuilder;
     auto swResult =
-        doApplyOps(DatabaseName(dbName),
+        doApplyOps(DatabaseName::createDatabaseName_forTest(boost::none, dbName),
                    {
                        BSON("ts" << _presentTs << "t" << 1LL << "op"
                                  << "c"
@@ -1408,7 +1410,7 @@ TEST_F(StorageTimestampTest, SecondarySetWildcardIndexMultikeyOnInsert) {
         _coordinatorMock,
         _consistencyMarkers,
         storageInterface,
-        repl::OplogApplier::Options(repl::OplogApplication::Mode::kStableRecovering),
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kRecovering),
         writerPool.get());
 
     uassertStatusOK(oplogApplier.applyOplogBatch(_opCtx, ops));
@@ -1507,7 +1509,7 @@ TEST_F(StorageTimestampTest, SecondarySetWildcardIndexMultikeyOnUpdate) {
         _coordinatorMock,
         _consistencyMarkers,
         storageInterface,
-        repl::OplogApplier::Options(repl::OplogApplication::Mode::kStableRecovering),
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kRecovering),
         writerPool.get());
 
     uassertStatusOK(oplogApplier.applyOplogBatch(_opCtx, ops));
@@ -2211,7 +2213,7 @@ TEST_F(StorageTimestampTest, TimestampMultiIndexBuildsDuringRename) {
     // Rename collection.
     BSONObj renameResult;
     ASSERT(client.runCommand(
-        DatabaseName(boost::none, "admin"),
+        DatabaseName::kAdmin,
         BSON("renameCollection" << nss.ns() << "to" << renamedNss.ns() << "dropTarget" << true),
         renameResult))
         << renameResult;
@@ -2957,8 +2959,8 @@ TEST_F(StorageTimestampTest, ViewCreationSeparateTransaction) {
 
     const NamespaceString viewNss =
         NamespaceString::createNamespaceString_forTest("unittests.view");
-    const NamespaceString systemViewsNss =
-        NamespaceString::makeSystemDotViewsNamespace({boost::none, "unittests"});
+    const NamespaceString systemViewsNss = NamespaceString::makeSystemDotViewsNamespace(
+        DatabaseName::createDatabaseName_forTest(boost::none, "unittests"));
 
     ASSERT_OK(createCollection(_opCtx,
                                viewNss.dbName(),
@@ -2985,7 +2987,7 @@ TEST_F(StorageTimestampTest, ViewCreationSeparateTransaction) {
         auto systemViewsMd = getMetaDataAtTime(
             durableCatalog, catalogId, Timestamp(systemViewsCreateTs.asULL() - 1));
         ASSERT(systemViewsMd == nullptr)
-            << systemViewsNss
+            << systemViewsNss.toStringForErrorMsg()
             << " incorrectly exists before creation. CreateTs: " << systemViewsCreateTs;
 
         systemViewsMd = getMetaDataAtTime(durableCatalog, catalogId, systemViewsCreateTs);
@@ -3244,7 +3246,8 @@ TEST_F(RetryableFindAndModifyTest, RetryableFindAndModifyUpdate) {
             Snapshotted<BSONObj>(_opCtx->recoveryUnit()->getSnapshotId(), oldObj),
             newObj,
             collection_internal::kUpdateNoIndexes,
-            nullptr,
+            nullptr /* indexesAffected */,
+            nullptr /* opDebug */,
             &args);
         wuow.commit();
     }
@@ -3304,7 +3307,8 @@ TEST_F(RetryableFindAndModifyTest, RetryableFindAndModifyUpdateWithDamages) {
                                                            source,
                                                            damages,
                                                            collection_internal::kUpdateNoIndexes,
-                                                           nullptr,
+                                                           nullptr /* indexesAffected */,
+                                                           nullptr /* opDebug */,
                                                            &args);
         wuow.commit();
         ASSERT_OK(statusWith.getStatus());

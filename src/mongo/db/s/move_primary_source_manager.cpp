@@ -104,7 +104,7 @@ Status MovePrimarySourceManager::clone(OperationContext* opCtx) {
         // We use AutoGetDb::ensureDbExists() the first time just in case movePrimary was called
         // before any data was inserted into the database.
         AutoGetDb autoDb(opCtx, getNss().dbName(), MODE_X);
-        invariant(autoDb.ensureDbExists(opCtx), getNss().toString());
+        invariant(autoDb.ensureDbExists(opCtx), getNss().toStringForErrorMsg());
 
         auto scopedDss =
             DatabaseShardingState::assertDbLockedAndAcquireExclusive(opCtx, getNss().dbName());
@@ -171,7 +171,7 @@ Status MovePrimarySourceManager::enterCriticalSection(OperationContext* opCtx) {
 
         if (!autoDb.getDb()) {
             uasserted(ErrorCodes::ConflictingOperationInProgress,
-                      str::stream() << "The database " << getNss().toString()
+                      str::stream() << "The database " << getNss().toStringForErrorMsg()
                                     << " was dropped during the movePrimary operation.");
         }
 
@@ -222,7 +222,7 @@ Status MovePrimarySourceManager::commitOnConfig(OperationContext* opCtx) {
 
         if (!autoDb.getDb()) {
             uasserted(ErrorCodes::ConflictingOperationInProgress,
-                      str::stream() << "The database " << getNss().toString()
+                      str::stream() << "The database " << getNss().toStringForErrorMsg()
                                     << " was dropped during the movePrimary operation.");
         }
 
@@ -282,7 +282,7 @@ Status MovePrimarySourceManager::commitOnConfig(OperationContext* opCtx) {
 
             if (!autoDb.getDb()) {
                 uasserted(ErrorCodes::ConflictingOperationInProgress,
-                          str::stream() << "The database " << getNss().toString()
+                          str::stream() << "The database " << getNss().toStringForErrorMsg()
                                         << " was dropped during the movePrimary operation.");
             }
 
@@ -292,10 +292,10 @@ Status MovePrimarySourceManager::commitOnConfig(OperationContext* opCtx) {
                 scopedDss->clearDbInfo(opCtx);
                 uassertStatusOK(validateStatus.withContext(
                     str::stream() << "Unable to verify movePrimary commit for database: "
-                                  << getNss().ns()
+                                  << getNss().toStringForErrorMsg()
                                   << " because the node's replication role changed. Version "
                                      "was cleared for: "
-                                  << getNss().ns()
+                                  << getNss().toStringForErrorMsg()
                                   << ", so it will get a full refresh when accessed again."));
             }
         }
@@ -305,8 +305,9 @@ Status MovePrimarySourceManager::commitOnConfig(OperationContext* opCtx) {
         // OpTime.
         fassert(50762,
                 validateStatus.withContext(
-                    str::stream() << "Failed to commit movePrimary for database " << getNss().ns()
-                                  << " due to " << redact(commitStatus)
+                    str::stream() << "Failed to commit movePrimary for database "
+                                  << getNss().toStringForErrorMsg() << " due to "
+                                  << redact(commitStatus)
                                   << ". Updating the optime with a write before clearing the "
                                   << "version also failed"));
 
@@ -345,7 +346,8 @@ Status MovePrimarySourceManager::_commitOnConfig(OperationContext* opCtx,
     notifyChangeStreamsOnMovePrimary(opCtx, getNss().dbName(), _fromShard, _toShard);
 
     const auto commitStatus = [&] {
-        ConfigsvrCommitMovePrimary commitRequest(_dbname, expectedDbVersion, _toShard);
+        ConfigsvrCommitMovePrimary commitRequest(
+            DatabaseName{_dbname}, expectedDbVersion, _toShard);
         commitRequest.setDbName(DatabaseName::kAdmin);
 
         const auto commitResponse =
@@ -465,7 +467,7 @@ Status MovePrimarySourceManager::cleanStaleData(OperationContext* opCtx) {
     DBDirectClient client(opCtx);
     for (auto& coll : _clonedColls) {
         BSONObj dropCollResult;
-        client.runCommand(_dbname, BSON("drop" << coll.coll()), dropCollResult);
+        client.runCommand(DatabaseName{_dbname}, BSON("drop" << coll.coll()), dropCollResult);
         Status dropStatus = getStatusFromCommandResult(dropCollResult);
         if (!dropStatus.isOK()) {
             LOGV2(22045,

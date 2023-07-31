@@ -65,11 +65,11 @@ sh._writeBalancerStateDeprecated = function(onOrNot) {
  * Asserts the specified command is executed successfully. However, if a retryable error occurs, the
  * command is retried.
  */
-sh._assertRetryableCommandWorked = function(cmd, msg) {
+sh.assertRetryableCommandWorkedOrFailedWithCodes = function(cmd, msg, expectedErrorCodes = []) {
     var res = undefined;
     assert.soon(function() {
         try {
-            res = cmd();
+            res = assert.commandWorked(cmd());
             return true;
         } catch (err) {
             if (err instanceof WriteError && ErrorCodes.isRetriableError(err.code)) {
@@ -83,6 +83,9 @@ sh._assertRetryableCommandWorked = function(cmd, msg) {
                     ErrorCodes.isRetriableError(err.getWriteConcernError().code)) {
                     return false;
                 }
+            }
+            if (expectedErrorCodes.includes(err.code)) {
+                return true;
             }
             throw err;
         }
@@ -267,8 +270,8 @@ sh.disableAutoMerge = function(coll) {
         sh._checkMongos();
     }
 
-    return sh._assertRetryableCommandWorked(() => {
-        dbase.getSiblingDB("config").collections.update(
+    return sh.assertRetryableCommandWorkedOrFailedWithCodes(() => {
+        return dbase.getSiblingDB("config").collections.update(
             {_id: coll + ""},
             {$set: {"enableAutoMerge": false}},
             {writeConcern: {w: 'majority', wtimeout: 60000}});
@@ -286,8 +289,8 @@ sh.enableAutoMerge = function(coll) {
         sh._checkMongos();
     }
 
-    return sh._assertRetryableCommandWorked(() => {
-        dbase.getSiblingDB("config").collections.update(
+    return sh.assertRetryableCommandWorkedOrFailedWithCodes(() => {
+        return dbase.getSiblingDB("config").collections.update(
             {_id: coll + ""},
             {$unset: {"enableAutoMerge": 1}},
             {writeConcern: {w: 'majority', wtimeout: 60000}});
@@ -365,8 +368,8 @@ sh.disableBalancing = function(coll) {
         sh._checkMongos();
     }
 
-    return sh._assertRetryableCommandWorked(() => {
-        dbase.getSiblingDB("config").collections.update(
+    return sh.assertRetryableCommandWorkedOrFailedWithCodes(() => {
+        return dbase.getSiblingDB("config").collections.update(
             {_id: coll + ""},
             {$set: {"noBalance": true}},
             {writeConcern: {w: 'majority', wtimeout: 60000}});
@@ -384,8 +387,8 @@ sh.enableBalancing = function(coll) {
         sh._checkMongos();
     }
 
-    return sh._assertRetryableCommandWorked(() => {
-        dbase.getSiblingDB("config").collections.update(
+    return sh.assertRetryableCommandWorkedOrFailedWithCodes(() => {
+        return dbase.getSiblingDB("config").collections.update(
             {_id: coll + ""},
             {$set: {"noBalance": false}},
             {writeConcern: {w: 'majority', wtimeout: 60000}});

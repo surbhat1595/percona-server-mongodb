@@ -195,7 +195,11 @@ let testCases = {
     _shardsvrCollMod: {skip: "internal command"},
     _shardsvrCollModParticipant: {skip: "internal command"},
     _shardsvrParticipantBlock: {skip: "internal command"},
-    _startStreamProcessor: {skip: "internal command"},
+    streams_startStreamProcessor: {skip: "internal command"},
+    streams_startStreamSample: {skip: "internal command"},
+    streams_stopStreamProcessor: {skip: "internal command"},
+    streams_getMoreStreamSample: {skip: "internal command"},
+    streams_testOnlyInsert: {skip: "internal command"},
     _transferMods: {skip: "internal command"},
     _vectorClockPersist: {skip: "internal command"},
     abortReshardCollection: {skip: "does not accept read or write concern"},
@@ -260,6 +264,7 @@ let testCases = {
     checkShardingIndex: {skip: "does not accept read or write concern"},
     cleanupOrphaned: {skip: "only on shard server"},
     cleanupReshardCollection: {skip: "does not accept read or write concern"},
+    cleanupStructuredEncryptionData: {skip: "does not accept read or write concern"},
     clearJumboFlag: {skip: "does not accept read or write concern"},
     clearLog: {skip: "does not accept read or write concern"},
     clone: {skip: "deprecated"},
@@ -509,23 +514,7 @@ let testCases = {
     getLog: {skip: "does not accept read or write concern"},
     getMore: {skip: "does not accept read or write concern"},
     getParameter: {skip: "does not accept read or write concern"},
-    getQueryableEncryptionCountInfo: {
-        // TODO SERVER-75631 - Enable this test once the feature flag is gone
-        skip: "requires feature flag"
-        // setUp: function(conn) {
-        //     assert.commandWorked(conn.getCollection(nss).insert({x: 1}, {writeConcern: {w: 1}}));
-        // },
-        // command: {
-        //     getQueryableEncryptionCountInfo: coll,
-        //     tokens: [
-        //         {tokens: [{"s": BinData(0, "lUBO7Mov5Sb+c/D4cJ9whhhw/+PZFLCk/AQU2+BpumQ=")}]},
-        //     ],
-        //     "forInsert": true,
-        // },
-        // checkReadConcern: true,
-        // checkWriteConcern: false,
-        // useLogs: true,
-    },
+    getQueryableEncryptionCountInfo: {skip: "not profiled or logged"},
     getShardMap: {skip: "internal command"},
     getShardVersion: {skip: "internal command"},
     getnonce: {skip: "removed in v6.3"},

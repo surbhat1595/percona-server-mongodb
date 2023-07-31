@@ -190,12 +190,8 @@ public:
         OperationContext* opCtx, UncommittedCatalogUpdates& uncommittedCatalogUpdates) {
         if (opCtx->recoveryUnit()->hasRegisteredChangeForCatalogVisibility())
             return;
-        // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-        if (feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
-            opCtx->recoveryUnit()->registerPreCommitHook(
-                [](OperationContext* opCtx) { PublishCatalogUpdates::preCommit(opCtx); });
-        }
-
+        opCtx->recoveryUnit()->registerPreCommitHook(
+            [](OperationContext* opCtx) { PublishCatalogUpdates::preCommit(opCtx); });
         opCtx->recoveryUnit()->registerChangeForCatalogVisibility(
             std::make_unique<PublishCatalogUpdates>(uncommittedCatalogUpdates));
     }
@@ -304,7 +300,6 @@ public:
                     writeJobs.push_back(
                         [coll = entry.collection.get(), commitTime](CollectionCatalog& catalog) {
                             if (commitTime) {
-                                coll->setMinimumVisibleSnapshot(commitTime.value());
                                 coll->setMinimumValidSnapshot(commitTime.value());
                             }
                             catalog._pushCatalogIdForNSSAndUUID(
@@ -365,10 +360,6 @@ public:
 
     void rollback(OperationContext* opCtx) override {
         auto entries = _uncommittedCatalogUpdates.releaseEntries();
-        // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-        if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe())
-            return;
-
         if (std::none_of(
                 entries.begin(), entries.end(), UncommittedCatalogUpdates::isTwoPhaseCommitEntry)) {
             // Nothing to do, avoid calling CollectionCatalog::write.
@@ -719,7 +710,8 @@ Status CollectionCatalog::modifyView(
     auto viewPtr = viewsForDb.lookup(viewName);
     if (!viewPtr)
         return Status(ErrorCodes::NamespaceNotFound,
-                      str::stream() << "cannot modify missing view " << viewName.ns());
+                      str::stream()
+                          << "cannot modify missing view " << viewName.toStringForErrorMsg());
 
     if (!NamespaceString::validCollectionName(viewOn.coll()))
         return Status(ErrorCodes::InvalidNamespace,
@@ -835,11 +827,6 @@ const Collection* CollectionCatalog::establishConsistentCollection(
 bool CollectionCatalog::_needsOpenCollection(OperationContext* opCtx,
                                              const NamespaceStringOrUUID& nsOrUUID,
                                              boost::optional<Timestamp> readTimestamp) const {
-    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-    if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
-        return false;
-    }
-
     // Don't need to open the collection if it was already previously instantiated.
     if (nsOrUUID.nss()) {
         if (OpenedCollections::get(opCtx).lookupByNamespace(*nsOrUUID.nss())) {
@@ -867,11 +854,6 @@ const Collection* CollectionCatalog::_openCollection(
     OperationContext* opCtx,
     const NamespaceStringOrUUID& nssOrUUID,
     boost::optional<Timestamp> readTimestamp) const {
-    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-    if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
-        return nullptr;
-    }
-
     // The implementation of openCollection() is quite different at a timestamp compared to at
     // latest. Separated the implementation into helper functions and we call the right one
     // depending on the input parameters.
@@ -1331,7 +1313,7 @@ void CollectionCatalog::onCreateCollection(OperationContext* opCtx,
     auto [found, existingColl, newColl] =
         UncommittedCatalogUpdates::lookupCollection(opCtx, coll->ns());
     uassert(31370,
-            str::stream() << "collection already exists. ns: " << coll->ns(),
+            str::stream() << "collection already exists. ns: " << coll->ns().toStringForErrorMsg(),
             existingColl == nullptr);
 
     // When we already have a drop and recreate the collection, we want to seamlessly swap out the
@@ -1440,7 +1422,7 @@ Collection* CollectionCatalog::lookupCollectionByUUIDForMetadataWrite(OperationC
         auto nss = uncommittedPtr->ns();
         // If the collection is newly created, invariant on the collection being locked in MODE_IX.
         invariant(!newColl || opCtx->lockState()->isCollectionLockedForMode(nss, MODE_IX),
-                  nss.toString());
+                  nss.toStringForErrorMsg());
         return uncommittedPtr.get();
     }
 
@@ -1565,7 +1547,7 @@ Collection* CollectionCatalog::lookupCollectionByNamespaceForMetadataWrite(
     if (uncommittedPtr) {
         // If the collection is newly created, invariant on the collection being locked in MODE_IX.
         invariant(!newColl || opCtx->lockState()->isCollectionLockedForMode(nss, MODE_IX),
-                  nss.toString());
+                  nss.toStringForErrorMsg());
         return uncommittedPtr.get();
     }
 
@@ -1801,7 +1783,8 @@ NamespaceString CollectionCatalog::resolveNamespaceStringOrUUID(
     OperationContext* opCtx, NamespaceStringOrUUID nsOrUUID) const {
     if (auto& nss = nsOrUUID.nss()) {
         uassert(ErrorCodes::InvalidNamespace,
-                str::stream() << "Namespace " << *nss << " is not a valid collection name",
+                str::stream() << "Namespace " << (*nss).toStringForErrorMsg()
+                              << " is not a valid collection name",
                 nss->isValid());
         return std::move(*nss);
     }
@@ -1809,14 +1792,15 @@ NamespaceString CollectionCatalog::resolveNamespaceStringOrUUID(
     auto resolvedNss = lookupNSSByUUID(opCtx, *nsOrUUID.uuid());
 
     uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "Unable to resolve " << nsOrUUID.toString(),
+            str::stream() << "Unable to resolve " << nsOrUUID.toStringForErrorMsg(),
             resolvedNss && resolvedNss->isValid());
 
     uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "UUID: " << nsOrUUID.toString() << " specified in provided db name: "
+            str::stream() << "UUID: " << nsOrUUID.toStringForErrorMsg()
+                          << " specified in provided db name: "
                           << nsOrUUID.dbName()->toStringForErrorMsg()
                           << " resolved to a collection in a different database, resolved nss: "
-                          << *resolvedNss,
+                          << (*resolvedNss).toStringForErrorMsg(),
             resolvedNss->dbName() == nsOrUUID.dbName());
 
     return std::move(*resolvedNss);
@@ -2082,9 +2066,7 @@ std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(
     invariant(_collections.find(ns));
     invariant(_orderedCollections.find(dbIdPair) != _orderedCollections.end());
 
-    // TODO SERVER-68674: Remove feature flag check.
-    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-    if (feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe() && isDropPending) {
+    if (isDropPending) {
         if (auto sharedIdent = coll->getSharedIdent(); sharedIdent) {
             auto ident = sharedIdent->getIdent();
             LOGV2_DEBUG(
@@ -2155,8 +2137,9 @@ void CollectionCatalog::_ensureNamespaceDoesNotExist(OperationContext* opCtx,
         LOGV2(5725001,
               "Conflicted registering namespace, already have a collection with the same namespace",
               "nss"_attr = nss);
-        throwWriteConflictException(str::stream() << "Collection namespace '" << nss.ns()
-                                                  << "' is already in use.");
+        throwWriteConflictException(str::stream()
+                                    << "Collection namespace '" << nss.toStringForErrorMsg()
+                                    << "' is already in use.");
     }
 
     if (type == NamespaceType::kAll) {
@@ -2164,8 +2147,9 @@ void CollectionCatalog::_ensureNamespaceDoesNotExist(OperationContext* opCtx,
             LOGV2(5725002,
                   "Conflicted registering namespace, already have a view with the same namespace",
                   "nss"_attr = nss);
-            throwWriteConflictException(str::stream() << "Collection namespace '" << nss.ns()
-                                                      << "' is already in use.");
+            throwWriteConflictException(str::stream()
+                                        << "Collection namespace '" << nss.toStringForErrorMsg()
+                                        << "' is already in use.");
         }
 
         if (auto viewsForDb = _getViewsForDatabase(opCtx, nss.dbName())) {
@@ -2186,13 +2170,6 @@ void CollectionCatalog::_pushCatalogIdForNSSAndUUID(const NamespaceString& nss,
                                                     const UUID& uuid,
                                                     boost::optional<RecordId> catalogId,
                                                     boost::optional<Timestamp> ts) {
-    // TODO SERVER-68674: Remove feature flag check.
-    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-    if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
-        // No-op.
-        return;
-    }
-
     auto doPushCatalogId = [this, &ts, &catalogId](auto& catalogIdsContainer,
                                                    auto& catalogIdChangesContainer,
                                                    const auto& key) {
@@ -2270,13 +2247,6 @@ void CollectionCatalog::_pushCatalogIdForNSSAndUUID(const NamespaceString& nss,
 void CollectionCatalog::_pushCatalogIdForRename(const NamespaceString& from,
                                                 const NamespaceString& to,
                                                 boost::optional<Timestamp> ts) {
-    // TODO SERVER-68674: Remove feature flag check.
-    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-    if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
-        // No-op.
-        return;
-    }
-
     // Get 'toIds' first, it may need to instantiate in the container which invalidates all
     // references.
     auto idsWriter = _nssCatalogIds.transient();
@@ -2338,13 +2308,6 @@ void CollectionCatalog::_insertCatalogIdForNSSAndUUIDAfterScan(
     boost::optional<UUID> uuid,
     boost::optional<RecordId> catalogId,
     Timestamp ts) {
-    // TODO SERVER-68674: Remove feature flag check.
-    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-    if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
-        // No-op.
-        return;
-    }
-
     auto doInsert = [this, &catalogId, &ts](auto& catalogIdsContainer,
                                             auto& catalogIdChangesContainer,
                                             const auto& key) {
@@ -2499,14 +2462,6 @@ void CollectionCatalog::clearViews(OperationContext* opCtx, const DatabaseName& 
 void CollectionCatalog::deregisterIndex(OperationContext* opCtx,
                                         std::shared_ptr<IndexCatalogEntry> indexEntry,
                                         bool isDropPending) {
-    // TODO SERVER-68674: Remove feature flag check.
-    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-    if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe() ||
-        !isDropPending) {
-        // No-op.
-        return;
-    }
-
     // Unfinished index builds return a nullptr for getSharedIdent(). Use getIdent() instead.
     std::string ident = indexEntry->getIdent();
 
@@ -2541,13 +2496,6 @@ CollectionCatalog::iterator CollectionCatalog::end(OperationContext* opCtx) cons
 }
 
 bool CollectionCatalog::needsCleanupForOldestTimestamp(Timestamp oldest) const {
-    // TODO SERVER-68674: Remove feature flag check.
-    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-    if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
-        // No-op.
-        return false;
-    }
-
     return _lowestCatalogIdTimestampForCleanup <= oldest;
 }
 
@@ -2684,7 +2632,7 @@ void CollectionCatalog::cleanupForCatalogReopen(Timestamp stable) {
 
 void CollectionCatalog::invariantHasExclusiveAccessToCollection(OperationContext* opCtx,
                                                                 const NamespaceString& nss) {
-    invariant(hasExclusiveAccessToCollection(opCtx, nss), nss.toString());
+    invariant(hasExclusiveAccessToCollection(opCtx, nss), nss.toStringForErrorMsg());
 }
 
 bool CollectionCatalog::hasExclusiveAccessToCollection(OperationContext* opCtx,

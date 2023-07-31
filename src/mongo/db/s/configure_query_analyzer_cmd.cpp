@@ -62,7 +62,7 @@ constexpr int kMaxSampleRate = 1'000'000;
 StatusWith<UUID> validateCollectionOptionsOnPrimaryShard(OperationContext* opCtx,
                                                          const NamespaceString& nss) {
     ListCollections listCollections;
-    listCollections.setDbName(nss.db());
+    listCollections.setDbName(nss.dbName());
     listCollections.setFilter(BSON("name" << nss.coll()));
     auto listCollectionsCmdObj =
         CommandHelpers::filterCommandRequestForPassthrough(listCollections.toBSON({}));
@@ -115,7 +115,7 @@ StatusWith<UUID> validateCollectionOptionsOnPrimaryShard(OperationContext* opCtx
 
             auto info = listCollRepItem.getInfo();
             uassert(6915301,
-                    str::stream() << "The listCollections reply for '" << nss
+                    str::stream() << "The listCollections reply for '" << nss.toStringForErrorMsg()
                                   << "' does not have the 'info' field",
                     info);
             return *info->getUuid();

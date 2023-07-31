@@ -82,7 +82,7 @@ void assertNoMovePrimaryInProgress(OperationContext* opCtx, const NamespaceStrin
         LOGV2(4908600, "assertNoMovePrimaryInProgress", logAttrs(nss));
 
         uasserted(ErrorCodes::MovePrimaryInProgress,
-                  "movePrimary is in progress for namespace " + nss.toString());
+                  "movePrimary is in progress for namespace " + nss.toStringForErrorMsg());
     }
 }
 
@@ -121,7 +121,7 @@ void OpObserverShardingImpl::shardObserveInsertsOp(
 
     auto* const css = shardingWriteRouter.getCss();
     css->checkShardVersionOrThrow(opCtx);
-    DatabaseShardingState::assertMatchingDbVersion(opCtx, nss.db());
+    DatabaseShardingState::assertMatchingDbVersion(opCtx, nss.dbName());
 
     auto* const csr = checked_cast<CollectionShardingRuntime*>(css);
     auto metadata = csr->getCurrentMetadataIfKnown();
@@ -159,11 +159,10 @@ void OpObserverShardingImpl::shardObserveUpdateOp(OperationContext* opCtx,
                                                   const BSONObj& postImageDoc,
                                                   const repl::OpTime& opTime,
                                                   const ShardingWriteRouter& shardingWriteRouter,
-                                                  const repl::OpTime& prePostImageOpTime,
                                                   const bool inMultiDocumentTransaction) {
     auto* const css = shardingWriteRouter.getCss();
     css->checkShardVersionOrThrow(opCtx);
-    DatabaseShardingState::assertMatchingDbVersion(opCtx, nss.db());
+    DatabaseShardingState::assertMatchingDbVersion(opCtx, nss.dbName());
 
     auto* const csr = checked_cast<CollectionShardingRuntime*>(css);
     auto metadata = csr->getCurrentMetadataIfKnown();
@@ -186,7 +185,7 @@ void OpObserverShardingImpl::shardObserveUpdateOp(OperationContext* opCtx,
 
     auto cloner = MigrationSourceManager::getCurrentCloner(*csr);
     if (cloner) {
-        cloner->onUpdateOp(opCtx, preImageDoc, postImageDoc, opTime, prePostImageOpTime);
+        cloner->onUpdateOp(opCtx, preImageDoc, postImageDoc, opTime);
     }
 }
 
@@ -195,11 +194,10 @@ void OpObserverShardingImpl::shardObserveDeleteOp(OperationContext* opCtx,
                                                   const BSONObj& documentKey,
                                                   const repl::OpTime& opTime,
                                                   const ShardingWriteRouter& shardingWriteRouter,
-                                                  const repl::OpTime& preImageOpTime,
                                                   const bool inMultiDocumentTransaction) {
     auto* const css = shardingWriteRouter.getCss();
     css->checkShardVersionOrThrow(opCtx);
-    DatabaseShardingState::assertMatchingDbVersion(opCtx, nss.db());
+    DatabaseShardingState::assertMatchingDbVersion(opCtx, nss.dbName());
 
     auto* const csr = checked_cast<CollectionShardingRuntime*>(css);
     auto metadata = csr->getCurrentMetadataIfKnown();
@@ -222,7 +220,7 @@ void OpObserverShardingImpl::shardObserveDeleteOp(OperationContext* opCtx,
 
     auto cloner = MigrationSourceManager::getCurrentCloner(*csr);
     if (cloner && getIsMigrating(opCtx)) {
-        cloner->onDeleteOp(opCtx, documentKey, opTime, preImageOpTime);
+        cloner->onDeleteOp(opCtx, documentKey, opTime);
     }
 }
 

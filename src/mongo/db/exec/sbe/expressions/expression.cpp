@@ -644,7 +644,7 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"abs", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::abs, false}},
     {"ceil", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::ceil, false}},
     {"floor", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::floor, false}},
-    {"trunc", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::trunc, false}},
+    {"trunc", BuiltinFn{[](size_t n) { return n == 1 || n == 2; }, vm::Builtin::trunc, false}},
     {"exp", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::exp, false}},
     {"ln", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::ln, false}},
     {"log10", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::log10, false}},
@@ -767,6 +767,8 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"sortKeyComponentVectorGetElement",
      BuiltinFn{
          [](size_t n) { return n == 2; }, vm::Builtin::sortKeyComponentVectorGetElement, false}},
+    {"sortKeyComponentVectorToArray",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::sortKeyComponentVectorToArray, false}},
     {"tsSecond", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::tsSecond, false}},
     {"tsIncrement", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::tsIncrement, false}},
     {"typeMatch", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::typeMatch, false}},
@@ -779,6 +781,7 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::objectToArray, false}},
     {"arrayToObject",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::arrayToObject, false}},
+    {"array", BuiltinFn{kAnyNumberOfArgs, vm::Builtin::newArray, false}},
 };
 
 /**

@@ -127,8 +127,6 @@ StatusWith<int> StorageInterfaceImpl::getRollbackID(OperationContext* opCtx) {
 }
 
 StatusWith<int> StorageInterfaceImpl::initializeRollbackID(OperationContext* opCtx) {
-    // TODO (SERVER-71443): Fix to be interruptible or document exception.
-    UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
     auto status = createCollection(opCtx, _rollbackIdNss, CollectionOptions());
     if (!status.isOK()) {
         return status;
@@ -242,7 +240,8 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
         AutoGetCollection coll(opCtx.get(), nss, MODE_X);
         if (coll) {
             return Status(ErrorCodes::NamespaceExists,
-                          str::stream() << "Collection " << nss.ns() << " already exists.");
+                          str::stream()
+                              << "Collection " << nss.toStringForErrorMsg() << " already exists.");
         }
         {
             // Create the collection.
@@ -322,7 +321,7 @@ StatusWith<const CollectionPtr*> getCollection(const AutoGetCollectionType& auto
     const auto& collection = autoGetCollection.getCollection();
     if (!collection) {
         return {ErrorCodes::NamespaceNotFound,
-                str::stream() << "Collection [" << nsOrUUID.toString() << "] not found. "
+                str::stream() << "Collection [" << nsOrUUID.toStringForErrorMsg() << "] not found. "
                               << message};
     }
 
@@ -439,7 +438,8 @@ StatusWith<size_t> StorageInterfaceImpl::getOplogMaxSize(OperationContext* opCtx
     const auto options = oplog->getCollectionOptions();
     if (!options.capped)
         return {ErrorCodes::BadValue,
-                str::stream() << NamespaceString::kRsOplogNamespace.ns() << " isn't capped"};
+                str::stream() << NamespaceString::kRsOplogNamespace.toStringForErrorMsg()
+                              << " isn't capped"};
     return options.cappedSize;
 }
 
@@ -448,35 +448,35 @@ Status StorageInterfaceImpl::createCollection(OperationContext* opCtx,
                                               const CollectionOptions& options,
                                               const bool createIdIndex,
                                               const BSONObj& idIndexSpec) {
-    return writeConflictRetry(opCtx, "StorageInterfaceImpl::createCollection", nss.ns(), [&] {
-        AutoGetDb databaseWriteGuard(opCtx, nss.dbName(), MODE_IX);
-        auto db = databaseWriteGuard.ensureDbExists(opCtx);
-        invariant(db);
+    try {
+        return writeConflictRetry(opCtx, "StorageInterfaceImpl::createCollection", nss.ns(), [&] {
+            AutoGetDb databaseWriteGuard(opCtx, nss.dbName(), MODE_IX);
+            auto db = databaseWriteGuard.ensureDbExists(opCtx);
+            invariant(db);
 
-        // Check if there already exist a Collection/view on the given namespace 'nss'. The answer
-        // may change at any point after this call as we make this call without holding the
-        // collection lock. But, it is fine as we properly handle while registering the uncommitted
-        // collection with CollectionCatalog. This check is just here to prevent it from being
-        // created in the common case.
-        Status status = mongo::catalog::checkIfNamespaceExists(opCtx, nss);
-        if (!status.isOK()) {
-            return status;
-        }
+            // Check if there already exist a Collection/view on the given namespace 'nss'. The
+            // answer may change at any point after this call as we make this call without holding
+            // the collection lock. But, it is fine as we properly handle while registering the
+            // uncommitted collection with CollectionCatalog. This check is just here to prevent it
+            // from being created in the common case.
+            Status status = mongo::catalog::checkIfNamespaceExists(opCtx, nss);
+            if (!status.isOK()) {
+                return status;
+            }
 
-        Lock::CollectionLock lk(opCtx, nss, MODE_IX);
-        WriteUnitOfWork wuow(opCtx);
-        try {
+            Lock::CollectionLock lk(opCtx, nss, MODE_IX);
+            WriteUnitOfWork wuow(opCtx);
             auto coll = db->createCollection(opCtx, nss, options, createIdIndex, idIndexSpec);
             invariant(coll);
 
-            // This commit call can throw if a view already exists while registering the collection.
+            // This commit call can throw if a view already exists while registering the
+            // collection.
             wuow.commit();
-        } catch (const AssertionException& ex) {
-            return ex.toStatus();
-        }
-
-        return Status::OK();
-    });
+            return Status::OK();
+        });
+    } catch (const DBException& ex) {
+        return ex.toStatus();
+    }
 }
 
 Status StorageInterfaceImpl::createIndexesOnEmptyCollection(
@@ -509,21 +509,25 @@ Status StorageInterfaceImpl::createIndexesOnEmptyCollection(
 }
 
 Status StorageInterfaceImpl::dropCollection(OperationContext* opCtx, const NamespaceString& nss) {
-    return writeConflictRetry(opCtx, "StorageInterfaceImpl::dropCollection", nss.ns(), [&] {
-        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
-        Lock::CollectionLock collLock(opCtx, nss, MODE_X);
-        if (!autoDb.getDb()) {
-            // Database does not exist - nothing to do.
+    try {
+        return writeConflictRetry(opCtx, "StorageInterfaceImpl::dropCollection", nss.ns(), [&] {
+            AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
+            Lock::CollectionLock collLock(opCtx, nss, MODE_X);
+            if (!autoDb.getDb()) {
+                // Database does not exist - nothing to do.
+                return Status::OK();
+            }
+            WriteUnitOfWork wunit(opCtx);
+            const auto status = autoDb.getDb()->dropCollectionEvenIfSystem(opCtx, nss);
+            if (!status.isOK()) {
+                return status;
+            }
+            wunit.commit();
             return Status::OK();
-        }
-        WriteUnitOfWork wunit(opCtx);
-        const auto status = autoDb.getDb()->dropCollectionEvenIfSystem(opCtx, nss);
-        if (!status.isOK()) {
-            return status;
-        }
-        wunit.commit();
-        return Status::OK();
-    });
+        });
+    } catch (const DBException& ex) {
+        return ex.toStatus();
+    }
 }
 
 Status StorageInterfaceImpl::truncateCollection(OperationContext* opCtx,
@@ -553,16 +557,18 @@ Status StorageInterfaceImpl::renameCollection(OperationContext* opCtx,
     if (fromNS.db() != toNS.db()) {
         return Status(ErrorCodes::InvalidNamespace,
                       str::stream() << "Cannot rename collection between databases. From NS: "
-                                    << fromNS.ns() << "; to NS: " << toNS.ns());
+                                    << fromNS.toStringForErrorMsg()
+                                    << "; to NS: " << toNS.toStringForErrorMsg());
     }
 
     return writeConflictRetry(opCtx, "StorageInterfaceImpl::renameCollection", fromNS.ns(), [&] {
         AutoGetDb autoDB(opCtx, fromNS.dbName(), MODE_X);
         if (!autoDB.getDb()) {
             return Status(ErrorCodes::NamespaceNotFound,
-                          str::stream() << "Cannot rename collection from " << fromNS.ns() << " to "
-                                        << toNS.ns() << ". Database "
-                                        << fromNS.dbName().toStringForErrorMsg() << " not found.");
+                          str::stream()
+                              << "Cannot rename collection from " << fromNS.toStringForErrorMsg()
+                              << " to " << toNS.toStringForErrorMsg() << ". Database "
+                              << fromNS.dbName().toStringForErrorMsg() << " not found.");
         }
         WriteUnitOfWork wunit(opCtx);
         const auto status = autoDB.getDb()->renameCollection(opCtx, fromNS, toNS, stayTemp);
@@ -583,8 +589,9 @@ Status StorageInterfaceImpl::setIndexIsMultikey(OperationContext* opCtx,
                                                 Timestamp ts) {
     if (ts.isNull()) {
         return Status(ErrorCodes::InvalidOptions,
-                      str::stream() << "Cannot set index " << indexName << " on " << nss.ns()
-                                    << " (" << collectionUUID << ") as multikey at null timestamp");
+                      str::stream()
+                          << "Cannot set index " << indexName << " on " << nss.toStringForErrorMsg()
+                          << " (" << collectionUUID << ") as multikey at null timestamp");
     }
 
     return writeConflictRetry(opCtx, "StorageInterfaceImpl::setIndexIsMultikey", nss.ns(), [&] {
@@ -614,9 +621,9 @@ Status StorageInterfaceImpl::setIndexIsMultikey(OperationContext* opCtx,
             IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished);
         if (!idx) {
             return Status(ErrorCodes::IndexNotFound,
-                          str::stream()
-                              << "Could not find index " << indexName << " in " << nss.ns() << " ("
-                              << collectionUUID << ") to set to multikey.");
+                          str::stream() << "Could not find index " << indexName << " in "
+                                        << nss.toStringForErrorMsg() << " (" << collectionUUID
+                                        << ") to set to multikey.");
         }
         collection->getIndexCatalog()->setMultikeyPaths(
             opCtx, collection, idx, multikeyMetadataKeys, paths);
@@ -763,14 +770,16 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
                     opCtx, *indexName, IndexCatalog::InclusionPolicy::kReady);
                 if (!indexDescriptor) {
                     return Result(ErrorCodes::IndexNotFound,
-                                  str::stream() << "Index not found, ns:" << nsOrUUID.toString()
-                                                << ", index: " << *indexName);
+                                  str::stream()
+                                      << "Index not found, ns:" << nsOrUUID.toStringForErrorMsg()
+                                      << ", index: " << *indexName);
                 }
                 if (indexDescriptor->isPartial()) {
                     return Result(ErrorCodes::IndexOptionsConflict,
                                   str::stream()
                                       << "Partial index is not allowed for this operation, ns:"
-                                      << nsOrUUID.toString() << ", index: " << *indexName);
+                                      << nsOrUUID.toStringForErrorMsg()
+                                      << ", index: " << *indexName);
                 }
 
                 KeyPattern keyPattern(indexDescriptor->keyPattern());
@@ -849,7 +858,7 @@ StatusWith<BSONObj> _findOrDeleteById(OperationContext* opCtx,
     if (docs.empty()) {
         return {ErrorCodes::NoSuchKey,
                 str::stream() << "No document found with _id: " << redact(idKey) << " in namespace "
-                              << nsOrUUID.toString()};
+                              << nsOrUUID.toStringForErrorMsg()};
     }
 
     return docs.front();
@@ -911,10 +920,11 @@ StatusWith<BSONObj> StorageInterfaceImpl::findSingleton(OperationContext* opCtx,
     const auto& docs = result.getValue();
     if (docs.empty()) {
         return {ErrorCodes::CollectionIsEmpty,
-                str::stream() << "No document found in namespace: " << nss.ns()};
+                str::stream() << "No document found in namespace: " << nss.toStringForErrorMsg()};
     } else if (docs.size() != 1U) {
         return {ErrorCodes::TooManyMatchingDocuments,
-                str::stream() << "More than singleton document found in namespace: " << nss.ns()};
+                str::stream() << "More than singleton document found in namespace: "
+                              << nss.toStringForErrorMsg()};
     }
 
     return docs.front();
@@ -971,11 +981,11 @@ Status _updateWithQuery(OperationContext* opCtx,
         }
 
         AutoGetCollection autoColl(opCtx, nss, MODE_IX);
-        auto collectionResult =
-            getCollection(autoColl,
-                          nss,
-                          str::stream() << "Unable to update documents in " << nss.ns()
-                                        << " using query " << request.getQuery());
+        auto collectionResult = getCollection(
+            autoColl,
+            nss,
+            str::stream() << "Unable to update documents in " << nss.toStringForErrorMsg()
+                          << " using query " << request.getQuery());
         if (!collectionResult.isOK()) {
             return collectionResult.getStatus();
         }
@@ -1119,25 +1129,25 @@ Status StorageInterfaceImpl::deleteByFilter(OperationContext* opCtx,
     request.setGod(true);
 
     return writeConflictRetry(opCtx, "StorageInterfaceImpl::deleteByFilter", nss.ns(), [&] {
-        // ParsedDelete needs to be inside the write conflict retry loop because it may create a
-        // CanonicalQuery whose ownership will be transferred to the plan executor in
-        // getExecutorDelete().
-        ParsedDelete parsedDelete(opCtx, &request);
-        auto parsedDeleteStatus = parsedDelete.parseRequest();
-        if (!parsedDeleteStatus.isOK()) {
-            return parsedDeleteStatus;
-        }
-
         AutoGetCollection autoColl(opCtx, nss, MODE_IX);
         auto collectionResult =
             getCollection(autoColl,
                           nss,
-                          str::stream() << "Unable to delete documents in " << nss.ns()
-                                        << " using filter " << filter);
+                          str::stream() << "Unable to delete documents in "
+                                        << nss.toStringForErrorMsg() << " using filter " << filter);
         if (!collectionResult.isOK()) {
             return collectionResult.getStatus();
         }
         const auto& collection = *collectionResult.getValue();
+
+        // ParsedDelete needs to be inside the write conflict retry loop because it may create a
+        // CanonicalQuery whose ownership will be transferred to the plan executor in
+        // getExecutorDelete().
+        ParsedDelete parsedDelete(opCtx, &request, collection);
+        auto parsedDeleteStatus = parsedDelete.parseRequest();
+        if (!parsedDeleteStatus.isOK()) {
+            return parsedDeleteStatus;
+        }
 
         auto planExecutorResult = mongo::getExecutorDelete(
             nullptr, &collection, &parsedDelete, boost::none /* verbosity */);
@@ -1337,7 +1347,9 @@ StatusWith<UUID> StorageInterfaceImpl::getCollectionUUID(OperationContext* opCtx
     AutoGetCollectionForRead autoColl(opCtx, nss);
 
     auto collectionResult = getCollection(
-        autoColl, nss, str::stream() << "Unable to get UUID of " << nss.ns() << " collection.");
+        autoColl,
+        nss,
+        str::stream() << "Unable to get UUID of " << nss.toStringForErrorMsg() << " collection.");
     if (!collectionResult.isOK()) {
         return collectionResult.getStatus();
     }

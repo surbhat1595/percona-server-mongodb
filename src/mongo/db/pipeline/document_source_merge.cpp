@@ -343,7 +343,7 @@ std::unique_ptr<DocumentSourceMerge::LiteParsed> DocumentSourceMerge::LiteParsed
     auto targetNss = mergeSpec.getTargetNss();
 
     uassert(ErrorCodes::InvalidNamespace,
-            "Invalid {} target namespace: '{}'"_format(kStageName, targetNss.ns()),
+            "Invalid {} target namespace: '{}'"_format(kStageName, targetNss.toStringForErrorMsg()),
             targetNss.isValid());
 
     auto whenMatched =
@@ -425,7 +425,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceMerge::create(
             isSupportedMergeMode(whenMatched, whenNotMatched));
 
     uassert(ErrorCodes::InvalidNamespace,
-            "Invalid {} target namespace: '{}'"_format(kStageName, outputNs.ns()),
+            "Invalid {} target namespace: '{}'"_format(kStageName, outputNs.toStringForErrorMsg()),
             outputNs.isValid());
 
     uassert(ErrorCodes::OperationNotSupportedInTransaction,
@@ -439,7 +439,8 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceMerge::create(
             (outputNs.isSystemStatsCollection() && isInternalClient(expCtx->opCtx->getClient())));
 
     uassert(31320,
-            "Cannot {} to internal database: {}"_format(kStageName, outputNs.db()),
+            "Cannot {} to internal database: {}"_format(kStageName,
+                                                        outputNs.dbName().toStringForErrorMsg()),
             !outputNs.isOnInternalDb() || isInternalClient(expCtx->opCtx->getClient()));
 
     if (whenMatched == WhenMatched::kPipeline) {
@@ -535,6 +536,7 @@ boost::optional<DocumentSource::DistributedPlanLogic> DocumentSourceMerge::distr
 Value DocumentSourceMerge::serialize(SerializationOptions opts) const {
     auto explain = opts.verbosity;
     if (opts.redactIdentifiers || opts.replacementForLiteralArgs) {
+        // TODO: SERVER-76208 support query shapification for IDL types with custom serializers.
         MONGO_UNIMPLEMENTED_TASSERT(7484324);
     }
 

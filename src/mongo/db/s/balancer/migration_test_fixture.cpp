@@ -45,14 +45,6 @@ std::shared_ptr<RemoteCommandTargeterMock> MigrationTestFixture::shardTargeterMo
         uassertStatusOK(shardRegistry()->getShard(opCtx, shardId))->getTargeter());
 }
 
-void MigrationTestFixture::setUpDatabase(const std::string& dbName, const ShardId primaryShard) {
-    DatabaseType db(dbName, primaryShard, DatabaseVersion(UUID::gen(), Timestamp()));
-    ASSERT_OK(catalogClient()->insertConfigDocument(operationContext(),
-                                                    NamespaceString::kConfigDatabasesNamespace,
-                                                    db.toBSON(),
-                                                    kMajorityWriteConcern));
-}
-
 void MigrationTestFixture::setUpCollection(
     const NamespaceString& collName,
     const UUID& collUUID,
@@ -86,9 +78,9 @@ void MigrationTestFixture::setUpZones(const NamespaceString& collName,
                                       const StringMap<ChunkRange>& zoneChunkRanges) {
     for (auto const& zoneChunkRange : zoneChunkRanges) {
         BSONObjBuilder zoneDocBuilder;
-        zoneDocBuilder.append(
-            "_id",
-            BSON(TagsType::ns(collName.ns()) << TagsType::min(zoneChunkRange.second.getMin())));
+        zoneDocBuilder.append("_id",
+                              BSON(TagsType::ns(collName.ns().toString())
+                                   << TagsType::min(zoneChunkRange.second.getMin())));
         zoneDocBuilder.append(TagsType::ns(), collName.ns());
         zoneDocBuilder.append(TagsType::min(), zoneChunkRange.second.getMin());
         zoneDocBuilder.append(TagsType::max(), zoneChunkRange.second.getMax());

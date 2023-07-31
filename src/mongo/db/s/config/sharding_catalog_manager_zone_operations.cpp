@@ -74,7 +74,7 @@ Status checkForOverlappingZonedKeyRange(OperationContext* opCtx,
                                                           kConfigPrimarySelector,
                                                           repl::ReadConcernLevel::kLocalReadConcern,
                                                           TagsType::ConfigNS,
-                                                          BSON(TagsType::ns(nss.ns())),
+                                                          BSON(TagsType::ns(nss.ns().toString())),
                                                           BSONObj(),
                                                           0);
     if (!tagStatus.isOK()) {
@@ -131,7 +131,7 @@ ChunkRange includeFullShardKey(OperationContext* opCtx,
                                               1))
                               .docs;
     uassert(ErrorCodes::NamespaceNotSharded,
-            str::stream() << nss.ns() << " is not sharded",
+            str::stream() << nss.toStringForErrorMsg() << " is not sharded",
             !findCollResult.empty());
 
     CollectionType coll(findCollResult.front());
@@ -141,11 +141,11 @@ ChunkRange includeFullShardKey(OperationContext* opCtx,
 
     uassert(ErrorCodes::ShardKeyNotFound,
             str::stream() << "min: " << range.getMin() << " is not a prefix of the shard key "
-                          << shardKeyBSON << " of ns: " << nss.ns(),
+                          << shardKeyBSON << " of ns: " << nss.toStringForErrorMsg(),
             range.getMin().isFieldNamePrefixOf(shardKeyBSON));
     uassert(ErrorCodes::ShardKeyNotFound,
             str::stream() << "max: " << range.getMax() << " is not a prefix of the shard key "
-                          << shardKeyBSON << " of ns: " << nss.ns(),
+                          << shardKeyBSON << " of ns: " << nss.toStringForErrorMsg(),
             range.getMax().isFieldNamePrefixOf(shardKeyBSON));
 
     return ChunkRange(shardKeyPattern.extendRangeBound(range.getMin(), false),
@@ -362,7 +362,7 @@ void ShardingCatalogManager::assignKeyRangeToZone(OperationContext* opCtx,
     uassertStatusOK(_localCatalogClient->updateConfigDocument(
         opCtx,
         TagsType::ConfigNS,
-        BSON(TagsType::ns(nss.ns()) << TagsType::min(actualRange.getMin())),
+        BSON(TagsType::ns(nss.ns().toString()) << TagsType::min(actualRange.getMin())),
         updateBuilder.obj(),
         true,
         kNoWaitWriteConcern));

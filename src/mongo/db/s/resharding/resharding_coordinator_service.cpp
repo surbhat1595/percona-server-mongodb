@@ -664,21 +664,22 @@ void insertChunkAndTagDocsForTempNss(OperationContext* opCtx,
     ShardingCatalogManager::get(opCtx)->insertConfigDocuments(opCtx, TagsType::ConfigNS, newZones);
 }
 
+void removeTagsDocs(OperationContext* opCtx, const BSONObj& tagsQuery) {
+    // Remove tag documents with the specified tagsQuery.
+    const auto tagDeleteOperationHint = BSON(TagsType::ns() << 1 << TagsType::min() << 1);
+    const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
+
+    uassertStatusOK(catalogClient->removeConfigDocuments(
+        opCtx, TagsType::ConfigNS, tagsQuery, kMajorityWriteConcern, tagDeleteOperationHint));
+}
+
 // Requires that there be no session information on the opCtx.
 void removeChunkAndTagsDocs(OperationContext* opCtx,
                             const BSONObj& tagsQuery,
                             const UUID& collUUID) {
-    // Remove all chunk documents for the original nss. We do not know how many chunk docs
-    // currently exist, so cannot pass a value for expectedNumModified
-    const auto chunksQuery = BSON(ChunkType::collectionUUID() << collUUID);
-    const auto tagDeleteOperationHint = BSON(TagsType::ns() << 1 << TagsType::min() << 1);
-
-    const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
-
-    uassertStatusOK(catalogClient->removeConfigDocuments(
-        opCtx, ChunkType::ConfigNS, chunksQuery, kMajorityWriteConcern));
-    uassertStatusOK(catalogClient->removeConfigDocuments(
-        opCtx, TagsType::ConfigNS, tagsQuery, kMajorityWriteConcern, tagDeleteOperationHint));
+    // Remove all chunk documents and specified tag documents.
+    resharding::removeChunkDocs(opCtx, collUUID);
+    removeTagsDocs(opCtx, tagsQuery);
 }
 
 /**
@@ -696,7 +697,7 @@ void executeMetadataChangesInTxn(
 BSONObj makeFlushRoutingTableCacheUpdatesCmd(const NamespaceString& nss) {
     auto cmd = FlushRoutingTableCacheUpdatesWithWriteConcern(nss);
     cmd.setSyncFromConfig(true);
-    cmd.setDbName(nss.db());
+    cmd.setDbName(nss.dbName());
     return cmd.toBSON(
         BSON(WriteConcernOptions::kWriteConcernField << kMajorityWriteConcern.toBSON()));
 }
@@ -733,28 +734,14 @@ CollectionType createTempReshardingCollectionType(
     return collType;
 }
 
-void cleanupSourceConfigCollections(OperationContext* opCtx,
-                                    const ReshardingCoordinatorDocument& coordinatorDoc) {
-    using Doc = Document;
-    using Arr = std::vector<Value>;
-    using V = Value;
+void removeChunkDocs(OperationContext* opCtx, const UUID& collUUID) {
+    // Remove all chunk documents for the specified collUUID. We do not know how many chunk docs
+    // currently exist, so cannot pass a value for expectedNumModified
+    const auto chunksQuery = BSON(ChunkType::collectionUUID() << collUUID);
+    const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
 
-    auto createTagFilter = [](const V value) {
-        return V{Doc{{"$map",
-                      V{Doc{{"input", V{Doc{{"$objectToArray", value}}}},
-                            {"in", V{StringData("$$this.k")}}}}}}};
-    };
-
-
-    auto skipNewTagsFilter = Doc{
-        {"$ne",
-         Arr{createTagFilter(V{StringData("$min")}),
-             createTagFilter(V{Doc{{"$literal", coordinatorDoc.getReshardingKey().toBSON()}}})}}};
-
-    const auto removeTagsQuery =
-        BSON(TagsType::ns(coordinatorDoc.getSourceNss().ns()) << "$expr" << skipNewTagsFilter);
-
-    removeChunkAndTagsDocs(opCtx, removeTagsQuery, coordinatorDoc.getSourceUUID());
+    uassertStatusOK(catalogClient->removeConfigDocuments(
+        opCtx, ChunkType::ConfigNS, chunksQuery, kMajorityWriteConcern));
 }
 
 void writeDecisionPersistedState(OperationContext* opCtx,
@@ -800,6 +787,15 @@ void writeDecisionPersistedState(OperationContext* opCtx,
                                                         newCollectionTimestamp,
                                                         reshardedCollectionPlacement,
                                                         txnNumber);
+
+            // Delete all of the config.tags entries for the user collection namespace.
+            const auto removeTagsQuery =
+                BSON(TagsType::ns(coordinatorDoc.getSourceNss().ns().toString()));
+            removeTagsDocs(opCtx, removeTagsQuery);
+
+            // Update all of the config.tags entries for the temporary resharding namespace
+            // to refer to the user collection namespace.
+            updateTagsDocsForTempNss(opCtx, coordinatorDoc);
         });
 }
 
@@ -808,11 +804,11 @@ void updateTagsDocsForTempNss(OperationContext* opCtx,
     auto hint = BSON("ns" << 1 << "min" << 1);
     auto tagsRequest = BatchedCommandRequest::buildUpdateOp(
         TagsType::ConfigNS,
-        BSON(TagsType::ns(coordinatorDoc.getTempReshardingNss().ns())),    // query
-        BSON("$set" << BSON("ns" << coordinatorDoc.getSourceNss().ns())),  // update
-        false,                                                             // upsert
-        true,                                                              // multi
-        hint                                                               // hint
+        BSON(TagsType::ns(coordinatorDoc.getTempReshardingNss().ns().toString())),  // query
+        BSON("$set" << BSON("ns" << coordinatorDoc.getSourceNss().ns())),           // update
+        false,                                                                      // upsert
+        true,                                                                       // multi
+        hint                                                                        // hint
     );
 
     // Update the 'ns' field to be the original collection namespace for all tags documents that
@@ -838,7 +834,7 @@ void insertCoordDocAndChangeOrigCollEntry(OperationContext* opCtx,
 
             uassert(5808200,
                     str::stream() << "config.collection entry not found for "
-                                  << coordinatorDoc.getSourceNss().ns(),
+                                  << coordinatorDoc.getSourceNss().toStringForErrorMsg(),
                     doc);
 
             CollectionType configCollDoc(*doc);
@@ -866,7 +862,8 @@ void writeParticipantShardsAndTempCollInfo(
     std::vector<ChunkType> initialChunks,
     std::vector<BSONObj> zones,
     boost::optional<CollectionIndexes> indexVersion) {
-    const auto tagsQuery = BSON(TagsType::ns(updatedCoordinatorDoc.getTempReshardingNss().ns()));
+    const auto tagsQuery =
+        BSON(TagsType::ns(updatedCoordinatorDoc.getTempReshardingNss().ns().toString()));
 
     removeChunkAndTagsDocs(opCtx, tagsQuery, updatedCoordinatorDoc.getReshardingUUID());
     insertChunkAndTagDocsForTempNss(opCtx, initialChunks, zones);
@@ -949,7 +946,8 @@ void removeCoordinatorDocAndReshardingFields(OperationContext* opCtx,
     updatedCoordinatorDoc.setState(CoordinatorStateEnum::kDone);
     emplaceTruncatedAbortReasonIfExists(updatedCoordinatorDoc, abortReason);
 
-    const auto tagsQuery = BSON(TagsType::ns(coordinatorDoc.getTempReshardingNss().ns()));
+    const auto tagsQuery =
+        BSON(TagsType::ns(coordinatorDoc.getTempReshardingNss().ns().toString()));
     // Once the decision has been persisted, the coordinator would have modified the
     // config.chunks and config.collections entry. This means that the UUID of the
     // non-temp collection is now the UUID of what was previously the UUID of the temp
@@ -1151,13 +1149,14 @@ void ReshardingCoordinatorService::checkIfConflictsWithOtherInstances(
         iassert(ErrorCodes::ConflictingOperationInProgress,
                 str::stream() << "Only one resharding operation is allowed to be active at a "
                                  "time, aborting resharding op for "
-                              << coordinatorDoc.getSourceNss(),
+                              << coordinatorDoc.getSourceNss().toStringForErrorMsg(),
                 isNssSame && isReshardingKeySame);
 
         iasserted(ReshardingCoordinatorServiceConflictingOperationInProgressInfo(
                       typedInstance->shared_from_this()),
                   str::stream() << "Found an active resharding operation for "
-                                << coordinatorDoc.getSourceNss() << " with resharding key "
+                                << coordinatorDoc.getSourceNss().toStringForErrorMsg()
+                                << " with resharding key "
                                 << coordinatorDoc.getReshardingKey().toString());
     }
 }
@@ -1483,12 +1482,8 @@ ExecutorFuture<void> ReshardingCoordinator::_commitAndFinishReshardOperation(
     const ReshardingCoordinatorDocument& updatedCoordinatorDoc) noexcept {
     return resharding::WithAutomaticRetry([this, executor, updatedCoordinatorDoc] {
                return ExecutorFuture<void>(**executor)
-                   .then([this, executor, updatedCoordinatorDoc] {
-                       _commit(updatedCoordinatorDoc);
-
-                       auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
-                       resharding::updateTagsDocsForTempNss(opCtx.get(), updatedCoordinatorDoc);
-                   })
+                   .then(
+                       [this, executor, updatedCoordinatorDoc] { _commit(updatedCoordinatorDoc); })
                    .then([this] { return _waitForMajority(_ctHolder->getStepdownToken()); })
                    .thenRunOn(**executor)
                    .then([this, executor] {
@@ -1497,8 +1492,8 @@ ExecutorFuture<void> ReshardingCoordinator::_commitAndFinishReshardOperation(
                    .then([this] { _updateChunkImbalanceMetrics(_coordinatorDoc.getSourceNss()); })
                    .then([this, updatedCoordinatorDoc] {
                        auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
-                       resharding::cleanupSourceConfigCollections(opCtx.get(),
-                                                                  updatedCoordinatorDoc);
+                       resharding::removeChunkDocs(opCtx.get(),
+                                                   updatedCoordinatorDoc.getSourceUUID());
                        return Status::OK();
                    })
                    .then([this, executor] { return _awaitAllParticipantShardsDone(executor); })
@@ -1632,11 +1627,13 @@ ExecutorFuture<void> ReshardingCoordinator::_runReshardingOp(
         .onCompletion([this, self = shared_from_this()](Status status) {
             _metrics->onStateTransition(_coordinatorDoc.getState(), boost::none);
 
-            // Destroy metrics early so it's lifetime will not be tied to the lifetime of this
+            // Destroy metrics early so its lifetime will not be tied to the lifetime of this
             // state machine. This is because we have future callbacks copy shared pointers to this
             // state machine that causes it to live longer than expected and potentially overlap
-            // with a newer instance when stepping up.
+            // with a newer instance when stepping up. The commit monitor also has a shared pointer
+            // to the metrics, so release this as well.
             _metrics.reset();
+            _commitMonitor.reset();
 
             if (!status.isOK()) {
                 {
@@ -1883,10 +1880,12 @@ void ReshardingCoordinator::_calculateParticipantsAndChunksThenWriteToDisk() {
 
     // Remove the presetReshardedChunks and zones from the coordinator document to reduce
     // the possibility of the document reaching the BSONObj size constraint.
+    ShardKeyPattern shardKey(updatedCoordinatorDoc.getReshardingKey());
     std::vector<BSONObj> zones;
     if (updatedCoordinatorDoc.getZones()) {
         zones = resharding::buildTagsDocsFromZones(updatedCoordinatorDoc.getTempReshardingNss(),
-                                                   *updatedCoordinatorDoc.getZones());
+                                                   *updatedCoordinatorDoc.getZones(),
+                                                   shardKey);
     }
     updatedCoordinatorDoc.setPresetReshardedChunks(boost::none);
     updatedCoordinatorDoc.setZones(boost::none);

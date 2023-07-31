@@ -160,7 +160,7 @@ public:
      * not consider whether the index is visible or ready in the current storage snapshot. For
      * that, use isReadyInMySnapshot() or isPresentInMySnapshot().
      */
-    virtual bool isReady(OperationContext* opCtx) const = 0;
+    virtual bool isReady() const = 0;
 
     /**
      * Safely check whether this index is visible in the durable catalog in the current storage
@@ -184,14 +184,6 @@ public:
      * Returns true if the documents should be validated for incompatible values for this index.
      */
     virtual bool shouldValidateDocument() const = 0;
-
-    /**
-     * If return value is not boost::none, reads with majority read concern using an older snapshot
-     * must treat this index as unfinished.
-     */
-    virtual boost::optional<Timestamp> getMinimumVisibleSnapshot() const = 0;
-
-    virtual void setMinimumVisibleSnapshot(Timestamp name) = 0;
 
     virtual const UpdateIndexData& getIndexedPaths() const = 0;
 };

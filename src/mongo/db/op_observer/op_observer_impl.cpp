@@ -70,9 +70,6 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
-#include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
-#include "mongo/db/timeseries/bucket_catalog/bucket_catalog_helpers.h"
-#include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
 #include "mongo/db/views/util.h"
@@ -209,7 +206,6 @@ BSONObj makeObject2ForDropOrRename(uint64_t numRecords) {
 
 struct OpTimeBundle {
     repl::OpTime writeOpTime;
-    repl::OpTime prePostImageOpTime;
     Date_t wallClockTime;
 };
 
@@ -628,11 +624,6 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
             txnParticipant.addTransactionOperation(opCtx, operation);
         }
     } else {
-        std::function<boost::optional<ShardId>(const BSONObj& doc)> getDestinedRecipientFn =
-            [&shardingWriteRouter](const BSONObj& doc) {
-                return shardingWriteRouter.getReshardingDestinedRecipient(doc);
-            };
-
         // Ensure well-formed embedded ReplOperation for logging.
         // This means setting optype, nss, and object at the minimum.
         MutableOplogEntry oplogEntryTemplate;
@@ -650,7 +641,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
                                                 first,
                                                 last,
                                                 std::move(fromMigrate),
-                                                getDestinedRecipientFn,
+                                                shardingWriteRouter,
                                                 coll);
         if (!opTimeList.empty())
             lastOpTime = opTimeList.back();
@@ -726,28 +717,6 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
                     }
                 });
         }
-    } else if (nss.isTimeseriesBucketsCollection()) {
-        // Check if the bucket _id is sourced from a date outside the standard range. If our writes
-        // end up erroring out or getting rolled back, then this flag will stay set. This is okay
-        // though, as it only disables some query optimizations and won't result in any correctness
-        // issues if the flag is set when it doesn't need to be (as opposed to NOT being set when it
-        // DOES need to be -- that will cause correctness issues). Additionally, if the user tried
-        // to insert measurements with dates outside the standard range, chances are they will do so
-        // again, and we will have only set the flag a little early.
-        invariant(opCtx->lockState()->isCollectionLockedForMode(nss, MODE_IX));
-        // Hold reference to the catalog for collection lookup without locks to be safe.
-        auto catalog = CollectionCatalog::get(opCtx);
-        auto bucketsColl = catalog->lookupCollectionByNamespace(opCtx, nss);
-        tassert(6905201, "Could not find collection for write", bucketsColl);
-        auto timeSeriesOptions = bucketsColl->getTimeseriesOptions();
-        if (timeSeriesOptions.has_value()) {
-            if (auto currentSetting = bucketsColl->getRequiresTimeseriesExtendedRangeSupport();
-                !currentSetting &&
-                timeseries::bucketsHaveDateOutsideStandardRange(
-                    timeSeriesOptions.value(), first, last)) {
-                bucketsColl->setRequiresTimeseriesExtendedRangeSupport(opCtx);
-            }
-        }
     }
 }
 
@@ -795,10 +764,10 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
     failCollectionUpdates.executeIf(
         [&](const BSONObj&) {
             uasserted(40654,
-                      str::stream()
-                          << "failCollectionUpdates failpoint enabled, namespace: "
-                          << args.coll->ns().ns() << ", update: " << args.updateArgs->update
-                          << " on document with " << args.updateArgs->criteria);
+                      str::stream() << "failCollectionUpdates failpoint enabled, namespace: "
+                                    << args.coll->ns().toStringForErrorMsg()
+                                    << ", update: " << args.updateArgs->update
+                                    << " on document with " << args.updateArgs->criteria);
         },
         [&](const BSONObj& data) {
             // If the failpoint specifies no collection or matches the existing one, fail.
@@ -833,13 +802,21 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
         const bool inRetryableInternalTransaction =
             isInternalSessionForRetryableWrite(*opCtx->getLogicalSessionId());
 
+        invariant(
+            inRetryableInternalTransaction ||
+                args.retryableFindAndModifyLocation == RetryableFindAndModifyLocation::kNone,
+            str::stream()
+                << "Attempted a retryable write within a non-retryable multi-document transaction");
+
         auto operation = MutableOplogEntry::makeUpdateOperation(
             args.coll->ns(), args.coll->uuid(), args.updateArgs->update, args.updateArgs->criteria);
 
         if (inRetryableInternalTransaction) {
             operation.setInitializedStatementIds(args.updateArgs->stmtIds);
             if (args.updateArgs->storeDocOption == CollectionUpdateArgs::StoreDocOption::PreImage) {
-                invariant(!args.updateArgs->preImageDoc.isEmpty());
+                invariant(!args.updateArgs->preImageDoc.isEmpty(),
+                          str::stream()
+                              << "Pre-image document must be present for pre-image recording");
                 operation.setPreImage(args.updateArgs->preImageDoc.getOwned());
                 operation.setPreImageRecordedForRetryableInternalTransaction();
                 if (args.retryableFindAndModifyLocation ==
@@ -849,7 +826,9 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
             }
             if (args.updateArgs->storeDocOption ==
                 CollectionUpdateArgs::StoreDocOption::PostImage) {
-                invariant(!args.updateArgs->updatedDoc.isEmpty());
+                invariant(!args.updateArgs->updatedDoc.isEmpty(),
+                          str::stream()
+                              << "Update document must be present for pre-image recording");
                 operation.setPostImage(args.updateArgs->updatedDoc.getOwned());
                 if (args.retryableFindAndModifyLocation ==
                     RetryableFindAndModifyLocation::kSideCollection) {
@@ -859,7 +838,9 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
         }
 
         if (args.updateArgs->changeStreamPreAndPostImagesEnabledForCollection) {
-            invariant(!args.updateArgs->preImageDoc.isEmpty());
+            invariant(!args.updateArgs->preImageDoc.isEmpty(),
+                      str::stream()
+                          << "Pre-image document must be present for pre-image recording");
             operation.setPreImage(args.updateArgs->preImageDoc.getOwned());
             operation.setChangeStreamPreImageRecordingMode(
                 ChangeStreamPreImageRecordingMode::kPreImagesCollection);
@@ -930,12 +911,12 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
             args.updateArgs->source != OperationSource::kFromMigrate &&
             !args.coll->ns().isTemporaryReshardingCollection()) {
             const auto& preImageDoc = args.updateArgs->preImageDoc;
-            tassert(5868600, "PreImage must be set", !preImageDoc.isEmpty());
+            invariant(!preImageDoc.isEmpty(), str::stream() << "PreImage must be set");
 
             ChangeStreamPreImageId id(args.coll->uuid(), opTime.writeOpTime.getTimestamp(), 0);
             ChangeStreamPreImage preImage(id, opTime.wallClockTime, preImageDoc);
 
-            ChangeStreamPreImagesCollectionManager::insertPreImage(
+            ChangeStreamPreImagesCollectionManager::get(opCtx).insertPreImage(
                 opCtx, args.coll->ns().tenantId(), preImage);
         }
 
@@ -953,7 +934,6 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
                                  args.updateArgs->updatedDoc,
                                  opTime.writeOpTime,
                                  shardingWriteRouter,
-                                 opTime.prePostImageOpTime,
                                  inMultiDocumentTransaction);
         }
     }
@@ -970,11 +950,6 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
     } else if (args.coll->ns() == NamespaceString::kConfigSettingsNamespace) {
         ReadWriteConcernDefaults::get(opCtx).observeDirectWriteToConfigSettings(
             opCtx, args.updateArgs->updatedDoc["_id"], args.updateArgs->updatedDoc);
-    } else if (args.coll->ns().isTimeseriesBucketsCollection()) {
-        if (args.updateArgs->source != OperationSource::kTimeseriesInsert) {
-            OID bucketId = args.updateArgs->updatedDoc["_id"].OID();
-            timeseries::bucket_catalog::handleDirectWrite(opCtx, args.coll->ns(), bucketId);
-        }
     }
 }
 
@@ -990,11 +965,6 @@ void OpObserverImpl::aboutToDelete(OperationContext* opCtx,
     destinedRecipientDecoration(opCtx) = op.getDestinedRecipient();
 
     shardObserveAboutToDelete(opCtx, coll->ns(), doc);
-
-    if (coll->ns().isTimeseriesBucketsCollection()) {
-        OID bucketId = doc["_id"].OID();
-        timeseries::bucket_catalog::handleDirectWrite(opCtx, coll->ns(), bucketId);
-    }
 }
 
 void OpObserverImpl::onDelete(OperationContext* opCtx,
@@ -1004,7 +974,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
     const auto& nss = coll->ns();
     const auto uuid = coll->uuid();
     auto optDocKey = repl::documentKeyDecoration(opCtx);
-    invariant(optDocKey, nss.ns());
+    invariant(optDocKey, nss.toStringForErrorMsg());
     auto& documentKey = optDocKey.value();
 
     auto txnParticipant = TransactionParticipant::get(opCtx);
@@ -1025,10 +995,11 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
         const bool inRetryableInternalTransaction =
             isInternalSessionForRetryableWrite(*opCtx->getLogicalSessionId());
 
-        tassert(5868700,
-                "Attempted a retryable write within a non-retryable multi-document transaction",
-                inRetryableInternalTransaction ||
-                    args.retryableFindAndModifyLocation == RetryableFindAndModifyLocation::kNone);
+        invariant(
+            inRetryableInternalTransaction ||
+                args.retryableFindAndModifyLocation == RetryableFindAndModifyLocation::kNone,
+            str::stream()
+                << "Attempted a retryable write within a non-retryable multi-document transaction");
 
         auto operation =
             MutableOplogEntry::makeDeleteOperation(nss, uuid, documentKey.getShardKeyAndId());
@@ -1037,9 +1008,9 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
             operation.setInitializedStatementIds({stmtId});
             if (args.retryableFindAndModifyLocation ==
                 RetryableFindAndModifyLocation::kSideCollection) {
-                tassert(6054000,
-                        "Deleted document must be present for pre-image recording",
-                        args.deletedDoc);
+                invariant(!args.deletedDoc->isEmpty(),
+                          str::stream()
+                              << "Deleted document must be present for pre-image recording");
                 operation.setPreImage(args.deletedDoc->getOwned());
                 operation.setPreImageRecordedForRetryableInternalTransaction();
                 operation.setNeedsRetryImage(repl::RetryImageEnum::kPreImage);
@@ -1047,9 +1018,8 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
         }
 
         if (args.changeStreamPreAndPostImagesEnabledForCollection) {
-            tassert(5869400,
-                    "Deleted document must be present for pre-image recording",
-                    args.deletedDoc);
+            invariant(!args.deletedDoc->isEmpty(),
+                      str::stream() << "Deleted document must be present for pre-image recording");
             operation.setPreImage(args.deletedDoc->getOwned());
             operation.setChangeStreamPreImageRecordingMode(
                 ChangeStreamPreImageRecordingMode::kPreImagesCollection);
@@ -1060,13 +1030,11 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
         txnParticipant.addTransactionOperation(opCtx, operation);
     } else {
         MutableOplogEntry oplogEntry;
-        boost::optional<BSONObj> deletedDocForOplog = boost::none;
 
         if (args.retryableFindAndModifyLocation ==
             RetryableFindAndModifyLocation::kSideCollection) {
-            tassert(5868703,
-                    "Deleted document must be present for pre-image recording",
-                    args.deletedDoc);
+            invariant(!args.deletedDoc->isEmpty(),
+                      str::stream() << "Deleted document must be present for pre-image recording");
             invariant(opCtx->getTxnNumber());
 
             oplogEntry.setNeedsRetryImage({repl::RetryImageEnum::kPreImage});
@@ -1098,12 +1066,13 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
         //    sync mode application).
         if (args.changeStreamPreAndPostImagesEnabledForCollection && !opTime.writeOpTime.isNull() &&
             !args.fromMigrate && !nss.isTemporaryReshardingCollection()) {
-            tassert(5868704, "Deleted document must be set", args.deletedDoc);
+            invariant(!args.deletedDoc->isEmpty(), str::stream() << "Deleted document must be set");
 
             ChangeStreamPreImageId id(uuid, opTime.writeOpTime.getTimestamp(), 0);
             ChangeStreamPreImage preImage(id, opTime.wallClockTime, *args.deletedDoc);
 
-            ChangeStreamPreImagesCollectionManager::insertPreImage(opCtx, nss.tenantId(), preImage);
+            ChangeStreamPreImagesCollectionManager::get(opCtx).insertPreImage(
+                opCtx, nss.tenantId(), preImage);
         }
 
         SessionTxnRecord sessionTxnRecord;
@@ -1120,7 +1089,6 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
                                  documentKey.getShardKeyAndId(),
                                  opTime.writeOpTime,
                                  shardingWriteRouter,
-                                 opTime.prePostImageOpTime,
                                  inMultiDocumentTransaction);
         }
     }
@@ -1298,9 +1266,6 @@ void OpObserverImpl::onDropDatabase(OperationContext* opCtx, const DatabaseName&
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
         mongoDSessionCatalog->invalidateAllSessions(opCtx);
     }
-
-    auto& bucketCatalog = timeseries::bucket_catalog::BucketCatalog::get(opCtx);
-    clear(bucketCatalog, dbName.db());
 }
 
 repl::OpTime OpObserverImpl::onDropCollection(OperationContext* opCtx,
@@ -1366,9 +1331,6 @@ repl::OpTime OpObserverImpl::onDropCollection(OperationContext* opCtx,
         mongoDSessionCatalog->invalidateAllSessions(opCtx);
     } else if (collectionName == NamespaceString::kConfigSettingsNamespace) {
         ReadWriteConcernDefaults::get(opCtx).invalidate();
-    } else if (collectionName.isTimeseriesBucketsCollection()) {
-        auto& bucketCatalog = timeseries::bucket_catalog::BucketCatalog::get(opCtx);
-        clear(bucketCatalog, collectionName.getTimeseriesViewNamespace());
     } else if (collectionName.isSystemDotJavascript()) {
         // Inform the JavaScript engine of the change to system.js.
         Scope::storedFuncMod(opCtx);
@@ -1578,7 +1540,7 @@ void writeChangeStreamPreImagesForApplyOpsEntries(
             invariant(operation.getUuid());
             invariant(!operation.getPreImage().isEmpty());
 
-            ChangeStreamPreImagesCollectionManager::insertPreImage(
+            ChangeStreamPreImagesCollectionManager::get(opCtx).insertPreImage(
                 opCtx,
                 operation.getTid(),
                 ChangeStreamPreImage{
@@ -2240,17 +2202,6 @@ void OpObserverImpl::_onReplicationRollback(OperationContext* opCtx,
     // Force the default read/write concern cache to reload on next access in case the defaults
     // document was rolled back.
     ReadWriteConcernDefaults::get(opCtx).invalidate();
-
-    stdx::unordered_set<NamespaceString> timeseriesNamespaces;
-    for (const auto& ns : rbInfo.rollbackNamespaces) {
-        if (ns.isTimeseriesBucketsCollection()) {
-            timeseriesNamespaces.insert(ns.getTimeseriesViewNamespace());
-        }
-    }
-    auto& bucketCatalog = timeseries::bucket_catalog::BucketCatalog::get(opCtx);
-    clear(bucketCatalog,
-          [timeseriesNamespaces = std::move(timeseriesNamespaces)](
-              const NamespaceString& bucketNs) { return timeseriesNamespaces.contains(bucketNs); });
 }
 
 }  // namespace mongo

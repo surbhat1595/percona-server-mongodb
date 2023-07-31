@@ -143,7 +143,8 @@ std::set<ShardId> getRecipientShards(OperationContext* opCtx,
     auto [cm, _] = uassertStatusOK(catalogCache->getCollectionRoutingInfo(opCtx, tempNss));
 
     uassert(ErrorCodes::NamespaceNotSharded,
-            str::stream() << "Expected collection " << tempNss << " to be sharded",
+            str::stream() << "Expected collection " << tempNss.toStringForErrorMsg()
+                          << " to be sharded",
             cm.isSharded());
 
     std::set<ShardId> recipients;
@@ -224,10 +225,13 @@ void checkForOverlappingZones(std::vector<ReshardingZoneType>& zones) {
 }
 
 std::vector<BSONObj> buildTagsDocsFromZones(const NamespaceString& tempNss,
-                                            const std::vector<ReshardingZoneType>& zones) {
+                                            std::vector<ReshardingZoneType>& zones,
+                                            const ShardKeyPattern& shardKey) {
     std::vector<BSONObj> tags;
     tags.reserve(zones.size());
-    for (const auto& zone : zones) {
+    for (auto& zone : zones) {
+        zone.setMin(shardKey.getKeyPattern().extendRangeBound(zone.getMin(), false));
+        zone.setMax(shardKey.getKeyPattern().extendRangeBound(zone.getMax(), false));
         ChunkRange range(zone.getMin(), zone.getMax());
         TagsType tag(tempNss, zone.getZone().toString(), range);
         tags.push_back(tag.toBSON());
@@ -361,7 +365,7 @@ void doNoopWrite(OperationContext* opCtx, StringData opStr, const NamespaceStrin
     writeConflictRetry(opCtx, opStr, NamespaceString::kRsOplogNamespace.ns(), [&] {
         AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
 
-        const std::string msg = str::stream() << opStr << " on " << nss;
+        const std::string msg = str::stream() << opStr << " on " << nss.toStringForErrorMsg();
         WriteUnitOfWork wuow(opCtx);
         opCtx->getClient()->getServiceContext()->getOpObserver()->onInternalOpMessage(
             opCtx,

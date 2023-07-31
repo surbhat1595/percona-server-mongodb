@@ -127,23 +127,28 @@ public:
                 dbString.find('\0') == std::string::npos);
     }
 
+    static DatabaseName createDatabaseName_forTest(boost::optional<TenantId> tenantId,
+                                                   StringData dbString) {
+        return DatabaseName(tenantId, dbString);
+    }
+
     /**
      * Prefer to use the constructor above.
      * TODO SERVER-65456 Remove this constructor.
      */
-    DatabaseName(StringData dbName, boost::optional<TenantId> tenantId = boost::none)
+    explicit DatabaseName(StringData dbName, boost::optional<TenantId> tenantId = boost::none)
         : DatabaseName(std::move(tenantId), dbName) {}
 
     const boost::optional<TenantId>& tenantId() const {
         return _tenantId;
     }
 
-    const std::string& db() const {
+    StringData db() const {
         return _dbString;
     }
 
-    const std::string& toString() const {
-        return db();
+    std::string toString() const {
+        return db().toString();
     }
 
     std::string toStringWithTenantId() const {
@@ -157,10 +162,7 @@ public:
      * This function should only be used when logging a db name in an error message.
      */
     std::string toStringForErrorMsg() const {
-        if (_tenantId)
-            return str::stream() << *_tenantId << '_' << _dbString;
-
-        return _dbString;
+        return toStringWithTenantId();
     }
 
     /**

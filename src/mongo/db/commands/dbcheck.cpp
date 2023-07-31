@@ -165,7 +165,7 @@ std::unique_ptr<DbCheckRun> singleCollectionRun(OperationContext* opCtx,
             agc.getCollection());
 
     uassert(40619,
-            "Cannot run dbCheck on " + nss.toString() + " because it is not replicated",
+            "Cannot run dbCheck on " + nss.toStringForErrorMsg() + " because it is not replicated",
             nss.isReplicated());
 
     uassert(6769500, "dbCheck no longer supports snapshotRead:false", invocation.getSnapshotRead());
@@ -532,23 +532,11 @@ private:
         Lock::GlobalLock glob(opCtx, MODE_IX);
 
         // The CollectionCatalog to use for lock-free reads with point-in-time catalog lookups.
-        std::shared_ptr<const CollectionCatalog> catalog;
-
-        boost::optional<AutoGetCollection> autoColl;
-        const Collection* collection = nullptr;
-        // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-        if (feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
-            // Make sure we get a CollectionCatalog in sync with our snapshot.
-            catalog = getConsistentCatalogAndSnapshot(opCtx);
-
-            collection = catalog->establishConsistentCollection(
-                opCtx,
-                {info.nss.db(), info.uuid},
-                opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx));
-        } else {
-            autoColl.emplace(opCtx, info.nss, MODE_IS);
-            collection = autoColl->getCollection().get();
-        }
+        std::shared_ptr<const CollectionCatalog> catalog = getConsistentCatalogAndSnapshot(opCtx);
+        const Collection* collection = catalog->establishConsistentCollection(
+            opCtx,
+            {info.nss.dbName(), info.uuid},
+            opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx));
 
         if (_stepdownHasOccurred(opCtx, info.nss)) {
             _done = true;
@@ -564,14 +552,6 @@ private:
         uassert(ErrorCodes::SnapshotUnavailable,
                 "No snapshot available yet for dbCheck",
                 readTimestamp);
-        auto minVisible = collection->getMinimumVisibleSnapshot();
-        if (minVisible && *readTimestamp < *collection->getMinimumVisibleSnapshot()) {
-            // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-            invariant(!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe());
-            return {ErrorCodes::SnapshotUnavailable,
-                    str::stream() << "Unable to read from collection " << info.nss
-                                  << " due to pending catalog changes"};
-        }
 
         // The CollectionPtr needs to outlive the DbCheckHasher as it's used internally.
         const CollectionPtr collectionPtr(collection);

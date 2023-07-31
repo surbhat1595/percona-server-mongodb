@@ -102,8 +102,8 @@ void ShardServerProcessInterface::checkRoutingInfoEpochOrThrow(
     }();
 
     uassert(StaleEpochInfo(nss, receivedVersion, wantedVersion),
-            str::stream() << "Could not act as router for " << nss.ns() << ", received "
-                          << receivedVersion.toString() << ", but found "
+            str::stream() << "Could not act as router for " << nss.toStringForErrorMsg()
+                          << ", received " << receivedVersion.toString() << ", but found "
                           << wantedVersion.toString(),
             wantedVersion.placementVersion().isSameCollection(receivedVersion.placementVersion()));
 }
@@ -183,6 +183,7 @@ void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
     const NamespaceString& targetNs,
     bool dropTarget,
     bool stayTemp,
+    bool allowBuckets,
     const BSONObj& originalCollectionOptions,
     const std::list<BSONObj>& originalIndexes) {
     auto cachedDbInfo =
@@ -262,8 +263,8 @@ BSONObj ShardServerProcessInterface::getCollectionOptions(OperationContext* opCt
         }
 
         tassert(5983900,
-                str::stream() << "Expected at most one collection with the name " << nss << ": "
-                              << resultCollections.docs.size(),
+                str::stream() << "Expected at most one collection with the name "
+                              << nss.toStringForErrorMsg() << ": " << resultCollections.docs.size(),
                 resultCollections.docs.size() <= 1);
     }
 
@@ -435,7 +436,7 @@ ShardServerProcessInterface::expectUnshardedCollectionInScope(
 
 void ShardServerProcessInterface::checkOnPrimaryShardForDb(OperationContext* opCtx,
                                                            const NamespaceString& nss) {
-    DatabaseShardingState::assertIsPrimaryShardForDb(opCtx, nss.db());
+    DatabaseShardingState::assertIsPrimaryShardForDb(opCtx, nss.dbName());
 }
 
 }  // namespace mongo

@@ -106,3 +106,9 @@
 
 // Defined if grpc support is enabled
 @mongo_config_grpc@
+
+
+// Percona specific section
+
+// FIPSMode enabled
+@percona_fipsmode_enabled@

@@ -20,6 +20,12 @@
 #
 last-continuous:
   all:
+  - test_file: jstests/sharding/query/find_and_modify_with_partial_shard_key.js
+    ticket: SERVER-44422
+  - test_file: jstests/sharding/query/delete_with_partial_shard_key.js
+    ticket: SERVER-44422
+  - test_file: jstests/core/timeseries/timeseries_field_parsed_as_bson.js
+    ticket: SERVER-77654
   - test_file: jstests/sharding/conn_pool_stats.js
     ticket: SERVER-75911
   - test_file: jstests/replsets/tenant_migration_fetch_committed_transactions_retry.js
@@ -296,9 +302,21 @@ last-continuous:
     ticket: SERVER-78414
   - test_file: jstests/sharding/multi_writes_with_shard_version_ignored_dont_bubble_up_critical_section.js
     ticket: SERVER-61127
+  - test_file: jstests/sharding/cluster_time_across_add_shard.js
+    ticket: SERVER-60466
+  - test_file: jstests/change_streams/split_large_event.js
+    ticket: SERVER-67699
+  - test_file: jstests/core/query/elemmatch/elemmatch_or_pushdown_paths.js
+    ticket: SERVER-74954
+  - test_file: jstests/core/timeseries/timeseries_groupby_reorder.js
+    ticket: SERVER-79136
   suites: null
 last-lts:
   all:
+  - test_file: jstests/sharding/query/find_and_modify_with_partial_shard_key.js
+    ticket: SERVER-44422
+  - test_file: jstests/sharding/query/delete_with_partial_shard_key.js
+    ticket: SERVER-44422
   - test_file: jstests/sharding/conn_pool_stats.js
     ticket: SERVER-75911
   - test_file: jstests/sharding/database_versioning_all_commands.js
@@ -663,10 +681,18 @@ last-lts:
     ticket: SERVER-78050
   - test_file: jstests/sharding/implicit_create_collection_triggered_by_DDLs.js
     ticket: SERVER-76489
-  - test_file: jstests/change_streams/large_events_failed_metric.js
+  - test_file: jstests/change_streams/split_large_event.js
     ticket: SERVER-67699
   - test_file: jstests/sharding/transfer_mods_large_batches.js
     ticket: SERVER-78414
   - test_file: jstests/sharding/multi_writes_with_shard_version_ignored_dont_bubble_up_critical_section.js
     ticket: SERVER-61127
+  - test_file: jstests/sharding/cluster_time_across_add_shard.js
+    ticket: SERVER-60466
+  - test_file: jstests/core/query/elemmatch/elemmatch_or_pushdown_paths.js
+    ticket: SERVER-74954
+  - test_file: jstests/core/timeseries/timeseries_groupby_reorder.js
+    ticket: SERVER-79136
+  - test_file: jstests/replsets/commit_point_propagation_with_oplog_exhaust_cursor.js
+    ticket: SERVER-78813
   suites: null

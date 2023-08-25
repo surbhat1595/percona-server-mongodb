@@ -31,6 +31,7 @@
 
 #include "mongo/config.h"
 
+#include <array>
 #include <cstddef>
 #include <limits>
 #include <memory>

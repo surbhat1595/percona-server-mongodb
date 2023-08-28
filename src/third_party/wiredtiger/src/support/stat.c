@@ -1204,7 +1204,8 @@ static const char *const __stats_connection_desc[] = {
   "cache: internal pages split during eviction",
   "cache: leaf pages split during eviction",
   "cache: maximum bytes configured",
-  "cache: maximum page size at eviction",
+  "cache: maximum milliseconds spent at a single eviction",
+  "cache: maximum page size seen at eviction",
   "cache: modified pages evicted",
   "cache: modified pages evicted by application threads",
   "cache: operations timed out waiting for space in cache",
@@ -1222,6 +1223,7 @@ static const char *const __stats_connection_desc[] = {
   "cache: pages read into cache",
   "cache: pages read into cache after truncate",
   "cache: pages read into cache after truncate in prepare state",
+  "cache: pages removed from the ordinary queue to be queued for urgent eviction",
   "cache: pages requested from the cache",
   "cache: pages seen by eviction walk",
   "cache: pages seen by eviction walk that are already queued",
@@ -1237,6 +1239,7 @@ static const char *const __stats_connection_desc[] = {
   "cache: percentage overhead",
   "cache: the number of times full update inserted to history store",
   "cache: the number of times reverse modify inserted to history store",
+  "cache: total milliseconds spent inside reentrant history store evictions in a reconciliation",
   "cache: tracked bytes belonging to internal pages in the cache",
   "cache: tracked bytes belonging to leaf pages in the cache",
   "cache: tracked dirty bytes in the cache",
@@ -1426,7 +1429,10 @@ static const char *const __stats_connection_desc[] = {
   "reconciliation: approximate byte size of transaction IDs in pages written",
   "reconciliation: fast-path pages deleted",
   "reconciliation: leaf-page overflow keys",
-  "reconciliation: maximum seconds spent in a reconciliation call",
+  "reconciliation: maximum milliseconds spent in a reconciliation call",
+  "reconciliation: maximum milliseconds spent in building a disk image in a reconciliation",
+  "reconciliation: maximum milliseconds spent in moving updates to the history store in a "
+  "reconciliation",
   "reconciliation: page reconciliation calls",
   "reconciliation: page reconciliation calls for eviction",
   "reconciliation: page reconciliation calls that resulted in values with prepared transaction "
@@ -1764,6 +1770,7 @@ __wt_stat_connection_clear_single(WT_CONNECTION_STATS *stats)
     stats->cache_eviction_split_internal = 0;
     stats->cache_eviction_split_leaf = 0;
     /* not clearing cache_bytes_max */
+    /* not clearing cache_eviction_maximum_milliseconds */
     /* not clearing cache_eviction_maximum_page_size */
     stats->cache_eviction_dirty = 0;
     stats->cache_eviction_app_dirty = 0;
@@ -1782,6 +1789,7 @@ __wt_stat_connection_clear_single(WT_CONNECTION_STATS *stats)
     stats->cache_read = 0;
     stats->cache_read_deleted = 0;
     stats->cache_read_deleted_prepared = 0;
+    stats->cache_eviction_clear_ordinary = 0;
     stats->cache_pages_requested = 0;
     stats->cache_eviction_pages_seen = 0;
     stats->cache_eviction_pages_already_queued = 0;
@@ -1795,6 +1803,7 @@ __wt_stat_connection_clear_single(WT_CONNECTION_STATS *stats)
     /* not clearing cache_overhead */
     stats->cache_hs_insert_full_update = 0;
     stats->cache_hs_insert_reverse_modify = 0;
+    /* not clearing cache_reentry_hs_eviction_milliseconds */
     /* not clearing cache_bytes_internal */
     /* not clearing cache_bytes_leaf */
     /* not clearing cache_bytes_dirty */
@@ -1984,7 +1993,9 @@ __wt_stat_connection_clear_single(WT_CONNECTION_STATS *stats)
     stats->rec_time_window_bytes_txn = 0;
     stats->rec_page_delete_fast = 0;
     stats->rec_overflow_key_leaf = 0;
-    /* not clearing rec_maximum_seconds */
+    /* not clearing rec_maximum_milliseconds */
+    /* not clearing rec_maximum_image_build_milliseconds */
+    /* not clearing rec_maximum_hs_wrapup_milliseconds */
     stats->rec_pages = 0;
     stats->rec_pages_eviction = 0;
     stats->rec_pages_with_prepare = 0;
@@ -2316,6 +2327,8 @@ __wt_stat_connection_aggregate(WT_CONNECTION_STATS **from, WT_CONNECTION_STATS *
     to->cache_eviction_split_internal += WT_STAT_READ(from, cache_eviction_split_internal);
     to->cache_eviction_split_leaf += WT_STAT_READ(from, cache_eviction_split_leaf);
     to->cache_bytes_max += WT_STAT_READ(from, cache_bytes_max);
+    to->cache_eviction_maximum_milliseconds +=
+      WT_STAT_READ(from, cache_eviction_maximum_milliseconds);
     to->cache_eviction_maximum_page_size += WT_STAT_READ(from, cache_eviction_maximum_page_size);
     to->cache_eviction_dirty += WT_STAT_READ(from, cache_eviction_dirty);
     to->cache_eviction_app_dirty += WT_STAT_READ(from, cache_eviction_app_dirty);
@@ -2339,6 +2352,7 @@ __wt_stat_connection_aggregate(WT_CONNECTION_STATS **from, WT_CONNECTION_STATS *
     to->cache_read += WT_STAT_READ(from, cache_read);
     to->cache_read_deleted += WT_STAT_READ(from, cache_read_deleted);
     to->cache_read_deleted_prepared += WT_STAT_READ(from, cache_read_deleted_prepared);
+    to->cache_eviction_clear_ordinary += WT_STAT_READ(from, cache_eviction_clear_ordinary);
     to->cache_pages_requested += WT_STAT_READ(from, cache_pages_requested);
     to->cache_eviction_pages_seen += WT_STAT_READ(from, cache_eviction_pages_seen);
     to->cache_eviction_pages_already_queued +=
@@ -2356,6 +2370,8 @@ __wt_stat_connection_aggregate(WT_CONNECTION_STATS **from, WT_CONNECTION_STATS *
     to->cache_overhead += WT_STAT_READ(from, cache_overhead);
     to->cache_hs_insert_full_update += WT_STAT_READ(from, cache_hs_insert_full_update);
     to->cache_hs_insert_reverse_modify += WT_STAT_READ(from, cache_hs_insert_reverse_modify);
+    to->cache_reentry_hs_eviction_milliseconds +=
+      WT_STAT_READ(from, cache_reentry_hs_eviction_milliseconds);
     to->cache_bytes_internal += WT_STAT_READ(from, cache_bytes_internal);
     to->cache_bytes_leaf += WT_STAT_READ(from, cache_bytes_leaf);
     to->cache_bytes_dirty += WT_STAT_READ(from, cache_bytes_dirty);
@@ -2550,7 +2566,11 @@ __wt_stat_connection_aggregate(WT_CONNECTION_STATS **from, WT_CONNECTION_STATS *
     to->rec_time_window_bytes_txn += WT_STAT_READ(from, rec_time_window_bytes_txn);
     to->rec_page_delete_fast += WT_STAT_READ(from, rec_page_delete_fast);
     to->rec_overflow_key_leaf += WT_STAT_READ(from, rec_overflow_key_leaf);
-    to->rec_maximum_seconds += WT_STAT_READ(from, rec_maximum_seconds);
+    to->rec_maximum_milliseconds += WT_STAT_READ(from, rec_maximum_milliseconds);
+    to->rec_maximum_image_build_milliseconds +=
+      WT_STAT_READ(from, rec_maximum_image_build_milliseconds);
+    to->rec_maximum_hs_wrapup_milliseconds +=
+      WT_STAT_READ(from, rec_maximum_hs_wrapup_milliseconds);
     to->rec_pages += WT_STAT_READ(from, rec_pages);
     to->rec_pages_eviction += WT_STAT_READ(from, rec_pages_eviction);
     to->rec_pages_with_prepare += WT_STAT_READ(from, rec_pages_with_prepare);

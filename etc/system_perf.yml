@@ -351,6 +351,9 @@ functions:
           EOF
           fi
           tar czf mongodb${compile_variant|}.tar.gz mongodb
+          # Put all matching mongo debug from the build directory in an archive in the same location
+          # as the library archive (i.e. mongodb/bin).
+          tar czvf mongodb${compile_variant|}-debugsymbols.tar.gz $(find ./build/cached -name mongo\*.debug -type f) --xform 's:^.*/:mongodb/bin/:'
     - command: s3.put
       params:
         aws_key: ${aws_key}
@@ -361,6 +364,16 @@ functions:
         permissions: public-read
         content_type: ${content_type|application/x-gzip}
         display_name: mongodb${compile_variant|}.tar.gz
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/mongodb${compile_variant|}-debugsymbols.tar.gz
+        remote_file: ${project_dir}/${version_id}/${revision}/${platform}/mongodb${compile_variant|}-${version_id}-debugsymbols.tar.gz
+        bucket: mciuploads
+        permissions: public-read
+        content_type: ${content_type|application/x-gzip}
+        display_name: mongo-debugsymbols.tgz
   ###
 
   ## Schedule Tasks ##
@@ -617,12 +630,13 @@ tasks:
         vars:
           test_control: "cursor_manager"
 
-  - name: mixed_workloads
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "mixed_workloads"
+  # unscheduling according to SERVER-78888
+  # - name: mixed_workloads
+  #   priority: 5
+  #   commands:
+  #     - func: f_run_dsi_workload
+  #       vars:
+  #         test_control: "mixed_workloads"
 
   - name: mixed_workloads_genny_stepdowns
     priority: 5
@@ -1344,7 +1358,6 @@ buildvariants:
   #     - name: crud_workloads
   #     - name: genny_canaries
   #     - name: cursor_manager
-  #     - name: mixed_workloads
   #     - name: misc_workloads
   #     - name: map_reduce_workloads
   #     - name: non_sharded_workloads
@@ -1391,7 +1404,6 @@ buildvariants:
   #     - name: industry_benchmarks
   #     - name: ycsb_60GB
   #     - name: crud_workloads
-  #     - name: mixed_workloads
   #     - name: misc_workloads
   #     - name: map_reduce_workloads
   #     - name: smoke_test
@@ -1569,7 +1581,6 @@ buildvariants:
   #     - name: schedule_variant_auto_tasks
   #     - name: industry_benchmarks
   #     - name: crud_workloads
-  #     - name: mixed_workloads
   #     - name: misc_workloads
   #     - name: map_reduce_workloads
   #     - name: smoke_test
@@ -1623,7 +1634,6 @@ buildvariants:
   #     - name: industry_benchmarks
   #     - name: industry_benchmarks_wmajority
   #     - name: linkbench
-  #     - name: mixed_workloads
   #     - name: mongos_workloads
   #     - name: mongos_large_catalog_workloads
   #     - name: move_chunk_large_chunk_map_workloads
@@ -1689,7 +1699,6 @@ buildvariants:
   #     - name: industry_benchmarks_secondary_reads
   #     - name: crud_workloads
   #     - name: crud_workloads_majority
-  #     - name: mixed_workloads
   #     - name: misc_workloads
   #     - name: map_reduce_workloads
   #     - name: refine_shard_key_transaction_stress
@@ -1735,7 +1744,6 @@ buildvariants:
   #     - name: industry_benchmarks_secondary_reads
   #     - name: crud_workloads
   #     - name: crud_workloads_majority
-  #     - name: mixed_workloads
   #     - name: misc_workloads
   #     - name: map_reduce_workloads
   #     - name: refine_shard_key_transaction_stress
@@ -1781,7 +1789,6 @@ buildvariants:
   #     - name: industry_benchmarks_secondary_reads
   #     - name: crud_workloads
   #     - name: crud_workloads_majority
-  #     - name: mixed_workloads
   #     - name: smoke_test
   #     - name: industry_benchmarks_wmajority
   #     - name: change_streams_latency
@@ -1807,7 +1814,6 @@ buildvariants:
   #     - name: schedule_patch_auto_tasks
   #     - name: schedule_variant_auto_tasks
   #     - name: industry_benchmarks
-  #     - name: mixed_workloads
 
   # - name: linux-3-node-replSet-maintenance-events
   #   display_name: Linux 3-Node ReplSet (Maintenance Events) Legacy
@@ -1954,7 +1960,6 @@ buildvariants:
   #     - name: industry_benchmarks_secondary_reads
   #     - name: crud_workloads
   #     - name: crud_workloads_majority
-  #     - name: mixed_workloads
   #     - name: misc_workloads
   #     - name: map_reduce_workloads
   #     - name: smoke_test
@@ -2095,7 +2100,6 @@ buildvariants:
       - name: crud_workloads
       - name: genny_canaries
       - name: cursor_manager
-      - name: mixed_workloads
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: non_sharded_workloads
@@ -2128,7 +2132,6 @@ buildvariants:
       - name: industry_benchmarks
       - name: ycsb_60GB
       - name: crud_workloads
-      - name: mixed_workloads
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: smoke_test
@@ -2314,7 +2317,6 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
       - name: crud_workloads
-      - name: mixed_workloads
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: smoke_test
@@ -2376,7 +2378,6 @@ buildvariants:
       - name: change_streams_listen_throughput
       - name: industry_benchmarks
       - name: linkbench
-      - name: mixed_workloads
       - name: mongos_workloads
       - name: mongos_large_catalog_workloads
       - name: move_chunk_large_chunk_map_workloads
@@ -2406,7 +2407,6 @@ buildvariants:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
-      - name: mixed_workloads
       - name: mongos_workloads
       - name: move_chunk_workloads
       - name: move_chunk_waiting_workloads
@@ -2480,7 +2480,6 @@ buildvariants:
       - name: ycsb_60GB
       - name: industry_benchmarks_secondary_reads
       - name: crud_workloads
-      - name: mixed_workloads
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: refine_shard_key_transaction_stress
@@ -2525,7 +2524,6 @@ buildvariants:
       - name: industry_benchmarks
       - name: ycsb_60GB
       - name: crud_workloads
-      - name: mixed_workloads
       - name: smoke_test
       - name: linkbench
       - name: linkbench2
@@ -2552,7 +2550,6 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: crud_workloads
       - name: industry_benchmarks
-      - name: mixed_workloads
 
   - name: linux-3-node-replSet-maintenance-events.2022-11
     display_name: Linux 3-Node ReplSet (Maintenance Events) 2022-11

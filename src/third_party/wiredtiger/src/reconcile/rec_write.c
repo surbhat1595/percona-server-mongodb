@@ -30,15 +30,16 @@ int
 __wt_reconcile(WT_SESSION_IMPL *session, WT_REF *ref, WT_SALVAGE_COOKIE *salvage, uint32_t flags)
 {
     WT_BTREE *btree;
+    WT_CONNECTION_IMPL *conn;
     WT_DECL_RET;
     WT_PAGE *page;
-    uint64_t start, now;
     bool no_reconcile_set, page_locked;
 
     btree = S2BT(session);
+    conn = S2C(session);
     page = ref->page;
 
-    __wt_seconds(session, &start);
+    session->reconcile_timeline.reconcile_start = __wt_clock(session);
 
     __wt_verbose(session, WT_VERB_RECONCILE, "%p reconcile %s (%s%s)", (void *)ref,
       __wt_page_type_string(page->type), LF_ISSET(WT_REC_EVICT) ? "evict" : "checkpoint",
@@ -97,7 +98,7 @@ __wt_reconcile(WT_SESSION_IMPL *session, WT_REF *ref, WT_SALVAGE_COOKIE *salvage
     ret = __reconcile(session, ref, salvage, flags, &page_locked);
 
     /* If writing a page in service of compaction, we're done, clear the flag. */
-    F_CLR_ATOMIC(ref->page, WT_PAGE_COMPACTION_WRITE);
+    F_CLR_ATOMIC_16(ref->page, WT_PAGE_COMPACTION_WRITE);
 
 err:
     if (page_locked)
@@ -105,11 +106,31 @@ err:
     if (!no_reconcile_set)
         F_CLR(session, WT_SESSION_NO_RECONCILE);
 
-    /* Track the longest reconciliation, ignoring races (it's just a statistic). */
-    __wt_seconds(session, &now);
-    if (now - start > S2C(session)->rec_maximum_seconds)
-        S2C(session)->rec_maximum_seconds = now - start;
-
+    /*
+     * Track the longest reconciliation and time spent in each reconciliation stage, ignoring races
+     * (it's just a statistic).
+     */
+    session->reconcile_timeline.reconcile_finish = __wt_clock(session);
+    if (WT_CLOCKDIFF_MS(session->reconcile_timeline.hs_wrapup_finish,
+          session->reconcile_timeline.hs_wrapup_start) > conn->rec_maximum_hs_wrapup_milliseconds)
+        conn->rec_maximum_hs_wrapup_milliseconds =
+          WT_CLOCKDIFF_MS(session->reconcile_timeline.hs_wrapup_finish,
+            session->reconcile_timeline.hs_wrapup_start);
+    if (WT_CLOCKDIFF_MS(session->reconcile_timeline.image_build_finish,
+          session->reconcile_timeline.image_build_start) >
+      conn->rec_maximum_image_build_milliseconds)
+        conn->rec_maximum_image_build_milliseconds =
+          WT_CLOCKDIFF_MS(session->reconcile_timeline.image_build_finish,
+            session->reconcile_timeline.image_build_start);
+    if (WT_CLOCKDIFF_SEC(session->reconcile_timeline.reconcile_finish,
+          session->reconcile_timeline.reconcile_start) > conn->rec_maximum_milliseconds)
+        conn->rec_maximum_milliseconds =
+          WT_CLOCKDIFF_MS(session->reconcile_timeline.reconcile_finish,
+            session->reconcile_timeline.reconcile_start);
+    if (session->reconcile_timeline.total_reentry_hs_eviction_time >
+      conn->cache->reentry_hs_eviction_ms)
+        conn->cache->reentry_hs_eviction_ms =
+          session->reconcile_timeline.total_reentry_hs_eviction_time;
     return (ret);
 }
 
@@ -174,6 +195,10 @@ __reconcile(WT_SESSION_IMPL *session, WT_REF *ref, WT_SALVAGE_COOKIE *salvage, u
     WT_RET(__rec_init(session, ref, flags, salvage, &session->reconcile));
     r = session->reconcile;
 
+    /* Only update if we are in the first entry into eviction. */
+    if (!session->evict_timeline.reentry_hs_eviction)
+        session->reconcile_timeline.image_build_start = __wt_clock(session);
+
     /* Reconcile the page. */
     switch (page->type) {
     case WT_PAGE_COL_FIX:
@@ -203,6 +228,9 @@ __reconcile(WT_SESSION_IMPL *session, WT_REF *ref, WT_SALVAGE_COOKIE *salvage, u
         ret = __wt_illegal_value(session, page->type);
         break;
     }
+
+    if (!session->evict_timeline.reentry_hs_eviction)
+        session->reconcile_timeline.image_build_finish = __wt_clock(session);
 
     /*
      * Update the global history store score. Only use observations during eviction, not checkpoints
@@ -452,7 +480,7 @@ __rec_root_write(WT_SESSION_IMPL *session, WT_PAGE *page, uint32_t flags)
      * discard these pages.
      */
     WT_RET(__wt_page_alloc(session, page->type, mod->mod_multi_entries, false, &next));
-    F_SET_ATOMIC(next, WT_PAGE_EVICT_NO_PROGRESS);
+    F_SET_ATOMIC_16(next, WT_PAGE_EVICT_NO_PROGRESS);
 
     WT_INTL_INDEX_GET(session, next, pindex);
     for (i = 0; i < mod->mod_multi_entries; ++i) {
@@ -1713,7 +1741,7 @@ __rec_split_write_reuse(
      * those blocks. Check after calculating the checksum, there's a possibility the calculated
      * checksum will be useful in the future.
      */
-    if (F_ISSET_ATOMIC(r->page, WT_PAGE_COMPACTION_WRITE))
+    if (F_ISSET_ATOMIC_16(r->page, WT_PAGE_COMPACTION_WRITE))
         return (false);
 
     /*
@@ -2156,6 +2184,7 @@ __rec_write_wrapup(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_PAGE *page)
 {
     WT_BM *bm;
     WT_BTREE *btree;
+    WT_DECL_RET;
     WT_MULTI *multi;
     WT_PAGE_MODIFY *mod;
     WT_REF *ref;
@@ -2173,8 +2202,12 @@ __rec_write_wrapup(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_PAGE *page)
      * visible when reconciling this page, copy them into the database's history store. This can
      * fail, so try before clearing the page's previous reconciliation state.
      */
-    if (F_ISSET(r, WT_REC_HS))
-        WT_RET(__rec_hs_wrapup(session, r));
+    if (F_ISSET(r, WT_REC_HS)) {
+        session->reconcile_timeline.hs_wrapup_start = __wt_clock(session);
+        ret = __rec_hs_wrapup(session, r);
+        session->reconcile_timeline.hs_wrapup_finish = __wt_clock(session);
+        WT_RET(ret);
+    }
 
     /*
      * Wrap up overflow tracking. If we are about to create a checkpoint, the system must be

@@ -484,6 +484,7 @@ struct __wt_connection_stats {
     int64_t cache_eviction_split_internal;
     int64_t cache_eviction_split_leaf;
     int64_t cache_bytes_max;
+    int64_t cache_eviction_maximum_milliseconds;
     int64_t cache_eviction_maximum_page_size;
     int64_t cache_eviction_dirty;
     int64_t cache_eviction_app_dirty;
@@ -502,6 +503,7 @@ struct __wt_connection_stats {
     int64_t cache_read;
     int64_t cache_read_deleted;
     int64_t cache_read_deleted_prepared;
+    int64_t cache_eviction_clear_ordinary;
     int64_t cache_pages_requested;
     int64_t cache_eviction_pages_seen;
     int64_t cache_eviction_pages_already_queued;
@@ -515,6 +517,7 @@ struct __wt_connection_stats {
     int64_t cache_overhead;
     int64_t cache_hs_insert_full_update;
     int64_t cache_hs_insert_reverse_modify;
+    int64_t cache_reentry_hs_eviction_milliseconds;
     int64_t cache_bytes_internal;
     int64_t cache_bytes_leaf;
     int64_t cache_bytes_dirty;
@@ -704,7 +707,9 @@ struct __wt_connection_stats {
     int64_t rec_time_window_bytes_txn;
     int64_t rec_page_delete_fast;
     int64_t rec_overflow_key_leaf;
-    int64_t rec_maximum_seconds;
+    int64_t rec_maximum_milliseconds;
+    int64_t rec_maximum_image_build_milliseconds;
+    int64_t rec_maximum_hs_wrapup_milliseconds;
     int64_t rec_pages;
     int64_t rec_pages_eviction;
     int64_t rec_pages_with_prepare;

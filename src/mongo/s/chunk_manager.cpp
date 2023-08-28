@@ -276,6 +276,19 @@ BSONObj ChunkMap::toBSON() const {
     return builder.obj();
 }
 
+std::string ChunkMap::toString() const {
+    StringBuilder sb;
+
+    sb << "Chunks (" << size() << "):\n";
+    for (const auto& chunkInfoPtr : _chunkMap) {
+        sb << "\t" << chunkInfoPtr->toString() << '\n';
+    }
+
+    sb << "Collection version:" << _collectionVersion.toString() << '\n';
+
+    return sb.str();
+}
+
 ChunkMap::ChunkVector::const_iterator ChunkMap::_findIntersectingChunk(const BSONObj& shardKey,
                                                                        bool isMaxInclusive) const {
     auto shardKeyString = ShardKeyPattern::toKeyString(shardKey);
@@ -402,7 +415,8 @@ bool ChunkManager::keyBelongsToShard(const BSONObj& shardKey, const ShardId& sha
 void ChunkManager::getShardIdsForQuery(boost::intrusive_ptr<ExpressionContext> expCtx,
                                        const BSONObj& query,
                                        const BSONObj& collation,
-                                       std::set<ShardId>* shardIds) const {
+                                       std::set<ShardId>* shardIds,
+                                       bool bypassIsFieldHashedCheck) const {
     auto findCommand = std::make_unique<FindCommandRequest>(_rt->optRt->nss());
     findCommand->setFilter(query.getOwned());
 
@@ -429,7 +443,7 @@ void ChunkManager::getShardIdsForQuery(boost::intrusive_ptr<ExpressionContext> e
     auto shardKeyToFind = _rt->optRt->getShardKeyPattern().extractShardKeyFromQuery(*cq);
     if (!shardKeyToFind.isEmpty()) {
         try {
-            auto chunk = findIntersectingChunk(shardKeyToFind, collation);
+            auto chunk = findIntersectingChunk(shardKeyToFind, collation, bypassIsFieldHashedCheck);
             shardIds->insert(chunk.getShardId());
             return;
         } catch (const DBException&) {
@@ -733,11 +747,7 @@ std::string RoutingTableHistory::toString() const {
     StringBuilder sb;
     sb << "RoutingTableHistory: " << _nss.ns() << " key: " << _shardKeyPattern.toString() << '\n';
 
-    sb << "Chunks:\n";
-    _chunkMap.forEach([&sb](const auto& chunk) {
-        sb << "\t" << chunk->toString() << '\n';
-        return true;
-    });
+    sb << _chunkMap.toString();
 
     sb << "Shard versions:\n";
     for (const auto& entry : _shardVersions) {

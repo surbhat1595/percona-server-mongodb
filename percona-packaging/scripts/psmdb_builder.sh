@@ -265,25 +265,14 @@ install_gcc_deb(){
 }
 
 set_compiler(){
-    export CC=/opt/mongodbtoolchain/v4/bin/clang
-    export CXX=/opt/mongodbtoolchain/v4/bin/clang++
-    if [ "x$OS" = "xdeb" ]; then
-        if [ x"${DEBIAN}" = xbullseye -o x"${DEBIAN}" = xbookworm ]; then
-            export CC=/usr/bin/clang-13
-            export CXX=/usr/bin/clang++-13
-       fi
-    fi
+    export CC=/opt/mongodbtoolchain/v4/bin/gcc
+    export CXX=/opt/mongodbtoolchain/v4/bin/g++
     return
 }
 
 fix_rules(){
-    if [ x"${DEBIAN}" = xbullseye -o x"${DEBIAN}" = xbookworm ]; then
-       sed -i 's|CC = gcc-5|CC = /usr/bin/clang-13|' debian/rules
-        sed -i 's|CXX = g++-5|CXX = /usr/bin/clang++-13|' debian/rules
-    else
-        sed -i 's|CC = gcc-5|CC = /opt/mongodbtoolchain/v4/bin/clang|' debian/rules
-        sed -i 's|CXX = g++-5|CXX = /opt/mongodbtoolchain/v4/bin/clang++|' debian/rules
-    fi
+    sed -i 's|CC = gcc-5|CC = /opt/mongodbtoolchain/v4/bin/gcc|' debian/rules
+    sed -i 's|CXX = g++-5|CXX = /opt/mongodbtoolchain/v4/bin/g++|' debian/rules
     sed -i 's:release:release --disable-warnings-as-errors :g' debian/rules
     return
 }
@@ -303,18 +292,12 @@ aws_sdk_build(){
             mkdir build
             cd build
             CMAKE_CMD="cmake"
-#            if [ -f /etc/redhat-release ]; then
-#                RHEL=$(rpm --eval %rhel)
-#                if [ x"$RHEL" = x7 ]; then
-#                    CMAKE_CMD="cmake3"
-#                fi
-#            fi
             set_compiler
             CMAKE_CXX_FLAGS=""
-#            if [ x"${DEBIAN}" = xjammy -o x"${DEBIAN}" = xbookworm ]; then
-#                CMAKE_CXX_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=deprecated-declarations -Wno-error=uninitialized "
-#                CMAKE_C_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=maybe-uninitialized -Wno-error=uninitialized "
-#            fi
+            if [ x"${DEBIAN}" = xjammy -o x"${DEBIAN}" = xbookworm ]; then
+                CMAKE_CXX_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=deprecated-declarations -Wno-error=uninitialized "
+                CMAKE_C_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=maybe-uninitialized -Wno-error=uninitialized "
+            fi
             if [ -z "${CC}" -a -z "${CXX}" ]; then
                 ${CMAKE_CMD} .. -DCMAKE_C_FLAGS="${CMAKE_C_FLAGS}" -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}" -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON || exit $?
             else
@@ -420,27 +403,12 @@ install_deps() {
       export DEBIAN=$(lsb_release -sc)
       export ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
       wget https://repo.percona.com/apt/pool/main/p/percona-release/percona-release_1.0-27.generic_all.deb && dpkg -i percona-release_1.0-27.generic_all.deb
-      if [ x"${DEBIAN}" = "xbionic" -o x"${DEBIAN}" = "xfocal" ]; then
-        add-apt-repository -y ppa:deadsnakes/ppa
-      elif [ x"${DEBIAN}" = "xbuster" ]; then
-        wget https://people.debian.org/~paravoid/python-all/unofficial-python-all.asc
-        mv unofficial-python-all.asc /etc/apt/trusted.gpg.d/
-        echo "deb http://people.debian.org/~paravoid/python-all ${DEBIAN} main" | tee /etc/apt/sources.list.d/python-all.list
-      fi
       percona-release enable tools testing
       apt-get update
-      if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xbookworm" -o x"${DEBIAN}" = "xjammy" ]; then
-        INSTALL_LIST="python3 python3-dev python3-pip"
-      else
-        INSTALL_LIST="python3.7 python3.7-dev dh-systemd"
-      fi
       INSTALL_LIST="${INSTALL_LIST} git valgrind scons liblz4-dev devscripts debhelper debconf libpcap-dev libbz2-dev libsnappy-dev pkg-config zlib1g-dev libzlcore-dev libsasl2-dev gcc g++ cmake curl"
       INSTALL_LIST="${INSTALL_LIST} libssl-dev libcurl4-openssl-dev libldap2-dev libkrb5-dev liblzma-dev patchelf libexpat1-dev sudo libfile-copy-recursive-perl"
       if [ x"${DEBIAN}" != "xbullseye" -a x"${DEBIAN}" != "xbookworm" -a x"${DEBIAN}" != "xjammy" ]; then
         INSTALL_LIST="${INSTALL_LIST} python3.7-distutils"
-      fi
-      if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xbookworm" ]; then
-          INSTALL_LIST="${INSTALL_LIST} clang-13 lld-13"
       fi
       until apt-get -y install dirmngr; do
         sleep 1
@@ -452,21 +420,11 @@ install_deps() {
       done
       apt-get -y install libext2fs-dev || apt-get -y install e2fslibs-dev
       install_golang
-      install_gcc_deb
-      if [ x"${DEBIAN}" = "xbookworm" ]; then
-        update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
-       rm -f /usr/lib/python3.11/EXTERNALLY-MANAGED
-      elif [ x"${DEBIAN}" = "xbullseye" ]; then
-        update-alternatives --install /usr/bin/python python /usr/bin/python3.9 1
-      else
-        update-alternatives --install /usr/bin/python python /usr/bin/python3.7 1
-        ln -sf /usr/bin/python3.7 /usr/bin/python3
-      fi
-      if [ x"${DEBIAN}" = "xbuster" -o x"${DEBIAN}" = "xfocal" -o x"${DEBIAN}" = "xjammy" ]; then
-          install_mongodbtoolchain
-          PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
-          update-alternatives --install /usr/bin/python python /opt/mongodbtoolchain/v4/bin/python3.10 1
-      fi
+
+      install_mongodbtoolchain
+      PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
+      update-alternatives --install /usr/bin/python python /opt/mongodbtoolchain/v4/bin/python3.10 1
+
       wget https://bootstrap.pypa.io/get-pip.py -O get-pip.py
       python get-pip.py
       easy_install pip
@@ -477,9 +435,14 @@ install_deps() {
 }
 
 install_mongodbtoolchain(){
-    curl -o toolchain_installer.sh http://mongodbtoolchain.build.10gen.cc/installer.sh
+    curl -o toolchain_installer.sh https://jenkins.percona.com/downloads/mongodbtoolchain/installer.sh
+    if [ ! -z "${RHEL}" ]; then
+        OS_CODE_NAME=${RHEL}
+    else
+        OS_CODE_NAME=${DEBIAN}
+    fi
     export USER=$(whoami)
-    bash -x ./toolchain_installer.sh -k || exit 1
+    bash -x ./toolchain_installer.sh -k --download-url https://jenkins.percona.com/downloads/mongodbtoolchain/${OS_CODE_NAME}_mongodbtoolchain.tar.gz || exit 1
     export PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
 }
 
@@ -561,7 +524,6 @@ build_srpm(){
     if [ x"$RHEL" = x7 ]; then
       if [ -f /opt/rh/devtoolset-9/enable ]; then
         source /opt/rh/devtoolset-9/enable
-        source /opt/rh/rh-python38/enable
         source /opt/rh/devtoolset-11/enable
       fi
     elif [ x"$RHEL" = x8 ]; then
@@ -616,7 +578,6 @@ build_rpm(){
     if [ x"$RHEL" = x7 ]; then
       if [ -f /opt/rh/devtoolset-9/enable ]; then
         source /opt/rh/devtoolset-9/enable
-        #source /opt/rh/rh-python38/enable
         source /opt/rh/devtoolset-11/enable
       fi
     elif [ x"$RHEL" = x8 ]; then
@@ -640,8 +601,8 @@ build_rpm(){
     cd $WORKDIR
 
     echo "CC and CXX should be modified once correct compiller would be installed on Centos"
-    export CC=/opt/mongodbtoolchain/v4/bin/clang
-    export CXX=/opt/mongodbtoolchain/v4/bin/clang++
+    export CC=/opt/mongodbtoolchain/v4/bin/gcc
+    export CXX=/opt/mongodbtoolchain/v4/bin/g++
     #
     echo "RHEL=${RHEL}" >> percona-server-mongodb-70.properties
     echo "ARCH=${ARCH}" >> percona-server-mongodb-70.properties
@@ -655,7 +616,7 @@ build_rpm(){
     export GOBINPATH="/usr/local/go/bin"
 
     export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-    export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1"
+    export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1 -B/opt/mongodbtoolchain/v4/bin"
     rpmbuild --define "_topdir ${WORKDIR}/rpmbuild" --define "dist .$OS_NAME" --rebuild rpmbuild/SRPMS/$SRC_RPM
 
     return_code=$?
@@ -763,6 +724,8 @@ build_deb(){
     dpkg-source -x ${DSC}
     #
     cd ${PRODUCT}-${VERSION}
+    PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
+
     pip install --upgrade pip
 
     # PyYAML pkg installation fix, more info: https://github.com/yaml/pyyaml/issues/724
@@ -784,7 +747,7 @@ build_deb(){
     . ./mongo-tools/set_tools_revision.sh
     dch -m -D "${DEBIAN}" --force-distribution -v "${VERSION}-${RELEASE}.${DEBIAN}" 'Update distribution'
     export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-    export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1"
+    export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1 -B/opt/mongodbtoolchain/v4/bin"
 
     export GOROOT="/usr/local/go/"
     export GOPATH=$PWD/../
@@ -938,7 +901,7 @@ build_tarball(){
         fi
     fi
     export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-    export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1"
+    export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1 -B/opt/mongodbtoolchain/v4/bin"
     if [ x"${DEBIAN}" = "xstretch" ]; then
       CURL_LINKFLAGS=$(pkg-config libcurl --static --libs)
       export OPT_LINKFLAGS="${OPT_LINKFLAGS} ${CURL_LINKFLAGS}"

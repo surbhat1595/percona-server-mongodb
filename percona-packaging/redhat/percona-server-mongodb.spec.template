@@ -122,8 +122,8 @@ Conflicts: Percona-Server-MongoDB-tools Percona-Server-MongoDB-32-tools Percona-
 
 %build
 
-export CC=${CC:-clang}
-export CXX=${CXX:-clang++}
+export CC=${CC:-gcc}
+export CXX=${CXX:-g++}
 export PSM_TARGETS="install-mongod install-mongos install-mongo install-perconadecrypt build/install/bin/mongobridge"
 export INSTALLDIR=$RPM_BUILD_DIR/install
 export INSTALLDIR_AWS=$RPM_BUILD_DIR/install_aws
@@ -132,7 +132,7 @@ export TOOLS_TAGS="ssl sasl"
 export PORTABLE=1
 export USE_SSE=1
 export PATH=/usr/local/go/bin:$PATH
-export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1"
+export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1 -B/opt/mongodbtoolchain/v4/bin"
 
 export PATH=/usr/local/go/bin:${PATH}
 export GOROOT="/usr/local/go/"

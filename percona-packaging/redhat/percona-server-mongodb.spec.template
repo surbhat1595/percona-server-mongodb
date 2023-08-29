@@ -101,6 +101,14 @@ Requires: percona-mongodb-mongosh
 This package contains the Percona Server for MongoDB server software, default configuration files and init.d scripts
 Conflicts: Percona-Server-MongoDB-server Percona-Server-MongoDB-32-server Percona-Server-MongoDB-34-server Percona-Server-MongoDB-36-server mongodb-org-server
 
+%package shell
+Group:          Applications/Databases
+Summary:        Percona Server for MongoDB shell client
+Requires:  cyrus-sasl-plain
+%description shell
+This package contains the Percona Server for MongoDB shell
+Conflicts: Percona-Server-MongoDB-shell Percona-Server-MongoDB-32-shell Percona-Server-MongoDB-34-shell Percona-Server-MongoDB-36-shell mongodb-org-shell
+
 %package tools
 Group:          Applications/Databases
 Summary:        The tools package for Percona Server for MongoDB
@@ -116,7 +124,7 @@ Conflicts: Percona-Server-MongoDB-tools Percona-Server-MongoDB-32-tools Percona-
 
 export CC=${CC:-clang}
 export CXX=${CXX:-clang++}
-export PSM_TARGETS="install-mongod install-mongos install-perconadecrypt build/install/bin/mongobridge"
+export PSM_TARGETS="install-mongod install-mongos install-mongo install-perconadecrypt build/install/bin/mongobridge"
 export INSTALLDIR=$RPM_BUILD_DIR/install
 export INSTALLDIR_AWS=$RPM_BUILD_DIR/install_aws
 export AWS_LIBS="/usr/local"
@@ -216,6 +224,7 @@ install -m 644 %{SOURCE3} %{buildroot}/%{_sysconfdir}/sysconfig/mongod
 install -m 755 %{SOURCE4} %{buildroot}/%{_bindir}/
 install -m 755 %{SOURCE7} %{buildroot}/%{_bindir}/
 #
+install -m 755 build/install/bin/mongo %{buildroot}/%{_bindir}/mongo
 install -m 755 build/install/bin/mongod %{buildroot}/%{_bindir}/mongod
 install -m 755 build/install/bin/mongos %{buildroot}/%{_bindir}/mongos
 install -m 755 build/install/bin/perconadecrypt %{buildroot}/%{_bindir}/
@@ -253,6 +262,11 @@ install -m 644 $RPM_BUILD_DIR/%{src_dir}/manpages/* %{buildroot}/%{_mandir}/man1
 %config(noreplace) %{_sysconfdir}/sysconfig/mongod
 %attr(0640,mongod,mongod) %ghost /var/log/mongo/mongod.log
 %doc LICENSE-Community.txt README THIRD-PARTY-NOTICES
+
+%files shell
+%defattr(-,root,root,-)
+%{_bindir}/mongo
+%{_mandir}/man1/mongo.1.gz
 
 %files tools
 %defattr(-,root,root,-)

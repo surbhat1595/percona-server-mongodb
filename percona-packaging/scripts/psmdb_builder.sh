@@ -23,6 +23,7 @@ Usage: $0 [OPTIONS]
         --mongo_tools_tag   MONGO_TOOLS_TAG(mandatory)
         --special_targets   Special targets for tests
         --jenkins_mode      If it is set it means that this script is used on jenkins infrastructure
+        --enable_fipsmode   build gated PSMDB
         --debug             build debug tarball
         --help) usage ;;
 Example $0 --builddir=/tmp/PSMDB --get_sources=1 --build_src_rpm=1 --build_rpm=1
@@ -61,6 +62,7 @@ parse_arguments() {
             --jenkins_mode=*) JENKINS_MODE="$val" ;;
             --debug=*) DEBUG="$val" ;;
             --special_targets=*) SPECIAL_TAR="$val" ;;
+            --enable_fipsmode=*) FIPSMODE="$val" ;;
             --help) usage ;;
             *)
               if test -n "$pick_args"
@@ -291,6 +293,9 @@ fix_rules(){
         sed -i 's|CXX = g++-5|CXX = /usr/bin/g++-10|' debian/rules
     fi
     sed -i 's:release:release --disable-warnings-as-errors :g' debian/rules
+    if [ x"${FIPSMODE}" == x1 ]; then
+        sed -i 's:FIPSMODE=0:FIPSMODE=1:' debian/rules
+    fi
 }
 
 aws_sdk_build(){
@@ -656,7 +661,11 @@ build_rpm(){
         export GOBINPATH="/usr/local/go/bin"
     #fi
     export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-    rpmbuild --define "_topdir ${WORKDIR}/rpmbuild" --define "dist .$OS_NAME" --rebuild rpmbuild/SRPMS/$SRC_RPM
+    if [[ "x${FIPSMODE}" == "x1" ]]; then
+        rpmbuild --define "_topdir ${WORKDIR}/rpmbuild" --define "dist .$OS_NAME" --define "enable_fipsmode 1" --rebuild rpmbuild/SRPMS/$SRC_RPM
+    else
+        rpmbuild --define "_topdir ${WORKDIR}/rpmbuild" --define "dist .$OS_NAME" --rebuild rpmbuild/SRPMS/$SRC_RPM
+    fi
 
     return_code=$?
     if [ $return_code != 0 ]; then
@@ -953,11 +962,14 @@ build_tarball(){
       CURL_LINKFLAGS=$(pkg-config libcurl --static --libs)
       export LINKFLAGS="${LINKFLAGS} ${CURL_LINKFLAGS}"
     fi
+    if [ x"${FIPSMODE}" == x1 ]; then
+        ENABLE_FIPS="--enable-fipsmode"
+    fi
     if [ ${DEBUG} = 0 ]; then
-        buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --release --ssl --opt=on -j${NCPU} --use-sasl-client --wiredtiger --audit --inmemory --hotbackup CPPPATH="${INSTALLDIR}/include ${AWS_LIBS}/include" LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" LINKFLAGS="${LINKFLAGS}" ${PSM_REAL_TARGETS[@]} || exit $?
+        buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --release --ssl --opt=on -j${NCPU} --use-sasl-client "${ENABLE_FIPS}" --wiredtiger --audit --inmemory --hotbackup CPPPATH="${INSTALLDIR}/include ${AWS_LIBS}/include" LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" LINKFLAGS="${LINKFLAGS}" ${PSM_REAL_TARGETS[@]} || exit $?
     else
         buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --audit --ssl --dbg=on -j${NCPU} --use-sasl-client \
-        CPPPATH="${INSTALLDIR}/include ${AWS_LIBS}/include" LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" LINKFLAGS="${LINKFLAGS}" --wiredtiger --inmemory --hotbackup ${PSM_REAL_TARGETS[@]} || exit $?
+        CPPPATH="${INSTALLDIR}/include ${AWS_LIBS}/include" LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" LINKFLAGS="${LINKFLAGS}" "${ENABLE_FIPS}" --wiredtiger --inmemory --hotbackup ${PSM_REAL_TARGETS[@]} || exit $?
     fi
     #
     # scons install doesn't work - it installs the binaries not linked with fractal tree
@@ -1199,6 +1211,7 @@ PSM_RELEASE="1"
 MONGO_TOOLS_TAG="master"
 PRODUCT=percona-server-mongodb
 DEBUG=0
+FIPSMODE=0
 parse_arguments PICK-ARGS-FROM-ARGV "$@"
 VERSION=${PSM_VER}
 RELEASE=${PSM_RELEASE}

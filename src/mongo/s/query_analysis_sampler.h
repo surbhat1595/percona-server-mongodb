@@ -31,6 +31,7 @@
 
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
+#include "mongo/idl/mutable_observer_registry.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
 #include "mongo/s/analyze_shard_key_role.h"
 #include "mongo/s/analyze_shard_key_server_parameters_gen.h"
@@ -88,8 +89,6 @@ public:
 
     private:
         double _calculateExponentialMovingAverage(double prevAvg, long long newVal) const;
-
-        const double _smoothingFactor = gQueryAnalysisQueryStatsSmoothingFactor;
 
         // The counts for update, delete and find are already tracked by the OpCounters.
         long long _lastFindAndModifyQueriesCount = 0;
@@ -190,6 +189,9 @@ public:
     static QueryAnalysisSampler& get(OperationContext* opCtx);
     static QueryAnalysisSampler& get(ServiceContext* serviceContext);
 
+    static inline MutableObserverRegistry<int32_t>
+        observeQueryAnalysisSamplerConfigurationRefreshSecs;
+
     void onStartup();
 
     void onShutdown();
@@ -224,7 +226,7 @@ public:
     }
 
     std::map<NamespaceString, SampleRateLimiter> getRateLimitersForTest() const {
-        stdx::lock_guard<Latch> lk(_mutex);
+        stdx::lock_guard<Latch> lk(_sampleRateLimitersMutex);
         return _sampleRateLimiters;
     }
 
@@ -244,13 +246,14 @@ private:
                             const NamespaceString& nss,
                             SampledCommandNameEnum cmdName);
 
-    mutable Mutex _mutex = MONGO_MAKE_LATCH("QueryAnalysisSampler::_mutex");
+    mutable Mutex _sampleRateLimitersMutex =
+        MONGO_MAKE_LATCH("QueryAnalysisSampler::_sampleRateLimitersMutex");
     mutable Mutex _queryStatsMutex = MONGO_MAKE_LATCH("QueryAnalysisSampler::_queryStatsMutex");
 
     PeriodicJobAnchor _periodicQueryStatsRefresher;
     QueryStats _queryStats;
 
-    PeriodicJobAnchor _periodicConfigurationsRefresher;
+    std::shared_ptr<PeriodicJobAnchor> _periodicConfigurationsRefresher;
     std::map<NamespaceString, SampleRateLimiter> _sampleRateLimiters;
     std::array<AtomicWord<uint64_t>, srlBloomFilterNumBlocks> _srlBloomFilter{};
 };

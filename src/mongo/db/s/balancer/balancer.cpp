@@ -304,24 +304,29 @@ Balancer::Balancer()
       _imbalancedCollectionsCache(std::make_unique<stdx::unordered_set<NamespaceString>>()) {}
 
 Balancer::~Balancer() {
-    // Terminate the balancer thread so it doesn't leak memory.
-    interruptBalancer();
-    waitForBalancerToStop();
+    onShutdown();
 }
 
 void Balancer::onStepUpBegin(OperationContext* opCtx, long long term) {
-    // Before starting step-up, ensure the balancer is ready to start. Specifically, that the
-    // balancer is actually stopped, because it may still be in the process of stopping if this
-    // node was previously primary.
-    waitForBalancerToStop();
+    // Before starting step-up, ensure the balancer is ready to start. Specifically, that there is
+    // not an outstanding termination sequence requested during a previous step down of this node.
+    joinTermination();
 }
 
 void Balancer::onStepUpComplete(OperationContext* opCtx, long long term) {
-    initiateBalancer(opCtx);
+    initiate(opCtx);
 }
 
 void Balancer::onStepDown() {
-    interruptBalancer();
+    // Asynchronously request to terminate all the worker threads and allow the stepdown sequence to
+    // continue.
+    requestTermination();
+}
+
+void Balancer::onShutdown() {
+    // Terminate the balancer thread so it doesn't leak memory.
+    requestTermination();
+    joinTermination();
 }
 
 void Balancer::onBecomeArbiter() {
@@ -330,11 +335,11 @@ void Balancer::onBecomeArbiter() {
     MONGO_UNREACHABLE;
 }
 
-void Balancer::initiateBalancer(OperationContext* opCtx) {
+void Balancer::initiate(OperationContext* opCtx) {
     stdx::lock_guard<Latch> scopedLock(_mutex);
     _imbalancedCollectionsCache->clear();
-    invariant(_state == kStopped);
-    _state = kRunning;
+    invariant(_threadSetState == ThreadSetState::Terminated);
+    _threadSetState = ThreadSetState::Running;
 
     invariant(!_thread.joinable());
     invariant(!_actionStreamConsumerThread.joinable());
@@ -342,13 +347,13 @@ void Balancer::initiateBalancer(OperationContext* opCtx) {
     _thread = stdx::thread([this] { _mainThread(); });
 }
 
-void Balancer::interruptBalancer() {
+void Balancer::requestTermination() {
     stdx::lock_guard<Latch> scopedLock(_mutex);
-    if (_state != kRunning) {
+    if (_threadSetState != ThreadSetState::Running) {
         return;
     }
 
-    _state = kStopping;
+    _threadSetState = ThreadSetState::Terminating;
 
     // Interrupt the balancer thread if it has been started. We are guaranteed that the operation
     // context of that thread is still alive, because we hold the balancer mutex.
@@ -361,9 +366,9 @@ void Balancer::interruptBalancer() {
     _actionStreamCondVar.notify_all();
 }
 
-void Balancer::waitForBalancerToStop() {
+void Balancer::joinTermination() {
     stdx::unique_lock<Latch> scopedLock(_mutex);
-    _joinCond.wait(scopedLock, [this] { return _state == kStopped; });
+    _joinCond.wait(scopedLock, [this] { return _threadSetState == ThreadSetState::Terminated; });
     if (_thread.joinable()) {
         _thread.join();
     }
@@ -453,16 +458,6 @@ void Balancer::_consumeActionStreamLoop() {
         _outstandingStreamingOps.store(0);
     });
 
-    // Lambda function for applying action response
-    auto applyActionResponseTo = [this](const BalancerStreamAction& action,
-                                        const BalancerStreamActionResponse& response,
-                                        ActionsStreamPolicy* policy) {
-        invariant(_outstandingStreamingOps.addAndFetch(-1) >= 0);
-        ThreadClient tc("BalancerSecondaryThread::applyActionResponse", getGlobalServiceContext());
-        auto opCtx = tc->makeOperationContext();
-        policy->applyActionResult(opCtx.get(), action, response);
-    };
-
     // Lambda function to sleep for throttling
     auto applyThrottling =
         [lastActionTime = Date_t::fromMillisSinceEpoch(0)](const Milliseconds throttle) mutable {
@@ -491,7 +486,7 @@ void Balancer::_consumeActionStreamLoop() {
             //  - There were  actions to schedule on the previous iteration or there is an update on
             //  the streams state
             auto stopWaitingCondition = [&] {
-                return _state != kRunning ||
+                return _threadSetState != ThreadSetState::Running ||
                     (_outstandingStreamingOps.load() <= kMaxOutstandingStreamingOperations &&
                      _actionStreamsStateUpdated.load());
             };
@@ -504,7 +499,7 @@ void Balancer::_consumeActionStreamLoop() {
                     ul, backOff.nextSleep().toSystemDuration(), stopWaitingCondition);
             }
 
-            if (_state != kRunning) {
+            if (_threadSetState != ThreadSetState::Running) {
                 break;
             }
         }
@@ -570,11 +565,9 @@ void Balancer::_consumeActionStreamLoop() {
                                                  mergeAction.chunkRange,
                                                  mergeAction.collectionPlacementVersion)
                             .thenRunOn(*executor)
-                            .onCompletion([this,
-                                           stream,
-                                           &applyActionResponseTo,
-                                           action = std::move(mergeAction)](const Status& status) {
-                                applyActionResponseTo(action, status, stream);
+                            .onCompletion([this, stream, action = std::move(mergeAction)](
+                                              const Status& status) {
+                                _applyStreamingActionResponseToPolicy(action, status, stream);
                             });
                 },
                 [&, stream = sourcedStream](DataSizeInfo&& dataSizeAction) {
@@ -589,12 +582,9 @@ void Balancer::_consumeActionStreamLoop() {
                                               dataSizeAction.estimatedValue,
                                               dataSizeAction.maxSize)
                             .thenRunOn(*executor)
-                            .onCompletion([this,
-                                           stream,
-                                           &applyActionResponseTo,
-                                           action = std::move(dataSizeAction)](
+                            .onCompletion([this, stream, action = std::move(dataSizeAction)](
                                               const StatusWith<DataSizeResponse>& swDataSize) {
-                                applyActionResponseTo(action, swDataSize, stream);
+                                _applyStreamingActionResponseToPolicy(action, swDataSize, stream);
                             });
                 },
                 [&, stream = sourcedStream](MergeAllChunksOnShardInfo&& mergeAllChunksAction) {
@@ -608,12 +598,10 @@ void Balancer::_consumeActionStreamLoop() {
                                 opCtx.get(), mergeAllChunksAction.nss, mergeAllChunksAction.shardId)
                             .thenRunOn(*executor)
                             .onCompletion(
-                                [this,
-                                 stream,
-                                 &applyActionResponseTo,
-                                 action = mergeAllChunksAction](
+                                [this, stream, action = mergeAllChunksAction](
                                     const StatusWith<NumMergedChunks>& swNumMergedChunks) {
-                                    applyActionResponseTo(action, swNumMergedChunks, stream);
+                                    _applyStreamingActionResponseToPolicy(
+                                        action, swNumMergedChunks, stream);
                                 });
                 },
                 [](MigrateInfo&& _) {
@@ -628,8 +616,8 @@ void Balancer::_mainThread() {
     ON_BLOCK_EXIT([this] {
         {
             stdx::lock_guard<Latch> scopedLock(_mutex);
-            _state = kStopped;
-            LOGV2_DEBUG(21855, 1, "Balancer thread terminated");
+            _threadSetState = ThreadSetState::Terminated;
+            LOGV2_DEBUG(21855, 1, "Balancer thread set terminated");
         }
         _joinCond.notify_all();
     });
@@ -648,7 +636,7 @@ void Balancer::_mainThread() {
     const Seconds kInitBackoffInterval(10);
 
     auto balancerConfig = shardingContext->getBalancerConfiguration();
-    while (!_stopRequested()) {
+    while (!_terminationRequested()) {
         Status refreshStatus = balancerConfig->refreshAndCheck(opCtx.get());
         if (!refreshStatus.isOK()) {
             LOGV2_WARNING(
@@ -677,7 +665,7 @@ void Balancer::_mainThread() {
     // Main balancer loop
     auto lastMigrationTime = Date_t::fromMillisSinceEpoch(0);
     auto lastDrainingShardsCheckTime{Date_t::fromMillisSinceEpoch(0)};
-    while (!_stopRequested()) {
+    while (!_terminationRequested()) {
         BalanceRoundDetails roundDetails;
 
         _beginRound(opCtx.get());
@@ -697,7 +685,7 @@ void Balancer::_mainThread() {
                 continue;
             }
 
-            if (!balancerConfig->shouldBalance() || _stopRequested()) {
+            if (!balancerConfig->shouldBalance() || _terminationRequested()) {
 
                 if (balancerConfig->getBalancerMode() == BalancerSettingsType::BalancerMode::kOff &&
                     Date_t::now() - lastDrainingShardsCheckTime >= kDrainingShardsCheckInterval) {
@@ -855,7 +843,7 @@ void Balancer::_mainThread() {
 
     {
         stdx::lock_guard<Latch> scopedLock(_mutex);
-        invariant(_state == kStopping);
+        invariant(_threadSetState == ThreadSetState::Terminating);
     }
 
     _commandScheduler->stop();
@@ -871,9 +859,18 @@ void Balancer::_mainThread() {
     LOGV2(21867, "CSRS balancer is now stopped");
 }
 
-bool Balancer::_stopRequested() {
+void Balancer::_applyStreamingActionResponseToPolicy(const BalancerStreamAction& action,
+                                                     const BalancerStreamActionResponse& response,
+                                                     ActionsStreamPolicy* policy) {
+    invariant(_outstandingStreamingOps.addAndFetch(-1) >= 0);
+    ThreadClient tc("BalancerSecondaryThread::applyActionResponse", getGlobalServiceContext());
+    auto opCtx = tc->makeOperationContext();
+    policy->applyActionResult(opCtx.get(), action, response);
+};
+
+bool Balancer::_terminationRequested() {
     stdx::lock_guard<Latch> scopedLock(_mutex);
-    return (_state != kRunning);
+    return (_threadSetState != ThreadSetState::Running);
 }
 
 void Balancer::_beginRound(OperationContext* opCtx) {
@@ -896,7 +893,9 @@ void Balancer::_endRound(OperationContext* opCtx, Milliseconds waitTimeout) {
 
 void Balancer::_sleepFor(OperationContext* opCtx, Milliseconds waitTimeout) {
     stdx::unique_lock<Latch> lock(_mutex);
-    _condVar.wait_for(lock, waitTimeout.toSystemDuration(), [&] { return _state != kRunning; });
+    _condVar.wait_for(lock, waitTimeout.toSystemDuration(), [&] {
+        return _threadSetState != ThreadSetState::Running;
+    });
 }
 
 bool Balancer::_checkOIDs(OperationContext* opCtx) {
@@ -908,7 +907,7 @@ bool Balancer::_checkOIDs(OperationContext* opCtx) {
     map<int, ShardId> oids;
 
     for (const ShardId& shardId : all) {
-        if (_stopRequested()) {
+        if (_terminationRequested()) {
             return false;
         }
 
@@ -1020,8 +1019,13 @@ int Balancer::_moveChunks(OperationContext* opCtx,
     auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
 
     // If the balancer was disabled since we started this round, don't start new chunk moves
-    if (_stopRequested() || !balancerConfig->shouldBalance()) {
-        LOGV2_DEBUG(21870, 1, "Skipping balancing round because balancer was stopped");
+    if (const bool terminating = _terminationRequested(), enabled = balancerConfig->shouldBalance();
+        terminating || !enabled) {
+        LOGV2_DEBUG(21870,
+                    1,
+                    "Skipping balancing round",
+                    "terminating"_attr = terminating,
+                    "balancerEnabled"_attr = enabled);
         return 0;
     }
 

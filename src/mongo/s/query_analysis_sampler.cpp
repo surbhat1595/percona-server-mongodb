@@ -49,6 +49,8 @@ namespace analyze_shard_key {
 namespace {
 
 using QuerySamplingOptions = OperationContext::QuerySamplingOptions;
+using ConfigurationRefreshSecs =
+    decltype(QueryAnalysisSampler::observeQueryAnalysisSamplerConfigurationRefreshSecs)::Argument;
 
 MONGO_FAIL_POINT_DEFINE(disableQueryAnalysisSampler);
 MONGO_FAIL_POINT_DEFINE(overwriteQueryAnalysisSamplerAvgLastCountToZero);
@@ -117,7 +119,7 @@ void QueryAnalysisSampler::onStartup() {
     auto periodicRunner = serviceContext->getPeriodicRunner();
     invariant(periodicRunner);
 
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<Latch> lk(_sampleRateLimitersMutex);
 
     PeriodicRunner::PeriodicJob queryStatsRefresherJob(
         "QueryAnalysisQueryStatsRefresher",
@@ -139,18 +141,30 @@ void QueryAnalysisSampler::onStartup() {
                       "error"_attr = redact(ex));
             }
         },
-        Seconds(gQueryAnalysisSamplerConfigurationRefreshSecs));
-    _periodicConfigurationsRefresher =
-        periodicRunner->makeJob(std::move(configurationsRefresherJob));
-    _periodicConfigurationsRefresher.start();
+        Seconds(gQueryAnalysisSamplerConfigurationRefreshSecs.load()));
+    _periodicConfigurationsRefresher = std::make_shared<PeriodicJobAnchor>(
+        periodicRunner->makeJob(std::move(configurationsRefresherJob)));
+    _periodicConfigurationsRefresher->start();
+
+    QueryAnalysisSampler::observeQueryAnalysisSamplerConfigurationRefreshSecs.addObserver(
+        [refresher = _periodicConfigurationsRefresher](const ConfigurationRefreshSecs& secs) {
+            try {
+                refresher->setPeriod(Seconds(secs));
+            } catch (const DBException& ex) {
+                LOGV2(7891301,
+                      "Failed to update the period of the thread for refreshing query sampling "
+                      "configurations",
+                      "error"_attr = ex.toStatus());
+            }
+        });
 }
 
 void QueryAnalysisSampler::onShutdown() {
     if (_periodicQueryStatsRefresher.isValid()) {
         _periodicQueryStatsRefresher.stop();
     }
-    if (_periodicConfigurationsRefresher.isValid()) {
-        _periodicConfigurationsRefresher.stop();
+    if (_periodicConfigurationsRefresher && _periodicConfigurationsRefresher->isValid()) {
+        _periodicConfigurationsRefresher->stop();
     }
 }
 
@@ -168,7 +182,8 @@ void QueryAnalysisSampler::QueryStats::gotCommand(const StringData& cmdName) {
 
 double QueryAnalysisSampler::QueryStats::_calculateExponentialMovingAverage(
     double prevAvg, long long newVal) const {
-    return (1 - _smoothingFactor) * prevAvg + _smoothingFactor * newVal;
+    auto smoothingFactor = gQueryAnalysisQueryStatsSmoothingFactor.load();
+    return (1 - smoothingFactor) * prevAvg + smoothingFactor * newVal;
 }
 
 void QueryAnalysisSampler::QueryStats::refreshTotalCount() {
@@ -311,7 +326,7 @@ void QueryAnalysisSampler::_refreshConfigurations(OperationContext* opCtx) {
                 "numQueriesExecutedPerSecond"_attr = lastAvgCount,
                 "configurations"_attr = configurations);
 
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<Latch> lk(_sampleRateLimitersMutex);
 
     if (configurations.size() != _sampleRateLimiters.size()) {
         LOGV2(7362407,
@@ -415,8 +430,8 @@ boost::optional<UUID> QueryAnalysisSampler::tryGenerateSampleId(OperationContext
     }
 
     // Before checking '_sampleRateLimiters', check '_srlBloomFilter' first. If the bit
-    // corresponding to nss's hash is 0, then we don't need to bother with acquiring '_mutex'
-    // and we can return 'boost::none'.
+    // corresponding to nss's hash is 0, then we don't need to bother with acquiring
+    // '_sampleRateLimitersMutex' and we can return 'boost::none'.
     size_t nssHash = absl::Hash<NamespaceString>{}(nss);
     size_t blockIdx = (nssHash / srlBloomFilterNumBitsPerBlock) % srlBloomFilterNumBlocks;
     size_t bit = nssHash % srlBloomFilterNumBitsPerBlock;
@@ -424,7 +439,7 @@ boost::optional<UUID> QueryAnalysisSampler::tryGenerateSampleId(OperationContext
         return boost::none;
     }
 
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<Latch> lk(_sampleRateLimitersMutex);
     auto it = _sampleRateLimiters.find(nss);
 
     if (it == _sampleRateLimiters.end()) {

@@ -405,11 +405,11 @@ install_deps() {
       wget https://repo.percona.com/apt/pool/main/p/percona-release/percona-release_1.0-27.generic_all.deb && dpkg -i percona-release_1.0-27.generic_all.deb
       percona-release enable tools testing
       apt-get update
+      if [ x"${DEBIAN}" = "xfocal" ]; then
+        INSTALL_LIST="dh-systemd"
+      fi
       INSTALL_LIST="${INSTALL_LIST} git valgrind scons liblz4-dev devscripts debhelper debconf libpcap-dev libbz2-dev libsnappy-dev pkg-config zlib1g-dev libzlcore-dev libsasl2-dev gcc g++ cmake curl"
       INSTALL_LIST="${INSTALL_LIST} libssl-dev libcurl4-openssl-dev libldap2-dev libkrb5-dev liblzma-dev patchelf libexpat1-dev sudo libfile-copy-recursive-perl"
-      if [ x"${DEBIAN}" != "xbullseye" -a x"${DEBIAN}" != "xbookworm" -a x"${DEBIAN}" != "xjammy" ]; then
-        INSTALL_LIST="${INSTALL_LIST} python3.7-distutils"
-      fi
       until apt-get -y install dirmngr; do
         sleep 1
         echo "waiting"
@@ -668,6 +668,8 @@ build_source_deb(){
     #
     mv ${TARFILE} ${PRODUCT}_${VERSION}.orig.tar.gz
     cd ${BUILDDIR}
+
+    PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
     pip install --upgrade pip
 
     # PyYAML pkg installation fix, more info: https://github.com/yaml/pyyaml/issues/724

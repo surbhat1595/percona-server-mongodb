@@ -3,7 +3,7 @@
 export DH_VERBOSE=1
 export DEB_BUILD_HARDENING=1
 export NJOBS=$(shell grep -c processor /proc/cpuinfo)
-export PSM_TARGETS=install-mongod install-mongos install-perconadecrypt build/install/bin/mongobridge
+export PSM_TARGETS=install-mongod install-mongos install-mongo install-perconadecrypt build/install/bin/mongobridge
 export PSMSRC=$(CURDIR)
 export MONGOTOOLS=bsondump mongostat mongofiles mongoexport mongoimport mongorestore mongodump mongotop
 export INSTALLDIR=/usr/local
@@ -11,7 +11,7 @@ export TOOLS_TAGS=ssl sasl
 export PORTABLE=1
 export USE_SSE=1
 export PATH := /usr/local/go/bin:$(PATH)
-export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1"
+export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1 -B/opt/mongodbtoolchain/v4/bin"
 CC = gcc-5
 CXX = g++-5
 #
@@ -26,7 +26,7 @@ override_dh_auto_clean:
 	rm -fr $(PSMSRC)/bin
 	#rm -fr $(INSTALLDIR)
 	buildscripts/scons.py CC=$(CC) CXX=$(CXX) -C $(PSMSRC) -c --disable-warnings-as-errors --audit --release --ssl --opt -j$(NJOBS) --use-sasl-client CPPPATH=$(INSTALLDIR)/include \
-	LIBPATH=$(INSTALLDIR)/lib LINKFLAGS="$(OPT_LINKFLAGS)" --wiredtiger --inmemory --hotbackup $(PSM_TARGETS) || exit $?
+	LIBPATH=$(INSTALLDIR)/lib LINKFLAGS=$(OPT_LINKFLAGS) --wiredtiger --inmemory --hotbackup $(PSM_TARGETS) || exit $?
 	rm -fr build resmoke.ini
 	find $(PSMSRC) -name '*.pyc' -delete
 
@@ -34,7 +34,7 @@ override_dh_auto_clean:
 percona-server-mongodb:
 	buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --audit --release --ssl --opt=on -j$(NJOBS) \
 	--use-sasl-client --wiredtiger --inmemory --hotbackup \
-	CPPPATH=${INSTALLDIR}/include LIBPATH=${INSTALLDIR}/lib LINKFLAGS="${OPT_LINKFLAGS}" ${PSM_TARGETS} || exit $?
+	CPPPATH=${INSTALLDIR}/include LIBPATH=${INSTALLDIR}/lib LINKFLAGS=${OPT_LINKFLAGS} ${PSM_TARGETS} || exit $?
 
 compile-mongo-tools:
 	mkdir $(PSMSRC)/bin || true;
@@ -58,6 +58,7 @@ build: percona-server-mongodb compile-mongo-tools
 override_dh_auto_install:
 	dh_auto_install
 	cp -av build/install/bin/mongos debian/percona-server-mongodb-mongos/usr/bin/mongos
+	cp -av build/install/bin/mongo debian/percona-server-mongodb-shell/usr/bin/mongo
 	cp -av build/install/bin/mongod debian/percona-server-mongodb-server/usr/bin/mongod
 	cp -av build/install/bin/perconadecrypt debian/percona-server-mongodb-server/usr/bin
 	cp -av build/install/bin/mongobridge debian/percona-server-mongodb-server/usr/bin/mongobridge

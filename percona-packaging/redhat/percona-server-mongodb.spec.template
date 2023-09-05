@@ -1,6 +1,6 @@
 #
 %define         mongo_home /var/lib/mongo
-%if 0%{?rhel} == 9
+%if 0%{?rhel} >= 8
 %undefine _debugsource_packages
 %endif
 

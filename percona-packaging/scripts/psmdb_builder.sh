@@ -1049,6 +1049,17 @@ build_tarball(){
         done
     }
 
+    function add_hmac_files {
+        for hfile in $(readlink -f $(find /usr/lib64 /lib/x86_64-linux-gnu -type f -name '.*.hmac') | sort -n | uniq); do
+            hmac_file=$(echo $(basename ${hfile}) | awk -F"." 'BEGIN { OFS = "." }{ print $1, $2, $3 ".hmac"}')
+            if [ ! -f "lib/private/${hmac_file}" ]; then
+                echo "Copying file ${hfile} to ${hmac_file}"
+                cp ${hfile} lib/private/${hmac_file}
+                cp ${hfile} lib/private
+            fi
+        done
+    }
+
     function set_runpath {
         # Set proper runpath for bins but check before doing anything
         local elf_path=$1
@@ -1148,6 +1159,9 @@ build_tarball(){
         # Create and replace by sparse file to reduce size
         create_sparse bin
         replace_binaries bin
+
+        # Add hmac files that are required for fips mode
+        add_hmac_files
 
         # Make final check in order to determine any error after linkage
         for DIR in ${DIRLIST}; do

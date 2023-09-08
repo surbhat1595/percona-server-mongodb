@@ -963,13 +963,13 @@ build_tarball(){
       export LINKFLAGS="${LINKFLAGS} ${CURL_LINKFLAGS}"
     fi
     if [ x"${FIPSMODE}" == x1 ]; then
-        ENABLE_FIPS="--enable-fipsmode"
+        ENABLE_FIPS="--enable-fipsmode "
     fi
     if [ ${DEBUG} = 0 ]; then
-        buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --release --ssl --opt=on -j${NCPU} --use-sasl-client "${ENABLE_FIPS}" --wiredtiger --audit --inmemory --hotbackup CPPPATH="${INSTALLDIR}/include ${AWS_LIBS}/include" LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" LINKFLAGS="${LINKFLAGS}" ${PSM_REAL_TARGETS[@]} || exit $?
+        buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --release --ssl --opt=on -j${NCPU} --use-sasl-client ${ENABLE_FIPS}--wiredtiger --audit --inmemory --hotbackup CPPPATH="${INSTALLDIR}/include ${AWS_LIBS}/include" LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" LINKFLAGS="${LINKFLAGS}" ${PSM_REAL_TARGETS[@]} || exit $?
     else
         buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --audit --ssl --dbg=on -j${NCPU} --use-sasl-client \
-        CPPPATH="${INSTALLDIR}/include ${AWS_LIBS}/include" LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" LINKFLAGS="${LINKFLAGS}" "${ENABLE_FIPS}" --wiredtiger --inmemory --hotbackup ${PSM_REAL_TARGETS[@]} || exit $?
+        CPPPATH="${INSTALLDIR}/include ${AWS_LIBS}/include" LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" LINKFLAGS="${LINKFLAGS}" ${ENABLE_FIPS}--wiredtiger --inmemory --hotbackup ${PSM_REAL_TARGETS[@]} || exit $?
     fi
     #
     # scons install doesn't work - it installs the binaries not linked with fractal tree
@@ -1046,6 +1046,17 @@ build_tarball(){
                 done
                 unset IFS
             done
+        done
+    }
+
+    function add_hmac_files {
+        for hfile in $(readlink -f $(find /usr/lib64 /lib/x86_64-linux-gnu -type f -name '.*.hmac') | sort -n | uniq); do
+            hmac_file=$(echo $(basename ${hfile}) | awk -F"." 'BEGIN { OFS = "." }{ print $1, $2, $3 ".hmac"}')
+            if [ ! -f "lib/private/${hmac_file}" ]; then
+                echo "Copying file ${hfile} to ${hmac_file}"
+                cp ${hfile} lib/private/${hmac_file}
+                cp ${hfile} lib/private
+            fi
         done
     }
 
@@ -1148,6 +1159,9 @@ build_tarball(){
         # Create and replace by sparse file to reduce size
         create_sparse bin
         replace_binaries bin
+
+        # Add hmac files that are required for fips mode
+        add_hmac_files
 
         # Make final check in order to determine any error after linkage
         for DIR in ${DIRLIST}; do

@@ -408,6 +408,7 @@ env.Library(
         'mongod_options_general.idl',
         'mongod_options_ldapauthz.idl',
         'mongod_options_legacy.idl',
+        'mongod_options_removed.idl',
         'mongod_options_replication.idl',
         'mongod_options_sharding.idl',
         'mongod_options_storage.idl',

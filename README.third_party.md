@@ -23,7 +23,7 @@ a notice will be included in
 | ---------------------------| ----------------- | ------------------| :------------------: | :-----------------------------: |
 | [abseil-cpp]               | Apache-2.0        | 20210324.1        |                      |                ✗                |
 | Aladdin MD5                | Zlib              | Unknown           |          ✗           |                ✗                |
-| [ASIO]                     | BSL-1.0           | b0926b61b0        |                      |                ✗                |
+| [ASIO]                     | BSL-1.0           | 22afb86087        |                      |                ✗                |
 | [benchmark]                | Apache-2.0        | 1.5.2             |                      |                                 |
 | [Boost]                    | BSL-1.0           | 1.76.0            |                      |                ✗                |
 | [fmt]                      | BSD-2-Clause      | 7.1.3             |                      |                ✗                |
@@ -52,7 +52,7 @@ a notice will be included in
 | [Valgrind]                 | BSD-3-Clause<sup>\[<a href="#note_vg" id="ref_vg">1</a>]</sup> | 3.17.0 | |             ✗                |
 | [variant]                  | BSL-1.0           | 1.4.0             |                      |                ✗                |
 | [wiredtiger]               |                   | <sup>\[<a href="#note_wt" id="ref_wt">2</a>]</sup> | ✗ |  ✗                |
-| [yaml-cpp]                 | MIT               | 0.6.2             |                      |                ✗                |
+| [yaml-cpp]                 | MIT               | 0.6.3             |                      |                ✗                |
 | [Zlib]                     | Zlib              | 1.2.13            |          ✗           |                ✗                |
 | [Zstandard]                | BSD-3-Clause      | 1.5.2             |          ✗           |                ✗                |
 

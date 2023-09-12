@@ -1,108 +1,6 @@
 # All remaining release variants not included in other files.
 
 buildvariants:
-- name: amazon
-  display_name: Amazon Linux
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  run_on:
-  - amazon1-2018-test
-  expansions:
-    push_path: linux
-    push_bucket: downloads.mongodb.org
-    push_name: linux
-    push_arch: x86_64-amazon
-    compile_flags: --ssl MONGO_DISTMOD=amazon -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux
-    multiversion_platform: amazon
-    multiversion_edition: targeted
-    has_packages: true
-    packager_script: packager.py
-    packager_arch: x86_64
-    packager_distro: amazon
-    repo_edition: org
-    scons_cache_scope: shared
-    virtualenv: /opt/mongodbtoolchain/v3/bin/virtualenv
-    large_distro_name: amazon1-2018-build
-  tasks:
-  - name: compile_test_and_package_serial_TG
-    distros:
-    - amazon1-2018-build
-  - name: .aggfuzzer .common
-  - name: aggregation
-  - name: .auth !.audit !.multiversion
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: .misc_js
-  - name: .concurrency .common
-  - name: concurrency_replication_causal_consistency_gen
-  - name: disk_wiredtiger
-  - name: free_monitoring
-  - name: .jscore .common
-  - name: .jstestfuzz .common
-  - name: libunwind_tests
-  - name: .logical_session_cache .one_sec
-  - name: multiversion_gen
-  - name: replica_sets_gen
-  - name: .replica_sets .common
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.csrs
-  - name: .sharding .txns
-  - name: .ssl
-  - name: .stitch
-  - name: generate_buildid_to_debug_symbols_mapping
-
-- name: enterprise-linux-64-amazon-ami
-  display_name: "Enterprise Amazon Linux"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
-  run_on:
-  - amazon1-2018-test
-  expansions:
-    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: x86_64-enterprise-amzn64
-    compile_flags: --ssl MONGO_DISTMOD=amzn64 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    crypt_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
-    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux
-    multiversion_platform: amzn64
-    multiversion_edition: enterprise
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: x86_64
-    packager_distro: amazon
-    repo_edition: enterprise
-    scons_cache_scope: shared
-    virtualenv: /opt/mongodbtoolchain/v3/bin/virtualenv
-  tasks:
-  - name: compile_test_and_package_serial_TG
-    distros:
-    - amazon1-2018-build
-  - name: .aggfuzzer .common
-  - name: aggregation
-  - name: .auth !.multiversion
-  - name: audit
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: .encrypt !.aggregation
-  - name: .jscore .common
-  - name: .jstestfuzz .common
-  - name: libunwind_tests
-  - name: .logical_session_cache .one_sec
-  - name: noPassthrough_gen
-  - name: noPassthroughWithMongod_gen
-  - name: .powercycle
-  - name: .replica_sets .common
-  - name: sasl
-  - name: serial_run
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .txns
-  - name: slow1_gen
-  - name: snmp
-  - name: .stitch
-  - name: .crypt
-  - name: generate_buildid_to_debug_symbols_mapping
-
 - name: amazon2
   display_name: Amazon Linux 2
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
@@ -137,7 +35,6 @@ buildvariants:
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: libunwind_tests
@@ -243,7 +140,6 @@ buildvariants:
     - amazon2-arm64-large
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -373,6 +269,9 @@ buildvariants:
     - amazon2-arm64-large
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
+  - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
 
 - name: debian10
   display_name: Debian 10
@@ -409,7 +308,6 @@ buildvariants:
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common !.decimal
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -509,7 +407,6 @@ buildvariants:
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common !.decimal
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -604,7 +501,6 @@ buildvariants:
     - rhel70
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -689,7 +585,6 @@ buildvariants:
     - rhel80-build
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -817,6 +712,9 @@ buildvariants:
   - name: selinux_rhel8_enterprise
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
+  - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
 
 - name: rhel-82-arm64
   display_name: RHEL 8.2 arm64
@@ -850,7 +748,6 @@ buildvariants:
     - rhel82-arm64-large
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -918,6 +815,9 @@ buildvariants:
   - name: .publish_crypt
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
+  - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
 
 - name: rhel90
   display_name: RHEL 9.0
@@ -952,7 +852,6 @@ buildvariants:
     - rhel90-large
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common !.multiversion
   - name: .logical_session_cache .one_sec
@@ -1037,6 +936,9 @@ buildvariants:
   - name: .crypt
   - name: .publish_crypt
   - name: unittest_shell_hang_analyzer_gen
+  - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: selinux_rhel9_enterprise
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
@@ -1072,7 +974,6 @@ buildvariants:
     - rhel90-arm64-large
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -1138,6 +1039,9 @@ buildvariants:
     distros:
     - rhel90-arm64-large
   - name: .publish_crypt
+  - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -1177,7 +1081,6 @@ buildvariants:
     - suse12-sp5-large
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common !.decimal
   - name: .jstestfuzz .common
   - name: multiversion_gen
@@ -1316,7 +1219,6 @@ buildvariants:
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common !.decimal
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -1363,7 +1265,6 @@ buildvariants:
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jepsen
     distros:
     - ubuntu1804-build
@@ -1526,7 +1427,6 @@ buildvariants:
     scons_cache_scope: shared
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: free_monitoring
   - name: jsCore
   - name: replica_sets_jscore_passthrough
   - name: .publish
@@ -1565,7 +1465,6 @@ buildvariants:
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: libunwind_tests
@@ -1613,7 +1512,6 @@ buildvariants:
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: libunwind_tests
@@ -1806,7 +1704,6 @@ buildvariants:
     scons_cache_scope: shared
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: free_monitoring
   - name: jsCore
   - name: replica_sets_jscore_passthrough
   - name: .publish
@@ -1888,7 +1785,6 @@ buildvariants:
     scons_cache_scope: shared
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: free_monitoring
   - name: jsCore
   - name: replica_sets_jscore_passthrough
   - name: .publish
@@ -1934,7 +1830,6 @@ buildvariants:
     - windows-vsCurrent-large
   - name: .concurrency .common
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common !.auth
   - name: json_schema
   - name: .jstestfuzz !.initsync !.flow_control !.stepdowns
@@ -2045,7 +1940,6 @@ buildvariants:
   - name: .misc_js
   - name: .concurrency !.ubsan !.no_txns !.debug_only !.kill_terminate
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: initial_sync_fuzzer_gen
   - name: .jscore .common !.auth
   - name: jsCore_txns_large_txns_format
@@ -2093,7 +1987,6 @@ buildvariants:
   - name: .misc_js
   - name: .concurrency !.ubsan !.no_txns !.debug_only !.kill_terminate
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: initial_sync_fuzzer_gen
   - name: .jscore .common !.auth
   - name: jsCore_txns_large_txns_format

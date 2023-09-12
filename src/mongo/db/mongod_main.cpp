@@ -84,7 +84,6 @@
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/fcv_op_observer.h"
 #include "mongo/db/fle_crud.h"
-#include "mongo/db/free_mon/free_mon_mongod.h"
 #include "mongo/db/ftdc/ftdc_mongod.h"
 #include "mongo/db/ftdc/util.h"
 #include "mongo/db/global_settings.h"
@@ -704,8 +703,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             logStartup(startupOpCtx.get());
         }
 
-        startFreeMonitoring(serviceContext);
-
         auto replCoord = repl::ReplicationCoordinator::get(startupOpCtx.get());
         invariant(replCoord);
 
@@ -1180,8 +1177,6 @@ void setUpObservers(ServiceContext* serviceContext) {
         opObserverRegistry->addObserver(std::make_unique<ClusterServerParameterOpObserver>());
     }
 
-    setupFreeMonitoringOpObserver(opObserverRegistry.get());
-
     if (audit::opObserverRegistrar) {
         audit::opObserverRegistrar(opObserverRegistry.get());
     }
@@ -1417,9 +1412,11 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         validator->shutDown();
     }
 
-    if (auto pool = Grid::get(serviceContext)->getExecutorPool()) {
-        LOGV2_OPTIONS(6773200, {LogComponent::kSharding}, "Shutting down the ExecutorPool");
-        pool->shutdownAndJoin();
+    if (TestingProctor::instance().isEnabled()) {
+        if (auto pool = Grid::get(serviceContext)->getExecutorPool()) {
+            LOGV2_OPTIONS(6773200, {LogComponent::kSharding}, "Shutting down the ExecutorPool");
+            pool->shutdownAndJoin();
+        }
     }
 
     // The migrationutil executor must be shut down before shutting down the CatalogCacheLoader.
@@ -1448,9 +1445,6 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
                           "Service entry point did not shutdown within the time limit");
         }
     }
-
-    LOGV2(4784925, "Shutting down free monitoring");
-    stopFreeMonitoring();
 
     LOGV2(4784927, "Shutting down the HealthLog");
     HealthLog::get(serviceContext).shutdown();

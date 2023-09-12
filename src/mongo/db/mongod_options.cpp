@@ -50,6 +50,7 @@
 #include "mongo/db/mongod_options_general_gen.h"
 #include "mongo/db/mongod_options_ldapauthz_gen.h"
 #include "mongo/db/mongod_options_legacy_gen.h"
+#include "mongo/db/mongod_options_removed_gen.h"
 #include "mongo/db/mongod_options_replication_gen.h"
 #include "mongo/db/mongod_options_sharding_gen.h"
 #include "mongo/db/mongod_options_storage_gen.h"
@@ -98,6 +99,7 @@ Status addMongodOptions(moe::OptionSection* options) try {
     uassertStatusOK(addMongodStorageOptions(options));
     uassertStatusOK(addMongodEncryptionOptions(options));
     uassertStatusOK(addMongodLDAPAuthzOptions(options));
+    uassertStatusOK(addMongodRemovedOptions(options));
     uassertStatusOK(addMongodLegacyOptions(options));
     uassertStatusOK(addKeyfileServerOption(options));
     uassertStatusOK(addClusterAuthModeServerOption(options));
@@ -206,6 +208,16 @@ Status validateMongodOptions(const moe::Environment& params) {
     Status ret = validateServerOptions(params);
     if (!ret.isOK()) {
         return ret;
+    }
+
+    if (params.count("nojournal") || params.count("storage.journal.enabled")) {
+        LOGV2_WARNING_OPTIONS(
+            29117,
+            {logv2::LogTag::kStartupWarnings},
+            "The storage.journal.enabled option and the corresponding --journal and "
+            "--nojournal command-line options have no effect in this version of Percona "
+            "Server for MongoDB. Journaling is always enabled. Please remove those "
+            "options from the config");
     }
 
 #ifdef _WIN32

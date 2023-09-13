@@ -117,6 +117,27 @@ protected:
         ASSERT_OK(getStatusFromWriteCommandReply(result));
     }
 
+    void testRefreshDoesNotErrorIfExternalKeysCacheIsEmpty(KeysCollectionClient* client);
+
+    void testGetKeyShouldReturnCorrectKeysAfterRefresh(KeysCollectionClient* client);
+
+    void testGetInternalKeyShouldReturnErrorIfNoKeyIsValidForGivenTime(
+        KeysCollectionClient* client);
+
+    void testGetInternalKeyShouldReturnOldestKeyPossible(KeysCollectionClient* client);
+
+    void testRefreshShouldNotGetInternalKeysForOtherPurpose(KeysCollectionClient* client);
+
+    void testRefreshShouldNotGetExternalKeysForOtherPurpose(KeysCollectionClient* client);
+
+    void testGetRefreshCanIncrementallyGetNewKeys(KeysCollectionClient* client);
+
+    void testCacheExternalKeyBasic(KeysCollectionClient* client);
+
+    void testRefreshClearsRemovedExternalKeys(KeysCollectionClient* client);
+
+    void testRefreshHandlesKeysReceivingTTLValue(KeysCollectionClient* client);
+
 private:
     std::unique_ptr<KeysCollectionClient> _catalogClient;
     std::unique_ptr<KeysCollectionClient> _directClient;
@@ -150,8 +171,8 @@ TEST_F(CacheTest, RefreshErrorsIfInternalCacheIsEmpty) {
     ASSERT_FALSE(status.reason().empty());
 }
 
-TEST_F(CacheTest, RefreshDoesNotErrorIfExternalKeysCacheIsEmpty) {
-    KeysCollectionCache cache("test", catalogClient());
+void CacheTest::testRefreshDoesNotErrorIfExternalKeysCacheIsEmpty(KeysCollectionClient* client) {
+    KeysCollectionCache cache("test", client);
 
     KeysCollectionDocument origKey1(1);
     origKey1.setKeysCollectionDocumentBase(
@@ -163,56 +184,16 @@ TEST_F(CacheTest, RefreshDoesNotErrorIfExternalKeysCacheIsEmpty) {
     ASSERT_OK(status);
 }
 
-
-TEST_F(CacheTest, GetKeyShouldReturnCorrectKeyAfterRefreshSharded) {
-    KeysCollectionCache cache("test", catalogClient());
-
-    KeysCollectionDocument origKey1(1);
-    origKey1.setKeysCollectionDocumentBase(
-        {"test", TimeProofService::generateRandomKey(), LogicalTime(Timestamp(105, 0))});
-    ASSERT_OK(insertToConfigCollection(
-        operationContext(), NamespaceString::kKeysCollectionNamespace, origKey1.toBSON()));
-
-    auto refreshStatus = cache.refresh(operationContext());
-    ASSERT_OK(refreshStatus.getStatus());
-
-    {
-        auto key = refreshStatus.getValue();
-        ASSERT_EQ(1, key.getKeyId());
-        ASSERT_EQ(origKey1.getKey(), key.getKey());
-        ASSERT_EQ("test", key.getPurpose());
-        ASSERT_EQ(Timestamp(105, 0), key.getExpiresAt().asTimestamp());
-    }
-
-    auto swInternalKey = cache.getInternalKey(LogicalTime(Timestamp(1, 0)));
-    ASSERT_OK(swInternalKey.getStatus());
-
-    {
-        auto key = swInternalKey.getValue();
-        ASSERT_EQ(1, key.getKeyId());
-        ASSERT_EQ(origKey1.getKey(), key.getKey());
-        ASSERT_EQ("test", key.getPurpose());
-        ASSERT_EQ(Timestamp(105, 0), key.getExpiresAt().asTimestamp());
-    }
-
-    swInternalKey = cache.getInternalKeyById(1, LogicalTime(Timestamp(1, 0)));
-    ASSERT_OK(swInternalKey.getStatus());
-
-    {
-        auto key = swInternalKey.getValue();
-        ASSERT_EQ(1, key.getKeyId());
-        ASSERT_EQ(origKey1.getKey(), key.getKey());
-        ASSERT_EQ("test", key.getPurpose());
-        ASSERT_EQ(Timestamp(105, 0), key.getExpiresAt().asTimestamp());
-    }
-
-    auto swExternalKeys = cache.getExternalKeysById(1, LogicalTime(Timestamp(1, 0)));
-    ASSERT_EQ(ErrorCodes::KeyNotFound, swExternalKeys.getStatus());
+TEST_F(CacheTest, RefreshDoesNotErrorIfExternalKeysCacheIsEmptyShardedClient) {
+    testRefreshDoesNotErrorIfExternalKeysCacheIsEmpty(catalogClient());
 }
 
-TEST_F(CacheTest, GetKeyShouldReturnCorrectKeysAfterRefreshDirectClient) {
-    KeysCollectionCache cache("test", directClient());
+TEST_F(CacheTest, RefreshDoesNotErrorIfExternalKeysCacheIsEmptyDirectClient) {
+    testRefreshDoesNotErrorIfExternalKeysCacheIsEmpty(directClient());
+}
 
+void CacheTest::testGetKeyShouldReturnCorrectKeysAfterRefresh(KeysCollectionClient* client) {
+    KeysCollectionCache cache("test", client);
     KeysCollectionDocument origKey0(1);
     origKey0.setKeysCollectionDocumentBase(
         {"test", TimeProofService::generateRandomKey(), LogicalTime(Timestamp(105, 0))});
@@ -221,14 +202,16 @@ TEST_F(CacheTest, GetKeyShouldReturnCorrectKeysAfterRefreshDirectClient) {
 
     // Use external keys with the same keyId and expiresAt as the internal key to test that the
     // cache correctly tackles key collisions.
-    ExternalKeysCollectionDocument origKey1(OID::gen(), 1, kMigrationId1);
+    ExternalKeysCollectionDocument origKey1(OID::gen(), 1);
+    origKey1.setMigrationId(kMigrationId1);
     origKey1.setKeysCollectionDocumentBase(
         {"test", TimeProofService::generateRandomKey(), LogicalTime(Timestamp(105, 0))});
     origKey1.setTTLExpiresAt(ServiceContext().getFastClockSource()->now() + Seconds(30));
     insertDocument(
         operationContext(), NamespaceString::kExternalKeysCollectionNamespace, origKey1.toBSON());
 
-    ExternalKeysCollectionDocument origKey2(OID::gen(), 1, kMigrationId2);
+    ExternalKeysCollectionDocument origKey2(OID::gen(), 1);
+    origKey2.setMigrationId(kMigrationId2);
     origKey2.setKeysCollectionDocumentBase(
         {"test", TimeProofService::generateRandomKey(), LogicalTime(Timestamp(205, 0))});
     insertDocument(
@@ -315,8 +298,17 @@ TEST_F(CacheTest, GetKeyShouldReturnCorrectKeysAfterRefreshDirectClient) {
     ASSERT_EQ(ErrorCodes::KeyNotFound, swExternalKeys.getStatus());
 }
 
-TEST_F(CacheTest, GetInternalKeyShouldReturnErrorIfNoKeyIsValidForGivenTime) {
-    KeysCollectionCache cache("test", catalogClient());
+TEST_F(CacheTest, GetKeyShouldReturnCorrectKeyAfterRefreshShardedClient) {
+    testGetKeyShouldReturnCorrectKeysAfterRefresh(catalogClient());
+}
+
+TEST_F(CacheTest, GetKeyShouldReturnCorrectKeysAfterRefreshDirectClient) {
+    testGetKeyShouldReturnCorrectKeysAfterRefresh(directClient());
+}
+
+void CacheTest::testGetInternalKeyShouldReturnErrorIfNoKeyIsValidForGivenTime(
+    KeysCollectionClient* client) {
+    KeysCollectionCache cache("test", client);
 
     KeysCollectionDocument origKey1(1);
     origKey1.setKeysCollectionDocumentBase(
@@ -339,8 +331,16 @@ TEST_F(CacheTest, GetInternalKeyShouldReturnErrorIfNoKeyIsValidForGivenTime) {
     ASSERT_EQ(ErrorCodes::KeyNotFound, swKey.getStatus());
 }
 
-TEST_F(CacheTest, GetInternalKeyShouldReturnOldestKeyPossible) {
-    KeysCollectionCache cache("test", catalogClient());
+TEST_F(CacheTest, GetInternalKeyShouldReturnErrorIfNoKeyIsValidForGivenTimeShardedClient) {
+    testGetInternalKeyShouldReturnErrorIfNoKeyIsValidForGivenTime(catalogClient());
+}
+
+TEST_F(CacheTest, GetInternalKeyShouldReturnErrorIfNoKeyIsValidForGivenTimeDirectClient) {
+    testGetInternalKeyShouldReturnErrorIfNoKeyIsValidForGivenTime(directClient());
+}
+
+void CacheTest::testGetInternalKeyShouldReturnOldestKeyPossible(KeysCollectionClient* client) {
+    KeysCollectionCache cache("test", client);
 
     KeysCollectionDocument origKey0(0);
     origKey0.setKeysCollectionDocumentBase(
@@ -383,8 +383,16 @@ TEST_F(CacheTest, GetInternalKeyShouldReturnOldestKeyPossible) {
     }
 }
 
-TEST_F(CacheTest, RefreshShouldNotGetInternalKeysForOtherPurpose) {
-    KeysCollectionCache cache("test", catalogClient());
+TEST_F(CacheTest, GetInternalKeyShouldReturnOldestKeyPossibleShardedClient) {
+    testGetInternalKeyShouldReturnOldestKeyPossible(catalogClient());
+}
+
+TEST_F(CacheTest, GetInternalKeyShouldReturnOldestKeyPossibleDirectClient) {
+    testGetInternalKeyShouldReturnOldestKeyPossible(directClient());
+}
+
+void CacheTest::testRefreshShouldNotGetInternalKeysForOtherPurpose(KeysCollectionClient* client) {
+    KeysCollectionCache cache("test", client);
 
     KeysCollectionDocument origKey0(0);
     origKey0.setKeysCollectionDocumentBase(
@@ -429,8 +437,16 @@ TEST_F(CacheTest, RefreshShouldNotGetInternalKeysForOtherPurpose) {
     }
 }
 
-TEST_F(CacheTest, RefreshShouldNotGetExternalKeysForOtherPurpose) {
-    KeysCollectionCache cache("test", directClient());
+TEST_F(CacheTest, RefreshShouldNotGetInternalKeysForOtherPurposeShardedClient) {
+    testRefreshShouldNotGetInternalKeysForOtherPurpose(catalogClient());
+}
+
+TEST_F(CacheTest, RefreshShouldNotGetInternalKeysForOtherPurposeDirectClient) {
+    testRefreshShouldNotGetInternalKeysForOtherPurpose(directClient());
+}
+
+void CacheTest::testRefreshShouldNotGetExternalKeysForOtherPurpose(KeysCollectionClient* client) {
+    KeysCollectionCache cache("test", client);
 
     KeysCollectionDocument origKey0(0);
     origKey0.setKeysCollectionDocumentBase(
@@ -438,7 +454,8 @@ TEST_F(CacheTest, RefreshShouldNotGetExternalKeysForOtherPurpose) {
     insertDocument(
         operationContext(), NamespaceString::kKeysCollectionNamespace, origKey0.toBSON());
 
-    ExternalKeysCollectionDocument origKey1(OID::gen(), 1, kMigrationId1);
+    ExternalKeysCollectionDocument origKey1(OID::gen(), 1);
+    origKey1.setMigrationId(kMigrationId1);
     origKey1.setKeysCollectionDocumentBase(
         {"dummy", TimeProofService::generateRandomKey(), LogicalTime(Timestamp(105, 0))});
     insertDocument(
@@ -452,7 +469,8 @@ TEST_F(CacheTest, RefreshShouldNotGetExternalKeysForOtherPurpose) {
         ASSERT_EQ(ErrorCodes::KeyNotFound, swKey.getStatus());
     }
 
-    ExternalKeysCollectionDocument origKey2(OID::gen(), 2, kMigrationId1);
+    ExternalKeysCollectionDocument origKey2(OID::gen(), 2);
+    origKey2.setMigrationId(kMigrationId2);
     origKey2.setKeysCollectionDocumentBase(
         {"test", TimeProofService::generateRandomKey(), LogicalTime(Timestamp(110, 0))});
     insertDocument(
@@ -477,8 +495,16 @@ TEST_F(CacheTest, RefreshShouldNotGetExternalKeysForOtherPurpose) {
     }
 }
 
-TEST_F(CacheTest, RefreshCanIncrementallyGetNewKeys) {
-    KeysCollectionCache cache("test", catalogClient());
+TEST_F(CacheTest, RefreshShouldNotGetExternalKeysForOtherPurposeShardedClient) {
+    testRefreshShouldNotGetExternalKeysForOtherPurpose(catalogClient());
+}
+
+TEST_F(CacheTest, RefreshShouldNotGetExternalKeysForOtherPurposeDirectClient) {
+    testRefreshShouldNotGetExternalKeysForOtherPurpose(directClient());
+}
+
+void CacheTest::testGetRefreshCanIncrementallyGetNewKeys(KeysCollectionClient* client) {
+    KeysCollectionCache cache("test", client);
 
     KeysCollectionDocument origKey0(0);
     origKey0.setKeysCollectionDocumentBase(
@@ -536,14 +562,23 @@ TEST_F(CacheTest, RefreshCanIncrementallyGetNewKeys) {
     }
 }
 
-TEST_F(CacheTest, CacheExternalKeyBasic) {
-    KeysCollectionCache cache("test", catalogClient());
+TEST_F(CacheTest, RefreshCanIncrementallyGetNewKeysShardedClient) {
+    testGetRefreshCanIncrementallyGetNewKeys(catalogClient());
+}
+
+TEST_F(CacheTest, RefreshCanIncrementallyGetNewKeysDirectClient) {
+    testGetRefreshCanIncrementallyGetNewKeys(directClient());
+}
+
+void CacheTest::testCacheExternalKeyBasic(KeysCollectionClient* client) {
+    KeysCollectionCache cache("test", client);
 
     auto swExternalKeys = cache.getExternalKeysById(5, LogicalTime(Timestamp(10, 1)));
     ASSERT_EQ(ErrorCodes::KeyNotFound, swExternalKeys.getStatus());
 
-    ExternalKeysCollectionDocument externalKey(OID::gen(), 5, kMigrationId1);
-    externalKey.setTTLExpiresAt(ServiceContext().getFastClockSource()->now() + Seconds(30));
+    ExternalKeysCollectionDocument externalKey(OID::gen(), 5);
+    externalKey.setMigrationId(kMigrationId1);
+    externalKey.setTTLExpiresAt(getServiceContext()->getFastClockSource()->now() + Seconds(30));
     externalKey.setKeysCollectionDocumentBase(
         {"test", TimeProofService::generateRandomKey(), LogicalTime(Timestamp(100, 0))});
 
@@ -560,7 +595,15 @@ TEST_F(CacheTest, CacheExternalKeyBasic) {
     ASSERT_EQ(*externalKey.getTTLExpiresAt(), *cachedKey.getTTLExpiresAt());
 }
 
-TEST_F(CacheTest, RefreshClearsRemovedExternalKeys) {
+TEST_F(CacheTest, CacheExternalKeyBasicShardedClient) {
+    testCacheExternalKeyBasic(catalogClient());
+}
+
+TEST_F(CacheTest, CacheExternalKeyBasicDirectClient) {
+    testCacheExternalKeyBasic(directClient());
+}
+
+void CacheTest::testRefreshClearsRemovedExternalKeys(KeysCollectionClient* client) {
     KeysCollectionCache cache("test", directClient());
 
     KeysCollectionDocument origKey0(1);
@@ -569,14 +612,16 @@ TEST_F(CacheTest, RefreshClearsRemovedExternalKeys) {
     insertDocument(
         operationContext(), NamespaceString::kKeysCollectionNamespace, origKey0.toBSON());
 
-    ExternalKeysCollectionDocument origKey1(OID::gen(), 1, kMigrationId1);
+    ExternalKeysCollectionDocument origKey1(OID::gen(), 1);
+    origKey1.setMigrationId(kMigrationId1);
     origKey1.setKeysCollectionDocumentBase(
         {"test", TimeProofService::generateRandomKey(), LogicalTime(Timestamp(105, 0))});
     origKey1.setTTLExpiresAt(ServiceContext().getFastClockSource()->now() + Seconds(30));
     insertDocument(
         operationContext(), NamespaceString::kExternalKeysCollectionNamespace, origKey1.toBSON());
 
-    ExternalKeysCollectionDocument origKey2(OID::gen(), 1, kMigrationId2);
+    ExternalKeysCollectionDocument origKey2(OID::gen(), 1);
+    origKey2.setMigrationId(kMigrationId2);
     origKey2.setKeysCollectionDocumentBase(
         {"test", TimeProofService::generateRandomKey(), LogicalTime(Timestamp(205, 0))});
     insertDocument(
@@ -633,8 +678,16 @@ TEST_F(CacheTest, RefreshClearsRemovedExternalKeys) {
     }
 }
 
-TEST_F(CacheTest, RefreshHandlesKeysReceivingTTLValue) {
-    KeysCollectionCache cache("test", directClient());
+TEST_F(CacheTest, RefreshClearsRemovedExternalKeysShardedClient) {
+    testRefreshClearsRemovedExternalKeys(catalogClient());
+}
+
+TEST_F(CacheTest, RefreshClearsRemovedExternalKeysDirectClient) {
+    testRefreshClearsRemovedExternalKeys(directClient());
+}
+
+void CacheTest::testRefreshHandlesKeysReceivingTTLValue(KeysCollectionClient* client) {
+    KeysCollectionCache cache("test", client);
 
     KeysCollectionDocument origKey0(1);
     origKey0.setKeysCollectionDocumentBase(
@@ -642,7 +695,8 @@ TEST_F(CacheTest, RefreshHandlesKeysReceivingTTLValue) {
     insertDocument(
         operationContext(), NamespaceString::kKeysCollectionNamespace, origKey0.toBSON());
 
-    ExternalKeysCollectionDocument origKey1(OID::gen(), 1, kMigrationId1);
+    ExternalKeysCollectionDocument origKey1(OID::gen(), 1);
+    origKey1.setMigrationId(kMigrationId1);
     origKey1.setKeysCollectionDocumentBase(
         {"test", TimeProofService::generateRandomKey(), LogicalTime(Timestamp(105, 0))});
     insertDocument(

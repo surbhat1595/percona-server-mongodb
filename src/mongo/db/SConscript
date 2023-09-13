@@ -32,7 +32,6 @@ env.SConscript(
         'cst',
         'encryption',
         'exec',
-        'free_mon',
         'fts',
         'ftdc',
         'geo',
@@ -1746,6 +1745,19 @@ env.Library(
 )
 
 env.Library(
+    target='keys_collection_util',
+    source=[
+        'keys_collection_util.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/catalog_raii',
+        '$BUILD_DIR/mongo/db/concurrency/exception_util',
+        'dbhelpers',
+        'keys_collection_document',
+    ],
+)
+
+env.Library(
     target='keys_collection_client_direct',
     source=[
         'keys_collection_client_direct.cpp',
@@ -2136,7 +2148,6 @@ env.Library(
         'dbdirectclient',
         'dbhelpers',
         'exec/working_set',
-        'free_mon/free_mon_mongod',
         'ftdc/ftdc_mongod',
         'fts/ftsmongod',
         'index/index_access_method',
@@ -2240,7 +2251,6 @@ env.Library(
         'concurrency/flow_control_ticketholder',
         'concurrency/lock_manager',
         'fcv_op_observer',
-        'free_mon/free_mon_mongod',
         'ftdc/ftdc_mongod',
         'index/index_access_method',
         'index_builds_coordinator_mongod',

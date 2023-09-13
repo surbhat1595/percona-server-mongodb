@@ -82,7 +82,6 @@
 #include "mongo/db/encryption/error.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/fcv_op_observer.h"
-#include "mongo/db/free_mon/free_mon_mongod.h"
 #include "mongo/db/ftdc/ftdc_mongod.h"
 #include "mongo/db/ftdc/util.h"
 #include "mongo/db/global_settings.h"
@@ -675,8 +674,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             logStartup(startupOpCtx.get());
         }
 
-        startFreeMonitoring(serviceContext);
-
         auto replCoord = repl::ReplicationCoordinator::get(startupOpCtx.get());
         invariant(replCoord);
 
@@ -696,7 +693,18 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
                 makeShardingTaskExecutor(executor::makeNetworkInterface("AddShard-TaskExecutor")));
 
             Grid::get(startupOpCtx.get())->setShardingInitialized();
-        } else if (replSettings.usingReplSets()) {  // standalone replica set
+        }
+
+        if (replSettings.usingReplSets() &&
+            (serverGlobalParams.clusterRole == ClusterRole::None ||
+             !Grid::get(startupOpCtx.get())->isShardingInitialized())) {
+            // If this is a mongod in a standalone replica set or a shardsvr replica set that has
+            // not initialized its sharding identity, start up the cluster time keys manager with a
+            // local/direct keys client. The keys client must use local read concern if the storage
+            // engine can't support majority read concern. If this is a mongod in a configsvr or
+            // shardsvr replica set that has initialized its sharding identity, the keys manager is
+            // by design initialized separately with a sharded keys client when the sharding state
+            // is initialized.
             auto keysCollectionClient = std::make_unique<KeysCollectionClientDirect>();
             auto keyManager = std::make_shared<KeysCollectionManager>(
                 KeysCollectionManager::kKeyManagerPurposeString,
@@ -706,7 +714,9 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 
             LogicalTimeValidator::set(startupOpCtx->getServiceContext(),
                                       std::make_unique<LogicalTimeValidator>(keyManager));
+        }
 
+        if (replSettings.usingReplSets() && serverGlobalParams.clusterRole == ClusterRole::None) {
             ReplicaSetNodeProcessInterface::getReplicaSetNodeExecutor(serviceContext)->startup();
         }
 
@@ -1084,8 +1094,6 @@ void setUpObservers(ServiceContext* serviceContext) {
         std::make_unique<repl::PrimaryOnlyServiceOpObserver>(serviceContext));
     opObserverRegistry->addObserver(std::make_unique<FcvOpObserver>());
 
-    setupFreeMonitoringOpObserver(opObserverRegistry.get());
-
     if (audit::opObserverRegistrar) {
         audit::opObserverRegistrar(opObserverRegistry.get());
     }
@@ -1236,7 +1244,10 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
             uniqueOpCtx = client->makeOperationContext();
             opCtx = uniqueOpCtx.get();
         }
-        opCtx->setIsExecutingShutdown();
+        {
+            stdx::lock_guard lg(*client);
+            opCtx->setIsExecutingShutdown();
+        }
 
         // This can wait a long time while we drain the secondary's apply queue, especially if
         // it is building an index.
@@ -1340,9 +1351,11 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         validator->shutDown();
     }
 
-    if (auto pool = Grid::get(serviceContext)->getExecutorPool()) {
-        LOGV2_OPTIONS(6773200, {LogComponent::kSharding}, "Shutting down the ExecutorPool");
-        pool->shutdownAndJoin();
+    if (TestingProctor::instance().isEnabled()) {
+        if (auto pool = Grid::get(serviceContext)->getExecutorPool()) {
+            LOGV2_OPTIONS(6773200, {LogComponent::kSharding}, "Shutting down the ExecutorPool");
+            pool->shutdownAndJoin();
+        }
     }
 
     // The migrationutil executor must be shut down before shutting down the CatalogCacheLoader.
@@ -1371,9 +1384,6 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
                           "Service entry point did not shutdown within the time limit");
         }
     }
-
-    LOGV2(4784925, "Shutting down free monitoring");
-    stopFreeMonitoring();
 
     LOGV2(4784927, "Shutting down the HealthLog");
     HealthLog::get(serviceContext).shutdown();

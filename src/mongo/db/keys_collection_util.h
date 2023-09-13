@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2023-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -29,28 +29,26 @@
 
 #pragma once
 
-#include <string>
-#include <vector>
+#include "mongo/db/keys_collection_document_gen.h"
+#include "mongo/db/operation_context.h"
 
 namespace mongo {
+namespace keys_collection_util {
 
-/**
- * Free Moniting Command line choices
+/*
+ * Creates an ExternalKeysCollectionDocument representing an config.external_validation_keys
+ * document created based on the given the admin.system.keys document BSONObj.
  */
-enum class EnableCloudStateEnum : std::int32_t {
-    kOn,
-    kOff,
-    kRuntime,
-};
+ExternalKeysCollectionDocument makeExternalClusterTimeKeyDoc(BSONObj keyDoc,
+                                                             boost::optional<UUID> migrationId,
+                                                             boost::optional<Date_t> expireAt);
 
-/**
- * Free Monitoring configuration options
+/*
+ * Upserts the given ExternalKeysCollectionDocuments into the
+ * config.external_validation_keys collection, and returns the optime for the upserts.
  */
-struct FreeMonParams {
-    std::vector<std::string> freeMonitoringTags;
-    EnableCloudStateEnum freeMonitoringState = EnableCloudStateEnum::kRuntime;
-};
+repl::OpTime storeExternalClusterTimeKeyDocs(OperationContext* opCtx,
+                                             std::vector<ExternalKeysCollectionDocument> keyDocs);
 
-extern FreeMonParams globalFreeMonParams;
-
+}  // namespace keys_collection_util
 }  // namespace mongo

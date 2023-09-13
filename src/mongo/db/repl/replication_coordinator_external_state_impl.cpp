@@ -54,7 +54,6 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/free_mon/free_mon_mongod.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/kill_sessions_local.h"
@@ -561,8 +560,6 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
 
     IndexBuildsCoordinator::get(opCtx)->onStepUp(opCtx);
 
-    notifyFreeMonitoringOnTransitionToPrimary();
-
     // It is only necessary to check the system indexes on the first transition to primary.
     // On subsequent transitions to primary the indexes will have already been created.
     static std::once_flag verifySystemIndexesOnce;
@@ -932,7 +929,8 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
 
         const bool scheduleAsyncRefresh = true;
         resharding::clearFilteringMetadata(opCtx, scheduleAsyncRefresh);
-    } else {  // unsharded
+    }
+    if (serverGlobalParams.clusterRole == ClusterRole::None) {  // unsharded
         if (auto validator = LogicalTimeValidator::get(_service)) {
             validator->enableKeyGenerator(opCtx, true);
         }

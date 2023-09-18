@@ -453,10 +453,17 @@ SemiFuture<CollectionAndChangedChunks> ShardServerCatalogCacheLoader::getChunksS
     }();
 
     return ExecutorFuture<void>(_executor)
-        .then([=]() {
+        .then([=, this]() {
             ThreadClient tc("ShardServerCatalogCacheLoader::getChunksSince",
                             getGlobalServiceContext());
             auto context = _contexts.makeOperationContext(*tc);
+
+            // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+            {
+                stdx::lock_guard<Client> lk(*tc.get());
+                tc.get()->setSystemOperationUnkillableByStepdown(lk);
+            }
+
             {
                 // We may have missed an OperationContextGroup interrupt since this operation
                 // began but before the OperationContext was added to the group. So we'll check
@@ -497,6 +504,12 @@ SemiFuture<DatabaseType> ShardServerCatalogCacheLoader::getDatabase(StringData d
             ThreadClient tc("ShardServerCatalogCacheLoader::getDatabase",
                             getGlobalServiceContext());
             auto context = _contexts.makeOperationContext(*tc);
+
+            // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+            {
+                stdx::lock_guard<Client> lk(*tc.get());
+                tc.get()->setSystemOperationUnkillableByStepdown(lk);
+            }
 
             {
                 // We may have missed an OperationContextGroup interrupt since this operation began
@@ -682,11 +695,6 @@ StatusWith<CollectionAndChangedChunks> ShardServerCatalogCacheLoader::_runSecond
                               "duration"_attr = Milliseconds(t.millis()));
 
     // Read the local metadata.
-
-    // Disallow reading on an older snapshot because this relies on being able to read the
-    // side effects of writes during secondary replication after being signalled from the
-    // CollectionPlacementVersionLogOpHandler.
-    BlockSecondaryReadsDuringBatchApplication_DONT_USE secondaryReadsBlockBehindReplication(opCtx);
 
     return _getCompletePersistedMetadataForSecondarySinceVersion(
         opCtx, nss, catalogCacheSinceVersion);
@@ -1072,6 +1080,12 @@ void ShardServerCatalogCacheLoader::_runCollAndChunksTasks(const NamespaceString
                     getGlobalServiceContext());
     auto context = _contexts.makeOperationContext(*tc);
 
+    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(*tc.get());
+        tc.get()->setSystemOperationUnkillableByStepdown(lk);
+    }
+
     bool taskFinished = false;
     bool inShutdown = false;
     try {
@@ -1150,6 +1164,12 @@ void ShardServerCatalogCacheLoader::_runCollAndChunksTasks(const NamespaceString
 void ShardServerCatalogCacheLoader::_runDbTasks(StringData dbName) {
     ThreadClient tc("ShardServerCatalogCacheLoader::runDbTasks", getGlobalServiceContext());
     auto context = _contexts.makeOperationContext(*tc);
+
+    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(*tc.get());
+        tc.get()->setSystemOperationUnkillableByStepdown(lk);
+    }
 
     bool taskFinished = false;
     bool inShutdown = false;
@@ -1311,6 +1331,17 @@ ShardServerCatalogCacheLoader::_getCompletePersistedMetadataForSecondarySinceVer
     // Keep trying to load the metadata until we get a complete view without updates being
     // concurrently applied.
     while (true) {
+        // Disallow reading on an older snapshot because this relies on being able to read the
+        // side effects of writes during secondary replication after being signalled from the
+        // CollectionPlacementVersionLogOpHandler.
+        BlockSecondaryReadsDuringBatchApplication_DONT_USE secondaryReadsBlockBehindReplication(
+            opCtx);
+
+        // Taking the PBWM and blocking on admission control can lead to deadlock with prepared
+        // transactions, so have internal refresh operations skip admission control
+        ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+                                                            AdmissionContext::Priority::kImmediate);
+
         const auto beginRefreshState = [&]() {
             while (true) {
                 auto notif = _namespaceNotifications.createNotification(nss);

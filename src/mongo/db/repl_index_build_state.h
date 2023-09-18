@@ -144,12 +144,17 @@ public:
          */
         kApplyCommitOplogEntry,
         /**
-         * Below state indicates that index build was successfully able to commit or abort. For
-         * kCommitted, the state is set immediately before it commits the index build. For
-         * kAborted, this state is set after the build is cleaned up and the abort oplog entry is
-         * replicated.
+         * Below state indicates that index build was successfully able to commit and is set
+         * immediately before it commits the index build.
          */
         kCommitted,
+        /**
+         * Below state indicates that index build was successfully able to abort. In case of self
+         * abort this state is set after the build is cleaned up and the abort oplog entry is
+         * replicated. In case of an external abort, this state is set before interrupting the
+         * builder thread, as a way of indicating that a self abort is not required. Cleanup and
+         * oplog entry replicating in this case is done after setting the state.
+         */
         kAborted,
         /**
          * Below state indicates that the index build thread has voted for an abort to the current
@@ -297,10 +302,24 @@ public:
     void completeSetup();
 
     /**
-     * Try to set the index build to in-progress state. Returns true on success, or false if the
-     * build is already aborted / interrupted.
+     * Try to set the index build to in-progress state, does an interrupt check and throws if the
+     * build is already killed.
      */
-    Status tryStart(OperationContext* opCtx);
+    void setInProgress(OperationContext* opCtx);
+
+    /**
+     * Indicate that the index build has attempted to vote for commit readiness. After calling this,
+     * the index build cannot vote for abort. Performs an interrupt check, in case the build was
+     * concurrently forced to self abort or received a killop, in which case the vote for abort is
+     * necessary.
+     */
+    void setVotedForCommitReadiness(OperationContext* opCtx);
+
+    /**
+     * Returns true if this index build can still vote for abort. Voting for abort is not possible
+     * after the index build has voted for commit.
+     */
+    bool canVoteForAbort() const;
 
     /**
      * This index build has completed successfully and there is no further work to be done.
@@ -378,7 +397,7 @@ public:
     std::string getAbortReason() const;
 
     /**
-     * Returns abort status. Invariants if not in aborted state.
+     * Returns abort status. Returns Status::OK() if not in aborted state.
      */
     Status getAbortStatus() const;
 
@@ -568,6 +587,9 @@ private:
 
     // Set once setup is complete, indicating that a clean up is required in case of abort.
     bool _cleanUpRequired = false;
+
+    // Set once before attempting to vote for commit readiness.
+    bool _votedForCommitReadiness = false;
 };
 
 }  // namespace mongo

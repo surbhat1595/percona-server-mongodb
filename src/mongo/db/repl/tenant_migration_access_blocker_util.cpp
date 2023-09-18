@@ -256,46 +256,6 @@ void fassertOnUnsafeInitialSync(const UUID& migrationId) {
         "migrationId"_attr = migrationId);
 }
 
-std::shared_ptr<TenantMigrationDonorAccessBlocker> getDonorAccessBlockerForMigration(
-    ServiceContext* serviceContext, const UUID& migrationId) {
-    return checked_pointer_cast<TenantMigrationDonorAccessBlocker>(
-        TenantMigrationAccessBlockerRegistry::get(serviceContext)
-            .getAccessBlockerForMigration(migrationId,
-                                          TenantMigrationAccessBlocker::BlockerType::kDonor));
-}
-
-std::shared_ptr<TenantMigrationRecipientAccessBlocker> getRecipientAccessBlockerForMigration(
-    ServiceContext* serviceContext, const UUID& migrationId) {
-    return checked_pointer_cast<TenantMigrationRecipientAccessBlocker>(
-        TenantMigrationAccessBlockerRegistry::get(serviceContext)
-            .getAccessBlockerForMigration(migrationId,
-                                          TenantMigrationAccessBlocker::BlockerType::kRecipient));
-}
-
-std::shared_ptr<TenantMigrationRecipientAccessBlocker> getTenantMigrationRecipientAccessBlocker(
-    ServiceContext* const serviceContext, StringData tenantId) {
-
-    TenantId tid = TenantId::parseFromString(tenantId);
-
-    return checked_pointer_cast<TenantMigrationRecipientAccessBlocker>(
-        TenantMigrationAccessBlockerRegistry::get(serviceContext)
-            .getTenantMigrationAccessBlockerForTenantId(tid, MtabType::kRecipient));
-}
-
-void addTenantMigrationRecipientAccessBlocker(ServiceContext* serviceContext,
-                                              const StringData& tenantId,
-                                              const UUID& migrationId) {
-    if (getTenantMigrationRecipientAccessBlocker(serviceContext, tenantId)) {
-        return;
-    }
-
-    auto mtab =
-        std::make_shared<TenantMigrationRecipientAccessBlocker>(serviceContext, migrationId);
-
-    const auto tid = TenantId::parseFromString(tenantId);
-    TenantMigrationAccessBlockerRegistry::get(serviceContext).add(tid, mtab);
-}
-
 void validateNssIsBeingMigrated(const boost::optional<TenantId>& tenantId,
                                 const NamespaceString& nss,
                                 const UUID& migrationId) {
@@ -529,6 +489,17 @@ Status checkIfCanBuildIndex(OperationContext* opCtx, const DatabaseName& dbName)
     return Status::OK();
 }
 
+void assertCanOpenChangeStream(OperationContext* opCtx, const DatabaseName& dbName) {
+    // We only block opening change streams on the donor.
+    auto mtab = TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
+                    .getTenantMigrationAccessBlockerForDbName(dbName, MtabType::kDonor);
+    if (mtab) {
+        auto status = mtab->checkIfCanOpenChangeStream();
+        mtab->recordTenantMigrationError(status);
+        uassertStatusOK(status);
+    }
+}
+
 void assertCanGetMoreChangeStream(OperationContext* opCtx, const DatabaseName& dbName) {
     // We only block change stream getMores on the donor.
     auto mtab = TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
@@ -663,10 +634,10 @@ void performNoopWrite(OperationContext* opCtx, StringData msg) {
     AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
     uassert(ErrorCodes::NotWritablePrimary,
             "Not primary when performing noop write for {}"_format(msg),
-            replCoord->canAcceptWritesForDatabase(opCtx, "admin"));
+            replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin));
 
     writeConflictRetry(
-        opCtx, "performNoopWrite", NamespaceString::kRsOplogNamespace.ns(), [&opCtx, &msg] {
+        opCtx, "performNoopWrite", NamespaceString::kRsOplogNamespace, [&opCtx, &msg] {
             WriteUnitOfWork wuow(opCtx);
             opCtx->getClient()->getServiceContext()->getOpObserver()->onOpMessage(
                 opCtx, BSON("msg" << msg));

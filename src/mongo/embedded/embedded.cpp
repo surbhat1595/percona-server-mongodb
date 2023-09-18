@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/embedded/embedded.h"
 
 #include "mongo/base/initializer.h"
@@ -42,7 +39,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/fsync_locked.h"
-#include "mongo/db/concurrency/lock_state.h"
+#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
@@ -158,6 +155,12 @@ void shutdown(ServiceContext* srvContext) {
         auto const client = Client::getCurrent();
         auto const serviceContext = client->getServiceContext();
 
+        // TODO(SERVER-74659): Please revisit if this thread could be made killable.
+        {
+            stdx::lock_guard<Client> lk(*tc.get());
+            tc.get()->setSystemOperationUnkillableByStepdown(lk);
+        }
+
         serviceContext->setKillAllOperations();
 
         // We should always be able to acquire the global lock at shutdown.
@@ -202,6 +205,13 @@ ServiceContext* initialize(const char* yaml_config) {
     setGlobalServiceContext(ServiceContext::make());
 
     Client::initThread("initandlisten");
+
+    // TODO(SERVER-74659): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(cc());
+        cc().setSystemOperationUnkillableByStepdown(lk);
+    }
+
     // Make sure current thread have no client set in thread_local when we leave this function
     ScopeGuard clientGuard([] { Client::releaseCurrent(); });
 

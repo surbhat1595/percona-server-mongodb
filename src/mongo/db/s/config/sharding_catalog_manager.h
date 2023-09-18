@@ -393,7 +393,8 @@ public:
     void setAllowMigrationsAndBumpOneChunk(OperationContext* opCtx,
                                            const NamespaceString& nss,
                                            const boost::optional<UUID>& collectionUUID,
-                                           bool allowMigrations);
+                                           bool allowMigrations,
+                                           const std::string& cmdName);
 
     /**
      * Bump the minor version of the newest chunk on each shard
@@ -485,7 +486,7 @@ public:
     StatusWith<std::string> addShard(OperationContext* opCtx,
                                      const std::string* shardProposedName,
                                      const ConnectionString& shardConnectionString,
-                                     bool isCatalogShard);
+                                     bool isConfigShard);
 
     /**
      * Inserts the config server shard identity document using a sentinel shard id. Requires the
@@ -661,7 +662,7 @@ private:
                                                std::shared_ptr<RemoteCommandTargeter> targeter,
                                                const std::string* shardProposedName,
                                                const ConnectionString& connectionString,
-                                               bool isCatalogShard);
+                                               bool isConfigShard);
 
     /**
      * Drops the sessions collection on the specified host.
@@ -885,6 +886,12 @@ private:
      * taking this.
      */
     Lock::ResourceMutex _kZoneOpLock;
+
+    /**
+     * Lock for serializing internal/external initialization requests of config.placementHistory.
+     * Regular DDL and chunk operations over the same collection may be run concurrently.
+     */
+    Lock::ResourceMutex _kPlacementHistoryInitializationLock;
 };
 
 }  // namespace mongo

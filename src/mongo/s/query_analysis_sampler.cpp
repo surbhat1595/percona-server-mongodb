@@ -108,7 +108,7 @@ QueryAnalysisSampler& QueryAnalysisSampler::get(OperationContext* opCtx) {
 }
 
 QueryAnalysisSampler& QueryAnalysisSampler::get(ServiceContext* serviceContext) {
-    invariant(analyze_shard_key::supportsSamplingQueries(serviceContext, true /* ignoreFCV */));
+    invariant(analyze_shard_key::supportsSamplingQueries(serviceContext));
     return getQueryAnalysisSampler(serviceContext);
 }
 
@@ -122,7 +122,9 @@ void QueryAnalysisSampler::onStartup() {
     PeriodicRunner::PeriodicJob queryStatsRefresherJob(
         "QueryAnalysisQueryStatsRefresher",
         [this](Client* client) { _refreshQueryStats(); },
-        Seconds(1));
+        Seconds(1),
+        // TODO(SERVER-74662): Please revisit if this periodic job could be made killable.
+        false /*isKillableByStepdown*/);
     _periodicQueryStatsRefresher = periodicRunner->makeJob(std::move(queryStatsRefresherJob));
     _periodicQueryStatsRefresher.start();
 
@@ -139,7 +141,9 @@ void QueryAnalysisSampler::onStartup() {
                       "error"_attr = redact(ex));
             }
         },
-        Seconds(gQueryAnalysisSamplerConfigurationRefreshSecs));
+        Seconds(gQueryAnalysisSamplerConfigurationRefreshSecs),
+        // TODO(SERVER-74662): Please revisit if this periodic job could be made killable.
+        false /*isKillableByStepdown*/);
     _periodicConfigurationsRefresher =
         periodicRunner->makeJob(std::move(configurationsRefresherJob));
     _periodicConfigurationsRefresher.start();
@@ -331,11 +335,6 @@ void QueryAnalysisSampler::_refreshConfigurations(OperationContext* opCtx) {
                                                          configuration.getSampleRate()});
         } else {
             auto rateLimiter = it->second;
-            if (it->second.getNss() != configuration.getNs()) {
-                // Nss changed due to collection rename.
-                // TODO SERVER-73990: Test collection renaming during query sampling
-                it->second.setNss(configuration.getNs());
-            }
             rateLimiter.refreshRate(configuration.getSampleRate());
             sampleRateLimiters.emplace(configuration.getNs(), std::move(rateLimiter));
         }

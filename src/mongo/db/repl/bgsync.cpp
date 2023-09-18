@@ -226,6 +226,11 @@ void BackgroundSync::_run() {
     Client::initThread("BackgroundSync");
     AuthorizationSession::get(cc())->grantInternalAuthorization(&cc());
 
+    {
+        stdx::lock_guard<Client> lk(cc());
+        cc().setSystemOperationUnkillableByStepdown(lk);
+    }
+
     while (!inShutdown()) {
         try {
             _runProducer();
@@ -964,7 +969,7 @@ OpTime BackgroundSync::_readLastAppliedOpTime(OperationContext* opCtx) {
     BSONObj oplogEntry;
     try {
         bool success = writeConflictRetry(
-            opCtx, "readLastAppliedOpTime", NamespaceString::kRsOplogNamespace.ns(), [&] {
+            opCtx, "readLastAppliedOpTime", NamespaceString::kRsOplogNamespace, [&] {
                 return Helpers::getLast(opCtx, NamespaceString::kRsOplogNamespace, oplogEntry);
             });
 

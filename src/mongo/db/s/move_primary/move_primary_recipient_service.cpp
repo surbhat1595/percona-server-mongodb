@@ -614,8 +614,10 @@ MovePrimaryRecipientService::MovePrimaryRecipient::_getUnshardedCollections(
     const auto fromShard =
         uassertStatusOK(shardRegistry->getShard(opCtx, _metadata.getFromShardName().toString()));
 
-    auto collectionsToCloneWithStatus = _cloner->getListOfCollections(
-        opCtx, getDatabaseName().dbName().toString(), fromShard->getConnString().toString());
+    auto collectionsToCloneWithStatus =
+        _cloner->getListOfCollections(opCtx,
+                                      DatabaseNameUtil::serialize(getDatabaseName().dbName()),
+                                      fromShard->getConnString().toString());
     auto collectionsToClone = uassertStatusOK(collectionsToCloneWithStatus);
 
     const auto allCollections = [&] {
@@ -898,7 +900,7 @@ repl::OpTime MovePrimaryRecipientService::MovePrimaryRecipient::_getStartApplyin
 
     auto rawResp = _movePrimaryRecipientExternalState->sendCommandToShards(
         opCtx,
-        "local"_sd,
+        DatabaseName::kLocal.db(),
         findCmd.toBSON({}),
         {ShardId(_metadata.getFromShardName().toString())},
         **executor);

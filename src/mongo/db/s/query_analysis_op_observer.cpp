@@ -51,7 +51,8 @@ void QueryAnalysisOpObserver::onInserts(OperationContext* opCtx,
                                         std::vector<InsertStatement>::const_iterator begin,
                                         std::vector<InsertStatement>::const_iterator end,
                                         std::vector<bool> fromMigrate,
-                                        bool defaultFromMigrate) {
+                                        bool defaultFromMigrate,
+                                        InsertsOpStateAccumulator* opAccumulator) {
     if (analyze_shard_key::supportsCoordinatingQueryAnalysis(opCtx)) {
         if (coll->ns() == NamespaceString::kConfigQueryAnalyzersNamespace) {
             for (auto it = begin; it != end; ++it) {
@@ -77,7 +78,9 @@ void QueryAnalysisOpObserver::onInserts(OperationContext* opCtx,
     }
 }
 
-void QueryAnalysisOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
+void QueryAnalysisOpObserver::onUpdate(OperationContext* opCtx,
+                                       const OplogUpdateEntryArgs& args,
+                                       OpStateAccumulator* opAccumulator) {
     if (analyze_shard_key::supportsCoordinatingQueryAnalysis(opCtx)) {
         if (args.coll->ns() == NamespaceString::kConfigQueryAnalyzersNamespace) {
             const auto parsedDoc = QueryAnalyzerDocument::parse(
@@ -124,7 +127,8 @@ void QueryAnalysisOpObserver::aboutToDelete(OperationContext* opCtx,
 void QueryAnalysisOpObserver::onDelete(OperationContext* opCtx,
                                        const CollectionPtr& coll,
                                        StmtId stmtId,
-                                       const OplogDeleteEntryArgs& args) {
+                                       const OplogDeleteEntryArgs& args,
+                                       OpStateAccumulator* opAccumulator) {
     if (analyze_shard_key::supportsCoordinatingQueryAnalysis(opCtx)) {
         if (coll->ns() == NamespaceString::kConfigQueryAnalyzersNamespace) {
             auto& doc = docToDeleteDecoration(opCtx);

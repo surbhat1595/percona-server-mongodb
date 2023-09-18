@@ -44,8 +44,7 @@
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_state.h"
-#include "mongo/db/concurrency/locker.h"
+#include "mongo/db/concurrency/locker_impl.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/dbdirectclient.h"
@@ -553,10 +552,10 @@ void TransactionParticipant::performNoopWrite(OperationContext* opCtx, StringDat
         AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
         uassert(ErrorCodes::NotWritablePrimary,
                 "Not primary when performing noop write for {}"_format(msg),
-                replCoord->canAcceptWritesForDatabase(opCtx, "admin"));
+                replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin));
 
         writeConflictRetry(
-            opCtx, "performNoopWrite", NamespaceString::kRsOplogNamespace.ns(), [&opCtx, &msg] {
+            opCtx, "performNoopWrite", NamespaceString::kRsOplogNamespace, [&opCtx, &msg] {
                 WriteUnitOfWork wuow(opCtx);
                 opCtx->getClient()->getServiceContext()->getOpObserver()->onOpMessage(
                     opCtx, BSON("msg" << msg));
@@ -572,6 +571,13 @@ TransactionParticipant::getOldestActiveTimestamp(Timestamp stableTimestamp) {
     // the server, and it both blocks this thread from querying config.transactions and waits for
     // this thread to terminate.
     auto client = getGlobalServiceContext()->makeClient("OldestActiveTxnTimestamp");
+
+    // TODO(SERVER-74656): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(*client.get());
+        client.get()->setSystemOperationUnkillableByStepdown(lk);
+    }
+
     AlternativeClientRegion acr(client);
 
     try {
@@ -939,7 +945,7 @@ void TransactionParticipant::Participant::beginOrContinue(
         auto replCoord = repl::ReplicationCoordinator::get(opCtx);
         uassert(ErrorCodes::NotWritablePrimary,
                 "Not primary so we cannot begin or continue a transaction",
-                replCoord->canAcceptWritesForDatabase(opCtx, "admin"));
+                replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin));
         // Disallow multi-statement transactions on shard servers that have
         // writeConcernMajorityJournalDefault=false unless enableTestCommands=true. But allow
         // retryable writes (autocommit == boost::none).
@@ -1208,8 +1214,8 @@ TransactionParticipant::TxnResources::TxnResources(WithLock wl,
     // On secondaries, we yield the locks for transactions.
     if (stashStyle == StashStyle::kSecondary) {
         _lockSnapshot = std::make_unique<Locker::LockSnapshot>();
-        // Transactions have at least a global IX lock. Invariant that we have something to release.
-        invariant(_locker->releaseWriteUnitOfWorkAndUnlock(_lockSnapshot.get()));
+        // Transactions have at least a global IX lock.
+        _locker->releaseWriteUnitOfWorkAndUnlock(_lockSnapshot.get());
     }
 
     // This thread must still respect the transaction lock timeout, since it can prevent the
@@ -1858,7 +1864,7 @@ void TransactionParticipant::Participant::commitPreparedTransaction(
     if (opCtx->writesAreReplicated()) {
         uassert(ErrorCodes::NotWritablePrimary,
                 "Not primary so we cannot commit a prepared transaction",
-                replCoord->canAcceptWritesForDatabase(opCtx, "admin"));
+                replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin));
     }
 
     uassert(
@@ -1926,27 +1932,24 @@ void TransactionParticipant::Participant::commitPreparedTransaction(
         invariant(!o().lastWriteOpTime.isNull());
 
         auto commitOplogSlotOpTime = commitOplogEntryOpTime.value_or(commitOplogSlot);
+
+        // If we are a primary committing a transaction that was split into smaller prepared
+        // transactions, cascade the commit.
         auto* splitPrepareManager =
             repl::ReplicationCoordinator::get(opCtx)->getSplitPrepareSessionManager();
         if (opCtx->writesAreReplicated() &&
             splitPrepareManager->isSessionSplit(
                 _sessionId(), o().activeTxnNumberAndRetryCounter.getTxnNumber())) {
-            // If we are a primary committing a transaction that was split into smaller prepared
-            // transactions, use a special commit code path.
-            _commitSplitPreparedTxnOnPrimary(opCtx,
-                                             splitPrepareManager,
-                                             _sessionId(),
-                                             o().activeTxnNumberAndRetryCounter.getTxnNumber(),
-                                             commitTimestamp,
-                                             commitOplogSlot.getTimestamp());
-        } else {
-            // If commitOplogEntryOpTime is a nullopt, then we grab the OpTime from the
-            // commitOplogSlot which will only be set if we are primary. Otherwise, the
-            // commitOplogEntryOpTime must have been passed in during secondary oplog application.
-            opCtx->recoveryUnit()->setCommitTimestamp(commitTimestamp);
-            opCtx->recoveryUnit()->setDurableTimestamp(commitOplogSlotOpTime.getTimestamp());
-            _commitStorageTransaction(opCtx);
+            _commitSplitPreparedTxnOnPrimary(
+                opCtx, splitPrepareManager, commitTimestamp, commitOplogSlot.getTimestamp());
         }
+
+        // If commitOplogEntryOpTime is a nullopt, then we grab the OpTime from commitOplogSlot
+        // which will only be set if we are primary. Otherwise, the commitOplogEntryOpTime must
+        // have been passed in during secondary oplog application.
+        opCtx->recoveryUnit()->setCommitTimestamp(commitTimestamp);
+        opCtx->recoveryUnit()->setDurableTimestamp(commitOplogSlotOpTime.getTimestamp());
+        _commitStorageTransaction(opCtx);
 
         auto opObserver = opCtx->getServiceContext()->getOpObserver();
         invariant(opObserver);
@@ -1995,10 +1998,11 @@ void TransactionParticipant::Participant::_commitStorageTransaction(OperationCon
 void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
     OperationContext* userOpCtx,
     repl::SplitPrepareSessionManager* splitPrepareManager,
-    const LogicalSessionId& userSessionId,
-    const TxnNumber& userTxnNumber,
     const Timestamp& commitTimestamp,
     const Timestamp& durableTimestamp) {
+
+    const auto& userSessionId = _sessionId();
+    const auto& userTxnNumber = o().activeTxnNumberAndRetryCounter.getTxnNumber();
 
     for (const auto& sessInfos :
          splitPrepareManager->getSplitSessions(userSessionId, userTxnNumber).get()) {
@@ -2013,8 +2017,14 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
 
         auto splitClientOwned = userOpCtx->getServiceContext()->makeClient("tempSplitClient");
         auto splitOpCtx = splitClientOwned->makeOperationContext();
-        AlternativeClientRegion acr(splitClientOwned);
 
+        // TODO(SERVER-74656): Please revisit if this thread could be made killable.
+        {
+            stdx::lock_guard<Client> lk(*splitClientOwned.get());
+            splitClientOwned.get()->setSystemOperationUnkillableByStepdown(lk);
+        }
+
+        AlternativeClientRegion acr(splitClientOwned);
         std::unique_ptr<MongoDSessionCatalog::Session> checkedOutSession;
 
         repl::UnreplicatedWritesBlock notReplicated(splitOpCtx.get());
@@ -2050,9 +2060,6 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
     }
 
     splitPrepareManager->releaseSplitSessions(userSessionId, userTxnNumber);
-    userOpCtx->recoveryUnit()->setCommitTimestamp(commitTimestamp);
-    userOpCtx->recoveryUnit()->setDurableTimestamp(durableTimestamp);
-    this->_commitStorageTransaction(userOpCtx);
 }
 
 void TransactionParticipant::Participant::_finishCommitTransaction(
@@ -2144,7 +2151,7 @@ void TransactionParticipant::Participant::_abortActivePreparedTransaction(Operat
         auto replCoord = repl::ReplicationCoordinator::get(opCtx);
         uassert(ErrorCodes::NotWritablePrimary,
                 "Not primary so we cannot abort a prepared transaction",
-                replCoord->canAcceptWritesForDatabase(opCtx, "admin"));
+                replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin));
     }
 
     _abortActiveTransaction(opCtx, TransactionState::kPrepared);
@@ -2154,17 +2161,11 @@ void TransactionParticipant::Participant::_abortActiveTransaction(
     OperationContext* opCtx, TransactionState::StateSet expectedStates) {
     invariant(!o().txnResourceStash);
 
-    // If this is a split-prepared transaction, cascade the abort.
     auto* splitPrepareManager =
         repl::ReplicationCoordinator::get(opCtx)->getSplitPrepareSessionManager();
-    if (opCtx->writesAreReplicated() &&
+    bool isSplitPreparedTxn = opCtx->writesAreReplicated() &&
         splitPrepareManager->isSessionSplit(_sessionId(),
-                                            o().activeTxnNumberAndRetryCounter.getTxnNumber())) {
-        _abortSplitPreparedTxnOnPrimary(opCtx,
-                                        splitPrepareManager,
-                                        _sessionId(),
-                                        o().activeTxnNumberAndRetryCounter.getTxnNumber());
-    }
+                                            o().activeTxnNumberAndRetryCounter.getTxnNumber());
 
     if (!o().txnState.isInRetryableWriteMode()) {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -2181,6 +2182,12 @@ void TransactionParticipant::Participant::_abortActiveTransaction(
         // causally related to the transaction abort enter the oplog at a timestamp earlier than the
         // abort oplog entry.
         OplogSlotReserver oplogSlotReserver(opCtx);
+
+        // If we are a primary aborting a transaction that was split into smaller prepared
+        // transactions, cascade the abort.
+        if (isSplitPreparedTxn) {
+            _abortSplitPreparedTxnOnPrimary(opCtx, splitPrepareManager);
+        }
 
         // Clean up the transaction resources on the opCtx even if the transaction resources on the
         // session were not aborted. This actually aborts the storage-transaction.
@@ -2218,6 +2225,7 @@ void TransactionParticipant::Participant::_abortActiveTransaction(
         // is not cleaning up some internal TransactionParticipant state, updating metrics, or
         // logging the end of the transaction. That will either be cleaned up in the
         // ServiceEntryPoint's abortGuard or when the next transaction begins.
+        invariant(!isSplitPreparedTxn);
         _cleanUpTxnResourceOnOpCtx(opCtx, TerminationCause::kAborted);
         opObserver->onTransactionAbort(opCtx, boost::none);
         _finishAbortingActiveTransaction(opCtx, expectedStates);
@@ -2225,19 +2233,26 @@ void TransactionParticipant::Participant::_abortActiveTransaction(
 }
 
 void TransactionParticipant::Participant::_abortSplitPreparedTxnOnPrimary(
-    OperationContext* opCtx,
-    repl::SplitPrepareSessionManager* splitPrepareManager,
-    const LogicalSessionId& sessionId,
-    const TxnNumber& txnNumber) {
+    OperationContext* userOpCtx, repl::SplitPrepareSessionManager* splitPrepareManager) {
+
+    const auto& userSessionId = _sessionId();
+    const auto& userTxnNumber = o().activeTxnNumberAndRetryCounter.getTxnNumber();
+
     // If there are split prepared sessions, it must be because this transaction was prepared
     // via an oplog entry applied as a secondary.
     for (const repl::SplitSessionInfo& sessionInfo :
-         splitPrepareManager->getSplitSessions(sessionId, txnNumber).get()) {
+         splitPrepareManager->getSplitSessions(userSessionId, userTxnNumber).get()) {
 
-        auto splitClientOwned = opCtx->getServiceContext()->makeClient("tempSplitClient");
+        auto splitClientOwned = userOpCtx->getServiceContext()->makeClient("tempSplitClient");
         auto splitOpCtx = splitClientOwned->makeOperationContext();
-        AlternativeClientRegion acr(splitClientOwned);
 
+        // TODO(SERVER-74656): Please revisit if this thread could be made killable.
+        {
+            stdx::lock_guard<Client> lk(*splitClientOwned.get());
+            splitClientOwned.get()->setSystemOperationUnkillableByStepdown(lk);
+        }
+
+        AlternativeClientRegion acr(splitClientOwned);
         std::unique_ptr<MongoDSessionCatalog::Session> checkedOutSession;
 
         repl::UnreplicatedWritesBlock notReplicated(splitOpCtx.get());
@@ -2258,7 +2273,7 @@ void TransactionParticipant::Participant::_abortSplitPreparedTxnOnPrimary(
         checkedOutSession->checkIn(splitOpCtx.get(), OperationContextSession::CheckInReason::kDone);
     }
 
-    splitPrepareManager->releaseSplitSessions(_sessionId(),
+    splitPrepareManager->releaseSplitSessions(userSessionId,
                                               o().activeTxnNumberAndRetryCounter.getTxnNumber());
 }
 
@@ -2860,7 +2875,9 @@ void TransactionParticipant::Participant::_setNewTxnNumberAndRetryCounter(
         // Only observe parent sessions because retryable transactions begin the same txnNumber on
         // their parent session.
         OperationContextSession::observeNewTxnNumberStarted(
-            opCtx, _sessionId(), txnNumberAndRetryCounter.getTxnNumber());
+            opCtx,
+            _sessionId(),
+            {txnNumberAndRetryCounter.getTxnNumber(), SessionCatalog::Provenance::kParticipant});
     }
 }
 
@@ -3511,7 +3528,9 @@ void TransactionParticipant::Participant::_registerUpdateCacheOnCommit(
     onPrimaryTransactionalWrite.execute([&](const BSONObj& data) {
         const auto closeConnectionElem = data["closeConnection"];
         if (closeConnectionElem.eoo() || closeConnectionElem.Bool()) {
-            opCtx->getClient()->session()->end();
+            if (auto session = opCtx->getClient()->session()) {
+                session->end();
+            }
         }
 
         const auto failBeforeCommitExceptionElem = data["failBeforeCommitExceptionCode"];

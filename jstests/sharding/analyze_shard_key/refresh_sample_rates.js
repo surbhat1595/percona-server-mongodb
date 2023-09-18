@@ -44,8 +44,8 @@ function testBasic(createConnFn, rst, samplerNames) {
     assert.commandWorked(
         conn.adminCommand({configureQueryAnalyzer: ns1, mode: "full", sampleRate: sampleRate1}));
     const configColl = conn.getCollection("config.queryAnalyzers");
-    const startTime0 = configColl.findOne({ns: ns0}).startTime;
-    const startTime1 = configColl.findOne({ns: ns1}).startTime;
+    const startTime0 = configColl.findOne({_id: ns0}).startTime;
+    const startTime1 = configColl.findOne({_id: ns1}).startTime;
 
     // Query distribution after: [1, unknown, unknown]. Verify that refreshing returns
     // sampleRate / numSamplers.
@@ -200,7 +200,7 @@ function testFailover(createConnFn, rst, samplerNames) {
     assert.commandWorked(
         conn.adminCommand({configureQueryAnalyzer: ns, mode: "full", sampleRate: sampleRate}));
     const configColl = conn.getCollection("config.queryAnalyzers");
-    const startTime = configColl.findOne({ns: ns}).startTime;
+    const startTime = configColl.findOne({_id: ns}).startTime;
 
     assert.commandWorked(
         primary.adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: true}));
@@ -242,7 +242,7 @@ function testRestart(createConnFn, rst, samplerNames) {
     assert.commandWorked(
         conn.adminCommand({configureQueryAnalyzer: ns, mode: "full", sampleRate: sampleRate}));
     const configColl = conn.getCollection("config.queryAnalyzers");
-    const startTime = configColl.findOne({ns: ns}).startTime;
+    const startTime = configColl.findOne({_id: ns}).startTime;
 
     rst.stopSet(null /* signal */, true /*forRestart */);
     rst.startSet({restart: true});
@@ -293,6 +293,11 @@ function runTest(createConnFn, rst, samplerNames) {
     st.configRS.isConfigSvr = true;
     const samplerNames = [st.s0.host, st.s1.host, st.s2.host];
 
+    jsTest.log("Wait for the config server to be aware that there are 3 mongoses in the cluster");
+    assert.soon(() => {
+        return st.s.getCollection("config.mongos").find().itcount() == 3;
+    });
+
     jsTest.log("Test that the _refreshQueryAnalyzerConfiguration command is not supported on " +
                "mongos or shardsvr mongod or configsvr secondary mongod");
     const cmdObj = {
@@ -301,8 +306,8 @@ function runTest(createConnFn, rst, samplerNames) {
         numQueriesExecutedPerSecond: 1
     };
     assert.commandFailedWithCode(st.s.adminCommand(cmdObj), ErrorCodes.CommandNotFound);
-    if (!TestData.catalogShard) {
-        // Shard0 is the config server in catalog shard mode.
+    if (!TestData.configShard) {
+        // Shard0 is the config server in config shard mode.
         st.rs0.nodes.forEach(node => {
             assert.commandFailedWithCode(node.adminCommand(cmdObj), ErrorCodes.IllegalOperation);
         });

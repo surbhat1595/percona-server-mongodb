@@ -28,6 +28,7 @@
  */
 
 
+#include "mongo/db/namespace_string.h"
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/commands/fsync.h"
@@ -356,6 +357,12 @@ void FSyncLockThread::run() {
     stdx::lock_guard<SimpleMutex> lkf(filesLockedFsync);
     stdx::unique_lock<Latch> stateLock(fsyncStateMutex);
 
+    // TODO(SERVER-74657): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(*tc.get());
+        tc.get()->setSystemOperationUnkillableByStepdown(lk);
+    }
+
     invariant(fsyncCmd.getLockCount_inLock() == 1);
 
     try {
@@ -382,9 +389,11 @@ void FSyncLockThread::run() {
         bool successfulFsyncLock = false;
         auto backupCursorHooks = BackupCursorHooks::get(_serviceContext);
         try {
+            // TODO SERVER-65920: Create a NamespaceString for logging with the "global" ns in
+            // writeConflictRetry.
             writeConflictRetry(&opCtx,
                                "beginBackup",
-                               "global",
+                               NamespaceString("global"),
                                [&opCtx, backupCursorHooks, &successfulFsyncLock, storageEngine] {
                                    if (backupCursorHooks->enabled()) {
                                        backupCursorHooks->fsyncLock(&opCtx);

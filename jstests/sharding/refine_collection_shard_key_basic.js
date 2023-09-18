@@ -7,7 +7,7 @@ TestData.skipCheckShardFilteringMetadata = true;
 
 (function() {
 'use strict';
-load("jstests/libs/catalog_shard_util.js");
+load("jstests/libs/config_shard_util.js");
 load('jstests/libs/fail_point_util.js');
 load('jstests/libs/profiler.js');
 load('jstests/sharding/libs/shard_versioning_util.js');
@@ -307,10 +307,10 @@ assert.commandFailedWithCode(
     ErrorCodes.NamespaceNotSharded);
 
 // Should fail because operation can't run on config server
-const isCatalogShardEnabled = CatalogShardUtil.isEnabledIgnoringFCV(st);
+const isConfigShardEnabled = ConfigShardUtil.isEnabledIgnoringFCV(st);
 assert.commandFailedWithCode(
     mongos.adminCommand({refineCollectionShardKey: "config.collections", key: {_id: 1, aKey: 1}}),
-    isCatalogShardEnabled ? ErrorCodes.NamespaceNotSharded : ErrorCodes.NoShardingEnabled);
+    isConfigShardEnabled ? ErrorCodes.NamespaceNotSharded : ErrorCodes.NoShardingEnabled);
 
 enableShardingAndShardColl({_id: 1});
 
@@ -737,17 +737,9 @@ if (!isStepdownSuite) {
     assert.soon(() => oldPrimaryEpoch !==
                     st.shard0.adminCommand({getShardVersion: kNsName, fullMetadata: true})
                         .metadata.shardVersionEpoch.toString());
-    // TODO (SERVER-74477): Always assume that all shards will refresh during rename.
-    if (FeatureFlagUtil.isPresentAndEnabled(st.shard0.getDB(kDbName),
-                                            "AllowMigrationsRefreshToAll")) {
-        assert.soon(() => oldSecondaryEpoch !==
-                        st.shard1.adminCommand({getShardVersion: kNsName, fullMetadata: true})
-                            .metadata.shardVersionEpoch.toString());
-    } else {
-        assert.soon(() => oldSecondaryEpoch ===
-                        st.shard1.adminCommand({getShardVersion: kNsName, fullMetadata: true})
-                            .metadata.shardVersionEpoch.toString());
-    }
+    assert.soon(() => oldSecondaryEpoch !==
+                    st.shard1.adminCommand({getShardVersion: kNsName, fullMetadata: true})
+                        .metadata.shardVersionEpoch.toString());
 }
 
 // Assumes the given arrays are sorted by the max field.

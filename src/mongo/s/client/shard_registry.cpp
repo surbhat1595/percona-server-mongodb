@@ -190,7 +190,7 @@ ShardRegistry::Cache::LookupResult ShardRegistry::_lookup(OperationContext* opCt
 
         auto name = shard->getConnString().getSetName();
         if (shardId != ShardId::kConfigServerId) {
-            // Don't remove the catalog shard's RSM because it is used to target the config server.
+            // Don't remove the config shard's RSM because it is used to target the config server.
             ReplicaSetMonitor::remove(name);
         }
         _removeReplicaSet(name);
@@ -461,6 +461,12 @@ SharedSemiFuture<ShardRegistry::Cache::ValueHandle> ShardRegistry::_reloadAsync(
 void ShardRegistry::updateReplicaSetOnConfigServer(ServiceContext* serviceContext,
                                                    const ConnectionString& connStr) noexcept {
     ThreadClient tc("UpdateReplicaSetOnConfigServer", serviceContext);
+
+    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(*tc.get());
+        tc.get()->setSystemOperationUnkillableByStepdown(lk);
+    }
 
     auto opCtx = tc->makeOperationContext();
     auto const grid = Grid::get(opCtx.get());

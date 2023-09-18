@@ -75,7 +75,9 @@ void generateNewDocumentFromSuppliedDoc(OperationContext* opCtx,
     UpdateDriver replacementDriver(nullptr);
 
     // Create a new replacement-style update from the supplied document.
-    replacementDriver.parse(write_ops::UpdateModification::parseFromClassicUpdate(suppliedDoc), {});
+    replacementDriver.parse(
+        write_ops::UpdateModification(suppliedDoc, write_ops::UpdateModification::ReplacementTag{}),
+        {});
     replacementDriver.setLogOp(false);
 
     // We do not validate for storage, as we will validate the full document before inserting.
@@ -165,9 +167,7 @@ void makeUpdateRequest(OperationContext* opCtx,
     requestOut->setMulti(false);
     requestOut->setExplain(explain);
 
-    requestOut->setYieldPolicy(opCtx->inMultiDocumentTransaction()
-                                   ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
-                                   : PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
+    requestOut->setYieldPolicy(PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
 }
 
 }  // namespace update

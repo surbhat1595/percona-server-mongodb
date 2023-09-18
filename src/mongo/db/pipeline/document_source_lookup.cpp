@@ -450,7 +450,7 @@ StageConstraints DocumentSourceLookUp::constraints(Pipeline::SplitState pipeStat
         // is allowed.
         hostRequirement = HostTypeRequirement::kAnyShard;
     } else if (_fromNs == NamespaceString::kConfigsvrCollectionsNamespace &&
-               // (Ignore FCV check): If the catalog shard feature flag is enabled, the config
+               // (Ignore FCV check): If the config shard feature flag is enabled, the config
                // server should have the components necessary to handle a merge. Config servers are
                // upgraded first and downgraded last, so if any server is running the latest binary,
                // we can assume the conifg servers are too.
@@ -1045,14 +1045,14 @@ void DocumentSourceLookUp::serializeToArray(std::vector<Value>& array,
     // syntax) or if a $match was absorbed.
     auto serializedPipeline = [&]() -> std::vector<BSONObj> {
         auto pipeline = _userPipeline.get_value_or(std::vector<BSONObj>());
-        if (opts.redactIdentifiers || opts.replacementForLiteralArgs) {
+        if (opts.applyHmacToIdentifiers || opts.replacementForLiteralArgs) {
             return Pipeline::parse(pipeline, _fromExpCtx)->serializeToBson(opts);
         }
         return pipeline;
     }();
     if (_additionalFilter) {
         auto serializedFilter = [&]() -> BSONObj {
-            if (opts.redactIdentifiers || opts.replacementForLiteralArgs) {
+            if (opts.applyHmacToIdentifiers || opts.replacementForLiteralArgs) {
                 auto filter =
                     uassertStatusOK(MatchExpressionParser::parse(*_additionalFilter, pExpCtx));
                 return filter->serialize(opts);
@@ -1124,7 +1124,19 @@ DepsTracker::State DocumentSourceLookUp::getDependencies(DepsTracker* deps) cons
     }
 
     if (hasLocalFieldForeignFieldJoin()) {
-        deps->fields.insert(_localField->fullPath());
+        const FieldRef ref(_localField->fullPath());
+        // We need everything up until the first numeric component. Otherwise, a projection could
+        // treat the numeric component as a field name rather than an index into an array.
+        size_t firstNumericIx;
+        for (firstNumericIx = 0; firstNumericIx < ref.numParts(); firstNumericIx++) {
+            // We are lenient with the component, because classic $lookup treats 0-prefixed numeric
+            // fields like "00" as both an index and a field name. Allowing it in a dependency would
+            // restrict the usage to only a field name.
+            if (ref.isNumericPathComponentLenient(firstNumericIx)) {
+                break;
+            }
+        }
+        deps->fields.insert(ref.dottedSubstring(0, firstNumericIx).toString());
     }
 
     // Purposely ignore '_matchSrc' and '_unwindSrc', since those should only be absorbed if we know

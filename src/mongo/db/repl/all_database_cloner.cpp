@@ -173,7 +173,7 @@ BaseCloner::AfterStageBehavior AllDatabaseCloner::listDatabasesStage() {
             : boost::none;
         DatabaseName dbName = DatabaseNameUtil::deserialize(tenantId, dbBSON["name"].str());
 
-        if (dbName.db() == "local") {
+        if (dbName.db() == DatabaseName::kLocal.db()) {
             LOGV2_DEBUG(21056,
                         1,
                         "Excluding database from the 'listDatabases' response: {db}",
@@ -230,7 +230,6 @@ void AllDatabaseCloner::postStage() {
             BSONObj cmdObj = BSON("dbStats" << 1);
             BSONObjBuilder b(cmdObj);
             if (gMultitenancySupport &&
-                serverGlobalParams.featureCompatibility.isVersionInitialized() &&
                 gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility) &&
                 dbName.tenantId()) {
                 dbName.tenantId()->serializeToBSON("$tenant", &b);

@@ -184,7 +184,8 @@ void ReshardingOpObserver::onInserts(OperationContext* opCtx,
                                      std::vector<InsertStatement>::const_iterator begin,
                                      std::vector<InsertStatement>::const_iterator end,
                                      std::vector<bool> fromMigrate,
-                                     bool defaultFromMigrate) {
+                                     bool defaultFromMigrate,
+                                     InsertsOpStateAccumulator* opAccumulator) {
     const auto& nss = coll->ns();
 
     if (nss == NamespaceString::kDonorReshardingOperationsNamespace) {
@@ -205,7 +206,9 @@ void ReshardingOpObserver::onInserts(OperationContext* opCtx,
     }
 }
 
-void ReshardingOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
+void ReshardingOpObserver::onUpdate(OperationContext* opCtx,
+                                    const OplogUpdateEntryArgs& args,
+                                    OpStateAccumulator* opAccumulator) {
     if (args.coll->ns() == NamespaceString::kDonorReshardingOperationsNamespace) {
         // Primaries and secondaries should execute pinning logic when observing changes to the
         // donor resharding document.
@@ -252,7 +255,8 @@ void ReshardingOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEn
 void ReshardingOpObserver::onDelete(OperationContext* opCtx,
                                     const CollectionPtr& coll,
                                     StmtId stmtId,
-                                    const OplogDeleteEntryArgs& args) {
+                                    const OplogDeleteEntryArgs& args,
+                                    OpStateAccumulator* opAccumulator) {
     if (coll->ns() == NamespaceString::kDonorReshardingOperationsNamespace) {
         _doPin(opCtx);
     }

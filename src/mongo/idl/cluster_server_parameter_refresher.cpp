@@ -64,6 +64,11 @@ getFCVAndClusterParametersFromConfigServer() {
     // Use an alternative client region, because we call refreshParameters both from the internal
     // refresher process and from getClusterParameter.
     auto altClient = getGlobalServiceContext()->makeClient("clusterParameterRefreshTransaction");
+    // TODO(SERVER-74660): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(*altClient.get());
+        altClient.get()->setSystemOperationUnkillableByStepdown(lk);
+    }
     AlternativeClientRegion clientRegion(altClient);
     auto opCtx = cc().makeOperationContext();
     auto as = AuthorizationSession::get(cc());
@@ -144,9 +149,7 @@ getFCVAndClusterParametersFromConfigServer() {
 
     auto executor = Grid::get(opCtx.get())->getExecutorPool()->getFixedExecutor();
     auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
-    auto sleepInlineExecutor = inlineExecutor->getSleepableExecutor(executor);
-    txn_api::SyncTransactionWithRetries txn(
-        opCtx.get(), sleepInlineExecutor, nullptr, inlineExecutor);
+    txn_api::SyncTransactionWithRetries txn(opCtx.get(), executor, nullptr, inlineExecutor);
     txn.run(opCtx.get(), doFetch);
     return {*fcv, *allDocs};
 }
@@ -300,7 +303,9 @@ void ClusterServerParameterRefresher::start(ServiceContext* serviceCtx, Operatio
     PeriodicRunner::PeriodicJob job(
         "ClusterServerParameterRefresher",
         [serviceCtx](Client* client) { getClusterServerParameterRefresher(serviceCtx)->run(); },
-        loadInterval());
+        loadInterval(),
+        // TODO(SERVER-74659): Please revisit if this periodic job could be made killable.
+        false /*isKillableByStepdown*/);
 
     refresher->_job = std::make_unique<PeriodicJobAnchor>(periodicRunner->makeJob(std::move(job)));
 
@@ -326,9 +331,8 @@ void ClusterServerParameterRefresher::onShutdown(ServiceContext* serviceCtx) {
     // Make sure that we finish the possibly running transaction and don't start any more.
     auto& refresher = getClusterServerParameterRefresher(serviceCtx);
     if (refresher && refresher->_job && refresher->_job->isValid()) {
-        refresher->_job->stop();
+        refresher->_job->pause();
     }
-    getClusterServerParameterRefresher(serviceCtx) = nullptr;
 }
 
 }  // namespace mongo

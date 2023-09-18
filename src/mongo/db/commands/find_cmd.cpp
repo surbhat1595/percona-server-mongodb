@@ -52,9 +52,10 @@
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/find.h"
 #include "mongo/db/query/find_common.h"
+#include "mongo/db/query/find_request_shapifier.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/telemetry.h"
+#include "mongo/db/query/query_stats.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/service_context.h"
@@ -560,14 +561,20 @@ public:
             cq->setUseCqfIfEligible(true);
 
             if (collection) {
-                // Collect telemetry. Exclude queries against collections with encrypted fields.
+                // Collect queryStats. Exclude queries against collections with encrypted fields.
                 if (!collection.get()->getCollectionOptions().encryptedFieldConfig) {
-                    telemetry::registerFindRequest(cq->getFindCommandRequest(),
-                                                   collection.get()->ns(),
-                                                   opCtx,
-                                                   cq->getExpCtx());
+                    query_stats::registerRequest(
+                        std::make_unique<query_stats::FindRequestShapifier>(
+                            cq->getFindCommandRequest(), opCtx),
+                        collection.get()->ns(),
+                        opCtx,
+                        cq->getExpCtx());
                 }
             }
+
+            // We need to copy the serialization context from the request to the reply object before
+            // the request object goes out of scope
+            const auto serializationContext = cq->getFindCommandRequest().getSerializationContext();
 
             // Get the execution plan for the query.
             bool permitYield = true;
@@ -724,8 +731,8 @@ public:
             // documents.
             auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
             metricsCollector.incrementDocUnitsReturned(nss.ns(), docUnitsReturned);
-            query_request_helper::validateCursorResponse(result->getBodyBuilder().asTempObj(),
-                                                         nss.tenantId());
+            query_request_helper::validateCursorResponse(
+                result->getBodyBuilder().asTempObj(), nss.tenantId(), serializationContext);
         }
 
         void appendMirrorableRequest(BSONObjBuilder* bob) const override {
@@ -774,9 +781,9 @@ public:
                     processFLEFindD(
                         opCtx, findCommand->getNamespaceOrUUID().nss().value(), findCommand.get());
                 }
-                // Set the telemetryStoreKey to none so telemetry isn't collected when we've done a
-                // FLE rewrite.
-                CurOp::get(opCtx)->debug().telemetryStoreKey = boost::none;
+                // Set the queryStatsStoreKey to none so queryStats isn't collected when we've done
+                // a FLE rewrite.
+                CurOp::get(opCtx)->debug().queryStatsStoreKeyHash = boost::none;
                 CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
             }
 

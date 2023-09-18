@@ -67,12 +67,13 @@ const allCommands = {
     _configsvrRemoveTags: {skip: isAnInternalCommand},
     _configsvrRepairShardedCollectionChunksHistory: {skip: isAnInternalCommand},
     _configsvrRenameCollectionMetadata: {skip: isAnInternalCommand},
+    _configsvrResetPlacementHistory: {skip: isAnInternalCommand},
     _configsvrReshardCollection: {skip: isAnInternalCommand},
     _configsvrRunRestore: {skip: isAnInternalCommand},
     _configsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _configsvrSetClusterParameter: {skip: isAnInternalCommand},
     _configsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
-    _configsvrTransitionToCatalogShard: {skip: isAnInternalCommand},
+    _configsvrTransitionFromDedicatedConfigServer: {skip: isAnInternalCommand},
     _configsvrTransitionToDedicatedConfigServer: {skip: isAnInternalCommand},
     _configsvrUpdateZoneKeyRange: {skip: isAnInternalCommand},
     _flushDatabaseCacheUpdates: {skip: isAnInternalCommand},
@@ -98,6 +99,7 @@ const allCommands = {
     _recvChunkStatus: {skip: isAnInternalCommand},
     _refreshQueryAnalyzerConfiguration: {skip: isAnInternalCommand},
     _shardsvrAbortReshardCollection: {skip: isAnInternalCommand},
+    _shardsvrCleanupStructuredEncryptionData: {skip: isAnInternalCommand},
     _shardsvrCleanupReshardCollection: {skip: isAnInternalCommand},
     _shardsvrCloneCatalogData: {skip: isAnInternalCommand},
     _shardsvrCompactStructuredEncryptionData: {skip: isAnInternalCommand},
@@ -148,7 +150,9 @@ const allCommands = {
     streams_startStreamProcessor: {skip: isAnInternalCommand},
     streams_startStreamSample: {skip: isAnInternalCommand},
     streams_stopStreamProcessor: {skip: isAnInternalCommand},
+    streams_listStreamProcessors: {skip: isAnInternalCommand},
     streams_getMoreStreamSample: {skip: isAnInternalCommand},
+    streams_getStats: {skip: isAnInternalCommand},
     streams_testOnlyInsert: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
@@ -236,8 +240,6 @@ const allCommands = {
     analyzeShardKey: {
         // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
         skip: commandIsDisabledOnLastLTS,
-        // TODO SERVER-67966: Remove check when this feature flag is removed.
-        checkFeatureFlag: "AnalyzeShardKey",
         setUp: function(conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
             assert.commandWorked(
@@ -503,8 +505,6 @@ const allCommands = {
     configureQueryAnalyzer: {
         // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
         skip: commandIsDisabledOnLastLTS,
-        // TODO SERVER-67966: Remove check when this feature flag is removed.
-        checkFeatureFlag: "AnalyzeShardKey",
         setUp: function(conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
             for (let i = 0; i < 10; i++) {
@@ -1315,6 +1315,11 @@ const allCommands = {
         isAdminCommand: true,
         command: {replSetResizeOplog: 1, minRetentionHours: 1},
     },
+    resetPlacementHistory: {
+        command: {resetPlacementHistory: 1},
+        isShardedOnly: true,
+        isAdminCommand: true,
+    },
     reshardCollection: {
         // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
         skip: commandIsDisabledOnLastLTS,
@@ -1541,12 +1546,12 @@ const allCommands = {
         isAdminCommand: true,
         doesNotRunOnMongos: true,
     },
-    transitionToCatalogShard: {
+    transitionFromDedicatedConfigServer: {
         // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
         skip: commandIsDisabledOnLastLTS,
         // TODO SERVER-66060: Remove check when this feature flag is removed.
         checkFeatureFlag: "CatalogShard",
-        command: {transitionToCatalogShard: 1},
+        command: {transitionFromDedicatedConfigServer: 1},
         isShardedOnly: true,
         isAdminCommand: true,
     },

@@ -125,8 +125,8 @@ auto makeOnSuppressedErrorFn(const std::function<void()>& saveCursorBeforeWrite,
 }
 
 bool shouldRelaxConstraints(OperationContext* opCtx, const CollectionPtr& collection) {
-    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-    if (!feature_flags::gIndexBuildGracefulErrorHandling.isEnabledAndIgnoreFCVUnsafe()) {
+    if (!feature_flags::gIndexBuildGracefulErrorHandling.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
         // Always suppress.
         return true;
     }
@@ -508,7 +508,7 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(
         // Unlock before hanging so replication recognizes we've completed.
         collection.yield();
         Locker::LockSnapshot lockInfo;
-        invariant(opCtx->lockState()->saveLockStateAndUnlock(&lockInfo));
+        opCtx->lockState()->saveLockStateAndUnlock(&lockInfo);
 
         LOGV2(4585201,
               "Hanging index build with no locks due to "
@@ -623,7 +623,7 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(
         // Unlock before hanging so replication recognizes we've completed.
         collection.yield();
         Locker::LockSnapshot lockInfo;
-        invariant(opCtx->lockState()->saveLockStateAndUnlock(&lockInfo));
+        opCtx->lockState()->saveLockStateAndUnlock(&lockInfo);
 
         LOGV2(20390,
               "Hanging index build with no locks due to "
@@ -865,11 +865,11 @@ Status MultiIndexBlock::dumpInsertsFromBulk(
                 collection,
                 dupsAllowed,
                 kYieldIterations,
-                [=](const KeyString::Value& duplicateKey) {
+                [=, this](const KeyString::Value& duplicateKey) {
                     // Do not record duplicates when explicitly ignored. This may be the case on
                     // secondaries.
                     return writeConflictRetry(
-                        opCtx, "recordingDuplicateKey", entry->getNSSFromCatalog(opCtx).ns(), [&] {
+                        opCtx, "recordingDuplicateKey", entry->getNSSFromCatalog(opCtx), [&] {
                             if (dupsAllowed && !onDuplicateRecord && !_ignoreUnique &&
                                 entry->indexBuildInterceptor()) {
                                 WriteUnitOfWork wuow(opCtx);
@@ -1226,7 +1226,7 @@ Status MultiIndexBlock::_failPointHangDuringBuild(OperationContext* opCtx,
                                                   unsigned long long iteration) const {
     try {
         fp->executeIf(
-            [=, &doc](const BSONObj& data) {
+            [=, this, &doc](const BSONObj& data) {
                 LOGV2(20386,
                       "Hanging index build during collection scan phase",
                       "where"_attr = where,

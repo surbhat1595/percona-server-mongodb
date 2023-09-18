@@ -143,6 +143,17 @@ std::shared_ptr<MigrationChunkClonerSource> MigrationSourceManager::getCurrentCl
     return msm->_cloneDriver;
 }
 
+// static
+bool MigrationSourceManager::isMigrating(OperationContext* opCtx,
+                                         NamespaceString const& nss,
+                                         BSONObj const& docToDelete) {
+    const auto scopedCsr =
+        CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss);
+    auto cloner = MigrationSourceManager::getCurrentCloner(*scopedCsr);
+
+    return cloner && cloner->isDocumentInMigratingChunk(docToDelete);
+}
+
 MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
                                                ShardsvrMoveRange&& request,
                                                WriteConcernOptions&& writeConcern,
@@ -743,10 +754,6 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
             }
 
             auto newClient = _opCtx->getServiceContext()->makeClient("MigrationCoordinator");
-            {
-                stdx::lock_guard<Client> lk(*newClient.get());
-                newClient->setSystemOperationKillableByStepdown(lk);
-            }
             AlternativeClientRegion acr(newClient);
             auto newOpCtxPtr = cc().makeOperationContext();
             auto newOpCtx = newOpCtxPtr.get();

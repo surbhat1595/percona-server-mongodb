@@ -60,7 +60,8 @@ void ClusterServerParameterOpObserver::onInserts(OperationContext* opCtx,
                                                  std::vector<InsertStatement>::const_iterator first,
                                                  std::vector<InsertStatement>::const_iterator last,
                                                  std::vector<bool> fromMigrate,
-                                                 bool defaultFromMigrate) {
+                                                 bool defaultFromMigrate,
+                                                 InsertsOpStateAccumulator* opAccumulator) {
     if (!isConfigNamespace(coll->ns())) {
         return;
     }
@@ -74,7 +75,8 @@ void ClusterServerParameterOpObserver::onInserts(OperationContext* opCtx,
 }
 
 void ClusterServerParameterOpObserver::onUpdate(OperationContext* opCtx,
-                                                const OplogUpdateEntryArgs& args) {
+                                                const OplogUpdateEntryArgs& args,
+                                                OpStateAccumulator* opAccumulator) {
     auto updatedDoc = args.updateArgs->updatedDoc;
     if (!isConfigNamespace(args.coll->ns()) || args.updateArgs->update.isEmpty()) {
         return;
@@ -117,7 +119,8 @@ void ClusterServerParameterOpObserver::aboutToDelete(OperationContext* opCtx,
 void ClusterServerParameterOpObserver::onDelete(OperationContext* opCtx,
                                                 const CollectionPtr& coll,
                                                 StmtId stmtId,
-                                                const OplogDeleteEntryArgs& args) {
+                                                const OplogDeleteEntryArgs& args,
+                                                OpStateAccumulator* opAccumulator) {
     const auto& docName = aboutToDeleteDoc(opCtx);
     if (!docName.empty()) {
         opCtx->recoveryUnit()->onCommit([docName, tenantId = tenantIdToDelete(opCtx)](
@@ -143,7 +146,8 @@ repl::OpTime ClusterServerParameterOpObserver::onDropCollection(
     const NamespaceString& collectionName,
     const UUID& uuid,
     std::uint64_t numRecords,
-    CollectionDropType dropType) {
+    CollectionDropType dropType,
+    bool markFromMigrate) {
     if (isConfigNamespace(collectionName)) {
         // Entire collection deleted, reset to default state.
         opCtx->recoveryUnit()->onCommit([tenantId = collectionName.dbName().tenantId()](
@@ -155,8 +159,8 @@ repl::OpTime ClusterServerParameterOpObserver::onDropCollection(
     return {};
 }
 
-void ClusterServerParameterOpObserver::_onReplicationRollback(OperationContext* opCtx,
-                                                              const RollbackObserverInfo& rbInfo) {
+void ClusterServerParameterOpObserver::onReplicationRollback(OperationContext* opCtx,
+                                                             const RollbackObserverInfo& rbInfo) {
     for (const auto& nss : rbInfo.rollbackNamespaces) {
         if (isConfigNamespace(nss)) {
             // We can call resynchronize directly because onReplicationRollback is guaranteed to be

@@ -93,6 +93,9 @@ ThreadPool::Options makeDefaultThreadPoolOptions() {
     // Ensure all threads have a client.
     options.onCreateThread = [](const std::string& threadName) {
         Client::initThread(threadName.c_str());
+
+        stdx::lock_guard<Client> lk(cc());
+        cc().setSystemOperationUnkillableByStepdown(lk);
     };
 
     return options;
@@ -464,9 +467,9 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
         // Start collecting metrics for the index build. The metrics for this operation will only be
         // aggregated globally if the node commits or aborts while it is primary.
         auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx.get());
-        if (ResourceConsumption::shouldCollectMetricsForDatabase(dbName.toStringWithTenantId()) &&
+        if (ResourceConsumption::shouldCollectMetricsForDatabase(dbName) &&
             ResourceConsumption::isMetricsCollectionEnabled()) {
-            metricsCollector.beginScopedCollecting(opCtx.get(), dbName.toStringWithTenantId());
+            metricsCollector.beginScopedCollecting(opCtx.get(), dbName);
         }
 
         // Index builds should never take the PBWM lock, even on a primary. This allows the
@@ -794,6 +797,14 @@ void IndexBuildsCoordinatorMongod::_signalPrimaryForCommitReadiness(
           "buildUUID"_attr = replState->buildUUID,
           logAttrs(replState->dbName),
           "collectionUUID"_attr = replState->collectionUUID);
+
+    // Indicate that the index build in this node has already tried to vote for commit readiness.
+    // We do not try to determine whether the vote has actually succeeded or not, as it is
+    // challenging due to the asynchronous request and potential concurrent interrupts. After this
+    // point, the node cannot vote to abort this index build, and if it needs to abort the index
+    // build it must try to do so independently. Meaning, as a primary it will succeed, but as a
+    // secondary it will fassert.
+    replState->setVotedForCommitReadiness(opCtx);
 
     const auto generateCmd = [](const UUID& uuid, const std::string& address) {
         return BSON("voteCommitIndexBuild" << uuid << "hostAndPort" << address << "writeConcern"

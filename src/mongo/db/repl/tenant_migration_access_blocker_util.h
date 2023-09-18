@@ -40,23 +40,7 @@ namespace mongo {
 
 namespace tenant_migration_access_blocker {
 
-std::shared_ptr<TenantMigrationDonorAccessBlocker> getDonorAccessBlockerForMigration(
-    ServiceContext* serviceContext, const UUID& migrationId);
-
-std::shared_ptr<TenantMigrationRecipientAccessBlocker> getRecipientAccessBlockerForMigration(
-    ServiceContext* serviceContext, const UUID& migrationId);
-
-std::shared_ptr<TenantMigrationRecipientAccessBlocker> getTenantMigrationRecipientAccessBlocker(
-    ServiceContext* serviceContext, StringData tenantId);
-
 void fassertOnUnsafeInitialSync(const UUID& migrationId);
-
-/**
- * Add an access blocker if one does not already exist.
- */
-void addTenantMigrationRecipientAccessBlocker(ServiceContext* serviceContext,
-                                              const StringData& tenantId,
-                                              const UUID& migrationId);
 
 /**
  * Parse the tenantId from a database name, or return boost::none if there is no tenantId.
@@ -107,6 +91,11 @@ void checkIfCanWriteOrThrow(OperationContext* opCtx, const DatabaseName& dbName,
  * in the blocking state). Returns TenantMigrationCommitted if it is in committed.
  */
 Status checkIfCanBuildIndex(OperationContext* opCtx, const DatabaseName& dbName);
+
+/**
+ * Asserts if opening a new change stream should block.
+ */
+void assertCanOpenChangeStream(OperationContext* opCtx, const DatabaseName& dbName);
 
 /**
  * Asserts if getMores for change streams should fail.

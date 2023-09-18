@@ -51,10 +51,10 @@
 #include "mongo/db/exec/sbe/stages/limit_skip.h"
 #include "mongo/db/exec/shard_filter.h"
 #include "mongo/db/exec/sort_key_generator.h"
+#include "mongo/db/exec/spool.h"
 #include "mongo/db/exec/subplan.h"
 #include "mongo/db/exec/timeseries/bucket_unpacker.h"
 #include "mongo/db/exec/timeseries_modify.h"
-#include "mongo/db/exec/unpack_timeseries_bucket.h"
 #include "mongo/db/exec/upsert_stage.h"
 #include "mongo/db/index/columns_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -63,6 +63,7 @@
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/ops/delete_request_gen.h"
+#include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/query/bind_input_params.h"
 #include "mongo/db/query/canonical_query.h"
@@ -534,7 +535,8 @@ bool shouldWaitForOplogVisibility(OperationContext* opCtx,
     // to wait for the oplog visibility timestamp to be updated, it would wait for a replication
     // batch that would never complete because it couldn't reacquire its own lock, the global lock
     // held by the waiting reader.
-    return repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesForDatabase(opCtx, "admin");
+    return repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesForDatabase(
+        opCtx, DatabaseName::kAdmin);
 }
 
 namespace {
@@ -1315,12 +1317,12 @@ std::unique_ptr<sbe::RuntimePlanner> makeRuntimePlannerIfNeeded(
     return nullptr;
 }
 
-std::unique_ptr<PlanYieldPolicySBE> makeSbeYieldPolicy(
-    OperationContext* opCtx,
-    PlanYieldPolicy::YieldPolicy requestedYieldPolicy,
-    const Yieldable* yieldable,
-    NamespaceString nss) {
-    return std::make_unique<PlanYieldPolicySBE>(requestedYieldPolicy,
+std::unique_ptr<PlanYieldPolicySBE> makeSbeYieldPolicy(OperationContext* opCtx,
+                                                       PlanYieldPolicy::YieldPolicy policy,
+                                                       const Yieldable* yieldable,
+                                                       NamespaceString nss) {
+    return std::make_unique<PlanYieldPolicySBE>(opCtx,
+                                                policy,
                                                 opCtx->getServiceContext()->getFastClockSource(),
                                                 internalQueryExecYieldIterations.load(),
                                                 Milliseconds{internalQueryExecYieldPeriodMS.load()},
@@ -1457,7 +1459,21 @@ bool shouldUseRegularSbe(const CanonicalQuery& cq) {
     // The 'ExpressionContext' may indicate that there are expressions which are only supported in
     // SBE when 'featureFlagSbeFull' is set, or fully supported regardless of the value of the
     // feature flag. This function should only return true in the latter case.
-    return cq.getExpCtx()->sbeCompatibility == SbeCompatibility::fullyCompatible;
+    if (cq.getExpCtx()->sbeCompatibility != SbeCompatibility::fullyCompatible) {
+        return false;
+    }
+    for (const auto& stage : cq.pipeline()) {
+        if (auto groupStage = dynamic_cast<DocumentSourceGroup*>(stage->documentSource())) {
+            // Group stage wouldn't be pushed down if it's not supported in SBE.
+            tassert(7548611,
+                    "Unexpected SBE compatibility value",
+                    groupStage->sbeCompatibility() != SbeCompatibility::notCompatible);
+            if (groupStage->sbeCompatibility() != SbeCompatibility::fullyCompatible) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 /**
@@ -1642,9 +1658,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
     bool permitYield,
     QueryPlannerParams plannerParams) {
 
-    auto yieldPolicy = (permitYield && !opCtx->inMultiDocumentTransaction())
-        ? PlanYieldPolicy::YieldPolicy::YIELD_AUTO
-        : PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY;
+    auto yieldPolicy = permitYield ? PlanYieldPolicy::YieldPolicy::YIELD_AUTO
+                                   : PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY;
 
     if (OperationShardingState::isComingFromRouter(opCtx)) {
         plannerParams.options |= QueryPlannerParams::INCLUDE_SHARD_FILTER;
@@ -1725,18 +1740,12 @@ StatusWith<std::unique_ptr<projection_ast::Projection>> makeProjection(const BSO
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDelete(
     OpDebug* opDebug,
-    stdx::variant<const CollectionPtr*, const ScopedCollectionAcquisition*> coll,
+    const ScopedCollectionAcquisition& coll,
     ParsedDelete* parsedDelete,
     boost::optional<ExplainOptions::Verbosity> verbosity,
     DeleteStageParams::DocumentCounter&& documentCounter) {
-    const auto& collectionPtr =
-        *stdx::visit(OverloadedVisitor{
-                         [](const CollectionPtr* collectionPtr) { return collectionPtr; },
-                         [](const ScopedCollectionAcquisition* collectionAcquisition) {
-                             return &collectionAcquisition->getCollectionPtr();
-                         },
-                     },
-                     coll);
+    const auto& collectionPtr = coll.getCollectionPtr();
+
     auto expCtx = parsedDelete->expCtx();
     OperationContext* opCtx = expCtx->opCtx;
     const DeleteRequest* request = parsedDelete->getRequest();
@@ -1799,7 +1808,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
         return plan_executor_factory::make(expCtx,
                                            std::move(ws),
                                            std::make_unique<EOFStage>(expCtx.get()),
-                                           &CollectionPtr::null,
+                                           &coll,
                                            policy,
                                            false, /* whether we must return owned data */
                                            nss);
@@ -1840,12 +1849,12 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
                     std::make_unique<DeleteStage>(expCtx.get(),
                                                   std::move(deleteStageParams),
                                                   ws.get(),
-                                                  collectionPtr,
+                                                  coll,
                                                   idHackStage.release());
                 return plan_executor_factory::make(expCtx,
                                                    std::move(ws),
                                                    std::move(root),
-                                                   coll,
+                                                   &coll,
                                                    policy,
                                                    false /* whether owned BSON must be returned */);
             }
@@ -1917,10 +1926,10 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
         // directly.
         root = std::make_unique<TimeseriesModifyStage>(
             expCtxRaw,
-            std::move(deleteStageParams),
+            TimeseriesModifyParams(deleteStageParams.get()),
             ws.get(),
             std::move(root),
-            collectionPtr,
+            coll,
             BucketUnpacker(*collectionPtr->getTimeseriesOptions()),
             parsedDelete->releaseResidualExpr());
     } else if (batchDelete) {
@@ -1928,11 +1937,11 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
                                                     std::move(deleteStageParams),
                                                     std::make_unique<BatchedDeleteStageParams>(),
                                                     ws.get(),
-                                                    collectionPtr,
+                                                    coll,
                                                     root.release());
     } else {
         root = std::make_unique<DeleteStage>(
-            expCtxRaw, std::move(deleteStageParams), ws.get(), collectionPtr, root.release());
+            expCtxRaw, std::move(deleteStageParams), ws.get(), coll, root.release());
     }
 
     if (projection) {
@@ -1945,7 +1954,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
     return plan_executor_factory::make(std::move(cq),
                                        std::move(ws),
                                        std::move(root),
-                                       coll,
+                                       &coll,
                                        policy,
                                        defaultPlannerOptions,
                                        NamespaceString(),
@@ -1958,18 +1967,11 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpdate(
     OpDebug* opDebug,
-    stdx::variant<const CollectionPtr*, const ScopedCollectionAcquisition*> coll,
+    const ScopedCollectionAcquisition& coll,
     ParsedUpdate* parsedUpdate,
     boost::optional<ExplainOptions::Verbosity> verbosity,
     UpdateStageParams::DocumentCounter&& documentCounter) {
-    const auto& collectionPtr =
-        *stdx::visit(OverloadedVisitor{
-                         [](const CollectionPtr* collectionPtr) { return collectionPtr; },
-                         [](const ScopedCollectionAcquisition* collectionAcquisition) {
-                             return &collectionAcquisition->getCollectionPtr();
-                         },
-                     },
-                     coll);
+    const auto& collectionPtr = coll.getCollectionPtr();
 
     auto expCtx = parsedUpdate->expCtx();
     OperationContext* opCtx = expCtx->opCtx;
@@ -1988,15 +1990,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
     // If there is no collection and this is an upsert, callers are supposed to create
     // the collection prior to calling this method. Explain, however, will never do
     // collection or database creation.
-    if (!collectionPtr && request->isUpsert()) {
+    if (!coll.exists() && request->isUpsert()) {
         invariant(request->explain());
-    }
-
-    // If the parsed update does not have a user-specified collation, set it from the collection
-    // default.
-    if (collectionPtr && parsedUpdate->getRequest()->getCollation().isEmpty() &&
-        collectionPtr->getDefaultCollator()) {
-        parsedUpdate->setCollator(collectionPtr->getDefaultCollator()->clone());
     }
 
     // If this is a user-issued update, then we want to return an error: you cannot perform
@@ -2020,7 +2015,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
     // should have already enforced upstream that in this case either the upsert flag is false, or
     // we are an explain. If the collection doesn't exist, we're not an explain, and the upsert flag
     // is true, we expect the caller to have created the collection already.
-    if (!collectionPtr) {
+    if (!coll.exists()) {
         LOGV2_DEBUG(20929,
                     2,
                     "Collection does not exist. Using EOF stage",
@@ -2035,13 +2030,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
                                            nss);
     }
 
-    // Pass index information to the update driver, so that it can determine for us whether the
-    // update affects indices.
-    const auto& updateIndexData = CollectionQueryInfo::get(collectionPtr).getIndexKeys(opCtx);
-    driver->refreshIndexKeys(&updateIndexData);
-
     if (!parsedUpdate->hasParsedQuery()) {
-
         // Only consider using the idhack if no hint was provided.
         if (request->getHint().isEmpty()) {
             // This is the idhack fast-path for getting a PlanExecutor without doing the work
@@ -2116,12 +2105,27 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
 
     updateStageParams.canonicalQuery = cq.get();
     const bool isUpsert = updateStageParams.request->isUpsert();
-    root =
-        (isUpsert
-             ? std::make_unique<UpsertStage>(
-                   cq->getExpCtxRaw(), updateStageParams, ws.get(), collectionPtr, root.release())
-             : std::make_unique<UpdateStage>(
-                   cq->getExpCtxRaw(), updateStageParams, ws.get(), collectionPtr, root.release()));
+    if (isUpsert) {
+        root = std::make_unique<UpsertStage>(
+            cq->getExpCtxRaw(), updateStageParams, ws.get(), coll, root.release());
+    } else if (parsedUpdate->isEligibleForArbitraryTimeseriesUpdate()) {
+        if (request->isMulti()) {
+            // If this is a multi-update, we need to spool the data before beginning to apply
+            // updates, in order to avoid the Halloween problem.
+            root = std::make_unique<SpoolStage>(cq->getExpCtxRaw(), ws.get(), std::move(root));
+        }
+        root = std::make_unique<TimeseriesModifyStage>(
+            cq->getExpCtxRaw(),
+            TimeseriesModifyParams(&updateStageParams),
+            ws.get(),
+            std::move(root),
+            coll,
+            BucketUnpacker(*collectionPtr->getTimeseriesOptions()),
+            parsedUpdate->releaseResidualExpr());
+    } else {
+        root = std::make_unique<UpdateStage>(
+            cq->getExpCtxRaw(), updateStageParams, ws.get(), coll, root.release());
+    }
 
     if (projection) {
         root = std::make_unique<ProjectionStageDefault>(
@@ -2133,7 +2137,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
     return plan_executor_factory::make(std::move(cq),
                                        std::move(ws),
                                        std::move(root),
-                                       coll,
+                                       &coll,
                                        policy,
                                        defaultPlannerOptions,
                                        NamespaceString(),
@@ -2407,9 +2411,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCoun
     }
     std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
-    const auto yieldPolicy = opCtx->inMultiDocumentTransaction()
-        ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
-        : PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
+    const auto yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
 
     const auto skip = request.getSkip().value_or(0);
     const auto limit = request.getLimit().value_or(0);
@@ -2919,9 +2921,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDist
 
     auto expCtx = parsedDistinct->getQuery()->getExpCtx();
     OperationContext* opCtx = expCtx->opCtx;
-    const auto yieldPolicy = opCtx->inMultiDocumentTransaction()
-        ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
-        : PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
+    const auto yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
 
     // Assert that not eligible for bonsai
     uassert(ErrorCodes::InternalErrorNotSupported,

@@ -271,24 +271,24 @@ bool Helpers::getLast(OperationContext* opCtx, const NamespaceString& nss, BSONO
 }
 
 UpdateResult Helpers::upsert(OperationContext* opCtx,
-                             const NamespaceString& nss,
+                             ScopedCollectionAcquisition& coll,
                              const BSONObj& o,
                              bool fromMigrate) {
     BSONElement e = o["_id"];
     verify(e.type());
     BSONObj id = e.wrap();
-    return upsert(opCtx, nss, id, o, fromMigrate);
+    return upsert(opCtx, coll, id, o, fromMigrate);
 }
 
 UpdateResult Helpers::upsert(OperationContext* opCtx,
-                             const NamespaceString& nss,
+                             ScopedCollectionAcquisition& coll,
                              const BSONObj& filter,
                              const BSONObj& updateMod,
                              bool fromMigrate) {
-    OldClientContext context(opCtx, nss);
+    OldClientContext context(opCtx, coll.nss());
 
     auto request = UpdateRequest();
-    request.setNamespaceString(nss);
+    request.setNamespaceString(coll.nss());
 
     request.setQuery(filter);
     request.setUpdateModification(write_ops::UpdateModification::parseFromClassicUpdate(updateMod));
@@ -298,18 +298,18 @@ UpdateResult Helpers::upsert(OperationContext* opCtx,
     }
     request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::NO_YIELD);
 
-    return ::mongo::update(opCtx, context.db(), request);
+    return ::mongo::update(opCtx, coll, request);
 }
 
 void Helpers::update(OperationContext* opCtx,
-                     const NamespaceString& nss,
+                     ScopedCollectionAcquisition& coll,
                      const BSONObj& filter,
                      const BSONObj& updateMod,
                      bool fromMigrate) {
-    OldClientContext context(opCtx, nss);
+    OldClientContext context(opCtx, coll.nss());
 
     auto request = UpdateRequest();
-    request.setNamespaceString(nss);
+    request.setNamespaceString(coll.nss());
 
     request.setQuery(filter);
     request.setUpdateModification(write_ops::UpdateModification::parseFromClassicUpdate(updateMod));
@@ -318,19 +318,21 @@ void Helpers::update(OperationContext* opCtx,
     }
     request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::NO_YIELD);
 
-    ::mongo::update(opCtx, context.db(), request);
+    ::mongo::update(opCtx, coll, request);
 }
 
-void Helpers::putSingleton(OperationContext* opCtx, const NamespaceString& nss, BSONObj obj) {
-    OldClientContext context(opCtx, nss);
+void Helpers::putSingleton(OperationContext* opCtx,
+                           ScopedCollectionAcquisition& coll,
+                           BSONObj obj) {
+    OldClientContext context(opCtx, coll.nss());
 
     auto request = UpdateRequest();
-    request.setNamespaceString(nss);
+    request.setNamespaceString(coll.nss());
 
     request.setUpdateModification(write_ops::UpdateModification::parseFromClassicUpdate(obj));
     request.setUpsert();
 
-    ::mongo::update(opCtx, context.db(), request);
+    ::mongo::update(opCtx, coll, request);
 
     CurOp::get(opCtx)->done();
 }
@@ -351,14 +353,10 @@ BSONObj Helpers::inferKeyPattern(const BSONObj& o) {
     return kpBuilder.obj();
 }
 
-void Helpers::emptyCollection(OperationContext* opCtx, const NamespaceString& nss) {
-    OldClientContext context(opCtx, nss);
+void Helpers::emptyCollection(OperationContext* opCtx, const ScopedCollectionAcquisition& coll) {
+    OldClientContext context(opCtx, coll.nss());
     repl::UnreplicatedWritesBlock uwb(opCtx);
-    CollectionPtr collection = CollectionPtr(
-        context.db() ? CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss)
-                     : nullptr);
-
-    deleteObjects(opCtx, collection, nss, BSONObj(), false);
+    deleteObjects(opCtx, coll, BSONObj(), false);
 }
 
 bool Helpers::findByIdAndNoopUpdate(OperationContext* opCtx,

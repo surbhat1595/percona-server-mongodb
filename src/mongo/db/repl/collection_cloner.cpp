@@ -131,7 +131,7 @@ void CollectionCloner::preStage() {
     _stats.start = getSharedData()->getClock()->now();
 
     BSONObjBuilder b(BSON("collStats" << _sourceNss.coll().toString()));
-    if (gMultitenancySupport && serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+    if (gMultitenancySupport &&
         gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility) &&
         _sourceNss.tenantId()) {
         _sourceNss.tenantId()->serializeToBSON("$tenant", &b);
@@ -411,8 +411,10 @@ void CollectionCloner::handleNextBatch(DBClientCursor& cursor) {
     }
 
     // Schedule the next document batch insertion.
-    auto&& scheduleResult = _scheduleDbWorkFn(
-        [=](const executor::TaskExecutor::CallbackArgs& cbd) { insertDocumentsCallback(cbd); });
+    auto&& scheduleResult =
+        _scheduleDbWorkFn([=, this](const executor::TaskExecutor::CallbackArgs& cbd) {
+            insertDocumentsCallback(cbd);
+        });
 
     if (!scheduleResult.isOK()) {
         Status newStatus = scheduleResult.getStatus().withContext(

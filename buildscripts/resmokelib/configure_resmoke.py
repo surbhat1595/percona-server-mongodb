@@ -20,7 +20,7 @@ from buildscripts.idl.lib import ALL_FEATURE_FLAG_FILE
 
 from buildscripts.resmokelib import config as _config
 from buildscripts.resmokelib import utils
-from buildscripts.resmokelib import mongod_fuzzer_configs
+from buildscripts.resmokelib import mongo_fuzzer_configs
 from buildscripts.resmokelib.suitesconfig import SuiteFinder
 
 
@@ -301,6 +301,7 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
 
     _config.MONGOD_SET_PARAMETERS = _merge_set_params(mongod_set_parameters)
     _config.FUZZ_MONGOD_CONFIGS = config.pop("fuzz_mongod_configs")
+    _config.FUZZ_MONGOS_CONFIGS = config.pop("fuzz_mongos_configs")
     _config.CONFIG_FUZZ_SEED = config.pop("config_fuzz_seed")
 
     if _config.FUZZ_MONGOD_CONFIGS:
@@ -309,7 +310,7 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
         else:
             _config.CONFIG_FUZZ_SEED = int(_config.CONFIG_FUZZ_SEED)
         _config.MONGOD_SET_PARAMETERS, _config.WT_ENGINE_CONFIG, _config.WT_COLL_CONFIG, \
-        _config.WT_INDEX_CONFIG = mongod_fuzzer_configs.fuzz_set_parameters(
+        _config.WT_INDEX_CONFIG = mongo_fuzzer_configs.fuzz_mongod_set_parameters(
             _config.FUZZ_MONGOD_CONFIGS, _config.CONFIG_FUZZ_SEED, _config.MONGOD_SET_PARAMETERS)
         _config.EXCLUDE_WITH_ANY_TAGS.extend(["uses_compact"])
         _config.EXCLUDE_WITH_ANY_TAGS.extend(["requires_emptycapped"])
@@ -318,6 +319,15 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     mongos_set_parameters = config.pop("mongos_set_parameters")
     _config.MONGOS_SET_PARAMETERS = _merge_set_params(mongos_set_parameters)
 
+    if _config.FUZZ_MONGOS_CONFIGS:
+        if not _config.CONFIG_FUZZ_SEED:
+            _config.CONFIG_FUZZ_SEED = random.randrange(sys.maxsize)
+        else:
+            _config.CONFIG_FUZZ_SEED = int(_config.CONFIG_FUZZ_SEED)
+
+        _config.MONGOS_SET_PARAMETERS = mongo_fuzzer_configs.fuzz_mongos_set_parameters(
+            _config.FUZZ_MONGOS_CONFIGS, _config.CONFIG_FUZZ_SEED, _config.MONGOS_SET_PARAMETERS)
+
     _config.MONGOCRYPTD_SET_PARAMETERS = _merge_set_params(config.pop("mongocryptd_set_parameters"))
 
     _config.MRLOG = config.pop("mrlog")
@@ -325,8 +335,8 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     _config.NUM_CLIENTS_PER_FIXTURE = config.pop("num_clients_per_fixture")
     _config.NUM_REPLSET_NODES = config.pop("num_replset_nodes")
     _config.NUM_SHARDS = config.pop("num_shards")
-    _config.CATALOG_SHARD = utils.pick_catalog_shard_node(
-        config.pop("catalog_shard"), _config.NUM_SHARDS)
+    _config.CONFIG_SHARD = utils.pick_catalog_shard_node(
+        config.pop("config_shard"), _config.NUM_SHARDS)
     _config.PERF_REPORT_FILE = config.pop("perf_report_file")
     _config.CEDAR_REPORT_FILE = config.pop("cedar_report_file")
     _config.RANDOM_SEED = config.pop("seed")

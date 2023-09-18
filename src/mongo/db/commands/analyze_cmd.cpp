@@ -104,7 +104,7 @@ StatusWith<BSONObj> analyzeCommandAsAggregationCommand(OperationContext* opCtx,
                                                     << "insert"));
 
     return BSON("aggregate" << collection << "pipeline" << pipelineBuilder.arr() << "cursor"
-                            << BSONObj());
+                            << BSONObj() << "allowDiskUse" << false);
 }
 
 class CmdAnalyze final : public TypedCommand<CmdAnalyze> {
@@ -138,9 +138,8 @@ public:
         void typedRun(OperationContext* opCtx) {
             uassert(6660400,
                     "Analyze command requires common query framework feature flag to be enabled",
-                    serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-                        feature_flags::gFeatureFlagCommonQueryFramework.isEnabled(
-                            serverGlobalParams.featureCompatibility));
+                    feature_flags::gFeatureFlagCommonQueryFramework.isEnabled(
+                        serverGlobalParams.featureCompatibility));
 
             const auto& cmd = request();
             const NamespaceString& nss = ns();

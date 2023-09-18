@@ -334,7 +334,7 @@ StatusWith<DurableCatalog::EntryIdentifier> DurableCatalogImpl::_addEntry(
     BSONObj obj;
     {
         BSONObjBuilder b;
-        b.append("ns", nss.toStringWithTenantId());
+        b.append("ns", NamespaceStringUtil::serializeForCatalog(nss));
         b.append("ident", ident);
         BSONCollectionCatalogEntry::MetaData md;
         md.nss = nss;
@@ -525,7 +525,7 @@ Status DurableCatalogImpl::_replaceEntry(OperationContext* opCtx,
     {
         BSONObjBuilder b;
 
-        b.append("ns", toNss.toStringWithTenantId());
+        b.append("ns", NamespaceStringUtil::serializeForCatalog(toNss));
         b.append("md", md.toBSON());
 
         b.appendElementsUnique(old);
@@ -631,13 +631,13 @@ StatusWith<std::string> DurableCatalogImpl::newOrphanedIdent(
     // The collection will be named local.orphan.xxxxx.
     std::string identNs = ident;
     std::replace(identNs.begin(), identNs.end(), '-', '_');
-    NamespaceString nss(NamespaceString(NamespaceString::kOrphanCollectionDb,
-                                        NamespaceString::kOrphanCollectionPrefix + identNs));
+    NamespaceString nss{DatabaseName::kLocal.db(),
+                        NamespaceString::kOrphanCollectionPrefix + identNs};
 
     BSONObj obj;
     {
         BSONObjBuilder b;
-        b.append("ns", nss.toStringWithTenantId());
+        b.append("ns", NamespaceStringUtil::serializeForCatalog(nss));
         b.append("ident", ident);
         BSONCollectionCatalogEntry::MetaData md;
         md.nss = nss;
@@ -660,7 +660,7 @@ StatusWith<std::string> DurableCatalogImpl::newOrphanedIdent(
                 "stored meta data for orphaned collection {namespace} @ {res_getValue}",
                 logAttrs(nss),
                 "res_getValue"_attr = res.getValue());
-    return {nss.toStringWithTenantId()};
+    return {NamespaceStringUtil::serializeForCatalog(nss)};
 }
 
 StatusWith<std::pair<RecordId, std::unique_ptr<RecordStore>>> DurableCatalogImpl::createCollection(

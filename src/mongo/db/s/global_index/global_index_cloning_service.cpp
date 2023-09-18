@@ -212,8 +212,14 @@ void GlobalIndexCloningService::CloningStateMachine::_init(
         _metadata.getNss(), indexSpec.getName(), _metadata.getIndexCollectionUUID(), **executor);
 
     auto client = _serviceContext->makeClient("globalIndexClonerServiceInit");
-    AlternativeClientRegion clientRegion(client);
 
+    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(*client.get());
+        client.get()->setSystemOperationUnkillableByStepdown(lk);
+    }
+
+    AlternativeClientRegion clientRegion(client);
     auto opCtx = _serviceContext->makeOperationContext(Client::getCurrent());
 
     auto routingInfo =
@@ -465,7 +471,7 @@ void GlobalIndexCloningService::CloningStateMachine::_ensureCollection(Operation
     invariant(!opCtx->lockState()->inAWriteUnitOfWork());
 
     // Create the destination collection if necessary.
-    writeConflictRetry(opCtx, "CloningStateMachine::_ensureCollection", nss.toString(), [&] {
+    writeConflictRetry(opCtx, "CloningStateMachine::_ensureCollection", nss, [&] {
         const Collection* coll =
             CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
         if (coll) {

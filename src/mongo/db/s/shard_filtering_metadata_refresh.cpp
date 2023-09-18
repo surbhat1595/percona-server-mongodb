@@ -178,11 +178,6 @@ SharedSemiFuture<void> recoverRefreshDbVersion(OperationContext* opCtx,
                serviceCtx = opCtx->getServiceContext(),
                forwardableOpMetadata = ForwardableOperationMetadata(opCtx)] {
             ThreadClient tc("DbMetadataRefreshThread", serviceCtx);
-            {
-                stdx::lock_guard<Client> lk(*tc.get());
-                tc->setSystemOperationKillableByStepdown(lk);
-            }
-
             const auto opCtxHolder =
                 CancelableOperationContext(tc->makeOperationContext(), cancellationToken, executor);
             auto opCtx = opCtxHolder.get();
@@ -241,12 +236,12 @@ void onDbVersionMismatch(OperationContext* opCtx,
 
         {
             boost::optional<Lock::DBLock> dbLock;
-            dbLock.emplace(opCtx, DatabaseName{dbName}, MODE_IS);
+            dbLock.emplace(opCtx, DatabaseNameUtil::deserialize(boost::none, dbName), MODE_IS);
 
             if (receivedDbVersion) {
                 auto scopedDss =
                     boost::make_optional(DatabaseShardingState::assertDbLockedAndAcquireShared(
-                        opCtx, DatabaseName{dbName}));
+                        opCtx, DatabaseNameUtil::deserialize(boost::none, dbName)));
 
                 if (joinDbVersionOperation(opCtx, &dbLock, &scopedDss)) {
                     // Waited for another thread to exit from the critical section or to complete an
@@ -273,7 +268,7 @@ void onDbVersionMismatch(OperationContext* opCtx,
 
             auto scopedDss =
                 boost::make_optional(DatabaseShardingState::assertDbLockedAndAcquireExclusive(
-                    opCtx, DatabaseName{dbName}));
+                    opCtx, DatabaseNameUtil::deserialize(boost::none, dbName)));
 
             if (joinDbVersionOperation(opCtx, &dbLock, &scopedDss)) {
                 // Waited for another thread to exit from the critical section or to complete an
@@ -290,7 +285,9 @@ void onDbVersionMismatch(OperationContext* opCtx,
             CancellationToken cancellationToken = cancellationSource.token();
             (*scopedDss)
                 ->setDbMetadataRefreshFuture(
-                    recoverRefreshDbVersion(opCtx, DatabaseName{dbName}, cancellationToken),
+                    recoverRefreshDbVersion(opCtx,
+                                            DatabaseNameUtil::deserialize(boost::none, dbName),
+                                            cancellationToken),
                     std::move(cancellationSource));
             dbMetadataRefreshFuture = (*scopedDss)->getDbMetadataRefreshFuture();
         }
@@ -367,10 +364,6 @@ SharedSemiFuture<void> recoverRefreshCollectionPlacementVersion(
     return ExecutorFuture<void>(executor)
         .then([=] {
             ThreadClient tc("RecoverRefreshThread", serviceContext);
-            {
-                stdx::lock_guard<Client> lk(*tc.get());
-                tc->setSystemOperationKillableByStepdown(lk);
-            }
 
             if (MONGO_unlikely(hangInRecoverRefreshThread.shouldFail())) {
                 hangInRecoverRefreshThread.pauseWhileSet();
@@ -496,6 +489,13 @@ void onCollectionPlacementVersionMismatch(OperationContext* opCtx,
         boost::optional<SharedSemiFuture<void>> inRecoverOrRefresh;
 
         {
+            // The refresh threads do not perform any data reads themselves, therefore they don't
+            // need to synchronise with secondary oplog application or go through admission control.
+            ShouldNotConflictWithSecondaryBatchApplicationBlock skipParallelBatchWriterMutex(
+                opCtx->lockState());
+            ScopedAdmissionPriorityForLock skipAdmissionControl(
+                opCtx->lockState(), AdmissionContext::Priority::kImmediate);
+
             boost::optional<Lock::DBLock> dbLock;
             boost::optional<Lock::CollectionLock> collLock;
             dbLock.emplace(opCtx, nss.dbName(), MODE_IS);

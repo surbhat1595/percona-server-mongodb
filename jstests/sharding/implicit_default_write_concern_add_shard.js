@@ -6,8 +6,10 @@
 (function() {
 "use strict";
 
-// TODO SERVER-75820: Investigate why a shard node doesn't have metadata at test shutdown.
-TestData.skipCheckShardFilteringMetadata = true;
+// Adds a shard near the end of the test that won't have metadata for the sessions collection during
+// test shutdown. This is only a problem with a config shard because otherwise there are no shards
+// so the sessions collection can't be created.
+TestData.skipCheckShardFilteringMetadata = TestData.configShard;
 
 load("jstests/replsets/rslib.js");  // For reconfig and isConfigCommitted.
 
@@ -41,7 +43,7 @@ function testAddShard(CWWCSet, isPSASet, fixAddShard) {
     shardServer.initiate();
 
     const st = new ShardingTest({
-        shards: TestData.catalogShard ? 1 : 0,
+        shards: TestData.configShard ? 1 : 0,
         mongos: 1,
     });
     var admin = st.getDB('admin');

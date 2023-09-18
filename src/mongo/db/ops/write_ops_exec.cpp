@@ -28,6 +28,7 @@
  */
 
 #include "mongo/db/ops/write_ops_exec.h"
+
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/collection_options.h"
@@ -114,7 +115,6 @@ template <>
 struct BSONObjAppendFormat<write_ops_exec::Atomic64Metric> : FormatKind<NumberLong> {};
 }  // namespace mongo
 
-
 namespace mongo::write_ops_exec {
 
 /**
@@ -174,7 +174,6 @@ MONGO_FAIL_POINT_DEFINE(hangTimeseriesInsertBeforeCommit);
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesInsertBeforeReopeningQuery);
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesInsertBeforeWrite);
 MONGO_FAIL_POINT_DEFINE(failUnorderedTimeseriesInsert);
-
 
 /**
  * Metrics group for the `updateMany` and `deleteMany` operations. For each
@@ -270,7 +269,7 @@ void finishCurOp(OperationContext* opCtx, CurOp* curOp) {
 }
 
 void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
-    writeConflictRetry(opCtx, "implicit collection creation", ns.ns(), [&opCtx, &ns] {
+    writeConflictRetry(opCtx, "implicit collection creation", ns, [&opCtx, &ns] {
         AutoGetDb autoDb(opCtx, ns.dbName(), MODE_IX);
         Lock::CollectionLock collLock(opCtx, ns, MODE_IX);
 
@@ -294,11 +293,11 @@ void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
     });
 }
 
-void insertDocuments(OperationContext* opCtx,
-                     const CollectionPtr& collection,
-                     std::vector<InsertStatement>::iterator begin,
-                     std::vector<InsertStatement>::iterator end,
-                     bool fromMigrate) {
+void insertDocumentsAtomically(OperationContext* opCtx,
+                               const ScopedCollectionAcquisition& collection,
+                               std::vector<InsertStatement>::iterator begin,
+                               std::vector<InsertStatement>::iterator end,
+                               bool fromMigrate) {
     // Intentionally not using writeConflictRetry. That is handled by the caller so it can react to
     // oversized batches.
     WriteUnitOfWork wuow(opCtx);
@@ -313,7 +312,7 @@ void insertDocuments(OperationContext* opCtx,
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     auto inTransaction = opCtx->inMultiDocumentTransaction();
 
-    if (!inTransaction && !replCoord->isOplogDisabledFor(opCtx, collection->ns())) {
+    if (!inTransaction && !replCoord->isOplogDisabledFor(opCtx, collection.nss())) {
         // Populate 'slots' with new optimes for each insert.
         // This also notifies the storage engine of each new timestamp.
         auto oplogSlots = repl::getNextOpTimes(opCtx, batchSize);
@@ -335,11 +334,15 @@ void insertDocuments(OperationContext* opCtx,
         [&](const BSONObj& data) {
             // Check if the failpoint specifies no collection or matches the existing one.
             const auto collElem = data["collectionNS"];
-            return !collElem || collection->ns().ns() == collElem.str();
+            return !collElem || collection.nss().ns() == collElem.str();
         });
 
-    uassertStatusOK(collection_internal::insertDocuments(
-        opCtx, collection, begin, end, &CurOp::get(opCtx)->debug(), fromMigrate));
+    uassertStatusOK(collection_internal::insertDocuments(opCtx,
+                                                         collection.getCollectionPtr(),
+                                                         begin,
+                                                         end,
+                                                         &CurOp::get(opCtx)->debug(),
+                                                         fromMigrate));
     wuow.commit();
 }
 
@@ -537,14 +540,15 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
         uasserted(ErrorCodes::InternalError, "failAllInserts failpoint active!");
     }
 
-    boost::optional<AutoGetCollection> collection;
+    boost::optional<ScopedCollectionAcquisition> collection;
     auto acquireCollection = [&] {
         while (true) {
-            collection.emplace(opCtx,
-                               nss,
-                               fixLockModeForSystemDotViewsChanges(nss, MODE_IX),
-                               AutoGetCollection::Options{}.expectedUUID(collectionUUID));
-            if (*collection) {
+            collection.emplace(mongo::acquireCollection(
+                opCtx,
+                CollectionAcquisitionRequest::fromOpCtx(
+                    opCtx, nss, AcquisitionPrerequisites::kWrite, collectionUUID),
+                fixLockModeForSystemDotViewsChanges(nss, MODE_IX)));
+            if (collection->exists()) {
                 break;
             }
 
@@ -587,15 +591,15 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
 
     if (shouldProceedWithBatchInsert) {
         try {
-            if (!collection->getCollection()->isCapped() && !inTxn && batch.size() > 1) {
+            if (!collection->getCollectionPtr()->isCapped() && !inTxn && batch.size() > 1) {
                 // First try doing it all together. If all goes well, this is all we need to do.
                 // See Collection::_insertDocuments for why we do all capped inserts one-at-a-time.
                 lastOpFixer->startingOp(nss);
-                insertDocuments(opCtx,
-                                collection->getCollection(),
-                                batch.begin(),
-                                batch.end(),
-                                source == OperationSource::kFromMigrate);
+                insertDocumentsAtomically(opCtx,
+                                          *collection,
+                                          batch.begin(),
+                                          batch.end(),
+                                          source == OperationSource::kFromMigrate);
                 lastOpFixer->finishedOpSuccessfully();
                 globalOpCounters.gotInserts(batch.size());
                 ServerWriteConcernMetrics::get(opCtx)->recordWriteConcernForInserts(
@@ -623,19 +627,16 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
         ServerWriteConcernMetrics::get(opCtx)->recordWriteConcernForInsert(
             opCtx->getWriteConcern());
         try {
-            writeConflictRetry(opCtx, "insert", nss.ns(), [&] {
+            writeConflictRetry(opCtx, "insert", nss, [&] {
                 try {
                     if (!collection)
                         acquireCollection();
                     // Transactions are not allowed to operate on capped collections.
                     uassertStatusOK(
-                        checkIfTransactionOnCappedColl(opCtx, collection->getCollection()));
+                        checkIfTransactionOnCappedColl(opCtx, collection->getCollectionPtr()));
                     lastOpFixer->startingOp(nss);
-                    insertDocuments(opCtx,
-                                    collection->getCollection(),
-                                    it,
-                                    it + 1,
-                                    source == OperationSource::kFromMigrate);
+                    insertDocumentsAtomically(
+                        opCtx, *collection, it, it + 1, source == OperationSource::kFromMigrate);
                     lastOpFixer->finishedOpSuccessfully();
                     SingleWriteResult result;
                     result.setN(1);
@@ -703,9 +704,15 @@ UpdateResult writeConflictRetryUpsert(OperationContext* opCtx,
                                       bool remove,
                                       bool upsert,
                                       boost::optional<BSONObj>& docFound,
-                                      ParsedUpdate* parsedUpdate) {
-    AutoGetCollection autoColl(opCtx, nsString, MODE_IX);
-    Database* db = autoColl.ensureDbExists(opCtx);
+                                      const UpdateRequest* updateRequest) {
+    auto collection = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nsString, AcquisitionPrerequisites::kWrite),
+        MODE_IX);
+    Database* db = [&]() {
+        AutoGetDb autoDb(opCtx, nsString.dbName(), MODE_IX);
+        return autoDb.ensureDbExists(opCtx);
+    }();
 
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -715,50 +722,38 @@ UpdateResult writeConflictRetryUpsert(OperationContext* opCtx,
 
     assertCanWrite_inlock(opCtx, nsString);
 
-    CollectionPtr createdCollection;
-    const CollectionPtr* collectionPtr = &autoColl.getCollection();
-
     // TODO SERVER-50983: Create abstraction for creating collection when using
     // AutoGetCollection Create the collection if it does not exist when performing an upsert
     // because the update stage does not create its own collection
-    if (!*collectionPtr && upsert) {
-        assertCanWrite_inlock(opCtx, nsString);
-
-        createdCollection = CollectionPtr(
-            CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nsString));
-
-        // If someone else beat us to creating the collection, do nothing
-        if (!createdCollection) {
-            uassertStatusOK(userAllowedCreateNS(opCtx, nsString));
-            OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
-                unsafeCreateCollection(opCtx);
-            WriteUnitOfWork wuow(opCtx);
-            CollectionOptions defaultCollectionOptions;
-            uassertStatusOK(db->userCreateNS(opCtx, nsString, defaultCollectionOptions));
-            wuow.commit();
-
-            createdCollection = CollectionPtr(
-                CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nsString));
-        }
-
-        invariant(createdCollection);
-        createdCollection.makeYieldable(opCtx,
-                                        LockedCollectionYieldRestore(opCtx, createdCollection));
-        collectionPtr = &createdCollection;
+    if (!collection.exists() && upsert) {
+        CollectionWriter collectionWriter(opCtx, &collection);
+        uassertStatusOK(userAllowedCreateNS(opCtx, nsString));
+        OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE unsafeCreateCollection(
+            opCtx);
+        WriteUnitOfWork wuow(opCtx);
+        ScopedLocalCatalogWriteFence scopedLocalCatalogWriteFence(opCtx, &collection);
+        CollectionOptions defaultCollectionOptions;
+        uassertStatusOK(db->userCreateNS(opCtx, nsString, defaultCollectionOptions));
+        wuow.commit();
     }
-    const auto& collection = *collectionPtr;
 
-    if (collection && collection->isCapped()) {
+    if (collection.exists() && collection.getCollectionPtr()->isCapped()) {
         uassert(
             ErrorCodes::OperationNotSupportedInTransaction,
-            str::stream() << "Collection '" << collection->ns().toStringForErrorMsg()
+            str::stream() << "Collection '" << collection.nss().toStringForErrorMsg()
                           << "' is a capped collection. Writes in transactions are not allowed on "
                              "capped collections.",
             !inTransaction);
     }
 
+    const ExtensionsCallbackReal extensionsCallback(opCtx, &updateRequest->getNamespaceString());
+
+    ParsedUpdate parsedUpdate(
+        opCtx, updateRequest, extensionsCallback, collection.getCollectionPtr());
+    uassertStatusOK(parsedUpdate.parseRequest());
+
     const auto exec = uassertStatusOK(
-        getExecutorUpdate(opDebug, &collection, parsedUpdate, boost::none /* verbosity */));
+        getExecutorUpdate(opDebug, collection, &parsedUpdate, boost::none /* verbosity */));
 
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -773,8 +768,9 @@ UpdateResult writeConflictRetryUpsert(OperationContext* opCtx,
     PlanSummaryStats summaryStats;
     auto&& explainer = exec->getPlanExplainer();
     explainer.getSummaryStats(&summaryStats);
-    if (collection) {
-        CollectionQueryInfo::get(collection).notifyOfQuery(opCtx, collection, summaryStats);
+    if (collection.exists()) {
+        CollectionQueryInfo::get(collection.getCollectionPtr())
+            .notifyOfQuery(opCtx, collection.getCollectionPtr(), summaryStats);
     }
     auto updateResult = exec->getUpdateResult();
     write_ops_exec::recordUpdateResultInOpDebug(updateResult, opDebug);
@@ -802,7 +798,7 @@ UpdateResult writeConflictRetryUpsert(OperationContext* opCtx,
 }
 
 long long writeConflictRetryRemove(OperationContext* opCtx,
-                                   const NamespaceString& nsString,
+                                   const NamespaceString& nss,
                                    DeleteRequest* deleteRequest,
                                    CurOp* curOp,
                                    OpDebug* opDebug,
@@ -811,13 +807,25 @@ long long writeConflictRetryRemove(OperationContext* opCtx,
 
     invariant(deleteRequest);
 
+    auto [isTimeseriesDelete, nsString] = timeseries::isTimeseries(opCtx, *deleteRequest);
+    if (isTimeseriesDelete) {
+        // TODO SERVER-76583: Remove this check.
+        uassert(7308305,
+                "Retryable findAndModify on a timeseries is not supported",
+                !opCtx->isRetryableWrite());
+
+        if (nss != nsString) {
+            deleteRequest->setNsString(nsString);
+        }
+    }
+
     const auto collection = acquireCollection(
         opCtx,
         CollectionAcquisitionRequest::fromOpCtx(opCtx, nsString, AcquisitionPrerequisites::kWrite),
         MODE_IX);
     const auto& collectionPtr = collection.getCollectionPtr();
 
-    ParsedDelete parsedDelete(opCtx, deleteRequest, collectionPtr);
+    ParsedDelete parsedDelete(opCtx, deleteRequest, collectionPtr, isTimeseriesDelete);
     uassertStatusOK(parsedDelete.parseRequest());
 
     {
@@ -838,7 +846,7 @@ long long writeConflictRetryRemove(OperationContext* opCtx,
     }
 
     const auto exec = uassertStatusOK(
-        getExecutorDelete(opDebug, &collection, &parsedDelete, boost::none /* verbosity */));
+        getExecutorDelete(opDebug, collection, &parsedDelete, boost::none /* verbosity */));
 
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -1126,8 +1134,6 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
         }
     }();
 
-    UpdateStageParams::DocumentCounter documentCounter = nullptr;
-
     if (source == OperationSource::kTimeseriesUpdate) {
         uassert(ErrorCodes::NamespaceNotFound,
                 "Could not find time-series buckets collection for update",
@@ -1137,12 +1143,6 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
         uassert(ErrorCodes::InvalidOptions,
                 "Time-series buckets collection is missing time-series options",
                 timeseriesOptions);
-
-        auto metaField = timeseriesOptions->getMetaField();
-        uassert(
-            ErrorCodes::InvalidOptions,
-            "Cannot perform an update on a time-series collection that does not have a metaField",
-            metaField);
 
         uassert(ErrorCodes::InvalidOptions,
                 "Cannot perform a non-multi update on a time-series collection",
@@ -1159,12 +1159,20 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
                     *timeseriesOptions, updateRequest->getHint())));
         }
 
-        updateRequest->setQuery(timeseries::translateQuery(updateRequest->getQuery(), *metaField));
-        updateRequest->setUpdateModification(
-            timeseries::translateUpdate(updateRequest->getUpdateModification(), *metaField));
+        if (!feature_flags::gTimeseriesUpdatesSupport.isEnabled(
+                serverGlobalParams.featureCompatibility)) {
+            auto metaField = timeseriesOptions->getMetaField();
+            uassert(ErrorCodes::InvalidOptions,
+                    "Cannot perform an update on a time-series collection that does not have a "
+                    "metaField",
+                    timeseriesOptions->getMetaField());
 
-        documentCounter =
-            timeseries::numMeasurementsForBucketCounter(timeseriesOptions->getTimeField());
+            updateRequest->setQuery(
+                timeseries::translateQuery(updateRequest->getQuery(), *metaField));
+            auto modification = uassertStatusOK(
+                timeseries::translateUpdate(updateRequest->getUpdateModification(), *metaField));
+            updateRequest->setUpdateModification(modification);
+        }
     }
 
     if (const auto& coll = collection.getCollectionPtr()) {
@@ -1173,7 +1181,13 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
     }
 
     const ExtensionsCallbackReal extensionsCallback(opCtx, &updateRequest->getNamespaceString());
-    ParsedUpdate parsedUpdate(opCtx, updateRequest, extensionsCallback, forgoOpCounterIncrements);
+
+    ParsedUpdate parsedUpdate(opCtx,
+                              updateRequest,
+                              extensionsCallback,
+                              collection.getCollectionPtr(),
+                              forgoOpCounterIncrements,
+                              updateRequest->source() == OperationSource::kTimeseriesUpdate);
     uassertStatusOK(parsedUpdate.parseRequest());
 
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
@@ -1188,8 +1202,17 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
 
     assertCanWrite_inlock(opCtx, ns);
 
+    auto documentCounter = [&] {
+        if (source == OperationSource::kTimeseriesUpdate &&
+            !parsedUpdate.isEligibleForArbitraryTimeseriesUpdate()) {
+            return timeseries::numMeasurementsForBucketCounter(
+                collection.getCollectionPtr()->getTimeseriesOptions()->getTimeField());
+        }
+        return UpdateStageParams::DocumentCounter{};
+    }();
+
     auto exec = uassertStatusOK(getExecutorUpdate(&curOp.debug(),
-                                                  &collection,
+                                                  collection,
                                                   &parsedUpdate,
                                                   boost::none /* verbosity */,
                                                   std::move(documentCounter)));
@@ -1276,9 +1299,7 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
         request.setLetParameters(std::move(letParams));
     }
     request.setStmtIds(stmtIds);
-    request.setYieldPolicy(opCtx->inMultiDocumentTransaction()
-                               ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
-                               : PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
+    request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
     request.setSource(source);
     if (sampleId) {
         request.setSampleId(sampleId);
@@ -1306,7 +1327,9 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
             return ret;
         } catch (ExceptionFor<ErrorCodes::DuplicateKey>& ex) {
             const ExtensionsCallbackReal extensionsCallback(opCtx, &request.getNamespaceString());
-            ParsedUpdate parsedUpdate(opCtx, &request, extensionsCallback);
+            // We are only using this to check if we should retry the command, so we don't need to
+            // pass it a real collection object.
+            ParsedUpdate parsedUpdate(opCtx, &request, extensionsCallback, CollectionPtr::null);
             uassertStatusOK(parsedUpdate.parseRequest());
 
             if (!parsedUpdate.hasParsedQuery()) {
@@ -1403,7 +1426,7 @@ WriteResult performUpdates(OperationContext* opCtx,
             opCtx, ns, analyze_shard_key::SampledCommandNameEnum::kUpdate, singleOp);
         if (sampleId) {
             analyze_shard_key::QueryAnalysisWriter::get(opCtx)
-                ->addUpdateQuery(*sampleId, wholeOp, currentOpIndex)
+                ->addUpdateQuery(opCtx, *sampleId, wholeOp, currentOpIndex)
                 .getAsync([](auto) {});
         }
 
@@ -1490,9 +1513,7 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     request.setQuery(op.getQ());
     request.setCollation(write_ops::collationOf(op));
     request.setMulti(op.getMulti());
-    request.setYieldPolicy(opCtx->inMultiDocumentTransaction()
-                               ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
-                               : PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
+    request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
     request.setStmtId(stmtId);
     request.setHint(op.getHint());
 
@@ -1510,8 +1531,6 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
         opCtx, ns, AcquisitionPrerequisites::kWrite, opCollectionUUID);
     const auto collection = acquireCollection(
         opCtx, acquisitionRequest, fixLockModeForSystemDotViewsChanges(ns, MODE_IX));
-
-    DeleteStageParams::DocumentCounter documentCounter = nullptr;
 
     if (source == OperationSource::kTimeseriesDelete) {
         uassert(ErrorCodes::NamespaceNotFound,
@@ -1544,9 +1563,6 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
                 request.setQuery(timeseries::translateQuery(request.getQuery(), *metaField));
             }
         }
-
-        documentCounter =
-            timeseries::numMeasurementsForBucketCounter(timeseriesOptions->getTimeField());
     }
 
     ParsedDelete parsedDelete(opCtx,
@@ -1565,8 +1581,17 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &hangWithLockDuringBatchRemove, opCtx, "hangWithLockDuringBatchRemove");
 
+    auto documentCounter = [&] {
+        if (source == OperationSource::kTimeseriesDelete &&
+            !parsedDelete.isEligibleForArbitraryTimeseriesDelete()) {
+            return timeseries::numMeasurementsForBucketCounter(
+                collection.getCollectionPtr()->getTimeseriesOptions()->getTimeField());
+        }
+        return DeleteStageParams::DocumentCounter{};
+    }();
+
     auto exec = uassertStatusOK(getExecutorDelete(&curOp.debug(),
-                                                  &collection,
+                                                  collection,
                                                   &parsedDelete,
                                                   boost::none /* verbosity */,
                                                   std::move(documentCounter)));
@@ -1676,7 +1701,7 @@ WriteResult performDeletes(OperationContext* opCtx,
         if (auto sampleId = analyze_shard_key::getOrGenerateSampleId(
                 opCtx, ns, analyze_shard_key::SampledCommandNameEnum::kDelete, singleOp)) {
             analyze_shard_key::QueryAnalysisWriter::get(opCtx)
-                ->addDeleteQuery(*sampleId, wholeOp, currentOpIndex)
+                ->addDeleteQuery(opCtx, *sampleId, wholeOp, currentOpIndex)
                 .getAsync([](auto) {});
         }
 
@@ -1740,8 +1765,11 @@ Status performAtomicTimeseriesWrites(
     LastOpFixer lastOpFixer(opCtx);
     lastOpFixer.startingOp(ns);
 
-    AutoGetCollection coll{opCtx, ns, MODE_IX};
-    if (!coll) {
+    const auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, ns, AcquisitionPrerequisites::kWrite),
+        MODE_IX);
+    if (!coll.exists()) {
         assertTimeseriesBucketsCollectionNotFound(ns);
     }
 
@@ -1782,7 +1810,7 @@ Status performAtomicTimeseriesWrites(
 
     if (!insertOps.empty()) {
         auto status = collection_internal::insertDocuments(
-            opCtx, *coll, inserts.begin(), inserts.end(), &curOp->debug());
+            opCtx, coll.getCollectionPtr(), inserts.begin(), inserts.end(), &curOp->debug());
         if (!status.isOK()) {
             return status;
         }
@@ -1797,10 +1825,10 @@ Status performAtomicTimeseriesWrites(
         invariant(op.getUpdates().size() == 1);
         auto& update = op.getUpdates().front();
 
-        invariant(coll->isClustered());
+        invariant(coll.getCollectionPtr()->isClustered());
         auto recordId = record_id_helpers::keyForOID(update.getQ()["_id"].OID());
 
-        auto original = coll->docFor(opCtx, recordId);
+        auto original = coll.getCollectionPtr()->docFor(opCtx, recordId);
 
         CollectionUpdateArgs args{original.value()};
         args.criteria = update.getQ();
@@ -1815,13 +1843,10 @@ Status performAtomicTimeseriesWrites(
             collection_internal::kUpdateAllIndexes;  // Assume all indexes are affected.
         if (update.getU().type() == write_ops::UpdateModification::Type::kDelta) {
             diffFromUpdate = update.getU().getDiff();
-            auto result = doc_diff::applyDiff(original.value(),
-                                              diffFromUpdate,
-                                              &CollectionQueryInfo::get(*coll).getIndexKeys(opCtx),
-                                              static_cast<bool>(repl::tenantMigrationInfo(opCtx)));
-            updated = result.postImage;
-            diffOnIndexes =
-                result.indexesAffected ? &diffFromUpdate : collection_internal::kUpdateNoIndexes;
+            updated = doc_diff::applyDiff(original.value(),
+                                          diffFromUpdate,
+                                          static_cast<bool>(repl::tenantMigrationInfo(opCtx)));
+            diffOnIndexes = &diffFromUpdate;
             args.update = update_oplog_entry::makeDeltaOplogEntry(diffFromUpdate);
         } else if (update.getU().type() == write_ops::UpdateModification::Type::kTransform) {
             const auto& transform = update.getU().getTransform();
@@ -1842,7 +1867,7 @@ Status performAtomicTimeseriesWrites(
         }
 
         collection_internal::updateDocument(opCtx,
-                                            *coll,
+                                            coll.getCollectionPtr(),
                                             recordId,
                                             original,
                                             updated,
@@ -2309,10 +2334,8 @@ write_ops::UpdateCommandRequest makeTimeseriesDecompressAndUpdateOp(
     const bool mustCheckExistenceForInsertOperations =
         static_cast<bool>(repl::tenantMigrationInfo(opCtx));
     auto diff = makeTimeseriesUpdateOpEntry(opCtx, batch, metadata).getU().getDiff();
-    auto after =
-        doc_diff::applyDiff(
-            batch->decompressed.value().after, diff, nullptr, mustCheckExistenceForInsertOperations)
-            .postImage;
+    auto after = doc_diff::applyDiff(
+        batch->decompressed.value().after, diff, mustCheckExistenceForInsertOperations);
 
     auto bucketDecompressionFunc =
         [before = std::move(batch->decompressed.value().before),

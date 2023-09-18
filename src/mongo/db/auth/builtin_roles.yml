@@ -354,9 +354,9 @@ roles:
                   - getClusterParameter
                   - setChangeStreamState
                   - getChangeStreamState
-                  - telemetryRead
+                  - queryStatsRead
                   - checkMetadataConsistency
-                  - transitionToCatalogShard
+                  - transitionFromDedicatedConfigServer
                   - transitionToDedicatedConfigServer
 
             - matchType: any_normal

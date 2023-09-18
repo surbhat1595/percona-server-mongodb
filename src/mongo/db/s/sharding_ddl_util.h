@@ -112,11 +112,9 @@ bool removeCollAndChunksMetadataFromConfig_notIdempotent(OperationContext* opCtx
                                                          const WriteConcernOptions& writeConcern);
 
 /**
- * Delete the config query analyzer document for the given collection, if it exists.
+ * Delete the query analyzer documents that match the given filter.
  */
-void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx,
-                                           const NamespaceString& nss,
-                                           const boost::optional<UUID>& uuid);
+void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx, const BSONObj& filter);
 
 /**
  * Rename sharded collection metadata as part of a renameCollection operation.
@@ -129,7 +127,7 @@ void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx,
 void shardedRenameMetadata(OperationContext* opCtx,
                            const std::shared_ptr<Shard>& configShard,
                            ShardingCatalogClient* catalogClient,
-                           CollectionType& fromCollType,
+                           CollectionType fromCollType,
                            const NamespaceString& toNss,
                            const WriteConcernOptions& writeConcern);
 
@@ -185,7 +183,8 @@ boost::optional<CreateCollectionResponse> checkIfCollectionAlreadySharded(
  */
 void stopMigrations(OperationContext* opCtx,
                     const NamespaceString& nss,
-                    const boost::optional<UUID>& expectedCollectionUUID);
+                    const boost::optional<UUID>& expectedCollectionUUID,
+                    const boost::optional<OperationSessionInfo>& osi = boost::none);
 
 /**
  * Resume migrations and balancing rounds for the given nss.
@@ -194,7 +193,8 @@ void stopMigrations(OperationContext* opCtx,
  */
 void resumeMigrations(OperationContext* opCtx,
                       const NamespaceString& nss,
-                      const boost::optional<UUID>& expectedCollectionUUID);
+                      const boost::optional<UUID>& expectedCollectionUUID,
+                      const boost::optional<OperationSessionInfo>& osi = boost::none);
 
 /**
  * Calls to the config server primary to get the collection document for the given nss.

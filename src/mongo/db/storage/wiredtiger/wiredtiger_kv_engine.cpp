@@ -157,10 +157,6 @@ MONGO_FAIL_POINT_DEFINE(WTDisableFastShutDown);
 
 const std::string kPinOldestTimestampAtStartupName = "_wt_startup";
 
-#if !defined(__has_feature)
-#define __has_feature(x) 0
-#endif
-
 #if __has_feature(address_sanitizer)
 constexpr bool kAddressSanitizerEnabled = true;
 #else
@@ -279,6 +275,13 @@ public:
 
     virtual void run() {
         ThreadClient tc(name(), getGlobalServiceContext());
+
+        // TODO(SERVER-74657): Please revisit if this thread could be made killable.
+        {
+            stdx::lock_guard<Client> lk(*tc.get());
+            tc.get()->setSystemOperationUnkillableByStepdown(lk);
+        }
+
         LOGV2_DEBUG(22303, 1, "starting {name} thread", "name"_attr = name());
 
         while (!_shuttingDown.load()) {
@@ -3335,7 +3338,7 @@ void WiredTigerKVEngine::dropIdentForImport(OperationContext* opCtx, StringData 
 
 void WiredTigerKVEngine::keydbDropDatabase(const DatabaseName& dbName) {
     if (_encryptionKeyDB) {
-        int res = _encryptionKeyDB->delete_key_by_id(dbName.toString());
+        int res = _encryptionKeyDB->delete_key_by_id(DatabaseNameUtil::serialize(dbName));
         if (res) {
             // we cannot throw exceptions here because we are inside WUOW::commit
             // every other part of DB is already dropped so we just log error message

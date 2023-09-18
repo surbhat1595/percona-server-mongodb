@@ -402,8 +402,8 @@ var ShardingTest = function(params) {
         const replicaSetsToTerminate = [];
         [...(shardRS.map(obj => obj.test))].forEach(rst => {
             // Generating a list of live nodes in the replica set
-            liveNodes = [];
-            pidValues = [];
+            const liveNodes = [];
+            const pidValues = [];
             rst.nodes.forEach(function(node) {
                 try {
                     node.getDB('admin')._helloOrLegacyHello();
@@ -416,6 +416,7 @@ var ShardingTest = function(params) {
 
                 if (!node.pid) {
                     // Getting the pid for the node
+                    let serverStatus;
                     rst.keyFile = rst.keyFile ? rst.keyFile : this.keyFile;
                     if (rst.keyFile) {
                         serverStatus = authutil.asCluster(node, rst.keyFile, () => {
@@ -534,7 +535,7 @@ var ShardingTest = function(params) {
         print("ShardingTest stopped all shards, took " + (new Date() - startTime) + "ms for " +
               this._connections.length + " shards.");
 
-        if (!isCatalogShardMode) {
+        if (!isConfigShardMode) {
             this.stopAllConfigServers(opts);
         }
 
@@ -835,7 +836,6 @@ var ShardingTest = function(params) {
             return;
         }
 
-        var result;
         for (var i = 0; i < 5; i++) {
             var otherShard = this.getOther(this.getPrimaryShard(dbName)).name;
             let cmd = {movechunk: c, find: move, to: otherShard};
@@ -844,7 +844,7 @@ var ShardingTest = function(params) {
                 cmd._waitForDelete = waitForDelete;
             }
 
-            result = this.s.adminCommand(cmd);
+            const result = this.s.adminCommand(cmd);
             if (result.ok)
                 break;
 
@@ -872,11 +872,11 @@ var ShardingTest = function(params) {
             var replSet = this._rs[i];
             if (!replSet)
                 continue;
-            nodes = replSet.test.nodes;
-            keyFileUsed = replSet.test.keyFile;
+            const nodes = replSet.test.nodes;
+            const keyFileUsed = replSet.test.keyFile;
 
             for (var j = 0; j < nodes.length; ++j) {
-                diff = (new Date()).getTime() - start.getTime();
+                const diff = (new Date()).getTime() - start.getTime();
                 var currNode = nodes[j];
                 // Skip arbiters
                 if (currNode.getDB('admin')._helloOrLegacyHello().arbiterOnly) {
@@ -1193,9 +1193,9 @@ var ShardingTest = function(params) {
         !otherParams.hasOwnProperty('config') || otherParams.config === undefined;
     var numConfigs = otherParams.hasOwnProperty('config') ? otherParams.config : 3;
 
-    let isCatalogShardMode =
-        otherParams.hasOwnProperty('catalogShard') ? otherParams.catalogShard : false;
-    isCatalogShardMode = isCatalogShardMode || jsTestOptions().catalogShard;
+    let isConfigShardMode =
+        otherParams.hasOwnProperty('configShard') ? otherParams.configShard : false;
+    isConfigShardMode = isConfigShardMode || jsTestOptions().configShard;
 
     if ("shardAsReplicaSet" in otherParams) {
         throw new Error("Use of deprecated option 'shardAsReplicaSet'");
@@ -1225,8 +1225,8 @@ var ShardingTest = function(params) {
         numShards = tempCount;
     }
 
-    if (isCatalogShardMode) {
-        assert(numShards > 0, 'Catalog shard mode requires at least one shard');
+    if (isConfigShardMode) {
+        assert(numShards > 0, 'Config shard mode requires at least one shard');
     }
 
     if (Array.isArray(numMongos)) {
@@ -1236,7 +1236,7 @@ var ShardingTest = function(params) {
 
         numMongos = numMongos.length;
     } else if (isObject(numMongos)) {
-        var tempCount = 0;
+        let tempCount = 0;
         for (var i in numMongos) {
             otherParams[i] = numMongos[i];
             tempCount++;
@@ -1247,14 +1247,14 @@ var ShardingTest = function(params) {
 
     if (Array.isArray(numConfigs)) {
         assert(!usedDefaultNumConfigs);
-        for (var i = 0; i < numConfigs.length; i++) {
+        for (let i = 0; i < numConfigs.length; i++) {
             otherParams["c" + i] = numConfigs[i];
         }
 
         numConfigs = numConfigs.length;
     } else if (isObject(numConfigs)) {
         assert(!usedDefaultNumConfigs);
-        var tempCount = 0;
+        let tempCount = 0;
         for (var i in numConfigs) {
             otherParams[i] = numConfigs[i];
             tempCount++;
@@ -1357,9 +1357,9 @@ var ShardingTest = function(params) {
 
             var setIsConfigSvr = false;
 
-            if (isCatalogShardMode && i == 0) {
-                otherParams.configOptions =
-                    Object.merge(otherParams.configOptions, {configsvr: ""});
+            if (isConfigShardMode && i == 0) {
+                otherParams.configOptions = Object.merge(
+                    otherParams.configOptions, {configsvr: "", storageEngine: "wiredTiger"});
                 rsDefaults = Object.merge(rsDefaults, otherParams.configOptions);
                 setIsConfigSvr = true;
             } else {
@@ -1418,9 +1418,9 @@ var ShardingTest = function(params) {
                 numReplicas = 1;
             }
 
-            // Unless explicitly given a number of config servers, a catalog shard uses the shard's
+            // Unless explicitly given a number of config servers, a config shard uses the shard's
             // number of nodes to increase odds of compatibility with test assertions.
-            if (isCatalogShardMode && i == 0 && !usedDefaultNumConfigs) {
+            if (isConfigShardMode && i == 0 && !usedDefaultNumConfigs) {
                 numReplicas = numConfigs;
             }
 
@@ -1452,7 +1452,7 @@ var ShardingTest = function(params) {
                 {setName: setName, test: rs, nodes: rs.startSetAsync(rsDefaults), url: rs.getURL()};
         }
 
-        if (isCatalogShardMode) {
+        if (isConfigShardMode) {
             this.configRS = this._rs[0].test;
         } else {
             //
@@ -1505,7 +1505,7 @@ var ShardingTest = function(params) {
         //
         for (let i = 0; i < numShards; i++) {
             print("Waiting for shard " + this._rs[i].setName + " to finish starting up.");
-            if (isCatalogShardMode && i == 0) {
+            if (isConfigShardMode && i == 0) {
                 continue;
             }
             this._rs[i].test.startSetAwait();
@@ -1530,7 +1530,7 @@ var ShardingTest = function(params) {
         //
         const shardsRS = this._rs.map(obj => obj.test);
         var replSetToIntiateArr = [];
-        if (isCatalogShardMode) {
+        if (isConfigShardMode) {
             replSetToIntiateArr = [...shardsRS];
         } else {
             replSetToIntiateArr = [...shardsRS, this.configRS];
@@ -1830,26 +1830,25 @@ var ShardingTest = function(params) {
                     var n = z.name || z.host || z;
 
                     var name;
-                    if (isCatalogShardMode && idx == 0) {
+                    if (isConfigShardMode && idx == 0) {
                         name = "config";
 
-                        print("ShardingTest " + testName + " transitioning to catalog shard");
+                        print("ShardingTest " + testName + " transitioning to config shard");
 
-                        function transitionToCatalogShard() {
+                        function transitionFromDedicatedConfigServer() {
                             return assert.commandWorked(
-                                admin.runCommand({transitionToCatalogShard: 1}));
+                                admin.runCommand({transitionFromDedicatedConfigServer: 1}));
                         }
 
-                        // TODO SERVER-74448: Investigate if transitionToCatalogShard should be
-                        // added to the localhost bypass exception like addShard.
                         if (keyFile) {
-                            authutil.asCluster(admin.getMongo(), keyFile, transitionToCatalogShard);
+                            authutil.asCluster(
+                                admin.getMongo(), keyFile, transitionFromDedicatedConfigServer);
                         } else if (mongosOptions[0] && mongosOptions[0].keyFile) {
                             authutil.asCluster(admin.getMongo(),
                                                mongosOptions[0].keyFile,
-                                               transitionToCatalogShard);
+                                               transitionFromDedicatedConfigServer);
                         } else {
-                            transitionToCatalogShard();
+                            transitionFromDedicatedConfigServer();
                         }
 
                         z.shardName = name;

@@ -21,6 +21,8 @@ __compact_page_inmem_check_addrs(WT_SESSION_IMPL *session, WT_REF *ref, bool *sk
     WT_PAGE_MODIFY *mod;
     uint32_t i;
 
+    WT_ASSERT_SPINLOCK_OWNED(session, &S2BT(session)->flush_lock);
+
     *skipp = true; /* Default skip. */
 
     bm = S2BT(session)->bm;
@@ -61,6 +63,8 @@ __compact_page_inmem(WT_SESSION_IMPL *session, WT_REF *ref, bool *skipp)
 {
     *skipp = true; /* Default skip. */
 
+    WT_ASSERT_SPINLOCK_OWNED(session, &S2BT(session)->flush_lock);
+
     /*
      * Ignore dirty pages, checkpoint will likely write them. There are cases where checkpoint can
      * skip dirty pages: to avoid that, we could alter the transactional information of the page,
@@ -98,6 +102,8 @@ __compact_page_replace_addr(WT_SESSION_IMPL *session, WT_REF *ref, WT_ADDR_COPY 
     WT_ADDR *addr;
     WT_CELL_UNPACK_ADDR unpack;
     WT_DECL_RET;
+
+    WT_ASSERT_SPINLOCK_OWNED(session, &S2BT(session)->flush_lock);
 
     /*
      * If there's no address at all (the page has never been written), allocate a new WT_ADDR
@@ -160,6 +166,8 @@ __compact_page(WT_SESSION_IMPL *session, WT_REF *ref, bool *skipp)
     uint8_t previous_state;
 
     *skipp = true; /* Default skip. */
+
+    WT_ASSERT_SPINLOCK_OWNED(session, &S2BT(session)->flush_lock);
 
     /* Lock the WT_REF. */
     WT_REF_LOCK(session, ref, &previous_state);
@@ -306,11 +314,13 @@ __wt_compact(WT_SESSION_IMPL *session)
     u_int i, msg_count;
     bool first, skip;
 
-    uint64_t stats_pages_rewritten; /* Pages rewritten */
-    uint64_t stats_pages_reviewed;  /* Pages reviewed */
-    uint64_t stats_pages_skipped;   /* Pages skipped */
+    uint64_t stats_pages_reviewed;           /* Pages reviewed */
+    uint64_t stats_pages_rewritten;          /* Pages rewritten */
+    uint64_t stats_pages_rewritten_expected; /* How much pages we expect to rewrite */
+    uint64_t stats_pages_skipped;            /* Pages skipped */
 
     bm = S2BT(session)->bm;
+    msg_count = 0;
     ref = NULL;
 
     WT_STAT_DATA_INCR(session, session_compact);
@@ -328,8 +338,8 @@ __wt_compact(WT_SESSION_IMPL *session)
          * Print the "skipping compaction" message only if this is the first time we are working on
          * this table.
          */
-        __wt_block_compact_get_progress_stats(
-          session, bm, &stats_pages_reviewed, &stats_pages_skipped, &stats_pages_rewritten);
+        __wt_block_compact_get_progress_stats(session, bm, &stats_pages_reviewed,
+          &stats_pages_skipped, &stats_pages_rewritten, &stats_pages_rewritten_expected);
         if (stats_pages_reviewed == 0)
             __wt_verbose_info(session, WT_VERB_COMPACT,
               "%s: there is no useful work to do - skipping compaction", bm->block->name);
@@ -342,11 +352,13 @@ __wt_compact(WT_SESSION_IMPL *session)
     for (i = 0;;) {
 
         /* Track progress. */
-        __wt_block_compact_get_progress_stats(
-          session, bm, &stats_pages_reviewed, &stats_pages_skipped, &stats_pages_rewritten);
+        __wt_block_compact_get_progress_stats(session, bm, &stats_pages_reviewed,
+          &stats_pages_skipped, &stats_pages_rewritten, &stats_pages_rewritten_expected);
         WT_STAT_DATA_SET(session, btree_compact_pages_reviewed, stats_pages_reviewed);
         WT_STAT_DATA_SET(session, btree_compact_pages_skipped, stats_pages_skipped);
         WT_STAT_DATA_SET(session, btree_compact_pages_rewritten, stats_pages_rewritten);
+        WT_STAT_DATA_SET(
+          session, btree_compact_pages_rewritten_expected, stats_pages_rewritten_expected);
 
         /*
          * Periodically check if we've timed out or eviction is stuck. Quit if eviction is stuck,
@@ -393,8 +405,10 @@ __wt_compact(WT_SESSION_IMPL *session)
          * page when it is being read in. Handle that here, by re-checking the page type now that
          * the page is in memory.
          */
-        if (F_ISSET(ref, WT_REF_FLAG_INTERNAL))
+        if (F_ISSET(ref, WT_REF_FLAG_INTERNAL)) {
+            bm->block->compact_internal_pages_reviewed++;
             WT_WITH_PAGE_INDEX(session, ret = __compact_walk_internal(session, ref));
+        }
 
         WT_ERR(ret);
     }

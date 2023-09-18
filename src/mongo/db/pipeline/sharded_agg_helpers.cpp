@@ -118,13 +118,6 @@ RemoteCursor openChangeStreamNewShardMonitor(const boost::intrusive_ptr<Expressi
     aggReq.setFromMongos(true);
     aggReq.setNeedsMerge(true);
 
-    // TODO SERVER-65369: This code block can be removed after 7.0.
-    if (isMongos() && expCtx->changeStreamTokenVersion == 1) {
-        // A request for v1 resume tokens on mongos should only be allowed in test mode.
-        tassert(6497000, "Invalid request for v1 resume tokens", getTestCommandsEnabled());
-        aggReq.setGenerateV2ResumeTokens(false);
-    }
-
     SimpleCursorOptions cursor;
     cursor.setBatchSize(0);
     aggReq.setCursor(cursor);
@@ -1594,7 +1587,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> attachCursorToPipeline(
     // these namespaces, a local cursor should always be used.
     // TODO SERVER-59957: use NamespaceString::isPerShardNamespace instead.
     auto shouldAlwaysAttachLocalCursorForNamespace = [](const NamespaceString& ns) {
-        return (ns.isLocal() || ns.isConfigDotCacheDotChunks() ||
+        return (ns.isLocalDB() || ns.isConfigDotCacheDotChunks() ||
                 ns.isReshardingLocalOplogBufferCollection() ||
                 ns == NamespaceString::kConfigImagesNamespace ||
                 ns.isChangeStreamPreImagesCollection());

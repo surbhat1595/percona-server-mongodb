@@ -37,12 +37,12 @@ Use [Installing Percona Server for MongoDB](https://docs.percona.com/percona-ser
   To run a single server database:
 
   ```bash
-    $ sudo mkdir -p /data/db
-    $ ./mongod
-    $
-    $ # The mongo javascript shell connects to localhost and test database by default:
-    $ ./mongo
-    > help
+  $ sudo mkdir -p /data/db
+  $ ./mongod
+  $
+  $ # The mongo javascript shell connects to localhost and test database by default:
+  $ ./mongo
+  > help
   ```
 
 ## Drivers

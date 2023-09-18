@@ -240,12 +240,12 @@ std::vector<std::vector<FLEEdgeCountInfo>> toEdgeCounts(
 std::shared_ptr<txn_api::SyncTransactionWithRetries> getTransactionWithRetriesForMongoS(
     OperationContext* opCtx) {
 
+    auto& executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
     auto fleInlineCrudExecutor = std::make_shared<executor::InlineExecutor>();
 
     return std::make_shared<txn_api::SyncTransactionWithRetries>(
         opCtx,
-        fleInlineCrudExecutor->getSleepableExecutor(
-            Grid::get(opCtx)->getExecutorPool()->getFixedExecutor()),
+        executor,
         TransactionRouterResourceYielder::makeForLocalHandoff(),
         fleInlineCrudExecutor);
 }
@@ -405,7 +405,7 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
     uint32_t numDocs = 0;
     write_ops::WriteCommandReplyBase writeBase;
 
-    // TODO: Remove with SERVER-73714
+    // This is an optimization for single-document unencrypted inserts.
     if (documents.size() == 1) {
         auto serverPayload = EDCServerCollection::getEncryptedFieldInfo(documents[0]);
         if (serverPayload.size() == 0) {
@@ -1456,6 +1456,13 @@ BSONObj FLEQueryInterfaceImpl::getById(const NamespaceString& nss, BSONElement e
 uint64_t FLEQueryInterfaceImpl::countDocuments(const NamespaceString& nss) {
     // Since count() does not work in a transaction, call count() by bypassing the transaction api
     auto client = _serviceContext->makeClient("SEP-int-fle-crud");
+
+    // TODO(SERVER-74660): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(*client.get());
+        client.get()->setSystemOperationUnkillableByStepdown(lk);
+    }
+
     AlternativeClientRegion clientRegion(client);
     auto opCtx = cc().makeOperationContext();
     auto as = AuthorizationSession::get(cc());
@@ -1794,6 +1801,13 @@ std::vector<std::vector<FLEEdgeCountInfo>> FLETagNoTXNQuery::getTags(
 
     // Pop off the current op context so we can get a fresh set of read concern settings
     auto client = _opCtx->getServiceContext()->makeClient("FLETagNoTXNQuery");
+
+    // TODO(SERVER-74660): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(*client.get());
+        client.get()->setSystemOperationUnkillableByStepdown(lk);
+    }
+
     AlternativeClientRegion clientRegion(client);
     auto opCtx = cc().makeOperationContext();
     auto as = AuthorizationSession::get(cc());

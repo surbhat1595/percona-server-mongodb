@@ -33,6 +33,7 @@
 
 load('jstests/libs/profiler.js');
 load('jstests/sharding/libs/last_lts_mongod_commands.js');
+load('jstests/sharding/libs/last_lts_mongos_commands.js');
 
 // TODO SERVER-50144 Remove this and allow orphan checking.
 // This test calls removeShard which can leave docs in config.rangeDeletions in state "pending",
@@ -114,12 +115,13 @@ let testCases = {
     _configsvrRenameCollection: {skip: "internal command"},
     _configsvrRenameCollectionMetadata: {skip: "internal command"},
     _configsvrRepairShardedCollectionChunksHistory: {skip: "internal command"},
+    _configsvrResetPlacementHistory: {skip: "internal command"},
     _configsvrReshardCollection: {skip: "internal command"},
     _configsvrRunRestore: {skip: "internal command"},
     _configsvrSetAllowMigrations: {skip: "internal command"},
     _configsvrSetClusterParameter: {skip: "internal command"},
     _configsvrSetUserWriteBlockMode: {skip: "internal command"},
-    _configsvrTransitionToCatalogShard: {skip: "internal command"},
+    _configsvrTransitionFromDedicatedConfigServer: {skip: "internal command"},
     _configsvrTransitionToDedicatedConfigServer: {skip: "internal command"},
     _configsvrUpdateZoneKeyRange: {skip: "internal command"},
     _flushDatabaseCacheUpdates: {skip: "internal command"},
@@ -150,6 +152,7 @@ let testCases = {
     _shardsvrRegisterIndex: {skip: "internal command"},
     _shardsvrCheckMetadataConsistency: {skip: "internal command"},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: "internal command"},
+    _shardsvrCleanupStructuredEncryptionData: {skip: "internal command"},
     _shardsvrCommitIndexParticipant: {skip: "internal command"},
     _shardsvrCommitReshardCollection: {skip: "internal command"},
     _shardsvrCompactStructuredEncryptionData: {skip: "internal command"},
@@ -198,7 +201,9 @@ let testCases = {
     streams_startStreamProcessor: {skip: "internal command"},
     streams_startStreamSample: {skip: "internal command"},
     streams_stopStreamProcessor: {skip: "internal command"},
+    streams_listStreamProcessors: {skip: "internal command"},
     streams_getMoreStreamSample: {skip: "internal command"},
+    streams_getStats: {skip: "internal command"},
     streams_testOnlyInsert: {skip: "internal command"},
     _transferMods: {skip: "internal command"},
     _vectorClockPersist: {skip: "internal command"},
@@ -659,6 +664,7 @@ let testCases = {
     replSetTest: {skip: "does not accept read or write concern"},
     replSetTestEgress: {skip: "does not accept read or write concern"},
     replSetUpdatePosition: {skip: "does not accept read or write concern"},
+    resetPlacementHistory: {skip: "does not accept read or write concern"},
     reshardCollection: {skip: "does not accept read or write concern"},
     resync: {skip: "does not accept read or write concern"},
     revokePrivilegesFromRole: {
@@ -751,7 +757,7 @@ let testCases = {
     testVersions1And2: {skip: "does not accept read or write concern"},
     testVersion2: {skip: "does not accept read or write concern"},
     top: {skip: "does not accept read or write concern"},
-    transitionToCatalogShard: {skip: "does not accept read or write concern"},
+    transitionFromDedicatedConfigServer: {skip: "does not accept read or write concern"},
     transitionToDedicatedConfigServer: {skip: "does not accept read or write concern"},
     update: {
         setUp: function(conn) {
@@ -801,6 +807,10 @@ let testCases = {
 };
 
 commandsRemovedFromMongodSinceLastLTS.forEach(function(cmd) {
+    testCases[cmd] = {skip: "must define test coverage for backwards compatibility"};
+});
+
+commandsRemovedFromMongosSinceLastLTS.forEach(function(cmd) {
     testCases[cmd] = {skip: "must define test coverage for backwards compatibility"};
 });
 

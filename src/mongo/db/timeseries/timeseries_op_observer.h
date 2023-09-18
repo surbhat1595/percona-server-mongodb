@@ -50,9 +50,12 @@ public:
                    std::vector<InsertStatement>::const_iterator first,
                    std::vector<InsertStatement>::const_iterator last,
                    std::vector<bool> fromMigrate,
-                   bool defaultFromMigrate) final;
+                   bool defaultFromMigrate,
+                   InsertsOpStateAccumulator* opAccumulator = nullptr) final;
 
-    void onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) final;
+    void onUpdate(OperationContext* opCtx,
+                  const OplogUpdateEntryArgs& args,
+                  OpStateAccumulator* opAccumulator = nullptr) final;
 
     void aboutToDelete(OperationContext* opCtx,
                        const CollectionPtr& coll,
@@ -60,15 +63,14 @@ public:
 
     void onDropDatabase(OperationContext* opCtx, const DatabaseName& dbName) final;
 
-    using OpObserver::onDropCollection;
     repl::OpTime onDropCollection(OperationContext* opCtx,
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  CollectionDropType dropType) final;
+                                  CollectionDropType dropType,
+                                  bool markFromMigrate) final;
 
-private:
-    void _onReplicationRollback(OperationContext* opCtx, const RollbackObserverInfo& rbInfo);
+    void onReplicationRollback(OperationContext* opCtx, const RollbackObserverInfo& rbInfo) final;
 };
 
 }  // namespace mongo

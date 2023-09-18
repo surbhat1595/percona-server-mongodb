@@ -71,7 +71,7 @@ repl::OpTime _logOp(OperationContext* opCtx,
     oplogEntry.setObject(obj);
     AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
     return writeConflictRetry(
-        opCtx, "dbCheck oplog entry", NamespaceString::kRsOplogNamespace.ns(), [&] {
+        opCtx, "dbCheck oplog entry", NamespaceString::kRsOplogNamespace, [&] {
             auto const clockSource = opCtx->getServiceContext()->getFastClockSource();
             oplogEntry.setWallClockTime(clockSource->now());
 
@@ -199,7 +199,7 @@ std::unique_ptr<DbCheckRun> fullDatabaseRun(OperationContext* opCtx,
                                             const DbCheckAllInvocation& invocation) {
     uassert(ErrorCodes::InvalidNamespace,
             "Cannot run dbCheck on local database",
-            dbName.db() != "local");
+            dbName.db() != DatabaseName::kLocal.db());
 
     AutoGetDb agd(opCtx, dbName, MODE_IS);
     uassert(ErrorCodes::NamespaceNotFound,
@@ -292,7 +292,7 @@ std::shared_ptr<const CollectionCatalog> getConsistentCatalogAndSnapshot(Operati
 class DbCheckJob : public BackgroundJob {
 public:
     DbCheckJob(const DatabaseName& dbName, std::unique_ptr<DbCheckRun> run)
-        : BackgroundJob(true), _done(false), _dbName(dbName.toString()), _run(std::move(run)) {}
+        : BackgroundJob(true), _done(false), _run(std::move(run)) {}
 
 protected:
     virtual std::string name() const override {
@@ -302,12 +302,6 @@ protected:
     virtual void run() override {
         // Every dbCheck runs in its own client.
         ThreadClient tc(name(), getGlobalServiceContext());
-
-        {
-            stdx::lock_guard<Client> lk(*tc.get());
-            tc.get()->setSystemOperationKillableByStepdown(lk);
-        }
-
         auto uniqueOpCtx = tc->makeOperationContext();
         auto opCtx = uniqueOpCtx.get();
 
@@ -512,7 +506,6 @@ private:
 
     // Set if the job cannot proceed.
     bool _done;
-    std::string _dbName;
     std::unique_ptr<DbCheckRun> _run;
 
     StatusWith<BatchStats> _runBatch(OperationContext* opCtx,

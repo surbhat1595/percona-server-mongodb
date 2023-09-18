@@ -68,8 +68,7 @@ static ReplicaSetAwareServiceRegistry::Registerer<QueryAnalysisWriter>
 
 MONGO_FAIL_POINT_DEFINE(disableQueryAnalysisWriter);
 MONGO_FAIL_POINT_DEFINE(disableQueryAnalysisWriterFlusher);
-MONGO_FAIL_POINT_DEFINE(hangQueryAnalysisWriterBeforeWritingLocally);
-MONGO_FAIL_POINT_DEFINE(hangQueryAnalysisWriterBeforeWritingRemotely);
+MONGO_FAIL_POINT_DEFINE(queryAnalysisWriterSkipActiveSamplingCheck);
 
 const Backoff kExponentialBackoff(Seconds(1), Milliseconds::max());
 
@@ -93,6 +92,11 @@ BSONObj createIndex(OperationContext* opCtx, const NamespaceString& nss, const B
                 "response"_attr = redact(resObj));
 
     return resObj;
+}
+
+bool isInternalClient(const OperationContext* opCtx) {
+    return !opCtx->getClient()->session() ||
+        (opCtx->getClient()->session()->getTags() & transport::Session::kInternalClient);
 }
 
 struct SampledCommandRequest {
@@ -120,7 +124,10 @@ SampledCommandRequest makeSampledReadCommand(const UUID& sampleId,
  * Returns a sampled update command for the update at 'opIndex' in the given update command.
  */
 SampledCommandRequest makeSampledUpdateCommandRequest(
-    const UUID& sampleId, const write_ops::UpdateCommandRequest& originalCmd, int opIndex) {
+    const OperationContext* opCtx,
+    const UUID& sampleId,
+    const write_ops::UpdateCommandRequest& originalCmd,
+    int opIndex) {
     auto op = originalCmd.getUpdates()[opIndex];
     if (op.getSampleId()) {
         tassert(ErrorCodes::IllegalOperation,
@@ -132,10 +139,14 @@ SampledCommandRequest makeSampledUpdateCommandRequest(
     // If the initial query was a write without shard key, the two phase write protocol modifies the
     // query in the write phase. In order to get correct metrics, we need to reconstruct the
     // original query here.
-    if (originalCmd.getOriginalQuery()) {
+    if (originalCmd.getOriginalQuery() || originalCmd.getOriginalCollation()) {
         tassert(7406500,
                 "Found a _clusterWithoutShardKey command with batch size > 1",
                 originalCmd.getUpdates().size() == 1);
+        uassert(ErrorCodes::InvalidOptions,
+                "Cannot specify '$_originalQuery' or '$_originalCollation' since they are internal "
+                "fields",
+                isInternalClient(opCtx));
         op.setQ(*originalCmd.getOriginalQuery());
         op.setCollation(originalCmd.getOriginalCollation());
     }
@@ -152,7 +163,10 @@ SampledCommandRequest makeSampledUpdateCommandRequest(
  * Returns a sampled delete command for the delete at 'opIndex' in the given delete command.
  */
 SampledCommandRequest makeSampledDeleteCommandRequest(
-    const UUID& sampleId, const write_ops::DeleteCommandRequest& originalCmd, int opIndex) {
+    const OperationContext* opCtx,
+    const UUID& sampleId,
+    const write_ops::DeleteCommandRequest& originalCmd,
+    int opIndex) {
     auto op = originalCmd.getDeletes()[opIndex];
     if (op.getSampleId()) {
         tassert(ErrorCodes::IllegalOperation,
@@ -164,10 +178,14 @@ SampledCommandRequest makeSampledDeleteCommandRequest(
     // If the initial query was a write without shard key, the two phase write protocol modifies the
     // query in the write phase. In order to get correct metrics, we need to reconstruct the
     // original query here.
-    if (originalCmd.getOriginalQuery()) {
+    if (originalCmd.getOriginalQuery() || originalCmd.getOriginalCollation()) {
         tassert(7406501,
                 "Found a _clusterWithoutShardKey command with batch size > 1",
                 originalCmd.getDeletes().size() == 1);
+        uassert(ErrorCodes::InvalidOptions,
+                "Cannot specify '$_originalQuery' or '$_originalCollation' since they are internal "
+                "fields",
+                isInternalClient(opCtx));
         op.setQ(*originalCmd.getOriginalQuery());
         op.setCollation(originalCmd.getOriginalCollation());
     }
@@ -184,7 +202,9 @@ SampledCommandRequest makeSampledDeleteCommandRequest(
  * Returns a sampled findAndModify command for the given findAndModify command.
  */
 SampledCommandRequest makeSampledFindAndModifyCommandRequest(
-    const UUID& sampleId, const write_ops::FindAndModifyCommandRequest& originalCmd) {
+    OperationContext* opCtx,
+    const UUID& sampleId,
+    const write_ops::FindAndModifyCommandRequest& originalCmd) {
     write_ops::FindAndModifyCommandRequest sampledCmd(originalCmd.getNamespace());
     if (sampledCmd.getSampleId()) {
         tassert(ErrorCodes::IllegalOperation,
@@ -196,7 +216,11 @@ SampledCommandRequest makeSampledFindAndModifyCommandRequest(
     // If the initial query was a write without shard key, the two phase write protocol modifies the
     // query in the write phase. In order to get correct metrics, we need to reconstruct the
     // original query here.
-    if (originalCmd.getOriginalQuery()) {
+    if (originalCmd.getOriginalQuery() || originalCmd.getOriginalCollation()) {
+        uassert(ErrorCodes::InvalidOptions,
+                "Cannot specify '$_originalQuery' or '$_originalCollation' since they are internal "
+                "fields",
+                isInternalClient(opCtx));
         sampledCmd.setQuery(*originalCmd.getOriginalQuery());
         sampledCmd.setCollation(originalCmd.getOriginalCollation());
     } else {
@@ -214,6 +238,22 @@ SampledCommandRequest makeSampledFindAndModifyCommandRequest(
     return {sampleId,
             sampledCmd.getNamespace(),
             sampledCmd.toBSON(BSON("$db" << sampledCmd.getNamespace().db().toString()))};
+}
+
+/*
+ * Returns true if a sample for the collection with the given namespace and collection uuid should
+ * be persisted. If the collection does not exist (i.e. the collection uuid is none), returns false.
+ * If the collection has been recreated or renamed (i.e. the given collection uuid does not match
+ * the one in the sampling configuration), returns false. Otherwise, returns true.
+ */
+bool shouldPersistSample(OperationContext* opCtx,
+                         const NamespaceString& nss,
+                         const boost::optional<UUID>& collUuid) {
+    if (!collUuid) {
+        return false;
+    }
+    return MONGO_unlikely(queryAnalysisWriterSkipActiveSamplingCheck.shouldFail()) ||
+        QueryAnalysisSampleTracker::get(opCtx).isSamplingActive(nss, *collUuid);
 }
 
 }  // namespace
@@ -250,9 +290,7 @@ QueryAnalysisWriter* QueryAnalysisWriter::get(ServiceContext* serviceContext) {
 }
 
 bool QueryAnalysisWriter::shouldRegisterReplicaSetAwareService() const {
-    // This is invoked when the Register above is constructed which is before FCV is set so we need
-    // to ignore FCV when checking if the feature flag is enabled.
-    return supportsPersistingSampledQueries(true /* isReplEnabled */, true /* ignoreFCV */);
+    return supportsPersistingSampledQueries(true /* isReplEnabled */);
 }
 
 void QueryAnalysisWriter::onStartup(OperationContext* opCtx) {
@@ -275,7 +313,9 @@ void QueryAnalysisWriter::onStartup(OperationContext* opCtx) {
             auto opCtx = client->makeOperationContext();
             _flushQueries(opCtx.get());
         },
-        Seconds(gQueryAnalysisWriterIntervalSecs));
+        Seconds(gQueryAnalysisWriterIntervalSecs),
+        // TODO(SERVER-74662): Please revisit if this periodic job could be made killable.
+        false /*isKillableByStepdown*/);
     _periodicQueryWriter = periodicRunner->makeJob(std::move(queryWriterJob));
     _periodicQueryWriter.start();
 
@@ -288,7 +328,9 @@ void QueryAnalysisWriter::onStartup(OperationContext* opCtx) {
             auto opCtx = client->makeOperationContext();
             _flushDiffs(opCtx.get());
         },
-        Seconds(gQueryAnalysisWriterIntervalSecs));
+        Seconds(gQueryAnalysisWriterIntervalSecs),
+        // TODO(SERVER-74662): Please revisit if this periodic job could be made killable.
+        false /*isKillableByStepdown*/);
     _periodicDiffWriter = periodicRunner->makeJob(std::move(diffWriterJob));
     _periodicDiffWriter.start();
 
@@ -299,6 +341,10 @@ void QueryAnalysisWriter::onStartup(OperationContext* opCtx) {
     threadPoolOptions.poolName = "QueryAnalysisWriterThreadPool";
     threadPoolOptions.onCreateThread = [](const std::string& threadName) {
         Client::initThread(threadName.c_str());
+
+        // TODO(SERVER-74662): Please revisit if this thread could be made killable.
+        stdx::lock_guard<Client> lk(cc());
+        cc().setSystemOperationUnkillableByStepdown(lk);
     };
     _executor = std::make_shared<executor::ThreadPoolTaskExecutor>(
         std::make_unique<ThreadPool>(threadPoolOptions),
@@ -569,8 +615,7 @@ ExecutorFuture<void> QueryAnalysisWriter::_addReadQuery(
 
             auto collUuid =
                 CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, sampledReadCmd.nss);
-            if (!collUuid) {
-                LOGV2_WARNING(7047301, "Found a sampled read query for non-existing collection");
+            if (!shouldPersistSample(opCtx, sampledReadCmd.nss, collUuid)) {
                 return;
             }
 
@@ -604,20 +649,22 @@ ExecutorFuture<void> QueryAnalysisWriter::_addReadQuery(
 }
 
 ExecutorFuture<void> QueryAnalysisWriter::addUpdateQuery(
-    const UUID& sampleId, const write_ops::UpdateCommandRequest& updateCmd, int opIndex) {
+    OperationContext* originalOpCtx,
+    const UUID& sampleId,
+    const write_ops::UpdateCommandRequest& updateCmd,
+    int opIndex) {
     invariant(_executor);
 
     return ExecutorFuture<void>(_executor)
         .then([this,
-               sampledUpdateCmd = makeSampledUpdateCommandRequest(sampleId, updateCmd, opIndex)]() {
+               sampledUpdateCmd =
+                   makeSampledUpdateCommandRequest(originalOpCtx, sampleId, updateCmd, opIndex)]() {
             auto opCtxHolder = cc().makeOperationContext();
             auto opCtx = opCtxHolder.get();
 
             auto collUuid =
                 CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, sampledUpdateCmd.nss);
-            if (!collUuid) {
-                LOGV2_WARNING(7075300,
-                              "Found a sampled update query for a non-existing collection");
+            if (!shouldPersistSample(opCtx, sampledUpdateCmd.nss, collUuid)) {
                 return;
             }
 
@@ -653,27 +700,29 @@ ExecutorFuture<void> QueryAnalysisWriter::addUpdateQuery(
 }
 
 ExecutorFuture<void> QueryAnalysisWriter::addUpdateQuery(
-    const write_ops::UpdateCommandRequest& updateCmd, int opIndex) {
+    OperationContext* opCtx, const write_ops::UpdateCommandRequest& updateCmd, int opIndex) {
     auto sampleId = updateCmd.getUpdates()[opIndex].getSampleId();
     invariant(sampleId);
-    return addUpdateQuery(*sampleId, updateCmd, opIndex);
+    return addUpdateQuery(opCtx, *sampleId, updateCmd, opIndex);
 }
 
 ExecutorFuture<void> QueryAnalysisWriter::addDeleteQuery(
-    const UUID& sampleId, const write_ops::DeleteCommandRequest& deleteCmd, int opIndex) {
+    OperationContext* originalOpCtx,
+    const UUID& sampleId,
+    const write_ops::DeleteCommandRequest& deleteCmd,
+    int opIndex) {
     invariant(_executor);
 
     return ExecutorFuture<void>(_executor)
         .then([this,
-               sampledDeleteCmd = makeSampledDeleteCommandRequest(sampleId, deleteCmd, opIndex)]() {
+               sampledDeleteCmd =
+                   makeSampledDeleteCommandRequest(originalOpCtx, sampleId, deleteCmd, opIndex)]() {
             auto opCtxHolder = cc().makeOperationContext();
             auto opCtx = opCtxHolder.get();
 
             auto collUuid =
                 CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, sampledDeleteCmd.nss);
-            if (!collUuid) {
-                LOGV2_WARNING(7075302,
-                              "Found a sampled delete query for a non-existing collection");
+            if (!shouldPersistSample(opCtx, sampledDeleteCmd.nss, collUuid)) {
                 return;
             }
 
@@ -709,28 +758,28 @@ ExecutorFuture<void> QueryAnalysisWriter::addDeleteQuery(
 }
 
 ExecutorFuture<void> QueryAnalysisWriter::addDeleteQuery(
-    const write_ops::DeleteCommandRequest& deleteCmd, int opIndex) {
+    OperationContext* opCtx, const write_ops::DeleteCommandRequest& deleteCmd, int opIndex) {
     auto sampleId = deleteCmd.getDeletes()[opIndex].getSampleId();
     invariant(sampleId);
-    return addDeleteQuery(*sampleId, deleteCmd, opIndex);
+    return addDeleteQuery(opCtx, *sampleId, deleteCmd, opIndex);
 }
 
 ExecutorFuture<void> QueryAnalysisWriter::addFindAndModifyQuery(
-    const UUID& sampleId, const write_ops::FindAndModifyCommandRequest& findAndModifyCmd) {
+    OperationContext* originalOpCtx,
+    const UUID& sampleId,
+    const write_ops::FindAndModifyCommandRequest& findAndModifyCmd) {
     invariant(_executor);
 
     return ExecutorFuture<void>(_executor)
         .then([this,
-               sampledFindAndModifyCmd =
-                   makeSampledFindAndModifyCommandRequest(sampleId, findAndModifyCmd)]() {
+               sampledFindAndModifyCmd = makeSampledFindAndModifyCommandRequest(
+                   originalOpCtx, sampleId, findAndModifyCmd)]() {
             auto opCtxHolder = cc().makeOperationContext();
             auto opCtx = opCtxHolder.get();
 
             auto collUuid =
                 CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, sampledFindAndModifyCmd.nss);
-            if (!collUuid) {
-                LOGV2_WARNING(7075304,
-                              "Found a sampled findAndModify query for a non-existing collection");
+            if (!shouldPersistSample(opCtx, sampledFindAndModifyCmd.nss, collUuid)) {
                 return;
             }
 
@@ -766,10 +815,10 @@ ExecutorFuture<void> QueryAnalysisWriter::addFindAndModifyQuery(
 }
 
 ExecutorFuture<void> QueryAnalysisWriter::addFindAndModifyQuery(
-    const write_ops::FindAndModifyCommandRequest& findAndModifyCmd) {
+    OperationContext* opCtx, const write_ops::FindAndModifyCommandRequest& findAndModifyCmd) {
     auto sampleId = findAndModifyCmd.getSampleId();
     invariant(sampleId);
-    return addFindAndModifyQuery(*sampleId, findAndModifyCmd);
+    return addFindAndModifyQuery(opCtx, *sampleId, findAndModifyCmd);
 }
 
 ExecutorFuture<void> QueryAnalysisWriter::addDiff(const UUID& sampleId,
@@ -790,6 +839,14 @@ ExecutorFuture<void> QueryAnalysisWriter::addDiff(const UUID& sampleId,
             auto opCtx = opCtxHolder.get();
 
             if (!diff || diff->isEmpty()) {
+                return;
+            }
+
+            if (collUuid != CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, nss)) {
+                return;
+            }
+
+            if (!shouldPersistSample(opCtx, nss, collUuid)) {
                 return;
             }
 

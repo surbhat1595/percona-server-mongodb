@@ -91,20 +91,10 @@ void assertNoMovePrimaryInProgress(OperationContext* opCtx, const NamespaceStrin
 OpObserverShardingImpl::OpObserverShardingImpl(std::unique_ptr<OplogWriter> oplogWriter)
     : OpObserverImpl(std::move(oplogWriter)) {}
 
-bool OpObserverShardingImpl::isMigrating(OperationContext* opCtx,
-                                         NamespaceString const& nss,
-                                         BSONObj const& docToDelete) {
-    const auto scopedCsr =
-        CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss);
-    auto cloner = MigrationSourceManager::getCurrentCloner(*scopedCsr);
-
-    return cloner && cloner->isDocumentInMigratingChunk(docToDelete);
-}
-
 void OpObserverShardingImpl::shardObserveAboutToDelete(OperationContext* opCtx,
                                                        NamespaceString const& nss,
                                                        BSONObj const& docToDelete) {
-    getIsMigrating(opCtx) = isMigrating(opCtx, nss, docToDelete);
+    getIsMigrating(opCtx) = MigrationSourceManager::isMigrating(opCtx, nss, docToDelete);
 }
 
 void OpObserverShardingImpl::shardObserveInsertsOp(
@@ -236,12 +226,13 @@ void OpObserverShardingImpl::shardObserveTransactionPrepareOrUnpreparedCommit(
 
 void OpObserverShardingImpl::shardObserveNonPrimaryTransactionPrepare(
     OperationContext* opCtx,
+    const LogicalSessionId& lsid,
     const std::vector<repl::OplogEntry>& stmts,
     const repl::OpTime& prepareOrCommitOptime) {
 
     opCtx->recoveryUnit()->registerChange(
         std::make_unique<LogTransactionOperationsForShardingHandler>(
-            *opCtx->getLogicalSessionId(), stmts, prepareOrCommitOptime));
+            lsid, stmts, prepareOrCommitOptime));
 }
 
 }  // namespace mongo

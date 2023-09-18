@@ -38,6 +38,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/platform/random.h"
 #include "mongo/s/analyze_shard_key_documents_gen.h"
+#include "mongo/s/query_analysis_sample_tracker.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/util/fail_point.h"
 
@@ -49,6 +50,7 @@ namespace {
 
 const NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("testDb", "testColl0");
 const NamespaceString nss1 = NamespaceString::createNamespaceString_forTest("testDb", "testColl1");
+const int sampleRate = 100;
 
 TEST(QueryAnalysisWriterBufferTest, AddBasic) {
     auto buffer = QueryAnalysisWriter::Buffer(nss0);
@@ -175,6 +177,13 @@ public:
         DBDirectClient client(operationContext());
         client.createCollection(nss0);
         client.createCollection(nss1);
+
+        auto& tracker = QueryAnalysisSampleTracker::get(operationContext());
+        auto configuration0 = CollectionQueryAnalyzerConfiguration(
+            nss0, getCollectionUUID(nss0), sampleRate, Date_t::now());
+        auto configuration1 = CollectionQueryAnalyzerConfiguration(
+            nss1, getCollectionUUID(nss1), sampleRate, Date_t::now());
+        tracker.refreshConfigurations({configuration0, configuration1});
     }
 
     void tearDown() {
@@ -449,6 +458,11 @@ protected:
         assertBsonObjEqualUnordered(parsedDiffDoc.getDiff(), expectedDiff);
     }
 
+    /*
+     * The helper for testing that samples are discarded.
+     */
+    void assertNoSampling(const NamespaceString& nss, const UUID& collUuid);
+
     // Test with both empty and non-empty filter and collation to verify that the
     // QueryAnalysisWriter doesn't require filter or collation to be non-empty.
     const BSONObj emptyFilter{};
@@ -492,7 +506,6 @@ private:
         return cursor->next();
     }
 
-    RAIIServerParameterControllerForTest _featureFlagController{"featureFlagAnalyzeShardKey", true};
     // This fixture manually flushes sampled queries and diffs.
     FailPointEnableBlock _fp{"disableQueryAnalysisWriterFlusher"};
     PseudoRandom _random{SecureRandom{}.nextInt64()};
@@ -726,7 +739,7 @@ TEST_F(QueryAnalysisWriterTest, AggregateQuery) {
 DEATH_TEST_F(QueryAnalysisWriterTest, UpdateQueryNotMarkedForSampling, "invariant") {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
     auto [originalCmd, _] = makeUpdateCommandRequest(nss0, 1, {} /* markForSampling */);
-    writer.addUpdateQuery(originalCmd, 0).get();
+    writer.addUpdateQuery(operationContext(), originalCmd, 0).get();
 }
 
 TEST_F(QueryAnalysisWriterTest, UpdateQueriesMarkedForSampling) {
@@ -736,8 +749,8 @@ TEST_F(QueryAnalysisWriterTest, UpdateQueriesMarkedForSampling) {
         makeUpdateCommandRequest(nss0, 3, {0, 2} /* markForSampling */);
     ASSERT_EQ(expectedSampledCmds.size(), 2U);
 
-    writer.addUpdateQuery(originalCmd, 0).get();
-    writer.addUpdateQuery(originalCmd, 2).get();
+    writer.addUpdateQuery(operationContext(), originalCmd, 0).get();
+    writer.addUpdateQuery(operationContext(), originalCmd, 2).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 2);
     writer.flushQueriesForTest(operationContext());
     ASSERT_EQ(writer.getQueriesCountForTest(), 0);
@@ -754,7 +767,7 @@ TEST_F(QueryAnalysisWriterTest, UpdateQueriesMarkedForSampling) {
 DEATH_TEST_F(QueryAnalysisWriterTest, DeleteQueryNotMarkedForSampling, "invariant") {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
     auto [originalCmd, _] = makeDeleteCommandRequest(nss0, 1, {} /* markForSampling */);
-    writer.addDeleteQuery(originalCmd, 0).get();
+    writer.addDeleteQuery(operationContext(), originalCmd, 0).get();
 }
 
 TEST_F(QueryAnalysisWriterTest, DeleteQueriesMarkedForSampling) {
@@ -764,8 +777,8 @@ TEST_F(QueryAnalysisWriterTest, DeleteQueriesMarkedForSampling) {
         makeDeleteCommandRequest(nss0, 3, {1, 2} /* markForSampling */);
     ASSERT_EQ(expectedSampledCmds.size(), 2U);
 
-    writer.addDeleteQuery(originalCmd, 1).get();
-    writer.addDeleteQuery(originalCmd, 2).get();
+    writer.addDeleteQuery(operationContext(), originalCmd, 1).get();
+    writer.addDeleteQuery(operationContext(), originalCmd, 2).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 2);
     writer.flushQueriesForTest(operationContext());
     ASSERT_EQ(writer.getQueriesCountForTest(), 0);
@@ -783,7 +796,7 @@ DEATH_TEST_F(QueryAnalysisWriterTest, FindAndModifyQueryNotMarkedForSampling, "i
     auto& writer = *QueryAnalysisWriter::get(operationContext());
     auto [originalCmd, _] =
         makeFindAndModifyCommandRequest(nss0, true /* isUpdate */, false /* markForSampling */);
-    writer.addFindAndModifyQuery(originalCmd).get();
+    writer.addFindAndModifyQuery(operationContext(), originalCmd).get();
 }
 
 TEST_F(QueryAnalysisWriterTest, FindAndModifyQueryUpdateMarkedForSampling) {
@@ -794,7 +807,7 @@ TEST_F(QueryAnalysisWriterTest, FindAndModifyQueryUpdateMarkedForSampling) {
     ASSERT_EQ(expectedSampledCmds.size(), 1U);
     auto [sampleId, expectedSampledCmd] = *expectedSampledCmds.begin();
 
-    writer.addFindAndModifyQuery(originalCmd).get();
+    writer.addFindAndModifyQuery(operationContext(), originalCmd).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 1);
     writer.flushQueriesForTest(operationContext());
     ASSERT_EQ(writer.getQueriesCountForTest(), 0);
@@ -814,7 +827,7 @@ TEST_F(QueryAnalysisWriterTest, FindAndModifyQueryRemoveMarkedForSampling) {
     ASSERT_EQ(expectedSampledCmds.size(), 1U);
     auto [sampleId, expectedSampledCmd] = *expectedSampledCmds.begin();
 
-    writer.addFindAndModifyQuery(originalCmd).get();
+    writer.addFindAndModifyQuery(operationContext(), originalCmd).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 1);
     writer.flushQueriesForTest(operationContext());
     ASSERT_EQ(writer.getQueriesCountForTest(), 0);
@@ -845,8 +858,8 @@ TEST_F(QueryAnalysisWriterTest, MultipleQueriesAndCollections) {
     auto originalCountFilter = makeNonEmptyFilter();
     auto originalCountCollation = makeNonEmptyCollation();
 
-    writer.addDeleteQuery(originalDeleteCmd, 1).get();
-    writer.addUpdateQuery(originalUpdateCmd, 0).get();
+    writer.addDeleteQuery(operationContext(), originalDeleteCmd, 1).get();
+    writer.addUpdateQuery(operationContext(), originalUpdateCmd, 0).get();
     writer.addCountQuery(countSampleId, nss1, originalCountFilter, originalCountCollation).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 3);
     writer.flushQueriesForTest(operationContext());
@@ -903,7 +916,7 @@ TEST_F(QueryAnalysisWriterTest, DuplicateQueries) {
                                    originalFindFilter,
                                    originalFindCollation);
 
-    writer.addUpdateQuery(originalUpdateCmd, 0).get();
+    writer.addUpdateQuery(operationContext(), originalUpdateCmd, 0).get();
     writer
         .addFindQuery(findSampleId,
                       nss0,
@@ -959,8 +972,7 @@ TEST_F(QueryAnalysisWriterTest, QueriesMultipleBatches_MaxBatchSize) {
     }
 }
 
-TEST_F(QueryAnalysisWriterTest, QueriesMultipleBatches_MaxBSONObjSize) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagAnalyzeShardKey", true);
+TEST_F(QueryAnalysisWriterTest, QueriesMultipleBatchesFewQueries_MaxBSONObjSize) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
     auto numQueries = 3;
@@ -968,6 +980,30 @@ TEST_F(QueryAnalysisWriterTest, QueriesMultipleBatches_MaxBSONObjSize) {
     for (auto i = 0; i < numQueries; i++) {
         auto sampleId = UUID::gen();
         auto filter = BSON(std::string(BSONObjMaxUserSize / 2, 'a') << 1);
+        auto collation = makeNonEmptyCollation();
+        writer.addAggregateQuery(sampleId, nss0, filter, collation, boost::none /* letParameters */)
+            .get();
+        expectedSampledCmds.push_back({sampleId, filter, collation});
+    }
+    ASSERT_EQ(writer.getQueriesCountForTest(), numQueries);
+    writer.flushQueriesForTest(operationContext());
+    ASSERT_EQ(writer.getQueriesCountForTest(), 0);
+
+    ASSERT_EQ(getSampledQueryDocumentsCount(nss0), numQueries);
+    for (const auto& [sampleId, filter, collation] : expectedSampledCmds) {
+        assertSampledReadQueryDocument(
+            sampleId, nss0, SampledCommandNameEnum::kAggregate, filter, collation);
+    }
+}
+
+TEST_F(QueryAnalysisWriterTest, QueriesMultipleBatchesManyQueries_MaxBSONObjSize) {
+    auto& writer = *QueryAnalysisWriter::get(operationContext());
+
+    auto numQueries = 75'000;
+    std::vector<std::tuple<UUID, BSONObj, BSONObj>> expectedSampledCmds;
+    for (auto i = 0; i < numQueries; i++) {
+        auto sampleId = UUID::gen();
+        auto filter = makeNonEmptyFilter();
         auto collation = makeNonEmptyCollation();
         writer.addAggregateQuery(sampleId, nss0, filter, collation, boost::none /* letParameters */)
             .get();
@@ -1028,10 +1064,10 @@ TEST_F(QueryAnalysisWriterTest, FlushAfterAddUpdateIfExceedsSizeLimit) {
                                  std::string(maxMemoryUsageBytes / 2, 'a') /* filterFieldName */);
     ASSERT_EQ(expectedSampledCmds.size(), 2U);
 
-    writer.addUpdateQuery(originalCmd, 0).get();
+    writer.addUpdateQuery(operationContext(), originalCmd, 0).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 1);
     // Adding the next query causes the size to exceed the limit.
-    writer.addUpdateQuery(originalCmd, 2).get();
+    writer.addUpdateQuery(operationContext(), originalCmd, 2).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 0);
 
     ASSERT_EQ(getSampledQueryDocumentsCount(nss0), 2);
@@ -1056,10 +1092,10 @@ TEST_F(QueryAnalysisWriterTest, FlushAfterAddDeleteIfExceedsSizeLimit) {
                                  std::string(maxMemoryUsageBytes / 2, 'a') /* filterFieldName */);
     ASSERT_EQ(expectedSampledCmds.size(), 2U);
 
-    writer.addDeleteQuery(originalCmd, 0).get();
+    writer.addDeleteQuery(operationContext(), originalCmd, 0).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 1);
     // Adding the next query causes the size to exceed the limit.
-    writer.addDeleteQuery(originalCmd, 1).get();
+    writer.addDeleteQuery(operationContext(), originalCmd, 1).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 0);
 
     ASSERT_EQ(getSampledQueryDocumentsCount(nss0), 2);
@@ -1094,10 +1130,10 @@ TEST_F(QueryAnalysisWriterTest, FlushAfterAddFindAndModifyIfExceedsSizeLimit) {
     ASSERT_EQ(expectedSampledCmds0.size(), 1U);
     auto [sampleId1, expectedSampledCmd1] = *expectedSampledCmds1.begin();
 
-    writer.addFindAndModifyQuery(originalCmd0).get();
+    writer.addFindAndModifyQuery(operationContext(), originalCmd0).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 1);
     // Adding the next query causes the size to exceed the limit.
-    writer.addFindAndModifyQuery(originalCmd1).get();
+    writer.addFindAndModifyQuery(operationContext(), originalCmd1).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 0);
 
     ASSERT_EQ(getSampledQueryDocumentsCount(nss0), 1);
@@ -1470,6 +1506,70 @@ TEST_F(QueryAnalysisWriterTest, DiffExceedsSizeLimit) {
     ASSERT_EQ(writer.getDiffsCountForTest(), 0);
 
     ASSERT_EQ(getDiffDocumentsCount(nss0), 0);
+}
+
+void QueryAnalysisWriterTest::assertNoSampling(const NamespaceString& nss, const UUID& collUuid) {
+    auto& writer = *QueryAnalysisWriter::get(operationContext());
+
+    writer
+        .addFindQuery(UUID::gen() /* sampleId */,
+                      nss,
+                      emptyFilter,
+                      emptyCollation,
+                      boost::none /* letParameters */)
+        .get();
+    ASSERT_EQ(writer.getQueriesCountForTest(), 0);
+
+    writer
+        .addAggregateQuery(UUID::gen() /* sampleId */,
+                           nss,
+                           emptyFilter,
+                           emptyCollation,
+                           boost::none /* letParameters */)
+        .get();
+    ASSERT_EQ(writer.getQueriesCountForTest(), 0);
+
+    writer.addCountQuery(UUID::gen() /* sampleId */, nss, emptyFilter, emptyCollation).get();
+    ASSERT_EQ(writer.getQueriesCountForTest(), 0);
+
+    writer.addDistinctQuery(UUID::gen() /* sampleId */, nss, emptyFilter, emptyCollation).get();
+    ASSERT_EQ(writer.getQueriesCountForTest(), 0);
+
+    auto originalUpdateCmd = makeUpdateCommandRequest(nss, 1, {0} /* markForSampling */).first;
+    writer.addUpdateQuery(operationContext(), originalUpdateCmd, 0).get();
+    ASSERT_EQ(writer.getQueriesCountForTest(), 0);
+
+    auto originalDeleteCmd = makeDeleteCommandRequest(nss, 1, {0} /* markForSampling */).first;
+    writer.addDeleteQuery(operationContext(), originalDeleteCmd, 0).get();
+    ASSERT_EQ(writer.getQueriesCountForTest(), 0);
+
+    auto originalFindAndModifyCmd =
+        makeFindAndModifyCommandRequest(nss, true /* isUpdate */, true /* markForSampling */).first;
+    writer.addFindAndModifyQuery(operationContext(), originalFindAndModifyCmd).get();
+
+    writer
+        .addDiff(UUID::gen() /* sampleId */,
+                 nss,
+                 collUuid,
+                 BSON("a" << 0) /* preImage */,
+                 BSON("a" << 1) /* postImage */)
+        .get();
+    ASSERT_EQ(writer.getDiffsCountForTest(), 0);
+}
+
+TEST_F(QueryAnalysisWriterTest, DiscardSamplesIfCollectionNoLongerExists) {
+    DBDirectClient client(operationContext());
+    auto collUuid0BeforeDrop = getCollectionUUID(nss0);
+    client.dropCollection(nss0);
+    assertNoSampling(nss0, collUuid0BeforeDrop);
+}
+
+TEST_F(QueryAnalysisWriterTest, DiscardSamplesIfCollectionIsDroppedAndRecreated) {
+    DBDirectClient client(operationContext());
+    auto collUuid0BeforeDrop = getCollectionUUID(nss0);
+    client.dropCollection(nss0);
+    client.createCollection(nss0);
+    assertNoSampling(nss0, collUuid0BeforeDrop);
 }
 
 }  // namespace

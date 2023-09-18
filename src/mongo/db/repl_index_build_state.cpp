@@ -95,6 +95,11 @@ void IndexBuildState::setState(State state,
                   str::stream() << "current state :" << toString(_state)
                                 << ", new state: " << toString(state));
     }
+    LOGV2_DEBUG(6826201,
+                1,
+                "Index build: transitioning state",
+                "current"_attr = toString(_state),
+                "new"_attr = toString(state));
     _state = state;
     if (timestamp)
         _timestamp = timestamp;
@@ -106,9 +111,8 @@ void IndexBuildState::setState(State state,
 
 bool IndexBuildState::_checkIfValidTransition(IndexBuildState::State currentState,
                                               IndexBuildState::State newState) const {
-    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-    const auto graceful =
-        feature_flags::gIndexBuildGracefulErrorHandling.isEnabledAndIgnoreFCVUnsafe();
+    const auto graceful = feature_flags::gIndexBuildGracefulErrorHandling.isEnabled(
+        serverGlobalParams.featureCompatibility);
     switch (currentState) {
         case IndexBuildState::State::kSetup:
             return
@@ -211,15 +215,24 @@ void ReplIndexBuildState::completeSetup() {
     _cleanUpRequired = true;
 }
 
-Status ReplIndexBuildState::tryStart(OperationContext* opCtx) {
+void ReplIndexBuildState::setInProgress(OperationContext* opCtx) {
     stdx::lock_guard lk(_mutex);
     // The index build might have been aborted/interrupted before reaching this point. Trying to
     // transtion to kInProgress would be an error.
-    auto interruptCheck = opCtx->checkForInterruptNoAssert();
-    if (interruptCheck.isOK()) {
-        _indexBuildState.setState(IndexBuildState::kInProgress, false /* skipCheck */);
-    }
-    return interruptCheck;
+    opCtx->checkForInterrupt();
+    _indexBuildState.setState(IndexBuildState::kInProgress, false /* skipCheck */);
+}
+
+void ReplIndexBuildState::setVotedForCommitReadiness(OperationContext* opCtx) {
+    stdx::lock_guard lk(_mutex);
+    invariant(!_votedForCommitReadiness);
+    opCtx->checkForInterrupt();
+    _votedForCommitReadiness = true;
+}
+
+bool ReplIndexBuildState::canVoteForAbort() const {
+    stdx::lock_guard lk(_mutex);
+    return !_votedForCommitReadiness;
 }
 
 void ReplIndexBuildState::commit(OperationContext* opCtx) {
@@ -513,9 +526,14 @@ bool ReplIndexBuildState::forceSelfAbort(OperationContext* opCtx, const Status& 
     stdx::lock_guard lk(_mutex);
     if (_indexBuildState.isSettingUp() || _indexBuildState.isAborted() ||
         _indexBuildState.isCommitted() || _indexBuildState.isAwaitingPrimaryAbort() ||
-        _indexBuildState.isApplyingCommitOplogEntry()) {
+        _indexBuildState.isApplyingCommitOplogEntry() || _votedForCommitReadiness) {
         // If the build is setting up, it is not yet abortable. If the index build has already
         // passed a point of no return, interrupting will not be productive.
+        LOGV2(7617000,
+              "Index build: cannot force abort",
+              "buildUUID"_attr = buildUUID,
+              "state"_attr = _indexBuildState,
+              "votedForCommit"_attr = _votedForCommitReadiness);
         return false;
     }
 
@@ -530,11 +548,6 @@ bool ReplIndexBuildState::forceSelfAbort(OperationContext* opCtx, const Status& 
         auto targetOpCtx = target->getOperationContext();
 
         LOGV2(7419400, "Forcefully aborting index build", "buildUUID"_attr = buildUUID);
-
-        // If there is a pending voteCommitIndexBuild request, cancel it and clear the callback.
-        // Otherwise the index build will try to issue a voteAbortIndexBuild, and set the callback
-        // handle, while the previous one is still valid.
-        _cancelAndClearVoteRequestCbk(lk, opCtx);
 
         // We don't pass IndexBuildAborted as the interruption error code because that would imply
         // that we are taking responsibility for cleaning up the index build, when in fact the index
@@ -670,6 +683,17 @@ void ReplIndexBuildState::appendBuildInfo(BSONObjBuilder* builder) const {
 bool ReplIndexBuildState::_shouldSkipIndexBuildStateTransitionCheck(OperationContext* opCtx) const {
     const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     if (replCoord->isReplEnabled() && protocol == IndexBuildProtocol::kTwoPhase) {
+        if (replCoord->getMemberState() == repl::MemberState::RS_STARTUP2 &&
+            !serverGlobalParams.featureCompatibility.isVersionInitialized()) {
+            // We're likely at the initial stages of a new logical initial sync attempt, and we
+            // haven't yet replicated the FCV from the sync source. Skip the index build state
+            // transition checks because they rely on the FCV.
+            LOGV2_DEBUG(6826202,
+                        2,
+                        "Index build: skipping index build state transition checks because the FCV "
+                        "isn't known yet");
+            return true;
+        }
         return false;
     }
     return true;

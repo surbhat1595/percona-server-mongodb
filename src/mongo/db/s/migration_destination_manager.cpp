@@ -70,6 +70,7 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_role.h"
 #include "mongo/db/storage/remove_saver.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/vector_clock.h"
@@ -595,11 +596,6 @@ repl::OpTime MigrationDestinationManager::fetchAndApplyBatch(
 
     stdx::thread applicationThread{[&] {
         Client::initThread("batchApplier", opCtx->getServiceContext(), nullptr);
-        auto client = Client::getCurrent();
-        {
-            stdx::lock_guard lk(*client);
-            client->setSystemOperationKillableByStepdown(lk);
-        }
         auto executor =
             Grid::get(opCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
         auto applicationOpCtx = CancelableOperationContext(
@@ -843,10 +839,9 @@ MigrationDestinationManager::IndexesAndIdIndex MigrationDestinationManager::getC
     auto indexes = uassertStatusOK(
         fromShard->runExhaustiveCursorCommand(opCtx,
                                               ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                              nssOrUUID.db().toString(),
+                                              DatabaseNameUtil::serialize(nssOrUUID.dbName()),
                                               cmd,
                                               Milliseconds(-1)));
-
     for (auto&& spec : indexes.docs) {
         if (spec[IndexDescriptor::kClusteredFieldName]) {
             // The 'clustered' index is implicitly created upon clustered collection creation.
@@ -889,7 +884,7 @@ MigrationDestinationManager::getCollectionOptions(OperationContext* opCtx,
     auto infosRes = uassertStatusOK(
         fromShard->runExhaustiveCursorCommand(opCtx,
                                               ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                              nssOrUUID.db().toString(),
+                                              DatabaseNameUtil::serialize(nssOrUUID.dbName()),
                                               cmd,
                                               Milliseconds(-1)));
 
@@ -1062,10 +1057,9 @@ void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
                               << collectionByUUID->ns().toStringForErrorMsg());
             }
 
-            // We do not have a collection by this name. Create the collection with the donor's
-            // options.
+            // We do not have a collection by this name. Create it with the donor's options.
             OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
-                unsafeCreateCollection(opCtx);
+                unsafeCreateCollection(opCtx, /* forceCSRAsUnknownAfterCollectionCreation */ true);
             WriteUnitOfWork wuow(opCtx);
             CollectionOptions collectionOptions = uassertStatusOK(
                 CollectionOptions::parse(collectionOptionsAndIndexes.options,
@@ -1098,11 +1092,6 @@ void MigrationDestinationManager::_migrateThread(CancellationToken cancellationT
 
     Client::initThread("migrateThread");
     auto client = Client::getCurrent();
-    {
-        stdx::lock_guard lk(*client);
-        client->setSystemOperationKillableByStepdown(lk);
-    }
-
     bool recovering = false;
     while (true) {
         const auto executor =
@@ -1296,11 +1285,6 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
         outerOpCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
         {
             auto newClient = outerOpCtx->getServiceContext()->makeClient("MigrationCoordinator");
-            {
-                stdx::lock_guard<Client> lk(*newClient.get());
-                newClient->setSystemOperationKillableByStepdown(lk);
-            }
-
             AlternativeClientRegion acr(newClient);
             auto executor =
                 Grid::get(outerOpCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
@@ -1361,10 +1345,6 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
         }
 
         auto newClient = outerOpCtx->getServiceContext()->makeClient("MigrationCoordinator");
-        {
-            stdx::lock_guard<Client> lk(*newClient.get());
-            newClient->setSystemOperationKillableByStepdown(lk);
-        }
         AlternativeClientRegion acr(newClient);
         auto executor =
             Grid::get(outerOpCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
@@ -1634,10 +1614,6 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
     } else {
         outerOpCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
         auto newClient = outerOpCtx->getServiceContext()->makeClient("MigrationCoordinator");
-        {
-            stdx::lock_guard<Client> lk(*newClient.get());
-            newClient->setSystemOperationKillableByStepdown(lk);
-        }
         AlternativeClientRegion acr(newClient);
         auto executor =
             Grid::get(outerOpCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
@@ -1667,10 +1643,6 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
 
     outerOpCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
     auto newClient = outerOpCtx->getServiceContext()->makeClient("MigrationCoordinator");
-    {
-        stdx::lock_guard<Client> lk(*newClient.get());
-        newClient->setSystemOperationKillableByStepdown(lk);
-    }
     AlternativeClientRegion acr(newClient);
     auto executor =
         Grid::get(outerOpCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
@@ -1710,11 +1682,17 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx, const
         BSONObjIterator i(xfer["deleted"].Obj());
         while (i.more()) {
             totalDocs++;
-            AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
+            const auto collection = acquireCollection(
+                opCtx,
+                CollectionAcquisitionRequest(_nss,
+                                             AcquisitionPrerequisites::kPretendUnsharded,
+                                             repl::ReadConcernArgs::get(opCtx),
+                                             AcquisitionPrerequisites::kWrite),
+                MODE_IX);
             uassert(ErrorCodes::ConflictingOperationInProgress,
                     str::stream() << "Collection " << _nss.toStringForErrorMsg()
                                   << " was dropped in the middle of the migration",
-                    autoColl.getCollection());
+                    collection.exists());
 
             BSONObj id = i.next().Obj();
 
@@ -1733,10 +1711,9 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx, const
                 uassertStatusOK(rs->goingToDelete(fullObj));
             }
 
-            writeConflictRetry(opCtx, "transferModsDeletes", _nss.ns(), [&] {
+            writeConflictRetry(opCtx, "transferModsDeletes", _nss, [&] {
                 deleteObjects(opCtx,
-                              autoColl.getCollection(),
-                              _nss,
+                              collection,
                               id,
                               true /* justOne */,
                               false /* god */,
@@ -1753,11 +1730,17 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx, const
         BSONObjIterator i(xfer["reload"].Obj());
         while (i.more()) {
             totalDocs++;
-            AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
+            auto collection = acquireCollection(
+                opCtx,
+                CollectionAcquisitionRequest(_nss,
+                                             AcquisitionPrerequisites::kPretendUnsharded,
+                                             repl::ReadConcernArgs::get(opCtx),
+                                             AcquisitionPrerequisites::kWrite),
+                MODE_IX);
             uassert(ErrorCodes::ConflictingOperationInProgress,
                     str::stream() << "Collection " << _nss.toStringForErrorMsg()
                                   << " was dropped in the middle of the migration",
-                    autoColl.getCollection());
+                    collection.exists());
 
             BSONObj updatedDoc = i.next().Obj();
 
@@ -1786,8 +1769,8 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx, const
             }
 
             // We are in write lock here, so sure we aren't killing
-            writeConflictRetry(opCtx, "transferModsUpdates", _nss.ns(), [&] {
-                auto res = Helpers::upsert(opCtx, _nss, updatedDoc, true);
+            writeConflictRetry(opCtx, "transferModsUpdates", _nss, [&] {
+                auto res = Helpers::upsert(opCtx, collection, updatedDoc, true);
                 if (!res.upsertedId.isEmpty()) {
                     changeInOrphans++;
                 }

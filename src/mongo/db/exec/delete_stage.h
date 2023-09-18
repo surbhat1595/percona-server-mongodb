@@ -33,6 +33,7 @@
 #include "mongo/db/exec/write_stage_common.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role.h"
 #include "mongo/db/storage/remove_saver.h"
 
 namespace mongo {
@@ -101,7 +102,7 @@ struct DeleteStageParams {
  * Callers of work() must be holding a write lock (and, for replicated deletes, callers must have
  * had the replication coordinator approve the write).
  */
-class DeleteStage : public RequiresMutableCollectionStage {
+class DeleteStage : public RequiresWritableCollectionStage {
     DeleteStage(const DeleteStage&) = delete;
     DeleteStage& operator=(const DeleteStage&) = delete;
 
@@ -111,14 +112,14 @@ public:
     DeleteStage(ExpressionContext* expCtx,
                 std::unique_ptr<DeleteStageParams> params,
                 WorkingSet* ws,
-                const CollectionPtr& collection,
+                const ScopedCollectionAcquisition& collection,
                 PlanStage* child);
 
     DeleteStage(const char* stageType,
                 ExpressionContext* expCtx,
                 std::unique_ptr<DeleteStageParams> params,
                 WorkingSet* ws,
-                const CollectionPtr& collection,
+                const ScopedCollectionAcquisition& collection,
                 PlanStage* child);
 
     bool isEOF();

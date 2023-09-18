@@ -217,7 +217,7 @@ void SessionCatalogMigrationDestination::start(ServiceContext* service) {
         _state = State::Migrating;
     }
 
-    _thread = stdx::thread([=] {
+    _thread = stdx::thread([=, this] {
         try {
             _retrieveSessionStateFromSource(service);
         } catch (const DBException& ex) {
@@ -262,12 +262,6 @@ void SessionCatalogMigrationDestination::join() {
 void SessionCatalogMigrationDestination::_retrieveSessionStateFromSource(ServiceContext* service) {
     Client::initThread(
         "sessionCatalogMigrationProducer-" + _migrationSessionId.toString(), service, nullptr);
-    auto client = Client::getCurrent();
-    {
-        stdx::lock_guard lk(*client);
-        client->setSystemOperationKillableByStepdown(lk);
-    }
-
     bool oplogDrainedAfterCommiting = false;
     ProcessOplogResult lastResult;
     repl::OpTime lastOpTimeWaited;
@@ -500,10 +494,7 @@ SessionCatalogMigrationDestination::_processSessionOplog(const BSONObj& oplogBSO
     oplogEntry.setHash(boost::none);
 
     writeConflictRetry(
-        opCtx,
-        "SessionOplogMigration",
-        NamespaceString::kSessionTransactionsTableNamespace.ns(),
-        [&] {
+        opCtx, "SessionOplogMigration", NamespaceString::kSessionTransactionsTableNamespace, [&] {
             // Need to take global lock here so repl::logOp will not unlock it and trigger the
             // invariant that disallows unlocking global lock while inside a WUOW. Take the
             // transaction table db lock to ensure the same lock ordering with normal replicated

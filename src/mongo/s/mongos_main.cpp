@@ -135,10 +135,6 @@ namespace mongo {
 
 using logv2::LogComponent;
 
-#if !defined(__has_feature)
-#define __has_feature(x) 0
-#endif
-
 // Failpoint for disabling replicaSetChangeConfigServerUpdateHook calls on signaled mongos.
 MONGO_FAIL_POINT_DEFINE(failReplicaSetChangeConfigServerUpdateHook);
 
@@ -233,6 +229,11 @@ void implicitlyAbortAllTransactions(OperationContext* opCtx) {
     });
 
     auto newClient = opCtx->getServiceContext()->makeClient("ImplicitlyAbortTxnAtShutdown");
+    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<mongo::Client> lk(*newClient.get());
+        newClient.get()->setSystemOperationUnkillableByStepdown(lk);
+    }
     AlternativeClientRegion acr(newClient);
 
     Status shutDownStatus(ErrorCodes::InterruptedAtShutdown,
@@ -268,8 +269,15 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
     {
         // This client initiation pattern is only to be used here, with plans to eliminate this
         // pattern down the line.
-        if (!haveClient())
+        if (!haveClient()) {
             Client::initThread(getThreadName());
+
+            // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+            {
+                stdx::lock_guard<Client> lk(cc());
+                cc().setSystemOperationUnkillableByStepdown(lk);
+            }
+        }
         Client& client = cc();
 
         ServiceContext::UniqueOperationContext uniqueTxn;
@@ -320,11 +328,8 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
             lsc->joinOnShutDown();
         }
 
-        if (analyze_shard_key::isFeatureFlagEnabled()) {
-            LOGV2_OPTIONS(
-                6973901, {LogComponent::kDefault}, "Shutting down the QueryAnalysisSampler");
-            analyze_shard_key::QueryAnalysisSampler::get(serviceContext).onShutdown();
-        }
+        LOGV2_OPTIONS(6973901, {LogComponent::kDefault}, "Shutting down the QueryAnalysisSampler");
+        analyze_shard_key::QueryAnalysisSampler::get(serviceContext).onShutdown();
 
         ReplicaSetMonitor::shutdown();
 
@@ -360,6 +365,7 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
         }
 
         if (auto pool = Grid::get(opCtx)->getExecutorPool()) {
+            LOGV2_OPTIONS(7698300, {LogComponent::kSharding}, "Shutting down the ExecutorPool");
             pool->shutdownAndJoin();
         }
 
@@ -368,6 +374,13 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
         }
 
         if (Grid::get(serviceContext)->isShardingInitialized()) {
+            // The CatalogCache must be shuted down before shutting down the CatalogCacheLoader as
+            // the CatalogCache may try to schedule work on CatalogCacheLoader and fail.
+            LOGV2_OPTIONS(7698301, {LogComponent::kSharding}, "Shutting down the CatalogCache");
+            Grid::get(serviceContext)->catalogCache()->shutDownAndJoin();
+
+            LOGV2_OPTIONS(
+                7698302, {LogComponent::kSharding}, "Shutting down the CatalogCacheLoader");
             CatalogCacheLoader::get(serviceContext).shutDown();
         }
 
@@ -680,6 +693,12 @@ private:
 ExitCode runMongosServer(ServiceContext* serviceContext) {
     ThreadClient tc("mongosMain", serviceContext);
 
+    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(*tc.get());
+        tc.get()->setSystemOperationUnkillableByStepdown(lk);
+    }
+
     logMongosVersionInfo(nullptr);
 
     // Set up the periodic runner for background job execution
@@ -801,9 +820,8 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     clusterCursorCleanupJob.go();
 
     UserCacheInvalidator::start(serviceContext, opCtx);
-    if (gFeatureFlagClusterWideConfigM2.isEnabled(serverGlobalParams.featureCompatibility)) {
-        ClusterServerParameterRefresher::start(serviceContext, opCtx);
-    }
+
+    ClusterServerParameterRefresher::start(serviceContext, opCtx);
 
     if (audit::initializeSynchronizeJob) {
         audit::initializeSynchronizeJob(serviceContext);

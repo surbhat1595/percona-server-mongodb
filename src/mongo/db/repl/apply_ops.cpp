@@ -35,7 +35,6 @@
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/db_raii.h"
@@ -47,6 +46,7 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_role.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -98,7 +98,7 @@ Status _applyOps(OperationContext* opCtx,
             status = writeConflictRetry(
                 opCtx,
                 "applyOps",
-                nss.ns(),
+                nss,
                 [opCtx, nss, opObj, opType, alwaysUpsert, oplogApplicationMode, &info, &dbName] {
                     BSONObjBuilder builder;
                     // Remove 'hash' field if it is set. A bit slow as it rebuilds the object.
@@ -149,9 +149,14 @@ Status _applyOps(OperationContext* opCtx,
                         }
                     }
 
-                    AutoGetCollection autoColl(
-                        opCtx, nss, fixLockModeForSystemDotViewsChanges(nss, MODE_IX));
-                    if (!autoColl.getCollection()) {
+                    auto collection = acquireCollection(
+                        opCtx,
+                        CollectionAcquisitionRequest(nss,
+                                                     AcquisitionPrerequisites::kPretendUnsharded,
+                                                     repl::ReadConcernArgs::get(opCtx),
+                                                     AcquisitionPrerequisites::kWrite),
+                        fixLockModeForSystemDotViewsChanges(nss, MODE_IX));
+                    if (!collection.exists()) {
                         // For idempotency reasons, return success on delete operations.
                         if (*opType == 'd') {
                             return Status::OK();
@@ -171,7 +176,7 @@ Status _applyOps(OperationContext* opCtx,
                     // application in the future.
                     const bool isDataConsistent = true;
                     return repl::applyOperation_inlock(opCtx,
-                                                       ctx.db(),
+                                                       collection,
                                                        ApplierOperation{&entry},
                                                        alwaysUpsert,
                                                        oplogApplicationMode,
@@ -251,8 +256,8 @@ Status applyOps(OperationContext* opCtx,
     }
 
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    bool userInitiatedWritesAndNotPrimary = opCtx->writesAreReplicated() &&
-        !replCoord->canAcceptWritesForDatabase(opCtx, dbName.toStringWithTenantId());
+    bool userInitiatedWritesAndNotPrimary =
+        opCtx->writesAreReplicated() && !replCoord->canAcceptWritesForDatabase(opCtx, dbName);
 
     if (userInitiatedWritesAndNotPrimary)
         return Status(ErrorCodes::NotWritablePrimary,

@@ -27,23 +27,20 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/storage/storage_engine_init.h"
 
 #include <cstdlib>
 #include <map>
-#include <memory>
 
 #include "mongo/base/init.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/concurrency/lock_state.h"
+#include "mongo/db/concurrency/locker_impl.h"
 #include "mongo/db/encryption/encryption_options.h"
 #include "mongo/db/encryption/key_id.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/control/storage_control.h"
+#include "mongo/db/storage/execution_control/concurrency_adjustment_parameters_gen.h"
 #include "mongo/db/storage/master_key_rotation_completed.h"
 #include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/db/storage/storage_engine_change_context.h"
@@ -64,9 +61,7 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
-
 namespace mongo {
-
 namespace {
 /**
  * Creates the lock file used to prevent concurrent processes from accessing the data files,
@@ -197,10 +192,19 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
     // This should be set once during startup.
     if ((initFlags & StorageEngineInitFlags::kForRestart) == StorageEngineInitFlags{}) {
         auto readTransactions = gConcurrentReadTransactions.load();
-        static constexpr auto DEFAULT_TICKETS_VALUE = 128;
-        readTransactions = readTransactions == 0 ? DEFAULT_TICKETS_VALUE : readTransactions;
         auto writeTransactions = gConcurrentWriteTransactions.load();
+        static constexpr auto DEFAULT_TICKETS_VALUE = 128;
+        bool userSetConcurrency = false;
+
+        userSetConcurrency = readTransactions != 0 || writeTransactions != 0;
+        readTransactions = readTransactions == 0 ? DEFAULT_TICKETS_VALUE : readTransactions;
         writeTransactions = writeTransactions == 0 ? DEFAULT_TICKETS_VALUE : writeTransactions;
+
+        if (userSetConcurrency) {
+            // If the user manually set concurrency limits, then disable execution control
+            // implicitly.
+            gStorageEngineConcurrencyAdjustmentAlgorithm = "fixedConcurrentTransactions";
+        }
 
         auto svcCtx = opCtx->getServiceContext();
         if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations

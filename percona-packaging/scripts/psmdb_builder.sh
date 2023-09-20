@@ -920,9 +920,9 @@ build_tarball(){
     #
     mkdir -p ${PSMDIR}/bin
     for target in ${PSM_TARGETS[@]}; do
-        cp -f build/install/bin/$target ${PSMDIR}/bin
+        cp -f build/install/bin/${target#"build/install/bin/"} ${PSMDIR}/bin
         if [ ${DEBUG} = 0 ]; then
-            strip --strip-debug ${PSMDIR}/bin/${target}
+            strip --strip-debug ${PSMDIR}/bin/${target#"build/install/bin/"}
         fi
     done
     #

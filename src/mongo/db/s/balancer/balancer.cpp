@@ -50,6 +50,7 @@
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/sharding_config_server_parameters_gen.h"
 #include "mongo/db/s/sharding_logging.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/executor/scoped_task_executor.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/balancer_configuration.h"
@@ -102,11 +103,17 @@ public:
 
     void setSucceeded(int numCandidateChunks,
                       int numChunksMoved,
-                      int numImbalancedCachedCollections) {
+                      int numImbalancedCachedCollections,
+                      Milliseconds selectionTime,
+                      Milliseconds throttleTime,
+                      Milliseconds migrationTime) {
         invariant(!_errMsg);
         _numCandidateChunks = numCandidateChunks;
         _numChunksMoved = numChunksMoved;
         _numImbalancedCachedCollections = numImbalancedCachedCollections;
+        _selectionTime = selectionTime;
+        _throttleTime = throttleTime;
+        _migrationTime = migrationTime;
     }
 
     void setFailed(const string& errMsg) {
@@ -124,12 +131,20 @@ public:
             builder.append("candidateChunks", _numCandidateChunks);
             builder.append("chunksMoved", _numChunksMoved);
             builder.append("imbalancedCachedCollections", _numImbalancedCachedCollections);
+            BSONObjBuilder timeInfo{builder.subobjStart("times"_sd)};
+            timeInfo.append("selectionTimeMillis"_sd, _selectionTime.count());
+            timeInfo.append("throttleTimeMillis"_sd, _throttleTime.count());
+            timeInfo.append("migrationTimeMillis"_sd, _migrationTime.count());
+            timeInfo.done();
         }
         return builder.obj();
     }
 
 private:
     const Timer _executionTimer;
+    Milliseconds _selectionTime;
+    Milliseconds _throttleTime;
+    Milliseconds _migrationTime;
 
     // Set only on success
     int _numCandidateChunks{0};
@@ -741,6 +756,8 @@ void Balancer::_mainThread() {
             // The current configuration is allowing the balancer to perform operations.
             // Unblock the secondary thread if needed.
             _actionStreamCondVar.notify_all();
+
+            // Split chunk to match zones boundaries
             {
                 Status status = _splitChunksIfNeeded(opCtx.get());
                 if (!status.isOK()) {
@@ -751,6 +768,11 @@ void Balancer::_mainThread() {
                 } else {
                     LOGV2_DEBUG(21861, 1, "Done enforcing zone range boundaries.");
                 }
+            }
+
+            // Select and migrate chunks
+            {
+                Timer selectionTimer;
 
                 const std::vector<ClusterStatistics::ShardStatistics> shardStats =
                     uassertStatusOK(_clusterStats->getStats(opCtx.get()));
@@ -773,6 +795,7 @@ void Balancer::_mainThread() {
                                                               shardStats,
                                                               &availableShards,
                                                               _imbalancedCollectionsCache.get()));
+                const Milliseconds selectionTimeMillis{selectionTimer.millis()};
 
                 if (chunksToRebalance.empty() && chunksToDefragment.empty()) {
                     LOGV2_DEBUG(21862, 1, "No need to move any chunk");
@@ -782,21 +805,36 @@ void Balancer::_mainThread() {
                               forcedBalancerRoundInterval ? *forcedBalancerRoundInterval
                                                           : kBalanceRoundDefaultInterval);
                 } else {
-                    auto timeSinceLastMigration = Date_t::now() - lastMigrationTime;
-                    _sleepFor(opCtx.get(),
-                              forcedBalancerRoundInterval
-                                  ? *forcedBalancerRoundInterval - timeSinceLastMigration
-                                  : Milliseconds(balancerMigrationsThrottlingMs.load()) -
-                                      timeSinceLastMigration);
 
+                    // Sleep according to the migration throttling settings
+                    const auto throttleTimeMillis = [&] {
+                        const auto& minRoundinterval = forcedBalancerRoundInterval
+                            ? *forcedBalancerRoundInterval
+                            : Milliseconds(balancerMigrationsThrottlingMs.load());
+
+                        const auto timeSinceLastMigration = Date_t::now() - lastMigrationTime;
+                        if (timeSinceLastMigration < minRoundinterval) {
+                            return minRoundinterval - timeSinceLastMigration;
+                        }
+                        return Milliseconds::zero();
+                    }();
+                    _sleepFor(opCtx.get(), throttleTimeMillis);
+
+                    // Migrate chunks
+                    Timer migrationTimer;
                     _balancedLastTime =
                         _moveChunks(opCtx.get(), chunksToRebalance, chunksToDefragment);
                     lastMigrationTime = Date_t::now();
+                    const Milliseconds migrationTimeMillis{migrationTimer.millis()};
 
+                    // Complete round
                     roundDetails.setSucceeded(
                         static_cast<int>(chunksToRebalance.size() + chunksToDefragment.size()),
                         _balancedLastTime,
-                        _imbalancedCollectionsCache->size());
+                        _imbalancedCollectionsCache->size(),
+                        selectionTimeMillis,
+                        throttleTimeMillis,
+                        migrationTimeMillis);
 
                     auto catalogManager = ShardingCatalogManager::get(opCtx.get());
                     ShardingLogging::get(opCtx.get())
@@ -1099,6 +1137,28 @@ int Balancer::_moveChunks(OperationContext* opCtx,
             ShardingCatalogManager::get(opCtx)->splitOrMarkJumbo(
                 opCtx, collection.getNss(), migrateInfo.minKey, migrateInfo.getMaxChunkSizeBytes());
             continue;
+        }
+
+        if (status == ErrorCodes::IndexNotFound &&
+            gFeatureFlagShardKeyIndexOptionalHashedSharding.isEnabled(
+                serverGlobalParams.featureCompatibility)) {
+
+            const auto [cm, _] = uassertStatusOK(
+                Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(
+                    opCtx, migrateInfo.nss));
+
+            if (cm.getShardKeyPattern().isHashedPattern()) {
+                LOGV2(78252,
+                      "Turning off balancing for hashed collection because migration failed due to "
+                      "missing shardkey index",
+                      "migrateInfo"_attr = redact(migrateInfo.toString()),
+                      "error"_attr = redact(status),
+                      "collection"_attr = migrateInfo.nss);
+
+                // Schedule writing to config.collections to turn off the balancer.
+                _commandScheduler->disableBalancerForCollection(opCtx, migrateInfo.nss);
+                continue;
+            }
         }
 
         LOGV2(21872,

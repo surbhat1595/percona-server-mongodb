@@ -559,6 +559,7 @@ colgroup
 colgroups
 collatorp
 comparator
+comparators
 comparep
 compat
 cond
@@ -778,6 +779,7 @@ gettimeofday
 getv
 ggg
 github
+globfree
 gobare
 goesc
 gostring
@@ -887,11 +889,11 @@ libmemkind
 libs
 libsodium
 libwiredtiger
+lifecycle
 linux
 llll
 llu
 llvm
-ln
 loadtext
 loc
 localTime
@@ -1134,7 +1136,6 @@ rmw
 rng
 rotN
 rotn
-rp
 rpc
 rts
 ru
@@ -1173,6 +1174,7 @@ sn
 snaplen
 snapsort
 snprintf
+sortable
 sp
 sparc
 spinlock

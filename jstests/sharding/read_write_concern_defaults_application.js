@@ -509,7 +509,6 @@ let testCases = {
     getDatabaseVersion: {skip: "does not accept read or write concern"},
     getDefaultRWConcern: {skip: "does not accept read or write concern"},
     getDiagnosticData: {skip: "does not accept read or write concern"},
-    getFreeMonitoringStatus: {skip: "does not accept read or write concern"},
     getLog: {skip: "does not accept read or write concern"},
     getMore: {skip: "does not accept read or write concern"},
     getParameter: {skip: "does not accept read or write concern"},
@@ -740,7 +739,6 @@ let testCases = {
     setCommittedSnapshot: {skip: "internal command"},
     setDefaultRWConcern: {skip: "special case (must run after all other commands)"},
     setFeatureCompatibilityVersion: {skip: "does not accept read or write concern"},
-    setFreeMonitoring: {skip: "does not accept read or write concern"},
     setProfilingFilterGlobally: {skip: "does not accept read or write concern"},
     setIndexCommitQuorum: {skip: "does not accept read or write concern"},
     setParameter: {skip: "does not accept read or write concern"},
@@ -928,6 +926,11 @@ function createProfileFilterForTestCase(test, targetId, explicitRWC) {
 function runScenario(
     desc, conn, regularCheckConn, configSvrCheckConn, {explicitRWC, explicitProvenance = false}) {
     let runCommandTest = function(cmdName, test) {
+        // These commands were removed but break this test in multiversion
+        if (cmdName === "getFreeMonitoringStatus" || cmdName === "setFreeMonitoring") {
+            return;
+        }
+
         assert(test !== undefined,
                "coverage failure: must define a RWC defaults application test for " + cmdName);
 

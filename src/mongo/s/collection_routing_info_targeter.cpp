@@ -558,20 +558,13 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetDelete(
             deleteQuery = timeseries::getBucketLevelPredicateForRouting(
                 deleteQuery, expCtx, tsFields->getMetaField());
         }
-
-        // Sharded collections have the following further requirements for targeting:
-        //
-        // Limit-1 deletes must be targeted exactly by shard key *or* exact _id
-        shardKey = uassertStatusOK(extractShardKeyFromBasicQueryWithContext(
-            expCtx, _cri.cm.getShardKeyPattern(), deleteQuery));
     }
 
-    // Target the shard key or delete query
-    if (!shardKey.isEmpty()) {
-        auto swEndpoint = _targetShardKey(shardKey, collation, chunkRanges);
-        if (swEndpoint.isOK()) {
-            return std::vector{std::move(swEndpoint.getValue())};
-        }
+    // We first try to target based on the delete's query. It is always valid to forward any
+    // delete to a single shard, so return immediately if we are able to target a single shard.
+    auto endPoints = uassertStatusOK(_targetQuery(expCtx, deleteQuery, collation, chunkRanges));
+    if (endPoints.size() == 1) {
+        return endPoints;
     }
 
     // We failed to target a single shard.
@@ -593,25 +586,21 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetDelete(
 
     // Regular single deletes must target a single shard or be exact-ID.
     // Time-series single deletes must target a single shard.
-    auto isShardedTimeseriesCollection = isShardedTimeSeriesBucketsNamespace();
     uassert(ErrorCodes::ShardKeyNotFound,
             fmt::format("A single delete on a sharded {} contain the shard key (and have the "
                         "simple collation). Delete request: {}, shard key pattern: {}",
-                        isShardedTimeseriesCollection
+                        _isRequestOnTimeseriesViewNamespace
                             ? "time-series collection must"
                             : "collection must contain an exact match on _id (and have the "
                               "collection default collation) or",
                         deleteOp.toBSON().toString(),
                         _cri.cm.getShardKeyPattern().toString()),
             !_cri.cm.isSharded() || deleteOp.getMulti() ||
-                (isExactIdQuery(opCtx, *cq, _cri.cm) && !isShardedTimeseriesCollection) ||
+                (isExactIdQuery(opCtx, *cq, _cri.cm) && !_isRequestOnTimeseriesViewNamespace) ||
                 feature_flags::gFeatureFlagUpdateOneWithoutShardKey.isEnabled(
                     serverGlobalParams.featureCompatibility));
 
-    if (chunkRanges) {
-        chunkRanges->clear();
-    }
-    return uassertStatusOK(_targetQuery(expCtx, deleteQuery, collation, chunkRanges));
+    return endPoints;
 }
 
 StatusWith<std::vector<ShardEndpoint>> CollectionRoutingInfoTargeter::_targetQuery(
@@ -756,6 +745,10 @@ int CollectionRoutingInfoTargeter::getNShardsOwningChunks() const {
 
 bool CollectionRoutingInfoTargeter::isShardedTimeSeriesBucketsNamespace() const {
     return _cri.cm.isSharded() && _cri.cm.getTimeseriesFields();
+}
+
+bool CollectionRoutingInfoTargeter::isRequestOnTimeseriesViewNamespace() const {
+    return _isRequestOnTimeseriesViewNamespace;
 }
 
 bool CollectionRoutingInfoTargeter::timeseriesNamespaceNeedsRewrite(

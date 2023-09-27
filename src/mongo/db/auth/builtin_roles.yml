@@ -237,7 +237,6 @@ roles:
         privileges:
             - matchType: cluster
               actions: &clusterMonitorRoleClusterActions
-                  - checkFreeMonitoringStatus
                   - connPoolStats
                   - getCmdLineOpts
                   - getDefaultRWConcern # clusterManager gets this also
@@ -349,7 +348,6 @@ roles:
                   - runTenantMigration
                   - setDefaultRWConcern
                   - setFeatureCompatibilityVersion
-                  - setFreeMonitoring
                   - setClusterParameter
                   - getClusterParameter
                   - setChangeStreamState

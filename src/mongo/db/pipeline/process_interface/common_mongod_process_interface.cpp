@@ -470,24 +470,26 @@ CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(
         }
     }
 
-    boost::optional<AutoGetCollectionForReadCommandMaybeLockFree> autoColl;
-    const NamespaceStringOrUUID nsOrUUID =
-        expCtx->uuid ? NamespaceStringOrUUID{expCtx->ns.dbName(), *expCtx->uuid} : expCtx->ns;
-
     // Reparse 'pipeline' to discover whether there are secondary namespaces that we need to lock
     // when constructing our query executor.
     auto lpp = LiteParsedPipeline(expCtx->ns, pipeline->serializeToBson());
     std::vector<NamespaceStringOrUUID> secondaryNamespaces = lpp.getForeignExecutionNamespaces();
 
-    autoColl.emplace(expCtx->opCtx,
-                     nsOrUUID,
-                     AutoGetCollection::Options{}.secondaryNssOrUUIDs(secondaryNamespaces),
-                     AutoStatsTracker::LogMode::kUpdateTop);
+    AutoGetCollectionForReadCommandMaybeLockFree autoColl(
+        expCtx->opCtx,
+        expCtx->ns,
+        AutoGetCollection::Options{}.secondaryNssOrUUIDs(secondaryNamespaces),
+        AutoStatsTracker::LogMode::kUpdateTop);
+
+    uassert(ErrorCodes::NamespaceNotFound,
+            fmt::format("collection '{}' does not match the expected uuid",
+                        expCtx->ns.toStringForErrorMsg()),
+            !expCtx->uuid || (autoColl && autoColl->uuid() == expCtx->uuid));
 
     MultipleCollectionAccessor holder{expCtx->opCtx,
-                                      &autoColl->getCollection(),
-                                      autoColl->getNss(),
-                                      autoColl->isAnySecondaryNamespaceAViewOrSharded(),
+                                      &autoColl.getCollection(),
+                                      autoColl.getNss(),
+                                      autoColl.isAnySecondaryNamespaceAViewOrSharded(),
                                       secondaryNamespaces};
     auto resolvedAggRequest = aggRequest ? &aggRequest.get() : nullptr;
     PipelineD::buildAndAttachInnerQueryExecutorToPipeline(
@@ -669,9 +671,7 @@ BSONObj CommonMongodProcessInterface::_reportCurrentOpForClient(
     OperationContext* clientOpCtx = client->getOperationContext();
 
     if (clientOpCtx) {
-        bool omitAndRedactInformation =
-            CurOp::get(clientOpCtx)->debug().shouldOmitDiagnosticInformation;
-        if (omitAndRedactInformation) {
+        if (CurOp::get(clientOpCtx)->getShouldOmitDiagnosticInformation()) {
             return builder.obj();
         }
 

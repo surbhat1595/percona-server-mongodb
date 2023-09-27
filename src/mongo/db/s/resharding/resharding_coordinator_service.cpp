@@ -45,6 +45,7 @@
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/metrics/sharding_data_transform_cumulative_metrics.h"
 #include "mongo/db/s/metrics/sharding_data_transform_metrics.h"
+#include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_coordinator_commit_monitor.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
@@ -111,14 +112,14 @@ Date_t getCurrentTime() {
     return svcCtx->getFastClockSource()->now();
 }
 
-void assertNumDocsModifiedMatchesExpected(const BatchedCommandRequest& request,
-                                          const BSONObj& response,
-                                          int expected) {
-    auto numDocsModified = response.getIntField("n");
+void assertNumDocsMatchedEqualsExpected(const BatchedCommandRequest& request,
+                                        const BSONObj& response,
+                                        int expected) {
+    auto numDocsMatched = response.getIntField("n");
     uassert(5030401,
             str::stream() << "Expected to match " << expected << " docs, but only matched "
-                          << numDocsModified << " for write request " << request.toString(),
-            expected == numDocsModified);
+                          << numDocsMatched << " for write request " << request.toString(),
+            expected == numDocsMatched);
 }
 
 void appendShardEntriesToSetBuilder(const ReshardingCoordinatorDocument& coordinatorDoc,
@@ -283,15 +284,15 @@ void writeToCoordinatorStateNss(OperationContext* opCtx,
         }
     }());
 
-    auto expectedNumModified = (request.getBatchType() == BatchedCommandRequest::BatchType_Insert)
+    auto expectedNumMatched = (request.getBatchType() == BatchedCommandRequest::BatchType_Insert)
         ? boost::none
         : boost::make_optional(1);
 
     auto res = ShardingCatalogManager::get(opCtx)->writeToConfigDocumentInTxn(
         opCtx, NamespaceString::kConfigReshardingOperationsNamespace, request, txnNumber);
 
-    if (expectedNumModified) {
-        assertNumDocsModifiedMatchesExpected(request, res, *expectedNumModified);
+    if (expectedNumMatched) {
+        assertNumDocsMatchedEqualsExpected(request, res, *expectedNumMatched);
     }
 
     setMeticsAfterWrite(metrics, nextState, timestamp);
@@ -460,7 +461,7 @@ void updateConfigCollectionsForOriginalNss(OperationContext* opCtx,
     auto res = ShardingCatalogManager::get(opCtx)->writeToConfigDocumentInTxn(
         opCtx, CollectionType::ConfigNS, request, txnNumber);
 
-    assertNumDocsModifiedMatchesExpected(request, res, 1 /* expected */);
+    assertNumDocsMatchedEqualsExpected(request, res, 1 /* expected */);
 }
 
 void writeToConfigCollectionsForTempNss(OperationContext* opCtx,
@@ -552,15 +553,15 @@ void writeToConfigCollectionsForTempNss(OperationContext* opCtx,
         }
     }());
 
-    auto expectedNumModified = (request.getBatchType() == BatchedCommandRequest::BatchType_Insert)
+    auto expectedNumMatched = (request.getBatchType() == BatchedCommandRequest::BatchType_Insert)
         ? boost::none
         : boost::make_optional(1);
 
     auto res = ShardingCatalogManager::get(opCtx)->writeToConfigDocumentInTxn(
         opCtx, CollectionType::ConfigNS, request, txnNumber);
 
-    if (expectedNumModified) {
-        assertNumDocsModifiedMatchesExpected(request, res, *expectedNumModified);
+    if (expectedNumMatched) {
+        assertNumDocsMatchedEqualsExpected(request, res, *expectedNumMatched);
     }
 }
 
@@ -645,7 +646,7 @@ void writeToConfigPlacementHistoryForOriginalNss(
     auto response = ShardingCatalogManager::get(opCtx)->writeToConfigDocumentInTxn(
         opCtx, NamespaceString::kConfigsvrPlacementHistoryNamespace, request, txnNumber);
 
-    assertNumDocsModifiedMatchesExpected(request, response, 1);
+    assertNumDocsMatchedEqualsExpected(request, response, 1);
 }
 
 void insertChunkAndTagDocsForTempNss(OperationContext* opCtx,
@@ -940,16 +941,21 @@ void writeStateTransitionAndCatalogUpdatesThenBumpCollectionPlacementVersions(
             ShardingCatalogClient::kLocalWriteConcern);
 }
 
-void removeCoordinatorDocAndReshardingFields(OperationContext* opCtx,
-                                             ReshardingMetrics* metrics,
-                                             const ReshardingCoordinatorDocument& coordinatorDoc,
-                                             boost::optional<Status> abortReason) {
+ReshardingCoordinatorDocument removeCoordinatorDocAndReshardingFields(
+    OperationContext* opCtx,
+    ReshardingMetrics* metrics,
+    const ReshardingCoordinatorDocument& coordinatorDoc,
+    boost::optional<Status> abortReason) {
     // If the coordinator needs to abort and isn't in kInitializing, additional collections need to
     // be cleaned up in the final transaction. Otherwise, cleanup for abort and success are the
     // same.
     const bool wasDecisionPersisted =
-        coordinatorDoc.getState() == CoordinatorStateEnum::kCommitting;
+        coordinatorDoc.getState() >= CoordinatorStateEnum::kCommitting;
     invariant((wasDecisionPersisted && !abortReason) || abortReason);
+
+    if (coordinatorDoc.getState() > CoordinatorStateEnum::kCommitting) {
+        return coordinatorDoc;
+    }
 
     ReshardingCoordinatorDocument updatedCoordinatorDoc = coordinatorDoc;
     updatedCoordinatorDoc.setState(CoordinatorStateEnum::kDone);
@@ -987,6 +993,7 @@ void removeCoordinatorDocAndReshardingFields(OperationContext* opCtx,
         ShardingCatalogClient::kLocalWriteConcern);
 
     metrics->onStateTransition(coordinatorDoc.getState(), updatedCoordinatorDoc.getState());
+    return updatedCoordinatorDoc;
 }
 }  // namespace resharding
 
@@ -1660,6 +1667,7 @@ ExecutorFuture<void> ReshardingCoordinator::_runReshardingOp(
         })
         .onCompletion([this, self = shared_from_this()](Status status) {
             _metrics->onStateTransition(_coordinatorDoc.getState(), boost::none);
+            _logStatsOnCompletion(status.isOK());
 
             // Destroy metrics early so its lifetime will not be tied to the lifetime of this
             // state machine. This is because we have future callbacks copy shared pointers to this
@@ -2382,6 +2390,25 @@ void ReshardingCoordinator::_updateChunkImbalanceMetrics(const NamespaceString& 
                       logAttrs(nss),
                       "error"_attr = redact(ex.toStatus()));
     }
+}
+
+void ReshardingCoordinator::_logStatsOnCompletion(bool success) {
+    BSONObjBuilder builder;
+    BSONObjBuilder statsBuilder;
+    builder.append("uuid", _coordinatorDoc.getReshardingUUID().toBSON());
+    builder.append("status", success ? "success" : "failed");
+    statsBuilder.append("ns", toStringForLogging(_coordinatorDoc.getSourceNss()));
+    statsBuilder.append("sourceUUID", _coordinatorDoc.getSourceUUID().toBSON());
+    statsBuilder.append("newUUID", _coordinatorDoc.getReshardingUUID().toBSON());
+    statsBuilder.append("newShardKey", _coordinatorDoc.getReshardingKey().toBSON());
+    if (_coordinatorDoc.getStartTime()) {
+        statsBuilder.append("startTime", *_coordinatorDoc.getStartTime());
+    }
+    statsBuilder.append("endTime", getCurrentTime());
+    _metrics->reportOnCompletion(&statsBuilder);
+
+    builder.append("statistics", statsBuilder.obj());
+    LOGV2(7763800, "Resharding complete", "info"_attr = builder.obj());
 }
 
 }  // namespace mongo

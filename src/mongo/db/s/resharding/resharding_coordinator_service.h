@@ -83,10 +83,11 @@ void writeStateTransitionAndCatalogUpdatesThenBumpCollectionPlacementVersions(
     ReshardingMetrics* metrics,
     const ReshardingCoordinatorDocument& coordinatorDoc);
 
-void removeCoordinatorDocAndReshardingFields(OperationContext* opCtx,
-                                             ReshardingMetrics* metrics,
-                                             const ReshardingCoordinatorDocument& coordinatorDoc,
-                                             boost::optional<Status> abortReason = boost::none);
+ReshardingCoordinatorDocument removeCoordinatorDocAndReshardingFields(
+    OperationContext* opCtx,
+    ReshardingMetrics* metrics,
+    const ReshardingCoordinatorDocument& coordinatorDoc,
+    boost::optional<Status> abortReason = boost::none);
 }  // namespace resharding
 
 class ReshardingCoordinatorExternalState {
@@ -538,6 +539,11 @@ private:
 
     // Waits for majority replication of the latest opTime unless token is cancelled.
     SemiFuture<void> _waitForMajority(const CancellationToken& token);
+
+    /**
+     * Print a log containing the information of this resharding operation.
+     */
+    void _logStatsOnCompletion(bool success);
 
     // The unique key for a given resharding operation. InstanceID is an alias for BSONObj. The
     // value of this is the UUID that will be used as the collection UUID for the new sharded

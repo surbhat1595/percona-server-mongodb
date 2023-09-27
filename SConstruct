@@ -455,14 +455,6 @@ add_option(
 )
 
 add_option(
-    'enable-free-mon',
-    choices=["auto", "on", "off"],
-    default="auto",
-    help='Disable support for Free Monitoring to avoid HTTP client library dependencies',
-    type='choice',
-)
-
-add_option(
     'enable-http-client',
     choices=["auto", "on", "off"],
     default="auto",
@@ -3328,7 +3320,6 @@ if has_ninja_module:
 
 # --- check system ---
 ssl_provider = None
-free_monitoring = get_option("enable-free-mon")
 http_client = get_option("enable-http-client")
 
 
@@ -3346,7 +3337,6 @@ env.AddMethod(isSanitizerEnabled, 'IsSanitizerEnabled')
 def doConfigure(myenv):
     global wiredtiger
     global ssl_provider
-    global free_monitoring
     global http_client
 
     # Check that the compilers work.
@@ -4694,6 +4684,17 @@ def doConfigure(myenv):
 
             if myenv.TargetOSIs('darwin'):
                 myenv.AddToLINKFLAGSIfSupported('-Wl,-object_path_lto,${TARGET}.lto')
+            else:
+                # According to intel benchmarks -fno-plt increases perf
+                # See PM-2215
+                if linker_ld != "gold":
+                    myenv.ConfError("lto compilation currently only works with the --linker=gold")
+                if link_model != "object":
+                    myenv.ConfError(
+                        "lto compilation currently only works with the --link-model=object")
+                if not myenv.AddToCCFLAGSIfSupported('-fno-plt') or \
+                    not myenv.AddToLINKFLAGSIfSupported('-fno-plt'):
+                    myenv.ConfError("-fno-plt is not supported by the compiler")
 
         else:
             myenv.ConfError("Don't know how to enable --lto on current toolchain")
@@ -5384,16 +5385,6 @@ def doConfigure(myenv):
     # ask each module to configure itself and the build environment.
     moduleconfig.configure_modules(mongo_modules, conf)
 
-    # Resolve --enable-free-mon
-    if free_monitoring == "auto":
-        if 'enterprise' not in conf.env['MONGO_MODULES']:
-            free_monitoring = "on"
-        else:
-            free_monitoring = "off"
-
-    if free_monitoring == "on":
-        checkHTTPLib(required=True)
-
     # Resolve --enable-http-client
     if http_client == "auto":
         if checkHTTPLib():
@@ -5403,12 +5394,6 @@ def doConfigure(myenv):
             http_client = "off"
     elif http_client == "on":
         checkHTTPLib(required=True)
-
-    # Sanity check.
-    # We know that http_client was explicitly disabled here,
-    # because the free_monitoring check would have failed if no http lib were available.
-    if (free_monitoring == "on") and (http_client == "off"):
-        env.ConfError("FreeMonitoring requires an HTTP client which has been explicitly disabled")
 
     if env['TARGET_ARCH'] == "ppc64le":
         # This checks for an altivec optimization we use in full text search.
@@ -6325,7 +6310,6 @@ version_parts = [int(x) for x in version_parts[:4]]
 Export([
     'debugBuild',
     'endian',
-    'free_monitoring',
     'get_option',
     'has_option',
     'http_client',

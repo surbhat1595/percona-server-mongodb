@@ -110,7 +110,6 @@ buildvariants:
   - name: .clustered_collections
   - name: .misc_js
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: jsCore_txns_large_txns_format
   - name: json_schema
@@ -316,6 +315,9 @@ buildvariants:
   - name: .serverless
     distros:
     - rhel80-xlarge
+  - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
 
 - &rhel80-debug-aubsan-lite-template
   <<: *linux_debug_aubsan_compile_variant_dependency

@@ -304,15 +304,15 @@ variables:
   - enterprise-amazon2
   - enterprise-amazon2-arm64
   - enterprise-amazon2023
+  - enterprise-amazon2023-lto
   - enterprise-amazon2023-arm64
-  - enterprise-debian10-64
+  - enterprise-amazon2023-arm64-lto
   - enterprise-debian11-64
   - enterprise-linux-64-amazon-ami
   - enterprise-macos
   - enterprise-macos-arm64
   - enterprise-rhel-70-64-bit
   - enterprise-rhel-81-ppc64le
-  - enterprise-rhel-72-s390x
   - enterprise-rhel-80-64-bit
   - enterprise-rhel-80-64-bit-coverage
   - enterprise-rhel-80-64-bit-suggested
@@ -322,8 +322,6 @@ variables:
   - enterprise-rhel-90-arm64
   - enterprise-suse12-64
   - enterprise-suse15-64
-  - enterprise-ubuntu1804-64
-  - enterprise-ubuntu1804-arm64
   - enterprise-ubuntu2004-arm64
   - enterprise-ubuntu2204-arm64
   - enterprise-ubuntu2004-64
@@ -332,10 +330,6 @@ variables:
   - enterprise-windows-debug-unoptimized
   - enterprise-windows-inmem
   - enterprise-windows-wtdevelop
-  - ubuntu1804-debug-asan
-  - ubuntu1804-debug-ubsan
-  - ubuntu1804-debug-aubsan-lite-required
-  - ubuntu1804-debug-aubsan-lite_fuzzer
 
 
 # List of all variants that make mh artifacts.
@@ -351,8 +345,9 @@ variables:
   - enterprise-rhel-90-arm64
   - enterprise-amazon2-arm64
   - enterprise-amazon2023
+  - enterprise-amazon2023-lto
   - enterprise-amazon2023-arm64
-  - enterprise-ubuntu1804-64
+  - enterprise-amazon2023-arm64-lto
   - enterprise-ubuntu2004-64
   - enterprise-ubuntu2204-64
   - enterprise-windows
@@ -368,15 +363,12 @@ variables:
   - enterprise-amazon2-arm64
   - enterprise-amazon2023
   - enterprise-amazon2023-arm64
-  - debian10
   - debian11
-  - enterprise-debian10-64
   - enterprise-debian11-64
   - rhel70
   - rhel76_compile_rhel70
   - enterprise-rhel-70-64-bit
   - enterprise-rhel-81-ppc64le
-  - enterprise-rhel-72-s390x
   - ubi8
   - rhel80
   - rhel-82-arm64
@@ -392,14 +384,10 @@ variables:
   - enterprise-suse12-64
   - suse15
   - enterprise-suse15-64
-  - ubuntu1804
-  - ubuntu1804-arm64
   - ubuntu2004-arm64
   - ubuntu2204-arm64
   - ubuntu2004
   - ubuntu2204
-  - enterprise-ubuntu1804-64
-  - enterprise-ubuntu1804-arm64
   - enterprise-ubuntu2004-arm64
   - enterprise-ubuntu2204-arm64
   - enterprise-ubuntu2004-64
@@ -750,6 +738,14 @@ functions:
       binary: bash
       args:
       - "./src/evergreen/functions/added_and_modified_patch_files_get.sh"
+
+  "umount tmp directory":
+  - *f_expansions_write
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/functions/tmp_directory_umount.sh"
 
   "determine resmoke jobs": &determine_resmoke_jobs
     command: subprocess.exec
@@ -2386,6 +2382,7 @@ post:
 - func: "save system resource information"
 - func: "save UndoDB recordings"
 - func: "umount shared scons directory"
+- func: "umount tmp directory"
 - func: "cleanup FUSE watchdog"
 - func: "cleanup environment"
 - func: "cleanup jepsen docker test"
@@ -3137,7 +3134,6 @@ tasks:
       targets: install-stitch-support install-stitch-support-debug install-stitch-support-dev
       task_compile_flags: >-
         --link-model=dynamic-sdk
-        --enable-free-mon=off
         --ssl=off
         --enable-http-client=off
         --modules=
@@ -3169,7 +3165,6 @@ tasks:
       targets: install-stitch-support-test
       compiling_for_test: true
       task_compile_flags: >-
-        --enable-free-mon=off
         --ssl=off
         --enable-http-client=off
         --modules=
@@ -3201,8 +3196,7 @@ tasks:
       targets: archive-mongo-crypt-dev
       task_compile_flags: >-
         --allocator=system
-        --enable-free-mon=off
-        --enterprise-features=fle,search
+        --enterprise-features=fle,search,vector_search
         --js-engine=none
         --link-model=dynamic-sdk
         --enable-http-client=off
@@ -3239,8 +3233,7 @@ tasks:
         --dbg=on
         --opt=off
         --allocator=system
-        --enable-free-mon=off
-        --enterprise-features=fle,search
+        --enterprise-features=fle,search,vector_search
         --js-engine=none
         --link-model=dynamic-sdk
         DESTDIR='$BUILD_ROOT/crypt-lib-$MONGO_VERSION'
@@ -3277,8 +3270,7 @@ tasks:
       compiling_for_test: true
       task_compile_flags: >-
         --allocator=system
-        --enable-free-mon=off
-        --enterprise-features=fle,search
+        --enterprise-features=fle,search,vector_search
         --js-engine=none
         --link-model=static
         DESTDIR='$BUILD_ROOT/crypt-lib-$MONGO_VERSION'
@@ -3614,18 +3606,6 @@ tasks:
   - func: "run tests"
     vars:
       suites: benchmarks_abt_path_lowering
-      exec_timeout_secs: 18000  # 5 hour timeout.
-      resmoke_jobs_max: 1
-  - func: "send benchmark results"
-
-- <<: *benchmark_template
-  name: benchmarks_streams
-  tags: ["benchmarks"]
-  commands:
-  - func: "do benchmark setup"
-  - func: "run tests"
-    vars:
-      suites: benchmarks_streams
       exec_timeout_secs: 18000  # 5 hour timeout.
       resmoke_jobs_max: 1
   - func: "send benchmark results"
@@ -6667,15 +6647,6 @@ tasks:
       resmoke_jobs_max: 1
 
 - <<: *task_template
-  name: free_monitoring
-  tags: []
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_jobs_max: 1
-
-- <<: *task_template
   name: client_encrypt
   tags: ["ssl", "encrypt", "patch_build"]
   commands:
@@ -8009,6 +7980,33 @@ tasks:
       resmoke_jobs_max: 1
 
 - <<: *task_template
+  name: vector_search
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_jobs_max: 1
+
+- <<: *task_template
+  name: vector_search_auth
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_jobs_max: 1
+
+- <<: *task_template
+  name: vector_search_ssl
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_jobs_max: 1
+
+- <<: *task_template
   name: cqf
   tags: []
   commands:
@@ -8031,13 +8029,6 @@ tasks:
 
 - <<: *task_template
   name: cqf_parallel
-  tags: []
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: streams
   tags: []
   commands:
   - func: "do setup"
@@ -8400,6 +8391,19 @@ task_groups:
   - archive_dbtest
   - compile_all_but_not_unittests
   - package
+
+# TODO: SERVER-79886 Fix commented out tasks
+- <<: *compile_task_group_template
+  name: compile_test_and_package_serial_lto_no_unittests_TG
+  tasks:
+  - compile_dist_test
+  - archive_dist_test
+  - archive_dist_test_debug
+  - compile_dbtest
+  # - run_dbtest
+  # - archive_dbtest
+  # - compile_all_but_not_unittests
+  # - package
 
 # SERVER-76006
 # This is a compile stream meant for non-cached and/or underpowered systems.

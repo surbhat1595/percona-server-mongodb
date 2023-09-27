@@ -553,15 +553,23 @@ std::vector<std::unique_ptr<Pipeline, PipelineDeleter>> createAdditionalPipeline
     boost::intrusive_ptr<ExpressionContext> expCtx,
     const AggregateCommandRequest& request,
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
-    boost::optional<UUID> collUUID) {
+    boost::optional<UUID> collUUID,
+    const std::function<void(void)>& resetContextFn) {
 
     std::vector<std::unique_ptr<Pipeline, PipelineDeleter>> pipelines;
     // Exchange is not allowed to be specified if there is a $search stage.
-    if (auto metadataPipe = getSearchHelpers(opCtx->getServiceContext())
-                                ->generateMetadataPipelineForSearch(
-                                    opCtx, expCtx, request, pipeline.get(), collUUID)) {
+    if (getSearchHelpers(opCtx->getServiceContext())->isSearchPipeline(pipeline.get())) {
+        // Release locks early, before we generate the search pipeline, so that we don't hold them
+        // during network calls to mongot. This is fine for search pipelines since they are not
+        // reading any local (lock-protected) data in the main pipeline.
+        resetContextFn();
         pipelines.push_back(std::move(pipeline));
-        pipelines.push_back(std::move(metadataPipe));
+
+        if (auto metadataPipe = getSearchHelpers(opCtx->getServiceContext())
+                                    ->generateMetadataPipelineForSearch(
+                                        opCtx, expCtx, request, pipelines.back().get(), collUUID)) {
+            pipelines.push_back(std::move(metadataPipe));
+        }
     } else {
         // Takes ownership of 'pipeline'.
         pipelines =
@@ -628,7 +636,7 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createExecutor
                                                       pipeline.get());
 
         auto pipelines = createAdditionalPipelinesIfNeeded(
-            expCtx->opCtx, expCtx, request, std::move(pipeline), expCtx->uuid);
+            expCtx->opCtx, expCtx, request, std::move(pipeline), expCtx->uuid, resetContextFn);
         for (auto&& pipelineIt : pipelines) {
             // There are separate ExpressionContexts for each exchange pipeline, so make sure to
             // pass the pipeline's ExpressionContext to the plan executor factory.
@@ -1036,7 +1044,10 @@ Status runAggregate(OperationContext* opCtx,
         // If the aggregate command supports encrypted collections, do rewrites of the pipeline to
         // support querying against encrypted fields.
         if (shouldDoFLERewrite(request)) {
-            CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+            {
+                stdx::lock_guard<Client> lk(*opCtx->getClient());
+                CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+            }
 
             if (!request.getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                 pipeline = processFLEPipelineD(

@@ -29,7 +29,6 @@ env.SConscript(
         'cst',
         'encryption',
         'exec',
-        'free_mon',
         'fts',
         'ftdc',
         'geo',
@@ -2143,6 +2142,17 @@ env.Library(
 )
 
 env.Library(
+    target='feature_compatibility_version_metrics',
+    source=[
+        'feature_compatibility_version_metrics.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/commands/server_status_core',
+        'server_base',
+    ],
+)
+
+env.Library(
     target='service_context_test_fixture',
     source=[
         'service_context_test_fixture.cpp',
@@ -2375,7 +2385,7 @@ env.Library(
         'dbdirectclient',
         'dbhelpers',
         'exec/working_set',
-        'free_mon/free_mon_mongod',
+        'feature_compatibility_version_metrics',
         'ftdc/ftdc_mongod',
         'fts/ftsmongod',
         'index/index_access_method',
@@ -2496,7 +2506,6 @@ env.Library(
         'concurrency/flow_control_ticketholder',
         'concurrency/lock_manager',
         'fle_crud_mongod',
-        'free_mon/free_mon_mongod',
         'ftdc/ftdc_mongod',
         'index/index_access_method',
         'index_builds_coordinator_mongod',

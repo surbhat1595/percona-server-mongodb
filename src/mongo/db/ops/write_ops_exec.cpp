@@ -673,8 +673,7 @@ boost::optional<BSONObj> advanceExecutor(OperationContext* opCtx,
     PlanExecutor::ExecState state;
     try {
         state = exec->getNext(&value, nullptr);
-    } catch (const WriteConflictException&) {
-        // Propagate the WCE to be retried at a higher-level without logging.
+    } catch (const StorageUnavailableException&) {
         throw;
     } catch (DBException& exception) {
         auto&& explainer = exec->getPlanExplainer();
@@ -1822,7 +1821,7 @@ Status performAtomicTimeseriesWrites(
             diffFromUpdate = update.getU().getDiff();
             updated = doc_diff::applyDiff(original.value(),
                                           diffFromUpdate,
-                                          static_cast<bool>(repl::tenantMigrationInfo(opCtx)));
+                                          update.getU().mustCheckExistenceForInsertOperations());
             diffOnIndexes = &diffFromUpdate;
             args.update = update_oplog_entry::makeDeltaOplogEntry(diffFromUpdate);
         } else if (update.getU().type() == write_ops::UpdateModification::Type::kTransform) {

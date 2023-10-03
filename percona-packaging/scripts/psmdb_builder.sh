@@ -442,7 +442,7 @@ install_mongodbtoolchain(){
         OS_CODE_NAME=${DEBIAN}
     fi
     export USER=$(whoami)
-    bash -x ./toolchain_installer.sh -k --download-url https://jenkins.percona.com/downloads/mongodbtoolchain/${OS_CODE_NAME}_mongodbtoolchain.tar.gz || exit 1
+    bash -x ./toolchain_installer.sh -k --download-url https://jenkins.percona.com/downloads/mongodbtoolchain/${OS_CODE_NAME}_mongodbtoolchain_${ARCH}.tar.gz || exit 1
     export PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
 }
 

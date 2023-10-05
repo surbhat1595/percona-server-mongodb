@@ -238,7 +238,7 @@ install_golang() {
     elif [ x"$ARCH" = "xaarch64" ]; then
       GO_ARCH="arm64"
     fi
-    wget https://golang.org/dl/go1.19.11.linux-${GO_ARCH}.tar.gz -O /tmp/golang1.19.tar.gz
+    wget https://golang.org/dl/go1.19.12.linux-${GO_ARCH}.tar.gz -O /tmp/golang1.19.tar.gz
     tar --transform=s,go,go1.19, -zxf /tmp/golang1.19.tar.gz
     rm -rf /usr/local/go1.19 /usr/local/go1.11  /usr/local/go1.8 /usr/local/go1.9 /usr/local/go1.9.2 /usr/local/go
     mv go1.19 /usr/local/
@@ -442,7 +442,7 @@ install_mongodbtoolchain(){
         OS_CODE_NAME=${DEBIAN}
     fi
     export USER=$(whoami)
-    bash -x ./toolchain_installer.sh -k --download-url https://jenkins.percona.com/downloads/mongodbtoolchain/${OS_CODE_NAME}_mongodbtoolchain.tar.gz || exit 1
+    bash -x ./toolchain_installer.sh -k --download-url https://jenkins.percona.com/downloads/mongodbtoolchain/${OS_CODE_NAME}_mongodbtoolchain_${ARCH}.tar.gz || exit 1
     export PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
 }
 
@@ -939,8 +939,8 @@ build_tarball(){
     cp -r ${WORKDIR}/${TOOLSDIR} ./
     cd mongo-tools
     . ./set_tools_revision.sh
-    sed -i '12d' buildscript/build.go
-    sed -i '168,177d' buildscript/build.go
+    sed -i '15d' buildscript/build.go
+    sed -i '200,209d' buildscript/build.go
     sed -i "s:versionStr,:\"$PSMDB_TOOLS_REVISION\",:" buildscript/build.go
     sed -i "s:gitCommit):\"$PSMDB_TOOLS_COMMIT_HASH\"):" buildscript/build.go
     ./make build

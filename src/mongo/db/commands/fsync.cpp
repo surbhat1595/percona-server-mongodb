@@ -48,10 +48,12 @@
 #include "mongo/db/commands/fsync_locked.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/dbdirectclient.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/backup_cursor_hooks.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/background.h"
@@ -69,10 +71,13 @@ Lock::ResourceMutex commandMutex("fsyncCommandMutex");
  */
 class FSyncLockThread : public BackgroundJob {
 public:
-    FSyncLockThread(ServiceContext* serviceContext, bool allowFsyncFailure)
+    FSyncLockThread(ServiceContext* serviceContext,
+                    bool allowFsyncFailure,
+                    const Milliseconds deadline)
         : BackgroundJob(false),
           _serviceContext(serviceContext),
-          _allowFsyncFailure(allowFsyncFailure) {}
+          _allowFsyncFailure(allowFsyncFailure),
+          _deadline(deadline) {}
 
     std::string name() const override {
         return "FSyncLockThread";
@@ -84,6 +89,7 @@ private:
     ServiceContext* const _serviceContext;
     bool _allowFsyncFailure;
     static bool _shutdownTaskRegistered;
+    const Milliseconds _deadline;
 };
 
 class FSyncCommand : public ErrmsgCommandDeprecated {
@@ -125,6 +131,20 @@ public:
         actions.addAction(ActionType::fsync);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
+
+    virtual void checkForInProgressDDLOperations(OperationContext* opCtx) {
+        DBDirectClient client(opCtx);
+        const auto numDDLDocuments =
+            client.count(NamespaceString::kShardingDDLCoordinatorsNamespace);
+
+        if (numDDLDocuments != 0) {
+            LOGV2_WARNING(781541, "Cannot take lock while DDL operations is in progress");
+            releaseLock();
+            uasserted(ErrorCodes::IllegalOperation,
+                      "Cannot take lock while DDL operation is in progress");
+        }
+    }
+
     virtual bool errmsgRun(OperationContext* opCtx,
                            const std::string& dbname,
                            const BSONObj& cmdObj,
@@ -136,7 +156,12 @@ public:
         }
 
         const bool lock = cmdObj["lock"].trueValue();
-        LOGV2(20461, "CMD fsync: lock:{lock}", "CMD fsync", "lock"_attr = lock);
+        const bool forBackup = cmdObj["forBackup"].trueValue();
+        LOGV2(20461,
+              "CMD fsync: lock:{lock}",
+              "CMD fsync",
+              "lock"_attr = lock,
+              "forBackup"_attr = forBackup);
 
         // fsync + lock is sometimes used to block writes out of the system and does not care if
         // the `BackupCursorService::fsyncLock` call succeeds.
@@ -168,8 +193,23 @@ public:
                 stdx::unique_lock<Latch> lk(lockStateMutex);
                 threadStatus = Status::OK();
                 threadStarted = false;
-                _lockThread = std::make_unique<FSyncLockThread>(opCtx->getServiceContext(),
-                                                                allowFsyncFailure);
+
+                Milliseconds deadline = Milliseconds::max();
+                if (forBackup) {
+                    // Set a default deadline of 90s for the fsyncLock to be acquired.
+                    deadline = Milliseconds(90000);
+                    // Parse the cmdObj and update the deadline if
+                    // "fsyncLockAcquisitionTimeoutMillis" exists.
+                    for (const auto& elem : cmdObj) {
+                        if (elem.fieldNameStringData() == "fsyncLockAcquisitionTimeoutMillis") {
+                            deadline = Milliseconds{uassertStatusOK(parseMaxTimeMS(elem))};
+                        }
+                    }
+                }
+
+                _lockThread = std::make_unique<FSyncLockThread>(
+                    opCtx->getServiceContext(), allowFsyncFailure, deadline);
+
                 _lockThread->go();
 
                 while (!threadStarted && threadStatus.isOK()) {
@@ -187,6 +227,13 @@ public:
                               "error"_attr = status);
                 uassertStatusOK(status);
             }
+        }
+
+        if (forBackup) {
+            // The check must be performed only if the fsync+lock command has been issued for backup
+            // purposes (through monogs). There are valid cases where fsync+lock can be invoked on
+            // the mongod while DDLs are in progress.
+            checkForInProgressDDLOperations(opCtx);
         }
 
         LOGV2(20462,
@@ -349,7 +396,18 @@ void FSyncLockThread::run() {
     try {
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
-        Lock::GlobalRead global(&opCtx);  // Block any writes in order to flush the files.
+
+        // If the deadline exists, set it on the opCtx and GlobalRead lock.
+        Date_t lockDeadline = Date_t::max();
+        if (_deadline < Milliseconds::max()) {
+            lockDeadline = Date_t::now() + _deadline;
+        }
+
+        opCtx.setDeadlineAfterNowBy(Milliseconds(_deadline), ErrorCodes::ExceededTimeLimit);
+        Lock::GlobalRead global(
+            &opCtx,
+            lockDeadline,
+            Lock::InterruptBehavior::kThrow);  // Block any writes in order to flush the files.
 
         StorageEngine* storageEngine = _serviceContext->getStorageEngine();
 
@@ -439,7 +497,16 @@ void FSyncLockThread::run() {
                 storageEngine->endBackup(&opCtx);
             }
         }
-
+    } catch (const ExceptionForCat<ErrorCategory::ExceededTimeLimitError>&) {
+        LOGV2_ERROR(204739, "Fsync timed out with ExceededTimeLimitError");
+        fsyncCmd.threadStatus = Status(ErrorCodes::Error::LockTimeout, "Fsync lock timed out");
+        fsyncCmd.acquireFsyncLockSyncCV.notify_one();
+        return;
+    } catch (const ExceptionFor<ErrorCodes::LockTimeout>&) {
+        LOGV2_ERROR(204740, "Fsync timed out with LockTimeout");
+        fsyncCmd.threadStatus = Status(ErrorCodes::Error::LockTimeout, "Fsync lock timed out");
+        fsyncCmd.acquireFsyncLockSyncCV.notify_one();
+        return;
     } catch (const std::exception& e) {
         LOGV2_FATAL(40350,
                     "FSyncLockThread exception: {error}",

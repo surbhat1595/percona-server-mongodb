@@ -852,6 +852,23 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           // complete.
           const bool allowRenameOutOfTheWay = (mode != repl::OplogApplication::Mode::kSecondary);
 
+          // Check whether there is an open but empty database where the name conflicts with the new
+          // collection's database name. It is possible for a secondary's in-memory database state
+          // to diverge from the primary's, if the primary rolls back the dropDatabase oplog entry
+          // after closing its own in-memory database state. In this case, the primary may accept
+          // creating a new database with a conflicting name to what the secondary still has open.
+          // It is okay to simply close the empty database on the secondary in this case.
+          auto duplicates = DatabaseHolder::get(opCtx)->getNamesWithConflictingCasing(
+              TenantDatabaseName(boost::none, nss.db()));
+          if (duplicates.size() == 1) {
+              auto dupDatabaseIt = duplicates.begin();
+              if (CollectionCatalog::get(opCtx)
+                      ->getAllCollectionUUIDsFromDb(*dupDatabaseIt)
+                      .size() == 0) {
+                  fassert(7727801, dropDatabaseForApplyOps(opCtx, dupDatabaseIt->dbName()).isOK());
+              }
+          }
+
           Lock::DBLock dbLock(opCtx, nss.db(), MODE_IX);
           if (auto idIndexElem = cmd["idIndex"]) {
               // Remove "idIndex" field from command.
@@ -1578,13 +1595,13 @@ Status applyOperation_inlock(OperationContext* opCtx,
             request.setNamespaceString(requestNss);
             request.setQuery(updateCriteria);
             // If we are in steady state and the update is on a timeseries bucket collection, we can
-            // enable some optimizations in diff application. In some cases, during tenant
-            // migration, we can for some reason generate entries for timeseries bucket collections
-            // which still rely on the idempotency guarantee, which then means we shouldn't apply
-            // these optimizations.
+            // enable some optimizations in diff application. In some cases, like during tenant
+            // migration or $_internalApplyOplogUpdate update, we can for some reason generate
+            // entries for timeseries bucket collections which still rely on the idempotency
+            // guarantee, which then means we shouldn't apply these optimizations.
             write_ops::UpdateModification::DiffOptions options;
             if (mode == OplogApplication::Mode::kSecondary && collection->getTimeseriesOptions() &&
-                !op.getFromTenantMigration()) {
+                !op.getCheckExistenceForDiffInsert() && !op.getFromTenantMigration()) {
                 options.mustCheckExistenceForInsertOperations = false;
             }
             auto updateMod = write_ops::UpdateModification::parseFromOplogEntry(o, options);

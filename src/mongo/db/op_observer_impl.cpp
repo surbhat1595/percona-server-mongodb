@@ -246,6 +246,9 @@ OpTimeBundle replLogUpdate(OperationContext* opCtx,
     oplogEntry->setObject(args.updateArgs->update);
     oplogEntry->setObject2(args.updateArgs->criteria);
     oplogEntry->setFromMigrateIfTrue(args.updateArgs->source == OperationSource::kFromMigrate);
+    if (args.updateArgs->mustCheckExistenceForInsertOperations) {
+        oplogEntry->setCheckExistenceForDiffInsert();
+    }
     // oplogLink could have been changed to include pre/postImageOpTime by the previous no-op write.
     repl::appendOplogEntryChainInfo(opCtx, oplogEntry, &oplogLink, args.updateArgs->stmtIds);
     if (!args.updateArgs->oplogSlots.empty()) {
@@ -764,6 +767,9 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
             shardingWriteRouter.getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
         operation.setFromMigrateIfTrue_BackwardsCompatible(args.updateArgs->source ==
                                                            OperationSource::kFromMigrate);
+        if (args.updateArgs->mustCheckExistenceForInsertOperations) {
+            operation.setCheckExistenceForDiffInsert(true);
+        }
         txnParticipant.addTransactionOperation(opCtx, operation);
     } else {
         MutableOplogEntry oplogEntry;
@@ -1031,7 +1037,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
             ShardingWriteRouter shardingWriteRouter(opCtx, nss, Grid::get(opCtx)->catalogCache());
             shardObserveDeleteOp(opCtx,
                                  nss,
-                                 documentKey.getShardKeyAndId(),
+                                 documentKey,
                                  opTime.writeOpTime,
                                  shardingWriteRouter,
                                  opTime.prePostImageOpTime,

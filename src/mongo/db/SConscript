@@ -852,6 +852,8 @@ env.Library(
         '$BUILD_DIR/mongo/base',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/bson/dotted_path_support',
+        '$BUILD_DIR/mongo/s/sharding_routing_table',
         'catalog/collection_options',
         'index/index_access_method',
     ],
@@ -1348,6 +1350,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/database_holder',
+        '$BUILD_DIR/mongo/db/catalog/health_log_interface',
         '$BUILD_DIR/mongo/db/catalog/local_oplog_info',
         '$BUILD_DIR/mongo/db/commands/server_status_core',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
@@ -1893,6 +1896,17 @@ env.Library(
 )
 
 env.Library(
+    target='feature_compatibility_version_metrics',
+    source=[
+        'feature_compatibility_version_metrics.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/commands/server_status_core',
+        'server_options_core',
+    ],
+)
+
+env.Library(
     target='service_context_test_fixture',
     source=[
         'service_context_test_fixture.cpp',
@@ -2132,7 +2146,7 @@ env.Library(
         'catalog/catalog_impl',
         'catalog/collection_options',
         'catalog/document_validation',
-        'catalog/health_log',
+        'catalog/health_log_interface',
         'catalog/index_key_validate',
         'client_metadata_propagation_egress_hook',
         'collection_index_usage_tracker',
@@ -2148,6 +2162,7 @@ env.Library(
         'dbdirectclient',
         'dbhelpers',
         'exec/working_set',
+        'feature_compatibility_version_metrics',
         'ftdc/ftdc_mongod',
         'fts/ftsmongod',
         'index/index_access_method',
@@ -2246,6 +2261,7 @@ env.Library(
         'catalog/catalog_impl',
         'catalog/collection',
         'catalog/health_log',
+        'catalog/health_log_interface',
         'commands/mongod',
         'commands/shell_protocol',
         'concurrency/flow_control_ticketholder',

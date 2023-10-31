@@ -2476,10 +2476,11 @@ tasks:
         vars:
           posix_configure_flags: --enable-python --with-spinlock=gcc --enable-strict
       - func: "make check all"
+      - func: "unit test"
       - func: "format test"
         vars:
           times: 3
-      - func: "unit test"
+          extra_args: runs.rows=1000000:2500000
 
   - name: spinlock-pthread-adaptive-test
     commands:
@@ -2488,10 +2489,11 @@ tasks:
         vars:
           posix_configure_flags: --enable-python --with-spinlock=pthread_adaptive --enable-strict
       - func: "make check all"
+      - func: "unit test"
       - func: "format test"
         vars:
           times: 3
-      - func: "unit test"
+          extra_args: runs.rows=1000000:2500000
 
   - name: wtperf-test
     depends_on:
@@ -3234,7 +3236,22 @@ tasks:
           wtarg: -ops ['"load"']
       - func: "upload-perf-test-stats"
         vars:
-          perf-test-name: parallel-pop-btree
+          perf-test-name: parallel-pop-btree.wtperf
+  
+  - name: perf-test-parallel-pop-btree-long
+    tags: ["btree-perf"]
+    depends_on:
+      - name: compile
+    commands:
+      - func: "fetch artifacts"
+      - func: "run-perf-test"
+        vars:
+          perf-test-name: parallel-pop-btree-long.wtperf
+          maxruns: 1
+          wtarg: -ops ['"load"']
+      - func: "upload-perf-test-stats"
+        vars:
+          perf-test-name: parallel-pop-btree-long.wtperf
 
   - name: perf-test-update-only-btree
     tags: ["btree-perf"]

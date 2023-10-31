@@ -430,6 +430,20 @@ std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetAllShar
         opCtx, dbName, readPref, retryPolicy, buildUnversionedRequestsForAllShards(opCtx, cmdObj));
 }
 
+std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetConfigServerAndShards(
+    OperationContext* opCtx,
+    StringData dbName,
+    const BSONObj& cmdObj,
+    const ReadPreferenceSetting& readPref,
+    Shard::RetryPolicy retryPolicy) {
+    std::vector<AsyncRequestsSender::Request> requests;
+    for (auto shardId : Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx))
+        requests.emplace_back(std::move(shardId), cmdObj);
+    auto configShardId = Grid::get(opCtx)->shardRegistry()->getConfigShard()->getId();
+    requests.emplace_back(std::move(configShardId), cmdObj);
+    return gatherResponses(opCtx, dbName, readPref, retryPolicy, requests);
+}
+
 std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRoutingTable(
     OperationContext* opCtx,
     StringData dbName,

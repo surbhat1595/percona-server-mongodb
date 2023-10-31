@@ -56,6 +56,7 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/balancer_collection_status_gen.h"
 #include "mongo/s/shard_util.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point.h"
@@ -91,10 +92,15 @@ class BalanceRoundDetails {
 public:
     BalanceRoundDetails() : _executionTimer() {}
 
-    void setSucceeded(int candidateChunks, int chunksMoved) {
+    void setSucceeded(int candidateChunks,
+                      int chunksMoved,
+                      Milliseconds selectionTime,
+                      Milliseconds migrationTime) {
         invariant(!_errMsg);
         _candidateChunks = candidateChunks;
         _chunksMoved = chunksMoved;
+        _selectionTime = selectionTime;
+        _migrationTime = migrationTime;
     }
 
     void setFailed(const string& errMsg) {
@@ -111,6 +117,10 @@ public:
         } else {
             builder.append("candidateChunks", _candidateChunks);
             builder.append("chunksMoved", _chunksMoved);
+            BSONObjBuilder timeInfo{builder.subobjStart("times"_sd)};
+            timeInfo.append("selectionTimeMillis"_sd, _selectionTime.count());
+            timeInfo.append("migrationTimeMillis"_sd, _migrationTime.count());
+            timeInfo.done();
         }
 
         return builder.obj();
@@ -118,6 +128,8 @@ public:
 
 private:
     const Timer _executionTimer;
+    Milliseconds _selectionTime;
+    Milliseconds _migrationTime;
 
     // Set only on success
     int _candidateChunks{0};
@@ -444,21 +456,21 @@ void Balancer::_mainThread() {
                 continue;
             }
 
+            LOGV2_DEBUG(21860,
+                        1,
+                        "Start balancing round. waitForDelete: {waitForDelete}, "
+                        "secondaryThrottle: {secondaryThrottle}",
+                        "Start balancing round",
+                        "waitForDelete"_attr = balancerConfig->waitForDelete(),
+                        "secondaryThrottle"_attr = balancerConfig->getSecondaryThrottle().toBSON());
+
+            static Occasionally sampler;
+            if (sampler.tick()) {
+                warnOnMultiVersion(uassertStatusOK(_clusterStats->getStats(opCtx.get())));
+            }
+
+            // Split chunk to match zones boundaries
             {
-                LOGV2_DEBUG(21860,
-                            1,
-                            "Start balancing round. waitForDelete: {waitForDelete}, "
-                            "secondaryThrottle: {secondaryThrottle}",
-                            "Start balancing round",
-                            "waitForDelete"_attr = balancerConfig->waitForDelete(),
-                            "secondaryThrottle"_attr =
-                                balancerConfig->getSecondaryThrottle().toBSON());
-
-                static Occasionally sampler;
-                if (sampler.tick()) {
-                    warnOnMultiVersion(uassertStatusOK(_clusterStats->getStats(opCtx.get())));
-                }
-
                 Status status = _splitChunksIfNeeded(opCtx.get());
                 if (!status.isOK()) {
                     LOGV2_WARNING(21878,
@@ -468,18 +480,27 @@ void Balancer::_mainThread() {
                 } else {
                     LOGV2_DEBUG(21861, 1, "Done enforcing tag range boundaries.");
                 }
+            }
 
+            // Select and migrate chunks
+            {
+                Timer selectionTimer;
                 const auto candidateChunks =
                     uassertStatusOK(_chunkSelectionPolicy->selectChunksToMove(opCtx.get()));
+                const Milliseconds selectionTimeMillis{selectionTimer.millis()};
 
                 if (candidateChunks.empty()) {
                     LOGV2_DEBUG(21862, 1, "No need to move any chunk");
                     _balancedLastTime = 0;
                 } else {
+                    Timer migrationTimer;
                     _balancedLastTime = _moveChunks(opCtx.get(), candidateChunks);
+                    const Milliseconds migrationTimeMillis{migrationTimer.millis()};
 
                     roundDetails.setSucceeded(static_cast<int>(candidateChunks.size()),
-                                              _balancedLastTime);
+                                              _balancedLastTime,
+                                              selectionTimeMillis,
+                                              migrationTimeMillis);
 
                     ShardingLogging::get(opCtx.get())
                         ->logAction(opCtx.get(), "balancer.round", "", roundDetails.toBSON())
@@ -754,6 +775,28 @@ int Balancer::_moveChunks(OperationContext* opCtx,
             continue;
         }
 
+        if (status == ErrorCodes::IndexNotFound &&
+            gFeatureFlagShardKeyIndexOptionalHashedSharding.isEnabled(
+                serverGlobalParams.featureCompatibility)) {
+
+            const auto cm = uassertStatusOK(
+                Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(
+                    opCtx, requestIt->nss));
+
+            if (cm.getShardKeyPattern().isHashedPattern()) {
+                LOGV2(78252,
+                      "Turning off balancing for hashed collection because migration failed due to "
+                      "missing shardkey index",
+                      "migrateInfo"_attr = redact(requestIt->toString()),
+                      "error"_attr = redact(status),
+                      "collection"_attr = requestIt->nss);
+
+                // Write to config.collections to turn off the balancer.
+                _disableBalancer(opCtx, requestIt->nss);
+                continue;
+            }
+        }
+
         LOGV2(21872,
               "Migration {migrateInfo} failed with {error}",
               "Migration failed",
@@ -767,6 +810,30 @@ int Balancer::_moveChunks(OperationContext* opCtx,
 void Balancer::notifyPersistedBalancerSettingsChanged() {
     stdx::unique_lock<Latch> lock(_mutex);
     _condVar.notify_all();
+}
+
+void Balancer::_disableBalancer(OperationContext* opCtx, NamespaceString nss) {
+    const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
+
+    BatchedCommandRequest updateRequest([&]() {
+        write_ops::UpdateCommandRequest updateOp(CollectionType::ConfigNS);
+        updateOp.setUpdates({[&] {
+            write_ops::UpdateOpEntry entry;
+            entry.setQ(BSON(CollectionType::kNssFieldName << nss.ns()));
+            entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(
+                BSON("$set" << BSON("noBalance" << true))));
+            entry.setMulti(false);
+            entry.setUpsert(false);
+            return entry;
+        }()});
+        return updateOp;
+    }());
+
+    updateRequest.setWriteConcern(ShardingCatalogClient::kMajorityWriteConcern.toBSON());
+
+    auto response = configShard->runBatchWriteCommand(
+        opCtx, Shard::kDefaultConfigCommandTimeout, updateRequest, Shard::RetryPolicy::kIdempotent);
+    uassertStatusOK(response.toStatus());
 }
 
 Balancer::BalancerStatus Balancer::getBalancerStatusForNs(OperationContext* opCtx,

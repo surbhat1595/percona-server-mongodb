@@ -110,14 +110,14 @@ Date_t getCurrentTime() {
     return svcCtx->getFastClockSource()->now();
 }
 
-void assertNumDocsModifiedMatchesExpected(const BatchedCommandRequest& request,
-                                          const BSONObj& response,
-                                          int expected) {
-    auto numDocsModified = response.getIntField("n");
+void assertNumDocsMatchedEqualsExpected(const BatchedCommandRequest& request,
+                                        const BSONObj& response,
+                                        int expected) {
+    auto numDocsMatched = response.getIntField("n");
     uassert(5030401,
             str::stream() << "Expected to match " << expected << " docs, but only matched "
-                          << numDocsModified << " for write request " << request.toString(),
-            expected == numDocsModified);
+                          << numDocsMatched << " for write request " << request.toString(),
+            expected == numDocsMatched);
 }
 
 void appendShardEntriesToSetBuilder(const ReshardingCoordinatorDocument& coordinatorDoc,
@@ -216,15 +216,15 @@ void writeToCoordinatorStateNss(OperationContext* opCtx,
         }
     }());
 
-    auto expectedNumModified = (request.getBatchType() == BatchedCommandRequest::BatchType_Insert)
+    auto expectedNumMatched = (request.getBatchType() == BatchedCommandRequest::BatchType_Insert)
         ? boost::none
         : boost::make_optional(1);
 
     auto res = ShardingCatalogManager::get(opCtx)->writeToConfigDocumentInTxn(
         opCtx, NamespaceString::kConfigReshardingOperationsNamespace, request, txnNumber);
 
-    if (expectedNumModified) {
-        assertNumDocsModifiedMatchesExpected(request, res, *expectedNumModified);
+    if (expectedNumMatched) {
+        assertNumDocsMatchedEqualsExpected(request, res, *expectedNumMatched);
     }
 }
 
@@ -383,7 +383,7 @@ void updateConfigCollectionsForOriginalNss(OperationContext* opCtx,
     auto res = ShardingCatalogManager::get(opCtx)->writeToConfigDocumentInTxn(
         opCtx, CollectionType::ConfigNS, request, txnNumber);
 
-    assertNumDocsModifiedMatchesExpected(request, res, 1 /* expected */);
+    assertNumDocsMatchedEqualsExpected(request, res, 1 /* expected */);
 }
 
 void writeToConfigCollectionsForTempNss(OperationContext* opCtx,
@@ -474,15 +474,15 @@ void writeToConfigCollectionsForTempNss(OperationContext* opCtx,
         }
     }());
 
-    auto expectedNumModified = (request.getBatchType() == BatchedCommandRequest::BatchType_Insert)
+    auto expectedNumMatched = (request.getBatchType() == BatchedCommandRequest::BatchType_Insert)
         ? boost::none
         : boost::make_optional(1);
 
     auto res = ShardingCatalogManager::get(opCtx)->writeToConfigDocumentInTxn(
         opCtx, CollectionType::ConfigNS, request, txnNumber);
 
-    if (expectedNumModified) {
-        assertNumDocsModifiedMatchesExpected(request, res, *expectedNumModified);
+    if (expectedNumMatched) {
+        assertNumDocsMatchedEqualsExpected(request, res, *expectedNumMatched);
     }
 }
 
@@ -741,15 +741,20 @@ void writeStateTransitionAndCatalogUpdatesThenBumpShardVersions(
         ShardingCatalogClient::kLocalWriteConcern);
 }
 
-void removeCoordinatorDocAndReshardingFields(OperationContext* opCtx,
-                                             const ReshardingCoordinatorDocument& coordinatorDoc,
-                                             boost::optional<Status> abortReason) {
+ReshardingCoordinatorDocument removeCoordinatorDocAndReshardingFields(
+    OperationContext* opCtx,
+    const ReshardingCoordinatorDocument& coordinatorDoc,
+    boost::optional<Status> abortReason) {
     // If the coordinator needs to abort and isn't in kInitializing, additional collections need
     // to be cleaned up in the final transaction. Otherwise, cleanup for abort and success are
     // the same.
     const bool wasDecisionPersisted =
-        coordinatorDoc.getState() == CoordinatorStateEnum::kCommitting;
+        coordinatorDoc.getState() >= CoordinatorStateEnum::kCommitting;
     invariant((wasDecisionPersisted && !abortReason) || abortReason);
+
+    if (coordinatorDoc.getState() > CoordinatorStateEnum::kCommitting) {
+        return coordinatorDoc;
+    }
 
     ReshardingCoordinatorDocument updatedCoordinatorDoc = coordinatorDoc;
     updatedCoordinatorDoc.setState(CoordinatorStateEnum::kDone);
@@ -784,6 +789,7 @@ void removeCoordinatorDocAndReshardingFields(OperationContext* opCtx,
                 opCtx, updatedCoordinatorDoc, boost::none, boost::none, txnNumber);
         },
         ShardingCatalogClient::kLocalWriteConcern);
+    return updatedCoordinatorDoc;
 }
 }  // namespace resharding
 
@@ -1400,6 +1406,8 @@ SemiFuture<void> ReshardingCoordinatorService::ReshardingCoordinator::run(
                 ReshardingMetrics::get(cc().getServiceContext())
                     ->onStepDown(ReshardingMetrics::Role::kCoordinator);
             }
+
+            _logStatsOnCompletion(status.isOK());
 
             if (!status.isOK()) {
                 {
@@ -2061,6 +2069,21 @@ void ReshardingCoordinatorService::ReshardingCoordinator::_updateChunkImbalanceM
                       "namespace"_attr = nss,
                       "error"_attr = redact(ex.toStatus()));
     }
+}
+
+void ReshardingCoordinatorService::ReshardingCoordinator::_logStatsOnCompletion(bool success) {
+    BSONObjBuilder builder;
+    BSONObjBuilder statsBuilder;
+    builder.append("uuid", _coordinatorDoc.getReshardingUUID().toBSON());
+    builder.append("status", success ? "success" : "failed");
+    statsBuilder.append("ns", _coordinatorDoc.getSourceNss().toString());
+    statsBuilder.append("sourceUUID", _coordinatorDoc.getSourceUUID().toBSON());
+    statsBuilder.append("newUUID", _coordinatorDoc.getReshardingUUID().toBSON());
+    statsBuilder.append("newShardKey", _coordinatorDoc.getReshardingKey().toBSON());
+    statsBuilder.append("endTime", getCurrentTime());
+
+    builder.append("statistics", statsBuilder.obj());
+    LOGV2(7763800, "Resharding complete", "info"_attr = builder.obj());
 }
 
 }  // namespace mongo

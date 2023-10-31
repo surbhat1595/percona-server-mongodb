@@ -130,17 +130,20 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
     auto idx = findShardKeyPrefixedIndex(
         opCtx, collection, collection->getIndexCatalog(), keyPattern, /*requireSingleKey=*/false);
     if (!idx) {
-        LOGV2_ERROR(23765,
-                    "Unable to find shard key index",
-                    "keyPattern"_attr = keyPattern,
-                    "namespace"_attr = nss.ns());
+        // Do not log that the shard key is missing for hashed shard key patterns.
+        if (!ShardKeyPattern::isHashedPatternEl(keyPattern.firstElement())) {
+            LOGV2_ERROR(23765,
+                        "Unable to find shard key index",
+                        "keyPattern"_attr = keyPattern,
+                        "namespace"_attr = nss.ns());
 
-        // When a shard key index is not found, the range deleter gets stuck and indefinitely logs
-        // an error message. This sleep is aimed at avoiding logging too aggressively in order to
-        // prevent log files to increase too much in size.
-        opCtx->sleepFor(Seconds(5));
+            // When a shard key index is not found, the range deleter moves the task to the bottom
+            // of the range deletion queue. This sleep is aimed at avoiding logging too aggressively
+            // in order to prevent log files to increase too much in size.
+            opCtx->sleepFor(Seconds(5));
+        }
 
-        uasserted(ErrorCodes::IndexNotFound,
+        iasserted(ErrorCodes::IndexNotFound,
                   str::stream() << "Unable to find shard key index"
                                 << " for " << nss.ns() << " and key pattern `"
                                 << keyPattern.toString() << "'");
@@ -200,7 +203,8 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
         hangBeforeDoingDeletion.pauseWhileSet(opCtx);
     }
 
-    int numDeleted = 0;
+    long long bytesDeleted = 0;
+    int numDocsDeleted = 0;
     do {
         BSONObj deletedObj;
 
@@ -235,12 +239,14 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
             break;
         }
 
+        bytesDeleted += deletedObj.objsize();
         invariant(PlanExecutor::ADVANCED == state);
-        ShardingStatistics::get(opCtx).countDocsDeletedByRangeDeleter.addAndFetch(1);
+    } while (++numDocsDeleted < numDocsToRemovePerBatch);
 
-    } while (++numDeleted < numDocsToRemovePerBatch);
+    ShardingStatistics::get(opCtx).countDocsDeletedByRangeDeleter.addAndFetch(numDocsDeleted);
+    ShardingStatistics::get(opCtx).countBytesDeletedByRangeDeleter.addAndFetch(bytesDeleted);
 
-    return numDeleted;
+    return numDocsDeleted;
 }
 
 template <typename Callable>
@@ -385,6 +391,7 @@ ExecutorFuture<void> deleteRangeInBatches(const std::shared_ptr<executor::TaskEx
                                 RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist ||
                         errorCode ==
                             ErrorCodes::RangeDeletionAbandonedBecauseTaskDocumentDoesNotExist ||
+                        errorCode == ErrorCodes::IndexNotFound ||
                         errorCode == ErrorCodes::KeyPatternShorterThanBound ||
                         ErrorCodes::isShutdownError(errorCode) ||
                         ErrorCodes::isNotPrimaryError(errorCode)) {
@@ -597,7 +604,7 @@ SharedSemiFuture<void> removeDocumentsInRange(
                             "Completed deletion of documents",
                             "namespace"_attr = nss.ns(),
                             "range"_attr = redact(range.toString()));
-            } else {
+            } else if (s.code() != ErrorCodes::IndexNotFound) {
                 LOGV2(23774,
                       "Failed to delete documents in {namespace} range {range} due to {error}",
                       "Failed to delete documents",

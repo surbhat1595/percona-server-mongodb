@@ -120,7 +120,16 @@ StorageEngineImpl::StorageEngineImpl(OperationContext* opCtx,
                                                         Timestamp timestamp) {
               // We take the global lock so there can be no concurrent
               // BatchedCollectionCatalogWriter and we are thus safe to perform writes.
-              Lock::GlobalLock lk{opCtx, MODE_IX};
+              //
+              // No need to hold the RSTL lock nor acquire a flow control ticket. This doesn't care
+              // about the replica state of the node and the operations aren't replicated.
+              Lock::GlobalLock lk{
+                  opCtx,
+                  MODE_IX,
+                  Date_t::max(),
+                  Lock::InterruptBehavior::kThrow,
+                  Lock::GlobalLockSkipOptions{.skipFlowControlTicket = true, .skipRSTLLock = true}};
+
               if (CollectionCatalog::latest(opCtx)->needsCleanupForOldestTimestamp(timestamp)) {
                   CollectionCatalog::write(opCtx, [timestamp](CollectionCatalog& catalog) {
                       catalog.cleanupForOldestTimestampAdvanced(timestamp);
@@ -1301,12 +1310,13 @@ void StorageEngineImpl::TimestampMonitor::_startup() {
             }
 
             try {
-                auto opCtx = client->getOperationContext();
-                mongo::ServiceContext::UniqueOperationContext uOpCtx;
-                if (!opCtx) {
-                    uOpCtx = client->makeOperationContext();
-                    opCtx = uOpCtx.get();
-                }
+                auto uniqueOpCtx = client->makeOperationContext();
+                auto opCtx = uniqueOpCtx.get();
+
+                // The TimestampMonitor is an important background cleanup task for the storage
+                // engine and needs to be able to make progress to free up resources.
+                ScopedAdmissionPriorityForLock immediatePriority(
+                    opCtx->lockState(), AdmissionContext::Priority::kImmediate);
 
                 Timestamp checkpoint;
                 Timestamp oldest;

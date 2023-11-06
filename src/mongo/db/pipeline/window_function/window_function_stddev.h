@@ -43,7 +43,7 @@ protected:
           _isSamp(isSamp),
           _count(0),
           _nonfiniteValueCount(0) {
-        _memUsageBytes = sizeof(*this);
+        _memUsageTracker.set(sizeof(*this));
     }
 
 public:
@@ -63,7 +63,7 @@ public:
         if (_nonfiniteValueCount > 0)
             return Value(BSONNULL);
         const long long adjustedCount = _isSamp ? _count - 1 : _count;
-        if (adjustedCount == 0)
+        if (adjustedCount <= 0)
             return getDefault();
         double squaredDifferences = _m2->getValue(false).coerceToDouble();
         if (squaredDifferences < 0 || (!_isSamp && _count == 1)) {
@@ -81,7 +81,7 @@ public:
     void reset() {
         _m2->reset();
         _sum->reset();
-        _memUsageBytes = sizeof(*this);
+        _memUsageTracker.set(sizeof(*this));
         _count = 0;
         _nonfiniteValueCount = 0;
     }
@@ -110,7 +110,7 @@ private:
         _count += quantity;
         _sum->process(Value{value.coerceToDouble() * quantity}, false);
         _m2->process(Value{x * x * quantity / (_count * (_count - quantity))}, false);
-        _memUsageBytes = sizeof(*this) + _sum->getMemUsage() + _m2->getMemUsage();
+        _memUsageTracker.set(sizeof(*this) + _sum->getMemUsage() + _m2->getMemUsage());
     }
 
     // Std dev cannot make use of RemovableSum because of its specific handling of non-finite

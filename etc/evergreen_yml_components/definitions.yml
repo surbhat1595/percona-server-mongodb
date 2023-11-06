@@ -308,6 +308,7 @@ variables:
   - enterprise-amazon2023-arm64
   - enterprise-amazon2023-arm64-lto
   - enterprise-debian11-64
+  - enterprise-debian12-64
   - enterprise-linux-64-amazon-ami
   - enterprise-macos
   - enterprise-macos-arm64
@@ -364,7 +365,9 @@ variables:
   - enterprise-amazon2023
   - enterprise-amazon2023-arm64
   - debian11
+  - debian12
   - enterprise-debian11-64
+  - enterprise-debian12-64
   - rhel70
   - rhel76_compile_rhel70
   - enterprise-rhel-70-64-bit
@@ -1280,6 +1283,11 @@ functions:
       binary: bash
       args:
       - "src/evergreen/scons_compile.sh"
+  - command: expansions.update
+    params:
+      updates:
+      - key: install_dir
+        value: ${install_dir}
 
   "ninja compile":
   - *f_expansions_write
@@ -1490,6 +1498,16 @@ functions:
       binary: bash
       args:
       - "./src/evergreen/lint_fuzzer_sanity_all.sh"
+
+  "sync repo with copybara":
+  - *f_expansions_write
+  - command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "buildscripts/sync_repo_with_copybara.py"
 
   # Used by generator
   "run jstestfuzz":
@@ -3489,21 +3507,6 @@ tasks:
   - func: "generate resmoke tasks"
 
 - <<: *benchmark_template
-  name: benchmarks_orphaned
-  tags: ["benchmarks"]
-  commands:
-  - func: "do benchmark setup"
-  - func: "run tests"
-    vars:
-      suite: benchmarks
-      exec_timeout_secs: 21600 # 6 hour timeout.
-      resmoke_jobs_max: 1
-  - func: "send benchmark results"
-#  - func: "analyze benchmark results"
-    vars:
-      suite: benchmarks
-
-- <<: *benchmark_template
   name: benchmarks_sharding
   tags: ["benchmarks"]
   commands:
@@ -4545,6 +4548,18 @@ tasks:
   - *set_up_venv
   - func: "setup jstestfuzz"
   - func: "lint fuzzer sanity all"
+
+
+- name: sync_repo_with_copybara
+  tags: []
+  commands:
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
+  - *set_up_venv
+  - func: "sync repo with copybara"
 
 ## integration test suites ##
 
@@ -6761,7 +6776,11 @@ tasks:
     vars:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
+    vars:
+      <<: *powercycle_remote_credentials
   - func: "run powercycle test"
+    vars:
+      <<: *powercycle_remote_credentials
     timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle
@@ -7218,7 +7237,7 @@ tasks:
 
 
 - name: publish_packages
-  run_on: rhel80-small
+  run_on: rhel8.7-small
   tags: ["publish"]
   # This should prevent this task from running in patch builds, where we
   # don't want to publish packages.
@@ -7252,7 +7271,7 @@ tasks:
       shell: bash
       script: |
         set -oe
-        podman login --username ${release_tools_container_registry_username} --password ${release_tools_container_registry_password} ${release_tools_container_registry}
+        echo "${release_tools_container_registry_password}" | podman login --password-stdin --username ${release_tools_container_registry_username} ${release_tools_container_registry}
   - command: subprocess.exec
     params:
       binary: bash
@@ -7328,7 +7347,7 @@ tasks:
       shell: bash
       script: |
         set -oe
-        podman login --username ${release_tools_container_registry_username} --password ${release_tools_container_registry_password} ${release_tools_container_registry}
+        echo "${release_tools_container_registry_password}" | podman login --password-stdin --username ${release_tools_container_registry_username} ${release_tools_container_registry}
 
   # signing windows artifacts
   - command: subprocess.exec
@@ -7869,7 +7888,7 @@ tasks:
       shell: bash
       script: |
         set -oe
-        podman login --username ${release_tools_container_registry_username} --password ${release_tools_container_registry_password} ${release_tools_container_registry}
+        echo "${release_tools_container_registry_password}" | podman login --password-stdin --username ${release_tools_container_registry_username} ${release_tools_container_registry}
   - command: subprocess.exec
     params:
       binary: bash

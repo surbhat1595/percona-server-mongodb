@@ -85,7 +85,7 @@ let testNoopWrite = (fromDbName, fromColl, toRS, toDbName, toColl, propagationPr
     if (propagationPreference == PropagationPreferenceOptions.kConfig) {
         configFromMongos.coll1.find().itcount();
     } else {
-        toDBFromMongos.toColl.find().itcount();
+        toDBFromMongos.coll1.find().itcount();
     }
 
     // Attempt a snapshot read at 'clusterTime' on toRS. Test that it performs a noop write
@@ -118,13 +118,6 @@ let testNoopWrite = (fromDbName, fromColl, toRS, toDbName, toColl, propagationPr
 //
 
 testNoopWrite("test0", "coll0", st.rs1, "test1", "coll1", PropagationPreferenceOptions.kShard);
-
-//
-// Test noop write. Read from the config server's primary.
-//
-
-testNoopWrite(
-    "test0", "coll2", st.configRS, "test1", "coll3", PropagationPreferenceOptions.kConfig);
 
 st.stop();
 }());

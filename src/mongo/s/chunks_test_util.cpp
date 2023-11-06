@@ -41,6 +41,21 @@ namespace {
 
 PseudoRandom _random{SecureRandom().nextInt64()};
 
+std::vector<ChunkHistory> genChunkHistory(const ShardId& currentShard,
+                                          const Timestamp& onCurrentShardSince,
+                                          size_t numShards,
+                                          size_t maxLenght) {
+    std::vector<ChunkHistory> history;
+    const auto historyLength = _random.nextInt64(maxLenght);
+    auto lastTime = onCurrentShardSince;
+    for (int64_t i = 0; i < historyLength; i++) {
+        auto shard = i == 0 ? currentShard : getShardId(_random.nextInt64(numShards));
+        history.emplace_back(onCurrentShardSince, shard);
+        lastTime = lastTime - 1 - _random.nextInt64(10000);
+    }
+    return history;
+}
+
 }  // namespace
 
 void assertEqualChunkInfo(const ChunkInfo& x, const ChunkInfo& y) {
@@ -50,6 +65,7 @@ void assertEqualChunkInfo(const ChunkInfo& x, const ChunkInfo& y) {
     ASSERT_EQ(x.getShardId(), y.getShardId());
     ASSERT_EQ(x.getLastmod(), y.getLastmod());
     ASSERT_EQ(x.isJumbo(), y.isJumbo());
+    ASSERT_EQ(x.getHistory(), y.getHistory());
 }
 
 ShardId getShardId(int shardIdx) {
@@ -60,9 +76,9 @@ std::vector<BSONObj> genRandomSplitPoints(size_t numChunks) {
     std::vector<BSONObj> splitPoints;
     splitPoints.reserve(numChunks + 1);
     splitPoints.emplace_back(kShardKeyPattern.globalMin());
-    int nextSplit{-1000};
+    int64_t nextSplit{-1000};
     for (size_t i = 0; i < numChunks - 1; ++i) {
-        nextSplit += i * 10 * (_random.nextInt32(10) + 1);
+        nextSplit += 10 * (_random.nextInt32(10) + 1);
         splitPoints.emplace_back(BSON(kSKey << nextSplit));
     }
     splitPoints.emplace_back(kShardKeyPattern.globalMax());
@@ -118,10 +134,34 @@ std::vector<ChunkType> genChunkVector(const UUID& uuid,
         auto maxKey = splitPoints.at(i + 1);
         const auto shard = getShardId(_random.nextInt64(numShards));
         const auto version = versions.at(i);
-        chunks.emplace_back(uuid, ChunkRange{minKey, maxKey}, version, shard);
+        ChunkType chunk{uuid, ChunkRange{minKey, maxKey}, version, shard};
+        chunk.setHistory(
+            genChunkHistory(shard, Timestamp{Date_t::now()}, numShards, 10 /* maxLenght */));
+        chunks.emplace_back(std::move(chunk));
         minKey = std::move(maxKey);
     }
     return chunks;
+}
+
+std::map<ShardId, Timestamp> calculateShardsMaxValidAfter(
+    const std::vector<ChunkType>& chunkVector) {
+
+    std::map<ShardId, Timestamp> vaMap;
+    for (const auto& chunk : chunkVector) {
+        if (chunk.getHistory().empty())
+            continue;
+
+        const auto& chunkMaxValidAfter = chunk.getHistory().front().getValidAfter();
+        auto mapIt = vaMap.find(chunk.getShard());
+        if (mapIt == vaMap.end()) {
+            vaMap.emplace(chunk.getShard(), chunkMaxValidAfter);
+            continue;
+        }
+        if (chunkMaxValidAfter > mapIt->second) {
+            mapIt->second = chunkMaxValidAfter;
+        }
+    }
+    return vaMap;
 }
 
 ChunkVersion calculateCollVersion(const std::map<ShardId, ChunkVersion>& shardVersions) {
@@ -185,25 +225,25 @@ BSONObj calculateIntermediateShardKey(const BSONObj& leftKey,
     const auto isMinKey = leftKey.woCompare(kShardKeyPattern.globalMin()) == 0;
     const auto isMaxKey = rightKey.woCompare(kShardKeyPattern.globalMax()) == 0;
 
-    int splitPoint;
+    int64_t splitPoint;
     if (isMinKey && isMaxKey) {
         // [min, max] -> split at 0
         splitPoint = 0;
     } else if (!isMinKey && !isMaxKey) {
         // [x, y] -> split in the middle
-        auto min = leftKey.firstElement().numberInt();
-        auto max = rightKey.firstElement().numberInt();
+        auto min = leftKey.firstElement().numberLong();
+        auto max = rightKey.firstElement().numberLong();
         invariant(min + 1 < max,
                   str::stream() << "Can't split range [" << min << ", " << max << "]");
         splitPoint = min + ((max - min) / 2);
     } else if (isMaxKey) {
         // [x, maxKey] -> split at x*2;
-        auto prevBound = leftKey.firstElement().numberInt();
+        auto prevBound = leftKey.firstElement().numberLong();
         auto increment = prevBound ? prevBound : _random.nextInt32(100) + 1;
         splitPoint = prevBound + std::abs(increment);
     } else if (isMinKey) {
         // [minKey, x] -> split at x*2;
-        auto prevBound = rightKey.firstElement().numberInt();
+        auto prevBound = rightKey.firstElement().numberLong();
         auto increment = prevBound ? prevBound : _random.nextInt32(100) + 1;
         splitPoint = prevBound - std::abs(increment);
     } else {
@@ -232,13 +272,18 @@ void performRandomChunkOperations(std::vector<ChunkType>* chunksPtr, size_t numO
         auto newShard = getShardId(_random.nextInt64(chunks.size()));
         chunkToMigrate.setShard(newShard);
         chunkToMigrate.setVersion(collVersion);
+        chunkToMigrate.setHistory([&] {
+            auto history = chunkToMigrate.getHistory();
+            history.emplace(history.begin(), Timestamp{Date_t::now()}, newShard);
+            return history;
+        }());
     };
 
     auto splitChunk = [&] {
         auto chunkToSplitIt = chunks.begin() + _random.nextInt32(chunks.size());
         while (chunkToSplitIt != chunks.begin() && chunkToSplitIt != std::prev(chunks.end()) &&
-               (chunkToSplitIt->getMax().firstElement().numberInt() -
-                chunkToSplitIt->getMin().firstElement().numberInt()) < 2) {
+               (chunkToSplitIt->getMax().firstElement().numberLong() -
+                chunkToSplitIt->getMin().firstElement().numberLong()) < 2) {
             // If the chunk is unsplittable select another one
             chunkToSplitIt = chunks.begin() + _random.nextInt32(chunks.size());
         }

@@ -119,7 +119,9 @@ bool RangeDeleterService::ReadyRangeDeletionsProcessor::_stopRequested() const {
 void RangeDeleterService::ReadyRangeDeletionsProcessor::emplaceRangeDeletion(
     const RangeDeletionTask& rdt) {
     stdx::unique_lock<Latch> lock(_mutex);
-    invariant(_state == kRunning);
+    if (_state != kRunning) {
+        return;
+    }
     _queue.push(rdt);
     _condVar.notify_all();
 }
@@ -210,12 +212,17 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
                         // deletion document doesn't exist
                         orphansRemovalCompleted = true;
                     } catch (const DBException& e) {
-                        LOGV2_ERROR(6872502,
-                                    "Failed to delete documents in orphan range",
-                                    "dbName"_attr = dbName,
-                                    "collectionUUID"_attr = collectionUuid.toString(),
-                                    "range"_attr = redact(range.toString()),
-                                    "error"_attr = e);
+                        if (e.code() != ErrorCodes::IndexNotFound) {
+                            // It is expected that we reschedule the range deletion task to the
+                            // bottom of the queue if the index is missing and do not need to log
+                            // this message.
+                            LOGV2_ERROR(6872502,
+                                        "Failed to delete documents in orphan range",
+                                        "dbName"_attr = dbName,
+                                        "collectionUUID"_attr = collectionUuid.toString(),
+                                        "range"_attr = redact(range.toString()),
+                                        "error"_attr = e);
+                        }
                         throw;
                     }
                 }
@@ -264,6 +271,14 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
                                 "error"_attr = e);
                     throw;
                 }
+            } catch (const ExceptionFor<ErrorCodes::IndexNotFound>&) {
+                // We cannot complete this range deletion right now because we do not have an index
+                // built on the shard key. This situation is expected for a hashed shard key and
+                // recoverable for a range shard key. This index may be rebuilt in the future, so
+                // reschedule the task at the end of the queue.
+                _completedRangeDeletion();
+                emplaceRangeDeletion(task);
+                break;
             } catch (const DBException&) {
                 // Release the thread only in case the operation context has been interrupted, as
                 // interruption only happens on shutdown/stepdown (this is fine because range

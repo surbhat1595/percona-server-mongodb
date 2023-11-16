@@ -545,11 +545,33 @@ build_srpm(){
     sed -i 's:@@LOGDIR@@:mongo:g' rpmbuild/SOURCES/*.default
     sed -i 's:@@LOGDIR@@:mongo:g' rpmbuild/SOURCES/percona-server-mongodb-helper.sh
     #
-    sed -e "s:@@SOURCE_TARBALL@@:$(basename ${TARFILE}):g" \
-    -e "s:@@VERSION@@:${VERSION}:g" \
-    -e "s:@@RELEASE@@:${RELEASE}:g" \
-    -e "s:@@SRC_DIR@@:$SRC_DIR:g" \
-    ${SPEC_TMPL} > rpmbuild/SPECS/$(basename ${SPEC_TMPL%.template})
+    if [[ "x${FIPSMODE}" == "x1" ]]; then
+        sed -e "s:@@SOURCE_TARBALL@@:$(basename ${TARFILE}):g" \
+        -e "s:@@VERSION@@:${VERSION}:g" \
+        -e "s:@@RELEASE@@:${RELEASE}:g" \
+        -e "s:@@SRC_DIR@@:$SRC_DIR:g" \
+        -e "s: server$: -n percona-server-mongodb-server-pro:g" \
+        -e "s: mongos$: -n percona-server-mongodb-mongos-pro:g" \
+        -e "s: shell$: -n percona-server-mongodb-shell:g" \
+        -e "s: tools$: -n percona-server-mongodb-tools:g" \
+        -e "s:Name\:           percona-server-mongodb:Name\:           percona-server-mongodb-pro:g" \
+        -e "s:%{name}-mongos:percona-server-mongodb-mongos-pro:g" \
+        -e "s:%{name}-server:percona-server-mongodb-server-pro:g" \
+        -e "s:%{name}-tools:percona-server-mongodb-tools:g" \
+        -e "s:Conflicts\: Percona-Server-MongoDB :Conflicts\: Percona-Server-MongoDB-pro :g" \
+        -e "s:Conflicts\: Percona-Server-MongoDB-mongos :Conflicts\: Percona-Server-MongoDB-mongos-pro :g" \
+        -e "s:Conflicts\: Percona-Server-MongoDB-server :Conflicts\: Percona-Server-MongoDB-server-pro :g" \
+        -e "s:mongodb-org$:mongodb-org\nObsoletes\: percona-server-mongodb:g" \
+        -e "s:mongodb-org-server$:mongodb-org-server\nObsoletes\: percona-server-mongodb-server:g" \
+        -e "s:mongodb-org-mongos$:mongodb-org-mongos\nObsoletes\: percona-server-mongodb-mongos:g" \
+       ${SPEC_TMPL} > rpmbuild/SPECS/$(basename ${SPEC_TMPL%.template})
+    else
+        sed -e "s:@@SOURCE_TARBALL@@:$(basename ${TARFILE}):g" \
+        -e "s:@@VERSION@@:${VERSION}:g" \
+        -e "s:@@RELEASE@@:${RELEASE}:g" \
+        -e "s:@@SRC_DIR@@:$SRC_DIR:g" \
+       ${SPEC_TMPL} > rpmbuild/SPECS/$(basename ${SPEC_TMPL%.template})
+    fi
     mv -fv ${TARFILE} ${WORKDIR}/rpmbuild/SOURCES
     if [ x"$RHEL" = x7 ]; then
       if [ -f /opt/rh/devtoolset-9/enable ]; then
@@ -711,10 +733,19 @@ build_source_deb(){
         sed -i 's:dh-systemd,::' ${BUILDDIR}/debian/control
     fi
     #
-    mv ${BUILDDIR}/debian/mongod.default ${BUILDDIR}/debian/percona-server-mongodb-server.mongod.default
-    mv ${BUILDDIR}/debian/mongod.service ${BUILDDIR}/debian/percona-server-mongodb-server.mongod.service
+    if [[ "x${FIPSMODE}" == "x1" ]]; then
+        mv ${BUILDDIR}/debian/mongod.default ${BUILDDIR}/debian/percona-server-mongodb-server-pro.mongod.default
+        mv ${BUILDDIR}/debian/mongod.service ${BUILDDIR}/debian/percona-server-mongodb-server-pro.mongod.service
+    else
+        mv ${BUILDDIR}/debian/mongod.default ${BUILDDIR}/debian/percona-server-mongodb-server.mongod.default
+        mv ${BUILDDIR}/debian/mongod.service ${BUILDDIR}/debian/percona-server-mongodb-server.mongod.service
+    fi
     #
-    mv ${TARFILE} ${PRODUCT}_${VERSION}.orig.tar.gz
+    if [[ "x${FIPSMODE}" == "x1" ]]; then
+        mv ${TARFILE} ${PRODUCT}-pro_${VERSION}.orig.tar.gz
+    else
+        mv ${TARFILE} ${PRODUCT}_${VERSION}.orig.tar.gz
+    fi
     cd ${BUILDDIR}
     pip install --upgrade pip
 
@@ -727,6 +758,30 @@ build_source_deb(){
     set_compiler
     fix_rules
 
+    if [[ "x${FIPSMODE}" == "x1" ]]; then
+        sed -i "s:percona-server-mongodb:percona-server-mongodb-pro:g" debian/changelog
+        sed -i "s:Source\: percona-server-mongodb:Source\: percona-server-mongodb-pro:g" debian/control
+        sed -i "s:Package\: percona-server-mongodb$:Package\: percona-server-mongodb-pro\nConflicts\: percona-server-mongodb\nReplaces\: percona-server-mongodb:g" debian/control
+        sed -i "s:Package\: percona-server-mongodb-mongos:Package\: percona-server-mongodb-mongos-pro\nConflicts\: percona-server-mongodb-mongos\nReplaces\: percona-server-mongodb-mongos:g" debian/control
+        sed -i "s:Package\: percona-server-mongodb-server:Package\: percona-server-mongodb-server-pro\nConflicts\: percona-server-mongodb-server\nReplaces\: percona-server-mongodb-server:g" debian/control
+        sed -i "s:, percona-server-mongodb-mongos :, percona-server-mongodb-mongos-pro :g" debian/control
+        sed -i "s:, percona-server-mongodb-server :, percona-server-mongodb-server-pro :g" debian/control
+        sed -i "s:Depends\: percona-server-mongodb :Depends\: percona-server-mongodb-pro :g" debian/control
+        sed -i "s:percona-server-mongodb\:$:percona-server-mongodb-pro\::g" debian/rules
+        sed -i "s:percona-server-mongodb :percona-server-mongodb-pro :g" debian/rules
+        sed -i "s:percona-server-mongodb-mongos/:percona-server-mongodb-mongos-pro/:g" debian/rules
+        sed -i "s:percona-server-mongodb-server/:percona-server-mongodb-server-pro/:g" debian/rules
+        cp debian/percona-server-mongodb-mongos.dirs debian/percona-server-mongodb-mongos-pro.dirs
+        cp debian/percona-server-mongodb-mongos.manpages debian/percona-server-mongodb-mongos-pro.manpages
+        cp debian/percona-server-mongodb-server.conffiles debian/percona-server-mongodb-server-pro.conffiles
+        cp debian/percona-server-mongodb-server.dirs debian/percona-server-mongodb-server-pro.dirs
+        cp debian/percona-server-mongodb-server.manpages debian/percona-server-mongodb-server-pro.manpages
+        cp debian/percona-server-mongodb-server.postinst debian/percona-server-mongodb-server-pro.postinst
+        cp debian/percona-server-mongodb-server.postrm debian/percona-server-mongodb-server-pro.postrm
+        cp debian/percona-server-mongodb-server.templates debian/percona-server-mongodb-server-pro.templates
+        cp debian/percona-server-mongodb-server.mongod.init debian/percona-server-mongodb-server-pro.mongod.init
+    fi
+
     dch -D unstable --force-distribution -v "${VERSION}-${RELEASE}" "Update to new Percona Server for MongoDB version ${VERSION}"
     dpkg-buildpackage -S
     cd ../
@@ -735,11 +790,16 @@ build_source_deb(){
     cp *.debian.tar.* $WORKDIR/source_deb
     cp *_source.changes $WORKDIR/source_deb
     cp *.dsc $WORKDIR/source_deb
-    cp *.orig.tar.gz $WORKDIR/source_deb
     cp *.debian.tar.* $CURDIR/source_deb
     cp *_source.changes $CURDIR/source_deb
     cp *.dsc $CURDIR/source_deb
-    cp *.orig.tar.gz $CURDIR/source_deb
+    if [[ "x${FIPSMODE}" == "x1" ]]; then
+        cp *-pro*.orig.tar.gz $WORKDIR/source_deb
+        cp *-pro*.orig.tar.gz $CURDIR/source_deb
+    else
+        cp *.orig.tar.gz $WORKDIR/source_deb
+        cp *.orig.tar.gz $CURDIR/source_deb
+    fi
 }
 
 build_deb(){
@@ -771,7 +831,11 @@ build_deb(){
     #
     dpkg-source -x ${DSC}
     #
-    cd ${PRODUCT}-${VERSION}
+    if [[ "x${FIPSMODE}" == "x1" ]]; then
+        cd ${PRODUCT}-pro-${VERSION}
+    else
+        cd ${PRODUCT}-${VERSION}
+    fi
     pip install --upgrade pip
 
     # PyYAML pkg installation fix, more info: https://github.com/yaml/pyyaml/issues/724
@@ -781,8 +845,17 @@ build_deb(){
     pip install -r etc/pip/evgtest-requirements.txt
     #
     cp -av percona-packaging/debian/rules debian/
+
     set_compiler
     fix_rules
+
+    if [[ "x${FIPSMODE}" == "x1" ]]; then
+        sed -i "s:percona-server-mongodb\:$:percona-server-mongodb-pro\::g" debian/rules
+        sed -i "s:percona-server-mongodb :percona-server-mongodb-pro :g" debian/rules
+        sed -i "s:percona-server-mongodb-mongos/:percona-server-mongodb-mongos-pro/:g" debian/rules
+        sed -i "s:percona-server-mongodb-server/:percona-server-mongodb-server-pro/:g" debian/rules
+    fi
+
     if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xxenial" -o x"${DEBIAN}" = "xjammy" ]; then
         sed -i 's:dh-systemd,::' debian/control
     fi

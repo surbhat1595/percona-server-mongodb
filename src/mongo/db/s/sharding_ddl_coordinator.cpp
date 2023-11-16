@@ -290,7 +290,10 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                     metadata().getDatabaseVersion() /* databaseVersion */);
 
                 // Check under the dbLock if this is still the primary shard for the database
-                DatabaseShardingState::assertIsPrimaryShardForDb(opCtx, originalNss().dbName());
+                Lock::DBLock dbLock(opCtx, originalNss().dbName(), MODE_IS);
+                const auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireShared(
+                    opCtx, originalNss().dbName());
+                scopedDss->assertIsPrimaryShardForDb(opCtx);
             };
         })
         .then([this, executor, token, anchor = shared_from_this()] {
@@ -491,6 +494,7 @@ void ShardingDDLCoordinator::_performNoopRetryableWriteOnAllShardsAndConfigsvr(
 bool ShardingDDLCoordinator::_isRetriableErrorForDDLCoordinator(const Status& status) {
     return status.isA<ErrorCategory::CursorInvalidatedError>() ||
         status.isA<ErrorCategory::ShutdownError>() || status.isA<ErrorCategory::RetriableError>() ||
+        status.isA<ErrorCategory::Interruption>() ||
         status.isA<ErrorCategory::CancellationError>() ||
         status.isA<ErrorCategory::ExceededTimeLimitError>() ||
         status.isA<ErrorCategory::WriteConcernError>() ||

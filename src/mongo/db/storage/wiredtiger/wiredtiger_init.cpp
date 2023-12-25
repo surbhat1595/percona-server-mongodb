@@ -141,7 +141,8 @@ public:
                                                  cacheMB,
                                                  wiredTigerGlobalOptions.getMaxHistoryFileSizeMB(),
                                                  params.ephemeral,
-                                                 params.repair);
+                                                 params.repair,
+                                                 opCtx->getServiceContext()->getPeriodicRunner());
         kv->setRecordStoreExtraOptions(wiredTigerGlobalOptions.collectionConfig);
         kv->setSortedDataInterfaceExtraOptions(wiredTigerGlobalOptions.indexConfig);
 

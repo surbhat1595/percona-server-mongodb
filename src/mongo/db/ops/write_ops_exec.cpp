@@ -1270,9 +1270,7 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
         request.setLetParameters(std::move(letParams));
     }
     request.setStmtIds(stmtIds);
-    request.setYieldPolicy(opCtx->inMultiDocumentTransaction()
-                               ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
-                               : PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
+    request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
     request.setSource(source);
     if (sampleId) {
         request.setSampleId(sampleId);
@@ -1493,9 +1491,7 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     request.setQuery(op.getQ());
     request.setCollation(write_ops::collationOf(op));
     request.setMulti(op.getMulti());
-    request.setYieldPolicy(opCtx->inMultiDocumentTransaction()
-                               ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
-                               : PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
+    request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
     request.setStmtId(stmtId);
     request.setHint(op.getHint());
 
@@ -1533,7 +1529,7 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
         }
 
         if (!feature_flags::gTimeseriesDeletesSupport.isEnabled(
-                serverGlobalParams.featureCompatibility)) {
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
             uassert(
                 ErrorCodes::InvalidOptions,
                 "Cannot perform a delete with a non-empty query on a time-series collection that "
@@ -2554,7 +2550,7 @@ void rebuildOptionsWithGranularityFromConfigServer(OperationContext* opCtx,
                 timeseries::getMaxSpanSecondsFromGranularity(*granularity));
 
             if (feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
-                    serverGlobalParams.featureCompatibility)) {
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                 timeSeriesOptions.setBucketRoundingSeconds(
                     timeseries::getBucketRoundingSecondsFromGranularity(*granularity));
             }
@@ -2563,14 +2559,14 @@ void rebuildOptionsWithGranularityFromConfigServer(OperationContext* opCtx,
             timeSeriesOptions.setBucketMaxSpanSeconds(
                 timeseries::getMaxSpanSecondsFromGranularity(*timeSeriesOptions.getGranularity()));
             if (feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
-                    serverGlobalParams.featureCompatibility)) {
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                 timeSeriesOptions.setBucketRoundingSeconds(
                     timeseries::getBucketRoundingSecondsFromGranularity(
                         *timeSeriesOptions.getGranularity()));
             }
         } else {
             invariant(feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
-                          serverGlobalParams.featureCompatibility) &&
+                          serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
                       bucketMaxSpanSeconds);
             timeSeriesOptions.setBucketMaxSpanSeconds(bucketMaxSpanSeconds);
 
@@ -2653,7 +2649,7 @@ std::tuple<TimeseriesBatches, TimeseriesStmtIds, size_t /* numInserted */> inser
             Status{ErrorCodes::BadValue, "Uninitialized InsertResult"};
         do {
             if (feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
-                    serverGlobalParams.featureCompatibility)) {
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                 swResult = timeseries::bucket_catalog::tryInsert(
                     opCtx,
                     bucketCatalog,

@@ -803,7 +803,8 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     clusterCursorCleanupJob.go();
 
     UserCacheInvalidator::start(serviceContext, opCtx);
-    if (gFeatureFlagClusterWideConfigM2.isEnabled(serverGlobalParams.featureCompatibility)) {
+    if (gFeatureFlagClusterWideConfigM2.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         ClusterServerParameterRefresher::start(serviceContext, opCtx);
     }
 
@@ -948,7 +949,7 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SetFeatureCompatibilityVersionLatest,
                                      ("EndStartupOptionStorage"))
 // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
 (InitializerContext* context) {
-    serverGlobalParams.mutableFeatureCompatibility.setVersion(multiversion::GenericFCV::kLatest);
+    serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLatest);
 }
 
 #ifdef MONGO_CONFIG_SSL

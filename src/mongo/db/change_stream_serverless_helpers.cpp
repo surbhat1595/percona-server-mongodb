@@ -45,9 +45,9 @@ namespace change_stream_serverless_helpers {
 
 namespace {
 bool isServerlessChangeStreamFeatureFlagEnabled() {
-    return serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-        feature_flags::gFeatureFlagServerlessChangeStreams.isEnabled(
-            serverGlobalParams.featureCompatibility);
+    return feature_flags::gFeatureFlagServerlessChangeStreams
+        .isEnabledUseLastLTSFCVWhenUninitialized(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
 }
 }  // namespace
 

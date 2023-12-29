@@ -334,8 +334,6 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
 
             boost::optional<TimeseriesOptions> options = collection->getTimeseriesOptions();
             if (options &&
-                feature_flags::gTimeseriesMetricIndexes.isEnabled(
-                    serverGlobalParams.featureCompatibility) &&
                 timeseries::doesBucketsIndexIncludeMeasurement(
                     opCtx, collection->ns(), *options, info)) {
                 invariant(collection->getTimeseriesBucketsMayHaveMixedSchemaData());
@@ -505,7 +503,7 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(
         // Unlock before hanging so replication recognizes we've completed.
         collection.yield();
         Locker::LockSnapshot lockInfo;
-        invariant(opCtx->lockState()->saveLockStateAndUnlock(&lockInfo));
+        opCtx->lockState()->saveLockStateAndUnlock(&lockInfo);
 
         LOGV2(4585201,
               "Hanging index build with no locks due to "
@@ -622,7 +620,7 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(
         // Unlock before hanging so replication recognizes we've completed.
         collection.yield();
         Locker::LockSnapshot lockInfo;
-        invariant(opCtx->lockState()->saveLockStateAndUnlock(&lockInfo));
+        opCtx->lockState()->saveLockStateAndUnlock(&lockInfo);
 
         LOGV2(20390,
               "Hanging index build with no locks due to "

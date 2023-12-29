@@ -314,7 +314,7 @@ bool ClusterWriteCmd::handleWouldChangeOwningShardError(OperationContext* opCtx,
     boost::optional<BSONObj> upsertedId;
 
     if (feature_flags::gFeatureFlagUpdateDocumentShardKeyUsingTransactionApi.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         if (txnRouter) {
             auto updateResult = handleWouldChangeOwningShardErrorTransaction(
                 opCtx, request, response, *wouldChangeOwningShardErrorInfo);
@@ -512,11 +512,8 @@ bool ClusterWriteCmd::InvocationBase::runImpl(OperationContext* opCtx,
     BatchWriteExecStats stats;
     BatchedCommandResponse response;
 
-    // The batched request will only have WC if it was supplied by the client. Otherwise, the
-    // batched request should use the WC from the opCtx.
-    if (!batchedRequest.hasWriteConcern()) {
-        batchedRequest.setWriteConcern(opCtx->getWriteConcern().toBSON());
-    }
+    // Append the write concern from the opCtx extracted during command setup.
+    batchedRequest.setWriteConcern(opCtx->getWriteConcern().toBSON());
 
     // Write ops are never allowed to have writeConcern inside transactions. Normally
     // disallowing WC on non-terminal commands in a transaction is handled earlier, during

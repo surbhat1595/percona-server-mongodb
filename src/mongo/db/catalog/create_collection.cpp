@@ -178,6 +178,14 @@ Status _createView(OperationContext* opCtx,
                           str::stream() << "Not primary while creating collection " << nss);
         }
 
+        // This is a top-level handler for collection creation name conflicts. New commands coming
+        // in, or commands that generated a WriteConflict must return a NamespaceExists error here
+        // on conflict.
+        Status statusNss = catalog::checkIfNamespaceExists(opCtx, nss);
+        if (!statusNss.isOK()) {
+            return statusNss;
+        }
+
         CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
             ->checkShardVersionOrThrow(opCtx);
 
@@ -218,7 +226,7 @@ Status _createView(OperationContext* opCtx,
 
 Status _createDefaultTimeseriesIndex(OperationContext* opCtx, CollectionWriter& collection) {
     if (!feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         return Status::OK();
     }
 

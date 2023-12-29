@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2022-present MongoDB, Inc.
+ *    Copyright (C) 2023-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,38 +27,48 @@
  *    it in the license file.
  */
 
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/index/multikey_paths.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
-namespace shard_role_details {
+namespace {
 
-TransactionResources::TransactionResources(repl::ReadConcernArgs readConcern)
-    : readConcern(std::move(readConcern)) {}
-
-void TransactionResources::releaseAllResourcesOnCommitOrAbort() noexcept {
-    locker.reset();
-    lockSnapshot.reset();
-    acquiredCollections.clear();
-    acquiredViews.clear();
+TEST(MultikeyPaths, PrintEmptyPaths) {
+    MultikeyPaths paths;
+    ASSERT_EQ(multikeyPathsToString(paths), "[]");
 }
 
-void TransactionResources::assertNoAcquiredCollections() const {
-    if (acquiredCollections.empty())
-        return;
-
-    std::stringstream ss("Found acquired collections:");
-    for (const auto& acquisition : acquiredCollections) {
-        ss << "\n" << acquisition.prerequisites.nss;
-    }
-    fassertFailedWithStatus(737660, Status{ErrorCodes::InternalError, ss.str()});
+TEST(MultikeyPaths, PrintEmptySetPaths) {
+    MultikeyPaths paths;
+    paths.resize(1);
+    ASSERT_EQ(multikeyPathsToString(paths), "[{}]");
 }
 
-TransactionResources::~TransactionResources() {
-    invariant(!locker);
-    invariant(!lockSnapshot);
-    invariant(acquiredCollections.empty());
-    invariant(acquiredViews.empty());
+TEST(MultikeyPaths, PrintEmptySetsPaths) {
+    MultikeyPaths paths;
+    paths.resize(2);
+    ASSERT_EQ(multikeyPathsToString(paths), "[{},{}]");
 }
 
-}  // namespace shard_role_details
+TEST(MultikeyPaths, PrintNonEmptySetPaths) {
+    MultikeyPaths paths;
+    paths.resize(2);
+    paths[1].insert(2);
+    ASSERT_EQ(multikeyPathsToString(paths), "[{},{2}]");
+}
+
+TEST(MultikeyPaths, PrintNonEmptySetsPaths) {
+    MultikeyPaths paths;
+    paths.resize(4);
+    paths[1].insert(2);
+    paths[3].insert(0);
+    paths[3].insert(1);
+    paths[3].insert(2);
+    ASSERT_EQ(multikeyPathsToString(paths), "[{},{2},{},{0,1,2}]");
+}
+
+}  // namespace
 }  // namespace mongo

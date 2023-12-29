@@ -163,6 +163,13 @@ server_parameters:
         - oplogSamplingLogIntervalSeconds
         default: 10
         validator: { gte: 0 }
+    collectionTruncationCheckPeriodSeconds:
+        description: 'The number of seconds the truncation thread wakes up periodically to check and truncate collection.'
+        set_at: [ startup ]
+        cpp_vartype: 'int'
+        cpp_varname: gCollectionTruncationCheckPeriodSeconds
+        default: 300
+        validator: { gt: 300 }
 
     allowUnsafeUntimestampedWrites:
         description: >- 
@@ -182,11 +189,6 @@ server_parameters:
 
 
 feature_flags:
-    featureFlagTimeseriesMetricIndexes:
-        description: "When enabled, support secondary indexes on time-series measurements"
-        cpp_varname: feature_flags::gTimeseriesMetricIndexes
-        default: true
-        version: 6.0
     featureFlagCollModIndexUnique:
         description: "When enabled, collMod supports making an index unique"
         cpp_varname: feature_flags::gCollModIndexUnique

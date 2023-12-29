@@ -81,6 +81,7 @@
 #include "mongo/db/query/planner_ixselect.h"
 #include "mongo/db/query/planner_wildcard_helpers.h"
 #include "mongo/db/query/projection_parser.h"
+#include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
@@ -1313,12 +1314,12 @@ std::unique_ptr<sbe::RuntimePlanner> makeRuntimePlannerIfNeeded(
     return nullptr;
 }
 
-std::unique_ptr<PlanYieldPolicySBE> makeSbeYieldPolicy(
-    OperationContext* opCtx,
-    PlanYieldPolicy::YieldPolicy requestedYieldPolicy,
-    const Yieldable* yieldable,
-    NamespaceString nss) {
-    return std::make_unique<PlanYieldPolicySBE>(requestedYieldPolicy,
+std::unique_ptr<PlanYieldPolicySBE> makeSbeYieldPolicy(OperationContext* opCtx,
+                                                       PlanYieldPolicy::YieldPolicy policy,
+                                                       const Yieldable* yieldable,
+                                                       NamespaceString nss) {
+    return std::make_unique<PlanYieldPolicySBE>(opCtx,
+                                                policy,
                                                 opCtx->getServiceContext()->getFastClockSource(),
                                                 internalQueryExecYieldIterations.load(),
                                                 Milliseconds{internalQueryExecYieldPeriodMS.load()},
@@ -1445,13 +1446,21 @@ bool shouldPlanningResultUseSbe(const SlotBasedPrepareExecutionResult& planningR
  * Function which returns true if 'cq' uses features that are currently supported in SBE without
  * 'featureFlagSbeFull' being set; false otherwise.
  */
-bool shouldUseRegularSbe(const CanonicalQuery& cq) {
+bool shouldUseRegularSbe(OperationContext* opCtx, const CanonicalQuery& cq) {
     auto sbeCompatLevel = cq.getExpCtx()->sbeCompatibility;
     // We shouldn't get here if there are expressions in the query which are completely unsupported
     // by SBE.
     tassert(7248600,
             "Unexpected SBE compatibility value",
             sbeCompatLevel != SbeCompatibility::notCompatible);
+
+    // When featureFlagSbeFull is not enabled, we cannot use SBE unless 'trySbeEngine' is enabled or
+    // if 'trySbeRestricted' is enabled, and we have eligible pushed down stages in the cq pipeline.
+    if (!QueryKnobConfiguration::decoration(opCtx).canPushDownFullyCompatibleStages() &&
+        cq.pipeline().empty()) {
+        return false;
+    }
+
     // The 'ExpressionContext' may indicate that there are expressions which are only supported in
     // SBE when 'featureFlagSbeFull' is set, or fully supported regardless of the value of the
     // feature flag. This function should only return true in the latter case.
@@ -1486,7 +1495,7 @@ attemptToGetSlotBasedExecutor(
     // (Ignore FCV check): This is intentional because we always want to use this feature once the
     // feature flag is enabled.
     const bool sbeFull = feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCVUnsafe();
-    const bool canUseRegularSbe = shouldUseRegularSbe(*canonicalQuery);
+    const bool canUseRegularSbe = shouldUseRegularSbe(opCtx, *canonicalQuery);
 
     // If 'canUseRegularSbe' is true, then only the subset of SBE which is currently on by default
     // is used by the query. If 'sbeFull' is true, then the server is configured to run any
@@ -1618,9 +1627,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
     bool permitYield,
     QueryPlannerParams plannerParams) {
 
-    auto yieldPolicy = (permitYield && !opCtx->inMultiDocumentTransaction())
-        ? PlanYieldPolicy::YieldPolicy::YIELD_AUTO
-        : PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY;
+    auto yieldPolicy = permitYield ? PlanYieldPolicy::YieldPolicy::YIELD_AUTO
+                                   : PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY;
 
     if (OperationShardingState::isComingFromRouter(opCtx)) {
         plannerParams.options |= QueryPlannerParams::INCLUDE_SHARD_FILTER;
@@ -1713,9 +1721,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
     const NamespaceString& nss(request->getNsString());
     if (!request->getGod()) {
         if (nss.isSystem() && opCtx->lockState()->shouldConflictWithSecondaryBatchApplication()) {
-            uassert(12050,
-                    "cannot delete from system namespace",
-                    nss.isLegalClientSystemNS(serverGlobalParams.featureCompatibility));
+            uassert(12050, "cannot delete from system namespace", nss.isLegalClientSystemNS());
         }
     }
 
@@ -1869,8 +1875,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
 
     // TODO (SERVER-64506): support change streams' pre- and post-images.
     // TODO (SERVER-66079): allow batched deletions in the config.* namespace.
-    const bool batchDelete =
-        feature_flags::gBatchMultiDeletes.isEnabled(serverGlobalParams.featureCompatibility) &&
+    const bool batchDelete = feature_flags::gBatchMultiDeletes.isEnabled(
+                                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
         gBatchUserMultiDeletes.load() &&
         (opCtx->recoveryUnit()->getState() == RecoveryUnit::State::kInactive ||
          opCtx->recoveryUnit()->getState() == RecoveryUnit::State::kActiveNotInUnitOfWork) &&
@@ -1944,7 +1950,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
     if (nss.isSystem() && opCtx->lockState()->shouldConflictWithSecondaryBatchApplication()) {
         uassert(10156,
                 str::stream() << "cannot update a system namespace: " << nss.ns(),
-                nss.isLegalClientSystemNS(serverGlobalParams.featureCompatibility));
+                nss.isLegalClientSystemNS());
     }
 
     // If there is no collection and this is an upsert, callers are supposed to create
@@ -2356,9 +2362,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCoun
     }
     std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
-    const auto yieldPolicy = opCtx->inMultiDocumentTransaction()
-        ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
-        : PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
+    const auto yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
 
     const auto skip = request.getSkip().value_or(0);
     const auto limit = request.getLimit().value_or(0);
@@ -2864,9 +2868,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDist
 
     auto expCtx = parsedDistinct->getQuery()->getExpCtx();
     OperationContext* opCtx = expCtx->opCtx;
-    const auto yieldPolicy = opCtx->inMultiDocumentTransaction()
-        ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
-        : PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
+    const auto yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
 
     if (!collection) {
         // Treat collections that do not exist as empty collections.

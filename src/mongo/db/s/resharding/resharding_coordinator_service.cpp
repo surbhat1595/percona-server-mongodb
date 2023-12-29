@@ -569,7 +569,7 @@ void writeToConfigIndexesForTempNss(OperationContext* opCtx,
                                     const ReshardingCoordinatorDocument& coordinatorDoc,
                                     TxnNumber txnNumber) {
     if (!feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         return;
     }
     auto nextState = coordinatorDoc.getState();
@@ -1834,7 +1834,7 @@ ExecutorFuture<bool> ReshardingCoordinator::_isReshardingOpRedundant(
                // Ensure indexes are loaded in the catalog cache, along with the collection
                // placement.
                if (feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
-                       serverGlobalParams.featureCompatibility)) {
+                       serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                    auto cri = uassertStatusOK(
                        Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(
                            opCtx, _coordinatorDoc.getSourceNss()));
@@ -1922,10 +1922,12 @@ void ReshardingCoordinator::_calculateParticipantsAndChunksThenWriteToDisk() {
 
     // Remove the presetReshardedChunks and zones from the coordinator document to reduce
     // the possibility of the document reaching the BSONObj size constraint.
+    ShardKeyPattern shardKey(updatedCoordinatorDoc.getReshardingKey());
     std::vector<BSONObj> zones;
     if (updatedCoordinatorDoc.getZones()) {
         zones = resharding::buildTagsDocsFromZones(updatedCoordinatorDoc.getTempReshardingNss(),
-                                                   *updatedCoordinatorDoc.getZones());
+                                                   *updatedCoordinatorDoc.getZones(),
+                                                   shardKey);
     }
     updatedCoordinatorDoc.setPresetReshardedChunks(boost::none);
     updatedCoordinatorDoc.setZones(boost::none);

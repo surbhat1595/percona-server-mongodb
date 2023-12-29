@@ -76,7 +76,8 @@ namespace {
 const auto getTTLMonitor = ServiceContext::declareDecoration<std::unique_ptr<TTLMonitor>>();
 
 bool isBatchingEnabled(const CollectionPtr& collectionPtr) {
-    return feature_flags::gBatchMultiDeletes.isEnabled(serverGlobalParams.featureCompatibility) &&
+    return feature_flags::gBatchMultiDeletes.isEnabled(
+               serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
         ttlMonitorBatchDeletes.load() && !collectionPtr->isChangeStreamPreAndPostImagesEnabled();
 }
 
@@ -588,6 +589,10 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
             return false;
         }
 
+        if (coll->getRequiresTimeseriesExtendedRangeSupport()) {
+            return false;
+        }
+
         ResourceConsumption::ScopedMetricsCollector scopedMetrics(opCtx, nss->db().toString());
 
         const auto& collection = coll.getCollection();
@@ -775,7 +780,7 @@ bool TTLMonitor::_deleteExpiredWithCollscan(OperationContext* opCtx,
 
     LOGV2_DEBUG(5400704, 1, "running TTL job for clustered collection", logAttrs(collection->ns()));
 
-    const auto startId = makeCollScanStartBound(collection, Date_t::min());
+    const auto startId = makeCollScanStartBound(collection, Date_t{});
 
     const auto expirationDate = safeExpirationDate(opCtx, collection, *expireAfterSeconds);
     const auto endId = makeCollScanEndBound(collection, expirationDate);

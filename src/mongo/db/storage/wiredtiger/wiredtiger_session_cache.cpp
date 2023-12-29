@@ -275,8 +275,6 @@ void WiredTigerSessionCache::waitUntilDurable(OperationContext* opCtx,
     // waiters, as a log flush is much cheaper than a full checkpoint.
     if ((syncType == Fsync::kCheckpointStableTimestamp || syncType == Fsync::kCheckpointAll) &&
         !isEphemeral()) {
-        UniqueWiredTigerSession session = getSession();
-        WT_SESSION* s = session->getSession();
         auto encryptionKeyDB = _engine->getEncryptionKeyDB();
         std::unique_ptr<WiredTigerSession> session2;
         WT_SESSION* s2 = nullptr;
@@ -284,33 +282,33 @@ void WiredTigerSessionCache::waitUntilDurable(OperationContext* opCtx,
             session2 = std::make_unique<WiredTigerSession>(encryptionKeyDB->getConnection());
             s2 = session2->getSession();
         }
-        {
-            auto journalListener = [&]() -> JournalListener* {
-                // The JournalListener may not be set immediately, so we must check under a mutex so
-                // as not to access the variable while setting a JournalListener. A JournalListener
-                // is only allowed to be set once, so using the pointer outside of a mutex is safe.
-                stdx::unique_lock<Latch> lk(_journalListenerMutex);
-                return _journalListener;
-            }();
-            boost::optional<JournalListener::Token> token;
-            if (journalListener && useListener == UseJournalListener::kUpdate) {
-                // Update a persisted value with the latest write timestamp that is safe across
-                // startup recovery in the repl layer. Then report that timestamp as durable to the
-                // repl layer below after we have flushed in-memory data to disk.
-                // Note: only does a write if primary, otherwise just fetches the timestamp.
-                token = journalListener->getToken(opCtx);
-            }
 
+        auto journalListener = [&]() -> JournalListener* {
+            // The JournalListener may not be set immediately, so we must check under a mutex so
+            // as not to access the variable while setting a JournalListener. A JournalListener
+            // is only allowed to be set once, so using the pointer outside of a mutex is safe.
+            stdx::unique_lock<Latch> lk(_journalListenerMutex);
+            return _journalListener;
+        }();
+        boost::optional<JournalListener::Token> token;
+        if (journalListener && useListener == UseJournalListener::kUpdate) {
+            // Update a persisted value with the latest write timestamp that is safe across
+            // startup recovery in the repl layer. Then report that timestamp as durable to the
+            // repl layer below after we have flushed in-memory data to disk.
+            // Note: only does a write if primary, otherwise just fetches the timestamp.
+            token = journalListener->getToken(opCtx);
+        }
+
+        getKVEngine()->forceCheckpoint(syncType == Fsync::kCheckpointStableTimestamp);
+
+        if (s2) {
             auto config = syncType == Fsync::kCheckpointStableTimestamp ? "use_timestamp=true"
                                                                         : "use_timestamp=false";
+            invariantWTOK(s2->checkpoint(s2, config), s2);
+        }
 
-            invariantWTOK(s->checkpoint(s, config), s);
-            if (s2)
-                invariantWTOK(s2->checkpoint(s2, config), s2);
-
-            if (token) {
-                journalListener->onDurable(token.value());
-            }
+        if (token) {
+            journalListener->onDurable(token.value());
         }
         LOGV2_DEBUG(22418, 4, "created checkpoint (forced)");
         return;
@@ -365,16 +363,10 @@ void WiredTigerSessionCache::waitUntilDurable(OperationContext* opCtx,
     audit::fsyncAuditLog();
 #endif
 
-    // Use the journal when available, or a checkpoint otherwise.
-    if (!isEphemeral()) {
-        invariantWTOK(_waitUntilDurableSession->log_flush(_waitUntilDurableSession, "sync=on"),
-                      _waitUntilDurableSession);
-        LOGV2_DEBUG(22419, 4, "flushed journal");
-    } else {
-        invariantWTOK(_waitUntilDurableSession->checkpoint(_waitUntilDurableSession, nullptr),
-                      _waitUntilDurableSession);
-        LOGV2_DEBUG(22420, 4, "created checkpoint");
-    }
+    // Flush the journal.
+    invariantWTOK(_waitUntilDurableSession->log_flush(_waitUntilDurableSession, "sync=on"),
+                  _waitUntilDurableSession);
+    LOGV2_DEBUG(22419, 4, "flushed journal");
 
     // keyDB is always durable (opened with journal enabled)
     if (_keyDBSession) {

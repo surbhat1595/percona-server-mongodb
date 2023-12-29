@@ -875,8 +875,7 @@ NamespaceString extractNsFromUUIDorNs(OperationContext* opCtx,
     return ui ? extractNsFromUUID(opCtx, ui.value()) : extractNs(ns.dbName(), cmd);
 }
 
-StatusWith<BSONObj> getObjWithSanitizedStorageEngineOptions(OperationContext* opCtx,
-                                                            const BSONObj& cmd) {
+BSONObj getObjWithSanitizedStorageEngineOptions(OperationContext* opCtx, const BSONObj& cmd) {
     static_assert(
         CreateCommand::kStorageEngineFieldName == IndexDescriptor::kStorageEngineFieldName,
         "Expected storage engine options field to be the same for collections and indexes.");
@@ -886,11 +885,7 @@ StatusWith<BSONObj> getObjWithSanitizedStorageEngineOptions(OperationContext* op
         auto engineObj = storageEngineElem.embeddedObject();
         auto sanitizedObj =
             storageEngine->getSanitizedStorageOptionsForSecondaryReplication(engineObj);
-        if (!sanitizedObj.isOK()) {
-            return sanitizedObj.getStatus();
-        }
-        return cmd.addFields(
-            BSON(IndexDescriptor::kStorageEngineFieldName << sanitizedObj.getValue()));
+        return cmd.addFields(BSON(IndexDescriptor::kStorageEngineFieldName << sanitizedObj));
     }
     return cmd;
 }
@@ -923,12 +918,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           const auto& ui = entry.getUuid();
           // Sanitize storage engine options to remove options which might not apply to this node.
           // See SERVER-68122.
-          const auto sanitizedCmdOrStatus =
-              getObjWithSanitizedStorageEngineOptions(opCtx, entry.getObject());
-          if (!sanitizedCmdOrStatus.isOK()) {
-              return sanitizedCmdOrStatus.getStatus();
-          }
-          const auto& cmd = sanitizedCmdOrStatus.getValue();
+          const auto cmd = getObjWithSanitizedStorageEngineOptions(opCtx, entry.getObject());
           const NamespaceString nss(extractNs(entry.getNss().dbName(), cmd));
 
           // Mode SECONDARY steady state replication should not allow create collection to rename an
@@ -988,12 +978,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           // Sanitize storage engine options to remove options which might not apply to this node.
           // See SERVER-68122.
           const auto& entry = *op;
-          const auto sanitizedCmdOrStatus =
-              getObjWithSanitizedStorageEngineOptions(opCtx, entry.getObject());
-          if (!sanitizedCmdOrStatus.isOK()) {
-              return sanitizedCmdOrStatus.getStatus();
-          }
-          const auto& cmd = sanitizedCmdOrStatus.getValue();
+          const auto cmd = getObjWithSanitizedStorageEngineOptions(opCtx, entry.getObject());
 
           if (OplogApplication::Mode::kApplyOpsCmd == mode) {
               return {ErrorCodes::CommandNotSupported,
@@ -1034,11 +1019,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           // Sanitize storage engine options to remove options which might not apply to this node.
           // See SERVER-68122.
           for (auto& spec : swOplogEntry.getValue().indexSpecs) {
-              auto sanitizedObj = getObjWithSanitizedStorageEngineOptions(opCtx, spec);
-              if (!sanitizedObj.isOK()) {
-                  return swOplogEntry.getStatus();
-              }
-              spec = sanitizedObj.getValue();
+              spec = getObjWithSanitizedStorageEngineOptions(opCtx, spec);
           }
 
           IndexBuildsCoordinator::ApplicationMode applicationMode =
@@ -2388,19 +2369,15 @@ Status applyCommand_inlock(OperationContext* opCtx,
                 // their timestamp at commit.
                 TimestampBlock tsBlock(opCtx, writeTime);
                 return curOpToApply.applyFunc(opCtx, op, mode);
+            } catch (const StorageUnavailableException&) {
+                // Retriable error.
+                throw;
             } catch (const DBException& ex) {
                 return ex.toStatus();
             }
         }();
 
         switch (status.code()) {
-            case ErrorCodes::WriteConflict: {
-                // Need to throw this up to a higher level where it will be caught and the
-                // operation retried.
-                throwWriteConflictException(str::stream()
-                                            << "WriteConflict caught during oplog application."
-                                            << " Original error: " << status.reason());
-            }
             case ErrorCodes::BackgroundOperationInProgressForDatabase: {
                 invariant(mode == OplogApplication::Mode::kInitialSync);
 

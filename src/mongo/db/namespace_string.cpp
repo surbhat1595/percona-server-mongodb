@@ -88,8 +88,7 @@ bool NamespaceString::isCollectionlessAggregateNS() const {
     return coll() == collectionlessAggregateCursorCol;
 }
 
-bool NamespaceString::isLegalClientSystemNS(
-    const ServerGlobalParams::FeatureCompatibility& currentFCV) const {
+bool NamespaceString::isLegalClientSystemNS() const {
     auto collectionName = coll();
     if (isAdminDB()) {
         if (collectionName == "system.roles")
@@ -99,6 +98,8 @@ bool NamespaceString::isLegalClientSystemNS(
         if (collectionName == kKeysCollectionNamespace.coll())
             return true;
         if (collectionName == "system.backup_users")
+            return true;
+        if (collectionName == "system.new_users")
             return true;
     } else if (isConfigDB()) {
         if (collectionName == "system.sessions")

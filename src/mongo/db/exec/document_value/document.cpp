@@ -91,7 +91,8 @@ const StringDataSet Document::allMetadataFieldNames{Document::metaFieldTextScore
                                                     Document::metaFieldSearchSortValues,
                                                     Document::metaFieldIndexKey,
                                                     Document::metaFieldSearchScoreDetails,
-                                                    Document::metaFieldVectorSearchScore};
+                                                    Document::metaFieldVectorSearchScore,
+                                                    Document::metaFieldSearchSequenceToken};
 
 DocumentStorageIterator::DocumentStorageIterator(DocumentStorage* storage, BSONObjIterator bsonIt)
     : _bsonIt(std::move(bsonIt)),
@@ -427,6 +428,7 @@ Document DocumentStorage::shred() const {
             md[it.fieldName()] = valueElem.val.shred();
         }
     }
+    md.setMetadata(DocumentMetadataFields(metadata()));
     return md.freeze();
 }
 
@@ -481,6 +483,8 @@ void DocumentStorage::loadLazyMetadata() const {
                 _metadataFields.setSearchSortValues(elem.Obj());
             } else if (fieldName == Document::metaFieldVectorSearchScore) {
                 _metadataFields.setVectorSearchScore(elem.Double());
+            } else if (fieldName == Document::metaFieldSearchSequenceToken) {
+                _metadataFields.setSearchSequenceToken(Value(elem));
             }
         }
     }
@@ -581,6 +585,9 @@ void Document::toBsonWithMetaData(BSONObjBuilder* builder) const {
         builder->append(metaFieldSearchScoreDetails, metadata().getSearchScoreDetails());
     if (metadata().hasSearchSortValues()) {
         builder->append(metaFieldSearchSortValues, metadata().getSearchSortValues());
+    }
+    if (metadata().hasSearchSequenceToken()) {
+        metadata().getSearchSequenceToken().addToBsonObj(builder, metaFieldSearchSequenceToken);
     }
     if (metadata().hasVectorSearchScore()) {
         builder->append(metaFieldVectorSearchScore, metadata().getVectorSearchScore());

@@ -131,9 +131,9 @@ void CollectionCloner::preStage() {
     _stats.start = getSharedData()->getClock()->now();
 
     BSONObjBuilder b(BSON("collStats" << _sourceNss.coll().toString()));
-    if (gMultitenancySupport && serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-        gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility) &&
-        _sourceNss.tenantId()) {
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    if (gMultitenancySupport && fcvSnapshot.isVersionInitialized() &&
+        gFeatureFlagRequireTenantID.isEnabled(fcvSnapshot) && _sourceNss.tenantId()) {
         _sourceNss.tenantId()->serializeToBSON("$tenant", &b);
     }
 
@@ -228,9 +228,8 @@ BaseCloner::AfterStageBehavior CollectionCloner::listIndexesStage() {
             auto sanitizedStorageEngineOpts =
                 storageEngine->getSanitizedStorageOptionsForSecondaryReplication(
                     storageEngineElem.embeddedObject());
-            fassert(6812200, sanitizedStorageEngineOpts);
-            spec = spec.addFields(BSON(IndexDescriptor::kStorageEngineFieldName
-                                       << sanitizedStorageEngineOpts.getValue()));
+            spec = spec.addFields(
+                BSON(IndexDescriptor::kStorageEngineFieldName << sanitizedStorageEngineOpts));
         }
 
         if (spec.hasField("clustered")) {

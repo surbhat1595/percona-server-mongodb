@@ -42,6 +42,7 @@
 #include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/encryption/encryption_options.h"
 #include "mongo/db/encryption/key_id.h"
+#include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/control/storage_control.h"
 #include "mongo/db/storage/execution_control/concurrency_adjustment_parameters_gen.h"
@@ -79,7 +80,9 @@ void writeMetadata(std::unique_ptr<StorageEngineMetadata> metadata,
                    const StorageEngine::Factory* factory,
                    const StorageGlobalParams& params,
                    const encryption::KeyId* futureConfigured,
-                   StorageEngineInitFlags initFlags) {
+                   StorageEngineInitFlags initFlags,
+                   ServiceContext* service,
+                   BSONObjBuilder* startupTimeElapsedBuilder) {
     if ((initFlags & StorageEngineInitFlags::kSkipMetadataFile) != StorageEngineInitFlags{}) {
         return;
     }
@@ -101,13 +104,19 @@ void writeMetadata(std::unique_ptr<StorageEngineMetadata> metadata,
     }
     metadata->setStorageEngineOptions(options);
     if (metadataNeedsWriting) {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(service->getFastClockSource(),
+                                                "Write a new metadata for storage engine",
+                                                startupTimeElapsedBuilder);
         uassertStatusOK(metadata->write());
     }
 }
 }  // namespace
 
-StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx,
-                                                         const StorageEngineInitFlags initFlags) {
+StorageEngine::LastShutdownState initializeStorageEngine(
+    OperationContext* opCtx,
+    const StorageEngineInitFlags initFlags,
+    BSONObjBuilder* startupTimeElapsedBuilder) {
     ServiceContext* service = opCtx->getServiceContext();
 
     if (storageGlobalParams.restore) {
@@ -121,6 +130,10 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
         invariant(!service->getStorageEngine());
 
     if ((initFlags & StorageEngineInitFlags::kAllowNoLockFile) == StorageEngineInitFlags{}) {
+        auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+            service->getFastClockSource(),
+            "Create storage engine lock file in the data directory",
+            startupTimeElapsedBuilder);
         createLockFile(service);
     }
 
@@ -187,11 +200,19 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
 
     std::unique_ptr<StorageEngineMetadata> metadata;
     if ((initFlags & StorageEngineInitFlags::kSkipMetadataFile) == StorageEngineInitFlags{}) {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(service->getFastClockSource(),
+                                                "Get metadata describing storage engine",
+                                                startupTimeElapsedBuilder);
         metadata = StorageEngineMetadata::forPath(dbpath);
     }
 
     // Validate options in metadata against current startup options.
     if (metadata.get()) {
+        auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+            service->getFastClockSource(),
+            "Validate options in metadata against current startup options",
+            startupTimeElapsedBuilder);
         uassertStatusOK(factory->validateMetadata(*metadata, storageGlobalParams));
     }
 
@@ -266,6 +287,8 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
     });
     auto& lockFile = StorageEngineLockFile::get(service);
     try {
+        auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+            service->getFastClockSource(), "Create storage engine", startupTimeElapsedBuilder);
         if ((initFlags & StorageEngineInitFlags::kForRestart) == StorageEngineInitFlags{}) {
             auto storageEngine = std::unique_ptr<StorageEngine>(factory->create(
                 opCtx, storageGlobalParams, lockFile ? &*lockFile : nullptr));
@@ -286,7 +309,9 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
                       factory,
                       storageGlobalParams,
                       keyIds.futureConfigured.get(),
-                      initFlags);
+                      initFlags,
+                      service,
+                      startupTimeElapsedBuilder);
         LOGV2(29111,
               "Rotated master encryption key",
               "oldKeyIdentifier"_attr = *keyIds.decryption,
@@ -295,6 +320,8 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
     }
 
     if (lockFile) {
+        auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+            service->getFastClockSource(), "Write current PID to file", startupTimeElapsedBuilder);
         uassertStatusOK(lockFile->writePid());
     }
 
@@ -303,7 +330,9 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
                   factory,
                   storageGlobalParams,
                   encryption::WtKeyIds::instance().futureConfigured.get(),
-                  initFlags);
+                  initFlags,
+                  service,
+                  startupTimeElapsedBuilder);
 
     guard.dismiss();
 

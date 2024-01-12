@@ -232,6 +232,7 @@ static const char *const __stats_dsrc_desc[] = {
   "session: tiered operations dequeued and processed",
   "session: tiered operations scheduled",
   "session: tiered storage local retention time (secs)",
+  "transaction: a reader raced with a prepared transaction commit and skipped an update or updates",
   "transaction: checkpoint has acquired a snapshot for its transaction",
   "transaction: race to read prepared update retry",
   "transaction: rollback to stable history store records with stop timestamps older than newer "
@@ -506,6 +507,7 @@ __wt_stat_dsrc_clear_single(WT_DSRC_STATS *stats)
     stats->tiered_work_units_dequeued = 0;
     stats->tiered_work_units_created = 0;
     /* not clearing tiered_retention */
+    stats->txn_read_race_prepare_commit = 0;
     stats->txn_checkpoint_snapshot_acquired = 0;
     stats->txn_read_race_prepare_update = 0;
     stats->txn_rts_hs_stop_older_than_newer_start = 0;
@@ -770,6 +772,7 @@ __wt_stat_dsrc_aggregate_single(WT_DSRC_STATS *from, WT_DSRC_STATS *to)
     to->tiered_work_units_dequeued += from->tiered_work_units_dequeued;
     to->tiered_work_units_created += from->tiered_work_units_created;
     to->tiered_retention += from->tiered_retention;
+    to->txn_read_race_prepare_commit += from->txn_read_race_prepare_commit;
     to->txn_checkpoint_snapshot_acquired += from->txn_checkpoint_snapshot_acquired;
     to->txn_read_race_prepare_update += from->txn_read_race_prepare_update;
     to->txn_rts_hs_stop_older_than_newer_start += from->txn_rts_hs_stop_older_than_newer_start;
@@ -1041,6 +1044,7 @@ __wt_stat_dsrc_aggregate(WT_DSRC_STATS **from, WT_DSRC_STATS *to)
     to->tiered_work_units_dequeued += WT_STAT_READ(from, tiered_work_units_dequeued);
     to->tiered_work_units_created += WT_STAT_READ(from, tiered_work_units_created);
     to->tiered_retention += WT_STAT_READ(from, tiered_retention);
+    to->txn_read_race_prepare_commit += WT_STAT_READ(from, txn_read_race_prepare_commit);
     to->txn_checkpoint_snapshot_acquired += WT_STAT_READ(from, txn_checkpoint_snapshot_acquired);
     to->txn_read_race_prepare_update += WT_STAT_READ(from, txn_read_race_prepare_update);
     to->txn_rts_hs_stop_older_than_newer_start +=
@@ -1251,6 +1255,9 @@ static const char *const __stats_connection_desc[] = {
   "cache: pages written from cache",
   "cache: pages written requiring in-memory restoration",
   "cache: percentage overhead",
+  "cache: skip dirty pages during a running checkpoint",
+  "cache: skip pages that are written with transactions greater than the last running",
+  "cache: skip pages that previously failed eviction and likely will again",
   "cache: the number of times full update inserted to history store",
   "cache: the number of times reverse modify inserted to history store",
   "cache: total milliseconds spent inside reentrant history store evictions in a reconciliation",
@@ -1530,6 +1537,7 @@ static const char *const __stats_connection_desc[] = {
   "transaction: Number of prepared updates committed",
   "transaction: Number of prepared updates repeated on the same key",
   "transaction: Number of prepared updates rolled back",
+  "transaction: a reader raced with a prepared transaction commit and skipped an update or updates",
   "transaction: checkpoint has acquired a snapshot for its transaction",
   "transaction: oldest pinned transaction ID rolled back for eviction",
   "transaction: prepared transactions",
@@ -1819,6 +1827,9 @@ __wt_stat_connection_clear_single(WT_CONNECTION_STATS *stats)
     stats->cache_write = 0;
     stats->cache_write_restore = 0;
     /* not clearing cache_overhead */
+    stats->cache_eviction_server_skip_dirty_pages_during_checkpoint = 0;
+    stats->cache_eviction_server_skip_pages_last_running = 0;
+    stats->cache_eviction_server_skip_pages_retry = 0;
     stats->cache_hs_insert_full_update = 0;
     stats->cache_hs_insert_reverse_modify = 0;
     /* not clearing cache_reentry_hs_eviction_milliseconds */
@@ -2096,6 +2107,7 @@ __wt_stat_connection_clear_single(WT_CONNECTION_STATS *stats)
     stats->txn_prepared_updates_committed = 0;
     stats->txn_prepared_updates_key_repeated = 0;
     stats->txn_prepared_updates_rolledback = 0;
+    stats->txn_read_race_prepare_commit = 0;
     stats->txn_checkpoint_snapshot_acquired = 0;
     stats->txn_rollback_oldest_pinned = 0;
     stats->txn_prepare = 0;
@@ -2390,6 +2402,12 @@ __wt_stat_connection_aggregate(WT_CONNECTION_STATS **from, WT_CONNECTION_STATS *
     to->cache_write += WT_STAT_READ(from, cache_write);
     to->cache_write_restore += WT_STAT_READ(from, cache_write_restore);
     to->cache_overhead += WT_STAT_READ(from, cache_overhead);
+    to->cache_eviction_server_skip_dirty_pages_during_checkpoint +=
+      WT_STAT_READ(from, cache_eviction_server_skip_dirty_pages_during_checkpoint);
+    to->cache_eviction_server_skip_pages_last_running +=
+      WT_STAT_READ(from, cache_eviction_server_skip_pages_last_running);
+    to->cache_eviction_server_skip_pages_retry +=
+      WT_STAT_READ(from, cache_eviction_server_skip_pages_retry);
     to->cache_hs_insert_full_update += WT_STAT_READ(from, cache_hs_insert_full_update);
     to->cache_hs_insert_reverse_modify += WT_STAT_READ(from, cache_hs_insert_reverse_modify);
     to->cache_reentry_hs_eviction_milliseconds +=
@@ -2681,6 +2699,7 @@ __wt_stat_connection_aggregate(WT_CONNECTION_STATS **from, WT_CONNECTION_STATS *
     to->txn_prepared_updates_committed += WT_STAT_READ(from, txn_prepared_updates_committed);
     to->txn_prepared_updates_key_repeated += WT_STAT_READ(from, txn_prepared_updates_key_repeated);
     to->txn_prepared_updates_rolledback += WT_STAT_READ(from, txn_prepared_updates_rolledback);
+    to->txn_read_race_prepare_commit += WT_STAT_READ(from, txn_read_race_prepare_commit);
     to->txn_checkpoint_snapshot_acquired += WT_STAT_READ(from, txn_checkpoint_snapshot_acquired);
     to->txn_rollback_oldest_pinned += WT_STAT_READ(from, txn_rollback_oldest_pinned);
     to->txn_prepare += WT_STAT_READ(from, txn_prepare);

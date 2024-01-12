@@ -1107,12 +1107,15 @@ __conn_close(WT_CONNECTION *wt_conn, const char *config)
     WT_DECL_RET;
     WT_SESSION *wt_session;
     WT_SESSION_IMPL *s, *session;
+    WT_TIMER timer;
     uint32_t i;
 
     conn = (WT_CONNECTION_IMPL *)wt_conn;
 
     CONNECTION_API_CALL(conn, session, close, config, cfg);
 err:
+
+    __wt_timer_start(session, &timer);
 
     /*
      * Ramp the eviction dirty target down to encourage eviction threads to clear dirty content out
@@ -1193,6 +1196,14 @@ err:
     WT_TRET(__wt_config_gets(session, cfg, "leak_memory", &cval));
     if (cval.val != 0)
         F_SET(conn, WT_CONN_LEAK_MEMORY);
+
+    /* Time since the shutdown has started. */
+    __wt_timer_evaluate_ms(session, &timer, &conn->shutdown_timeline.shutdown_ms);
+    __wt_verbose(session, WT_VERB_RECOVERY_PROGRESS,
+      "shutdown was completed successfully and took %" PRIu64 "ms, including %" PRIu64
+      "ms for the rollback to stable, and %" PRIu64 "ms for the checkpoint.",
+      conn->shutdown_timeline.shutdown_ms, conn->shutdown_timeline.rts_ms,
+      conn->shutdown_timeline.checkpoint_ms);
 
     WT_TRET(__wt_connection_close(conn));
 
@@ -2259,6 +2270,7 @@ __wt_timing_stress_config(WT_SESSION_IMPL *session, const char *cfg[])
       {"history_store_sweep_race", WT_TIMING_STRESS_HS_SWEEP},
       {"prepare_checkpoint_delay", WT_TIMING_STRESS_PREPARE_CHECKPOINT_DELAY},
       {"prepare_resolution", WT_TIMING_STRESS_PREPARE_RESOLUTION},
+      {"prepare_resolution_2", WT_TIMING_STRESS_PREPARE_RESOLUTION_2},
       {"split_1", WT_TIMING_STRESS_SPLIT_1}, {"split_2", WT_TIMING_STRESS_SPLIT_2},
       {"split_3", WT_TIMING_STRESS_SPLIT_3}, {"split_4", WT_TIMING_STRESS_SPLIT_4},
       {"split_5", WT_TIMING_STRESS_SPLIT_5}, {"split_6", WT_TIMING_STRESS_SPLIT_6},

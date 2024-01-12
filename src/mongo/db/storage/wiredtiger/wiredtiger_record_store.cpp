@@ -265,7 +265,7 @@ void WiredTigerRecordStore::OplogStones::awaitHasExcessStonesOrDead() {
                 }
             }
         }
-        _oplogReclaimCv.wait(lock);
+        _oplogReclaimCv.wait_for(lock, stdx::chrono::seconds{gOplogTruncationCheckPeriodSeconds});
     }
 }
 
@@ -950,7 +950,7 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
     // case for temporary RecordStores (those not associated with any collection) and in unit
     // tests. Persistent size information is not required in either case. If a RecordStore needs
     // persistent size information, we require it to use a SizeStorer.
-    _sizeInfo = _sizeStorer ? _sizeStorer->load(ctx, _uri)
+    _sizeInfo = _sizeStorer ? _sizeStorer->load(_uri)
                             : std::make_shared<WiredTigerSizeStorer::SizeInfo>(0, 0);
 }
 
@@ -1180,8 +1180,7 @@ bool WiredTigerRecordStore::yieldAndAwaitOplogDeletionRequest(OperationContext* 
 
     // Release any locks before waiting on the condition variable. It is illegal to access any
     // methods or members of this record store after this line because it could be deleted.
-    bool releasedAnyLocks = locker->saveLockStateAndUnlock(&snapshot);
-    invariant(releasedAnyLocks);
+    locker->saveLockStateAndUnlock(&snapshot);
 
     // The top-level locks were freed, so also release any potential low-level (storage engine)
     // locks that might be held.

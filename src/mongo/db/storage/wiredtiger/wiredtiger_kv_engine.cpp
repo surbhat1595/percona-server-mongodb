@@ -2768,18 +2768,24 @@ void WiredTigerKVEngine::syncSizeInfo(bool sync) const {
     if (!_sizeStorer)
         return;
 
-    try {
-        _sizeStorer->flush(sync);
-    } catch (const WriteConflictException&) {
-        // ignore, we'll try again later.
-    } catch (const AssertionException& ex) {
-        // re-throw exception if it's not WT_CACHE_FULL.
-        if (!_durable && ex.code() == ErrorCodes::ExceededMemoryLimit) {
-            LOGV2_ERROR(29000,
-                        "size storer failed to sync cache... ignoring: {ex_what}",
-                        "ex_what"_attr = ex.what());
-        } else {
-            throw;
+    while (true) {
+        try {
+            return _sizeStorer->flush(sync);
+        } catch (const WriteConflictException&) {
+            if (!sync) {
+                // ignore, we'll try again later.
+                return;
+            }
+        } catch (const AssertionException& ex) {
+            // re-throw exception if it's not WT_CACHE_FULL
+            if (!_durable && ex.code() == ErrorCodes::ExceededMemoryLimit) {
+                LOGV2_ERROR(29000,
+                            "size storer failed to sync cache... ignoring: {ex_what}",
+                            "ex_what"_attr = ex.what());
+                return;
+            } else {
+                throw;
+            }
         }
     }
 }
@@ -3242,6 +3248,10 @@ Status WiredTigerKVEngine::dropIdent(RecoveryUnit* ru,
         return Status::OK();
     }
 
+    if (DurableCatalog::isCollectionIdent(ident)) {
+        _sizeStorer->remove(uri);
+    }
+
     if (onDrop) {
         onDrop();
     }
@@ -3401,6 +3411,20 @@ bool WiredTigerKVEngine::supportsDirectoryPerDB() const {
     return true;
 }
 
+void WiredTigerKVEngine::_checkpoint(WT_SESSION* session, bool useTimestamp) {
+    _currentCheckpointIteration.fetchAndAdd(1);
+    if (useTimestamp) {
+        invariantWTOK(session->checkpoint(session, "use_timestamp=true"), session);
+    } else {
+        invariantWTOK(session->checkpoint(session, "use_timestamp=false"), session);
+    }
+    auto checkpointedIteration = _finishedCheckpointIteration.fetchAndAdd(1);
+    LOGV2_FOR_RECOVERY(8097402,
+                       2,
+                       "Finished checkpoint, updated iteration counter",
+                       "checkpointIteration"_attr = checkpointedIteration);
+}
+
 void WiredTigerKVEngine::_checkpoint(WT_SESSION* session) {
     // Ephemeral WiredTiger instances cannot do a checkpoint to disk as there is no disk backing
     // the data.
@@ -3442,7 +3466,7 @@ void WiredTigerKVEngine::_checkpoint(WT_SESSION* session) {
         // Third, stableTimestamp >= initialDataTimestamp: Take stable checkpoint. Steady state
         // case.
         if (initialDataTimestamp.asULL() <= 1) {
-            invariantWTOK(session->checkpoint(session, "use_timestamp=false"), session);
+            _checkpoint(session, /*useTimestamp=*/false);
             LOGV2_FOR_RECOVERY(5576602,
                                2,
                                "Completed unstable checkpoint.",
@@ -3463,7 +3487,7 @@ void WiredTigerKVEngine::_checkpoint(WT_SESSION* session) {
                                "stableTimestamp"_attr = stableTimestamp,
                                "oplogNeededForRollback"_attr = toString(oplogNeededForRollback));
 
-            invariantWTOK(session->checkpoint(session, "use_timestamp=true"), session);
+            _checkpoint(session, /*useTimestamp=*/true);
 
             if (oplogNeededForRollback.isOK()) {
                 // Now that the checkpoint is durable, publish the oplog needed to recover from it.
@@ -3488,6 +3512,12 @@ void WiredTigerKVEngine::checkpoint() {
     UniqueWiredTigerSession session = _sessionCache->getSession();
     WT_SESSION* s = session->getSession();
     return _checkpoint(s);
+}
+
+void WiredTigerKVEngine::forceCheckpoint(bool useStableTimestamp) {
+    UniqueWiredTigerSession session = _sessionCache->getSession();
+    WT_SESSION* s = session->getSession();
+    return _checkpoint(s, useStableTimestamp);
 }
 
 bool WiredTigerKVEngine::hasIdent(OperationContext* opCtx, StringData ident) const {
@@ -4163,31 +4193,15 @@ KeyFormat WiredTigerKVEngine::getKeyFormat(OperationContext* opCtx, StringData i
     return wtTableConfig.find("key_format=u") != string::npos ? KeyFormat::String : KeyFormat::Long;
 }
 
-StatusWith<BSONObj> WiredTigerKVEngine::getSanitizedStorageOptionsForSecondaryReplication(
+BSONObj WiredTigerKVEngine::getSanitizedStorageOptionsForSecondaryReplication(
     const BSONObj& options) const {
 
     // Skip inMemory storage engine, encryption at rest only applies to storage backed engine.
-    if (_ephemeral || options.isEmpty()) {
+    if (_ephemeral) {
         return options;
     }
 
-    auto firstElem = options.firstElement();
-    if (firstElem.fieldName() != kWiredTigerEngineName) {
-        return Status(ErrorCodes::InvalidOptions,
-                      str::stream() << "Expected \"" << kWiredTigerEngineName
-                                    << "\" field, but got: " << firstElem.fieldName());
-    }
-
-    BSONObj wtObj = firstElem.Obj();
-    if (auto configStringElem = wtObj.getField(WiredTigerUtil::kConfigStringField)) {
-        auto configString = configStringElem.String();
-        WiredTigerUtil::removeEncryptionFromConfigString(&configString);
-        // Return a new BSONObj with the configString field sanitized.
-        return options.addFields(BSON(kWiredTigerEngineName << wtObj.addFields(BSON(
-                                          WiredTigerUtil::kConfigStringField << configString))));
-    }
-
-    return options;
+    return WiredTigerUtil::getSanitizedStorageOptionsForSecondaryReplication(options);
 }
 
 }  // namespace mongo

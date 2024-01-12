@@ -305,6 +305,16 @@ last-continuous:
     ticket: SERVER-81985
   - test_file: jstests/sharding/query/merge_nondefault_read_concern.js
     ticket: SERVER-69244
+  - test_file: jstests/core/timeseries/timeseries_project_pushdown.js
+    ticket: SERVER-82447
+  - test_file: jstests/core/match_with_and_or_lockstep_enumeration.js
+    ticket: SERVER-83091
+  - test_file: jstests/sharding/coordinate_txn_recover_on_stepup_with_tickets_exhausted.js
+    ticket: SERVER-82883
+  - test_file: jstests/core/nested_or_duplicate_predicates_index_scan.js
+    ticket: SERVER-84013
+  - test_file: jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js
+    ticket: SERVER-77506
   suites: null
 last-lts:
   all:
@@ -656,4 +666,14 @@ last-lts:
     ticket: SERVER-81985
   - test_file: jstests/sharding/query/merge_nondefault_read_concern.js
     ticket: SERVER-69244
+  - test_file: jstests/core/timeseries/timeseries_project_pushdown.js
+    ticket: SERVER-82447
+  - test_file: jstests/core/match_with_and_or_lockstep_enumeration.js
+    ticket: SERVER-83091
+  - test_file: jstests/sharding/coordinate_txn_recover_on_stepup_with_tickets_exhausted.js
+    ticket: SERVER-82883
+  - test_file: jstests/core/nested_or_duplicate_predicates_index_scan.js
+    ticket: SERVER-84013
+  - test_file: jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js
+    ticket: SERVER-77506
   suites: null

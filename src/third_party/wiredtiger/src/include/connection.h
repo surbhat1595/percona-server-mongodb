@@ -385,6 +385,20 @@ struct __wt_connection_impl {
     uint64_t ckpt_write_bytes;
     uint64_t ckpt_write_pages;
 
+    /* Record the important timestamps of each stage in recovery. */
+    struct __wt_recovery_timeline {
+        uint64_t log_replay_ms;
+        uint64_t rts_ms;
+        uint64_t checkpoint_ms;
+        uint64_t recovery_ms;
+    } recovery_timeline;
+
+    /* Record the important timestamps of each stage in shutdown. */
+    struct __wt_shutdown_timeline {
+        uint64_t rts_ms;
+        uint64_t checkpoint_ms;
+        uint64_t shutdown_ms;
+    } shutdown_timeline;
     /* Checkpoint and incremental backup data */
     uint64_t incr_granularity;
     WT_BLKINCR incr_backups[WT_BLKINCR_MAX];
@@ -602,14 +616,15 @@ struct __wt_connection_impl {
 #define WT_TIMING_STRESS_HS_SWEEP 0x000400u
 #define WT_TIMING_STRESS_PREPARE_CHECKPOINT_DELAY 0x000800u
 #define WT_TIMING_STRESS_PREPARE_RESOLUTION 0x001000u
-#define WT_TIMING_STRESS_SPLIT_1 0x002000u
-#define WT_TIMING_STRESS_SPLIT_2 0x004000u
-#define WT_TIMING_STRESS_SPLIT_3 0x008000u
-#define WT_TIMING_STRESS_SPLIT_4 0x010000u
-#define WT_TIMING_STRESS_SPLIT_5 0x020000u
-#define WT_TIMING_STRESS_SPLIT_6 0x040000u
-#define WT_TIMING_STRESS_SPLIT_7 0x080000u
-#define WT_TIMING_STRESS_TIERED_FLUSH_FINISH 0x100000u
+#define WT_TIMING_STRESS_PREPARE_RESOLUTION_2 0x002000u
+#define WT_TIMING_STRESS_SPLIT_1 0x004000u
+#define WT_TIMING_STRESS_SPLIT_2 0x008000u
+#define WT_TIMING_STRESS_SPLIT_3 0x010000u
+#define WT_TIMING_STRESS_SPLIT_4 0x020000u
+#define WT_TIMING_STRESS_SPLIT_5 0x040000u
+#define WT_TIMING_STRESS_SPLIT_6 0x080000u
+#define WT_TIMING_STRESS_SPLIT_7 0x100000u
+#define WT_TIMING_STRESS_TIERED_FLUSH_FINISH 0x200000u
     /* AUTOMATIC FLAG VALUE GENERATION STOP 64 */
     uint64_t timing_stress_flags;
 

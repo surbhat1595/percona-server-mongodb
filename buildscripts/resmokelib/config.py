@@ -101,6 +101,7 @@ DEFAULTS = {
     "stagger_jobs": None,
     "majority_read_concern": "on",
     "storage_engine": "wiredTiger",
+    "enable_enterprise_tests": None,
     "storage_engine_cache_size_gb": None,
     "suite_files": "with_server",
     "tag_files": [],
@@ -578,7 +579,7 @@ USE_LEGACY_MULTIVERSION = True
 # Expansions file location
 # in CI, the expansions file is located in the ${workdir}, one dir up
 # from src, the checkout directory
-EXPANSIONS_FILE = "../expansions.yml" if 'CI' in os.environ else None
+EXPANSIONS_FILE = "../expansions.yml" if 'CI' in os.environ else "expansions.yml"
 
 # Symbolizer secrets
 SYMBOLIZER_CLIENT_SECRET = None

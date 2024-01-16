@@ -164,6 +164,7 @@ StatusWith<HostAndPort> SyncSourceResolver::_chooseNewSyncSource() {
 
 std::unique_ptr<Fetcher> SyncSourceResolver::_makeFirstOplogEntryFetcher(
     HostAndPort candidate, OpTime earliestOpTimeSeen) {
+    long long dummyTerm = -1;
     return std::make_unique<Fetcher>(
         _taskExecutor,
         candidate,
@@ -172,7 +173,8 @@ std::unique_ptr<Fetcher> SyncSourceResolver::_makeFirstOplogEntryFetcher(
                     << "projection"
                     << BSON(OplogEntryBase::kTimestampFieldName
                             << 1 << OplogEntryBase::kTermFieldName << 1)
-                    << ReadConcernArgs::kReadConcernFieldName << ReadConcernArgs::kImplicitDefault),
+                    << ReadConcernArgs::kReadConcernFieldName << ReadConcernArgs::kImplicitDefault
+                    << "term" << dummyTerm),
         [=](const StatusWith<Fetcher::QueryResponse>& response,
             Fetcher::NextAction*,
             BSONObjBuilder*) {

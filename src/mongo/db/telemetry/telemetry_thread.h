@@ -29,52 +29,29 @@ Copyright (C) 2024-present Percona and/or its affiliates. All rights reserved.
     it in the license file.
 ======= */
 
-#include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/telemetry/telemetry_parameter_gen.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/util/str.h"
+#pragma once
 
 namespace mongo {
 
-class OperationContext;
-class TenantId;
+class ServiceContext;
 
-void TelemetryParameter::append(OperationContext* opCtx,
-                                BSONObjBuilder& b,
-                                const std::string& name) {
-    b.append(name, _data.load());
-}
+/**
+ * Starts the Percona telemetry job if its enabled
+ */
+void initPerconaTelemetry(ServiceContext* serviceContext);
 
-namespace {
+/**
+ * Stops the Percona telemetry job if it is running
+ */
+void shutdownPerconaTelemetry(ServiceContext* serviceContext);
 
-Status _set(AtomicWord<bool>* data, bool value) {
-    data->store(value);
-    return Status::OK();
-}
-
-}  // namespace
-
-Status TelemetryParameter::set(const BSONElement& newValueElement) {
-    if (!newValueElement.isBoolean()) {
-        return {ErrorCodes::BadValue, str::stream() << name() << " has to be a boolean"};
-    }
-    return _set(&_data, newValueElement.boolean());
-}
-
-Status TelemetryParameter::setFromString(const std::string& newValueString) {
-    if (newValueString == "true"_sd || newValueString == "1"_sd) {
-        return _set(&_data, true);
-    }
-    if (newValueString == "false"_sd || newValueString == "0"_sd) {
-        return _set(&_data, false);
-    }
-    return {ErrorCodes::BadValue, "can't convert string to bool"};
-}
+/**
+ * Update telemetry state when server parameter is set
+ *
+ * @param state The new state of the telemetry subsystem. The 'true' value effctively starts
+ * telemetry subsystem if it is not running. The 'false' value effectively stops telemetry subsystem
+ * if it was running
+ */
+void updatePerconaTelemetry(bool state);
 
 }  // namespace mongo

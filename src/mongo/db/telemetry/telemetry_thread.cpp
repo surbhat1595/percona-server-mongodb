@@ -52,6 +52,7 @@ Copyright (C) 2024-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/storage_interface.h"
@@ -228,6 +229,7 @@ private:
         // see ReplicationConsistencyMarkersImpl::setInitialSyncIdIfNotSet
         auto opCtxObj = cc().makeOperationContext();
         auto* opCtx = opCtxObj.get();
+        repl::UnreplicatedWritesBlock uwb(opCtx);
         auto* storageInterface = repl::StorageInterface::get(serviceContext);
         const NamespaceString nss{kTelemetryNamespace};
         auto status = storageInterface->createCollection(opCtx, nss, CollectionOptions());
@@ -266,6 +268,7 @@ private:
         _nextScrape = Date_t::now() + Seconds(perconaTelemetryScrapeInterval);
         auto opCtxObj = cc().makeOperationContext();
         auto* opCtx = opCtxObj.get();
+        repl::UnreplicatedWritesBlock uwb(opCtx);
         auto* storageInterface = repl::StorageInterface::get(serviceContext);
         const NamespaceString nss{kTelemetryNamespace};
         auto doc = BSON(kId << _dbid << kScheduledAt << _nextScrape);

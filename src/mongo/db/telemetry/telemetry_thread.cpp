@@ -107,6 +107,7 @@ constexpr StringData kReplMemberState = "replication_state"_sd;
 constexpr StringData kClusterId = "db_cluster_id"_sd;
 constexpr StringData kClusterRole = "cluster_role"_sd;
 constexpr StringData kUptime = "uptime"_sd;
+constexpr StringData kSource = "source"_sd;
 
 
 // We need this flag to filter out updates from server parameter which can arrive before global
@@ -300,6 +301,7 @@ private:
             bson.append(kPillarVersion, vii.version());
             // v5.0 has no pro features so we use empty list instead of vii.psmdbProFeatures()
             bson.append(kProFeatures, std::vector<StringData>());
+            bson.append(kSource, "mongod"_sd);
             if (clusterId.isSet()) {
                 bson.append(kClusterId, clusterId.toString());
                 bson.append(kClusterRole, clusterRoleName(serverGlobalParams.clusterRole));

@@ -181,6 +181,15 @@ public:
     }
 
     /**
+     * Returns whether this SemiFuture can or will be able to access a deferred status or value.
+     *
+     * TODO(SERVER-66010): Document validity semantics in `Future` member functions.
+     */
+    bool valid() const {
+        return _impl.valid();
+    }
+
+    /**
      * Returns when the Semifuture isReady().
      *
      * Throws if the interruptible passed is interrupted (explicitly or via deadline).
@@ -213,7 +222,6 @@ public:
     T get(Interruptible* interruptible = Interruptible::notInterruptible()) && {
         return std::move(_impl).get(interruptible);
     }
-
     future_details::AddRefUnlessVoid<T> get(
         Interruptible* interruptible = Interruptible::notInterruptible()) & {
         return _impl.get(interruptible);
@@ -316,6 +324,7 @@ public:
     using SemiFuture<T>::SemiFuture;  // Constructors.
     using SemiFuture<T>::share;
     using SemiFuture<T>::isReady;
+    using SemiFuture<T>::valid;
     using SemiFuture<T>::wait;
     using SemiFuture<T>::waitNoThrow;
     using SemiFuture<T>::get;
@@ -594,6 +603,7 @@ public:
     using value_type = T;
     using SemiFuture<T>::share;
     using SemiFuture<T>::isReady;
+    using SemiFuture<T>::valid;
     using SemiFuture<T>::wait;
     using SemiFuture<T>::waitNoThrow;
     using SemiFuture<T>::get;
@@ -963,6 +973,10 @@ public:
         return _shared.isReady();
     }
 
+    bool valid() const {
+        return _shared.valid();
+    }
+
     void wait(Interruptible* interruptible = Interruptible::notInterruptible()) const {
         _shared.wait(interruptible);
     }
@@ -1261,7 +1275,7 @@ MONGO_COMPILER_NOINLINE auto ExecutorFuture<T>::wrapCBHelper(unique_function<Sig
 }
 
 template <typename T>
-    inline ExecutorFuture<T> SemiFuture<T>::thenRunOn(ExecutorPtr exec) && noexcept {
+    ExecutorFuture<T> SemiFuture<T>::thenRunOn(ExecutorPtr exec) && noexcept {
     return ExecutorFuture<T>(std::move(exec), std::move(_impl));
 }
 
@@ -1270,13 +1284,16 @@ template <typename T>
     return Future<T>(std::move(_impl));
 }
 
+namespace future_details {
 template <typename T>
-    inline SharedSemiFuture<future_details::FakeVoidToVoid<T>>
-    future_details::FutureImpl<T>::share() && noexcept {
+    SharedSemiFuture<FakeVoidToVoid<T>> FutureImpl<T>::share() && noexcept {
+    invariant(valid());
     using Out = SharedSemiFuture<FakeVoidToVoid<T>>;
     if (_immediate)
-        return Out(SharedStateHolder<FakeVoidToVoid<T>>::makeReady(std::move(*_immediate)));
+        return Out(SharedStateHolder<FakeVoidToVoid<T>>::makeReady(*std::exchange(_immediate, {})));
+
     return Out(SharedStateHolder<FakeVoidToVoid<T>>(std::move(_shared)));
 }
+}  // namespace future_details
 
 }  // namespace mongo

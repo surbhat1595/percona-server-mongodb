@@ -570,6 +570,12 @@ Status ShardingCatalogManager::_initConfigIndexes(OperationContext* opCtx) {
         return result.withContext("couldn't create lock id index on config db");
     }
 
+    result = configShard->createIndexOnConfig(
+        opCtx, LocksType::ConfigNS, BSON(LocksType::process() << 1), !unique);
+    if (!result.isOK()) {
+        return result.withContext("couldn't create lock process index on config db");
+    }
+
     result =
         configShard->createIndexOnConfig(opCtx,
                                          LocksType::ConfigNS,
@@ -803,7 +809,8 @@ void ShardingCatalogManager::_upgradeDatabasesEntriesTo50(OperationContext* opCt
             DatabaseType::ConfigNS,
             BSON(DatabaseType::name << name),
             BSON("$set" << BSON(DatabaseType::version() + "." + DatabaseVersion::kTimestampFieldName
-                                << clusterTime)),
+                                << clusterTime)
+                        << "$unset" << BSON(DatabaseType::lastMovedTimestampPre50() << 1)),
             false /* upsert */,
             false /* multi*/);
     }

@@ -109,6 +109,8 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/stacktrace.h"
+#include "mongo/util/str.h"
+#include "mongo/util/synchronized_value.h"
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
@@ -2481,14 +2483,43 @@ ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown::AutoGetRstlForStepUpSt
     // The state transition should never be rollback within this class.
     invariant(_stateTransition != ReplicationCoordinator::OpsKillingStateTransitionEnum::kRollback);
 
-    // Enqueues RSTL in X mode.
-    _rstlLock.emplace(_opCtx, MODE_X, ReplicationStateTransitionLockGuard::EnqueueOnly());
+    int rstlTimeout = fassertOnLockTimeoutForStepUpDown.load();
+    Date_t start{Date_t::now()};
+    if (rstlTimeout > 0 && deadline - start > Seconds(rstlTimeout)) {
+        deadline = start + Seconds(rstlTimeout);  // cap deadline
+    }
 
-    ON_BLOCK_EXIT([&] { _stopAndWaitForKillOpThread(); });
-    _startKillOpThread();
+    try {
+        // Enqueues RSTL in X mode.
+        _rstlLock.emplace(_opCtx, MODE_X, ReplicationStateTransitionLockGuard::EnqueueOnly());
 
-    // Wait for RSTL to be acquired.
-    _rstlLock->waitForLockUntil(deadline);
+        ON_BLOCK_EXIT([&] { _stopAndWaitForKillOpThread(); });
+        _startKillOpThread();
+
+        // Wait for RSTL to be acquired.
+        _rstlLock->waitForLockUntil(deadline);
+
+    } catch (const ExceptionFor<ErrorCodes::LockTimeout>&) {
+        if (rstlTimeout > 0 && Date_t::now() - start >= Seconds(rstlTimeout)) {
+            auto lockerInfo =
+                opCtx->lockState()->getLockerInfo(CurOp::get(opCtx)->getLockStatsBase());
+            BSONObjBuilder lockRep;
+            lockerInfo->stats.report(&lockRep);
+            LOGV2_FATAL_CONTINUE(
+                5675600,
+                "Time out exceeded waiting for RSTL, stepUp/stepDown is not possible "
+                "thus calling abort() to allow cluster to progress.",
+                "lockRep"_attr = lockRep.obj());
+
+#if defined(MONGO_STACKTRACE_CAN_DUMP_ALL_THREADS)
+            // Dump the stack of each thread.
+            printAllThreadStacksBlocking();
+#endif
+            fassertFailedNoTrace(7152000);
+        }
+        // Rethrow to keep processing as before at a higher layer.
+        throw;
+    }
 };
 
 void ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown::_startKillOpThread() {
@@ -2593,7 +2624,6 @@ void ReplicationCoordinatorImpl::stepDown(OperationContext* opCtx,
                                           const bool force,
                                           const Milliseconds& waitTime,
                                           const Milliseconds& stepdownTime) {
-
     const Date_t startTime = _replExecutor->now();
     const Date_t stepDownUntil = startTime + stepdownTime;
     const Date_t waitUntil = startTime + waitTime;

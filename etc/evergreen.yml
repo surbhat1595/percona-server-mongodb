@@ -296,8 +296,8 @@ variables:
   - name: sharding_auth_audit_gen
   - name: snmp
 
-- &stitch_support_task_group_template
-  name: stitch_support_task_group_template
+- &stitch_support_task_group_template_community_only
+  name: stitch_support_task_group_template_community_only
   setup_task:
     - func: "apply compile expansions"
     - func: "set task expansion macros"
@@ -325,7 +325,11 @@ variables:
 # If a variant is listed here and has a push task, mongocryptd is pushed
 - mongocryptd_variants: &mongocryptd_variants
   - enterprise-amazon2
+  - enterprise-amazon2-openssl111
   - enterprise-amazon2-arm64
+  - enterprise-amazon2-arm64-openssl111
+  - enterprise-amazon2023
+  - enterprise-amazon2023-arm64
   - enterprise-debian92-64
   - enterprise-debian10-64
   - enterprise-debian11-64
@@ -372,6 +376,9 @@ variables:
   - enterprise-rhel-70-64-bit
   - enterprise-rhel-82-arm64
   - enterprise-amazon2-arm64
+  - enterprise-amazon2-arm64-openssl111
+  - enterprise-amazon2023
+  - enterprise-amazon2023-arm64
   - enterprise-ubuntu1804-64
   - enterprise-windows
   - enterprise-windows-suggested
@@ -382,8 +389,14 @@ variables:
   - amazon
   - enterprise-linux-64-amazon-ami
   - amazon2
+  - amazon2023
+  - amazon2023-arm64
   - enterprise-amazon2
+  - enterprise-amazon2-openssl111
   - enterprise-amazon2-arm64
+  - enterprise-amazon2-arm64-openssl111
+  - enterprise-amazon2023
+  - enterprise-amazon2023-arm64
   - debian10
   - debian11
   - enterprise-debian10-64
@@ -2500,7 +2513,7 @@ tasks:
         permissions: public-read
         content_type: ${content_type|application/x-gzip}
 
-- name: stitch_support_create_lib
+- name: stitch_support_create_lib_community_only
   commands:
     - *f_expansions_write
     - func: "scons compile"
@@ -2531,9 +2544,9 @@ tasks:
         content_type: application/tar
         display_name: "Stitch Support Library"
 
-- name: stitch_support_install_tests
+- name: stitch_support_install_tests_community_only
   depends_on:
-    - name: stitch_support_create_lib
+    - name: stitch_support_create_lib_community_only
   commands:
     - func: "scons compile"
       vars:
@@ -2547,9 +2560,9 @@ tasks:
           --separate-debug
           DESTDIR='$BUILD_ROOT/stitch-support-lib-$MONGO_VERSION'
 
-- name: stitch_support_run_tests
+- name: stitch_support_run_tests_community_only
   depends_on:
-    - name: stitch_support_install_tests
+    - name: stitch_support_install_tests_community_only
   commands:
     - *f_expansions_write
     - command: subprocess.exec
@@ -2829,7 +2842,7 @@ tasks:
   - func: "do benchmark setup"
   - func: "run tests"
     vars:
-      exec_timeout_secs: 10800  # 3 hour timeout.
+      exec_timeout_secs: 14400  # 4 hour timeout.
       resmoke_args: --suites=benchmarks
       resmoke_jobs_max: 1
 
@@ -5612,6 +5625,16 @@ tasks:
       suite: ssl_x509
       resmoke_args: --storageEngine=wiredTiger
 
+- <<: *gen_task_template
+  name: ssl_linear_gen
+  tags: ["encrypt", "ssl"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      suite: ssl_linear
+      resmoke_jobs_max: 1
+      resmoke_args: --storageEngine=wiredTiger
+
 - <<: *task_template
   name: jsCore_decimal
   tags: ["jscore", "common", "decimal"]
@@ -6059,25 +6082,6 @@ tasks:
   - func: "set up venv"
   - func: "upload pip requirements"
   - func: "run idl tests"
-
-- name: blackduck_scanner
-  patchable: false
-  commands:
-  - *f_expansions_write
-  - func: "do non-compile setup"
-  - command: subprocess.exec
-    type: setup
-    params:
-      binary: bash
-      silent: true
-      args:
-        - "src/evergreen/blackduck_setup.sh"
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-        - "src/evergreen/blackduck_hub.sh"
 
 - name: tla_plus
   commands:
@@ -7246,18 +7250,18 @@ task_groups:
   - "embedded_sdk_s3_put_latest"
   - "embedded_sdk_tests_s3_put_latest"
 
-- <<: *stitch_support_task_group_template
-  name: stitch_support_lib_build_and_archive
+- <<: *stitch_support_task_group_template_community_only
+  name: stitch_support_lib_build_and_archive_community_only
   tags: ["stitch"]
   tasks:
-    - "stitch_support_create_lib"
-- <<: *stitch_support_task_group_template
-  name: stitch_support_lib_build_and_test
+    - "stitch_support_create_lib_community_only"
+- <<: *stitch_support_task_group_template_community_only
+  name: stitch_support_lib_build_and_test_community_only
   tags: ["stitch"]
   max_hosts: 1
   tasks:
-    - "stitch_support_install_tests"
-    - "stitch_support_run_tests"
+    - "stitch_support_install_tests_community_only"
+    - "stitch_support_run_tests_community_only"
 
 #######################################
 #               Modules               #
@@ -7674,7 +7678,6 @@ buildvariants:
   - name: sharding_gen
   - name: sharding_jscore_passthrough
   - name: .ssl
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -7716,7 +7719,6 @@ buildvariants:
   - name: .sharding .txns
   - name: sharding_gen
   - name: sharding_jscore_passthrough
-  - name: .stitch
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: ubuntu1804-arm64
@@ -7909,7 +7911,6 @@ buildvariants:
   - name: sharding_gen
   - name: sharding_jscore_passthrough
   - name: .ssl
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -7990,7 +7991,6 @@ buildvariants:
   - name: .sharding .txns
   - name: slow1_gen
   - name: snmp
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -8089,7 +8089,6 @@ buildvariants:
   - name: .sharding .txns !.csrs
   - name: slow1_gen
   - name: snmp
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -8143,6 +8142,56 @@ buildvariants:
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
+- name: enterprise-amazon2-openssl111
+  display_name: "Enterprise Amazon Linux 2 (openssl 1.1.1)"
+  run_on:
+  - amazon2-openssl111-small
+  expansions:
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
+    test_flags: >-
+      --excludeWithAnyTags=SERVER-34286,incompatible_with_amazon_linux
+    push_path: linux
+    push_bucket: downloads.10gen.com
+    push_name: linux
+    push_arch: x86_64-enterprise-amazon2-openssl111
+    compile_flags: --ssl MONGO_DISTMOD=amazon2 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    multiversion_platform: amazon2
+    multiversion_edition: enterprise
+    has_packages: true
+    packager_script: packager_enterprise.py
+    packager_arch: x86_64
+    packager_distro: amazon2
+    repo_edition: enterprise
+    scons_cache_scope: shared
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - amazon2-openssl111-large
+  - name: build_variant_gen
+  - name: .aggfuzzer .common
+  - name: aggregation
+  - name: audit
+  - name: .auth !.gle !.multiversion
+  - name: bulk_gle_passthrough
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .encrypt !.aggregation
+  - name: .jscore .common !.compat
+  - name: .jstestfuzz .common
+  - name: libunwind_tests
+  - name: .logical_session_cache .one_sec
+  - name: noPassthrough_gen
+  - name: noPassthroughWithMongod_gen
+  - name: .replica_sets .common
+  - name: sasl
+  - name: serial_run
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .txns !.csrs
+  - name: slow1_gen
+  - name: snmp
+  - name: .stitch
+  - name: push
+  - name: generate_buildid_to_debug_symbols_mapping
+
 - name: enterprise-amazon2-arm64
   display_name: "Enterprise Amazon Linux 2 arm64"
   run_on:
@@ -8188,7 +8237,6 @@ buildvariants:
   - name: sharding_auth_audit_gen
   - name: sharding_auth_gen
   - name: snmp
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -8236,6 +8284,256 @@ buildvariants:
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
+- name: amazon2023
+  display_name: Amazon Linux 2023
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - amazon2023.0-small
+  expansions:
+    push_path: linux
+    push_bucket: downloads.mongodb.org
+    push_name: linux
+    push_arch: x86_64-amazon2023
+    compile_flags: --ssl MONGO_DISTMOD=amazon2023 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars --use-diagnostic-latches=off --modules=
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_external_data_source,requires_latch_analyzer --enableEnterpriseTests=off
+    has_packages: true
+    packager_script: packager.py
+    packager_arch: x86_64
+    packager_distro: amazon2023
+    repo_edition: org
+    scons_cache_scope: shared
+    large_distro_name: amazon2023.0-large
+    compile_variant: amazon2023
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - amazon2023.0-large
+  - name: build_variant_gen
+  - name: .aggfuzzer .common !.multiversion
+  - name: aggregation
+  - name: .auth !.audit !.multiversion
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .misc_js !.parallel
+  - name: .concurrency .common
+    distros:
+    - amazon2023.0-large
+  - name: concurrency_replication_causal_consistency_gen
+  - name: disk_wiredtiger
+  - name: .jscore .common
+  - name: .jstestfuzz .common
+  - name: libunwind_tests
+  - name: .logical_session_cache .one_sec
+  - name: replica_sets_gen
+  - name: .replica_sets .common
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .common !.op_query !.csrs !.multiversion
+  - name: .sharding .txns
+  - name: .ssl
+  - name: .stitch
+  - name: .publish
+  - name: generate_buildid_to_debug_symbols_mapping
+
+- name: enterprise-amazon2023
+  display_name: "Enterprise Amazon Linux 2023"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - amazon2023.0-small
+  expansions:
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
+    push_path: linux
+    push_bucket: downloads.10gen.com
+    push_name: linux
+    push_arch: x86_64-enterprise-amazon2023
+    compile_flags: --ssl MONGO_DISTMOD=amazon2023 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars --use-diagnostic-latches=off --enterprise-features="audit,encryptdb,fle,search,hot_backups,inmemory,ldap,live_import,mongohouse,queryable,sasl,kerberos"
+    crypt_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
+    # TODO BUILD-13887 should fix uses_pykmip incompatibility.
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,uses_pykmip,requires_v4_0,requires_external_data_source,requires_latch_analyzer
+    has_packages: true
+    multiversion_platform: amazon2023
+    multiversion_edition: enterprise
+    multiversion_architecture: x86_64
+    packager_script: packager_enterprise.py
+    packager_arch: x86_64
+    packager_distro: amazon2023
+    repo_edition: enterprise
+    scons_cache_scope: shared
+    compile_variant: enterprise-amazon2023
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - amazon2023.0-large
+  - name: build_variant_gen
+  - name: .aggfuzzer .common !.multiversion
+  - name: aggregation
+  - name: audit
+  - name: .auth !.gle !.multiversion
+  - name: bulk_gle_passthrough
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .encrypt !.aggregation
+  - name: .jscore .common !.compat
+  - name: .jstestfuzz .common
+  - name: libunwind_tests
+  - name: .logical_session_cache .one_sec
+  - name: noPassthrough_gen
+  - name: noPassthroughWithMongod_gen
+  - name: .replica_sets .common
+  - name: sasl
+  - name: serial_run
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .txns !.csrs
+  - name: slow1_gen
+  - name: .publish
+  - name: generate_buildid_to_debug_symbols_mapping
+
+- name: amazon2023-arm64
+  display_name: Amazon Linux 2023 arm64
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - amazon2023.0-arm64-small
+  expansions:
+    push_path: linux
+    push_bucket: downloads.mongodb.org
+    push_name: linux
+    push_arch: aarch64-amazon2023
+    compile_flags: --ssl MONGO_DISTMOD=amazon2023 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars --use-diagnostic-latches=off --modules=
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_external_data_source,requires_latch_analyzer --enableEnterpriseTests=off
+    has_packages: true
+    packager_script: packager.py
+    packager_arch: aarch64
+    packager_distro: amazon2023
+    repo_edition: org
+    scons_cache_scope: shared
+    large_distro_name: amazon2023.0-arm64-large
+    compile_variant: amazon2023-arm64
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - amazon2023.0-arm64-large
+  - name: build_variant_gen
+  - name: aggregation
+  - name: .auth !.audit !.multiversion
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .misc_js !.parallel
+  - name: .concurrency .common
+    distros:
+    - amazon2023.0-arm64-large
+  - name: concurrency_replication_causal_consistency_gen
+  - name: disk_wiredtiger
+  - name: .jscore .common
+  - name: .jstestfuzz .common
+  - name: .logical_session_cache .one_sec
+  - name: replica_sets_gen
+  - name: .replica_sets .common
+  - name: .sharding .txns
+  - name: .sharding .common !.op_query !.csrs !.multiversion
+  - name: .ssl
+  - name: .stitch
+  - name: .publish
+  - name: generate_buildid_to_debug_symbols_mapping
+
+- name: enterprise-amazon2023-arm64
+  display_name: "Enterprise Amazon Linux 2023 arm64"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - amazon2023.0-arm64-small
+  expansions:
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
+    push_path: linux
+    push_bucket: downloads.10gen.com
+    push_name: linux
+    push_arch: aarch64-enterprise-amazon2023
+    compile_flags: --ssl MONGO_DISTMOD=amazon2023 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars --use-diagnostic-latches=off --enterprise-features="audit,encryptdb,fle,search,hot_backups,inmemory,ldap,live_import,mongohouse,queryable,sasl,kerberos"
+    crypt_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
+    # TODO BUILD-13887 should fix uses_pykmip incompatibility.
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,uses_pykmip,requires_v4_0,requires_external_data_source,requires_latch_analyzer
+    has_packages: true
+    multiversion_platform: amazon2023
+    multiversion_edition: enterprise
+    multiversion_architecture: aarch64
+    packager_script: packager_enterprise.py
+    packager_arch: aarch64
+    packager_distro: amazon2023
+    repo_edition: enterprise
+    scons_cache_scope: shared
+    compile_variant: enterprise-amazon2023-arm64
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - amazon2023.0-arm64-large
+  - name: build_variant_gen
+  - name: .aggfuzzer !.multiversion
+  - name: audit
+  - name: auth_audit_gen
+  - name: auth_gen
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .encrypt !.sharding !.replica_sets !.aggregation !.jscore
+  - name: external_auth
+  - name: external_auth_aws
+  - name: .jscore .common !.compat !.decimal !.sharding
+  - name: jsCore_txns_large_txns_format
+  - name: .jstestfuzz .common
+  - name: .logical_session_cache .one_sec
+  - name: replica_sets_auth_gen
+  - name: replica_sets_jscore_passthrough
+  - name: .replica_sets .multi_oplog
+  - name: sasl
+  - name: search
+  - name: search_auth
+  - name: search_ssl
+  - name: sharding_auth_audit_gen
+  - name: sharding_auth_gen
+  - name: .publish
+  - name: generate_buildid_to_debug_symbols_mapping
+
+- name: enterprise-amazon2-arm64-openssl111
+  display_name: "Enterprise Amazon Linux 2 arm64 (openssl 1.1.1)"
+  run_on:
+  - amazon2-arm64-openssl111-small
+  expansions:
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
+    push_path: linux
+    push_bucket: downloads.10gen.com
+    push_name: linux
+    push_arch: aarch64-enterprise-amazon2-openssl111
+    compile_flags: --ssl MONGO_DISTMOD=amazon2 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux
+    has_packages: true
+    packager_script: packager_enterprise.py
+    packager_arch: aarch64
+    packager_distro: amazon2
+    repo_edition: enterprise
+    scons_cache_scope: shared
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - amazon2-arm64-large
+  - name: build_variant_gen
+  - name: .aggfuzzer !.multiversion
+  - name: audit
+  - name: auth_audit_gen
+  - name: auth_gen
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .encrypt !.sharding !.replica_sets !.aggregation !.jscore
+  - name: external_auth
+  - name: external_auth_aws
+  - name: .jscore .common !.compat !.decimal !.sharding
+  - name: jsCore_txns_large_txns_format
+  - name: .jstestfuzz .common
+  - name: .logical_session_cache .one_sec
+  - name: replica_sets_auth_gen
+  - name: replica_sets_jscore_passthrough
+  - name: .replica_sets .multi_oplog
+  - name: sasl
+  - name: search
+  - name: search_auth
+  - name: search_ssl
+  - name: sharding_auth_audit_gen
+  - name: sharding_auth_gen
+  - name: snmp
+  - name: .stitch
+  - name: push
+  - name: generate_buildid_to_debug_symbols_mapping
+
 - name: stm-daily-cron
   display_name: "~ STM Daily Cron"
   run_on:
@@ -8248,14 +8546,6 @@ buildvariants:
   - name: lint_fuzzer_sanity_all
   - name: powercycle_sentinel
   - name: powercycle_smoke_skip_compile_gen
-
-- name: security-daily-cron
-  display_name: "~ Security Daily Cron"
-  run_on:
-  - rhel80-small
-  stepback: false
-  tasks:
-  - name: blackduck_scanner
 
 ###########################################
 #         Windows buildvariants           #
@@ -8608,7 +8898,6 @@ buildvariants:
   - name: .sharding .txns
   - name: .sharding .common !.op_query !.csrs
   - name: .ssl
-  - name: .stitch
   - name: .updatefuzzer
   - name: push
 
@@ -8688,7 +8977,7 @@ buildvariants:
   - name: retryable_writes_jscore_passthrough_gen
   - name: .rollbackfuzzer
   - name: session_jscore_passthrough
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !sharding_update_v1_oplog_jscore_passthrough
   - name: .sharding .txns
   - name: .ssl
   - name: .stitch
@@ -8910,7 +9199,6 @@ buildvariants:
   - name: .sharding .txns
   - name: .sharding .common
   - name: snmp
-  - name: .stitch
   - name: .updatefuzzer
   - name: secondary_reads_passthrough_gen
   - name: server_discovery_and_monitoring_json_test_TG
@@ -9038,7 +9326,6 @@ buildvariants:
   - name: .sharding .common
   - name: sharding_opportunistic_secondary_targeting_gen
   - name: snmp
-  - name: .stitch
   - name: .updatefuzzer
   - name: secondary_reads_passthrough_gen
   - name: server_discovery_and_monitoring_json_test_TG
@@ -9127,7 +9414,6 @@ buildvariants:
     - name: .sharding .txns
     - name: .sharding .common
     - name: snmp
-    - name: .stitch
     - name: .updatefuzzer
     - name: secondary_reads_passthrough_gen
 
@@ -9313,7 +9599,6 @@ buildvariants:
   - name: .sharding .txns
   - name: .sharding .common
   - name: snmp
-  - name: .stitch
   - name: .updatefuzzer
   - name: secondary_reads_passthrough_gen
   - name: server_discovery_and_monitoring_json_test_TG
@@ -9514,7 +9799,6 @@ buildvariants:
   - name: sharding_auth_audit_gen
   - name: sharding_auth_gen
   - name: snmp
-  - name: .stitch
   - name: unittest_shell_hang_analyzer_gen
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
@@ -9591,7 +9875,6 @@ buildvariants:
   - name: sharding_auth_audit_gen
   - name: sharding_auth_gen
   - name: snmp
-  - name: .stitch
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-rhel-82-arm64
@@ -9639,7 +9922,6 @@ buildvariants:
   - name: sharding_auth_audit_gen
   - name: sharding_auth_gen
   - name: snmp
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -9713,7 +9995,6 @@ buildvariants:
   - name: sharding_auth_audit_gen
   - name: sharding_auth_gen
   - name: snmp
-  - name: .stitch
 
 - name: ubuntu1804-debug-suggested
   display_name: "* Shared Library Ubuntu 18.04 DEBUG"
@@ -9999,7 +10280,6 @@ buildvariants:
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .common !.multiversion
   - name: snmp
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -10048,7 +10328,6 @@ buildvariants:
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .common !.multiversion
   - name: snmp
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -10127,7 +10406,6 @@ buildvariants:
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .common !.multiversion
   - name: snmp
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -10176,7 +10454,6 @@ buildvariants:
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .common !.multiversion
   - name: snmp
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -10244,7 +10521,6 @@ buildvariants:
   - name: sasl
   - name: sharding_auth_gen
   - name: snmp
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -10331,7 +10607,6 @@ buildvariants:
   - name: sasl
   - name: sharding_auth_gen
   - name: snmp
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -10423,7 +10698,6 @@ buildvariants:
   - name: sasl
   - name: sharding_auth_gen
   - name: snmp
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -10512,7 +10786,6 @@ buildvariants:
   - name: sasl
   - name: sharding_auth_gen
   - name: snmp
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -10600,7 +10873,6 @@ buildvariants:
   - name: sasl
   - name: sharding_auth_gen
   - name: snmp
-  - name: .stitch
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -10879,7 +11151,6 @@ buildvariants:
   - name: .sharding .common !.csrs
   - name: snmp
   - name: .watchdog
-  - name: .stitch
   - name: unittest_shell_hang_analyzer_gen
   - name: .updatefuzzer
   - name: server_discovery_and_monitoring_json_test_TG
@@ -10965,7 +11236,6 @@ buildvariants:
   - name: .sharding .jscore !.wo_snapshot
   - name: .sharding .common !.csrs
   - name: snmp
-  - name: .stitch
   - name: .updatefuzzer
   - name: watchdog_wiredtiger
   - name: server_discovery_and_monitoring_json_test_TG

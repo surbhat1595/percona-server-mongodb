@@ -45,7 +45,6 @@
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/s/query/async_results_merger_params_gen.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/timer.h"
 
@@ -318,13 +317,9 @@ public:
     /**
      * Helpers to serialize a pipeline.
      */
-    std::vector<Value> serialize(boost::optional<ExplainOptions::Verbosity> explain) const;
     std::vector<Value> serialize(boost::optional<SerializationOptions> opts = boost::none) const;
-    std::vector<BSONObj> serializeToBson(boost::optional<ExplainOptions::Verbosity> explain) const;
     std::vector<BSONObj> serializeToBson(
         boost::optional<SerializationOptions> opts = boost::none) const;
-    static std::vector<Value> serializeContainer(
-        const SourceContainer& container, boost::optional<ExplainOptions::Verbosity> explain);
     static std::vector<Value> serializeContainer(
         const SourceContainer& container, boost::optional<SerializationOptions> opts = boost::none);
 
@@ -342,7 +337,7 @@ public:
      * Write the pipeline's operators to a std::vector<Value>, providing the level of detail
      * specified by 'verbosity'.
      */
-    std::vector<Value> writeExplainOps(ExplainOptions::Verbosity verbosity) const;
+    std::vector<Value> writeExplainOps(SerializationOptions opts = SerializationOptions()) const;
 
     /**
      * Returns the dependencies needed by this pipeline. 'unavailableMetadata' should reflect what

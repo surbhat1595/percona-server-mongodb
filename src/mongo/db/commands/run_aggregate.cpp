@@ -73,7 +73,8 @@
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_common.h"
-#include "mongo/db/query/telemetry.h"
+#include "mongo/db/query/query_stats.h"
+#include "mongo/db/query/query_stats_aggregate_key_generator.h"
 #include "mongo/db/read_concern.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -660,6 +661,15 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createExecutor
     return execs;
 }
 
+Status _runAggregate(OperationContext* opCtx,
+                     const NamespaceString& origNss,
+                     AggregateCommandRequest& request,
+                     const LiteParsedPipeline& liteParsedPipeline,
+                     const BSONObj& cmdObj,
+                     const PrivilegeVector& privileges,
+                     rpc::ReplyBuilderInterface* result,
+                     std::shared_ptr<ExternalDataSourceScopeGuard> externalDataSourceGuard);
+
 Status runAggregateOnView(OperationContext* opCtx,
                           const NamespaceString& origNss,
                           const AggregateCommandRequest& request,
@@ -723,7 +733,8 @@ Status runAggregateOnView(OperationContext* opCtx,
 
     auto status{Status::OK()};
     try {
-        status = runAggregate(opCtx, origNss, newRequest, newCmd, privileges, result);
+        status = _runAggregate(
+            opCtx, origNss, newRequest, {newRequest}, newCmd, privileges, result, nullptr);
     } catch (const ExceptionForCat<ErrorCategory::StaleShardVersionError>& ex) {
         // Since we expect the view to be UNSHARDED, if we reached to this point there are
         // two possibilities:
@@ -749,25 +760,14 @@ Status runAggregateOnView(OperationContext* opCtx,
     return status;
 }
 
-}  // namespace
-
-Status runAggregate(OperationContext* opCtx,
-                    const NamespaceString& nss,
-                    AggregateCommandRequest& request,
-                    const BSONObj& cmdObj,
-                    const PrivilegeVector& privileges,
-                    rpc::ReplyBuilderInterface* result) {
-    return runAggregate(opCtx, nss, request, {request}, cmdObj, privileges, result, {});
-}
-
-Status runAggregate(OperationContext* opCtx,
-                    const NamespaceString& origNss,
-                    AggregateCommandRequest& request,
-                    const LiteParsedPipeline& liteParsedPipeline,
-                    const BSONObj& cmdObj,
-                    const PrivilegeVector& privileges,
-                    rpc::ReplyBuilderInterface* result,
-                    ExternalDataSourceScopeGuard externalDataSourceGuard) {
+Status _runAggregate(OperationContext* opCtx,
+                     const NamespaceString& origNss,
+                     AggregateCommandRequest& request,
+                     const LiteParsedPipeline& liteParsedPipeline,
+                     const BSONObj& cmdObj,
+                     const PrivilegeVector& privileges,
+                     rpc::ReplyBuilderInterface* result,
+                     std::shared_ptr<ExternalDataSourceScopeGuard> externalDataSourceGuard) {
 
     // Perform some validations on the LiteParsedPipeline and request before continuing with the
     // aggregation command.
@@ -809,14 +809,6 @@ Status runAggregate(OperationContext* opCtx,
     // The UUID of the collection for the execution namespace of this aggregation.
     boost::optional<UUID> uuid;
 
-    // All cursors share the ownership to 'extDataSrcGuard'. Once all cursors are destroyed,
-    // 'extDataSrcGuard' will also be destroyed and any virtual collections will be dropped by
-    // the destructor of ExternalDataSourceScopeGuard. We obtain a reference before taking locks so
-    // that the virtual collections will be dropped after releasing our read locks, avoiding a lock
-    // upgrade.
-    std::shared_ptr<ExternalDataSourceScopeGuard> extDataSrcGuard =
-        std::make_shared<ExternalDataSourceScopeGuard>(std::move(externalDataSourceGuard));
-
     // If emplaced, AutoGetCollectionForReadCommand will throw if the sharding version for this
     // connection is out of date. If the namespace is a view, the lock will be released before
     // re-running the expanded aggregation.
@@ -847,15 +839,6 @@ Status runAggregate(OperationContext* opCtx,
     auto resetContext = [&]() -> void {
         ctx.reset();
         collections.clear();
-    };
-
-    auto registerTelemetry = [&]() -> void {
-        // Register telemetry. Exclude queries against collections with encrypted fields.
-        // We still collect telemetry on collection-less aggregations.
-        if (!(ctx && ctx->getCollection() &&
-              ctx->getCollection()->getCollectionOptions().encryptedFieldConfig)) {
-            telemetry::registerAggRequest(request, opCtx);
-        }
     };
 
     std::vector<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> execs;
@@ -938,7 +921,6 @@ Status runAggregate(OperationContext* opCtx,
 
             // Obtain collection locks on the execution namespace; that is, the oplog.
             initContext(auto_get_collection::ViewMode::kViewsForbidden);
-            registerTelemetry();
         } else if (nss.isCollectionlessAggregateNS() && pipelineInvolvedNamespaces.empty()) {
             uassert(4928901,
                     str::stream() << AggregateCommandRequest::kCollectionUUIDFieldName
@@ -958,11 +940,9 @@ Status runAggregate(OperationContext* opCtx,
             tassert(6235101,
                     "A collection-less aggregate should not take any locks",
                     ctx == boost::none);
-            registerTelemetry();
         } else {
             // This is a regular aggregation. Lock the collection or view.
             initContext(auto_get_collection::ViewMode::kViewsPermitted);
-            registerTelemetry();
             auto [collator, match] =
                 PipelineD::resolveCollator(opCtx,
                                            request.getCollation().get_value_or(BSONObj()),
@@ -973,6 +953,32 @@ Status runAggregate(OperationContext* opCtx,
                 uuid = collections.getMainCollection()->uuid();
             }
         }
+
+        auto parsePipeline = [&](std::unique_ptr<CollatorInterface> collator) {
+            expCtx =
+                makeExpressionContext(opCtx,
+                                      request,
+                                      std::move(collator),
+                                      uuid,
+                                      collatorToUseMatchesDefault,
+                                      collections.getMainCollection()
+                                          ? collections.getMainCollection()->getCollectionOptions()
+                                          : boost::optional<CollectionOptions>(boost::none));
+
+            // If any involved collection contains extended-range data, set a flag which individual
+            // DocumentSource parsers can check.
+            collections.forEach([&](const CollectionPtr& coll) {
+                if (coll->getRequiresTimeseriesExtendedRangeSupport())
+                    expCtx->setRequiresTimeseriesExtendedRangeSupport(true);
+            });
+
+            expCtx->startExpressionCounters();
+            auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
+            curOp->beginQueryPlanningTimer();
+            expCtx->stopExpressionCounters();
+
+            return std::make_pair(expCtx, std::move(pipeline));
+        };
 
         // If this is a view, resolve it by finding the underlying collection and stitching view
         // pipelines and this request's pipeline together. We then release our locks before
@@ -985,6 +991,37 @@ Status runAggregate(OperationContext* opCtx,
         // underlying bucket collection.
         if (ctx && ctx->getView() &&
             (!liteParsedPipeline.startsWithCollStats() || ctx->getView()->timeseries())) {
+            try {
+                invariant(collatorToUse.has_value());
+                query_stats::registerRequest(opCtx, nss, [&]() {
+                    // In this path we haven't yet parsed the pipeline, but we need to do so for
+                    // query shape stats - which should track the queries before views are resolved.
+                    // Inside this callback we know we have already checked that query stats are
+                    // enabled and know that this request has not been rate limited.
+
+                    // We can't move out of collatorToUse as it's needed for runAggregateOnView().
+                    // Clone instead.
+                    auto&& [expCtx, pipeline] = parsePipeline(
+                        *collatorToUse == nullptr ? nullptr : (*collatorToUse)->clone());
+
+                    return std::make_unique<query_stats::AggregateKeyGenerator>(
+                        request,
+                        *pipeline,
+                        expCtx,
+                        pipelineInvolvedNamespaces,
+                        origNss,
+                        ctx->getCollectionType());
+                });
+            } catch (const DBException& ex) {
+                if (ex.code() == 6347902) {
+                    // TODO Handle the $$SEARCH_META case in SERVER-76087.
+                    LOGV2_WARNING(7198701,
+                                  "Failed to parse pipeline before view resolution",
+                                  "error"_attr = ex.toStatus());
+                } else {
+                    throw;
+                }
+            }
             return runAggregateOnView(opCtx,
                                       origNss,
                                       request,
@@ -1004,30 +1041,27 @@ Status runAggregate(OperationContext* opCtx,
             opCtx, nss, collections.getMainCollection(), request.getCollectionUUID());
 
         invariant(collatorToUse);
-        expCtx = makeExpressionContext(opCtx,
-                                       request,
-                                       std::move(*collatorToUse),
-                                       uuid,
-                                       collatorToUseMatchesDefault,
-                                       collections.getMainCollection()
-                                           ? collections.getMainCollection()->getCollectionOptions()
-                                           : boost::optional<CollectionOptions>(boost::none));
-
-        // If any involved collection contains extended-range data, set a flag which individual
-        // DocumentSource parsers can check.
-        collections.forEach([&](const CollectionPtr& coll) {
-            if (coll->getRequiresTimeseriesExtendedRangeSupport())
-                expCtx->setRequiresTimeseriesExtendedRangeSupport(true);
-        });
-
-        expCtx->startExpressionCounters();
-        auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
-        curOp->beginQueryPlanningTimer();
-        expCtx->stopExpressionCounters();
-
+        auto&& expCtxAndPipeline = parsePipeline(std::move(*collatorToUse));
+        auto expCtx = expCtxAndPipeline.first;
+        auto pipeline = std::move(expCtxAndPipeline.second);
         // After parsing to detect if $$USER_ROLES is referenced in the query, set the value of
         // $$USER_ROLES for the aggregation.
         expCtx->setUserRoles();
+
+        // Register query stats with the pre-optimized pipeline. Exclude queries against collections
+        // with encrypted fields. We still collect query stats on collection-less aggregations.
+        if (!(ctx && ctx->getCollection() &&
+              ctx->getCollection()->getCollectionOptions().encryptedFieldConfig)) {
+            query_stats::registerRequest(opCtx, nss, [&]() {
+                return std::make_unique<query_stats::AggregateKeyGenerator>(
+                    request,
+                    *pipeline,
+                    expCtx,
+                    pipelineInvolvedNamespaces,
+                    nss,
+                    ctx ? boost::make_optional(ctx->getCollectionType()) : boost::none);
+            });
+        }
 
         if (!request.getAllowDiskUse().value_or(true)) {
             allowDiskUseFalseCounter.increment();
@@ -1056,10 +1090,6 @@ Status runAggregate(OperationContext* opCtx,
                     opCtx, nss, request.getEncryptionInformation().value(), std::move(pipeline));
                 request.getEncryptionInformation()->setCrudProcessed(true);
             }
-
-            // Set the telemetryStoreKey to none so telemetry isn't collected when we've done a FLE
-            // rewrite.
-            CurOp::get(opCtx)->debug().telemetryStoreKey = boost::none;
         }
 
         pipeline->optimizePipeline();
@@ -1115,6 +1145,13 @@ Status runAggregate(OperationContext* opCtx,
             p.deleteUnderlying();
         }
     });
+
+    // We disallowed external data sources in queries with multiple plan executors due to a data
+    // race (see SERVER-85453 for more details).
+    tassert(8545301,
+            "External data sources are not currently compatible with queries that use multiple "
+            "plan executors.",
+            externalDataSourceGuard == nullptr || execs.size() == 1);
     for (auto&& exec : execs) {
         ClientCursorParams cursorParams(
             std::move(exec),
@@ -1132,7 +1169,9 @@ Status runAggregate(OperationContext* opCtx,
 
         pin->incNBatches();
         cursors.emplace_back(pin.getCursor());
-        ExternalDataSourceScopeGuard::get(pin.getCursor()) = extDataSrcGuard;
+        if (externalDataSourceGuard) {
+            ExternalDataSourceScopeGuard::get(pin.getCursor()) = externalDataSourceGuard;
+        }
         pins.emplace_back(std::move(pin));
     }
 
@@ -1172,12 +1211,9 @@ Status runAggregate(OperationContext* opCtx,
         PlanSummaryStats stats;
         planExplainer.getSummaryStats(&stats);
         curOp->debug().setPlanSummaryMetrics(stats);
+        curOp->setEndOfOpMetrics(stats.nReturned);
 
-        if (keepCursor) {
-            collectTelemetryMongod(opCtx, pins[0], stats.nReturned);
-        } else {
-            collectTelemetryMongod(opCtx, cmdObj, stats.nReturned);
-        }
+        collectQueryStatsMongod(opCtx, pins[0]);
 
         // For an optimized away pipeline, signal the cache that a query operation has completed.
         // For normal pipelines this is done in DocumentSourceCursor.
@@ -1216,6 +1252,40 @@ Status runAggregate(OperationContext* opCtx,
     }
 
     return Status::OK();
+}
+}  // namespace
+
+Status runAggregate(OperationContext* opCtx,
+                    const NamespaceString& nss,
+                    AggregateCommandRequest& request,
+                    const BSONObj& cmdObj,
+                    const PrivilegeVector& privileges,
+                    rpc::ReplyBuilderInterface* result) {
+    return _runAggregate(opCtx, nss, request, {request}, cmdObj, privileges, result, nullptr);
+}
+
+Status runAggregate(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    AggregateCommandRequest& request,
+    const LiteParsedPipeline& liteParsedPipeline,
+    const BSONObj& cmdObj,
+    const PrivilegeVector& privileges,
+    rpc::ReplyBuilderInterface* result,
+    const std::vector<std::pair<NamespaceString, std::vector<ExternalDataSourceInfo>>>&
+        usedExternalDataSources) {
+    // Create virtual collections and drop them when aggregate command is done.
+    // If a cursor is registered, the ExternalDataSourceScopeGuard will be stored in the cursor;
+    // when the cursor is later destroyed, the scope guard will also be destroyed, and any virtual
+    // collections will be dropped by the destructor of ExternalDataSourceScopeGuard.
+    // We create this scope guard prior to taking locks in _runAggregate so that, if no cursor is
+    // registered, the virtual collections will be dropped after releasing our read locks, avoiding
+    // a lock upgrade.
+    auto extDataSrcGuard = usedExternalDataSources.size() > 0
+        ? std::make_shared<ExternalDataSourceScopeGuard>(opCtx, usedExternalDataSources)
+        : nullptr;
+    return _runAggregate(
+        opCtx, nss, request, liteParsedPipeline, cmdObj, privileges, result, extDataSrcGuard);
 }
 
 }  // namespace mongo

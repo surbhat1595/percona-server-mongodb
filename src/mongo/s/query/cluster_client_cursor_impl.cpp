@@ -32,7 +32,7 @@
 #include <memory>
 
 #include "mongo/db/curop.h"
-#include "mongo/db/query/telemetry.h"
+#include "mongo/db/query/query_stats.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/query/router_stage_limit.h"
 #include "mongo/s/query/router_stage_merge.h"
@@ -75,7 +75,8 @@ ClusterClientCursorImpl::ClusterClientCursorImpl(OperationContext* opCtx,
       _lastUseDate(_createdDate),
       _queryHash(CurOp::get(opCtx)->debug().queryHash),
       _shouldOmitDiagnosticInformation(CurOp::get(opCtx)->getShouldOmitDiagnosticInformation()),
-      _telemetryStoreKey(CurOp::get(opCtx)->debug().telemetryStoreKey) {
+      _queryStatsStoreKeyHash(CurOp::get(opCtx)->debug().queryStatsStoreKeyHash),
+      _queryStatsKeyGenerator(std::move(CurOp::get(opCtx)->debug().queryStatsKeyGenerator)) {
     dassert(!_params.compareWholeSortKeyOnRouter ||
             SimpleBSONObjComparator::kInstance.evaluate(
                 _params.sortToApplyOnRouter == AsyncResultsMerger::kWholeSortKeySortPattern));
@@ -93,7 +94,9 @@ ClusterClientCursorImpl::ClusterClientCursorImpl(OperationContext* opCtx,
       _createdDate(opCtx->getServiceContext()->getPreciseClockSource()->now()),
       _lastUseDate(_createdDate),
       _queryHash(CurOp::get(opCtx)->debug().queryHash),
-      _shouldOmitDiagnosticInformation(CurOp::get(opCtx)->getShouldOmitDiagnosticInformation()) {
+      _shouldOmitDiagnosticInformation(CurOp::get(opCtx)->getShouldOmitDiagnosticInformation()),
+      _queryStatsStoreKeyHash(CurOp::get(opCtx)->debug().queryStatsStoreKeyHash),
+      _queryStatsKeyGenerator(std::move(CurOp::get(opCtx)->debug().queryStatsKeyGenerator)) {
     dassert(!_params.compareWholeSortKeyOnRouter ||
             SimpleBSONObjComparator::kInstance.evaluate(
                 _params.sortToApplyOnRouter == AsyncResultsMerger::kWholeSortKeySortPattern));
@@ -139,12 +142,13 @@ void ClusterClientCursorImpl::kill(OperationContext* opCtx) {
         return;
     }
 
-    if (_telemetryStoreKey && opCtx) {
-        telemetry::writeTelemetry(opCtx,
-                                  _telemetryStoreKey,
-                                  getOriginatingCommand(),
-                                  _metrics.executionTime.value_or(Microseconds{0}).count(),
-                                  _metrics.nreturned.value_or(0));
+    if (_queryStatsStoreKeyHash && opCtx) {
+        query_stats::writeQueryStats(opCtx,
+                                     _queryStatsStoreKeyHash,
+                                     std::move(_queryStatsKeyGenerator),
+                                     _metrics.executionTime.value_or(Microseconds{0}).count(),
+                                     _firstResponseExecutionTime.value_or(Microseconds{0}).count(),
+                                     _metrics.nreturned.value_or(0));
     }
 
     _root->kill(opCtx);
@@ -280,6 +284,10 @@ std::unique_ptr<RouterExecStage> ClusterClientCursorImpl::buildMergerPlan(
 
 bool ClusterClientCursorImpl::shouldOmitDiagnosticInformation() const {
     return _shouldOmitDiagnosticInformation;
+}
+
+std::unique_ptr<query_stats::KeyGenerator> ClusterClientCursorImpl::getKeyGenerator() {
+    return std::move(_queryStatsKeyGenerator);
 }
 
 }  // namespace mongo

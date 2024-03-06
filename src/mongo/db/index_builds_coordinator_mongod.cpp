@@ -468,8 +468,6 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
                                                  std::move(impersonatedClientAttrs.roleNames));
         }
 
-        ScopedSetShardRole scopedSetShardRole(opCtx.get(), nss, shardVersion, dbVersion);
-
         while (MONGO_unlikely(hangBeforeInitializingIndexBuild.shouldFail())) {
             sleepmillis(100);
         }
@@ -488,6 +486,13 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
             opCtx->lockState());
 
         if (indexBuildOptions.applicationMode != ApplicationMode::kStartupRepair) {
+            // The shard version protocol is only required when setting up the index build and
+            // writing the 'startIndexBuild' oplog entry. If a chunk migration is in-progress while
+            // an index build is started, it will be aborted. A recipient shard will copy
+            // in-progress indexes from the donor shard, and if the index build is aborted on the
+            // donor, the client running createIndexes will receive an error requiring them to retry
+            // the command, and the indexes will become consistent.
+            ScopedSetShardRole scopedSetShardRole(opCtx.get(), nss, shardVersion, dbVersion);
             status = _setUpIndexBuild(opCtx.get(), buildUUID, startTimestamp, indexBuildOptions);
             if (!status.isOK()) {
                 startPromise.setError(status);
@@ -941,8 +946,8 @@ void IndexBuildsCoordinatorMongod::_waitForNextIndexBuildActionAndCommit(
                 needsToRetryWait = true;
                 break;
             case CommitResult::kLockTimeout:
-                LOGV2(4698900,
-                      "Unable to acquire RSTL for commit within deadline. Releasing locks and "
+                LOGV2(7866201,
+                      "Unable to acquire locks for commit within deadline. Releasing locks and "
                       "trying again",
                       "buildUUID"_attr = replState->buildUUID);
                 needsToRetryWait = true;

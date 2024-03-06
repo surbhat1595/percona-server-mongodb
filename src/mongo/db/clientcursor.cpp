@@ -48,7 +48,7 @@
 #include "mongo/db/cursor_server_params.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/query/explain.h"
-#include "mongo/db/query/telemetry.h"
+#include "mongo/db/query/query_stats.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/util/background.h"
@@ -124,7 +124,9 @@ ClientCursor::ClientCursor(ClientCursorParams params,
       _planSummary(_exec->getPlanExplainer().getPlanSummary()),
       _planCacheKey(CurOp::get(operationUsingCursor)->debug().planCacheKey),
       _queryHash(CurOp::get(operationUsingCursor)->debug().queryHash),
-      _telemetryStoreKey(CurOp::get(operationUsingCursor)->debug().telemetryStoreKey),
+      _queryStatsStoreKeyHash(CurOp::get(operationUsingCursor)->debug().queryStatsStoreKeyHash),
+      _queryStatsKeyGenerator(
+          std::move(CurOp::get(operationUsingCursor)->debug().queryStatsKeyGenerator)),
       _shouldOmitDiagnosticInformation(
           CurOp::get(operationUsingCursor)->getShouldOmitDiagnosticInformation()),
       _opKey(operationUsingCursor->getOperationKey()) {
@@ -158,12 +160,13 @@ void ClientCursor::dispose(OperationContext* opCtx, boost::optional<Date_t> now)
         return;
     }
 
-    if (_telemetryStoreKey && opCtx) {
-        telemetry::writeTelemetry(opCtx,
-                                  _telemetryStoreKey,
-                                  getOriginatingCommandObj(),
-                                  _metrics.executionTime.value_or(Microseconds{0}).count(),
-                                  _metrics.nreturned.value_or(0));
+    if (_queryStatsStoreKeyHash && opCtx) {
+        query_stats::writeQueryStats(opCtx,
+                                     _queryStatsStoreKeyHash,
+                                     std::move(_queryStatsKeyGenerator),
+                                     _metrics.executionTime.value_or(Microseconds{0}).count(),
+                                     _firstResponseExecutionTime.value_or(Microseconds{0}).count(),
+                                     _metrics.nreturned.value_or(0));
     }
 
     if (now) {
@@ -386,29 +389,22 @@ void startClientCursorMonitor() {
     getClientCursorMonitor(getGlobalServiceContext()).go();
 }
 
-void collectTelemetryMongod(OperationContext* opCtx,
-                            ClientCursorPin& pinnedCursor,
-                            long long nreturned) {
-    auto curOp = CurOp::get(opCtx);
-    telemetry::collectMetricsOnOpDebug(curOp, nreturned);
-    pinnedCursor->incrementCursorMetrics(curOp->debug().additiveMetrics);
+void collectQueryStatsMongod(OperationContext* opCtx, ClientCursorPin& pinnedCursor) {
+    pinnedCursor->incrementCursorMetrics(CurOp::get(opCtx)->debug().additiveMetrics);
 }
 
-void collectTelemetryMongod(OperationContext* opCtx,
-                            const BSONObj& originatingCommand,
-                            long long nreturned) {
-    auto curOp = CurOp::get(opCtx);
-    telemetry::collectMetricsOnOpDebug(curOp, nreturned);
-
+void collectQueryStatsMongod(OperationContext* opCtx,
+                             std::unique_ptr<query_stats::KeyGenerator> keyGenerator) {
     // If we haven't registered a cursor to prepare for getMore requests, we record
-    // telemetry directly.
-    auto& opDebug = curOp->debug();
-    telemetry::writeTelemetry(
-        opCtx,
-        opDebug.telemetryStoreKey,
-        originatingCommand,
-        opDebug.additiveMetrics.executionTime.value_or(Microseconds{0}).count(),
-        opDebug.additiveMetrics.nreturned.value_or(0));
+    // query stats directly.
+    auto& opDebug = CurOp::get(opCtx)->debug();
+    int64_t execTime = opDebug.additiveMetrics.executionTime.value_or(Microseconds{0}).count();
+    query_stats::writeQueryStats(opCtx,
+                                 opDebug.queryStatsStoreKeyHash,
+                                 std::move(keyGenerator),
+                                 execTime,
+                                 execTime,
+                                 opDebug.additiveMetrics.nreturned.value_or(0));
 }
 
 }  // namespace mongo

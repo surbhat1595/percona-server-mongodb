@@ -416,7 +416,7 @@ last-continuous:
   - test_file: jstests/core/timeseries/timeseries_collection_uuid.js
     ticket: SERVER-79446
   - test_file: jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js
-    ticket: SERVER-77506
+    ticket: SERVER-84723
   - test_file: jstests/sharding/move_chunk_basic.js
     ticket: SERVER-81201
   - test_file: jstests/sharding/flushRoutingTableCacheUpdates_enforced_on_collections.js
@@ -435,8 +435,6 @@ last-continuous:
     ticket: SERVER-78066
   - test_file: src/mongo/db/modules/enterprise/jstests/external_auth_oidc/oidc_omit_client_id.js
     ticket: SERVER-78066
-  - test_file: jstests/sharding/coordinate_txn_recover_on_stepup_with_tickets_exhausted.js
-    ticket: SERVER-82883
   - test_file: jstests/core/command_let_variables.js
     ticket: SERVER-83685
   - test_file: jstests/core/query/plan_cache/plan_cache_list_shapes.js
@@ -447,6 +445,20 @@ last-continuous:
     ticket: SERVER-83685
   - test_file: jstests/noPassthroughWithMongod/lookup_with_limit.js
     ticket: SERVER-83685
+  - test_file: jstests/sharding/move_primary_basic.js
+    ticket: SERVER-82353
+  - test_file: jstests/sharding/store_historical_placement_data.js
+    ticket: SERVER-82353
+  - test_file: jstests/core/timeseries/timeseries_bucket_level_filter.js
+    ticket: SERVER-84130
+  - test_file: jstests/core/txns/out_not_blocked_by_txn.js
+    ticket: SERVER-72703
+  - test_file: jstests/core/notablescan.js
+    ticket: SERVER-83119
+  - test_file: jstests/sharding/clustered_coll_scan.js
+    ticket: SERVER-83119
+  - test_file: jstests/change_streams/split_large_event_with_other_stages.js
+    ticket: SERVER-85848
   suites: null
 last-lts:
   all:
@@ -909,7 +921,7 @@ last-lts:
   - test_file: jstests/core/timeseries/timeseries_collection_uuid.js
     ticket: SERVER-79446
   - test_file: jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js
-    ticket: SERVER-77506
+    ticket: SERVER-84723
   - test_file: jstests/sharding/move_chunk_basic.js
     ticket: SERVER-81201
   - test_file: jstests/sharding/flushRoutingTableCacheUpdates_enforced_on_collections.js
@@ -922,8 +934,6 @@ last-lts:
     ticket: SERVER-82984
   - test_file: jstests/core/timeseries/timeseries_project_pushdown.js
     ticket: SERVER-82447
-  - test_file: jstests/sharding/coordinate_txn_recover_on_stepup_with_tickets_exhausted.js
-    ticket: SERVER-82883
   - test_file: jstests/core/query/explode_for_sort_plan_cache.js
     ticket: SERVER-83777
   - test_file: jstests/core/command_let_variables.js
@@ -936,4 +946,18 @@ last-lts:
     ticket: SERVER-83685
   - test_file: jstests/noPassthroughWithMongod/lookup_with_limit.js
     ticket: SERVER-83685
+  - test_file: jstests/sharding/move_primary_basic.js
+    ticket: SERVER-82353
+  - test_file: jstests/sharding/store_historical_placement_data.js
+    ticket: SERVER-82353
+  - test_file: jstests/core/timeseries/timeseries_bucket_level_filter.js
+    ticket: SERVER-84130
+  - test_file: jstests/core/txns/out_not_blocked_by_txn.js
+    ticket: SERVER-72703
+  - test_file: jstests/core/notablescan.js
+    ticket: SERVER-83119
+  - test_file: jstests/sharding/clustered_coll_scan.js
+    ticket: SERVER-83119
+  - test_file: jstests/change_streams/split_large_event_with_other_stages.js
+    ticket: SERVER-85848
   suites: null

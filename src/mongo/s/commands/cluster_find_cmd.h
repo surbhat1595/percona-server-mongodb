@@ -39,7 +39,9 @@
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/pipeline/query_request_conversion.h"
 #include "mongo/db/query/cursor_response.h"
-#include "mongo/db/query/telemetry.h"
+#include "mongo/db/query/query_shape.h"
+#include "mongo/db/query/query_stats.h"
+#include "mongo/db/query/query_stats_find_key_generator.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -204,21 +206,25 @@ public:
 
             Impl::checkCanRunHere(opCtx);
 
-            auto findCommand = _parseCmdObjectToFindCommandRequest(opCtx, ns(), _request.body);
-
-            const boost::intrusive_ptr<ExpressionContext> expCtx;
-            auto cq = uassertStatusOK(
-                CanonicalQuery::canonicalize(opCtx,
-                                             std::move(findCommand),
-                                             false, /* isExplain */
-                                             expCtx,
-                                             ExtensionsCallbackNoop(),
-                                             MatchExpressionParser::kAllowAllSpecialFeatures));
+            auto&& parsedFindResult = uassertStatusOK(parsed_find_command::parse(
+                opCtx,
+                _parseCmdObjectToFindCommandRequest(opCtx, ns(), _request.body),
+                ExtensionsCallbackNoop(),
+                MatchExpressionParser::kAllowAllSpecialFeatures));
+            auto& expCtx = parsedFindResult.first;
+            auto& parsedFind = parsedFindResult.second;
 
             if (!_didDoFLERewrite) {
-                telemetry::registerFindRequest(
-                    cq->getFindCommandRequest(), cq->nss(), opCtx, cq->getExpCtx());
+                BSONObj queryShape = query_shape::extractQueryShape(
+                    *parsedFind,
+                    SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+                    expCtx);
+                query_stats::registerRequest(opCtx, expCtx->ns, [&]() {
+                    return std::make_unique<query_stats::FindKeyGenerator>(
+                        expCtx, *parsedFind, std::move(queryShape));
+                });
             }
+            auto cq = uassertStatusOK(CanonicalQuery::canonicalize(expCtx, std::move(parsedFind)));
 
             try {
                 // Do the work to generate the first batch of results. This blocks waiting to get

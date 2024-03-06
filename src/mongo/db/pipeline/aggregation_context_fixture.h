@@ -83,16 +83,31 @@ public:
         SerializationOptions options;
         options.verbosity = verbosity;
         if (performRedaction) {
-            options.replacementForLiteralArgs = "?";
-            options.identifierRedactionPolicy = [](StringData s) -> std::string {
+            options.literalPolicy = LiteralSerializationPolicy::kToDebugTypeString;
+            options.transformIdentifiersCallback = [](StringData s) -> std::string {
                 return str::stream() << "HASH<" << s << ">";
             };
-            options.redactIdentifiers = true;
+            options.transformIdentifiers = true;
         }
         std::vector<Value> serialized;
         docSource.serializeToArray(serialized, options);
         ASSERT_EQ(1, serialized.size());
         return serialized[0].getDocument().toBson().getOwned();
+    }
+
+    std::vector<Value> redactToArray(const DocumentSource& docSource,
+                                     bool performRedaction = true) {
+        SerializationOptions options;
+        if (performRedaction) {
+            options.literalPolicy = LiteralSerializationPolicy::kToDebugTypeString;
+            options.transformIdentifiersCallback = [](StringData s) -> std::string {
+                return str::stream() << "HASH<" << s << ">";
+            };
+            options.transformIdentifiers = true;
+        }
+        std::vector<Value> serialized;
+        docSource.serializeToArray(serialized, options);
+        return serialized;
     }
 
 private:

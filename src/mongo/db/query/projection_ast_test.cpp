@@ -773,15 +773,15 @@ TEST_F(ProjectionASTTest, ShouldThrowWithPositionalOnExclusion) {
         DBException,
         31395);
 }
-std::string redactFieldNameForTest(StringData s) {
+std::string applyHmacForTest(StringData s) {
     return str::stream() << "HASH<" << s << ">";
 }
 
 TEST_F(ProjectionASTTest, TestASTRedaction) {
     SerializationOptions options;
-    options.replacementForLiteralArgs = "?";
-    options.redactIdentifiers = true;
-    options.identifierRedactionPolicy = redactFieldNameForTest;
+    options.literalPolicy = LiteralSerializationPolicy::kToDebugTypeString;
+    options.transformIdentifiers = true;
+    options.transformIdentifiersCallback = applyHmacForTest;
 
 
     auto proj = fromjson("{'a.b': 1}");
@@ -806,7 +806,7 @@ TEST_F(ProjectionASTTest, TestASTRedaction) {
     proj = fromjson("{f: {$elemMatch: {foo: 'bar'}}}");
     output = projection_ast::serialize(*parseWithFindFeaturesEnabled(proj).root(), options);
     ASSERT_BSONOBJ_EQ_AUTO(  //
-        R"({"HASH<f>":{"$elemMatch":{"HASH<foo>":{"$eq":"?"}}},"HASH<_id>":true})",
+        R"({"HASH<f>":{"$elemMatch":{"HASH<foo>":{"$eq":"?string"}}},"HASH<_id>":true})",
         output);
 
     // Positional projection
@@ -821,14 +821,14 @@ TEST_F(ProjectionASTTest, TestASTRedaction) {
     proj = fromjson("{a: {$slice: 1}}");
     output = projection_ast::serialize(*parseWithFindFeaturesEnabled(proj).root(), options);
     ASSERT_BSONOBJ_EQ_AUTO(  //
-        R"({"HASH<a>":{"$slice":"?"}})",
+        R"({"HASH<a>":{"$slice":"?number"}})",
         output);
 
     // Slice (second form)
     proj = fromjson("{a: {$slice: [1, 3]}}");
     output = projection_ast::serialize(*parseWithFindFeaturesEnabled(proj).root(), options);
     ASSERT_BSONOBJ_EQ_AUTO(  //
-        R"({"HASH<a>":{"$slice":["?","?"]}})",
+        R"({"HASH<a>":{"$slice":["?number","?number"]}})",
         output);
 
     /// $meta projection

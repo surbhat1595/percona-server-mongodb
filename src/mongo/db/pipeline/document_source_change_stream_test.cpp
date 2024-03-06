@@ -496,8 +496,7 @@ TEST_F(ChangeStreamStageTest, ShouldRejectBothStartAtOperationTimeAndResumeAfter
         Lock::GlobalWrite lk(expCtx->opCtx);
         std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
         CollectionCatalog::write(expCtx->opCtx, [&](CollectionCatalog& catalog) {
-            catalog.registerCollection(
-                expCtx->opCtx, testUuid(), std::move(collection), /*ts=*/boost::none);
+            catalog.registerCollection(expCtx->opCtx, std::move(collection), /*ts=*/boost::none);
         });
     }
 
@@ -523,8 +522,7 @@ TEST_F(ChangeStreamStageTest, ShouldRejectBothStartAfterAndResumeAfterOptions) {
         Lock::GlobalWrite lk(opCtx);
         std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
         CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
-            catalog.registerCollection(
-                opCtx, testUuid(), std::move(collection), /*ts=*/boost::none);
+            catalog.registerCollection(opCtx, std::move(collection), /*ts=*/boost::none);
         });
     }
 
@@ -555,8 +553,7 @@ TEST_F(ChangeStreamStageTest, ShouldRejectBothStartAtOperationTimeAndStartAfterO
         Lock::GlobalWrite lk(opCtx);
         std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
         CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
-            catalog.registerCollection(
-                opCtx, testUuid(), std::move(collection), /*ts=*/boost::none);
+            catalog.registerCollection(opCtx, std::move(collection), /*ts=*/boost::none);
         });
     }
 
@@ -582,8 +579,7 @@ TEST_F(ChangeStreamStageTest, ShouldRejectResumeAfterWithResumeTokenMissingUUID)
         Lock::GlobalWrite lk(opCtx);
         std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
         CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
-            catalog.registerCollection(
-                opCtx, testUuid(), std::move(collection), /*ts=*/boost::none);
+            catalog.registerCollection(opCtx, std::move(collection), /*ts=*/boost::none);
         });
     }
 
@@ -2770,10 +2766,10 @@ TEST_F(ChangeStreamStageTest, DocumentKeyShouldNotIncludeShardKeyWhenNoO2FieldIn
 
     {
         Lock::GlobalWrite lk(getExpCtx()->opCtx);
-        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
+        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(uuid, nss);
         CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
             catalog.registerCollection(
-                getExpCtx()->opCtx, uuid, std::move(collection), /*ts=*/boost::none);
+                getExpCtx()->opCtx, std::move(collection), /*ts=*/boost::none);
         });
     }
 
@@ -2817,10 +2813,10 @@ TEST_F(ChangeStreamStageTest, DocumentKeyShouldUseO2FieldInOplog) {
 
     {
         Lock::GlobalWrite lk(getExpCtx()->opCtx);
-        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
+        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(uuid, nss);
         CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
             catalog.registerCollection(
-                getExpCtx()->opCtx, uuid, std::move(collection), /*ts=*/boost::none);
+                getExpCtx()->opCtx, std::move(collection), /*ts=*/boost::none);
         });
     }
 
@@ -2860,14 +2856,13 @@ TEST_F(ChangeStreamStageTest, DocumentKeyShouldUseO2FieldInOplog) {
 
 TEST_F(ChangeStreamStageTest, ResumeAfterFailsIfResumeTokenDoesNotContainUUID) {
     const Timestamp ts(3, 45);
-    const auto uuid = testUuid();
 
     {
         Lock::GlobalWrite lk(getExpCtx()->opCtx);
         std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
         CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
             catalog.registerCollection(
-                getExpCtx()->opCtx, uuid, std::move(collection), /*ts=*/boost::none);
+                getExpCtx()->opCtx, std::move(collection), /*ts=*/boost::none);
         });
     }
 
@@ -2934,7 +2929,7 @@ TEST_F(ChangeStreamStageTest, ResumeAfterWithTokenFromInvalidateShouldFail) {
         std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
         CollectionCatalog::write(expCtx->opCtx, [&](CollectionCatalog& catalog) {
             catalog.registerCollection(
-                getExpCtx()->opCtx, testUuid(), std::move(collection), /*ts=*/boost::none);
+                getExpCtx()->opCtx, std::move(collection), /*ts=*/boost::none);
         });
     }
 
@@ -3427,10 +3422,10 @@ TEST_F(ChangeStreamStageDBTest, DocumentKeyShouldNotIncludeShardKeyWhenNoO2Field
 
     {
         Lock::GlobalWrite lk(getExpCtx()->opCtx);
-        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
+        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(uuid, nss);
         CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
             catalog.registerCollection(
-                getExpCtx()->opCtx, uuid, std::move(collection), /*ts=*/boost::none);
+                getExpCtx()->opCtx, std::move(collection), /*ts=*/boost::none);
         });
     }
 
@@ -3469,10 +3464,10 @@ TEST_F(ChangeStreamStageDBTest, DocumentKeyShouldUseO2FieldInOplog) {
 
     {
         Lock::GlobalWrite lk(getExpCtx()->opCtx);
-        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
+        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(uuid, nss);
         CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
             catalog.registerCollection(
-                getExpCtx()->opCtx, uuid, std::move(collection), /*ts=*/boost::none);
+                getExpCtx()->opCtx, std::move(collection), /*ts=*/boost::none);
         });
     }
 
@@ -3514,7 +3509,7 @@ TEST_F(ChangeStreamStageDBTest, ResumeAfterWithTokenFromInvalidateShouldFail) {
         std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
         CollectionCatalog::write(expCtx->opCtx, [&](CollectionCatalog& catalog) {
             catalog.registerCollection(
-                getExpCtx()->opCtx, testUuid(), std::move(collection), /*ts=*/boost::none);
+                getExpCtx()->opCtx, std::move(collection), /*ts=*/boost::none);
         });
     }
 
@@ -3539,10 +3534,10 @@ TEST_F(ChangeStreamStageDBTest, ResumeAfterWithTokenFromDropDatabase) {
 
     {
         Lock::GlobalWrite lk(getExpCtx()->opCtx);
-        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
+        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(uuid, nss);
         CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
             catalog.registerCollection(
-                getExpCtx()->opCtx, uuid, std::move(collection), /*ts=*/boost::none);
+                getExpCtx()->opCtx, std::move(collection), /*ts=*/boost::none);
         });
     }
 
@@ -3577,10 +3572,10 @@ TEST_F(ChangeStreamStageDBTest, StartAfterSucceedsEvenIfResumeTokenDoesNotContai
 
     {
         Lock::GlobalWrite lk(getExpCtx()->opCtx);
-        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
+        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(uuid, nss);
         CollectionCatalog::write(getExpCtx()->opCtx, [&](CollectionCatalog& catalog) {
             catalog.registerCollection(
-                getExpCtx()->opCtx, uuid, std::move(collection), /*ts=*/boost::none);
+                getExpCtx()->opCtx, std::move(collection), /*ts=*/boost::none);
         });
     }
 
@@ -4491,7 +4486,7 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamAddPostImag
         R"({"$_internalChangeStreamAddPostImage":{"fullDocument":"updateLookup"}})",
         docSource->serialize(SerializationOptions{}).getDocument().toBson());
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
-        R"({"$_internalChangeStreamAddPostImage":{"fullDocument":"?"}})",
+        R"({"$_internalChangeStreamAddPostImage":{"fullDocument":"updateLookup"}})",
         redact(*docSource));
 }
 
@@ -4507,7 +4502,7 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamAddPreImage
         })",
         docSource.serialize(SerializationOptions{}).getDocument().toBson());
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
-        R"({"$_internalChangeStreamAddPreImage":{"fullDocumentBeforeChange":"?"}})",
+        R"({"$_internalChangeStreamAddPreImage":{"fullDocumentBeforeChange":"whenAvailable"}})",
         redact(docSource));
 }
 
@@ -4532,7 +4527,7 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamCheckInvali
         })",
         docSource->serialize(SerializationOptions{}).getDocument().toBson());
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
-        R"({"$_internalChangeStreamCheckInvalidate":{"startAfterInvalidate":"?"}})",
+        R"({"$_internalChangeStreamCheckInvalidate":{"startAfterInvalidate":"?object"}})",
         redact(*docSource));
 }
 
@@ -4556,7 +4551,7 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamCheckResuma
         })",
         docSource->serialize(SerializationOptions{}).getDocument().toBson());
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
-        R"({"$_internalChangeStreamCheckResumability":{"resumeToken":"?"}})",
+        R"({"$_internalChangeStreamCheckResumability":{"resumeToken":"?object"}})",
         redact(*docSource));
 }
 
@@ -4591,7 +4586,11 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamEnsureResum
         })",
         docSource->serialize(SerializationOptions{}).getDocument().toBson());
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
-        R"({"$_internalChangeStreamEnsureResumeTokenPresent":{"resumeToken":"?"}})",
+        R"({
+            "$_internalChangeStreamEnsureResumeTokenPresent": {
+                "resumeToken": "?object"
+            }
+        })",
         redact(*docSource));
 }
 
@@ -4648,9 +4647,9 @@ TEST_F(ChangeStreamStageTestNoSetup, RedactDocumentSourceChangeStreamTransform) 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "$_internalChangeStreamTransform": {
-                "resumeAfter": "?",
-                "fullDocument": "?",
-                "fullDocumentBeforeChange": "?"
+                "resumeAfter": "?object",
+                "fullDocument": "default",
+                "fullDocumentBeforeChange": "off"
             }
         })",
         redact(*docSource));

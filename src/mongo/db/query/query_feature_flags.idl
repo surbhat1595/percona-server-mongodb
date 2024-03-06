@@ -81,9 +81,9 @@ feature_flags:
       cpp_varname: gFeatureFlagSbeFull
       default: false
 
-    featureFlagTelemetry:
-      description: "Feature flag for enabling the telemetry store."
-      cpp_varname: gFeatureFlagTelemetry
+    featureFlagQueryStats:
+      description: "Feature flag for enabling the queryStats store."
+      cpp_varname: gFeatureFlagQueryStats
       default: false
 
     featureFlagBitwiseAggOperators:
@@ -103,12 +103,13 @@ feature_flags:
       cpp_varname: gFeatureFlagShardedSearchCustomSort
       default: true
       version: 7.0
-
+    
     featureFlagUserRoles:
       description: "Feature flag to enable usage of $$USER_ROLES."
       cpp_varname: gFeatureFlagUserRoles
       default: true
       version: 7.0
+
 
     featureFlagApproxPercentiles:
       description: "Feature flag to enable approximate $percentile accumulator/expression."

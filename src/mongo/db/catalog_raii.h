@@ -59,9 +59,15 @@ struct OptionsBase {
         return std::move(*static_cast<T*>(this));
     }
 
+    T globalLockSkipOptions(boost::optional<Lock::GlobalLockSkipOptions> globalLockSkipOptions) {
+        _globalLockSkipOptions = globalLockSkipOptions;
+        return std::move(*static_cast<T*>(this));
+    }
+
     ViewMode _viewMode = ViewMode::kViewsForbidden;
     Date_t _deadline = Date_t::max();
     boost::optional<UUID> _expectedUUID;
+    boost::optional<Lock::GlobalLockSkipOptions> _globalLockSkipOptions;
 };
 
 struct Options : OptionsBase<Options> {};
@@ -74,6 +80,15 @@ struct OptionsWithSecondaryCollections : OptionsBase<OptionsWithSecondaryCollect
 
     std::vector<NamespaceStringOrUUID> _secondaryNssOrUUIDs;
 };
+
+/*
+ * Checks that, when in multi-document transaction, local catalog stashed by the transaction and the
+ * CollectionPtr it obtained are valid to be used for a request that attached
+ */
+void checkLocalCatalogIsValidForUnshardedShardVersion(OperationContext* opCtx,
+                                                      const CollectionCatalog& stashedCatalog,
+                                                      const CollectionPtr& collectionPtr,
+                                                      const NamespaceString& nss);
 }  // namespace auto_get_collection
 
 /**

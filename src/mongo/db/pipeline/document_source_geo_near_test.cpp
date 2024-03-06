@@ -130,18 +130,16 @@ TEST_F(DocumentSourceGeoNearTest, RedactionWithGeoJSONPoint) {
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "$geoNear": {
-                "near": {
-                    "$const": "?"
-                },
+                "near": "?object",
                 "distanceField": "HASH<a>",
-                "maxDistance": "?",
-                "minDistance": "?",
+                "maxDistance": "?number",
+                "minDistance": "?number",
                 "query": {
                     "HASH<foo>": {
-                        "$eq": "?"
+                        "$eq": "?string"
                     }
                 },
-                "spherical": "?"
+                "spherical": "?bool"
             }
         })",
         redact(*docSource));
@@ -162,13 +160,11 @@ TEST_F(DocumentSourceGeoNearTest, RedactionWithGeoJSONLineString) {
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "$geoNear": {
-                "near": {
-                    "$const": "?"
-                },
+                "near": "?object",
                 "distanceField": "HASH<a>",
-                "minDistance": "?",
+                "minDistance": "?number",
                 "query": {},
-                "spherical": "?"
+                "spherical": "?bool"
             }
         })",
         redact(*docSource));
@@ -193,17 +189,15 @@ TEST_F(DocumentSourceGeoNearTest, RedactionWithLegacyCoordinates) {
         R"({
             "$geoNear": {
                 "key": "HASH<z>",
-                "near": {
-                    "$const": "?"
-                },
+                "near": "?array<?number>",
                 "distanceField": "HASH<foo>",
                 "query": {
                     "HASH<a>": {
-                        "$gt": "?"
+                        "$gt": "?number"
                     }
                 },
-                "spherical": "?",
-                "distanceMultiplier": "?",
+                "spherical": "?bool",
+                "distanceMultiplier": "?number",
                 "includeLocs": "HASH<bar>.HASH<baz>"
             }
         })",

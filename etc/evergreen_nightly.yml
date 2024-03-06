@@ -1,10 +1,12 @@
 # Similar to etc/evergreen.yml, but for release builds.
 
 include:
+- filename: etc/evergreen_yml_components/configuration.yml
 - filename: etc/evergreen_yml_components/definitions.yml
 - filename: etc/evergreen_yml_components/variants/task_generation.yml
 - filename: etc/evergreen_yml_components/variants/atlas.yml
 - filename: etc/evergreen_yml_components/variants/misc_release.yml
+- filename: etc/evergreen_yml_components/variants/openssl_111.yml
 ### Comment out when using this file for a Rapid release branch. ###
 - filename: etc/evergreen_yml_components/variants/ibm.yml
 ### Uncomment when using this file for a LTS release branch. ###
@@ -17,7 +19,8 @@ include:
 ### Uncomment when using this file for a LTS or Rapid release branch. ###
 - filename: etc/evergreen_yml_components/variants/classic_engine.yml
 ### Uncomment when using this file for a LTS or Rapid release branch. ###
-- filename: etc/evergreen_yml_components/variants/config_shard.yml
+# TODO: (SERVER-86211) Re-enable config shard evergreen variant.
+# - filename: etc/evergreen_yml_components/variants/config_shard.yml
 
 
 parameters:
@@ -392,17 +395,6 @@ buildvariants:
   - name: check_feature_flag_tags
   - name: compile_venv_deps_check
   - name: resmoke_validation_tests
-
-- name: security-daily-cron
-  modules:
-  - enterprise
-  display_name: "~ Security Daily Cron"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  run_on:
-  - rhel80-small
-  stepback: false
-  tasks:
-  - name: blackduck_scanner
 
 ###########################################
 #          Copybara buildvariants           #

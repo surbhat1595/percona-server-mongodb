@@ -50,6 +50,8 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_parser_gen.h"
 #include "mongo/db/pipeline/variable_validation.h"
+#include "mongo/db/query/collation/collator_factory_interface.h"
+#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/sort_pattern.h"
 #include "mongo/db/query/util/make_data_structure.h"
@@ -74,12 +76,18 @@ using std::string;
 using std::vector;
 
 /// Helper function to easily wrap constants with $const.
-static Value serializeConstant(Value val) {
+Value ExpressionConstant::serializeConstant(const SerializationOptions& opts, Value val) {
     if (val.missing()) {
         return Value("$$REMOVE"_sd);
     }
+    if (opts.literalPolicy == LiteralSerializationPolicy::kToDebugTypeString) {
+        return opts.serializeLiteral(val);
+    }
 
-    return Value(DOC("$const" << val));
+    // Other serialization policies need to include this $const in order to be unambiguous for
+    // re-parsing this output later. If for example the constant was '$cashMoney' - we don't want to
+    // misinterpret it as a field path when parsing.
+    return Value(DOC("$const" << opts.serializeLiteral(val)));
 }
 
 /* --------------------------- Expression ------------------------------ */
@@ -639,8 +647,10 @@ Value ExpressionArray::evaluate(const Document& root, Variables* variables) cons
 }
 
 Value ExpressionArray::serialize(SerializationOptions options) const {
-    if (options.replacementForLiteralArgs && selfAndChildrenAreConstant()) {
-        return serializeConstant(Value(options.replacementForLiteralArgs.get()));
+    if (options.literalPolicy != LiteralSerializationPolicy::kUnchanged &&
+        selfAndChildrenAreConstant()) {
+        return ExpressionConstant::serializeConstant(
+            options, evaluate(Document{}, &(getExpressionContext()->variables)));
     }
     vector<Value> expressions;
     expressions.reserve(_children.size());
@@ -1223,10 +1233,7 @@ Value ExpressionConstant::evaluate(const Document& root, Variables* variables) c
 }
 
 Value ExpressionConstant::serialize(SerializationOptions options) const {
-    if (options.replacementForLiteralArgs) {
-        return serializeConstant(Value(options.replacementForLiteralArgs.get()));
-    }
-    return serializeConstant(_value);
+    return ExpressionConstant::serializeConstant(options, _value);
 }
 
 REGISTER_STABLE_EXPRESSION(const, ExpressionConstant::parse);
@@ -2385,8 +2392,9 @@ bool ExpressionObject::selfAndChildrenAreConstant() const {
 }
 
 Value ExpressionObject::serialize(SerializationOptions options) const {
-    if (options.replacementForLiteralArgs && selfAndChildrenAreConstant()) {
-        return serializeConstant(Value(options.replacementForLiteralArgs.get()));
+    if (options.literalPolicy != LiteralSerializationPolicy::kUnchanged &&
+        selfAndChildrenAreConstant()) {
+        return ExpressionConstant::serializeConstant(options, Value(Document{}));
     }
     MutableDocument outputDoc;
     for (auto&& pair : _expressions) {
@@ -2602,7 +2610,7 @@ Value ExpressionFieldPath::serialize(SerializationOptions options) const {
     auto [prefix, path] = getPrefixAndPath(_fieldPath);
     // First handles special cases for redaction of system variables. User variables will fall
     // through to the default full redaction case.
-    if (options.redactIdentifiers && prefix.length() == 2) {
+    if (options.transformIdentifiers && prefix.length() == 2) {
         if (path.getPathLength() == 1 && Variables::isBuiltin(_variable)) {
             // Nothing to redact for builtin variables.
             return Value(prefix + path.fullPath());
@@ -2973,8 +2981,8 @@ Value ExpressionLet::serialize(SerializationOptions options) const {
     for (VariableMap::const_iterator it = _variables.begin(), end = _variables.end(); it != end;
          ++it) {
         auto key = it->second.name;
-        if (options.redactIdentifiers) {
-            key = options.identifierRedactionPolicy(key);
+        if (options.transformIdentifiers) {
+            key = options.transformIdentifiersCallback(key);
         }
         vars[key] = it->second.expression->serialize(options);
     }
@@ -8061,7 +8069,6 @@ Value ExpressionGetField::evaluate(const Document& root, Variables* variables) c
         return Value();
     }
 
-
     return inputValue.getDocument().getField(fieldValue.getString());
 }
 
@@ -8070,19 +8077,23 @@ intrusive_ptr<Expression> ExpressionGetField::optimize() {
 }
 
 Value ExpressionGetField::serialize(SerializationOptions options) const {
-    MutableDocument argDoc;
-    if (options.redactIdentifiers) {
-        // The parser guarantees that the '_children[_kField]' expression evaluates to a constant
-        // string.
-        auto strPath =
-            static_cast<ExpressionConstant*>(_children[_kField].get())->getValue().getString();
-        argDoc.addField("field"_sd, Value(options.serializeFieldPathFromString(strPath)));
-    } else {
-        argDoc.addField("field"_sd, _children[_kField]->serialize(options));
-    }
-    argDoc.addField("input"_sd, _children[_kInput]->serialize(options));
+    // The parser guarantees that the '_children[_kField]' expression evaluates to a constant
+    // string.
+    auto strPath =
+        static_cast<ExpressionConstant*>(_children[_kField].get())->getValue().getString();
 
-    return Value(Document{{"$getField"_sd, argDoc.freezeToValue()}});
+    Value maybeRedactedPath{options.serializeFieldPathFromString(strPath)};
+    // This is a pretty unique option to serialize. It is both a constant and a field path, which
+    // means that it:
+    //  - should be redacted (if that option is set).
+    //  - should *not* be wrapped in $const iff we are serializing for a debug string
+    if (options.literalPolicy != LiteralSerializationPolicy::kToDebugTypeString) {
+        maybeRedactedPath = Value(Document{{"$const"_sd, maybeRedactedPath}});
+    }
+
+    return Value(Document{{"$getField"_sd,
+                           Document{{"field"_sd, std::move(maybeRedactedPath)},
+                                    {"input"_sd, _children[_kInput]->serialize(options)}}}});
 }
 
 /* -------------------------- ExpressionSetField ------------------------------ */
@@ -8193,20 +8204,24 @@ intrusive_ptr<Expression> ExpressionSetField::optimize() {
 }
 
 Value ExpressionSetField::serialize(SerializationOptions options) const {
-    MutableDocument argDoc;
-    if (options.redactIdentifiers) {
-        // The parser guarantees that the '_children[_kField]' expression evaluates to a constant
-        // string.
-        auto strPath =
-            static_cast<ExpressionConstant*>(_children[_kField].get())->getValue().getString();
-        argDoc.addField("field"_sd, Value(options.serializeFieldPathFromString(strPath)));
-    } else {
-        argDoc.addField("field"_sd, _children[_kField]->serialize(options));
-    }
-    argDoc.addField("input"_sd, _children[_kInput]->serialize(options));
-    argDoc.addField("value"_sd, _children[_kValue]->serialize(options));
+    // The parser guarantees that the '_children[_kField]' expression evaluates to a constant
+    // string.
+    auto strPath =
+        static_cast<ExpressionConstant*>(_children[_kField].get())->getValue().getString();
 
-    return Value(Document{{"$setField"_sd, argDoc.freezeToValue()}});
+    Value maybeRedactedPath{options.serializeFieldPathFromString(strPath)};
+    // This is a pretty unique option to serialize. It is both a constant and a field path, which
+    // means that it:
+    //  - should be redacted (if that option is set).
+    //  - should *not* be wrapped in $const iff we are serializing for a debug string
+    if (options.literalPolicy != LiteralSerializationPolicy::kToDebugTypeString) {
+        maybeRedactedPath = Value(Document{{"$const"_sd, maybeRedactedPath}});
+    }
+
+    return Value(Document{{"$setField"_sd,
+                           Document{{"field"_sd, std::move(maybeRedactedPath)},
+                                    {"input"_sd, _children[_kInput]->serialize(options)},
+                                    {"value"_sd, _children[_kValue]->serialize(options)}}}});
 }
 
 /* ------------------------- ExpressionTsSecond ----------------------------- */
@@ -8293,4 +8308,84 @@ REGISTER_EXPRESSION_WITH_FEATURE_FLAG(bitXor,
 
 MONGO_INITIALIZER_GROUP(BeginExpressionRegistration, ("default"), ("EndExpressionRegistration"))
 MONGO_INITIALIZER_GROUP(EndExpressionRegistration, ("BeginExpressionRegistration"), ())
+
+/* ----------------------- ExpressionInternalKeyStringValue ---------------------------- */
+
+REGISTER_STABLE_EXPRESSION(_internalKeyStringValue, ExpressionInternalKeyStringValue::parse);
+
+boost::intrusive_ptr<Expression> ExpressionInternalKeyStringValue::parse(
+    ExpressionContext* expCtx, BSONElement expr, const VariablesParseState& vps) {
+
+    uassert(
+        8281500,
+        str::stream() << "$_internalKeyStringValue only supports an object as its argument, not "
+                      << typeName(expr.type()),
+        expr.type() == BSONType::Object);
+
+    boost::intrusive_ptr<Expression> inputExpr;
+    boost::intrusive_ptr<Expression> collationExpr;
+
+    for (auto&& element : expr.embeddedObject()) {
+        auto field = element.fieldNameStringData();
+        if ("input"_sd == field) {
+            inputExpr = parseOperand(expCtx, element, vps);
+        } else if ("collation"_sd == field) {
+            collationExpr = parseOperand(expCtx, element, vps);
+        } else {
+            uasserted(8281501,
+                      str::stream() << "Unrecognized argument to $_internalKeyStringValue: "
+                                    << element.fieldName());
+        }
+    }
+    uassert(8281502,
+            str::stream() << "$_internalKeyStringValue requires 'input' to be specified",
+            inputExpr);
+
+    return make_intrusive<ExpressionInternalKeyStringValue>(expCtx, inputExpr, collationExpr);
+}
+
+Value ExpressionInternalKeyStringValue::serialize(SerializationOptions options) const {
+    return Value(
+        Document{{getOpName(),
+                  Document{{"input", _children[_kInput]->serialize(options)},
+                           {"collation",
+                            _children[_kCollation] ? _children[_kCollation]->serialize(options)
+                                                   : Value()}}}});
+}
+
+Value ExpressionInternalKeyStringValue::evaluate(const Document& root, Variables* variables) const {
+    const Value input = _children[_kInput]->evaluate(root, variables);
+    auto inputBson = input.wrap("");
+
+    std::unique_ptr<CollatorInterface> collator = nullptr;
+    if (_children[_kCollation]) {
+        const Value collation = _children[_kCollation]->evaluate(root, variables);
+        uassert(8281503,
+                str::stream() << "Collation spec must be an object, not "
+                              << typeName(collation.getType()),
+                collation.isObject());
+        auto collationBson = collation.getDocument().toBson();
+
+        auto collatorFactory =
+            CollatorFactoryInterface::get(getExpressionContext()->opCtx->getServiceContext());
+        collator = uassertStatusOKWithContext(collatorFactory->makeFromBSON(collationBson),
+                                              "Invalid collation spec");
+    }
+
+    KeyString::HeapBuilder ksBuilder(KeyString::Version::V1);
+    if (collator) {
+        ksBuilder.appendBSONElement(inputBson.firstElement(), [&](StringData str) {
+            return collator->getComparisonString(str);
+        });
+    } else {
+        ksBuilder.appendBSONElement(inputBson.firstElement());
+    }
+    auto ksValue = ksBuilder.release();
+
+    // The result omits the typebits so that the numeric value of different types have the same
+    // binary representation.
+    return Value(
+        BSONBinData{ksValue.getBuffer(), static_cast<int>(ksValue.getSize()), BinDataGeneral});
+}
+
 }  // namespace mongo

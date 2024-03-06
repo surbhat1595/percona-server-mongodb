@@ -2717,6 +2717,176 @@ class TestBinder(testcase.IDLTestcase):
                         d1: danger
             """), idl.errors.ERROR_ID_INHERITANCE_AND_DISABLE_CHECK_NOT_ALLOWED)
 
+    def test_query_shape_component_validation(self):
+        self.assert_bind(self.common_types + textwrap.dedent("""
+            structs:
+                struct1:
+                    query_shape_component: true
+                    strict: true
+                    description: ""
+                    fields:
+                        field1:
+                            query_shape: literal
+                            type: string
+                        field2:
+                            type: bool
+                            query_shape: parameter
+        """))
+
+        self.assert_bind_fail(
+            self.common_types + textwrap.dedent("""
+            structs:
+                struct1:
+                    query_shape_component: true
+                    strict: true
+                    description: ""
+                    fields:
+                        field1:
+                            type: string
+                        field2:
+                            type: bool
+                            query_shape: parameter
+        """), idl.errors.ERROR_ID_FIELD_MUST_DECLARE_SHAPE_LITERAL)
+
+        self.assert_bind_fail(
+            self.common_types + textwrap.dedent("""
+            structs:
+                struct1:
+                    strict: true
+                    description: ""
+                    fields:
+                        field1:
+                            type: string
+                        field2:
+                            type: bool
+                            query_shape: parameter
+        """), idl.errors.ERROR_ID_CANNOT_DECLARE_SHAPE_LITERAL)
+
+        # Validating query_shape_anonymize relies on std::string
+        basic_types = textwrap.dedent("""
+            types:
+                string:
+                    bson_serialization_type: string
+                    description: "A BSON UTF-8 string"
+                    cpp_type: "std::string"
+                    deserializer: "mongo::BSONElement::str"
+                bool:
+                    bson_serialization_type: bool
+                    description: "A BSON bool"
+                    cpp_type: "bool"
+                    deserializer: "mongo::BSONElement::boolean"
+                serialization_context:
+                    bson_serialization_type: any
+                    description: foo
+                    cpp_type: foo
+                    internal_only: true
+        """)
+        self.assert_bind(basic_types + textwrap.dedent("""
+            structs:
+                struct1:
+                    query_shape_component: true
+                    strict: true
+                    description: ""
+                    fields:
+                        field1:
+                            query_shape: anonymize
+                            type: string
+                        field2:
+                            query_shape: parameter
+                            type: bool
+        """))
+
+        self.assert_bind(basic_types + textwrap.dedent("""
+            structs:
+                struct1:
+                    query_shape_component: true
+                    strict: true
+                    description: ""
+                    fields:
+                        field1:
+                            query_shape: anonymize
+                            type: array<string>
+                        field2:
+                            query_shape: parameter
+                            type: bool
+        """))
+
+        self.assert_bind_fail(
+            basic_types + textwrap.dedent("""
+            structs:
+                struct1:
+                    strict: true
+                    description: ""
+                    fields:
+                        field1:
+                            query_shape: blah
+                            type: string
+        """), idl.errors.ERROR_ID_QUERY_SHAPE_INVALID_VALUE)
+
+        self.assert_bind_fail(
+            basic_types + textwrap.dedent("""
+            structs:
+                struct1:
+                    query_shape_component: true
+                    strict: true
+                    description: ""
+                    fields:
+                        field1:
+                            query_shape: anonymize
+                            type: bool
+                        field2:
+                            query_shape: parameter
+                            type: bool
+        """), idl.errors.ERROR_ID_INVALID_TYPE_FOR_SHAPIFY)
+
+        self.assert_bind_fail(
+            basic_types + textwrap.dedent("""
+            structs:
+                struct1:
+                    query_shape_component: true
+                    strict: true
+                    description: ""
+                    fields:
+                        field1:
+                            query_shape: anonymize
+                            type: array<bool>
+                        field2:
+                            query_shape: parameter
+                            type: bool
+        """), idl.errors.ERROR_ID_INVALID_TYPE_FOR_SHAPIFY)
+
+        self.assert_bind_fail(
+            basic_types + textwrap.dedent("""
+            structs:
+                StructZero:
+                    strict: true
+                    description: ""
+                    fields:
+                        field1:
+                            query_shape: literal
+                            type: string
+            """), idl.errors.ERROR_ID_CANNOT_DECLARE_SHAPE_LITERAL)
+
+        self.assert_bind_fail(
+            basic_types + textwrap.dedent("""
+            structs:
+                StructZero:
+                    strict: true
+                    description: ""
+                    fields:
+                        field1:
+                            type: string
+                struct1:
+                    query_shape_component: true
+                    strict: true
+                    description: ""
+                    fields:
+                        field2:
+                            type: StructZero
+                            description: ""
+                            query_shape: literal
+            """), idl.errors.ERROR_ID_CANNOT_DECLARE_SHAPE_LITERAL)
+
 
 if __name__ == '__main__':
 

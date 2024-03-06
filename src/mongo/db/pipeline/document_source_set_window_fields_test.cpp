@@ -245,9 +245,9 @@ TEST_F(DocumentSourceSetWindowFieldsTest, RedactionOnShiftOperator) {
                 "output": {
                     "HASH<x>": {
                         "$shift": {
-                            by: "?",
-                            output: "$HASH<y>",
-                            default: "?"
+                            "by": "?number",
+                            "output": "$HASH<y>",
+                            "default": "?string"
                         }
                     }
                 }
@@ -287,8 +287,8 @@ TEST_F(DocumentSourceSetWindowFieldsTest, RedactionOnExpMovingAvgOperator) {
                 "output": {
                     "HASH<x>": {
                         "$expMovingAvg": {
-                            alpha: "?",
-                            input: "$HASH<y>"
+                            "alpha": "?number",
+                            "input": "$HASH<y>"
                         }
                     }
                 }
@@ -322,9 +322,7 @@ TEST_F(DocumentSourceSetWindowFieldsTest, RedactionOnExpressionNOperator) {
                 "output": {
                     "HASH<b>": {
                         "$minN": {
-                            "n": {
-                                "$const": "?"
-                            },
+                            "n": "?number",
                             "input": "$HASH<y>"
                         },
                         "window": {
@@ -447,9 +445,9 @@ TEST_F(DocumentSourceSetWindowFieldsTest, RedactionOnPushWithRangeWindowWithUnit
                         "window": {
                             "range": [
                                 "unbounded",
-                                "?"
+                                "?number"
                             ],
-                            "unit": "?"
+                            "unit": "?string"
                         }
                     }
                 }

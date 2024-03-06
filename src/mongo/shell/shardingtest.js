@@ -113,6 +113,9 @@ var ShardingTest = function(params) {
     // concern (5 minutes)
     var kDefaultWTimeoutMs = 5 * 60 * 1000;
 
+    // Oplog collection name
+    const kOplogName = 'oplog.rs';
+
     // Ensure we don't mutate the passed-in parameters.
     params = Object.extend({}, params, true);
 
@@ -1163,6 +1166,17 @@ var ShardingTest = function(params) {
     };
 
     /**
+     * Query the oplog from a given node.
+     */
+    ShardingTest.prototype.findOplog = function(conn, query, limit) {
+        return conn.getDB('local')
+            .getCollection(kOplogName)
+            .find(query)
+            .sort({$natural: -1})
+            .limit(limit);
+    };
+
+    /**
      * Returns if there is a new feature compatibility version for the "latest" version. This must
      * be manually changed if and when there is a new feature compatibility version.
      */
@@ -1356,7 +1370,6 @@ var ShardingTest = function(params) {
             };
 
             var setIsConfigSvr = false;
-
             if (isConfigShardMode && i == 0) {
                 otherParams.configOptions = Object.merge(
                     otherParams.configOptions, {configsvr: "", storageEngine: "wiredTiger"});
@@ -1404,8 +1417,22 @@ var ShardingTest = function(params) {
             }
 
             rsDefaults.setParameter = rsDefaults.setParameter || {};
+
+            if (typeof (rsDefaults.setParameter) === "string") {
+                var eqIdx = rsDefaults.setParameter.indexOf("=");
+                if (eqIdx != -1) {
+                    var param = rsDefaults.setParameter.substring(0, eqIdx);
+                    var value = rsDefaults.setParameter.substring(eqIdx + 1);
+                    rsDefaults.setParameter = {};
+                    rsDefaults.setParameter[param] = value;
+                }
+            }
+
             rsDefaults.setParameter.migrationLockAcquisitionMaxWaitMS =
                 otherParams.migrationLockAcquisitionMaxWaitMS;
+            if (isConfigShardMode && i == 0) {
+                rsDefaults.setParameter.featureFlagTransitionToCatalogShard = true;
+            }
 
             var rsSettings = rsDefaults.settings;
             delete rsDefaults.settings;
@@ -1699,6 +1726,10 @@ var ShardingTest = function(params) {
             options.setParameter = options.setParameter || {};
             options.setParameter.mongosShutdownTimeoutMillisForSignaledShutdown =
                 options.setParameter.mongosShutdownTimeoutMillisForSignaledShutdown || 0;
+
+            if (isConfigShardMode) {
+                options.setParameter.featureFlagTransitionToCatalogShard = true;
+            }
 
             options.port = options.port || _allocatePortForMongos();
 

@@ -53,7 +53,9 @@
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/telemetry.h"
+#include "mongo/db/query/query_shape.h"
+#include "mongo/db/query/query_stats.h"
+#include "mongo/db/query/query_stats_find_key_generator.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/service_context.h"
@@ -96,40 +98,13 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
         // ExpressionContext.
         collator = collPtr->getDefaultCollator()->clone();
     }
-
-    // Although both 'find' and 'aggregate' commands have an ExpressionContext, some of the data
-    // members in the ExpressionContext are used exclusively by the aggregation subsystem. This
-    // includes the following fields which here we simply initialize to some meaningless default
-    // value:
-    //  - explain
-    //  - fromMongos
-    //  - needsMerge
-    //  - bypassDocumentValidation
-    //  - mongoProcessInterface
-    //  - resolvedNamespaces
-    //  - uuid
-    //
-    // As we change the code to make the find and agg systems more tightly coupled, it would make
-    // sense to start initializing these fields for find operations as well.
-    auto expCtx = make_intrusive<ExpressionContext>(
-        opCtx,
-        verbosity,
-        false,  // fromMongos
-        false,  // needsMerge
-        findCommand.getAllowDiskUse().value_or(allowDiskUseByDefault.load()),
-        false,  // bypassDocumentValidation
-        false,  // isMapReduceCommand
-        findCommand.getNamespaceOrUUID().isNamespaceString()
-            ? findCommand.getNamespaceOrUUID().nss()
-            : NamespaceString{},
-        findCommand.getLegacyRuntimeConstants(),
-        std::move(collator),
-        nullptr,  // mongoProcessInterface
-        StringMap<ExpressionContext::ResolvedNamespace>{},
-        boost::none,                             // uuid
-        findCommand.getLet(),                    // let
-        CurOp::get(opCtx)->dbProfileLevel() > 0  // mayDbProfile
-    );
+    auto expCtx =
+        make_intrusive<ExpressionContext>(opCtx,
+                                          findCommand,
+                                          std::move(collator),
+                                          CurOp::get(opCtx)->dbProfileLevel() > 0,  // mayDbProfile
+                                          verbosity,
+                                          allowDiskUseByDefault.load());
     expCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
     expCtx->startExpressionCounters();
 
@@ -146,6 +121,52 @@ void beginQueryOp(OperationContext* opCtx, const NamespaceString& nss, const BSO
     curOp->setNS_inlock(nss);
 }
 
+/**
+ * Parses the grammar elements like 'filter', 'sort', and 'projection' from the raw
+ * 'FindCommandRequest', and tracks internal state like begining the operation's timer and recording
+ * query shape stats (if enabled).
+ */
+std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
+    OperationContext* opCtx,
+    const AutoGetCollectionForReadCommandMaybeLockFree& ctx,
+    const NamespaceString& nss,
+    BSONObj requestBody,
+    std::unique_ptr<FindCommandRequest> findCommand,
+    const CollectionPtr& collection) {
+    // Fill out curop information.
+    beginQueryOp(opCtx, nss, requestBody);
+    // Finish the parsing step by using the FindCommandRequest to create a CanonicalQuery.
+    const ExtensionsCallbackReal extensionsCallback(opCtx, &nss);
+
+    auto expCtx =
+        makeExpressionContext(opCtx, *findCommand, collection, boost::none /* verbosity */);
+
+    auto parsedRequest = uassertStatusOK(
+        parsed_find_command::parse(expCtx,
+                                   std::move(findCommand),
+                                   extensionsCallback,
+                                   MatchExpressionParser::kAllowAllSpecialFeatures));
+
+    // After parsing to detect if $$USER_ROLES is referenced in the query, set the value of
+    // $$USER_ROLES for the find command.
+    expCtx->setUserRoles();
+    // Register query stats collection. Exclude queries against collections with encrypted fields.
+    // It is important to do this before canonicalizing and optimizing the query, each of which
+    // would alter the query shape.
+    if (!(collection && collection.get()->getCollectionOptions().encryptedFieldConfig)) {
+        query_stats::registerRequest(opCtx, nss, [&]() {
+            BSONObj queryShape = query_shape::extractQueryShape(
+                *parsedRequest,
+                SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+                expCtx);
+            return std::make_unique<query_stats::FindKeyGenerator>(
+                expCtx, *parsedRequest, std::move(queryShape), ctx.getCollectionType());
+        });
+    }
+
+    return uassertStatusOK(
+        CanonicalQuery::canonicalize(std::move(expCtx), std::move(parsedRequest)));
+}
 /**
  * A command for running .find() queries.
  */
@@ -379,7 +400,6 @@ public:
 
             // Parse the command BSON to a FindCommandRequest. Pass in the parsedNss in case cmdObj
             // does not have a UUID.
-            const bool isExplain = false;
             const bool isOplogNss = (_ns == NamespaceString::kRsOplogNamespace);
             auto findCommand = _parseCmdObjectToFindCommandRequest(opCtx, _ns, cmdObj);
             CurOp::get(opCtx)->beginQueryPlanningTimer();
@@ -528,24 +548,8 @@ public:
                     findCommand->getResumeAfter(), isClusteredCollection));
             }
 
-            // Fill out curop information.
-            beginQueryOp(opCtx, nss, _request.body);
-
-            // Finish the parsing step by using the FindCommandRequest to create a CanonicalQuery.
-            const ExtensionsCallbackReal extensionsCallback(opCtx, &nss);
-
-            auto expCtx =
-                makeExpressionContext(opCtx, *findCommand, collection, boost::none /* verbosity */);
-            auto cq = uassertStatusOK(
-                CanonicalQuery::canonicalize(opCtx,
-                                             std::move(findCommand),
-                                             isExplain,
-                                             std::move(expCtx),
-                                             extensionsCallback,
-                                             MatchExpressionParser::kAllowAllSpecialFeatures));
-            // After parsing to detect if $$USER_ROLES is referenced in the query, set the value of
-            // $$USER_ROLES for the find command.
-            cq->getExpCtx()->setUserRoles();
+            auto cq = parseQueryAndBeginOperation(
+                opCtx, *ctx, nss, _request.body, std::move(findCommand), collection);
 
             // If we are running a query against a view redirect this query through the aggregation
             // system.
@@ -589,16 +593,6 @@ public:
                 // The readOnce option causes any storage-layer cursors created during plan
                 // execution to assume read data will not be needed again and need not be cached.
                 opCtx->recoveryUnit()->setReadOnce(true);
-            }
-
-            if (collection) {
-                // Collect telemetry. Exclude queries against collections with encrypted fields.
-                if (!collection.get()->getCollectionOptions().encryptedFieldConfig) {
-                    telemetry::registerFindRequest(cq->getFindCommandRequest(),
-                                                   collection.get()->ns(),
-                                                   opCtx,
-                                                   cq->getExpCtx());
-                }
             }
 
             // Get the execution plan for the query.
@@ -808,10 +802,7 @@ public:
                     processFLEFindD(
                         opCtx, findCommand->getNamespaceOrUUID().nss(), findCommand.get());
                 }
-                // Set the telemetryStoreKey to none so telemetry isn't collected when we've done a
-                // FLE rewrite.
                 stdx::lock_guard<Client> lk(*opCtx->getClient());
-                CurOp::get(opCtx)->debug().telemetryStoreKey = boost::none;
                 CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
             }
 

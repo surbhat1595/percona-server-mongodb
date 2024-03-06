@@ -575,11 +575,26 @@ TEST_F(BucketAutoTests, FailsWithInvalidNumberOfBuckets) {
         40243);
 }
 
-TEST_F(BucketAutoTests, FailsWithNonExpressionGroupBy) {
+TEST_F(BucketAutoTests, FailsWithNonOrInvalidExpressionGroupBy) {
     auto spec = fromjson("{$bucketAuto : {groupBy : 'test', buckets : 1}}");
     ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40239);
 
     spec = fromjson("{$bucketAuto : {groupBy : {test : 'test'}, buckets : 1}}");
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40239);
+
+    spec = fromjson("{$bucketAuto : {groupBy : '', buckets : 1}}");
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40239);
+
+    spec = fromjson("{$bucketAuto : {groupBy : {}}, buckets : 1}}");
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40239);
+
+    spec = fromjson("{$bucketAuto : {groupBy : '$'}, buckets : 1}}");
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40239);
+
+    spec = fromjson("{$bucketAuto : {groupBy : []}, buckets : 1}}");
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40239);
+
+    spec = fromjson("{$bucketAuto : {groupBy : null}, buckets : 1}}");
     ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40239);
 }
 
@@ -868,13 +883,11 @@ TEST_F(BucketAutoTests, RedactionWithoutOutputField) {
         R"({
             "$bucketAuto": {
                 "groupBy": "$HASH<_id>",
-                "buckets": "?",
-                "granularity": "?",
+                "buckets": "?number",
+                "granularity": "?string",
                 "output": {
                     "HASH<count>": {
-                        "$sum": {
-                            "$const": "?"
-                        }
+                        "$sum": "?number"
                     }
                 }
             }
@@ -891,20 +904,21 @@ TEST_F(BucketAutoTests, RedactionWithOutputField) {
                     count: { $sum: 1 },
                     years: { $push: '$year' }
                 }
-            }
-        })");
+            }})");
     auto docSource = DocumentSourceBucketAuto::createFromBson(spec.firstElement(), getExpCtx());
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "$bucketAuto": {
                 "groupBy": "$HASH<year>",
-                "buckets": "?",
+                "buckets": "?number",
                 "output": {
                     "HASH<count>": {
-                        $sum: { "$const": "?" }
+                        "$sum": "?number"
                     },
-                    "HASH<years>": { $push: "$HASH<year>" }
+                    "HASH<years>": {
+                        "$push": "$HASH<year>"
+                    }
                 }
             }
         })",

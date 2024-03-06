@@ -91,6 +91,12 @@ public:
         return "de-authenticate";
     }
 
+    // We should allow users to logout even if the user does not have the direct shard roles action
+    // type.
+    bool shouldSkipDirectConnectionChecks() const final {
+        return true;
+    }
+
     class Invocation final : public InvocationBase {
     public:
         using InvocationBase::InvocationBase;
@@ -205,10 +211,6 @@ void _authenticateX509(OperationContext* opCtx, AuthenticationSession* session) 
     AuthorizationSession* authorizationSession = AuthorizationSession::get(client);
 
     auto sslConfiguration = opCtx->getClient()->session()->getSSLManager()->getSSLConfiguration();
-
-    uassert(ErrorCodes::AuthenticationFailed,
-            "Unable to verify x.509 certificate, as no CA has been provided.",
-            sslConfiguration.hasCA);
 
     uassert(ErrorCodes::ProtocolError,
             "X.509 authentication must always use the $external database.",

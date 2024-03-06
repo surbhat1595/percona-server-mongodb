@@ -338,6 +338,15 @@ void CurOp::setGenericOpRequestDetails(NamespaceString nss,
     _nss = std::move(nss);
 }
 
+void CurOp::setEndOfOpMetrics(long long nreturned) {
+    _debug.additiveMetrics.nreturned = nreturned;
+    // executionTime is set with the final executionTime in completeAndLogOperation, but for
+    // query stats collection we want it set before incrementing cursor metrics using OpDebug's
+    // AdditiveMetrics. The value set here will be overwritten later in
+    // completeAndLogOperation.
+    _debug.additiveMetrics.executionTime = elapsedTimeExcludingPauses();
+}
+
 void CurOp::setMessage_inlock(StringData message) {
     if (_progressMeter.isActive()) {
         LOGV2_ERROR(20527,
@@ -393,7 +402,7 @@ void CurOp::done() {
 }
 
 void CurOp::calculateCpuTime() {
-    if (_cpuTimer && _debug.cpuTime == Nanoseconds::zero()) {
+    if (_cpuTimer && _debug.cpuTime < Nanoseconds::zero()) {
         _debug.cpuTime = _cpuTimer->getElapsed();
     }
 }
@@ -1130,7 +1139,9 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("operationMetrics", builder.obj());
     }
 
-    if (cpuTime > Nanoseconds::zero()) {
+    // Always report cpuNanos in rare cases that it is zero to facilitate testing that expects this
+    // field to always exist.
+    if (cpuTime >= Nanoseconds::zero()) {
         pAttrs->add("cpuNanos", durationCount<Nanoseconds>(cpuTime));
     }
 
@@ -1319,7 +1330,9 @@ void OpDebug::append(OperationContext* opCtx,
         b.append("remoteOpWaitMillis", durationCount<Milliseconds>(*remoteOpWaitTime));
     }
 
-    if (cpuTime > Nanoseconds::zero()) {
+    // Always log cpuNanos in rare cases that it is zero to facilitate testing that expects this
+    // field to always exist.
+    if (cpuTime >= Nanoseconds::zero()) {
         b.appendNumber("cpuNanos", durationCount<Nanoseconds>(cpuTime));
     }
 
@@ -1646,7 +1659,9 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
     });
 
     addIfNeeded("cpuNanos", [](auto field, auto args, auto& b) {
-        if (args.op.cpuTime > Nanoseconds::zero()) {
+        // Always report cpuNanos in rare cases that it is zero to facilitate testing that expects
+        // this field to always exist.
+        if (args.op.cpuTime >= Nanoseconds::zero()) {
             b.appendNumber(field, durationCount<Nanoseconds>(args.op.cpuTime));
         }
     });

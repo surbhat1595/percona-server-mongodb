@@ -40,6 +40,95 @@
 #include "mongo/db/matcher/expression_text_base.h"
 
 namespace mongo {
+namespace {
+
+PathMatchExpression* getEligiblePathMatchForNotSerialization(MatchExpression* expr) {
+    // Returns a pointer to a PathMatchExpression if 'expr' is such a pointer, otherwise returns
+    // nullptr.
+    //
+    // One exception: while TextMatchExpressionBase derives from PathMatchExpression, text match
+    // expressions cannot be serialized in the same manner as other PathMatchExpression derivatives.
+    // This is because the path for a TextMatchExpression is embedded within the $text object,
+    // whereas for other PathMatchExpressions it is on the left-hand-side, for example {x: {$eq:
+    // 1}}.
+    //
+    // Rather than the following dynamic_cast, we'll do a more performant, but also more verbose
+    // check.
+    // dynamic_cast<PathMatchExpression*>(expr) && !dynamic_cast<TextMatchExpressionBase*>(expr)
+    //
+    // This version below is less obviously exhaustive, but because this is just a legibility
+    // optimization, and this function also gets called on the query shape stats recording hot path,
+    // we think it is worth it.
+    switch (expr->matchType()) {
+        // leaf types
+        case MatchExpression::EQ:
+        case MatchExpression::LTE:
+        case MatchExpression::LT:
+        case MatchExpression::GT:
+        case MatchExpression::GTE:
+        case MatchExpression::REGEX:
+        case MatchExpression::MOD:
+        case MatchExpression::EXISTS:
+        case MatchExpression::MATCH_IN:
+        case MatchExpression::BITS_ALL_SET:
+        case MatchExpression::BITS_ALL_CLEAR:
+        case MatchExpression::BITS_ANY_SET:
+        case MatchExpression::BITS_ANY_CLEAR:
+        // array types
+        case MatchExpression::ELEM_MATCH_OBJECT:
+        case MatchExpression::ELEM_MATCH_VALUE:
+        case MatchExpression::SIZE:
+        // special types
+        case MatchExpression::TYPE_OPERATOR:
+        case MatchExpression::GEO:
+        case MatchExpression::GEO_NEAR:
+        // Internal subclasses of PathMatchExpression:
+        case MatchExpression::INTERNAL_SCHEMA_ALL_ELEM_MATCH_FROM_INDEX:
+        case MatchExpression::INTERNAL_SCHEMA_BIN_DATA_ENCRYPTED_TYPE:
+        case MatchExpression::INTERNAL_SCHEMA_BIN_DATA_FLE2_ENCRYPTED_TYPE:
+        case MatchExpression::INTERNAL_SCHEMA_BIN_DATA_SUBTYPE:
+        case MatchExpression::INTERNAL_SCHEMA_MATCH_ARRAY_INDEX:
+        case MatchExpression::INTERNAL_SCHEMA_MAX_ITEMS:
+        case MatchExpression::INTERNAL_SCHEMA_MAX_LENGTH:
+        case MatchExpression::INTERNAL_SCHEMA_MAX_PROPERTIES:
+        case MatchExpression::INTERNAL_SCHEMA_MIN_ITEMS:
+        case MatchExpression::INTERNAL_SCHEMA_MIN_LENGTH:
+        case MatchExpression::INTERNAL_SCHEMA_TYPE:
+        case MatchExpression::INTERNAL_SCHEMA_UNIQUE_ITEMS:
+            return static_cast<PathMatchExpression*>(expr);
+        // purposefully skip TEXT:
+        case MatchExpression::TEXT:
+        // Any other type is not considered a PathMatchExpression.
+        case MatchExpression::AND:
+        case MatchExpression::OR:
+        case MatchExpression::NOT:
+        case MatchExpression::NOR:
+        case MatchExpression::WHERE:
+        case MatchExpression::EXPRESSION:
+        case MatchExpression::ALWAYS_FALSE:
+        case MatchExpression::ALWAYS_TRUE:
+        case MatchExpression::INTERNAL_2D_POINT_IN_ANNULUS:
+        case MatchExpression::INTERNAL_BUCKET_GEO_WITHIN:
+        case MatchExpression::INTERNAL_EXPR_EQ:
+        case MatchExpression::INTERNAL_EXPR_GT:
+        case MatchExpression::INTERNAL_EXPR_GTE:
+        case MatchExpression::INTERNAL_EXPR_LT:
+        case MatchExpression::INTERNAL_EXPR_LTE:
+        case MatchExpression::INTERNAL_EQ_HASHED_KEY:
+        case MatchExpression::INTERNAL_SCHEMA_ALLOWED_PROPERTIES:
+        case MatchExpression::INTERNAL_SCHEMA_COND:
+        case MatchExpression::INTERNAL_SCHEMA_EQ:
+        case MatchExpression::INTERNAL_SCHEMA_FMOD:
+        case MatchExpression::INTERNAL_SCHEMA_MIN_PROPERTIES:
+        case MatchExpression::INTERNAL_SCHEMA_OBJECT_MATCH:
+        case MatchExpression::INTERNAL_SCHEMA_ROOT_DOC_EQ:
+        case MatchExpression::INTERNAL_SCHEMA_XOR:
+            return nullptr;
+        default:
+            MONGO_UNREACHABLE_TASSERT(7800300);
+    }
+};
+}  // namespace
 
 void ListOfMatchExpression::_debugList(StringBuilder& debug, int indentationLevel) const {
     for (unsigned i = 0; i < _expressions.size(); i++)
@@ -205,6 +294,21 @@ MatchExpression::ExpressionOptimizerFunc ListOfMatchExpression::getOptimizer() c
                         eqCollator = curCollator;
                     }
                     if (isRegEx(eqExpression->getData())) {
+                        ++countNonEquivExpr;
+                        continue;
+                    }
+                }
+
+                // Equality to parameterized constants should not participate in this rewrite
+                // because parameter information is lost. For example, consider a predicate
+                // {$or: [{a: 10}, {a: 20}]} where both the constants 10 and 20 are parameters; the
+                // resulting expression {a: {$in: [10, 20]}} cannot be correctly rebound to a
+                // predicate with different constants since we treat the $in operand as a single
+                // parameter.
+                if (childExpression->matchType() == MatchExpression::EQ) {
+                    auto eqExpression =
+                        static_cast<EqualityMatchExpression*>(childExpression.get());
+                    if (eqExpression->getInputParamId().has_value()) {
                         ++countNonEquivExpr;
                         continue;
                     }
@@ -466,11 +570,7 @@ void NotMatchExpression::serializeNotExpressionToNor(MatchExpression* exp,
 
 void NotMatchExpression::serialize(BSONObjBuilder* out, SerializationOptions opts) const {
     if (_exp->matchType() == MatchType::AND && _exp->numChildren() == 0) {
-        if (opts.replacementForLiteralArgs) {
-            out->append("$alwaysFalse", *opts.replacementForLiteralArgs);
-        } else {
-            out->append("$alwaysFalse", 1);
-        }
+        opts.appendLiteral(out, "$alwaysFalse", 1);
         return;
     }
 
@@ -497,14 +597,7 @@ void NotMatchExpression::serialize(BSONObjBuilder* out, SerializationOptions opt
     // It is generally easier to be correct if we just always serialize to a $nor, since this will
     // delegate the path serialization to lower in the tree where we have the information on-hand.
     // However, for legibility we preserve a $not with a single path-accepting child as a $not.
-    //
-    // One exception: while TextMatchExpressionBase derives from PathMatchExpression, text match
-    // expressions cannot be serialized in the same manner as other PathMatchExpression derivatives.
-    // This is because the path for a TextMatchExpression is embedded within the $text object,
-    // whereas for other PathMatchExpressions it is on the left-hand-side, for example {x: {$eq:
-    // 1}}.
-    if (auto pathMatch = dynamic_cast<PathMatchExpression*>(expressionToNegate);
-        pathMatch && !dynamic_cast<TextMatchExpressionBase*>(expressionToNegate)) {
+    if (auto pathMatch = getEligiblePathMatchForNotSerialization(expressionToNegate)) {
         auto append = [&](StringData path) {
             BSONObjBuilder pathBob(out->subobjStart(path));
             pathBob.append("$not", pathMatch->getSerializedRightHandSide(opts));

@@ -125,6 +125,7 @@ selector:
   - jstests/concurrency/fsm_workloads/indexed_insert_upsert.js
   - jstests/concurrency/fsm_workloads/indexed_insert_where.js
   - jstests/concurrency/fsm_workloads/list_indexes.js
+  - jstests/concurrency/fsm_workloads/query_stats_concurrent.js
   - jstests/concurrency/fsm_workloads/random_moveChunk_multi_update_delete_change_streams.js
   - jstests/concurrency/fsm_workloads/reindex.js
   - jstests/concurrency/fsm_workloads/reindex_background.js
@@ -207,6 +208,7 @@ selector:
   # The following tests start their own ShardingTest or ReplSetTest, respectively.
   - requires_sharding
   - requires_replication
+  - assumes_against_mongod_not_mongos
   - does_not_support_causal_consistency
 
 executor:

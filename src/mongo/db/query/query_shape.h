@@ -30,14 +30,16 @@
 #pragma once
 
 #include "mongo/db/matcher/expression.h"
+#include "mongo/db/pipeline/aggregate_command_gen.h"
+#include "mongo/db/query/find_command_gen.h"
+#include "mongo/db/query/query_request_helper.h"
 
 namespace mongo::query_shape {
 
-constexpr StringData kLiteralArgString = "?"_sd;
-
+using QueryShapeHash = SHA256Block;
 /**
  * Computes a BSONObj that is meant to be used to classify queries according to their shape, for the
- * purposes of collecting telemetry.
+ * purposes of collecting queryStats.
  *
  * For example, if the MatchExpression represents {a: 2}, it will return the same BSONObj as the
  * MatchExpression for {a: 1}, {a: 10}, and {a: {$eq: 2}} (identical bits but not sharing memory)
@@ -49,9 +51,32 @@ constexpr StringData kLiteralArgString = "?"_sd;
  * TODO better consider how this interacts with persistent query settings project, and document it.
  * TODO (TODO SERVER ticket) better distinguish this from a plan cache or CQ 'query shape'.
  */
-BSONObj predicateShape(const MatchExpression* predicate);
+BSONObj debugPredicateShape(const MatchExpression* predicate);
+BSONObj representativePredicateShape(const MatchExpression* predicate);
 
-BSONObj predicateShape(const MatchExpression* predicate,
-                       std::function<std::string(StringData)> identifierRedactionPolicy);
+BSONObj debugPredicateShape(const MatchExpression* predicate,
+                            std::function<std::string(StringData)> transformIdentifiersCallback);
+BSONObj representativePredicateShape(
+    const MatchExpression* predicate,
+    std::function<std::string(StringData)> transformIdentifiersCallback);
 
+BSONObj extractSortShape(const BSONObj& sortSpec,
+                         const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                         const SerializationOptions& opts);
+
+BSONObj extractQueryShape(const ParsedFindCommand& findRequest,
+                          const SerializationOptions& opts,
+                          const boost::intrusive_ptr<ExpressionContext>& expCtx);
+BSONObj extractQueryShape(const AggregateCommandRequest& aggregateCommand,
+                          const Pipeline& pipeline,
+                          const SerializationOptions& opts,
+                          const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                          const NamespaceString& nss);
+
+NamespaceStringOrUUID parseNamespaceShape(BSONElement cmdNsElt);
+void appendNamespaceShape(BSONObjBuilder& bob,
+                          const NamespaceString& nss,
+                          const SerializationOptions& opts);
+
+QueryShapeHash hash(const BSONObj& queryShape);
 }  // namespace mongo::query_shape

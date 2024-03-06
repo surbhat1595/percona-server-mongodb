@@ -54,13 +54,15 @@
 
 include:
 - filename: etc/evergreen_yml_components/project_and_distro_settings.yml
+- filename: etc/evergreen_yml_components/configuration.yml
 - filename: etc/evergreen_yml_components/definitions.yml
 - filename: etc/evergreen_yml_components/variants/task_generation.yml
 - filename: etc/evergreen_yml_components/variants/sanitizer.yml
 - filename: etc/evergreen_yml_components/variants/in_memory.yml
 - filename: etc/evergreen_yml_components/variants/ninja.yml
 - filename: etc/evergreen_yml_components/variants/compile_static_analysis.yml
-- filename: etc/evergreen_yml_components/variants/config_shard.yml
+# TODO: (SERVER-86211) Re-enable config shard evergreen variant.
+# - filename: etc/evergreen_yml_components/variants/config_shard.yml
 
 variables:
 
@@ -184,6 +186,9 @@ variables:
     external_auth_jobs_max: 1
   tasks:
   - name: compile_test_and_package_serial_TG
+    distros:
+    - windows-vsCurrent-large
+  - name: compile_test_and_package_parallel_unittest_stream_TG
     distros:
     - windows-vsCurrent-large
   - name: burn_in_tests_gen
@@ -508,17 +513,6 @@ buildvariants:
   - name: powercycle_sentinel
   - name: powercycle_smoke_skip_compile_gen
 
-- name: &security-daily-cron security-daily-cron
-  modules:
-  - enterprise
-  display_name: "~ Security Daily Cron"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  run_on:
-  - rhel80-small
-  stepback: false
-  tasks:
-  - name: blackduck_scanner
-
 - name: tooling-metrics-x86
   display_name: "* Tooling Metrics x86"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
@@ -566,6 +560,9 @@ buildvariants:
     compile_variant: *windows-debug-suggested
   tasks:
   - name: compile_test_and_package_serial_TG
+    distros:
+    - windows-vsCurrent-xlarge
+  - name: compile_test_and_package_parallel_unittest_stream_TG
     distros:
     - windows-vsCurrent-xlarge
   - name: compile_build_tools_next_TG
@@ -747,7 +744,8 @@ buildvariants:
   - name: .sharding .txns
   - name: sharding_auth_audit_gen
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gen
-  - name: telemetry_passthrough
+  - name: query_stats_passthrough
+  - name: query_stats_passthrough_writeonly
   - name: unittest_shell_hang_analyzer_gen
 
 - name: &enterprise-windows-debug-unoptimized enterprise-windows-debug-unoptimized
@@ -817,6 +815,7 @@ buildvariants:
     num_scons_link_jobs_available: 0.99
   tasks:
   - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_unittest_stream_TG
   - name: compile_build_tools_next_TG
   - name: aggregation !.feature_flag_guarded
   - name: auth_gen
@@ -851,6 +850,7 @@ buildvariants:
     num_scons_link_jobs_available: 0.99
   tasks:
   - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_unittest_stream_TG
   - name: audit
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough
@@ -886,6 +886,7 @@ buildvariants:
     num_scons_link_jobs_available: 0.99
   tasks:
   - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_unittest_stream_TG
   - name: audit
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough
@@ -917,6 +918,7 @@ buildvariants:
     num_scons_link_jobs_available: 0.99
   tasks:
   - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_unittest_stream_TG
   - name: audit
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough
@@ -1322,7 +1324,8 @@ buildvariants:
   - name: secondary_reads_passthrough_gen
   - name: .shard_split
   - name: .shard_merge
-  - name: telemetry_passthrough
+  - name: query_stats_passthrough
+  - name: query_stats_passthrough_writeonly
   - name: vector_search
   - name: vector_search_auth
   - name: vector_search_ssl
@@ -1909,7 +1912,8 @@ buildvariants:
   - name: secondary_reads_passthrough_gen
   - name: .shard_split
   - name: .shard_merge
-  - name: telemetry_passthrough
+  - name: query_stats_passthrough
+  - name: query_stats_passthrough_writeonly
   - name: vector_search
   - name: vector_search_auth
   - name: vector_search_ssl
@@ -1955,6 +1959,7 @@ buildvariants:
     large_distro_name: rhel80-build
   tasks:
   - name: compile_test_benchmark_and_package_serial_TG
+  - name: compile_test_and_package_parallel_unittest_stream_TG
   - name: .aggregation !.sbe_only
   - name: .auth
   - name: audit
@@ -2078,6 +2083,7 @@ buildvariants:
     large_distro_name: rhel80-build
   tasks:
   - name: compile_test_benchmark_and_package_serial_TG
+  - name: compile_test_and_package_parallel_unittest_stream_TG
   - name: .aggregation !.sbe_only
   - name: .auth
   - name: audit
@@ -2224,7 +2230,8 @@ buildvariants:
   - name: .serverless
   - name: .shard_split
   - name: .shard_merge
-  - name: telemetry_passthrough
+  - name: query_stats_passthrough
+  - name: query_stats_passthrough_writeonly
   - name: .updatefuzzer
   - name: .watchdog
 
@@ -2275,6 +2282,7 @@ buildvariants:
     multiversion_edition: enterprise
   tasks:
   - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_unittest_stream_TG
   # - name: compile_integration_and_test_parallel_stream_TG # Not passing
   # - name: test_api_version_compatibility # Not relevant for TSAN
   - name: check_feature_flag_tags
@@ -2396,6 +2404,7 @@ buildvariants:
     compile_variant: *enterprise-rhel80-debug-complete-tsan
   tasks:
   - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_unittest_stream_TG
   - name: compile_integration_and_test_parallel_stream_TG
   - name: .aggfuzzer !.feature_flag_guarded
   - name: .aggregation !.feature_flag_guarded
@@ -2771,6 +2780,10 @@ buildvariants:
     compile_variant: *enterprise-rhel80-join-ingress-sessions-on-shutdown
   tasks:
   - name: compile_test_and_package_serial_TG
+    distros:
+    - rhel80-build
+    patch_only: true
+  - name: compile_test_and_package_parallel_unittest_stream_TG
     distros:
     - rhel80-build
     patch_only: true

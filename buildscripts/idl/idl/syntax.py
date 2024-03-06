@@ -493,6 +493,10 @@ class Field(common.SourceLocation):
         self.serialize_op_msg_request_only = False  # type: bool
         self.constructed = False  # type: bool
 
+        self.query_shape = None  # type: Optional[str]
+
+        self.hidden = False  # type: bool
+
         super(Field, self).__init__(file_name, line, column)
 
 
@@ -564,6 +568,8 @@ class Struct(common.SourceLocation):
 
         # Internal property: cpp_namespace from globals section
         self.cpp_namespace = None  # type: str
+
+        self.query_shape_component = False  # type: bool
 
         super(Struct, self).__init__(file_name, line, column)
 

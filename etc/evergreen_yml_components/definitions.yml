@@ -5,13 +5,6 @@
 # Any global task, function, or taskgroup definition can be added here. Note that if
 # the definition is added to another file, YAML anchors from this file can't be used.
 
-command_type: system
-exec_timeout_secs: 21600  # 6 hours.
-oom_tracker: true
-pre_error_fails_task: true
-stepback: true
-
-
 # Files that match an ignore-list pattern will not trigger a build, if they're the only modified
 # files in the patch.
 ignore:
@@ -27,51 +20,6 @@ ignore:
 - "!/etc/evergreen.yml"
 - "README"
 
-
-## Parameters for parameterized builds (see https://github.com/evergreen-ci/evergreen/wiki/Parameterized-Builds)
-parameters:
-- key: patch_compile_flags
-  description: "Additional SCons flags to be applied during scons compile invocations in this patch"
-
-- key: future_git_tag
-  description: "Future git tag to be added. If empty, we will use the most recent git tag instead."
-
-- key: last_lts_evg_version_id
-  description: "The Evergreen Version ID of the last-lts MongoDB binaries. Only binaries from release variants are used"
-
-- key: last_continuous_evg_version_id
-  description: "The Evergreen Version ID of the last-continuous MongoDB binaries. Only binaries from release variants are used"
-
-- key: antithesis_image_tag
-  description: "The docker tag to use when pushing images to Antithesis"
-
-## Cron parameters.
-- key: project_required_suggested_cron
-  value: "0 */4 * * *" # Every 4 hours starting at 0000 UTC
-  description: "Cron schedule for required and suggested variants"
-- key: project_nightly_cron
-  value: "0 4 * * *" # Every day starting at 0400 UTC
-  description: "Cron schedule for nightly variants"
-- key: project_weekly_cron
-  value: "0 4 * * 0" # Every week starting 0400 UTC Sunday
-  description: "Cron schedule for nightly variants"
-
-
-#######################################
-#               Modules               #
-#######################################
-# if a module is added and to be added to the manifest
-# be sure to add the module to git.get_project revisions parameter
-modules:
-- name: enterprise
-  repo: git@github.com:10gen/mongo-enterprise-modules.git
-  prefix: src/mongo/db/modules
-  branch: v7.0
-
-- name: wtdevelop
-  repo: git@github.com:wiredtiger/wiredtiger.git
-  prefix: src/third_party
-  branch: develop
 
 #######################################
 #             Variable                #
@@ -302,7 +250,9 @@ variables:
 # If a variant is listed here and has a push task, mongocryptd is pushed
 - mongocryptd_variants: &mongocryptd_variants
   - enterprise-amazon2
+  - enterprise-amazon2-openssl111
   - enterprise-amazon2-arm64
+  - enterprise-amazon2-arm64-openssl111
   - enterprise-amazon2023
   - enterprise-amazon2023-lto
   - enterprise-amazon2023-arm64
@@ -361,7 +311,9 @@ variables:
   - amazon2023
   - amazon2023-arm64
   - enterprise-amazon2
+  - enterprise-amazon2-openssl111
   - enterprise-amazon2-arm64
+  - enterprise-amazon2-arm64-openssl111
   - enterprise-amazon2023
   - enterprise-amazon2023-arm64
   - debian11
@@ -1012,6 +964,14 @@ functions:
       args:
       - "./src/evergreen/powercycle_sentinel_run.sh"
 
+  "sign macos dev binaries": &sign_macos_dev_binaries
+    command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "buildscripts/sign_macos_binaries_for_testing.py"
+
   "execute resmoke tests": &execute_resmoke_tests
     command: subprocess.exec
     type: test
@@ -1186,6 +1146,7 @@ functions:
   - *update_task_timeout_expansions
   - *update_task_timeout
   - *f_expansions_write
+  - *sign_macos_dev_binaries
   - command: subprocess.exec
     params:
       binary: bash
@@ -1235,6 +1196,7 @@ functions:
   - *update_resmoke_jobs_expansions
   - *f_expansions_write
   - *configure_evergreen_api_credentials
+  - *sign_macos_dev_binaries
   - command: subprocess.exec
     params:
       binary: bash
@@ -1923,24 +1885,6 @@ functions:
   - *archive_jepsen_results
   - *upload_jepsen_log
 
-  "save blackduck artifacts":
-  - command: archive.targz_pack
-    params:
-      target: blackduck.tgz
-      source_dir: /home/ec2-user/blackduck/runs/
-      include:
-      - "**"
-  - command: s3.put
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      local_file: blackduck.tgz
-      remote_file: ${project}/${build_variant}/${version_id}/blackduck-${task_id}-${execution}.tgz
-      bucket: mciuploads
-      permissions: public-read
-      content_type: ${content_type|application/gzip}
-      display_name: BlackDuck logs
-
   ### Process & archive mongo coredumps ###
   "gather mongo coredumps": &gather_mongo_coredumps
     command: subprocess.exec
@@ -2372,45 +2316,6 @@ functions:
       content_type: text/plain
       display_name: Generated multiversion exclude tags options
 
-# Pre task steps
-pre:
-- func: "set task expansion macros"
-- func: "f_expansions_write"
-
-# Post task steps
-post:
-- func: "f_expansions_write"
-- func: "upload npm logs"
-- func: "attach local resmoke invocation"
-- func: "attach multiversion exclude tags"
-- func: "attach report"
-- func: "attach artifacts"
-- func: "save ec2 task artifacts"
-- func: "attach wiki page"
-- func: "upload jstestfuzz minimized output"
-- func: "kill processes"
-- func: "save local client logs"
-- func: "save code coverage data"
-- func: "save jepsen artifacts"
-- func: "save blackduck artifacts"
-- func: "save mongo coredumps"
-- func: "save failed unittests"
-- func: "save hang analyzer debugger files"
-- func: "save disk statistics"
-- func: "save system resource information"
-- func: "save UndoDB recordings"
-- func: "umount shared scons directory"
-- func: "umount tmp directory"
-- func: "cleanup FUSE watchdog"
-- func: "cleanup environment"
-- func: "cleanup jepsen docker test"
-
-# Timeout steps
-timeout:
-- func: "f_expansions_write"
-- func: "run hang analyzer"
-- func: "wait for resmoke to shutdown"
-
 
 #######################################
 #               Tasks                 #
@@ -2431,6 +2336,23 @@ tasks:
         ${additional_compile_targets|}
       task_compile_flags: >-
         PREFIX=dist-test
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/record_mongodb_server_version.sh"
+      - "./build/install/dist-test/bin/mongod"
+      - "./version_info_mongod.txt"
+  - command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/version_info_mongod.txt
+      remote_file: ${project}/${build_variant}/${version_id}/version-info-mongod-${task_id}.txt
+      bucket: mciuploads
+      permissions: public-read
+      content_type: text/plain
+      display_name: mongod --version output
 
 ## compile - build all scons targets except unittests ##
 - name: compile_dist_test_half
@@ -2558,6 +2480,7 @@ tasks:
       - "./etc/pip/**"
       - "./etc/repo_config.yaml"
       - "./etc/scons/**"
+      - "./etc/macos_dev_entitlements.xml"
       - "buildscripts/**"
       - "all_feature_flags.txt"  # Must correspond to the definition in buildscripts/idl/lib.py.
       - "jstests/**"
@@ -2878,6 +2801,86 @@ tasks:
       targets: install-all-meta-but-not-unittests
       compiling_for_test: true
 
+- name: compile_and_run_unittests_first_quarter
+  exec_timeout_secs: 10800 # 3 hours
+  depends_on:
+  - name: compile_dist_test
+  commands:
+  - func: "scons compile"
+    vars:
+      targets: install-first-quarter-unittests install-first-quarter-unittests-debug
+      compiling_for_test: true
+  - func: "f_expansions_write"
+  - func: "run diskstats"
+  - func: "f_expansions_write"
+  - func: "monitor process threads"
+  - func: "collect system resource info"
+  - func: "run tests"
+    vars:
+      suite: unittests_first_quarter
+      install_dir: build/install/bin
+      exec_timeout_secs: 10800 # 3 hours
+
+- name: compile_and_run_unittests_second_quarter
+  exec_timeout_secs: 10800 # 3 hours
+  depends_on:
+  - name: compile_dist_test
+  commands:
+  - func: "scons compile"
+    vars:
+      targets: install-second-quarter-unittests install-second-quarter-unittests-debug
+      compiling_for_test: true
+  - func: "f_expansions_write"
+  - func: "run diskstats"
+  - func: "f_expansions_write"
+  - func: "monitor process threads"
+  - func: "collect system resource info"
+  - func: "run tests"
+    vars:
+      suite: unittests_second_quarter
+      install_dir: build/install/bin
+      exec_timeout_secs: 10800 # 3 hours
+
+- name: compile_and_run_unittests_third_quarter
+  exec_timeout_secs: 10800 # 3 hours
+  depends_on:
+  - name: compile_dist_test
+  commands:
+  - func: "scons compile"
+    vars:
+      targets: install-third-quarter-unittests install-third-quarter-unittests-debug
+      compiling_for_test: true
+  - func: "f_expansions_write"
+  - func: "run diskstats"
+  - func: "f_expansions_write"
+  - func: "monitor process threads"
+  - func: "collect system resource info"
+  - func: "run tests"
+    vars:
+      suite: unittests_third_quarter
+      install_dir: build/install/bin
+      exec_timeout_secs: 10800 # 3 hours
+
+- name: compile_and_run_unittests_fourth_quarter
+  exec_timeout_secs: 10800 # 3 hours
+  depends_on:
+  - name: compile_dist_test
+  commands:
+  - func: "scons compile"
+    vars:
+      targets: install-fourth-quarter-unittests install-fourth-quarter-unittests-debug
+      compiling_for_test: true
+  - func: "f_expansions_write"
+  - func: "run diskstats"
+  - func: "f_expansions_write"
+  - func: "monitor process threads"
+  - func: "collect system resource info"
+  - func: "run tests"
+    vars:
+      suite: unittests_fourth_quarter
+      install_dir: build/install/bin
+      exec_timeout_secs: 10800 # 3 hours
+
 ## clang_tidy - run clang_tidy
 - name: clang_tidy
   tags: []
@@ -2954,10 +2957,6 @@ tasks:
     params:
       files:
       - src/build_metrics_task_gen.json
-
-## A copy of the compile_unittests task for the recorded unittest taskgroup ##
-- <<: *compile_unittests
-  name: compile_unittests_for_recorded_unittest
 
 ## run_unittests ##
 - name: run_unittests
@@ -5741,7 +5740,14 @@ tasks:
       use_large_distro: "true"
 
 - <<: *task_template
-  name: telemetry_passthrough
+  name: query_stats_passthrough
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+- <<: *task_template
+  name: query_stats_passthrough_writeonly
   tags: []
   commands:
   - func: "do setup"
@@ -6461,6 +6467,15 @@ tasks:
     vars:
       suite: ssl_x509
 
+- <<: *gen_task_template
+  name: ssl_linear_gen
+  tags: ["encrypt", "ssl", "patch_build"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      suite: ssl_linear
+      resmoke_jobs_max: 1
+
 - <<: *task_template
   name: jsCore_decimal
   tags: ["jscore", "common", "decimal"]
@@ -7007,26 +7022,6 @@ tasks:
   - func: "upload pip requirements"
   - func: "run idl tests"
 
-- name: blackduck_scanner
-  tags: []
-  patchable: false
-  commands:
-  - *f_expansions_write
-  - func: "do non-compile setup"
-  - command: subprocess.exec
-    type: setup
-    params:
-      binary: bash
-      silent: true
-      args:
-      - "src/evergreen/blackduck_setup.sh"
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/blackduck_hub.sh"
-
 - name: tla_plus
   tags: []
   commands:
@@ -7271,6 +7266,7 @@ tasks:
   - command: shell.exec
     params:
       shell: bash
+      silent: true
       script: |
         set -oe
         echo "${release_tools_container_registry_password}" | podman login --password-stdin --username ${release_tools_container_registry_username} ${release_tools_container_registry}
@@ -7347,6 +7343,7 @@ tasks:
   - command: shell.exec
     params:
       shell: bash
+      silent: true
       script: |
         set -oe
         echo "${release_tools_container_registry_password}" | podman login --password-stdin --username ${release_tools_container_registry_username} ${release_tools_container_registry}
@@ -7888,6 +7885,7 @@ tasks:
   - command: shell.exec
     params:
       shell: bash
+      silent: true
       script: |
         set -oe
         echo "${release_tools_container_registry_password}" | podman login --password-stdin --username ${release_tools_container_registry_username} ${release_tools_container_registry}
@@ -8390,12 +8388,10 @@ task_groups:
   - compile_dist_test
   - archive_dist_test
   - archive_dist_test_debug
-  - compile_unittests
-  - run_unittests
   - compile_dbtest
   - run_dbtest
   - archive_dbtest
-  - compile_all
+  - compile_all_but_not_unittests
   - package
 
 # The *no_unittests_TG taskgroups are useful for static builds,
@@ -8455,13 +8451,11 @@ task_groups:
   - compile_dist_test
   - archive_dist_test
   - archive_dist_test_debug
-  - compile_unittests
-  - run_unittests
   - compile_dbtest
   - run_dbtest
   - archive_dbtest
   - compile_upload_benchmarks
-  - compile_all
+  - compile_all_but_not_unittests
   - package
 
 # The *no_unittests_TG taskgroups are useful for static builds,
@@ -8480,15 +8474,6 @@ task_groups:
   - compile_all_but_not_unittests
   - package
 
-- <<: *compile_task_group_template
-  name: compile_and_test_TG
-  tasks:
-  - compile_dist_test
-  - compile_unittests
-  - run_unittests
-  - compile_dbtest
-  - run_dbtest
-  - compile_all
 
 # These `parallel` task groups are only appropriate for builders that
 # use --link-model=dynamic, and have scons_cache_scope: shared and
@@ -8506,14 +8491,17 @@ task_groups:
   - determine_patch_tests
   - archive_dist_test
   - archive_dist_test_debug
-  - compile_all
+  - compile_all_but_not_unittests
   - package
 
 - <<: *compile_task_group_template
   name: compile_test_and_package_parallel_unittest_stream_TG
+  max_hosts: -1
   tasks:
-  - compile_unittests
-  - run_unittests
+  - compile_and_run_unittests_first_quarter
+  - compile_and_run_unittests_second_quarter
+  - compile_and_run_unittests_third_quarter
+  - compile_and_run_unittests_fourth_quarter
 
 #- <<: *compile_task_group_template
 #  name: compile_test_and_package_parallel_unittest_stream_with_recording_TG

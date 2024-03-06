@@ -76,7 +76,8 @@ Status isValid(const std::string& queryStr, const FindCommandRequest& findComman
     BSONObj queryObj = fromjson(queryStr);
     std::unique_ptr<MatchExpression> me(parseMatchExpression(queryObj));
     me = MatchExpression::optimize(std::move(me));
-    if (auto status = CanonicalQuery::isValid(me.get(), findCommand).getStatus(); !status.isOK()) {
+    if (auto status = parsed_find_command::isValid(me.get(), findCommand).getStatus();
+        !status.isOK()) {
         return status;
     }
     return CanonicalQuery::isValidNormalized(me.get());
@@ -470,6 +471,13 @@ TEST(ExpressionOptimizeTest, OrRewrittenToIn) {
     ASSERT_BSONOBJ_EQ(optimizeExpr(queries[8].first), fromjson(queries[8].second));
     ASSERT_BSONOBJ_EQ(optimizeExpr(queries[9].first), fromjson(queries[9].second));
     ASSERT_BSONOBJ_EQ(optimizeExpr(queries[10].first), fromjson(queries[10].second));
+}
+
+TEST(ExpressionOptimizeTest, OrRewrittenToInWithParameters) {
+    BSONObj obj = fromjson("{$or: [{f1: {$eq: 3}}, {f1: {$eq: 4}}]}");
+    std::unique_ptr<MatchExpression> matchExpr(parseMatchExpression(obj));
+    MatchExpression::parameterize(matchExpr.get());
+    ASSERT_BSONOBJ_EQ(matchExpr->serialize(), obj);
 }
 
 TEST(ExpressionOptimizeTest, NorRemovesAlwaysFalseChildren) {

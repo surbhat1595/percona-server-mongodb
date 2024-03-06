@@ -37,7 +37,7 @@ env.Library(
     source=[
         'canonical_query.cpp',
         'canonical_query_encoder.cpp',
-        'query_shape.cpp',
+        'parsed_find_command.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/crypto/encrypted_field_config',
@@ -276,7 +276,7 @@ env.Library(
         'query_feature_flags.idl',
         'query_knobs.idl',
         'sbe_plan_cache_on_parameter_change.cpp',
-        'telemetry_util.cpp',
+        'query_stats_util.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
@@ -375,10 +375,34 @@ env.Library(
 )
 
 env.Library(
-    target='op_metrics',
+    target='query_shape',
     source=[
-        'telemetry.cpp',
+        'query_shape.cpp',
+        'query_shape.idl',
+        'query_stats_find_key_generator.cpp',
+        'query_stats_aggregate_key_generator.cpp',
     ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/catalog/collection_catalog',
+        '$BUILD_DIR/mongo/db/pipeline/pipeline',
+        "$BUILD_DIR/mongo/idl/idl_parser",
+        'canonical_query',
+    ],
+    LIBDEPS_PRIVATE=[
+        'projection_ast',
+        'sort_pattern',
+    ],
+)
+
+env.Library(target='query_stats_parse', source=['query_stats_transform_algorithm.idl'], LIBDEPS=[
+    '$BUILD_DIR/mongo/base',
+    '$BUILD_DIR/mongo/idl/idl_parser',
+])
+
+env.Library(
+    target='op_metrics',
+    source=['query_stats.cpp'],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/bson/mutable/mutable_bson',
@@ -395,13 +419,12 @@ env.Library(
         'command_request_response',
         'memory_util',
         'query_knobs',
+        'query_stats_parse',
         'rate_limiting',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/auth/auth',
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
-        'projection_ast',
-        'sort_pattern',
     ],
 )
 
@@ -436,6 +459,7 @@ env.CppUnitTest(
         "plan_cache_key_info_test.cpp",
         "plan_cache_test.cpp",
         "plan_ranker_test.cpp",
+        "plan_ranker_index_prefix_test.cpp",
         "planner_access_test.cpp",
         "planner_analysis_test.cpp",
         "planner_ixselect_test.cpp",
@@ -458,6 +482,8 @@ env.CppUnitTest(
         "query_request_test.cpp",
         "query_settings_test.cpp",
         "query_shape_test.cpp",
+        "query_shape_test.idl",
+        "query_stats_store_test.cpp",
         "query_solution_test.cpp",
         "rate_limiting_test.cpp",
         "sbe_and_hash_test.cpp",
@@ -471,7 +497,6 @@ env.CppUnitTest(
         "sbe_stage_builder_type_checker_test.cpp",
         "shard_filterer_factory_mock.cpp",
         "sort_pattern_test.cpp",
-        "telemetry_store_test.cpp",
         "util/memory_util_test.cpp",
         "view_response_formatter_test.cpp",
         'map_reduce_output_format_test.cpp',
@@ -490,6 +515,7 @@ env.CppUnitTest(
         "$BUILD_DIR/mongo/db/repl/storage_interface_impl",
         "$BUILD_DIR/mongo/db/service_context_d_test_fixture",
         "$BUILD_DIR/mongo/dbtests/mocklib",
+        "$BUILD_DIR/mongo/idl/idl_parser",
         "$BUILD_DIR/mongo/rpc/rpc",
         "$BUILD_DIR/mongo/util/clock_source_mock",
         "collation/collator_factory_mock",
@@ -501,6 +527,7 @@ env.CppUnitTest(
         "query_planner",
         "query_planner_test_fixture",
         "query_request",
+        "query_shape",
         "query_test_service_context",
         "rate_limiting",
     ],

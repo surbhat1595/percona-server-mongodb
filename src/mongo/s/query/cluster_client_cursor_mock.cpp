@@ -166,4 +166,8 @@ bool ClusterClientCursorMock::shouldOmitDiagnosticInformation() const {
     return false;
 }
 
+std::unique_ptr<query_stats::KeyGenerator> ClusterClientCursorMock::getKeyGenerator() {
+    return nullptr;
+}
+
 }  // namespace mongo

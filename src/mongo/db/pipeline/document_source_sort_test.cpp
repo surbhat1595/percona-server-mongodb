@@ -523,7 +523,7 @@ TEST_F(DocumentSourceSortExecutionTest, ShouldCorrectlyTrackMemoryUsageBetweenPa
     ASSERT_THROWS_CODE(
         sort->getNext(), AssertionException, ErrorCodes::QueryExceededMemoryLimitNoDiskUseAllowed);
 }
-std::string redactFieldNameForTest(StringData s) {
+std::string applyHmacForTest(StringData s) {
     return str::stream() << "HASH<" << s << ">";
 }
 TEST_F(DocumentSourceSortTest, Redaction) {
@@ -542,9 +542,9 @@ TEST_F(DocumentSourceSortTest, Redaction) {
                 },
                 "bound": {
                     "base": "min",
-                    "offsetSeconds": "?"
+                    "offsetSeconds": "?number"
                 },
-                "limit": "?"
+                "limit": "?number"
             }
         })",
         redact(*boundedSort, true));
@@ -561,9 +561,9 @@ TEST_F(DocumentSourceSortTest, Redaction) {
                 },
                 "bound": {
                     "base": "min",
-                    "offsetSeconds": "?"
+                    "offsetSeconds": "?number"
                 },
-                "limit": "?"
+                "limit": "?number"
             }
         })",
         redact(*boundedSort, true, ExplainOptions::Verbosity::kQueryPlanner));
@@ -575,10 +575,10 @@ TEST_F(DocumentSourceSortTest, Redaction) {
                     "HASH<a>": 1
                 }
             },
-            "totalDataSizeSortedBytesEstimate": "?",
-            "usedDisk": "?",
-            "spills": "?",
-            "spilledDataStorageSize": "?"
+            "totalDataSizeSortedBytesEstimate": "?number",
+            "usedDisk": "?bool",
+            "spills": "?number",
+            "spilledDataStorageSize": "?number"
         })",
         redact(*sort(), true, ExplainOptions::Verbosity::kExecStats));
 
@@ -590,14 +590,14 @@ TEST_F(DocumentSourceSortTest, Redaction) {
                 },
                 "bound": {
                     "base": "min",
-                    "offsetSeconds": "?"
+                    "offsetSeconds": "?number"
                 },
-                "limit": "?"
+                "limit": "?number"
             },
-            "totalDataSizeSortedBytesEstimate": "?",
-            "usedDisk": "?",
-            "spills": "?",
-            "spilledDataStorageSize": "?"
+            "totalDataSizeSortedBytesEstimate": "?number",
+            "usedDisk": "?bool",
+            "spills": "?number",
+            "spilledDataStorageSize": "?number"
         })",
         redact(*boundedSort, true, ExplainOptions::Verbosity::kExecStats));
 }

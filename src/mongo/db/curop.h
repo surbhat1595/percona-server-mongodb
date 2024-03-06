@@ -40,6 +40,7 @@
 #include "mongo/db/cursor_id.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/profile_filter.h"
+#include "mongo/db/query/query_stats_key_generator.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/db/write_concern_options.h"
@@ -292,8 +293,10 @@ public:
     // The hash of the query's "stable" key. This represents the query's shape.
     boost::optional<uint32_t> queryHash;
     // The shape of the original query serialized with readConcern, application name, and namespace.
-    // If boost::none, telemetry should not be collected for this operation.
-    boost::optional<BSONObj> telemetryStoreKey;
+    // If boost::none, query stats should not be collected for this operation.
+    boost::optional<std::size_t> queryStatsStoreKeyHash;
+    // The KeyGenerator used by query stats to generate the query stats store key.
+    std::unique_ptr<query_stats::KeyGenerator> queryStatsKeyGenerator;
 
     // The query framework that this operation used. Will be unknown for non query operations.
     PlanExecutor::QueryFramework queryFramework{PlanExecutor::QueryFramework::kUnknown};
@@ -317,9 +320,9 @@ public:
     // after optimizations.
     Microseconds planningTime{0};
 
-    // Amount of CPU time used by this thread. Will remain zero if this platform does not support
+    // Amount of CPU time used by this thread. Will remain -1 if this platform does not support
     // this feature.
-    Nanoseconds cpuTime{0};
+    Nanoseconds cpuTime{-1};
 
     int responseLength{-1};
 
@@ -465,6 +468,13 @@ public:
                                     const Command* command,
                                     BSONObj cmdObj,
                                     NetworkOp op);
+
+    /**
+     * Sets metrics collected at the end of an operation onto curOp's OpDebug instance. Note that
+     * this is used in tandem with OpDebug::setPlanSummaryMetrics so should not repeat any metrics
+     * collected there.
+     */
+    void setEndOfOpMetrics(long long nreturned);
 
     /**
      * Marks the operation end time, records the length of the client response if a valid response
@@ -761,7 +771,7 @@ public:
         return computeElapsedTimeTotal(start, _end.load()) - _totalPausedDuration;
     }
     /**
-    * The planningTimeMicros metric, reported in the system profiler and in telemetry, is measured
+    * The planningTimeMicros metric, reported in the system profiler and in queryStats, is measured
     * using the Curop instance's _tickSource. Currently, _tickSource is only paused in places where
     logical work is being done. If this were to change, and _tickSource
     were to be paused during query planning for reasons unrelated to the work of
@@ -945,16 +955,6 @@ public:
     void setTickSource_forTest(TickSource* tickSource) {
         _tickSource = tickSource;
     }
-
-    /**
-     * Merge match counters from the current operation into the global map and stop counting.
-     */
-    void stopMatchExprCounter();
-
-    /**
-     * Increment the counter for the match expression with given name in the current operation.
-     */
-    void incrementMatchExprCounter(StringData name);
 
     void setShouldOmitDiagnosticInformation_inlock(WithLock, bool shouldOmitDiagnosticInfo) {
         _shouldOmitDiagnosticInformation = shouldOmitDiagnosticInfo;

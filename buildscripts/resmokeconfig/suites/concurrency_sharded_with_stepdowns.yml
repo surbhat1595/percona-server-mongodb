@@ -97,6 +97,7 @@ selector:
   - jstests/concurrency/fsm_workloads/indexed_insert_upsert.js
   - jstests/concurrency/fsm_workloads/indexed_insert_where.js
   - jstests/concurrency/fsm_workloads/list_indexes.js
+  - jstests/concurrency/fsm_workloads/query_stats_concurrent.js
   - jstests/concurrency/fsm_workloads/reindex.js
   - jstests/concurrency/fsm_workloads/reindex_background.js
   - jstests/concurrency/fsm_workloads/reindex_writeconflict.js
@@ -161,6 +162,7 @@ selector:
 
   exclude_with_any_tags:
   - requires_replication
+  - assumes_against_mongod_not_mongos
   - requires_non_retryable_writes
   - assumes_balancer_on
   # Curop requires readConcern local.

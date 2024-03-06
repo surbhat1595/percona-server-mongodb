@@ -384,6 +384,93 @@ private:
 };
 
 /**
+ * A constant expression. Repeated calls to evaluate() will always return the same thing.
+ */
+class ExpressionConstant final : public Expression {
+public:
+    ExpressionConstant(ExpressionContext* expCtx, const Value& value);
+
+    boost::intrusive_ptr<Expression> optimize() final;
+    Value evaluate(const Document& root, Variables* variables) const final;
+    Value serialize(SerializationOptions options) const final;
+
+    const char* getOpName() const;
+
+    /**
+     * Creates a new ExpressionConstant with value 'value'.
+     */
+    static boost::intrusive_ptr<ExpressionConstant> create(ExpressionContext* expCtx,
+                                                           const Value& value);
+
+    static boost::intrusive_ptr<Expression> parse(ExpressionContext* expCtx,
+                                                  BSONElement bsonExpr,
+                                                  const VariablesParseState& vps);
+
+    /**
+     * Returns true if 'expression' is nullptr or if 'expression' is an instance of an
+     * ExpressionConstant.
+     */
+    static bool isNullOrConstant(boost::intrusive_ptr<Expression> expression) {
+        return !expression || dynamic_cast<ExpressionConstant*>(expression.get());
+    }
+
+    /**
+     * Returns true if 'expression' is an instance of an ExpressionConstant.
+     */
+    static bool isConstant(boost::intrusive_ptr<Expression> expression) {
+        return dynamic_cast<ExpressionConstant*>(expression.get());
+    }
+    static Value serializeConstant(const SerializationOptions& opts, Value val);
+
+    bool selfAndChildrenAreConstant() const override final {
+        return true;
+    }
+
+    /**
+     * Returns true if every expression in 'expressions' is either a nullptr or an instance of an
+     * ExpressionConstant.
+     */
+    static bool allNullOrConstant(
+        const std::initializer_list<boost::intrusive_ptr<Expression>>& expressions) {
+        return std::all_of(expressions.begin(), expressions.end(), [](auto exp) {
+            return ExpressionConstant::isNullOrConstant(exp);
+        });
+    }
+    template <typename ExpressionContainer>
+    static bool allConstant(const ExpressionContainer& expressions) {
+        return std::all_of(expressions.begin(), expressions.end(), [](auto exp) {
+            return ExpressionConstant::isConstant(exp);
+        });
+    }
+
+    /**
+     * Returns the constant value represented by this Expression.
+     */
+    Value getValue() const {
+        return _value;
+    }
+
+    void setValue(const Value& value) {
+        _value = value;
+    };
+
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
+        return visitor->visit(this);
+    }
+
+private:
+    monotonic::State getMonotonicState(const FieldPath& sortedFieldPath) const final {
+        return monotonic::State::Constant;
+    }
+
+    Value _value;
+};
+
+/**
  * Inherit from ExpressionVariadic or ExpressionFixedArity instead of directly from this class.
  */
 class ExpressionNary : public Expression {
@@ -454,6 +541,33 @@ public:
         : ExpressionNaryBase<SubClass>(expCtx) {}
     ExpressionVariadic(ExpressionContext* const expCtx, Expression::ExpressionVector&& children)
         : ExpressionNaryBase<SubClass>(expCtx, std::move(children)) {}
+
+    Value serialize(SerializationOptions options) const {
+        // As a special case, we would like to serialize a variadic number of children as
+        // "?array<?subtype>" if they are all constant. Check for that here, otherwise default to
+        // the normal one-by-one serialization of the children.
+        if (options.literalPolicy == LiteralSerializationPolicy::kToDebugTypeString &&
+            ExpressionConstant::allConstant(this->_children)) {
+            // We could evaluate the expression right here and now and end up with just the one
+            // constant answer, but this is not an optimization funciton, it is meant to just
+            // serialize what we have, so let's preserve the array of constants.
+            auto args = [&]() {
+                std::vector<Value> values;
+                const auto& constants = this->_children;
+                values.reserve(constants.size());
+                std::transform(constants.begin(),
+                               constants.end(),
+                               std::back_inserter(values),
+                               [](const auto& exp) {
+                                   return static_cast<ExpressionConstant*>(exp.get())->getValue();
+                               });
+                return values;
+            }();
+            return Value(Document{
+                {this->getOpName(), ExpressionConstant::serializeConstant(options, Value(args))}});
+        }
+        return ExpressionNary::serialize(options);
+    }
 };
 
 /**
@@ -754,85 +868,6 @@ public:
      *  Evaluate the expression on exactly two numeric arguments.
      */
     virtual Value evaluateNumericArgs(const Value& numericArg1, const Value& numericArg2) const = 0;
-};
-
-/**
- * A constant expression. Repeated calls to evaluate() will always return the same thing.
- */
-class ExpressionConstant final : public Expression {
-public:
-    ExpressionConstant(ExpressionContext* expCtx, const Value& value);
-
-    boost::intrusive_ptr<Expression> optimize() final;
-    Value evaluate(const Document& root, Variables* variables) const final;
-    Value serialize(SerializationOptions options) const final;
-
-    const char* getOpName() const;
-
-    /**
-     * Creates a new ExpressionConstant with value 'value'.
-     */
-    static boost::intrusive_ptr<ExpressionConstant> create(ExpressionContext* expCtx,
-                                                           const Value& value);
-
-    static boost::intrusive_ptr<Expression> parse(ExpressionContext* expCtx,
-                                                  BSONElement bsonExpr,
-                                                  const VariablesParseState& vps);
-
-    /**
-     * Returns true if 'expression' is nullptr or if 'expression' is an instance of an
-     * ExpressionConstant.
-     */
-    static bool isNullOrConstant(boost::intrusive_ptr<Expression> expression) {
-        return !expression || dynamic_cast<ExpressionConstant*>(expression.get());
-    }
-
-    /**
-     * Returns true if 'expression' is an instance of an ExpressionConstant.
-     */
-    static bool isConstant(boost::intrusive_ptr<Expression> expression) {
-        return dynamic_cast<ExpressionConstant*>(expression.get());
-    }
-    bool selfAndChildrenAreConstant() const override final {
-        return true;
-    }
-
-    /**
-     * Returns true if every expression in 'expressions' is either a nullptr or an instance of an
-     * ExpressionConstant.
-     */
-    static bool allNullOrConstant(
-        const std::initializer_list<boost::intrusive_ptr<Expression>>& expressions) {
-        return std::all_of(expressions.begin(), expressions.end(), [](auto exp) {
-            return ExpressionConstant::isNullOrConstant(exp);
-        });
-    }
-
-    /**
-     * Returns the constant value represented by this Expression.
-     */
-    Value getValue() const {
-        return _value;
-    }
-
-    void setValue(const Value& value) {
-        _value = value;
-    };
-
-    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
-        return visitor->visit(this);
-    }
-
-    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
-        return visitor->visit(this);
-    }
-
-private:
-    monotonic::State getMonotonicState(const FieldPath& sortedFieldPath) const final {
-        return monotonic::State::Constant;
-    }
-
-    Value _value;
 };
 
 /**
@@ -4689,4 +4724,82 @@ public:
         return visitor->visit(this);
     }
 };
+
+/**
+ * The expression '$_internalKeyStringValue' is used to generate the key string binary of any
+ * document value ('input' field) under an optionally different non-default collation ('collation'
+ * field). The generated key string binary purposefully doesn't contain the type bits information,
+ * so that the generated binary has the same ordering as the index.
+ *
+ * The expression specification is a follows:
+ * {
+ *     $_internalKeyStringValue: {
+ *         input: <expression>,
+ *         collation: <collation spec>
+ *     }
+ * }
+ *
+ * Examples:
+ * Case 1: The 'input' field is an integer.
+ * Input1:
+ * {
+ *     $_internalKeyStringValue: {
+ *         input: 1
+ *     }
+ * }
+ * Output1: BinData(0, "KwIE")
+ *
+ * Case 2: The 'input' field is an integer of the same numeric value as above but different type.
+ * Input2:
+ * {
+ *     $_internalKeyStringValue: {
+ *         input: 1.0
+ *     }
+ * }
+ * Output2: BinData(0, "KwIE")
+ *
+ * Case 3: The 'input' field is a string. The 'collation' field is a non-default collation spec.
+ * Input3:
+ * {
+ *     $_internalIndexKey: {
+ *         input: "aAa",
+ *         collation: {locale: "en", strength: 1}
+ *     }
+ * }
+ * Output3: BinData(0, "PCkpKQAE")
+ */
+class ExpressionInternalKeyStringValue final : public Expression {
+public:
+    ExpressionInternalKeyStringValue(ExpressionContext* expCtx,
+                                     boost::intrusive_ptr<Expression> input,
+                                     boost::intrusive_ptr<Expression> collation)
+        : Expression(expCtx, {input, collation}) {
+        expCtx->sbeCompatibility = SbeCompatibility::notCompatible;
+    }
+
+    static boost::intrusive_ptr<Expression> parse(ExpressionContext* expCtx,
+                                                  BSONElement expr,
+                                                  const VariablesParseState& vps);
+
+    Value serialize(SerializationOptions options) const final;
+
+    Value evaluate(const Document& root, Variables* variables) const final;
+
+    const char* getOpName() const {
+        return "$_internalKeyStringValue";
+    }
+
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
+        return visitor->visit(this);
+    }
+
+private:
+    static constexpr size_t _kInput = 0;
+    static constexpr size_t _kCollation = 1;
+};
+
 }  // namespace mongo

@@ -1666,6 +1666,7 @@ env.Library(
         'matcher/expression_array.cpp',
         'matcher/expression_expr.cpp',
         'matcher/expression_geo.cpp',
+        'matcher/expression_geo_serializer.cpp',
         'matcher/expression_internal_bucket_geo_within.cpp',
         'matcher/expression_leaf.cpp',
         'matcher/expression_parameterization.cpp',
@@ -1740,6 +1741,7 @@ env.Library(
         'query/collation/collator_interface',
         'query/datetime/date_time_support',
         'query/query_knobs',
+        'serialization_options',
         'stats/counters',
         'update/pattern_cmp',
     ],
@@ -1749,6 +1751,19 @@ env.Library(
         'service_context',
         'vector_clock',
     ],
+)
+
+env.Library(
+    target='serialization_options',
+    source=[
+        'query/serialization_options.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/exec/document_value/document_value',
+        '$BUILD_DIR/mongo/db/pipeline/field_path',
+    ],
+    LIBDEPS_PRIVATE=[],
 )
 
 env.Library(

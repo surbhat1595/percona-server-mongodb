@@ -22,14 +22,13 @@ buildvariants:
     separate_debug: off
   tasks:
     - name: compile_test_and_package_serial_TG
+    - name: compile_test_and_package_parallel_unittest_stream_TG
     - name: .aggfuzzer .common
     - name: .jstestfuzz !.initsync
 
 - name: rhel80-debug-asan
   display_name: ~ ASAN Enterprise RHEL 8.0 DEBUG
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - rhel80-build
   stepback: false
@@ -51,6 +50,7 @@ buildvariants:
     large_distro_name: rhel80-build
   tasks:
   - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_unittest_stream_TG
   - name: compile_benchmarks
   - name: compile_integration_and_test_parallel_stream_TG
   - name: .aggregation
@@ -92,7 +92,6 @@ buildvariants:
   - name: .sharding .common !.csrs
   - name: snmp
   - name: .watchdog
-  - name: .stitch
   - name: .serverless
   - name: unittest_shell_hang_analyzer_gen
   - name: .updatefuzzer
@@ -102,8 +101,6 @@ buildvariants:
 - name: rhel80-debug-ubsan
   display_name: ~ UBSAN Enterprise RHEL 8.0 DEBUG
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - rhel80-build
   stepback: false
@@ -123,6 +120,7 @@ buildvariants:
     large_distro_name: rhel80-build
   tasks:
   - name: compile_test_and_package_serial_TG
+  - name: compile_test_and_package_parallel_unittest_stream_TG
   - name: compile_benchmarks
   - name: compile_integration_and_test_parallel_stream_TG
   - name: .aggregation
@@ -160,7 +158,6 @@ buildvariants:
   - name: .sharding .jscore !.wo_snapshot
   - name: .sharding .common !.csrs
   - name: snmp
-  - name: .stitch
   - name: .updatefuzzer
   - name: .serverless
   - name: watchdog_wiredtiger

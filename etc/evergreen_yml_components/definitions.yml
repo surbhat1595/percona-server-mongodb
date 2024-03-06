@@ -68,11 +68,6 @@ parameters:
 # if a module is added and to be added to the manifest
 # be sure to add the module to git.get_project revisions parameter
 modules:
-- name: enterprise
-  repo: git@github.com:10gen/mongo-enterprise-modules.git
-  prefix: src/mongo/db/modules
-  branch: v6.0
-
 - name: wtdevelop
   repo: git@github.com:wiredtiger/wiredtiger.git
   prefix: src/third_party
@@ -268,8 +263,8 @@ variables:
   - func: "run hang analyzer"
   - func: "wait for resmoke to shutdown"
 
-- &stitch_support_task_group_template
-  name: stitch_support_task_group_template
+- &stitch_support_task_group_template_community_only
+  name: stitch_support_task_group_template_community_only
   setup_task:
   - func: "apply compile expansions"
   - func: "set task expansion macros"
@@ -299,7 +294,9 @@ variables:
 # If a variant is listed here and has a push task, mongocryptd is pushed
 - mongocryptd_variants: &mongocryptd_variants
   - enterprise-amazon2
+  - enterprise-amazon2-openssl111
   - enterprise-amazon2-arm64
+  - enterprise-amazon2-arm64-openssl111
   - enterprise-debian10-64
   - enterprise-debian11-64
   - enterprise-linux-64-amazon-ami
@@ -362,7 +359,9 @@ variables:
   - enterprise-linux-64-amazon-ami
   - amazon2
   - enterprise-amazon2
+  - enterprise-amazon2-openssl111
   - enterprise-amazon2-arm64
+  - enterprise-amazon2-arm64-openssl111
   - debian10
   - debian11
   - enterprise-debian10-64
@@ -1876,24 +1875,6 @@ functions:
   - *archive_jepsen_results
   - *upload_jepsen_log
 
-  "save blackduck artifacts":
-  - command: archive.targz_pack
-    params:
-      target: blackduck.tgz
-      source_dir: /home/ec2-user/blackduck/runs/
-      include:
-      - "**"
-  - command: s3.put
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      local_file: blackduck.tgz
-      remote_file: ${project}/${build_variant}/${version_id}/blackduck-${task_id}-${execution}.tgz
-      bucket: mciuploads
-      permissions: public-read
-      content_type: ${content_type|application/gzip}
-      display_name: BlackDuck logs
-
   ### Process & archive mongo coredumps ###
   "gather mongo coredumps": &gather_mongo_coredumps
     command: subprocess.exec
@@ -2240,7 +2221,6 @@ post:
 - func: "save local client logs"
 - func: "save code coverage data"
 - func: "save jepsen artifacts"
-- func: "save blackduck artifacts"
 - func: "save mongo coredumps"
 - func: "save failed unittests"
 - func: "save hang analyzer debugger files"
@@ -2636,6 +2616,96 @@ tasks:
       targets: install-all-meta
       compiling_for_test: true
 
+- name: compile_all_but_not_unittests
+  tags: []
+  depends_on:
+  - name: compile_dist_test
+  commands:
+  - func: "scons compile"
+    vars:
+      targets: install-all-meta-but-not-unittests
+      compiling_for_test: true
+
+- name: compile_and_run_unittests_first_quarter
+  exec_timeout_secs: 10800 # 3 hours
+  depends_on:
+  - name: compile_dist_test
+  commands:
+  - func: "scons compile"
+    vars:
+      targets: install-first-quarter-unittests install-first-quarter-unittests-debug
+      compiling_for_test: true
+  - func: "f_expansions_write"
+  - func: "run diskstats"
+  - func: "f_expansions_write"
+  - func: "monitor process threads"
+  - func: "collect system resource info"
+  - func: "run tests"
+    vars:
+      suite: unittests_first_quarter
+      install_dir: build/install/bin
+      exec_timeout_secs: 10800 # 3 hours
+
+- name: compile_and_run_unittests_second_quarter
+  exec_timeout_secs: 10800 # 3 hours
+  depends_on:
+  - name: compile_dist_test
+  commands:
+  - func: "scons compile"
+    vars:
+      targets: install-second-quarter-unittests install-second-quarter-unittests-debug
+      compiling_for_test: true
+  - func: "f_expansions_write"
+  - func: "run diskstats"
+  - func: "f_expansions_write"
+  - func: "monitor process threads"
+  - func: "collect system resource info"
+  - func: "run tests"
+    vars:
+      suite: unittests_second_quarter
+      install_dir: build/install/bin
+      exec_timeout_secs: 10800 # 3 hours
+
+- name: compile_and_run_unittests_third_quarter
+  exec_timeout_secs: 10800 # 3 hours
+  depends_on:
+  - name: compile_dist_test
+  commands:
+  - func: "scons compile"
+    vars:
+      targets: install-third-quarter-unittests install-third-quarter-unittests-debug
+      compiling_for_test: true
+  - func: "f_expansions_write"
+  - func: "run diskstats"
+  - func: "f_expansions_write"
+  - func: "monitor process threads"
+  - func: "collect system resource info"
+  - func: "run tests"
+    vars:
+      suite: unittests_third_quarter
+      install_dir: build/install/bin
+      exec_timeout_secs: 10800 # 3 hours
+
+- name: compile_and_run_unittests_fourth_quarter
+  exec_timeout_secs: 10800 # 3 hours
+  depends_on:
+  - name: compile_dist_test
+  commands:
+  - func: "scons compile"
+    vars:
+      targets: install-fourth-quarter-unittests install-fourth-quarter-unittests-debug
+      compiling_for_test: true
+  - func: "f_expansions_write"
+  - func: "run diskstats"
+  - func: "f_expansions_write"
+  - func: "monitor process threads"
+  - func: "collect system resource info"
+  - func: "run tests"
+    vars:
+      suite: unittests_fourth_quarter
+      install_dir: build/install/bin
+      exec_timeout_secs: 10800 # 3 hours
+
 ## clang_tidy - run clang_tidy
 - name: clang_tidy
   tags: []
@@ -3028,7 +3098,7 @@ tasks:
       permissions: public-read
       content_type: ${content_type|application/x-gzip}
 
-- name: stitch_support_create_lib
+- name: stitch_support_create_lib_community_only
   tags: []
   depends_on:
   - name: version_expansions_gen
@@ -3061,10 +3131,10 @@ tasks:
       content_type: application/tar
       display_name: "Stitch Support Library"
 
-- name: stitch_support_install_tests
+- name: stitch_support_install_tests_community_only
   tags: []
   depends_on:
-  - name: stitch_support_create_lib
+  - name: stitch_support_create_lib_community_only
   commands:
   - func: "scons compile"
     vars:
@@ -3076,10 +3146,10 @@ tasks:
         --modules=
         DESTDIR='$BUILD_ROOT/stitch-support-lib-$MONGO_VERSION'
 
-- name: stitch_support_run_tests
+- name: stitch_support_run_tests_community_only
   tags: []
   depends_on:
-  - name: stitch_support_install_tests
+  - name: stitch_support_install_tests_community_only
   commands:
   - func: "get and apply version expansions"
   - *f_expansions_write
@@ -6156,6 +6226,15 @@ tasks:
     vars:
       suite: ssl_x509
 
+- <<: *gen_task_template
+  name: ssl_linear_gen
+  tags: ["encrypt", "ssl"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      suite: ssl_linear
+      resmoke_jobs_max: 1
+
 - <<: *task_template
   name: jsCore_decimal
   tags: ["jscore", "common", "decimal"]
@@ -6731,26 +6810,6 @@ tasks:
   - func: "upload pip requirements"
   - func: "run idl tests"
 
-- name: blackduck_scanner
-  tags: []
-  patchable: false
-  commands:
-  - *f_expansions_write
-  - func: "do non-compile setup"
-  - command: subprocess.exec
-    type: setup
-    params:
-      binary: bash
-      silent: true
-      args:
-      - "src/evergreen/blackduck_setup.sh"
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/blackduck_hub.sh"
-
 - name: tla_plus
   tags: []
   commands:
@@ -7033,6 +7092,7 @@ tasks:
   - command: shell.exec
     params:
       shell: bash
+      silent: true
       script: |
         set -oe
         echo "${release_tools_container_registry_password}" | podman login --password-stdin --username ${release_tools_container_registry_username} ${release_tools_container_registry}
@@ -7510,6 +7570,7 @@ tasks:
   - command: shell.exec
     params:
       shell: bash
+      silent: true
       script: |
         set -oe
         echo "${release_tools_container_registry_password}" | podman login --password-stdin --username ${release_tools_container_registry_username} ${release_tools_container_registry}
@@ -7926,12 +7987,10 @@ task_groups:
   - compile_dist_test
   - archive_dist_test
   - archive_dist_test_debug
-  - compile_unittests
-  - run_unittests
   - compile_dbtest
   - run_dbtest
   - archive_dbtest
-  - compile_all
+  - compile_all_but_not_unittests
   - package
 
 # SERVER-76006
@@ -7950,15 +8009,6 @@ task_groups:
   - archive_dbtest
   - package
 
-- <<: *compile_task_group_template
-  name: compile_and_test_TG
-  tasks:
-  - compile_dist_test
-  - compile_unittests
-  - run_unittests
-  - compile_dbtest
-  - run_dbtest
-  - compile_all
 
 # These `parallel` task groups are only appropriate for builders that
 # use --link-model=dynamic, and have scons_cache_scope: shared and
@@ -7976,14 +8026,17 @@ task_groups:
   - determine_patch_tests
   - archive_dist_test
   - archive_dist_test_debug
-  - compile_all
+  - compile_all_but_not_unittests
   - package
 
 - <<: *compile_task_group_template
   name: compile_test_and_package_parallel_unittest_stream_TG
+  max_hosts: -1
   tasks:
-  - compile_unittests
-  - run_unittests
+  - compile_and_run_unittests_first_quarter
+  - compile_and_run_unittests_second_quarter
+  - compile_and_run_unittests_third_quarter
+  - compile_and_run_unittests_fourth_quarter
 
 #- <<: *compile_task_group_template
 #  name: compile_test_and_package_parallel_unittest_stream_with_recording_TG
@@ -8108,19 +8161,19 @@ task_groups:
   - "embedded_sdk_s3_put_latest"
   - "embedded_sdk_tests_s3_put_latest"
 
-- <<: *stitch_support_task_group_template
-  name: stitch_support_lib_build_and_archive
+- <<: *stitch_support_task_group_template_community_only
+  name: stitch_support_lib_build_and_archive_community_only
   tags: ["stitch"]
   tasks:
-  - "stitch_support_create_lib"
+  - "stitch_support_create_lib_community_only"
 
-- <<: *stitch_support_task_group_template
-  name: stitch_support_lib_build_and_test
+- <<: *stitch_support_task_group_template_community_only
+  name: stitch_support_lib_build_and_test_community_only
   tags: ["stitch"]
   max_hosts: 1
   tasks:
-  - "stitch_support_install_tests"
-  - "stitch_support_run_tests"
+  - "stitch_support_install_tests_community_only"
+  - "stitch_support_run_tests_community_only"
 
 - name: crypt_build
   setup_task:

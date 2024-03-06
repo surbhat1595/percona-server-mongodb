@@ -43,6 +43,8 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/is_mongos.h"
+#include "mongo/transport/message_compressor_base.h"
+#include "mongo/transport/message_compressor_manager.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/processinfo.h"
@@ -156,7 +158,7 @@ ClientMetadata::ClientMetadata(BSONObj doc) {
             foundOperatingSystem);
 }
 
-StatusWith<StringData> ClientMetadata::parseApplicationDocument(const BSONObj& doc) {
+StatusWith<std::string> ClientMetadata::parseApplicationDocument(const BSONObj& doc) {
     BSONObjIterator i(doc);
 
     while (i.more()) {
@@ -173,7 +175,7 @@ StatusWith<StringData> ClientMetadata::parseApplicationDocument(const BSONObj& d
                             << "' field must be a string in the client metadata document"};
             }
 
-            StringData value = e.checkAndGetStringData();
+            std::string value = str::escape(e.checkAndGetStringData().toString());
 
             if (value.size() > kMaxApplicationNameByteLength) {
                 return {ErrorCodes::ClientMetadataAppNameTooLarge,
@@ -183,11 +185,11 @@ StatusWith<StringData> ClientMetadata::parseApplicationDocument(const BSONObj& d
                                       << " bytes in the client metadata document"};
             }
 
-            return {std::move(value)};
+            return std::move(value);
         }
     }
 
-    return {StringData()};
+    return std::string();
 }
 
 Status ClientMetadata::validateDriverDocument(const BSONObj& doc) {
@@ -277,25 +279,7 @@ void ClientMetadata::setMongoSMetadata(StringData hostAndPort,
         sub.append(kVersion, version);
     }
 
-    auto document = builder.obj();
-
-    if (!_appName.empty()) {
-        // The _appName field points into the existing _document, which we are about to replace.
-        // We must redirect _appName to point into the new doc *before* replacing the old doc. We
-        // expect the 'application' metadata of the new document to be identical to the old.
-        auto appMetaData = document[kApplication];
-        invariant(appMetaData.isABSONObj());
-
-        auto appNameEl = appMetaData[kName];
-        invariant(appNameEl.type() == BSONType::String);
-
-        auto appName = appNameEl.valueStringData();
-        invariant(appName == _appName);
-
-        _appName = appName;
-    }
-
-    _document = std::move(document);
+    _document = builder.obj();
 }
 
 void ClientMetadata::serialize(StringData driverName,
@@ -390,7 +374,7 @@ Status ClientMetadata::serializePrivate(StringData driverName,
 }
 
 StringData ClientMetadata::getApplicationName() const {
-    return _appName;
+    return StringData(_appName);
 }
 
 const BSONObj& ClientMetadata::getDocument() const {
@@ -402,11 +386,20 @@ void ClientMetadata::logClientMetadata(Client* client) const {
         return;
     }
 
+    auto negotiatedCompressors =
+        MessageCompressorManager::forSession(client->session()).getNegotiatedCompressors();
+    std::vector<StringData> negotiatedCompressorNames(negotiatedCompressors.size(), nullptr);
+    std::transform(
+        negotiatedCompressors.begin(),
+        negotiatedCompressors.end(),
+        negotiatedCompressorNames.begin(),
+        [](auto& messageCompressor) { return StringData(messageCompressor->getName()); });
+
     LOGV2(51800,
-          "received client metadata from {remote} {client}: {doc}",
           "client metadata",
           "remote"_attr = client->getRemote(),
           "client"_attr = client->desc(),
+          "negotiatedCompressors"_attr = negotiatedCompressorNames,
           "doc"_attr = getDocument());
 }
 

@@ -40,6 +40,10 @@
 #include "mongo/db/tenant_database_name.h"
 #include "mongo/db/views/view.h"
 #include "mongo/stdx/unordered_map.h"
+#include "mongo/util/functional.h"
+#include "mongo/util/immutable/map.h"
+#include "mongo/util/immutable/unordered_map.h"
+#include "mongo/util/immutable/unordered_set.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo {
@@ -49,31 +53,23 @@ class Database;
 
 class CollectionCatalog {
     friend class iterator;
+    using OrderedCollectionMap =
+        immutable::map<std::pair<TenantDatabaseName, UUID>, std::shared_ptr<Collection>>;
 
 public:
     using CollectionInfoFn = std::function<bool(const CollectionPtr& collection)>;
     using ViewIteratorCallback = std::function<bool(const ViewDefinition& view)>;
 
-    // Number of how many Collection references for a single Collection that is stored in the
-    // catalog. Used to determine whether there are external references (uniquely owned). Needs to
-    // be kept in sync with the data structures below.
-    static constexpr size_t kNumCollectionReferencesStored = 3;
 
     class iterator {
     public:
         using value_type = CollectionPtr;
 
-        iterator(OperationContext* opCtx,
-                 const TenantDatabaseName& tenantDbName,
-                 const CollectionCatalog& catalog);
-        iterator(OperationContext* opCtx,
-                 std::map<std::pair<TenantDatabaseName, UUID>,
-                          std::shared_ptr<Collection>>::const_iterator mapIter,
-                 const CollectionCatalog& catalog);
+        iterator(const TenantDatabaseName& tenantDbName,
+                 OrderedCollectionMap::iterator it,
+                 const OrderedCollectionMap& catalog);
         value_type operator*();
         iterator operator++();
-        iterator operator++(int);
-        boost::optional<UUID> uuid();
 
         Collection* getWritableCollection(OperationContext* opCtx);
 
@@ -85,14 +81,25 @@ public:
         bool operator!=(const iterator& other) const;
 
     private:
-        bool _exhausted();
+        void _skipUncommitted();
 
-        OperationContext* _opCtx;
-        TenantDatabaseName _tenantDbName;
-        boost::optional<UUID> _uuid;
-        std::map<std::pair<TenantDatabaseName, UUID>, std::shared_ptr<Collection>>::const_iterator
+        const OrderedCollectionMap& _map;
+        immutable::map<std::pair<TenantDatabaseName, UUID>, std::shared_ptr<Collection>>::iterator
             _mapIter;
-        const CollectionCatalog* _catalog;
+        immutable::map<std::pair<TenantDatabaseName, UUID>, std::shared_ptr<Collection>>::iterator
+            _end;
+    };
+
+    class Range {
+    public:
+        Range(const OrderedCollectionMap&, const TenantDatabaseName& tenantDbName);
+        iterator begin() const;
+        iterator end() const;
+        bool empty() const;
+
+    private:
+        OrderedCollectionMap _map;
+        TenantDatabaseName _tenantDbName;
     };
 
     struct ProfileSettings {
@@ -250,9 +257,7 @@ public:
     /**
      * Register the collection with `uuid`.
      */
-    void registerCollection(OperationContext* opCtx,
-                            const UUID& uuid,
-                            std::shared_ptr<Collection> collection);
+    void registerCollection(OperationContext* opCtx, std::shared_ptr<Collection> collection);
 
     /**
      * Deregister the collection.
@@ -514,8 +519,13 @@ public:
      */
     uint64_t getEpoch() const;
 
-    iterator begin(OperationContext* opCtx, const TenantDatabaseName& tenantDbName) const;
-    iterator end(OperationContext* opCtx) const;
+    /**
+     * Provides an iterable range for the collections belonging to the specified database.
+     *
+     * Will not observe any updates made to the catalog after the creation of the 'Range'. The
+     * 'Range' object just remain in scope for the duration of the iteration.
+     */
+    Range range(const TenantDatabaseName& tenantDbName) const;
 
     /**
      * Lookup the name of a resource by its ResourceId. If there are multiple namespaces mapped to
@@ -601,15 +611,17 @@ private:
      * When present, indicates that the catalog is in closed state, and contains a map from UUID
      * to pre-close NSS. See also onCloseCatalog.
      */
-    boost::optional<mongo::stdx::unordered_map<UUID, NamespaceString, UUID::Hash>> _shadowCatalog;
+    boost::optional<immutable::unordered_map<UUID, NamespaceString, UUID::Hash>> _shadowCatalog;
 
-    using CollectionCatalogMap = stdx::unordered_map<UUID, std::shared_ptr<Collection>, UUID::Hash>;
-    using OrderedCollectionMap =
-        std::map<std::pair<TenantDatabaseName, UUID>, std::shared_ptr<Collection>>;
+    using CollectionCatalogMap =
+        immutable::unordered_map<UUID, std::shared_ptr<Collection>, UUID::Hash>;
     using NamespaceCollectionMap =
-        stdx::unordered_map<NamespaceString, std::shared_ptr<Collection>>;
-    using UncommittedViewsSet = stdx::unordered_set<NamespaceString>;
-    using DatabaseProfileSettingsMap = StringMap<ProfileSettings>;
+        immutable::unordered_map<NamespaceString, std::shared_ptr<Collection>>;
+    using UncommittedViewsSet = immutable::unordered_set<NamespaceString>;
+    using DatabaseProfileSettingsMap =
+        immutable::unordered_map<std::string, ProfileSettings, StringMapHasher, StringMapEq>;
+    using ViewsForDatabaseMap =
+        immutable::unordered_map<std::string, ViewsForDatabase, StringMapHasher, StringMapEq>;
 
     CollectionCatalogMap _catalog;
     OrderedCollectionMap _orderedCollections;  // Ordered by <tenantDbName, collUUID> pair
@@ -617,7 +629,7 @@ private:
     UncommittedViewsSet _uncommittedViews;
 
     // Map of database names to their corresponding views and other associated state.
-    StringMap<ViewsForDatabase> _viewsForDatabase;
+    ViewsForDatabaseMap _viewsForDatabase;
 
     // Incremented whenever the CollectionCatalog gets closed and reopened (onCloseCatalog and
     // onOpenCatalog).
@@ -632,7 +644,7 @@ private:
     uint64_t _epoch = 0;
 
     // Mapping from ResourceId to a set of strings that contains collection and database namespaces.
-    std::map<ResourceId, std::set<std::string>> _resourceInformation;
+    immutable::map<ResourceId, std::set<std::string>> _resourceInformation;
 
     /**
      * Contains non-default database profile settings. New collections, current collections and

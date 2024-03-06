@@ -314,7 +314,13 @@ last-continuous:
   - test_file: jstests/core/nested_or_duplicate_predicates_index_scan.js
     ticket: SERVER-84013
   - test_file: jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js
-    ticket: SERVER-77506
+    ticket: SERVER-82353
+  - test_file: jstests/core/notablescan.js
+    ticket: SERVER-83119
+  - test_file: jstests/sharding/clustered_coll_scan.js
+    ticket: SERVER-83119
+  - test_file: jstests/change_streams/split_large_event_with_other_stages.js
+    ticket: SERVER-85848
   suites: null
 last-lts:
   all:
@@ -675,5 +681,11 @@ last-lts:
   - test_file: jstests/core/nested_or_duplicate_predicates_index_scan.js
     ticket: SERVER-84013
   - test_file: jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js
-    ticket: SERVER-77506
+    ticket: SERVER-82353
+  - test_file: jstests/core/notablescan.js
+    ticket: SERVER-83119
+  - test_file: jstests/sharding/clustered_coll_scan.js
+    ticket: SERVER-83119
+  - test_file: jstests/change_streams/split_large_event_with_other_stages.js
+    ticket: SERVER-85848
   suites: null

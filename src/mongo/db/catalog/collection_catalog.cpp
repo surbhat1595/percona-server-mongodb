@@ -52,10 +52,13 @@ const ServiceContext::Decoration<LatestCollectionCatalog> getCatalog =
     ServiceContext::declareDecoration<LatestCollectionCatalog>();
 
 std::shared_ptr<CollectionCatalog> batchedCatalogWriteInstance;
+absl::flat_hash_set<Collection*> batchedCatalogClonedCollections;
 
 const OperationContext::Decoration<std::shared_ptr<const CollectionCatalog>> stashedCatalog =
     OperationContext::declareDecoration<std::shared_ptr<const CollectionCatalog>>();
 
+const auto maxUuid = UUID::parse("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF").getValue();
+const auto minUuid = UUID::parse("00000000-0000-0000-0000-000000000000").getValue();
 }  // namespace
 
 class IgnoreExternalViewChangesForDatabase {
@@ -91,12 +94,12 @@ public:
 
     static void setCollectionInCatalog(CollectionCatalog& catalog,
                                        std::shared_ptr<Collection> collection) {
-        catalog._collections[collection->ns()] = collection;
-        catalog._catalog[collection->uuid()] = collection;
+        catalog._collections = catalog._collections.set(collection->ns(), collection);
+        catalog._catalog = catalog._catalog.set(collection->uuid(), collection);
         // TODO SERVER-64608 Use tenantID from ns
         auto dbIdPair = std::make_pair(TenantDatabaseName(boost::none, collection->ns().db()),
                                        collection->uuid());
-        catalog._orderedCollections[dbIdPair] = collection;
+        catalog._orderedCollections = catalog._orderedCollections.set(dbIdPair, collection);
     }
 
     PublishCatalogUpdates(OperationContext* opCtx,
@@ -130,7 +133,7 @@ public:
                 case UncommittedCatalogUpdates::Entry::Action::kRenamedCollection: {
                     writeJobs.push_back(
                         [& from = entry.nss, &to = entry.renameTo](CollectionCatalog& catalog) {
-                            catalog._collections.erase(from);
+                            catalog._collections = catalog._collections.erase(from);
 
                             auto fromStr = from.ns();
                             auto toStr = to.ns();
@@ -151,10 +154,9 @@ public:
                     break;
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kRecreatedCollection: {
-                    writeJobs.push_back([opCtx = _opCtx,
-                                         collection = entry.collection,
-                                         uuid = *entry.externalUUID](CollectionCatalog& catalog) {
-                        catalog.registerCollection(opCtx, uuid, std::move(collection));
+                    writeJobs.push_back([opCtx = _opCtx, collection = entry.collection](
+                                            CollectionCatalog& catalog) {
+                        catalog.registerCollection(opCtx, std::move(collection));
                     });
                     // Fallthrough to the createCollection case to finish committing the collection.
                 }
@@ -221,90 +223,65 @@ private:
     UncommittedCatalogUpdates& _uncommittedCatalogUpdates;
 };
 
-CollectionCatalog::iterator::iterator(OperationContext* opCtx,
-                                      const TenantDatabaseName& tenantDbName,
-                                      const CollectionCatalog& catalog)
-    : _opCtx(opCtx), _tenantDbName(tenantDbName), _catalog(&catalog) {
-    auto minUuid = UUID::parse("00000000-0000-0000-0000-000000000000").getValue();
-
-    _mapIter = _catalog->_orderedCollections.lower_bound(std::make_pair(_tenantDbName, minUuid));
-
-    // Start with the first collection that is visible outside of its transaction.
-    while (!_exhausted() && !_mapIter->second->isCommitted()) {
-        _mapIter++;
-    }
-
-    if (!_exhausted()) {
-        _uuid = _mapIter->first.second;
-    }
+CollectionCatalog::iterator::iterator(const TenantDatabaseName& tenantDbName,
+                                      OrderedCollectionMap::iterator it,
+                                      const OrderedCollectionMap& map)
+    : _map{map}, _mapIter{it}, _end(_map.upper_bound(std::make_pair(tenantDbName, maxUuid))) {
+    _skipUncommitted();
 }
-
-CollectionCatalog::iterator::iterator(OperationContext* opCtx,
-                                      std::map<std::pair<TenantDatabaseName, UUID>,
-                                               std::shared_ptr<Collection>>::const_iterator mapIter,
-                                      const CollectionCatalog& catalog)
-    : _opCtx(opCtx), _mapIter(mapIter), _catalog(&catalog) {}
 
 CollectionCatalog::iterator::value_type CollectionCatalog::iterator::operator*() {
-    if (_exhausted()) {
-        return CollectionPtr();
+    if (_mapIter == _map.end()) {
+        return nullptr;
     }
-
-    return {
-        _opCtx, _mapIter->second.get(), LookupCollectionForYieldRestore(_mapIter->second->ns())};
-}
-
-Collection* CollectionCatalog::iterator::getWritableCollection(OperationContext* opCtx) {
-    return CollectionCatalog::get(opCtx)->lookupCollectionByUUIDForMetadataWrite(
-        opCtx, operator*()->uuid());
-}
-
-boost::optional<UUID> CollectionCatalog::iterator::uuid() {
-    return _uuid;
+    return _mapIter->second.get();
 }
 
 CollectionCatalog::iterator CollectionCatalog::iterator::operator++() {
+    invariant(_mapIter != _map.end());
+    invariant(_mapIter != _end);
     _mapIter++;
-
-    // Skip any collections that are not yet visible outside of their respective transactions.
-    while (!_exhausted() && !_mapIter->second->isCommitted()) {
-        _mapIter++;
-    }
-
-    if (_exhausted()) {
-        // If the iterator is at the end of the map or now points to an entry that does not
-        // correspond to the correct database.
-        _mapIter = _catalog->_orderedCollections.end();
-        _uuid = boost::none;
-        return *this;
-    }
-
-    _uuid = _mapIter->first.second;
+    _skipUncommitted();
     return *this;
 }
 
-CollectionCatalog::iterator CollectionCatalog::iterator::operator++(int) {
-    auto oldPosition = *this;
-    ++(*this);
-    return oldPosition;
-}
-
 bool CollectionCatalog::iterator::operator==(const iterator& other) const {
-    invariant(_catalog == other._catalog);
-    if (other._mapIter == _catalog->_orderedCollections.end()) {
-        return _uuid == boost::none;
+    invariant(_map == other._map);
+
+    if (other._mapIter == other._map.end()) {
+        return _mapIter == _map.end();
+    } else if (_mapIter == _map.end()) {
+        return other._mapIter == other._map.end();
     }
 
-    return _uuid == other._uuid;
+    return _mapIter->first.second == other._mapIter->first.second;
 }
 
 bool CollectionCatalog::iterator::operator!=(const iterator& other) const {
     return !(*this == other);
 }
 
-bool CollectionCatalog::iterator::_exhausted() {
-    return _mapIter == _catalog->_orderedCollections.end() ||
-        _mapIter->first.first != _tenantDbName;
+void CollectionCatalog::iterator::_skipUncommitted() {
+    // Advance to the next collection that is visible outside of its transaction.
+    while (_mapIter != _end && !_mapIter->second->isCommitted()) {
+        ++_mapIter;
+    }
+}
+
+CollectionCatalog::Range::Range(const OrderedCollectionMap& map,
+                                const TenantDatabaseName& tenantDbName)
+    : _map{map}, _tenantDbName{tenantDbName} {}
+
+CollectionCatalog::iterator CollectionCatalog::Range::begin() const {
+    return {_tenantDbName, _map.lower_bound(std::make_pair(_tenantDbName, minUuid)), _map};
+}
+
+CollectionCatalog::iterator CollectionCatalog::Range::end() const {
+    return {_tenantDbName, _map.upper_bound(std::make_pair(_tenantDbName, maxUuid)), _map};
+}
+
+bool CollectionCatalog::Range::empty() const {
+    return begin() == end();
 }
 
 std::shared_ptr<const CollectionCatalog> CollectionCatalog::get(ServiceContext* svcCtx) {
@@ -490,7 +467,7 @@ Status CollectionCatalog::createView(OperationContext* opCtx,
     invariant(opCtx->lockState()->isCollectionLockedForMode(
         NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
 
-    invariant(_viewsForDatabase.contains(viewName.db()));
+    invariant(_viewsForDatabase.find(viewName.db()));
     const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, viewName.db());
 
     auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
@@ -502,7 +479,7 @@ Status CollectionCatalog::createView(OperationContext* opCtx,
         return Status(ErrorCodes::BadValue,
                       "View must be created on a view or collection in the same database");
 
-    if (viewsForDb.lookup(viewName) || _collections.contains(viewName))
+    if (viewsForDb.lookup(viewName) || _collections.find(viewName))
         return Status(ErrorCodes::NamespaceExists, "Namespace already exists");
 
     if (!NamespaceString::validCollectionName(viewOn.coll()))
@@ -540,7 +517,7 @@ Status CollectionCatalog::modifyView(
     invariant(opCtx->lockState()->isCollectionLockedForMode(
         NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
 
-    invariant(_viewsForDatabase.contains(viewName.db()));
+    invariant(_viewsForDatabase.find(viewName.db()));
     const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, viewName.db());
 
     if (viewName.db() != viewOn.db())
@@ -578,12 +555,12 @@ Status CollectionCatalog::dropView(OperationContext* opCtx, const NamespaceStrin
     invariant(opCtx->lockState()->isCollectionLockedForMode(
         NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
 
-    invariant(_viewsForDatabase.contains(viewName.db()));
+    invariant(_viewsForDatabase.find(viewName.db()));
     const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, viewName.db());
     viewsForDb.requireValidCatalog();
 
     // Make sure the view exists before proceeding.
-    if (auto viewPtr = viewsForDb.lookup(viewName); !viewPtr) {
+    if (!viewsForDb.lookup(viewName)) {
         return {ErrorCodes::NamespaceNotFound,
                 str::stream() << "cannot drop missing view: " << viewName.ns()};
     }
@@ -627,9 +604,10 @@ Status CollectionCatalog::reloadViews(OperationContext* opCtx, StringData dbName
 
     // Create a copy of the ViewsForDatabase instance to modify it. Reset the views for this
     // database, but preserve the DurableViewCatalog pointer.
-    auto it = _viewsForDatabase.find(dbName);
-    invariant(it != _viewsForDatabase.end());
-    ViewsForDatabase viewsForDb{it->second.durable};
+    const ViewsForDatabase* viewsForDbPtr = _viewsForDatabase.find(dbName);
+    invariant(viewsForDbPtr);
+    ViewsForDatabase viewsForDb = *viewsForDbPtr;
+
     viewsForDb.valid = false;
     viewsForDb.viewGraphNeedsRefresh = true;
     viewsForDb.viewMap.clear();
@@ -694,16 +672,16 @@ void CollectionCatalog::onOpenDatabase(OperationContext* opCtx,
     invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_IS));
     uassert(ErrorCodes::AlreadyInitialized,
             str::stream() << "Database " << dbName << " is already initialized",
-            _viewsForDatabase.find(dbName) == _viewsForDatabase.end());
+            !_viewsForDatabase.find(dbName));
 
-    _viewsForDatabase[dbName] = std::move(viewsForDb);
+    _viewsForDatabase = _viewsForDatabase.set(dbName.toString(), std::move(viewsForDb));
 }
 
 void CollectionCatalog::onCloseDatabase(OperationContext* opCtx, TenantDatabaseName tenantDbName) {
     invariant(opCtx->lockState()->isDbLockedForMode(tenantDbName.dbName(), MODE_X));
     auto rid = ResourceId(RESOURCE_DATABASE, tenantDbName.dbName());
     removeResource(rid, tenantDbName.dbName());
-    _viewsForDatabase.erase(tenantDbName.dbName());
+    _viewsForDatabase = _viewsForDatabase.erase(tenantDbName.dbName());
 }
 
 void CollectionCatalog::onCloseCatalog() {
@@ -713,7 +691,7 @@ void CollectionCatalog::onCloseCatalog() {
 
     _shadowCatalog.emplace();
     for (auto& entry : _catalog)
-        _shadowCatalog->insert({entry.first, entry.second->ns()});
+        _shadowCatalog = _shadowCatalog->insert({entry.first, entry.second->ns()});
 }
 
 void CollectionCatalog::onOpenCatalog() {
@@ -724,6 +702,10 @@ void CollectionCatalog::onOpenCatalog() {
 
 uint64_t CollectionCatalog::getEpoch() const {
     return _epoch;
+}
+
+CollectionCatalog::Range CollectionCatalog::range(const TenantDatabaseName& tenantDbName) const {
+    return {_orderedCollections, tenantDbName};
 }
 
 std::shared_ptr<const Collection> CollectionCatalog::lookupCollectionByUUIDForRead(
@@ -779,6 +761,7 @@ Collection* CollectionCatalog::lookupCollectionByUUIDForMetadataWrite(OperationC
     // on the thread doing the batch write and it would trigger the regular path where we do a
     // copy-on-write on the catalog when committing.
     if (_isCatalogBatchWriter()) {
+        batchedCatalogClonedCollections.emplace(cloned.get());
         PublishCatalogUpdates::setCollectionInCatalog(*batchedCatalogWriteInstance,
                                                       std::move(cloned));
         return ptr;
@@ -812,8 +795,8 @@ bool CollectionCatalog::isCollectionAwaitingVisibility(UUID uuid) const {
 }
 
 std::shared_ptr<Collection> CollectionCatalog::_lookupCollectionByUUID(UUID uuid) const {
-    auto foundIt = _catalog.find(uuid);
-    return foundIt == _catalog.end() ? nullptr : foundIt->second;
+    const std::shared_ptr<Collection>* coll = _catalog.find(uuid);
+    return coll ? *coll : nullptr;
 }
 
 std::shared_ptr<const Collection> CollectionCatalog::lookupCollectionByNamespaceForRead(
@@ -830,8 +813,8 @@ std::shared_ptr<const Collection> CollectionCatalog::lookupCollectionByNamespace
         return nullptr;
     }
 
-    auto it = _collections.find(nss);
-    auto coll = (it == _collections.end() ? nullptr : it->second);
+    const std::shared_ptr<Collection>* collPtr = _collections.find(nss);
+    auto coll = collPtr ? *collPtr : nullptr;
     return (coll && coll->isCommitted()) ? coll : nullptr;
 }
 
@@ -861,8 +844,8 @@ Collection* CollectionCatalog::lookupCollectionByNamespaceForMetadataWrite(
         return nullptr;
     }
 
-    auto it = _collections.find(nss);
-    auto coll = (it == _collections.end() ? nullptr : it->second);
+    const std::shared_ptr<Collection>* collPtr = _collections.find(nss);
+    auto coll = collPtr ? *collPtr : nullptr;
 
     if (!coll || !coll->isCommitted())
         return nullptr;
@@ -882,6 +865,7 @@ Collection* CollectionCatalog::lookupCollectionByNamespaceForMetadataWrite(
     // on the thread doing the batch write and it would trigger the regular path where we do a
     // copy-on-write on the catalog when committing.
     if (_isCatalogBatchWriter()) {
+        batchedCatalogClonedCollections.emplace(cloned.get());
         PublishCatalogUpdates::setCollectionInCatalog(*batchedCatalogWriteInstance,
                                                       std::move(cloned));
         return ptr;
@@ -908,8 +892,8 @@ CollectionPtr CollectionCatalog::lookupCollectionByNamespace(OperationContext* o
         return nullptr;
     }
 
-    auto it = _collections.find(nss);
-    auto coll = (it == _collections.end() ? nullptr : it->second);
+    const std::shared_ptr<Collection>* collPtr = _collections.find(nss);
+    auto coll = collPtr ? *collPtr : nullptr;
     return (coll && coll->isCommitted())
         ? CollectionPtr(opCtx, coll.get(), LookupCollectionForYieldRestore(coll->ns()))
         : nullptr;
@@ -927,20 +911,21 @@ boost::optional<NamespaceString> CollectionCatalog::lookupNSSByUUID(OperationCon
         return boost::none;
     }
 
-    auto foundIt = _catalog.find(uuid);
-    if (foundIt != _catalog.end()) {
-        boost::optional<NamespaceString> ns = foundIt->second->ns();
-        invariant(!ns.get().isEmpty());
-        return _collections.find(ns.get())->second->isCommitted() ? ns : boost::none;
+    const std::shared_ptr<Collection>* collPtr = _catalog.find(uuid);
+    if (collPtr) {
+        auto coll = *collPtr;
+        boost::optional<NamespaceString> ns = coll->ns();
+        invariant(!ns.value().isEmpty());
+        return coll->isCommitted() ? ns : boost::none;
     }
 
     // Only in the case that the catalog is closed and a UUID is currently unknown, resolve it
     // using the pre-close state. This ensures that any tasks reloading the catalog can see their
     // own updates.
     if (_shadowCatalog) {
-        auto shadowIt = _shadowCatalog->find(uuid);
-        if (shadowIt != _shadowCatalog->end())
-            return shadowIt->second;
+        auto* shadowIt = _shadowCatalog->find(uuid);
+        if (shadowIt)
+            return *shadowIt;
     }
     return boost::none;
 }
@@ -956,10 +941,11 @@ boost::optional<UUID> CollectionCatalog::lookupUUIDByNSS(OperationContext* opCtx
         return boost::none;
     }
 
-    auto it = _collections.find(nss);
-    if (it != _collections.end()) {
-        const boost::optional<UUID>& uuid = it->second->uuid();
-        return it->second->isCommitted() ? uuid : boost::none;
+    const std::shared_ptr<Collection>* collPtr = _collections.find(nss);
+    if (collPtr) {
+        auto coll = *collPtr;
+        const boost::optional<UUID>& uuid = coll->uuid();
+        return coll->isCommitted() ? uuid : boost::none;
     }
     return boost::none;
 }
@@ -1105,28 +1091,33 @@ std::vector<TenantDatabaseName> CollectionCatalog::getAllDbNames() const {
 }
 
 void CollectionCatalog::setAllDatabaseProfileFilters(std::shared_ptr<ProfileFilter> filter) {
-    for (auto& [_, settings] : _databaseProfileSettings) {
-        settings.filter = filter;
+    auto dbProfileSettingsWriter = _databaseProfileSettings.transient();
+    for (const auto& [dbName, settings] : _databaseProfileSettings) {
+        ProfileSettings clone = settings;
+        clone.filter = filter;
+        dbProfileSettingsWriter.set(dbName, std::move(clone));
     }
+    _databaseProfileSettings = dbProfileSettingsWriter.persistent();
 }
 
 void CollectionCatalog::setDatabaseProfileSettings(
     StringData dbName, CollectionCatalog::ProfileSettings newProfileSettings) {
-    _databaseProfileSettings[dbName] = newProfileSettings;
+    _databaseProfileSettings =
+        _databaseProfileSettings.set(dbName.toString(), std::move(newProfileSettings));
 }
 
 CollectionCatalog::ProfileSettings CollectionCatalog::getDatabaseProfileSettings(
     StringData dbName) const {
-    auto it = _databaseProfileSettings.find(dbName);
-    if (it != _databaseProfileSettings.end()) {
-        return it->second;
+    const ProfileSettings* settings = _databaseProfileSettings.find(dbName);
+    if (settings) {
+        return *settings;
     }
 
     return {serverGlobalParams.defaultProfile, ProfileFilter::getDefault()};
 }
 
 void CollectionCatalog::clearDatabaseProfileSettings(StringData dbName) {
-    _databaseProfileSettings.erase(dbName);
+    _databaseProfileSettings = _databaseProfileSettings.erase(dbName.toString());
 }
 
 CollectionCatalog::Stats CollectionCatalog::getStats() const {
@@ -1154,9 +1145,9 @@ CollectionCatalog::ViewCatalogSet CollectionCatalog::getViewCatalogDbNames(
 }
 
 void CollectionCatalog::registerCollection(OperationContext* opCtx,
-                                           const UUID& uuid,
                                            std::shared_ptr<Collection> coll) {
     auto nss = coll->ns();
+    auto uuid = coll->uuid();
     // TODO SERVER-64608 Use tenantId from nss
     auto tenantDbName = TenantDatabaseName(boost::none, nss.db());
     _ensureNamespaceDoesNotExist(opCtx, nss, NamespaceType::kAll);
@@ -1171,12 +1162,12 @@ void CollectionCatalog::registerCollection(OperationContext* opCtx,
     auto dbIdPair = std::make_pair(tenantDbName, uuid);
 
     // Make sure no entry related to this uuid.
-    invariant(_catalog.find(uuid) == _catalog.end());
+    invariant(!_catalog.find(uuid));
     invariant(_orderedCollections.find(dbIdPair) == _orderedCollections.end());
 
-    _catalog[uuid] = coll;
-    _collections[nss] = coll;
-    _orderedCollections[dbIdPair] = coll;
+    _catalog = _catalog.set(uuid, coll);
+    _collections = _collections.set(nss, coll);
+    _orderedCollections = _orderedCollections.set(dbIdPair, coll);
 
     if (!nss.isOnInternalDb() && !nss.isSystem()) {
         _stats.userCollections += 1;
@@ -1202,7 +1193,7 @@ void CollectionCatalog::registerCollection(OperationContext* opCtx,
 
 std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(OperationContext* opCtx,
                                                                     const UUID& uuid) {
-    invariant(_catalog.find(uuid) != _catalog.end());
+    invariant(_catalog.find(uuid));
 
     auto coll = std::move(_catalog[uuid]);
     auto ns = coll->ns();
@@ -1213,12 +1204,12 @@ std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(OperationCon
     LOGV2_DEBUG(20281, 1, "Deregistering collection", logAttrs(ns), "uuid"_attr = uuid);
 
     // Make sure collection object exists.
-    invariant(_collections.find(ns) != _collections.end());
+    invariant(_collections.find(ns));
     invariant(_orderedCollections.find(dbIdPair) != _orderedCollections.end());
 
-    _orderedCollections.erase(dbIdPair);
-    _collections.erase(ns);
-    _catalog.erase(uuid);
+    _orderedCollections = _orderedCollections.erase(dbIdPair);
+    _collections = _collections.erase(ns);
+    _catalog = _catalog.erase(uuid);
 
     if (!ns.isOnInternalDb() && !ns.isSystem()) {
         _stats.userCollections -= 1;
@@ -1251,18 +1242,18 @@ void CollectionCatalog::registerUncommittedView(OperationContext* opCtx,
     // namespaces here.
     _ensureNamespaceDoesNotExist(opCtx, nss, NamespaceType::kCollection);
 
-    _uncommittedViews.emplace(nss);
+    _uncommittedViews = _uncommittedViews.insert(nss);
 }
 
 void CollectionCatalog::deregisterUncommittedView(const NamespaceString& nss) {
-    _uncommittedViews.erase(nss);
+    _uncommittedViews = _uncommittedViews.erase(nss);
 }
 
 void CollectionCatalog::_ensureNamespaceDoesNotExist(OperationContext* opCtx,
                                                      const NamespaceString& nss,
                                                      NamespaceType type) const {
     auto existingCollection = _collections.find(nss);
-    if (existingCollection != _collections.end()) {
+    if (existingCollection) {
         LOGV2(5725001,
               "Conflicted registering namespace, already have a collection with the same namespace",
               "nss"_attr = nss);
@@ -1270,7 +1261,7 @@ void CollectionCatalog::_ensureNamespaceDoesNotExist(OperationContext* opCtx,
     }
 
     if (type == NamespaceType::kAll) {
-        if (_uncommittedViews.contains(nss)) {
+        if (_uncommittedViews.find(nss)) {
             LOGV2(5725002,
                   "Conflicted registering namespace, already have a view with the same namespace",
                   "nss"_attr = nss);
@@ -1298,26 +1289,25 @@ void CollectionCatalog::deregisterAllCollectionsAndViews() {
         auto ns = entry.second->ns();
 
         LOGV2_DEBUG(20283, 1, "Deregistering collection", logAttrs(ns), "uuid"_attr = uuid);
-
-        entry.second.reset();
     }
 
-    _collections.clear();
-    _orderedCollections.clear();
-    _catalog.clear();
-    _viewsForDatabase.clear();
+    _collections = {};
+    _orderedCollections = {};
+    _catalog = {};
+    _viewsForDatabase = {};
     _stats = {};
 
-    _resourceInformation.clear();
+    _resourceInformation = {};
 }
 
 void CollectionCatalog::clearViews(OperationContext* opCtx, StringData dbName) const {
     invariant(opCtx->lockState()->isCollectionLockedForMode(
         NamespaceString(dbName, NamespaceString::kSystemDotViewsCollectionName), MODE_X));
 
-    auto it = _viewsForDatabase.find(dbName);
-    invariant(it != _viewsForDatabase.end());
-    ViewsForDatabase viewsForDb = it->second;
+    const ViewsForDatabase* viewsForDbPtr = _viewsForDatabase.find(dbName);
+    invariant(viewsForDbPtr);
+
+    ViewsForDatabase viewsForDb = *viewsForDbPtr;
 
     viewsForDb.viewMap.clear();
     viewsForDb.viewGraph.clear();
@@ -1328,16 +1318,6 @@ void CollectionCatalog::clearViews(OperationContext* opCtx, StringData dbName) c
         catalog._replaceViewsForDatabase(dbName, std::move(viewsForDb));
     });
 }
-
-CollectionCatalog::iterator CollectionCatalog::begin(OperationContext* opCtx,
-                                                     const TenantDatabaseName& tenantDbName) const {
-    return iterator(opCtx, tenantDbName, *this);
-}
-
-CollectionCatalog::iterator CollectionCatalog::end(OperationContext* opCtx) const {
-    return iterator(opCtx, _orderedCollections.end(), *this);
-}
-
 boost::optional<std::string> CollectionCatalog::lookupResourceName(const ResourceId& rid) const {
     invariant(rid.getType() == RESOURCE_DATABASE || rid.getType() == RESOURCE_COLLECTION);
 
@@ -1345,7 +1325,6 @@ boost::optional<std::string> CollectionCatalog::lookupResourceName(const Resourc
     if (search == _resourceInformation.end()) {
         return boost::none;
     }
-
     const std::set<std::string>& namespaces = search->second;
 
     // When there are multiple namespaces mapped to the same ResourceId, return boost::none as the
@@ -1365,12 +1344,14 @@ void CollectionCatalog::removeResource(const ResourceId& rid, const std::string&
         return;
     }
 
-    std::set<std::string>& namespaces = search->second;
+    std::set<std::string> namespaces = search->second;
     namespaces.erase(entry);
 
     // Remove the map entry if this is the last namespace in the set for the ResourceId.
     if (namespaces.size() == 0) {
-        _resourceInformation.erase(search);
+        _resourceInformation = _resourceInformation.erase(search, rid);
+    } else {
+        _resourceInformation = _resourceInformation.set(rid, std::move(namespaces));
     }
 }
 
@@ -1380,16 +1361,17 @@ void CollectionCatalog::addResource(const ResourceId& rid, const std::string& en
     auto search = _resourceInformation.find(rid);
     if (search == _resourceInformation.end()) {
         std::set<std::string> newSet = {entry};
-        _resourceInformation.insert(std::make_pair(rid, newSet));
+        _resourceInformation = _resourceInformation.set(rid, std::move(newSet));
         return;
     }
 
-    std::set<std::string>& namespaces = search->second;
-    if (namespaces.count(entry) > 0) {
+    if (const auto& namespaces = search->second; namespaces.count(entry) > 0) {
         return;
     }
 
+    std::set<std::string> namespaces = search->second;
     namespaces.insert(entry);
+    _resourceInformation = _resourceInformation.set(rid, std::move(namespaces));
 }
 
 void CollectionCatalog::invariantHasExclusiveAccessToCollection(OperationContext* opCtx,
@@ -1409,15 +1391,15 @@ boost::optional<const ViewsForDatabase&> CollectionCatalog::_getViewsForDatabase
         return uncommittedViews;
     }
 
-    auto it = _viewsForDatabase.find(dbName);
-    if (it == _viewsForDatabase.end()) {
+    const ViewsForDatabase* viewsForDb = _viewsForDatabase.find(dbName);
+    if (!viewsForDb) {
         return boost::none;
     }
-    return it->second;
+    return *viewsForDb;
 }
 
 void CollectionCatalog::_replaceViewsForDatabase(StringData dbName, ViewsForDatabase&& views) {
-    _viewsForDatabase[dbName] = std::move(views);
+    _viewsForDatabase = _viewsForDatabase.set(dbName.toString(), std::move(views));
 }
 
 Status CollectionCatalog::_createOrUpdateView(
@@ -1502,16 +1484,9 @@ bool CollectionCatalog::_isCatalogBatchWriter() const {
 
 bool CollectionCatalog::_alreadyClonedForBatchedWriter(
     const std::shared_ptr<Collection>& collection) const {
-    // We may skip cloning the Collection instance if and only if we are currently in a batched
-    // catalog write and all references to this Collection is owned by the cloned CollectionCatalog
-    // instance owned by the batch writer. i.e. the Collection is uniquely owned by the batch
-    // writer. When the batch writer initially clones the catalog, all collections will have a
-    // 'use_count' of at least kNumCollectionReferencesStored*2 (because there are at least 2
-    // catalog instances). To check for uniquely owned we need to check that the reference count is
-    // exactly kNumCollectionReferencesStored (owned by a single catalog) while also account for the
-    // instance that is extracted from the catalog and provided as a parameter to this function, we
-    // therefore need to add 1.
-    return _isCatalogBatchWriter() && collection.use_count() == kNumCollectionReferencesStored + 1;
+    // We may skip cloning the Collection instance if and only if have already cloned it for write
+    // use in this batch writer.
+    return _isCatalogBatchWriter() && batchedCatalogClonedCollections.contains(collection.get());
 }
 
 CollectionCatalogStasher::CollectionCatalogStasher(OperationContext* opCtx)
@@ -1581,6 +1556,7 @@ BatchedCollectionCatalogWriter::BatchedCollectionCatalogWriter(OperationContext*
     : _opCtx(opCtx) {
     invariant(_opCtx->lockState()->isW());
     invariant(!batchedCatalogWriteInstance);
+    invariant(batchedCatalogClonedCollections.empty());
 
     auto& storage = getCatalog(_opCtx->getServiceContext());
     // hold onto base so if we need to delete it we can do it outside of the lock
@@ -1603,6 +1579,7 @@ BatchedCollectionCatalogWriter::~BatchedCollectionCatalogWriter() {
     // Clear out batched pointer so no more attempts of batching are made
     _batchedInstance = nullptr;
     batchedCatalogWriteInstance = nullptr;
+    batchedCatalogClonedCollections.clear();
 }
 
 }  // namespace mongo

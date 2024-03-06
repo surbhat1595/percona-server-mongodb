@@ -3,8 +3,6 @@
 buildvariants:
 - name: enterprise-rhel-81-ppc64le
   display_name: Enterprise RHEL 8.1 PPC64LE
-  modules:
-  - enterprise
   run_on:
   - rhel81-power8-small
   cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
@@ -33,6 +31,9 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - rhel81-power8-large
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - rhel81-power8-large
   - name: compile_integration_and_test_no_audit_parallel_stream_TG
     distros:
     - rhel81-power8-large
@@ -49,7 +50,6 @@ buildvariants:
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .common !.multiversion
   - name: snmp
-  - name: .stitch
   - name: .crypt
   - name: .publish_crypt
   - name: .publish
@@ -57,8 +57,6 @@ buildvariants:
 
 - name: enterprise-rhel-71-ppc64le
   display_name: Enterprise RHEL 7.1 PPC64LE
-  modules:
-  - enterprise
   run_on:
   - rhel71-power8-small
   cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
@@ -87,6 +85,9 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - rhel71-power8-large
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - rhel71-power8-large
   - name: compile_integration_and_test_no_audit_parallel_stream_TG
     distros:
     - rhel71-power8-large
@@ -103,7 +104,6 @@ buildvariants:
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .common !.multiversion
   - name: snmp
-  - name: .stitch
   - name: .crypt
   - name: .publish_crypt
   - name: .publish
@@ -111,8 +111,6 @@ buildvariants:
 
 - name: enterprise-rhel-72-s390x
   display_name: Enterprise RHEL 7.2 s390x
-  modules:
-  - enterprise
   run_on:
   - rhel72-zseries-test
   cron: "0 4 * * 0"
@@ -141,6 +139,9 @@ buildvariants:
   - name: small_compile_test_and_package_serial_TG
     distros:
     - rhel72-zseries-build
+  - name: compile_test_and_package_parallel_unittest_stream_TG
+    distros:
+    - rhel72-zseries-build
   - name: compile_integration_and_test_no_audit_parallel_stream_TG
     distros:
     - rhel72-zseries-build
@@ -157,7 +158,6 @@ buildvariants:
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .common !.multiversion
   - name: snmp
-  - name: .stitch
   - name: .crypt
   - name: .publish_crypt
   - name: .publish
@@ -165,8 +165,6 @@ buildvariants:
 
 - name: enterprise-rhel-83-s390x
   display_name: Enterprise RHEL 8.3 s390x
-  modules:
-  - enterprise
   run_on:
   - rhel83-zseries-small
   cron: "0 4 * * 0"
@@ -211,7 +209,6 @@ buildvariants:
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .common !.multiversion
   - name: snmp
-  - name: .stitch
   - name: .crypt
   - name: .publish_crypt
   - name: .publish

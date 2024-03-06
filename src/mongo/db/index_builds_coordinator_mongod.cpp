@@ -64,7 +64,6 @@ namespace mongo {
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(hangAfterAcquiringIndexBuildSlot);
-MONGO_FAIL_POINT_DEFINE(hangAfterRegisteringIndexBuild);
 MONGO_FAIL_POINT_DEFINE(hangBeforeInitializingIndexBuild);
 MONGO_FAIL_POINT_DEFINE(hangIndexBuildAfterSignalPrimaryForCommitReadiness);
 MONGO_FAIL_POINT_DEFINE(hangBeforeRunningIndexBuild);
@@ -240,16 +239,6 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
         hangAfterAcquiringIndexBuildSlot.pauseWhileSet();
     }
 
-    ScopeGuard unregisterUnscheduledIndexBuild([&] {
-        auto replIndexBuildState = _getIndexBuild(buildUUID);
-        if (replIndexBuildState.isOK()) {
-            auto replState = invariant(replIndexBuildState);
-            if (replState->isSettingUp()) {
-                activeIndexBuilds.unregisterIndexBuild(&_indexBuildsManager, replState);
-            }
-        }
-    });
-
     if (indexBuildOptions.applicationMode == ApplicationMode::kStartupRepair) {
         // Two phase index build recovery goes though a different set-up procedure because we will
         // either resume the index build or the original index will be dropped first.
@@ -266,11 +255,6 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
             return status;
         }
     } else {
-        if (MONGO_unlikely(hangAfterRegisteringIndexBuild.shouldFail())) {
-            LOGV2(8296700, "Hanging due to hangAfterRegisteringIndexBuild");
-            hangAfterRegisteringIndexBuild.pauseWhileSet(opCtx);
-        }
-
         auto statusWithOptionalResult =
             _filterSpecsAndRegisterBuild(opCtx, dbName, collectionUUID, specs, buildUUID, protocol);
         if (!statusWithOptionalResult.isOK()) {
@@ -293,6 +277,8 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
                       "error"_attr = migrationStatus,
                       "buildUUID"_attr = buildUUID,
                       "collectionUUID"_attr = collectionUUID);
+                activeIndexBuilds.unregisterIndexBuild(&_indexBuildsManager,
+                                                       invariant(_getIndexBuild(buildUUID)));
                 return migrationStatus;
             }
 
@@ -303,6 +289,8 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
                       "error"_attr = buildBlockedStatus,
                       "buildUUID"_attr = buildUUID,
                       "collectionUUID"_attr = collectionUUID);
+                activeIndexBuilds.unregisterIndexBuild(&_indexBuildsManager,
+                                                       invariant(_getIndexBuild(buildUUID)));
                 return buildBlockedStatus;
             }
         }
@@ -341,7 +329,6 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
     // The thread pool task will be responsible for signalling the condition variable when the index
     // build thread is done running.
     onScopeExitGuard.dismiss();
-    unregisterUnscheduledIndexBuild.dismiss();
     _threadPool.schedule([
         this,
         buildUUID,
@@ -385,8 +372,6 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
                                                  std::move(impersonatedClientAttrs.roleNames));
         }
 
-        ScopedSetShardRole scopedSetShardRole(opCtx.get(), nss, shardVersion, dbVersion);
-
         {
             stdx::unique_lock<Client> lk(*opCtx->getClient());
             auto curOp = CurOp::get(opCtx.get());
@@ -412,6 +397,13 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
             opCtx->lockState());
 
         if (indexBuildOptions.applicationMode != ApplicationMode::kStartupRepair) {
+            // The shard version protocol is only required when setting up the index build and
+            // writing the 'startIndexBuild' oplog entry. If a chunk migration is in-progress while
+            // an index build is started, it will be aborted. A recipient shard will copy
+            // in-progress indexes from the donor shard, and if the index build is aborted on the
+            // donor, the client running createIndexes will receive an error requiring them to retry
+            // the command, and the indexes will become consistent.
+            ScopedSetShardRole scopedSetShardRole(opCtx.get(), nss, shardVersion, dbVersion);
             status = _setUpIndexBuild(opCtx.get(), buildUUID, startTimestamp, indexBuildOptions);
             if (!status.isOK()) {
                 startPromise.setError(status);
@@ -789,8 +781,8 @@ void IndexBuildsCoordinatorMongod::_waitForNextIndexBuildActionAndCommit(
                 needsToRetryWait = true;
                 break;
             case CommitResult::kLockTimeout:
-                LOGV2(4698900,
-                      "Unable to acquire RSTL for commit within deadline. Releasing locks and "
+                LOGV2(7866201,
+                      "Unable to acquire locks for commit within deadline. Releasing locks and "
                       "trying again",
                       "buildUUID"_attr = replState->buildUUID);
                 needsToRetryWait = true;

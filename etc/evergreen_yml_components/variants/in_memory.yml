@@ -4,8 +4,6 @@ buildvariants:
 - name: enterprise-rhel-80-64-bit-inmem
   display_name: Enterprise RHEL 8.0 (inMemory)
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - rhel80-small
   expansions:
@@ -18,6 +16,9 @@ buildvariants:
     large_distro_name: rhel80-large
   tasks:
   - name: compile_test_and_package_serial_TG
+    distros:
+    - rhel80-xlarge
+  - name: compile_test_and_package_parallel_unittest_stream_TG
     distros:
     - rhel80-xlarge
   - name: compile_integration_and_test_no_audit_parallel_stream_TG
@@ -67,8 +68,6 @@ buildvariants:
 - name: enterprise-windows-inmem
   display_name: Enterprise Windows (inMemory)
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
   run_on:
   - windows-vsCurrent-small
   expansions:
@@ -86,6 +85,9 @@ buildvariants:
     large_distro_name: windows-vsCurrent-large
   tasks:
   - name: compile_test_and_package_serial_TG
+    distros:
+    - windows-vsCurrent-large
+  - name: compile_test_and_package_parallel_unittest_stream_TG
     distros:
     - windows-vsCurrent-large
   - name: .aggfuzzer .common

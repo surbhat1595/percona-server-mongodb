@@ -199,9 +199,11 @@ Status TelemetryThreadBase::_initParameters(ServiceContext* serviceContext) try 
     pfx.append(kSource, _sourceName());
     {
         const auto& vii = VersionInfoInterface::instance();
-        pfx.append(kPillarVersion, vii.version());
         // v5.0 has no pro features so we use empty list instead of vii.psmdbProFeatures()
-        pfx.append(kProFeatures, std::vector<StringData>());
+        const std::vector<StringData> proFeatures;
+        pfx.append(kPillarVersion,
+                   fmt::format("{}{}", vii.version(), proFeatures.empty() ? ""_sd : "-pro"_sd));
+        pfx.append(kProFeatures, proFeatures);
     }
 
     // on first start both instance Id and internal Id are initialized to the same value

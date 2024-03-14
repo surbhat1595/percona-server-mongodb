@@ -133,6 +133,7 @@ public:
                 switch (subtype) {
                     case BinDataType::BinDataGeneral:
                     case BinDataType::Function:
+                    case BinDataType::Sensitive:
                     case BinDataType::bdtCustom:
                         break;
                     case BinDataType::Column:
@@ -383,8 +384,14 @@ private:
 template <bool precise, typename BSONValidator>
 class ValidateBuffer {
 public:
-    ValidateBuffer(const char* data, uint64_t maxLength, BSONValidator validator)
-        : _data(data), _maxLength(maxLength), _validator(validator) {
+    ValidateBuffer(const char* data,
+                   uint64_t maxLength,
+                   BSONValidator validator,
+                   ValidationVersion validationVersion)
+        : _data(data),
+          _maxLength(maxLength),
+          _validator(validator),
+          _validationVersion(validationVersion) {
         if constexpr (precise)
             _frames.resize(BSONDepth::getMaxAllowableDepth() + 1);
     }
@@ -414,13 +421,18 @@ public:
 
     /* Assumes the root level is a single literal element (which may contain nested objects).
      * Only validates up to the termination of that first literal, more data is permitted to
-       remain in the buffer after that and is not validated. Throws exception on invalid data*/
+     * remain in the buffer after that and is not validated. Throws exception on invalid data.
+     * Confirm field names for literals in BSONColumn have empty field names.
+     */
     int validateAndMeasureElem() {
         setupValidation();
         uassert(InvalidBSON,
                 "BSON literal is not followed by fieldname",
                 _maxLength > 1);  // must at least have a 0-terminator after control
-        size_t fieldNameSize = strnlen(_data + 1 /* skip type */, _maxLength - 1) + 1;
+        // Confirm fieldName is just a null terminator
+        uassert(NonConformantBSON,
+                "BSON literal content does not have an empty fieldname",
+                _maxLength > 1 && _data[1] == 0);
 
         // Handle one element without using iterative loop, and without expecting
         // multiple instances or an EOO.  Only resume with the iterative loop if
@@ -428,15 +440,13 @@ public:
 
         // Save pointer to currFrame->end so we can fill it in once we know the size
         const char** preEnd = &(_currFrame->end);
-        const char* ptr =
-            _validateElem(Cursor{_data + 1 + fieldNameSize, _data + _maxLength}, *_data);
-        _validator.checkNonConformantElem(_data, 1 + fieldNameSize, *_data);
+        const char* ptr = _validateElem(Cursor{_data + 2, _data + _maxLength}, *_data);
+        _validator.checkNonConformantElem(_data, 2, *_data);
 
         if (_currFrame != _frames.begin()) {
             // We know that type was kObject or kArray, so size is fieldname, type,
             // and a stored int
-            int size = 1 + fieldNameSize +
-                ConstDataView(_data + fieldNameSize + 1).read<LittleEndian<int32_t>>();
+            int size = 2 + ConstDataView(_data + 2).read<LittleEndian<int32_t>>();
             uassert(InvalidBSON,
                     "BSON literal content exceeds buffer size",
                     (size_t)size <= _maxLength);
@@ -535,14 +545,14 @@ private:
         return true;
     }
 
-    static const char* _validateSpecial(Cursor cursor, uint8_t type) {
+    const char* _validateSpecial(Cursor cursor, uint8_t type) {
         switch (type) {
             case BSONType::BinData: {
                 auto count = cursor.template read<uint32_t>();
                 auto subtype = cursor.template read<uint8_t>();
                 const char* columnStart = cursor.ptr;
                 cursor.skip(count);
-                if (subtype == BinDataType::Column) {
+                if (subtype == BinDataType::Column && _validationVersion >= V2_Column) {
                     /* do not pass down cursor; we want to reset the nesting depth */
                     uassert(NonConformantBSON,
                             "Invalid BSON column",
@@ -670,26 +680,34 @@ private:
     typename Frames::iterator _currFrame;  // Frame currently being validated.
     Frames _frames;  // Has end pointers to check and the containing element for precise mode.
     BSONValidator _validator;
+    ValidationVersion _validationVersion;
 };
 
 template <typename BSONValidator>
-Status _doValidate(const char* originalBuffer, uint64_t maxLength, BSONValidator validator) {
+Status _doValidate(const char* originalBuffer,
+                   uint64_t maxLength,
+                   BSONValidator validator,
+                   ValidationVersion validationVersion) {
     // First try validating using the fast but less precise version. That version will return
     // a not-OK status for objects with CodeWScope or nesting exceeding 32 levels. These cases and
     // actual failures will rerun the precise version that gives a detailed error context.
-    if (MONGO_likely((ValidateBuffer<false, BSONValidator>(originalBuffer, maxLength, validator)
+    if (MONGO_likely((ValidateBuffer<false, BSONValidator>(
+                          originalBuffer, maxLength, validator, validationVersion)
                           .validate()
                           .isOK())))
         return Status::OK();
 
-    return ValidateBuffer<true, BSONValidator>(originalBuffer, maxLength, validator).validate();
+    return ValidateBuffer<true, BSONValidator>(
+               originalBuffer, maxLength, validator, validationVersion)
+        .validate();
 }
 
 class ColumnValidator {
 public:
     static Status doValidateBSONColumn(const char* originalBuffer,
                                        int maxLength,
-                                       BSONValidateMode mode) noexcept {
+                                       BSONValidateMode mode,
+                                       ValidationVersion validationVersion) noexcept {
         // run control pointer through to end of buffer
         // run over literal data as directed by lengths from control
         // check formatting of Simple8B blocks
@@ -704,7 +722,9 @@ public:
 
         try {
             // Check this beforehand to ensure we cannot overflow the buffer with any strlen
-            uassert(NonConformantBSON, "BSON column is missing EOO termination", *(end - 1) == EOO);
+            uassert(NonConformantBSON,
+                    "BSON column is missing EOO termination",
+                    ptr < end && *(end - 1) == EOO);
 
             while (ptr < end) {
                 uint8_t control = *ptr;
@@ -719,26 +739,29 @@ public:
                                 ptr == end);
                         return Status::OK();
                     }
-                } else if (isBSONColumnControlLiteral(control)) {
+                } else if (bsoncolumn::isUncompressedLiteralControlByte(control)) {
                     int size;
                     if (MONGO_likely(mode == BSONValidateMode::kDefault))
                         size = ValidateBuffer<false, DefaultValidator>(
-                                   ptr, end - ptr, DefaultValidator())
+                                   ptr, end - ptr, DefaultValidator(), validationVersion)
                                    .validateAndMeasureElem();
                     else if (mode == BSONValidateMode::kExtended)
                         size = ValidateBuffer<false, ExtendedValidator>(
-                                   ptr, end - ptr, ExtendedValidator())
+                                   ptr, end - ptr, ExtendedValidator(), validationVersion)
                                    .validateAndMeasureElem();
                     else if (mode == BSONValidateMode::kFull)
-                        size = ValidateBuffer<false, FullValidator>(ptr, end - ptr, FullValidator())
+                        size = ValidateBuffer<false, FullValidator>(
+                                   ptr, end - ptr, FullValidator(), validationVersion)
                                    .validateAndMeasureElem();
                     else
                         MONGO_UNREACHABLE;
 
                     ptr += size;
-                } else if (isBSONColumnInterleavedStart(control)) {
+                } else if (bsoncolumn::isInterleavedStartControlByte(control)) {
                     // interleaved objects begin with a reference object, and then a series
-                    // of diff blocks for followup objects, ending with an EOO
+                    // of diff blocks for followup objects, ending with an EOO. Nesting interleaved
+                    // mode is not allowed.
+                    uassert(NonConformantBSON, "Nested interleaved mode", !interleavedMode);
                     ptr++;
                     uassert(NonConformantBSON,
                             "Invalid reference object for interleaved mode",
@@ -749,7 +772,7 @@ public:
                     interleavedMode = true;
                 } else {
                     // Simple8b block sequence, just check for memory overflow of block count
-                    uint8_t numBlocks = numSimple8bBlocksInBSONColumnControl(control);
+                    uint8_t numBlocks = bsoncolumn::numSimple8bBlocksForControlByte(control);
                     int size = sizeof(uint64_t) * numBlocks;
                     uassert(NonConformantBSON,
                             "BSONColumn blocks exceed buffer size",
@@ -764,47 +787,38 @@ public:
         // We should not get here for a valid object, the final EOO should have returned OK
         return Status(NonConformantBSON, "Missing terminating EOO");
     }
-
-private:
-    static bool isBSONColumnControlLiteral(char control) {
-        return (control & 0xE0) == 0 || control == (char)MinKey || control == (char)MaxKey;
-    }
-
-    static uint8_t numSimple8bBlocksInBSONColumnControl(char control) {
-        return (control & 0x0F) + 1;
-    }
-
-    static bool isBSONColumnInterleavedStart(char control) {
-        return control == bsoncolumn::kInterleavedStartControlByteLegacy ||
-            control == bsoncolumn::kInterleavedStartControlByte ||
-            control == bsoncolumn::kInterleavedStartArrayRootControlByte;
-    }
 };
 
 }  // namespace
 
 Status validateBSON(const char* originalBuffer,
                     uint64_t maxLength,
-                    BSONValidateMode mode) noexcept {
+                    BSONValidateMode mode,
+                    ValidationVersion validationVersion) noexcept {
     if (MONGO_likely(mode == BSONValidateMode::kDefault))
-        return _doValidate(originalBuffer, maxLength, DefaultValidator());
+        return _doValidate(originalBuffer, maxLength, DefaultValidator(), validationVersion);
     else if (mode == BSONValidateMode::kExtended)
-        return _doValidate(originalBuffer, maxLength, ExtendedValidator());
+        return _doValidate(originalBuffer, maxLength, ExtendedValidator(), validationVersion);
     else if (mode == BSONValidateMode::kFull)
-        return ValidateBuffer<true, FullValidator>(originalBuffer, maxLength, FullValidator())
+        return ValidateBuffer<true, FullValidator>(
+                   originalBuffer, maxLength, FullValidator(), validationVersion)
             .validate();
     else
         MONGO_UNREACHABLE;
 }
 
-Status validateBSON(const BSONObj& obj, BSONValidateMode mode) {
-    return validateBSON(obj.objdata(), obj.objsize(), mode);
+Status validateBSON(const BSONObj& obj,
+                    BSONValidateMode mode,
+                    ValidationVersion validationVersion) {
+    return validateBSON(obj.objdata(), obj.objsize(), mode, validationVersion);
 }
 
 Status validateBSONColumn(const char* originalBuffer,
                           int maxLength,
-                          BSONValidateMode mode) noexcept {
-    return ColumnValidator::doValidateBSONColumn(originalBuffer, maxLength, mode);
+                          BSONValidateMode mode,
+                          ValidationVersion validationVersion) noexcept {
+    return ColumnValidator::doValidateBSONColumn(
+        originalBuffer, maxLength, mode, validationVersion);
 }
 
 }  // namespace mongo

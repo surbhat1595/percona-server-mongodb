@@ -614,8 +614,7 @@ boost::optional<DocumentSource::DistributedPlanLogic> DocumentSourceMerge::distr
     return DocumentSourceWriter::distributedPlanLogic();
 }
 
-Value DocumentSourceMerge::serialize(SerializationOptions opts) const {
-    auto explain = opts.verbosity;
+Value DocumentSourceMerge::serialize(const SerializationOptions& opts) const {
     DocumentSourceMergeSpec spec;
     spec.setTargetNss(_outputNs);
     spec.setLet([&]() -> boost::optional<BSONObj> {
@@ -625,7 +624,7 @@ Value DocumentSourceMerge::serialize(SerializationOptions opts) const {
 
         BSONObjBuilder bob;
         for (auto&& [name, expr] : *_letVariables) {
-            bob << name << expr->serialize(explain);
+            bob << opts.serializeFieldPathFromString(name) << expr->serialize(opts);
         }
         return bob.obj();
     }());
@@ -637,8 +636,8 @@ Value DocumentSourceMerge::serialize(SerializationOptions opts) const {
             auto expCtxWithLetVariables = pExpCtx->copyWith(pExpCtx->ns);
             if (spec.getLet()) {
                 BSONObjBuilder cleanLetSpecBuilder;
-                for (auto& elt : spec.getLet().value()) {
-                    cleanLetSpecBuilder.append(elt.fieldNameStringData(), BSONObj{});
+                for (auto&& [name, expr] : *_letVariables) {
+                    cleanLetSpecBuilder.append(name, BSONObj{});
                 }
                 expCtxWithLetVariables->variables.seedVariablesWithLetParameters(
                     expCtxWithLetVariables.get(), cleanLetSpecBuilder.obj());
@@ -655,7 +654,7 @@ Value DocumentSourceMerge::serialize(SerializationOptions opts) const {
         return mergeOnFields;
     }());
     spec.setTargetCollectionVersion(_targetCollectionPlacementVersion);
-    return Value(Document{{getSourceName(), spec.toBSON()}});
+    return Value(Document{{getSourceName(), spec.toBSON(opts)}});
 }
 
 std::pair<DocumentSourceMerge::BatchObject, int> DocumentSourceMerge::makeBatchObject(

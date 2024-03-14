@@ -2,31 +2,36 @@
  * This test confirms that queryStats store key fields specific to replica sets (readConcern and
  * readPreference) are included and correctly shapified. General command fields related to api
  * versioning are included for good measure.
- * @tags: [featureFlagQueryStats]
+ * @tags: [featureFlagQueryStatsFindCommand]
  */
-load("jstests/libs/query_stats_utils.js");
+load("jstests/libs/query_stats_utils.js");  // For getLatestQueryStatsEntry
 (function() {
 "use strict";
 
-const replTest = new ReplSetTest({name: 'reindexTest', nodes: 2});
+const replTest = new ReplSetTest({
+    name: 'queryStatsTest',
+    nodes: [
+        {rsConfig: {tags: {dc: "east"}}},
+        {rsConfig: {tags: {dc: "west"}}},
+    ]
+});
 
-// Turn on the collecting of telemetry metrics.
+// Turn on the collecting of query stats metrics.
 replTest.startSet({setParameter: {internalQueryStatsRateLimit: -1}});
 replTest.initiate();
 
 const primary = replTest.getPrimary();
-const secondary = replTest.getSecondary();
 
 const dbName = jsTestName();
 const collName = "foobar";
 const primaryDB = primary.getDB(dbName);
 const primaryColl = primaryDB.getCollection(collName);
-const secondaryDB = secondary.getDB(dbName);
-const secondaryColl = secondaryDB.getCollection(collName);
 
 primaryColl.drop();
 
-assert.commandWorked(primaryColl.insert({a: 1000}));
+const clusterTime =
+    assert.commandWorked(primaryDB.runCommand({insert: collName, documents: [{a: 1000}]}))
+        .operationTime;
 
 replTest.awaitReplication();
 
@@ -46,32 +51,37 @@ let commandObj = {
     find: collName,
     filter: {v: {$eq: 2}},
     readConcern: {level: "local", afterClusterTime: new Timestamp(0, 1)},
-    $readPreference: {mode: "primary"},
+    $readPreference: {mode: "nearest", tags: [{some: "tag"}, {dc: "north pole"}, {dc: "east"}]},
     apiDeprecationErrors: false,
     apiVersion: "1",
     apiStrict: false,
 };
 const replSetConn = new Mongo(replTest.getURL());
 assert.commandWorked(replSetConn.getDB(dbName).runCommand(commandObj));
-let telemetry = getQueryStats(replSetConn, {collName: collName});
-delete telemetry[0].key["collectionType"];
-confirmCommandFieldsPresent(telemetry[0].key, commandObj);
-// check that readConcern afterClusterTime is normalized.
-assert.eq(telemetry[0].key.readConcern.afterClusterTime, "?timestamp");
+let stats = getLatestQueryStatsEntry(replSetConn, {collName: collName});
+delete stats.key["collectionType"];
+confirmCommandFieldsPresent(stats.key, commandObj);
+// Check that readConcern afterClusterTime is normalized.
+assert.eq(stats.key.readConcern.afterClusterTime, "?timestamp", tojson(stats.key.readConcern));
 
-// check that readPreference not populated and readConcern just has an afterClusterTime field.
+// Check that $readPreference.tags are sorted.
+assert.eq(stats.key.$readPreference.tags,
+          [{dc: "east"}, {dc: "north pole"}, {some: "tag"}],
+          tojson(stats.key.$readPreference));
+
+// Check that readConcern just has an afterClusterTime field.
 commandObj["readConcern"] = {
     afterClusterTime: new Timestamp(1, 0)
 };
 delete commandObj["$readPreference"];
 assert.commandWorked(replSetConn.getDB(dbName).runCommand(commandObj));
-telemetry = getQueryStats(replSetConn, {collName});
+stats = getLatestQueryStatsEntry(replSetConn, {collName});
 // We're not concerned with this field here.
-delete telemetry[0].key["collectionType"];
-confirmCommandFieldsPresent(telemetry[0].key, commandObj);
-assert.eq(telemetry[0].key["readConcern"], {"afterClusterTime": "?timestamp"});
+delete stats.key["collectionType"];
+confirmCommandFieldsPresent(stats.key, commandObj);
+assert.eq(stats.key["readConcern"], {"afterClusterTime": "?timestamp"});
 
-// check that readConcern has no afterClusterTime and fields related to api usage are not present.
+// Check that readConcern has no afterClusterTime and fields related to api usage are not present.
 commandObj["readConcern"] = {
     level: "local"
 };
@@ -79,11 +89,20 @@ delete commandObj["apiDeprecationErrors"];
 delete commandObj["apiVersion"];
 delete commandObj["apiStrict"];
 assert.commandWorked(replSetConn.getDB(dbName).runCommand(commandObj));
-telemetry = getQueryStats(replSetConn, {collName: collName});
-assert.eq(telemetry[1].key["readConcern"], {level: "local"});
+stats = getLatestQueryStatsEntry(replSetConn, {collName: collName});
+assert.eq(stats.key["readConcern"], {level: "local"});
 // We're not concerned with this field here.
-delete telemetry[1].key["collectionType"];
-confirmCommandFieldsPresent(telemetry[1].key, commandObj);
+delete stats.key["collectionType"];
+confirmCommandFieldsPresent(stats.key, commandObj);
+
+// Check that the 'atClusterTime' parameter is shapified correctly.
+commandObj.readConcern = {
+    level: "snapshot",
+    atClusterTime: clusterTime
+};
+assert.commandWorked(replSetConn.getDB(dbName).runCommand(commandObj));
+stats = getLatestQueryStatsEntry(replSetConn, {collName: collName});
+assert.eq(stats.key["readConcern"], {level: "snapshot", atClusterTime: "?timestamp"});
 
 replTest.stopSet();
 })();

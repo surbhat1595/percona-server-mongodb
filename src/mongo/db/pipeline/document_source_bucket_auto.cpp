@@ -380,14 +380,17 @@ void DocumentSourceBucketAuto::doDispose() {
     _sortedInput.reset();
 }
 
-Value DocumentSourceBucketAuto::serialize(SerializationOptions opts) const {
+Value DocumentSourceBucketAuto::serialize(const SerializationOptions& opts) const {
     MutableDocument insides;
 
     insides["groupBy"] = _groupByExpression->serialize(opts);
     insides["buckets"] = opts.serializeLiteral(_nBuckets);
 
     if (_granularityRounder) {
-        insides["granularity"] = opts.serializeLiteral(_granularityRounder->getName());
+        //"granularity" only supports some strings, so a specific representative value is used if
+        // necessary.
+        insides["granularity"] =
+            opts.serializeLiteral(_granularityRounder->getName(), Value("R5"_sd));
     }
 
     MutableDocument outputSpec(_accumulatedFields.size());

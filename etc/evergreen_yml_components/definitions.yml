@@ -5747,7 +5747,21 @@ tasks:
   - func: "run tests"
 
 - <<: *task_template
-  name: query_stats_passthrough_writeonly
+  name: query_stats_aggregation_passthrough
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+- <<: *task_template
+  name: query_stats_mongos_passthrough
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+- <<: *task_template
+  name: query_stats_mongos_aggregation_passthrough
   tags: []
   commands:
   - func: "do setup"
@@ -8269,6 +8283,13 @@ task_groups:
   - archive_dist_test
   - archive_dist_test_debug
   - package
+
+- <<: *compile_task_group_template
+  name: compile_and_package_serial_no_unittests_TG
+  tasks:
+  - compile_dist_test
+  - archive_dist_test
+  - archive_dist_test_debug
 
 - <<: *compile_task_group_template
   name: compile_ninja_next_TG

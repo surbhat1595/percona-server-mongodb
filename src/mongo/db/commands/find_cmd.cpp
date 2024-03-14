@@ -34,6 +34,7 @@
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
+#include "mongo/db/collection_type.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/run_aggregate.h"
 #include "mongo/db/commands/test_commands_enabled.h"
@@ -53,9 +54,10 @@
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/query_shape.h"
-#include "mongo/db/query/query_stats.h"
-#include "mongo/db/query/query_stats_find_key_generator.h"
+#include "mongo/db/query/query_shape/query_shape.h"
+#include "mongo/db/query/query_stats/find_key.h"
+#include "mongo/db/query/query_stats/key.h"
+#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/service_context.h"
@@ -154,14 +156,14 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
     // It is important to do this before canonicalizing and optimizing the query, each of which
     // would alter the query shape.
     if (!(collection && collection.get()->getCollectionOptions().encryptedFieldConfig)) {
-        query_stats::registerRequest(opCtx, nss, [&]() {
-            BSONObj queryShape = query_shape::extractQueryShape(
-                *parsedRequest,
-                SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
-                expCtx);
-            return std::make_unique<query_stats::FindKeyGenerator>(
-                expCtx, *parsedRequest, std::move(queryShape), ctx.getCollectionType());
-        });
+        query_stats::registerRequest(
+            opCtx,
+            nss,
+            [&]() {
+                return std::make_unique<query_stats::FindKey>(
+                    expCtx, *parsedRequest, ctx.getCollectionType());
+            },
+            /*requiresFullQueryStatsFeatureFlag*/ false);
     }
 
     return uassertStatusOK(
@@ -354,8 +356,8 @@ public:
                 try {
                     // An empty PrivilegeVector is acceptable because these privileges are only
                     // checked on getMore and explain will not open a cursor.
-                    uassertStatusOK(runAggregate(
-                        opCtx, nss, aggRequest, _request.body, PrivilegeVector(), result));
+                    uassertStatusOK(
+                        runAggregate(opCtx, aggRequest, _request.body, PrivilegeVector(), result));
                 } catch (DBException& error) {
                     if (error.code() == ErrorCodes::InvalidPipelineOperator) {
                         uasserted(ErrorCodes::InvalidPipelineOperator,
@@ -567,12 +569,7 @@ public:
                                                     aggRequest.getNamespace(),
                                                     aggRequest,
                                                     false));
-                auto status = runAggregate(opCtx,
-                                           aggRequest.getNamespace(),
-                                           aggRequest,
-                                           _request.body,
-                                           privileges,
-                                           result);
+                auto status = runAggregate(opCtx, aggRequest, _request.body, privileges, result);
                 if (status.code() == ErrorCodes::InvalidPipelineOperator) {
                     uasserted(ErrorCodes::InvalidPipelineOperator,
                               str::stream() << "Unsupported in view pipeline: " << status.reason());

@@ -21,6 +21,8 @@
 #
 last-continuous:
   all:
+  - test_file: src/mongo/db/modules/enterprise/jstests/fcbis/fcbis_pauses_watchdog_checks_during_storage_change.js
+    ticket: SERVER-83508
   - test_file: jstests/sharding/query/find_and_modify_without_two_phase.js
     ticket: SERVER-44422
   - test_file: jstests/sharding/query/delete_without_two_phase.js
@@ -416,7 +418,7 @@ last-continuous:
   - test_file: jstests/core/timeseries/timeseries_collection_uuid.js
     ticket: SERVER-79446
   - test_file: jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js
-    ticket: SERVER-84723
+    ticket: SERVER-87061
   - test_file: jstests/sharding/move_chunk_basic.js
     ticket: SERVER-81201
   - test_file: jstests/sharding/flushRoutingTableCacheUpdates_enforced_on_collections.js
@@ -459,9 +461,13 @@ last-continuous:
     ticket: SERVER-83119
   - test_file: jstests/change_streams/split_large_event_with_other_stages.js
     ticket: SERVER-85848
+  - test_file: jstests/sharding/timeseries_drop.js
+    ticket: SERVER-84589
   suites: null
 last-lts:
   all:
+  - test_file: src/mongo/db/modules/enterprise/jstests/fcbis/fcbis_pauses_watchdog_checks_during_storage_change.js
+    ticket: SERVER-83508
   - test_file: jstests/core/query/null_query_semantics.js
     ticket: SERVER-21929
   - test_file: jstests/core/query/or/or_to_in.js
@@ -921,7 +927,7 @@ last-lts:
   - test_file: jstests/core/timeseries/timeseries_collection_uuid.js
     ticket: SERVER-79446
   - test_file: jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js
-    ticket: SERVER-84723
+    ticket: SERVER-87061
   - test_file: jstests/sharding/move_chunk_basic.js
     ticket: SERVER-81201
   - test_file: jstests/sharding/flushRoutingTableCacheUpdates_enforced_on_collections.js
@@ -960,4 +966,6 @@ last-lts:
     ticket: SERVER-83119
   - test_file: jstests/change_streams/split_large_event_with_other_stages.js
     ticket: SERVER-85848
+  - test_file: jstests/sharding/timeseries_drop.js
+    ticket: SERVER-84589
   suites: null

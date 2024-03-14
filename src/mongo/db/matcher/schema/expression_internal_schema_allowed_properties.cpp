@@ -122,25 +122,29 @@ bool InternalSchemaAllowedPropertiesMatchExpression::_matchesBSONObj(const BSONO
 }
 
 void InternalSchemaAllowedPropertiesMatchExpression::serialize(BSONObjBuilder* builder,
-                                                               SerializationOptions opts) const {
+                                                               const SerializationOptions& opts,
+                                                               bool includePath) const {
     BSONObjBuilder expressionBuilder(
         builder->subobjStart(InternalSchemaAllowedPropertiesMatchExpression::kName));
 
     std::vector<StringData> sortedProperties(_properties.begin(), _properties.end());
     std::sort(sortedProperties.begin(), sortedProperties.end());
     opts.appendLiteral(&expressionBuilder, "properties", sortedProperties);
-    opts.appendLiteral(&expressionBuilder, "namePlaceholder", _namePlaceholder);
+    // This will be serialized to "i", which is the parser chosen namePlaceholder. Using this
+    // unmodified will have a similar effect to serializing to "?", however it preserves round trip
+    // parsing.
+    expressionBuilder.append("namePlaceholder", _namePlaceholder);
 
     BSONArrayBuilder patternPropertiesBuilder(expressionBuilder.subarrayStart("patternProperties"));
     for (auto&& [pattern, expression] : _patternProperties) {
         patternPropertiesBuilder << BSON(
             "regex" << opts.serializeLiteral(BSONRegEx(pattern.rawRegex)) << "expression"
-                    << expression->getFilter()->serialize(opts));
+                    << expression->getFilter()->serialize(opts, includePath));
     }
     patternPropertiesBuilder.doneFast();
 
     BSONObjBuilder otherwiseBuilder(expressionBuilder.subobjStart("otherwise"));
-    _otherwise->getFilter()->serialize(&otherwiseBuilder, opts);
+    _otherwise->getFilter()->serialize(&otherwiseBuilder, opts, includePath);
     otherwiseBuilder.doneFast();
     expressionBuilder.doneFast();
 }

@@ -117,9 +117,11 @@ public:
 
     boost::optional<uint32_t> getQueryHash() const final;
 
+    boost::optional<std::size_t> getQueryStatsKeyHash() const final;
+
     bool shouldOmitDiagnosticInformation() const final;
 
-    std::unique_ptr<query_stats::KeyGenerator> getKeyGenerator() final;
+    std::unique_ptr<query_stats::Key> getKey() final;
 
 public:
     /**
@@ -183,11 +185,11 @@ private:
     // profiler.
     bool _shouldOmitDiagnosticInformation = false;
 
-    // If boost::none, telemetry should not be collected for this cursor.
-    boost::optional<std::size_t> _queryStatsStoreKeyHash;
-    // The KeyGenerator used by query stats to generate the query stats store key.
+    // If boost::none, queryStats should not be collected for this cursor.
+    boost::optional<std::size_t> _queryStatsKeyHash;
 
-    std::unique_ptr<query_stats::KeyGenerator> _queryStatsKeyGenerator;
+    // The Key used by query stats to generate the query stats store key.
+    std::unique_ptr<query_stats::Key> _queryStatsKey;
 
     // Tracks if kill() has been called on the cursor. Multiple calls to kill() are treated as a
     // noop.

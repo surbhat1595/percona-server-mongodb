@@ -79,8 +79,7 @@ StageConstraints DocumentSourceChangeStreamEnsureResumeTokenPresent::constraints
     // inter-node parallelism and potentially reducing the amount of data sent form each shard to
     // the mongoS.
     constraints.canSwapWithMatch = true;
-    constraints.canSwapWithRedact = true;
-    constraints.canSwapWithSingleDocTransform = true;
+    constraints.canSwapWithSingleDocTransformOrRedact = true;
 
     return constraints;
 }
@@ -155,18 +154,16 @@ DocumentSource::GetNextResult DocumentSourceChangeStreamEnsureResumeTokenPresent
 }
 
 Value DocumentSourceChangeStreamEnsureResumeTokenPresent::serialize(
-    SerializationOptions opts) const {
+    const SerializationOptions& opts) const {
     BSONObjBuilder builder;
     if (opts.verbosity) {
         BSONObjBuilder sub(builder.subobjStart(DocumentSourceChangeStream::kStageName));
         sub.append("stage"_sd, kStageName);
-        opts.serializeLiteral(ResumeToken(_tokenFromClient).toDocument())
-            .addToBsonObj(&sub, "resumeToken"_sd);
+        sub << "resumeToken"_sd << Value(ResumeToken(_tokenFromClient).toDocument(opts));
         sub.done();
     } else {
         BSONObjBuilder sub(builder.subobjStart(kStageName));
-        opts.serializeLiteral(ResumeToken(_tokenFromClient).toDocument())
-            .addToBsonObj(&sub, "resumeToken"_sd);
+        sub << "resumeToken"_sd << Value(ResumeToken(_tokenFromClient).toDocument(opts));
         sub.done();
     }
     return Value(builder.obj());

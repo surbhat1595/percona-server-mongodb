@@ -250,8 +250,8 @@ roles:
                   - listShards # clusterManager gets this also
                   - netstat
                   - operationMetrics
-                  - replSetGetConfig # clusterMonitor gets this also
-                  - replSetGetStatus # clusterMonitor gets this also
+                  - replSetGetConfig # clusterManager gets this also
+                  - replSetGetStatus # clusterManager gets this also
                   - serverStatus
                   - top
                   - useUUID
@@ -259,6 +259,8 @@ roles:
                   - shardingState
                   - allCollectionStats
                   - shardedDataDistribution
+                  - queryStatsRead
+                  - queryStatsReadTransformed
             - matchType: any_normal
               actions: &clusterMonitorRoleDatabaseActions
                   - collStats
@@ -352,7 +354,6 @@ roles:
                   - getClusterParameter
                   - setChangeStreamState
                   - getChangeStreamState
-                  - queryStatsRead
                   - checkMetadataConsistency
                   - transitionFromDedicatedConfigServer
                   - transitionToDedicatedConfigServer

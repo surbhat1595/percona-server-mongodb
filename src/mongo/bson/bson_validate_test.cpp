@@ -34,6 +34,7 @@
 #include "mongo/base/data_view.h"
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bson_validate.h"
+#include "mongo/bson/util/bsoncolumn_util.h"
 #include "mongo/bson/util/bsoncolumnbuilder.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/db/jsobj.h"
@@ -934,6 +935,46 @@ TEST(BSONValidateColumn, BSONColumnInBSON) {
     ASSERT_EQ(status.code(), ErrorCodes::NonConformantBSON);
 }
 
+TEST(BSONValidateColumn, BSONColumnInBSONRespectsVersion) {
+    BSONColumnBuilder cb;
+    cb.append(BSON("a"
+                   << "deadbeef")
+                  .getField("a"));
+    cb.append(BSON("a" << 1).getField("a"));
+    cb.append(BSON("a" << 2).getField("a"));
+    cb.append(BSON("a" << 1).getField("a"));
+    BSONBinData columnData = cb.finalize();
+    BSONObj obj = BSON("a" << columnData);
+
+    // Change one important byte.
+    ((char*)columnData.data)[0] = '0';
+    obj = BSON("a" << columnData);
+
+    // Default refuses bad column
+    Status status = validateBSON(obj, BSONValidateMode::kDefault);
+    ASSERT_EQ(status.code(), ErrorCodes::NonConformantBSON);
+    status = validateBSON(obj, BSONValidateMode::kExtended);
+    ASSERT_EQ(status.code(), ErrorCodes::NonConformantBSON);
+    status = validateBSON(obj, BSONValidateMode::kFull);
+    ASSERT_EQ(status.code(), ErrorCodes::NonConformantBSON);
+
+    // V2 refuses bad column
+    status = validateBSON(obj, BSONValidateMode::kDefault, mongo::V2_Column);
+    ASSERT_EQ(status.code(), ErrorCodes::NonConformantBSON);
+    status = validateBSON(obj, BSONValidateMode::kExtended, mongo::V2_Column);
+    ASSERT_EQ(status.code(), ErrorCodes::NonConformantBSON);
+    status = validateBSON(obj, BSONValidateMode::kFull, mongo::V2_Column);
+    ASSERT_EQ(status.code(), ErrorCodes::NonConformantBSON);
+
+    // V1 passes bad column on default/extended, refuses on full
+    status = validateBSON(obj, BSONValidateMode::kDefault, mongo::V1_Original);
+    ASSERT_OK(status);
+    status = validateBSON(obj, BSONValidateMode::kExtended, mongo::V1_Original);
+    ASSERT_OK(status);
+    status = validateBSON(obj, BSONValidateMode::kFull, mongo::V1_Original);
+    ASSERT_EQ(status.code(), ErrorCodes::NonConformantBSON);
+}
+
 TEST(BSONValidateColumn, BSONColumnMissingEOO) {
     BSONColumnBuilder cb;
     cb.append(BSON("a"
@@ -949,6 +990,24 @@ TEST(BSONValidateColumn, BSONColumnMissingEOO) {
     ((char*)columnData.data)[columnData.length - 2] = 0;
     ASSERT_EQ(validateBSONColumn((char*)columnData.data, columnData.length - 1).code(),
               ErrorCodes::InvalidBSON);
+}
+
+TEST(BSONValidateColumn, BSONColumnFieldnameNotEmpty) {
+    BSONColumnBuilder cb;
+    cb.append(BSON("a"
+                   << "deadbeef")
+                  .getField("a"));
+    BSONBinData columnData = cb.finalize();
+    ASSERT_OK(validateBSONColumn((char*)columnData.data, columnData.length));
+
+    char buf[1024];
+    buf[0] = ((const char*)columnData.data)[0];
+    buf[1] = 'f';
+    buf[2] = 'o';
+    buf[3] = 'o';
+    memcpy(buf + 4, ((const char*)columnData.data) + 1, columnData.length - 1);
+
+    ASSERT_EQ(validateBSONColumn(buf, columnData.length + 3).code(), ErrorCodes::NonConformantBSON);
 }
 
 TEST(BSONValidateColumn, BSONColumnNoOverflowMissingAllEOOInColumn) {
@@ -1102,6 +1161,20 @@ TEST(BSONValidateColumn, BSONColumnInterleavedEmptyObjectPasses) {
                   .getField("c"));
     BSONBinData columnData = cb.finalize();
     ASSERT_OK(validateBSONColumn((char*)columnData.data, columnData.length));
+}
+
+TEST(BSONValidateColumn, BSONColumnInterleavedNestedInterleaved) {
+    BufBuilder buffer;
+    BSONObj ref = BSON("c" << 1);
+
+    buffer.appendChar(bsoncolumn::kInterleavedStartControlByteLegacy);
+    buffer.appendBuf(ref.objdata(), ref.objsize());
+    buffer.appendChar(bsoncolumn::kInterleavedStartControlByteLegacy);
+    buffer.appendBuf(ref.objdata(), ref.objsize());
+    buffer.appendChar(0);
+    buffer.appendChar(0);
+
+    ASSERT_EQ(validateBSONColumn(buffer.buf(), buffer.len()), ErrorCodes::NonConformantBSON);
 }
 
 TEST(BSONValidateColumn, BSONColumnNoOverflowBlocksShort) {

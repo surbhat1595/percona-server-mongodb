@@ -317,11 +317,13 @@ public:
     /**
      * Helpers to serialize a pipeline.
      */
-    std::vector<Value> serialize(boost::optional<SerializationOptions> opts = boost::none) const;
+    std::vector<Value> serialize(
+        boost::optional<const SerializationOptions&> opts = boost::none) const;
     std::vector<BSONObj> serializeToBson(
-        boost::optional<SerializationOptions> opts = boost::none) const;
+        boost::optional<const SerializationOptions&> opts = boost::none) const;
     static std::vector<Value> serializeContainer(
-        const SourceContainer& container, boost::optional<SerializationOptions> opts = boost::none);
+        const SourceContainer& container,
+        boost::optional<const SerializationOptions&> opts = boost::none);
 
     // The initial source is special since it varies between mongos and mongod.
     void addInitialSource(boost::intrusive_ptr<DocumentSource> source);
@@ -337,7 +339,8 @@ public:
      * Write the pipeline's operators to a std::vector<Value>, providing the level of detail
      * specified by 'verbosity'.
      */
-    std::vector<Value> writeExplainOps(SerializationOptions opts = SerializationOptions()) const;
+    std::vector<Value> writeExplainOps(
+        const SerializationOptions& opts = SerializationOptions{}) const;
 
     /**
      * Returns the dependencies needed by this pipeline. 'unavailableMetadata' should reflect what
@@ -413,6 +416,12 @@ public:
      */
     boost::intrusive_ptr<DocumentSource> popFrontWithNameAndCriteria(
         StringData targetStageName, std::function<bool(const DocumentSource* const)> predicate);
+
+    /**
+     * Appends another pipeline to the existing pipeline.
+     * NOTE: The other pipeline will be destroyed.
+     */
+    void appendPipeline(std::unique_ptr<Pipeline, PipelineDeleter> otherPipeline);
 
     /**
      * Performs common validation for top-level or facet pipelines. Throws if the pipeline is

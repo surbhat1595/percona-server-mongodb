@@ -123,7 +123,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/clustered_collection_options',
         '$BUILD_DIR/mongo/db/catalog/collection_crud',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/session/logical_session_id_helpers',
         '$BUILD_DIR/mongo/db/storage/key_string',
         '$BUILD_DIR/mongo/db/transaction/transaction',
@@ -200,7 +199,7 @@ env.Library(
         'curop_failpoint_helpers.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         '$BUILD_DIR/mongo/util/fail_point',
     ],
 )
@@ -601,7 +600,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/clustered_collection_options',
         '$BUILD_DIR/mongo/db/catalog/collection_crud',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/repl/storage_interface',
         'change_stream_options_manager',
         'change_stream_serverless_helpers',
@@ -969,7 +967,6 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/collection_uuid_mismatch_info',
         '$BUILD_DIR/mongo/db/catalog/local_oplog_info',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
         'multitenancy',
         'server_base',
         'storage/capped_snapshots',
@@ -1084,7 +1081,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         'not_primary_error_tracker',
         'ops/write_ops_parsers',
     ],
@@ -1132,7 +1129,6 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/transport/service_entry_point',
         'curop_metrics',
         'rw_concern_d',
@@ -1226,7 +1222,6 @@ env.Library(
         'catalog/collection_catalog',
         'catalog/index_build_entry_idl',
         'index_build_entry_helpers',
-        'query/op_metrics',
         'repl/tenant_migration_access_blocker',
         'resumable_index_builds_idl',
         's/forwardable_operation_metadata',
@@ -1319,7 +1314,7 @@ env.Library(
         "curop_metrics.cpp",
     ],
     LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/query/op_metrics",
+        "$BUILD_DIR/mongo/db/query/query_stats/query_stats",
         "commands/server_status_core",
     ],
 )
@@ -1345,7 +1340,7 @@ env.Library(
         'write_concern.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         'read_write_concern_defaults',
         'repl/read_concern_args',
         'repl/speculative_majority_read_info',
@@ -1369,7 +1364,6 @@ env.Library(
         'read_concern_mongod.idl',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/s/grid',
         'concurrency/exception_util',
         'repl/repl_coordinator_interface',
@@ -1583,7 +1577,6 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/auth/auth_checks',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/scripting/scripting',
         '$BUILD_DIR/mongo/util/background_job',
         '$BUILD_DIR/mongo/util/elapsed_tracker',
@@ -1716,6 +1709,7 @@ env.Library(
         'pipeline/make_js_function.cpp',
         'pipeline/monotonic_expression.cpp',
         'pipeline/variables.cpp',
+        'query/query_shape/cmd_with_let_shape.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/bson/util/bson_extract',
@@ -1741,7 +1735,7 @@ env.Library(
         'query/collation/collator_interface',
         'query/datetime/date_time_support',
         'query/query_knobs',
-        'serialization_options',
+        'query/query_shape/query_shape_common',
         'stats/counters',
         'update/pattern_cmp',
     ],
@@ -1751,19 +1745,6 @@ env.Library(
         'service_context',
         'vector_clock',
     ],
-)
-
-env.Library(
-    target='serialization_options',
-    source=[
-        'query/serialization_options.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/exec/document_value/document_value',
-        '$BUILD_DIR/mongo/db/pipeline/field_path',
-    ],
-    LIBDEPS_PRIVATE=[],
 )
 
 env.Library(
@@ -1881,7 +1862,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/pipeline/lite_parsed_document_source',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         '$BUILD_DIR/mongo/db/session/logical_session_id',
         'commands',
     ],
@@ -2356,7 +2337,6 @@ env.Library(
     LIBDEPS_PRIVATE=[
         # NOTE: If you need to add a static or mongo initializer to mongod startup,
         # please add that library here, as a private library dependency.
-        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/executor/async_rpc_error_info',
         '$BUILD_DIR/mongo/executor/network_interface_factory',
         '$BUILD_DIR/mongo/rpc/rpc',
@@ -2490,7 +2470,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/change_stream_options_manager',
         '$BUILD_DIR/mongo/db/change_streams_cluster_parameter',
         '$BUILD_DIR/mongo/db/pipeline/change_stream_expired_pre_image_remover',
-        '$BUILD_DIR/mongo/db/query/stats/query_stats',
         '$BUILD_DIR/mongo/db/s/query_analysis_writer',
         '$BUILD_DIR/mongo/db/set_change_stream_state_coordinator',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter',
@@ -2536,6 +2515,7 @@ env.Library(
         'op_observer/user_write_block_mode_op_observer',
         'periodic_runner_job_abort_expired_transactions',
         'pipeline/process_interface/mongod_process_interface_factory',
+        'query/stats/stats',
         'repl/drop_pending_collection_reaper',
         'repl/initial_syncer',
         'repl/repl_coordinator_impl',
@@ -2758,7 +2738,6 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/ops/write_ops',
             '$BUILD_DIR/mongo/db/pipeline/change_stream_expired_pre_image_remover',
             '$BUILD_DIR/mongo/db/query/common_query_enums_and_helpers',
-            '$BUILD_DIR/mongo/db/query/op_metrics',
             '$BUILD_DIR/mongo/db/query/query_test_service_context',
             '$BUILD_DIR/mongo/db/repl/image_collection_entry',
             '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',

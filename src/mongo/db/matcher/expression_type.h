@@ -76,8 +76,10 @@ public:
         _debugStringAttachTagInfo(&debug);
     }
 
-    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final {
-        opts.appendLiteral(bob, name(), _typeSet.toBSONArray());
+    void appendSerializedRightHandSide(BSONObjBuilder* bob,
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final {
+        bob->appendArray(name(), _typeSet.toBSONArray());
     }
 
     bool equivalent(const MatchExpression* other) const final {
@@ -238,7 +240,9 @@ public:
         _debugStringAttachTagInfo(&debug);
     }
 
-    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final {
+    void appendSerializedRightHandSide(BSONObjBuilder* bob,
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final {
         if (opts.literalPolicy == LiteralSerializationPolicy::kUnchanged) {
             bob->append(name(), _binDataSubType);
         } else {

@@ -181,7 +181,7 @@ DocumentSource::GetNextResult DocumentSourceChangeStreamCheckInvalidate::doGetNe
     return nextInput;
 }
 
-Value DocumentSourceChangeStreamCheckInvalidate::serialize(SerializationOptions opts) const {
+Value DocumentSourceChangeStreamCheckInvalidate::serialize(const SerializationOptions& opts) const {
     BSONObjBuilder builder;
     if (opts.verbosity) {
         BSONObjBuilder sub(builder.subobjStart(DocumentSourceChangeStream::kStageName));
@@ -192,8 +192,8 @@ Value DocumentSourceChangeStreamCheckInvalidate::serialize(SerializationOptions 
     if (_startAfterInvalidate) {
         spec.setStartAfterInvalidate(ResumeToken(*_startAfterInvalidate));
     }
-    return Value(
-        Document{{DocumentSourceChangeStreamCheckInvalidate::kStageName, spec.toBSON(opts)}});
+    builder.append(DocumentSourceChangeStreamCheckInvalidate::kStageName, spec.toBSON(opts));
+    return Value(builder.obj());
 }
 
 }  // namespace mongo

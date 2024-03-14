@@ -172,7 +172,8 @@ void _gatherIndexEntryErrors(OperationContext* opCtx,
         ValidateResults tempValidateResults;
         BSONObjBuilder tempBuilder;
 
-        indexValidator->traverseRecordStore(opCtx, &tempValidateResults, &tempBuilder);
+        indexValidator->traverseRecordStore(
+            opCtx, &tempValidateResults, &tempBuilder, validateState->validationVersion());
     }
 
     LOGV2_OPTIONS(
@@ -499,6 +500,7 @@ Status validate(OperationContext* opCtx,
                 const NamespaceString& nss,
                 ValidateMode mode,
                 RepairMode repairMode,
+                const AdditionalOptions& additionalOptions,
                 ValidateResults* results,
                 BSONObjBuilder* output,
                 bool logDiagnostics) {
@@ -506,7 +508,7 @@ Status validate(OperationContext* opCtx,
 
     // This is deliberately outside of the try-catch block, so that any errors thrown in the
     // constructor fail the cmd, as opposed to returning OK with valid:false.
-    ValidateState validateState(opCtx, nss, mode, repairMode, logDiagnostics);
+    ValidateState validateState(opCtx, nss, mode, repairMode, additionalOptions, logDiagnostics);
 
     const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     // Check whether we are allowed to read from this node after acquiring our locks. If we are
@@ -599,7 +601,8 @@ Status validate(OperationContext* opCtx,
         // the collection. For clustered collections, the validator also verifies that the
         // record key (RecordId) matches the cluster key field in the record value (document's
         // cluster key).
-        indexValidator.traverseRecordStore(opCtx, results, output);
+        indexValidator.traverseRecordStore(
+            opCtx, results, output, additionalOptions.validationVersion);
 
         // Pause collection validation while a lock is held and between collection and index data
         // validation.

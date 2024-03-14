@@ -29,6 +29,9 @@
 
 #pragma once
 
+#include "mongo/base/status.h"
+#include "mongo/bson/bson_validate.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/catalog/validate_results.h"
 #include "mongo/db/namespace_string.h"
 
@@ -94,6 +97,14 @@ enum class RepairMode {
 };
 
 /**
+ * Additional validation options that can run in any mode.
+ */
+struct AdditionalOptions {
+    bool warnOnSchemaValidation = false;  // only warn on schema validation failure
+    ValidationVersion validationVersion = currentValidationVersion;
+};
+
+/**
  * Expects the caller to hold no locks.
  *
  * @return OK if the validate run successfully
@@ -104,6 +115,7 @@ Status validate(OperationContext* opCtx,
                 const NamespaceString& nss,
                 ValidateMode mode,
                 RepairMode repairMode,
+                const AdditionalOptions& additionalOptions,
                 ValidateResults* results,
                 BSONObjBuilder* output,
                 bool logDiagnostics);

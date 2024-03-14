@@ -32,7 +32,7 @@
 #include <memory>
 
 #include "mongo/db/curop.h"
-#include "mongo/db/query/query_stats.h"
+#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/query/router_stage_limit.h"
 #include "mongo/s/query/router_stage_merge.h"
@@ -75,8 +75,8 @@ ClusterClientCursorImpl::ClusterClientCursorImpl(OperationContext* opCtx,
       _lastUseDate(_createdDate),
       _queryHash(CurOp::get(opCtx)->debug().queryHash),
       _shouldOmitDiagnosticInformation(CurOp::get(opCtx)->getShouldOmitDiagnosticInformation()),
-      _queryStatsStoreKeyHash(CurOp::get(opCtx)->debug().queryStatsStoreKeyHash),
-      _queryStatsKeyGenerator(std::move(CurOp::get(opCtx)->debug().queryStatsKeyGenerator)) {
+      _queryStatsKeyHash(CurOp::get(opCtx)->debug().queryStatsInfo.keyHash),
+      _queryStatsKey(std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key)) {
     dassert(!_params.compareWholeSortKeyOnRouter ||
             SimpleBSONObjComparator::kInstance.evaluate(
                 _params.sortToApplyOnRouter == AsyncResultsMerger::kWholeSortKeySortPattern));
@@ -95,8 +95,8 @@ ClusterClientCursorImpl::ClusterClientCursorImpl(OperationContext* opCtx,
       _lastUseDate(_createdDate),
       _queryHash(CurOp::get(opCtx)->debug().queryHash),
       _shouldOmitDiagnosticInformation(CurOp::get(opCtx)->getShouldOmitDiagnosticInformation()),
-      _queryStatsStoreKeyHash(CurOp::get(opCtx)->debug().queryStatsStoreKeyHash),
-      _queryStatsKeyGenerator(std::move(CurOp::get(opCtx)->debug().queryStatsKeyGenerator)) {
+      _queryStatsKeyHash(CurOp::get(opCtx)->debug().queryStatsInfo.keyHash),
+      _queryStatsKey(std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key)) {
     dassert(!_params.compareWholeSortKeyOnRouter ||
             SimpleBSONObjComparator::kInstance.evaluate(
                 _params.sortToApplyOnRouter == AsyncResultsMerger::kWholeSortKeySortPattern));
@@ -142,10 +142,10 @@ void ClusterClientCursorImpl::kill(OperationContext* opCtx) {
         return;
     }
 
-    if (_queryStatsStoreKeyHash && opCtx) {
+    if (_queryStatsKeyHash && opCtx) {
         query_stats::writeQueryStats(opCtx,
-                                     _queryStatsStoreKeyHash,
-                                     std::move(_queryStatsKeyGenerator),
+                                     _queryStatsKeyHash,
+                                     std::move(_queryStatsKey),
                                      _metrics.executionTime.value_or(Microseconds{0}).count(),
                                      _firstResponseExecutionTime.value_or(Microseconds{0}).count(),
                                      _metrics.nreturned.value_or(0));
@@ -242,6 +242,10 @@ boost::optional<uint32_t> ClusterClientCursorImpl::getQueryHash() const {
     return _queryHash;
 }
 
+boost::optional<std::size_t> ClusterClientCursorImpl::getQueryStatsKeyHash() const {
+    return _queryStatsKeyHash;
+}
+
 APIParameters ClusterClientCursorImpl::getAPIParameters() const {
     return _params.apiParameters;
 }
@@ -286,8 +290,8 @@ bool ClusterClientCursorImpl::shouldOmitDiagnosticInformation() const {
     return _shouldOmitDiagnosticInformation;
 }
 
-std::unique_ptr<query_stats::KeyGenerator> ClusterClientCursorImpl::getKeyGenerator() {
-    return std::move(_queryStatsKeyGenerator);
+std::unique_ptr<query_stats::Key> ClusterClientCursorImpl::getKey() {
+    return std::move(_queryStatsKey);
 }
 
 }  // namespace mongo

@@ -99,6 +99,12 @@ public:
     void acceptVisitor(MatchExpressionConstVisitor* visitor) const final {
         visitor->visit(this);
     }
+
+    void appendSerializedRightHandSide(BSONObjBuilder* bob,
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final {
+        opts.appendLiteral(bob, name(), _rhs, Value((long long)1));
+    }
 };
 
 }  // namespace mongo

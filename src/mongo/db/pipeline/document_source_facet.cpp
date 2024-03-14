@@ -185,7 +185,7 @@ DocumentSource::GetNextResult DocumentSourceFacet::doGetNext() {
     return resultDoc.freeze();
 }
 
-Value DocumentSourceFacet::serialize(SerializationOptions opts) const {
+Value DocumentSourceFacet::serialize(const SerializationOptions& opts) const {
     MutableDocument serialized;
     for (auto&& facet : _facets) {
         serialized[opts.serializeFieldPathFromString(facet.name)] =
@@ -288,6 +288,8 @@ DepsTracker::State DocumentSourceFacet::getDependencies(DepsTracker* deps) const
         deps->fields.insert(subDepsTracker.fields.begin(), subDepsTracker.fields.end());
 
         deps->needWholeDocument = deps->needWholeDocument || subDepsTracker.needWholeDocument;
+        // If the subpipeline needs any metadata, the top level pipeline must know to generate it.
+        deps->metadataDeps() |= subDepsTracker.metadataDeps();
 
         // The text score is the only type of metadata that could be needed by $facet.
         deps->setNeedsMetadata(
@@ -336,20 +338,25 @@ intrusive_ptr<DocumentSource> DocumentSourceFacet::createFromBson(
             });
         });
 
-        // Validate that none of the facet pipelines have any conflicting HostTypeRequirements. This
-        // verifies both that all stages within each pipeline are consistent, and that the pipelines
-        // are consistent with one another.
-        if (!needsShard && pipeline->needsShard()) {
-            needsShard.emplace(facetName);
+        // These checks potentially require that we check the catalog to determine where our data
+        // lives. In circumstances where we aren't actually running the query, we don't need to do
+        // this (and it can erroneously error - SERVER-83912).
+        if (expCtx->mongoProcessInterface->isExpectedToExecuteQueries()) {
+            // Validate that none of the facet pipelines have any conflicting HostTypeRequirements.
+            // This verifies both that all stages within each pipeline are consistent, and that the
+            // pipelines are consistent with one another.
+            if (!needsShard && pipeline->needsShard()) {
+                needsShard.emplace(facetName);
+            }
+            if (!needsMongoS && pipeline->needsMongosMerger()) {
+                needsMongoS.emplace(facetName);
+            }
+            uassert(ErrorCodes::IllegalOperation,
+                    str::stream() << "$facet pipeline '" << *needsMongoS
+                                  << "' must run on mongoS, but '" << *needsShard
+                                  << "' requires a shard",
+                    !(needsShard && needsMongoS));
         }
-        if (!needsMongoS && pipeline->needsMongosMerger()) {
-            needsMongoS.emplace(facetName);
-        }
-        uassert(ErrorCodes::IllegalOperation,
-                str::stream() << "$facet pipeline '" << *needsMongoS
-                              << "' must run on mongoS, but '" << *needsShard
-                              << "' requires a shard",
-                !(needsShard && needsMongoS));
 
         facetPipelines.emplace_back(facetName, std::move(pipeline));
     }

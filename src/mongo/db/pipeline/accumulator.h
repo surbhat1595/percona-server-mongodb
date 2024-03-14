@@ -44,7 +44,7 @@
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/memory_usage_tracker.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/stats/stats_gen.h"
 #include "mongo/db/query/stats/value_utils.h"
 #include "mongo/stdx/unordered_set.h"
@@ -140,10 +140,19 @@ public:
      */
     virtual Document serialize(boost::intrusive_ptr<Expression> initializer,
                                boost::intrusive_ptr<Expression> argument,
-                               SerializationOptions options = {}) const {
+                               const SerializationOptions& options = {}) const {
         ExpressionConstant const* ec = dynamic_cast<ExpressionConstant const*>(initializer.get());
         invariant(ec);
         invariant(ec->getValue().nullish());
+
+        // We want to wrap constant expressions in order to avoid re-parsing issues in cases where
+        // an array is being passed through a $literal, e.g. $push: {$literal: [1, a]}. Removing
+        // the wrapper would cause the query to error out since accumulators are unary operators.
+        ExpressionConstant const* argumentConst = dynamic_cast<ExpressionConstant*>(argument.get());
+        if (argumentConst) {
+            return DOC(getOpName() << argumentConst->serializeConstant(
+                           options, argumentConst->getValue(), true));
+        }
 
         return DOC(getOpName() << argument->serialize(options));
     }

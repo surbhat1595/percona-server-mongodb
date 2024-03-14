@@ -806,6 +806,11 @@ AutoGetCollectionForReadPITCatalog::AutoGetCollectionForReadPITCatalog(
 
         checkCollectionUUIDMismatch(opCtx, catalog, _resolvedNss, _coll, options._expectedUUID);
 
+        if (receivedShardVersion) {
+            auto_get_collection::checkShardingAndLocalCatalogCollectionUUIDMatch(
+                opCtx, _resolvedNss, *receivedShardVersion, collDesc, _coll);
+        }
+
         return;
     }
 
@@ -1583,17 +1588,15 @@ const NamespaceString& AutoGetCollectionForReadCommandMaybeLockFree::getNss() co
     }
 }
 
-StringData AutoGetCollectionForReadCommandMaybeLockFree::getCollectionType() const {
+query_shape::CollectionType AutoGetCollectionForReadCommandMaybeLockFree::getCollectionType()
+    const {
     if (auto&& view = getView()) {
-        if (view->timeseries())
-            return "timeseries"_sd;
-        return "view"_sd;
+        return view->timeseries() ? query_shape::CollectionType::kTimeseries
+                                  : query_shape::CollectionType::kView;
     }
     auto&& collection = getCollection();
-    if (!collection) {
-        return "nonExistent"_sd;
-    }
-    return "collection"_sd;
+    return collection ? query_shape::CollectionType::kCollection
+                      : query_shape::CollectionType::kNonExistent;
 }
 
 

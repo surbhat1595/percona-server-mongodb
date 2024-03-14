@@ -48,9 +48,11 @@ void InternalSchemaRootDocEqMatchExpression::debugString(StringBuilder& debug,
 }
 
 void InternalSchemaRootDocEqMatchExpression::serialize(BSONObjBuilder* out,
-                                                       SerializationOptions opts) const {
+                                                       const SerializationOptions& opts,
+                                                       bool includePath) const {
     BSONObjBuilder subObj(out->subobjStart(kName));
-    opts.addHmacedObjToBuilder(&subObj, _rhsObj);
+    SerializationOptions options = opts;
+    options.addHmacedObjToBuilder(&subObj, _rhsObj);
     subObj.doneFast();
 }
 

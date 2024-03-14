@@ -253,8 +253,8 @@ public:
     BSONObj rewriteAggExpressionForTest(const BSONObj& obj) {
         auto expr = Expression::parseExpression(&_expCtx, obj, _expCtx.variablesParseState);
         auto result = rewriteExpression(expr.get());
-        return result ? result->serialize(false).getDocument().toBson()
-                      : expr->serialize(false).getDocument().toBson();
+        return result ? result->serialize().getDocument().toBson()
+                      : expr->serialize().getDocument().toBson();
     }
 
 private:

@@ -56,8 +56,9 @@
 #include "mongo/db/query/explain_common.h"
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/fle/server_rewrite.h"
-#include "mongo/db/query/query_stats.h"
-#include "mongo/db/query/query_stats_aggregate_key_generator.h"
+#include "mongo/db/query/query_stats/agg_key.h"
+#include "mongo/db/query/query_stats/key.h"
+#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/views/resolved_view.h"
@@ -324,7 +325,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> parsePipelineAndRegisterQueryStats(
     // Skip query stats recording for queryable encryption queries.
     if (!shouldDoFLERewrite) {
         query_stats::registerRequest(opCtx, executionNss, [&]() {
-            return std::make_unique<query_stats::AggregateKeyGenerator>(
+            return std::make_unique<query_stats::AggKey>(
                 request, *pipeline, expCtx, involvedNamespaces, executionNss);
         });
     }
@@ -501,7 +502,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
             // query_stats::registerRequest.
             query_stats::registerRequest(opCtx, namespaces.executionNss, [&]() {
                 auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
-                return std::make_unique<query_stats::AggregateKeyGenerator>(
+                return std::make_unique<query_stats::AggKey>(
                     request, *pipeline, expCtx, involvedNamespaces, namespaces.executionNss);
             });
         }
@@ -534,10 +535,11 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                 // If this is an explain write the explain output and return.
                 auto expCtx = targeter.pipeline->getContext();
                 if (expCtx->explain) {
+                    auto opts = SerializationOptions{.verbosity = boost::make_optional(
+                                                         ExplainOptions::Verbosity::kQueryPlanner)};
                     *result << "splitPipeline" << BSONNULL << "mongos"
                             << Document{{"host", getHostNameCachedAndPort()},
-                                        {"stages",
-                                         targeter.pipeline->writeExplainOps(*expCtx->explain)}};
+                                        {"stages", targeter.pipeline->writeExplainOps(opts)}};
                     return Status::OK();
                 }
 

@@ -61,10 +61,6 @@ Document fromBson(BSONObj obj) {
     return Document(obj);
 }
 
-std::string applyHmacForTest(StringData s) {
-    return str::stream() << "HASH<" << s << ">";
-}
-
 namespace FieldPath {
 
 /** The provided field path does not pass validation. */
@@ -232,9 +228,7 @@ TEST(FieldPath, ScalarVariableWithDottedFieldPathOptimizesToConstantMissingValue
 }
 
 TEST(FieldPath, SerializeWithRedaction) {
-    SerializationOptions options;
-    options.transformIdentifiersCallback = applyHmacForTest;
-    options.transformIdentifiers = true;
+    SerializationOptions options = SerializationOptions::kMarkIdentifiers_FOR_TEST;
 
     auto expCtx = ExpressionContextForTest{};
     intrusive_ptr<Expression> expression =
@@ -523,7 +517,7 @@ public:
             ExpressionFieldPath::deprecatedCreate(&expCtx, "a.b.c");
         ASSERT_BSONOBJ_BINARY_EQ(BSON("foo"
                                       << "$a.b.c"),
-                                 BSON("foo" << expression->serialize(false)));
+                                 BSON("foo" << expression->serialize()));
     }
 };
 
@@ -535,7 +529,7 @@ public:
         intrusive_ptr<Expression> expression =
             ExpressionFieldPath::deprecatedCreate(&expCtx, "a.b.c");
         BSONArrayBuilder bab;
-        bab << expression->serialize(false);
+        bab << expression->serialize();
         ASSERT_BSONOBJ_BINARY_EQ(BSON_ARRAY("$a.b.c"), bab.arr());
     }
 };

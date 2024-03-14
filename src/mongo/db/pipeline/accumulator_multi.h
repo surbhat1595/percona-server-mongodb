@@ -39,7 +39,7 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/memory_token_container_util.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/sort_pattern.h"
 
 namespace mongo {
@@ -92,7 +92,7 @@ public:
      */
     static void serializeHelper(const boost::intrusive_ptr<Expression>& initializer,
                                 const boost::intrusive_ptr<Expression>& argument,
-                                SerializationOptions options,
+                                const SerializationOptions& options,
                                 MutableDocument& md);
 
 protected:
@@ -140,7 +140,7 @@ public:
 
     Document serialize(boost::intrusive_ptr<Expression> initializer,
                        boost::intrusive_ptr<Expression> argument,
-                       SerializationOptions options = {}) const final;
+                       const SerializationOptions& options = {}) const final;
 
     void reset() final;
 
@@ -215,7 +215,7 @@ public:
 
     Document serialize(boost::intrusive_ptr<Expression> initializer,
                        boost::intrusive_ptr<Expression> argument,
-                       SerializationOptions options = {}) const final;
+                       const SerializationOptions& options = {}) const final;
 
     void reset() final;
 
@@ -330,7 +330,7 @@ public:
 
     Document serialize(boost::intrusive_ptr<Expression> initializer,
                        boost::intrusive_ptr<Expression> argument,
-                       SerializationOptions options = {}) const final;
+                       const SerializationOptions& options = {}) const final;
 
     void reset() final;
 

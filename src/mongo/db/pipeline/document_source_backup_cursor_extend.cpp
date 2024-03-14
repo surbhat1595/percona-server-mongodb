@@ -34,7 +34,7 @@ Copyright (C) 2021-present Percona and/or its affiliates. All rights reserved.
 
 #include "mongo/db/pipeline/document_source_backup_cursor_extend.h"
 
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/logv2/log.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -66,7 +66,7 @@ const char* DocumentSourceBackupCursorExtend::getSourceName() const {
     return kStageName.rawData();
 }
 
-Value DocumentSourceBackupCursorExtend::serialize(SerializationOptions opts) const {
+Value DocumentSourceBackupCursorExtend::serialize(const SerializationOptions& opts) const {
     return Value(
         Document{{getSourceName(),
                   Document{{kBackupId, Value(_backupId)}, {kTimestamp, Value(_extendTo)}}}});

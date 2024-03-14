@@ -10,8 +10,13 @@ executor:
   archive:
     tests:
     - src/mongo/db/modules/enterprise/jstests/hot_backups/multiVersion/*.js
+    - src/mongo/db/modules/enterprise/jstests/search/multiVersion/*.js
   config:
     shell_options:
+      global_vars:
+        TestData:
+          setParameters:
+            bsonTestValidationVersion: 1
       nodb: ''
 matrix_suite: true
 selector:
@@ -28,4 +33,5 @@ selector:
   roots:
   - jstests/multiVersion/**/*.js
   - src/mongo/db/modules/*/jstests/hot_backups/multiVersion/*.js
+  - src/mongo/db/modules/*/jstests/search/multiVersion/*.js
 test_kind: js_test

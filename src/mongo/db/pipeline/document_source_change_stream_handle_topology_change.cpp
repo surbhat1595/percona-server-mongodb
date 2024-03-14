@@ -44,6 +44,11 @@
 namespace mongo {
 namespace {
 
+REGISTER_INTERNAL_DOCUMENT_SOURCE(_internalChangeStreamHandleTopologyChange,
+                                  LiteParsedDocumentSourceChangeStreamInternal::parse,
+                                  DocumentSourceChangeStreamHandleTopologyChange::createFromBson,
+                                  true);
+
 // Failpoint to throw an exception when the 'kNewShardDetected' event is observed.
 MONGO_FAIL_POINT_DEFINE(throwChangeStreamTopologyChangeExceptionToClient);
 
@@ -108,6 +113,15 @@ bool isShardConfigEvent(const Document& eventDoc) {
 }  // namespace
 
 boost::intrusive_ptr<DocumentSourceChangeStreamHandleTopologyChange>
+DocumentSourceChangeStreamHandleTopologyChange::createFromBson(
+    const BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    uassert(8131300,
+            str::stream() << "the '" << kStageName << "' spec must be an empty object",
+            elem.type() == Object && elem.Obj().isEmpty());
+    return new DocumentSourceChangeStreamHandleTopologyChange(expCtx);
+}
+
+boost::intrusive_ptr<DocumentSourceChangeStreamHandleTopologyChange>
 DocumentSourceChangeStreamHandleTopologyChange::create(
     const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     return new DocumentSourceChangeStreamHandleTopologyChange(expCtx);
@@ -133,8 +147,7 @@ StageConstraints DocumentSourceChangeStreamHandleTopologyChange::constraints(
     // stages and ensures that they get pushed down to the shards, as this stage bisects the change
     // streams pipeline.
     constraints.canSwapWithMatch = true;
-    constraints.canSwapWithRedact = true;
-    constraints.canSwapWithSingleDocTransform = true;
+    constraints.canSwapWithSingleDocTransformOrRedact = true;
 
     return constraints;
 }
@@ -256,7 +269,8 @@ BSONObj DocumentSourceChangeStreamHandleTopologyChange::replaceResumeTokenInComm
     return newCmd.freeze().toBson();
 }
 
-Value DocumentSourceChangeStreamHandleTopologyChange::serialize(SerializationOptions opts) const {
+Value DocumentSourceChangeStreamHandleTopologyChange::serialize(
+    const SerializationOptions& opts) const {
     if (opts.verbosity) {
         return Value(DOC(DocumentSourceChangeStream::kStageName
                          << DOC("stage"

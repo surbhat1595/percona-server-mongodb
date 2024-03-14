@@ -135,10 +135,12 @@ void ListOfMatchExpression::_debugList(StringBuilder& debug, int indentationLeve
         _expressions[i]->debugString(debug, indentationLevel + 1);
 }
 
-void ListOfMatchExpression::_listToBSON(BSONArrayBuilder* out, SerializationOptions opts) const {
+void ListOfMatchExpression::_listToBSON(BSONArrayBuilder* out,
+                                        const SerializationOptions& opts,
+                                        bool includePath) const {
     for (unsigned i = 0; i < _expressions.size(); i++) {
         BSONObjBuilder childBob(out->subobjStart());
-        _expressions[i]->serialize(&childBob, opts);
+        _expressions[i]->serialize(&childBob, opts, includePath);
     }
     out->doneFast();
 }
@@ -341,19 +343,19 @@ MatchExpression::ExpressionOptimizerFunc ListOfMatchExpression::getOptimizer() c
             if (countEquivEqPaths > 1) {
                 tassert(3401202, "There must be a common path", childPath);
                 auto inExpression = std::make_unique<InMatchExpression>(StringData(*childPath));
-                auto nonEquivOrExpr =
-                    (countNonEquivExpr > 0) ? std::make_unique<OrMatchExpression>() : nullptr;
+                std::vector<std::unique_ptr<MatchExpression>> nonEquivOrChildren;
+                nonEquivOrChildren.reserve(countNonEquivExpr);
                 BSONArrayBuilder bab;
 
                 for (auto& childExpression : children) {
                     if (*childPath != childExpression->path()) {
-                        nonEquivOrExpr->add(std::move(childExpression));
+                        nonEquivOrChildren.push_back(std::move(childExpression));
                     } else if (childExpression->matchType() == MatchExpression::EQ) {
                         std::unique_ptr<EqualityMatchExpression> eqExpressionPtr{
                             static_cast<EqualityMatchExpression*>(childExpression.release())};
                         if (isRegEx(eqExpressionPtr->getData()) ||
                             eqExpressionPtr->getCollator() != eqCollator) {
-                            nonEquivOrExpr->add(std::move(eqExpressionPtr));
+                            nonEquivOrChildren.push_back(std::move(eqExpressionPtr));
                         } else {
                             bab.append(eqExpressionPtr->getData());
                         }
@@ -368,13 +370,13 @@ MatchExpression::ExpressionOptimizerFunc ListOfMatchExpression::getOptimizer() c
                                 "Conversion from OR to IN should always succeed",
                                 status == Status::OK());
                     } else {
-                        nonEquivOrExpr->add(std::move(childExpression));
+                        nonEquivOrChildren.push_back(std::move(childExpression));
                     }
                 }
                 children.clear();
                 tassert(3401204,
                         "Incorrect number of non-equivalent expressions",
-                        !nonEquivOrExpr || nonEquivOrExpr->numChildren() == countNonEquivExpr);
+                        nonEquivOrChildren.size() == countNonEquivExpr);
 
                 auto backingArr = bab.arr();
                 std::vector<BSONElement> inEqualities;
@@ -398,11 +400,13 @@ MatchExpression::ExpressionOptimizerFunc ListOfMatchExpression::getOptimizer() c
                 if (countNonEquivExpr > 0) {
                     auto parentOrExpr = std::make_unique<OrMatchExpression>();
                     parentOrExpr->add(std::move(inExpression));
-                    if (countNonEquivExpr == 1) {
-                        parentOrExpr->add(nonEquivOrExpr->releaseChild(0));
-                    } else {
-                        parentOrExpr->add(std::move(nonEquivOrExpr));
-                    }
+
+                    // Move all of the non-equivalent children of the original $or so that they
+                    // become children of the newly constructed $or node.
+                    auto&& childVec = *parentOrExpr->getChildVector();
+                    std::move(std::make_move_iterator(nonEquivOrChildren.begin()),
+                              std::make_move_iterator(nonEquivOrChildren.end()),
+                              std::back_inserter(childVec));
                     return parentOrExpr;
                 }
                 return inExpression;
@@ -460,7 +464,9 @@ void AndMatchExpression::debugString(StringBuilder& debug, int indentationLevel)
     _debugList(debug, indentationLevel);
 }
 
-void AndMatchExpression::serialize(BSONObjBuilder* out, SerializationOptions opts) const {
+void AndMatchExpression::serialize(BSONObjBuilder* out,
+                                   const SerializationOptions& opts,
+                                   bool includePath) const {
     if (!numChildren()) {
         // It is possible for an AndMatchExpression to have no children, resulting in the serialized
         // expression {$and: []}, which is not a valid query object.
@@ -468,7 +474,7 @@ void AndMatchExpression::serialize(BSONObjBuilder* out, SerializationOptions opt
     }
 
     BSONArrayBuilder arrBob(out->subarrayStart("$and"));
-    _listToBSON(&arrBob, opts);
+    _listToBSON(&arrBob, opts, includePath);
     arrBob.doneFast();
 }
 
@@ -499,7 +505,9 @@ void OrMatchExpression::debugString(StringBuilder& debug, int indentationLevel) 
     _debugList(debug, indentationLevel);
 }
 
-void OrMatchExpression::serialize(BSONObjBuilder* out, SerializationOptions opts) const {
+void OrMatchExpression::serialize(BSONObjBuilder* out,
+                                  const SerializationOptions& opts,
+                                  bool includePath) const {
     if (!numChildren()) {
         // It is possible for an OrMatchExpression to have no children, resulting in the serialized
         // expression {$or: []}, which is not a valid query object. An empty $or is logically
@@ -508,7 +516,7 @@ void OrMatchExpression::serialize(BSONObjBuilder* out, SerializationOptions opts
         return;
     }
     BSONArrayBuilder arrBob(out->subarrayStart("$or"));
-    _listToBSON(&arrBob, opts);
+    _listToBSON(&arrBob, opts, includePath);
 }
 
 bool OrMatchExpression::isTriviallyFalse() const {
@@ -542,9 +550,11 @@ void NorMatchExpression::debugString(StringBuilder& debug, int indentationLevel)
     _debugList(debug, indentationLevel);
 }
 
-void NorMatchExpression::serialize(BSONObjBuilder* out, SerializationOptions opts) const {
+void NorMatchExpression::serialize(BSONObjBuilder* out,
+                                   const SerializationOptions& opts,
+                                   bool includePath) const {
     BSONArrayBuilder arrBob(out->subarrayStart("$nor"));
-    _listToBSON(&arrBob, opts);
+    _listToBSON(&arrBob, opts, includePath);
 }
 
 // -------
@@ -558,9 +568,10 @@ void NotMatchExpression::debugString(StringBuilder& debug, int indentationLevel)
 
 void NotMatchExpression::serializeNotExpressionToNor(MatchExpression* exp,
                                                      BSONObjBuilder* out,
-                                                     SerializationOptions opts) {
+                                                     const SerializationOptions& opts,
+                                                     bool includePath) {
     BSONObjBuilder childBob;
-    exp->serialize(&childBob, opts);
+    exp->serialize(&childBob, opts, includePath);
     BSONObj tempObj = childBob.obj();
 
     BSONArrayBuilder tBob(out->subarrayStart("$nor"));
@@ -568,23 +579,25 @@ void NotMatchExpression::serializeNotExpressionToNor(MatchExpression* exp,
     tBob.doneFast();
 }
 
-void NotMatchExpression::serialize(BSONObjBuilder* out, SerializationOptions opts) const {
+void NotMatchExpression::serialize(BSONObjBuilder* out,
+                                   const SerializationOptions& opts,
+                                   bool includePath) const {
     if (_exp->matchType() == MatchType::AND && _exp->numChildren() == 0) {
         opts.appendLiteral(out, "$alwaysFalse", 1);
         return;
     }
 
-    if (!opts.includePath) {
+    if (!includePath) {
         BSONObjBuilder notBob(out->subobjStart("$not"));
         // Our parser does not accept a $and directly within a $not, instead expecting the direct
         // notation like {x: {$not: {$gt: 5, $lt: 0}}}. We represent such an expression with an AND
         // internally, so we un-nest it here to be able to re-parse it.
         if (_exp->matchType() == MatchType::AND) {
             for (size_t x = 0; x < _exp->numChildren(); ++x) {
-                _exp->getChild(x)->serialize(&notBob, opts);
+                _exp->getChild(x)->serialize(&notBob, opts, includePath);
             }
         } else {
-            _exp->serialize(&notBob, opts);
+            _exp->serialize(&notBob, opts, includePath);
         }
         return;
     }

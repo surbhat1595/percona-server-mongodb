@@ -33,7 +33,7 @@
 #include <functional>
 #include <queue>
 
-#include "mongo/db/query/query_stats_key_generator.h"
+#include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/s/query/cluster_client_cursor.h"
 
@@ -107,6 +107,7 @@ public:
 
     boost::optional<uint32_t> getQueryHash() const final;
 
+    boost::optional<std::size_t> getQueryStatsKeyHash() const final;
     /**
      * Returns false unless the mock cursor has been fully iterated.
      */
@@ -119,7 +120,7 @@ public:
 
     bool shouldOmitDiagnosticInformation() const final;
 
-    std::unique_ptr<query_stats::KeyGenerator> getKeyGenerator() final;
+    std::unique_ptr<query_stats::Key> getKey() final;
 
 private:
     bool _killed = false;

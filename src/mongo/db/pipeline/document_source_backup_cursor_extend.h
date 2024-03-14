@@ -89,7 +89,7 @@ public:
         return constraints;
     }
 
-    Value serialize(SerializationOptions opts = SerializationOptions()) const final;
+    Value serialize(const SerializationOptions& opts = SerializationOptions()) const final;
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
         return boost::none;

@@ -29,12 +29,13 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/document_source_query_stats.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
 namespace mongo {
@@ -54,6 +55,7 @@ public:
 };
 
 TEST_F(DocumentSourceQueryStatsTest, ShouldFailToParseIfSpecIsNotObject) {
+    RAIIServerParameterControllerForTest queryStatsFeatureFlag{"featureFlagQueryStats", true};
     ASSERT_THROWS_CODE(DocumentSourceQueryStats::createFromBson(
                            fromjson("{$queryStats: 1}").firstElement(), getExpCtx()),
                        AssertionException,
@@ -61,6 +63,7 @@ TEST_F(DocumentSourceQueryStatsTest, ShouldFailToParseIfSpecIsNotObject) {
 }
 
 TEST_F(DocumentSourceQueryStatsTest, ShouldFailToParseIfNotRunOnAdmin) {
+    RAIIServerParameterControllerForTest queryStatsFeatureFlag{"featureFlagQueryStats", true};
     getExpCtx()->ns =
         NamespaceString::makeCollectionlessAggregateNSS(DatabaseName(boost::none, "foo"));
     ASSERT_THROWS_CODE(DocumentSourceQueryStats::createFromBson(
@@ -70,6 +73,7 @@ TEST_F(DocumentSourceQueryStatsTest, ShouldFailToParseIfNotRunOnAdmin) {
 }
 
 TEST_F(DocumentSourceQueryStatsTest, ShouldFailToParseIfNotRunWithAggregateOne) {
+    RAIIServerParameterControllerForTest queryStatsFeatureFlag{"featureFlagQueryStats", true};
     getExpCtx()->ns = NamespaceString::createNamespaceString_forTest("admin.foo");
     ASSERT_THROWS_CODE(DocumentSourceQueryStats::createFromBson(
                            fromjson("{$queryStats: {}}").firstElement(), getExpCtx()),
@@ -78,6 +82,7 @@ TEST_F(DocumentSourceQueryStatsTest, ShouldFailToParseIfNotRunWithAggregateOne) 
 }
 
 TEST_F(DocumentSourceQueryStatsTest, ShouldFailToParseIfUnrecognisedParameterSpecified) {
+    RAIIServerParameterControllerForTest queryStatsFeatureFlag{"featureFlagQueryStats", true};
     ASSERT_THROWS_CODE(DocumentSourceQueryStats::createFromBson(
                            fromjson("{$queryStats: {foo: true}}").firstElement(), getExpCtx()),
                        AssertionException,
@@ -85,14 +90,54 @@ TEST_F(DocumentSourceQueryStatsTest, ShouldFailToParseIfUnrecognisedParameterSpe
 }
 
 TEST_F(DocumentSourceQueryStatsTest, ParseAndSerialize) {
-    auto obj = fromjson("{$queryStats: {}}");
-    auto doc = DocumentSourceQueryStats::createFromBson(obj.firstElement(), getExpCtx());
-    auto queryStatsOp = static_cast<DocumentSourceQueryStats*>(doc.get());
-    auto expected = Document{{"$queryStats", Document{}}};
-    ASSERT_DOCUMENT_EQ(queryStatsOp->serialize().getDocument(), expected);
+    RAIIServerParameterControllerForTest queryStatsFeatureFlag{"featureFlagQueryStats", true};
+    const auto obj = fromjson("{$queryStats: {}}");
+    const auto doc = DocumentSourceQueryStats::createFromBson(obj.firstElement(), getExpCtx());
+    const auto queryStatsOp = static_cast<DocumentSourceQueryStats*>(doc.get());
+    const auto expected = Document{{"$queryStats", Document{}}};
+    const auto serialized = queryStatsOp->serialize().getDocument();
+    ASSERT_DOCUMENT_EQ(expected, serialized);
+
+    // Also make sure that we can parse out own serialization output.
+
+    ASSERT_DOES_NOT_THROW(
+        DocumentSourceQueryStats::createFromBson(serialized.toBson().firstElement(), getExpCtx()));
+}
+
+TEST_F(DocumentSourceQueryStatsTest, ParseAndSerializeShouldIncludeHmacKey) {
+    RAIIServerParameterControllerForTest queryStatsFeatureFlag{"featureFlagQueryStats", true};
+    const auto obj = fromjson(R"({
+        $queryStats: {
+            transformIdentifiers: {
+                algorithm: "hmac-sha-256",
+                hmacKey: {
+                    $binary: "YW4gYXJiaXRyYXJ5IEhNQUNrZXkgZm9yIHRlc3Rpbmc=",
+                    $type: "08"
+                }
+            }
+        }
+    })");
+    const auto doc = DocumentSourceQueryStats::createFromBson(obj.firstElement(), getExpCtx());
+    const auto queryStatsOp = static_cast<DocumentSourceQueryStats*>(doc.get());
+    const auto expected =
+        Document{{"$queryStats",
+                  Document{{"transformIdentifiers",
+                            Document{{"algorithm", "hmac-sha-256"_sd},
+                                     {"hmacKey",
+                                      BSONBinData("an arbitrary HMACkey for testing",
+                                                  32,
+                                                  BinDataType::Sensitive)}}}}}};
+    const auto serialized = queryStatsOp->serialize().getDocument();
+    ASSERT_DOCUMENT_EQ(serialized, expected);
+
+    // Also make sure that we can parse out own serialization output.
+
+    ASSERT_DOES_NOT_THROW(
+        DocumentSourceQueryStats::createFromBson(serialized.toBson().firstElement(), getExpCtx()));
 }
 
 TEST_F(DocumentSourceQueryStatsTest, ShouldFailToParseIfAlgorithmIsNotSupported) {
+    RAIIServerParameterControllerForTest queryStatsFeatureFlag{"featureFlagQueryStats", true};
     auto obj = fromjson(R"({
         $queryStats: {
             transformIdentifiers: {
@@ -107,6 +152,7 @@ TEST_F(DocumentSourceQueryStatsTest, ShouldFailToParseIfAlgorithmIsNotSupported)
 
 TEST_F(DocumentSourceQueryStatsTest,
        ShouldFailToParseIfTransformIdentifiersSpecifiedButEmptyAlgorithm) {
+    RAIIServerParameterControllerForTest queryStatsFeatureFlag{"featureFlagQueryStats", true};
     auto obj = fromjson(R"({
         $queryStats: {
             transformIdentifiers: {
@@ -121,6 +167,7 @@ TEST_F(DocumentSourceQueryStatsTest,
 
 TEST_F(DocumentSourceQueryStatsTest,
        ShouldFailToParseIfTransformIdentifiersSpecifiedButNoAlgorithm) {
+    RAIIServerParameterControllerForTest queryStatsFeatureFlag{"featureFlagQueryStats", true};
     auto obj = fromjson(R"({
         $queryStats: {
             transformIdentifiers: {

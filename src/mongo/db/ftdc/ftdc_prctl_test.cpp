@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2021-present MongoDB, Inc.
+ *    Copyright (C) 2024-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,49 +27,38 @@
  *    it in the license file.
  */
 
-#pragma once
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
-#include "mongo/db/pipeline/document_source_single_document_transformation.h"
-#include "mongo/db/query/projection_parser.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
 
 namespace mongo {
 
-namespace DocumentSourceDocuments {
-class LiteParsed : public LiteParsedDocumentSource {
-public:
-    static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss, const BSONElement& spec) {
-        return std::make_unique<LiteParsed>(spec.fieldName());
-    }
+#ifdef __linux__
+TEST(FTDCPrctlTest, InvalidTHPArgs) {
+    ASSERT_EQ(prctl(PR_GET_THP_DISABLE, 1, 1, 8, 0), -1);
+    ASSERT_EQ(prctl(PR_SET_THP_DISABLE, 0, 2, 5, 17), -1);
+}
 
-    LiteParsed(std::string parseTimeName) : LiteParsedDocumentSource(std::move(parseTimeName)) {}
+TEST(FTDCPrctlTest, ValidTHPArgs) {
+    int thpDisabledValue = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0);
 
-    stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final {
-        return stdx::unordered_set<NamespaceString>();
-    }
+    ON_BLOCK_EXIT([&]() { prctl(PR_SET_THP_DISABLE, thpDisabledValue, 0, 0, 0); });
 
-    PrivilegeVector requiredPrivileges(bool isMongos, bool bypassDocumentValidation) const final {
-        return {};
-    }
+    ASSERT_GREATER_THAN_OR_EQUALS(thpDisabledValue, 0);
+    ASSERT_EQ(prctl(PR_SET_THP_DISABLE, 0, 0, 0, 0), 0);
+    ASSERT_EQ(prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0), 0);
+}
 
-    bool isInitialSource() const final {
-        return true;
-    }
+TEST(FTDCPrctlTest, ToggleTHPDisable) {
+    int thpDisabledValue = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0);
 
-    bool isDocuments() const final {
-        return true;
-    }
+    ON_BLOCK_EXIT([&]() { prctl(PR_SET_THP_DISABLE, thpDisabledValue, 0, 0, 0); });
 
-    bool allowedToPassthroughFromMongos() const final {
-        return false;
-    }
-};
-
-static const std::string kGenFieldName = "_tempDocumentsField"s;
-static constexpr StringData kStageName = "$documents"_sd;
-
-std::list<boost::intrusive_ptr<DocumentSource>> createFromBson(
-    BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
-
-};  // namespace DocumentSourceDocuments
-
+    prctl(PR_SET_THP_DISABLE, !thpDisabledValue, 0, 0, 0);
+    ASSERT_EQ(prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0), !thpDisabledValue);
+}
+#endif  // __linux__
 }  // namespace mongo

@@ -1463,6 +1463,9 @@ __wt_ref_addr_copy(WT_SESSION_IMPL *session, WT_REF *ref, WT_ADDR_COPY *copy)
     unpack = &_unpack;
     page = ref->home;
 
+    /* Any thread accessing ref address must hold a valid split generation. */
+    WT_ASSERT(session, __wt_session_gen(session, WT_GEN_SPLIT) != 0);
+
     /*
      * To look at an on-page cell, we need to look at the parent page's disk image, and that can be
      * dangerous. The problem is if the parent page splits, deepening the tree. As part of that
@@ -1511,15 +1514,20 @@ static inline int
 __wt_ref_block_free(WT_SESSION_IMPL *session, WT_REF *ref)
 {
     WT_ADDR_COPY addr;
+    WT_DECL_RET;
 
+    WT_ENTER_GENERATION(session, WT_GEN_SPLIT);
     if (!__wt_ref_addr_copy(session, ref, &addr))
-        return (0);
+        goto err;
 
-    WT_RET(__wt_btree_block_free(session, addr.addr, addr.size));
+    WT_ERR(__wt_btree_block_free(session, addr.addr, addr.size));
 
     /* Clear the address (so we don't free it twice). */
     __wt_ref_addr_free(session, ref);
-    return (0);
+
+err:
+    WT_LEAVE_GENERATION(session, WT_GEN_SPLIT);
+    return (ret);
 }
 
 /*
@@ -2111,7 +2119,8 @@ __wt_btcur_skip_page(
           (previous_state == WT_REF_MEM && !__wt_page_is_modified(ref->page))) &&
       __wt_ref_addr_copy(session, ref, &addr) && addr.ta.newest_stop_txn != WT_TXN_MAX &&
       addr.ta.newest_stop_ts != WT_TS_MAX &&
-      __wt_txn_visible(session, addr.ta.newest_stop_txn, addr.ta.newest_stop_ts))
+      __wt_txn_snap_min_visible(
+        session, addr.ta.newest_stop_txn, addr.ta.newest_stop_ts, addr.ta.newest_stop_durable_ts))
         *skipp = true;
 
     WT_REF_UNLOCK(ref, previous_state);

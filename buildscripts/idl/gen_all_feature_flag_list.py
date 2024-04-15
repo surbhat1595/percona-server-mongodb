@@ -45,30 +45,31 @@ import buildscripts.idl.lib as lib
 from buildscripts.idl.idl import parser
 
 
-def is_third_party_idl(idl_path: str) -> bool:
-    """Check if an IDL file is under a third party directory."""
-    third_party_idl_subpaths = [os.path.join("third_party", "mozjs"), "win32com"]
-
-    for file_name in third_party_idl_subpaths:
-        if file_name in idl_path:
-            return True
-
-    return False
-
-
-def gen_all_feature_flags(idl_dir: str = os.getcwd()):
+def gen_all_feature_flags(idl_dirs: List[str] = None):
     """Generate a list of all feature flags."""
-    all_flags = []
-    for idl_path in sorted(lib.list_idls(idl_dir)):
-        if is_third_party_idl(idl_path):
-            continue
-        doc = parser.parse_file(open(idl_path), idl_path)
-        for feature_flag in doc.spec.feature_flags:
-            if feature_flag.default.literal != "true":
-                all_flags.append(feature_flag.name)
+    default_idl_dirs = ["src", "buildscripts"]
 
-    force_disabled_flags = yaml.safe_load(
-        open("buildscripts/resmokeconfig/fully_disabled_feature_flags.yml"))
+    if not idl_dirs:
+        idl_dirs = default_idl_dirs
+
+    all_flags = []
+    for idl_dir in idl_dirs:
+        for idl_path in sorted(lib.list_idls(idl_dir)):
+            if lib.is_third_party_idl(idl_path):
+                continue
+            # Most IDL files do not contain feature flags.
+            # We can discard these quickly without expensive YAML parsing.
+            with open(idl_path) as idl_file:
+                if 'feature_flags' not in idl_file.read():
+                    continue
+            with open(idl_path) as idl_file:
+                doc = parser.parse_file(idl_file, idl_path)
+            for feature_flag in doc.spec.feature_flags:
+                if feature_flag.default.literal != "true":
+                    all_flags.append(feature_flag.name)
+
+    with open("buildscripts/resmokeconfig/fully_disabled_feature_flags.yml") as fully_disabled_ffs:
+        force_disabled_flags = yaml.safe_load(fully_disabled_ffs)
 
     return list(set(all_flags) - set(force_disabled_flags))
 

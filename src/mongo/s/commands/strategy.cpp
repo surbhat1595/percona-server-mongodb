@@ -698,31 +698,53 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
         (opCtx->getClient()->session() &&
          (opCtx->getClient()->session()->getTags() & transport::Session::kInternalClient));
 
-    if (supportsWriteConcern && !clientSuppliedWriteConcern &&
+    bool canApplyDefaultWC = supportsWriteConcern &&
         (!TransactionRouter::get(opCtx) || isTransactionCommand(_parc->_commandName)) &&
-        !opCtx->getClient()->isInDirectClient()) {
-        if (isInternalClient) {
-            uassert(
-                5569900,
-                "received command without explicit writeConcern on an internalClient connection {}"_format(
-                    redact(request.body.toString())),
-                request.body.hasField(WriteConcernOptions::kWriteConcernField));
-        } else {
-            // This command is not from a DBDirectClient or internal client, and supports WC, but
-            // wasn't given one - so apply the default, if there is one.
-            const auto rwcDefaults =
+        !opCtx->getClient()->isInDirectClient();
+
+    if (canApplyDefaultWC) {
+        auto getDefaultWC = ([&]() {
+            auto rwcDefaults =
                 ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
-            if (const auto wcDefault = rwcDefaults.getDefaultWriteConcern()) {
-                _parc->_wc = *wcDefault;
-                const auto defaultWriteConcernSource = rwcDefaults.getDefaultWriteConcernSource();
-                customDefaultWriteConcernWasApplied = defaultWriteConcernSource &&
-                    defaultWriteConcernSource == DefaultWriteConcernSourceEnum::kGlobal;
-                LOGV2_DEBUG(22766,
-                            2,
-                            "Applying default writeConcern on {command} of {writeConcern}",
-                            "Applying default writeConcern on command",
-                            "command"_attr = request.getCommandName(),
-                            "writeConcern"_attr = *wcDefault);
+            auto wcDefault = rwcDefaults.getDefaultWriteConcern();
+            const auto defaultWriteConcernSource = rwcDefaults.getDefaultWriteConcernSource();
+            customDefaultWriteConcernWasApplied = defaultWriteConcernSource &&
+                defaultWriteConcernSource == DefaultWriteConcernSourceEnum::kGlobal;
+            return wcDefault;
+        });
+
+        if (!clientSuppliedWriteConcern) {
+            if (isInternalClient) {
+                uassert(
+                    5569900,
+                    "received command without explicit writeConcern on an internalClient connection {}"_format(
+                        redact(request.body.toString())),
+                    request.body.hasField(WriteConcernOptions::kWriteConcernField));
+            } else {
+                // This command is not from a DBDirectClient or internal client, and supports WC,
+                // but wasn't given one - so apply the default, if there is one.
+                const auto wcDefault = getDefaultWC();
+                // Default WC can be 'boost::none' if the implicit default is used and set to 'w:1'.
+                if (wcDefault) {
+                    _parc->_wc = *wcDefault;
+                    LOGV2_DEBUG(22766,
+                                2,
+                                "Applying default writeConcern on command",
+                                "command"_attr = request.getCommandName(),
+                                "writeConcern"_attr = *wcDefault);
+                }
+            }
+        }
+        // Client supplied a write concern object without 'w' field.
+        else if (_parc->_wc->isExplicitWithoutWField()) {
+            const auto wcDefault = getDefaultWC();
+            // Default WC can be 'boost::none' if the implicit default is used and set to 'w:1'.
+            if (wcDefault) {
+                clientSuppliedWriteConcern = false;
+                _parc->_wc->w = wcDefault->w;
+                if (_parc->_wc->syncMode == WriteConcernOptions::SyncMode::UNSET) {
+                    _parc->_wc->syncMode = wcDefault->syncMode;
+                }
             }
         }
     }
@@ -1026,9 +1048,20 @@ void ParseAndRunCommand::RunAndRetry::_onNeedRetargetting(Status& status) {
 
     auto opCtx = _parc->_rec->getOpCtx();
     const auto staleNs = staleInfo->getNss();
+    const auto& originalNs = _parc->_invocation->ns();
     auto catalogCache = Grid::get(opCtx)->catalogCache();
     catalogCache->invalidateShardOrEntireCollectionEntryForShardedCollection(
         staleNs, staleInfo->getVersionWanted(), staleInfo->getShardId());
+
+    if ((staleNs.isTimeseriesBucketsCollection() || originalNs.isTimeseriesBucketsCollection()) &&
+        staleNs != originalNs) {
+        // A timeseries might've been created, so we need to invalidate the original namespace
+        // version.
+        Grid::get(opCtx)
+            ->catalogCache()
+            ->invalidateShardOrEntireCollectionEntryForShardedCollection(
+                originalNs, boost::none, staleInfo->getShardId());
+    }
 
     catalogCache->setOperationShouldBlockBehindCatalogCacheRefresh(opCtx, true);
 
@@ -1160,6 +1193,13 @@ public:
     Future<DbResponse> run();
 
 private:
+    std::string _getDatabaseStringForLogging() const try {
+        // `getDatabase` throws if the request doesn't have a '$db' field.
+        return _rec->getRequest().getDatabase().toString();
+    } catch (const DBException& ex) {
+        return ex.toString();
+    }
+
     void _parseMessage();
 
     Future<void> _execute();
@@ -1202,7 +1242,7 @@ Future<void> ClientCommand::_execute() {
                 3,
                 "Command begin db: {db} msg id: {headerId}",
                 "Command begin",
-                "db"_attr = _rec->getRequest().getDatabase().toString(),
+                "db"_attr = _getDatabaseStringForLogging(),
                 "headerId"_attr = _rec->getMessage().header().getId());
 
     return future_util::makeState<ParseAndRunCommand>(_rec, _errorBuilder)
@@ -1212,7 +1252,7 @@ Future<void> ClientCommand::_execute() {
                         3,
                         "Command end db: {db} msg id: {headerId}",
                         "Command end",
-                        "db"_attr = _rec->getRequest().getDatabase().toString(),
+                        "db"_attr = _getDatabaseStringForLogging(),
                         "headerId"_attr = _rec->getMessage().header().getId());
         })
         .tapError([this](Status status) {
@@ -1221,7 +1261,7 @@ Future<void> ClientCommand::_execute() {
                 1,
                 "Exception thrown while processing command on {db} msg id: {headerId} {error}",
                 "Exception thrown while processing command",
-                "db"_attr = _rec->getRequest().getDatabase().toString(),
+                "db"_attr = _getDatabaseStringForLogging(),
                 "headerId"_attr = _rec->getMessage().header().getId(),
                 "error"_attr = redact(status));
 

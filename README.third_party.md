@@ -29,12 +29,12 @@ a notice will be included in
 | [fmt]                      | BSD-2-Clause      | 7.1.3             |                      |                ✗                |
 | [GPerfTools]               | BSD-3-Clause      | 2.9.1             |                      |                ✗                |
 | [ICU4]                     | ICU               | 57.1              |          ✗           |                ✗                |
-| [immer]                    | BSL-1.0           | d98a68c           |                      |                ✗                |
+| [immer]                    | BSL-1.0           | d98a68c + changes |                      |                ✗                |
 | [Intel Decimal FP Library] | BSD-3-Clause      | 2.0 Update 1      |                      |                ✗                |
 | [JSON-Schema-Test-Suite]   | MIT               | 728066f9c5        |                      |                                 |
 | [kms-message]              |                   | 1.0.1             |                      |                ✗                |
 | [libstemmer]               | BSD-3-Clause      | Unknown           |          ✗           |                ✗                |
-| [linenoise]                | BSD-3-Clause      | Unknown + changes |                      |                ✗                |
+| [linenoise]                | BSD-3-Clause      | 6cdc775 + changes |                      |                ✗                |
 | [MozJS]                    | MPL-2.0           | ESR 91.3.0        |                      |                ✗                |
 | [MurmurHash3]              | Public Domain     | Unknown + changes |          ✗           |                ✗                |
 | [ocspbuilder]              | MIT               | 0.10.2            |                      |                                 |
@@ -50,7 +50,7 @@ a notice will be included in
 | [TomCrypt]                 | Public Domain     | 1.18.2            |          ✗           |                ✗                |
 | [Unicode]                  | Unicode-DFS-2015  | 8.0.0             |          ✗           |                ✗                |
 | [libunwind]                | MIT               | 1.6.2 + changes   |                      |                ✗                |
-| [Valgrind]                 | BSD-3-Clause<sup>\[<a href="#note_vg" id="ref_vg">1</a>]</sup> | 3.17.0 | |             ✗                |
+| [Valgrind]                 | BSD-4-Clause<sup>\[<a href="#note_vg" id="ref_vg">1</a>]</sup> | 3.17.0 | |             ✗      |
 | [variant]                  | BSL-1.0           | 1.4.0             |                      |                ✗                |
 | [wiredtiger]               |                   | <sup>\[<a href="#note_wt" id="ref_wt">2</a>]</sup> | ✗ |  ✗                |
 | [yaml-cpp]                 | MIT               | 0.6.3             |                      |                ✗                |

@@ -26,11 +26,12 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+#include "mongo/bson/bsonobj.h"
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
-#include "mongo/db/s/balancer/cluster_chunks_resize_policy_impl.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/persistent_task_store.h"
+#include "mongo/db/s/balancer/cluster_chunks_resize_policy_impl.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/grid.h"
 
@@ -212,19 +213,9 @@ SharedSemiFuture<void> ClusterChunksResizePolicyImpl::activate(OperationContext*
 
     stdx::lock_guard<Latch> lk(_stateMutex);
     if (!_activeRequestPromise.is_initialized()) {
-        invariant(!_unprocessedCollections && _collectionsBeingProcessed.empty());
+        invariant(_collectionsBeingProcessed.empty());
         _defaultMaxChunksSizeBytes = defaultMaxChunksSizeBytes;
         invariant(_defaultMaxChunksSizeBytes > 0);
-
-        DBDirectClient dbClient(opCtx);
-        FindCommandRequest findCollectionsRequest{CollectionType::ConfigNS};
-        findCollectionsRequest.setFilter(
-            BSON(CollectionTypeBase::kChunksAlreadySplitForDowngradeFieldName
-                 << BSON("$not" << BSON("$eq" << true))));
-        _unprocessedCollections = dbClient.find(std::move(findCollectionsRequest));
-        uassert(ErrorCodes::OperationFailed,
-                "Failed to establish a cursor for accessing config.collections",
-                _unprocessedCollections);
 
         _activeRequestPromise.emplace();
     }
@@ -242,7 +233,6 @@ void ClusterChunksResizePolicyImpl::stop() {
         stdx::lock_guard<Latch> lk(_stateMutex);
         if (_activeRequestPromise.is_initialized()) {
             _collectionsBeingProcessed.clear();
-            _unprocessedCollections = nullptr;
             _activeRequestPromise->setFrom(
                 Status(ErrorCodes::Interrupted, "Chunk resizing task has been interrupted"));
             _activeRequestPromise = boost::none;
@@ -264,6 +254,17 @@ boost::optional<DefragmentationAction> ClusterChunksResizePolicyImpl::getNextStr
     }
 
     bool stateInspectionCompleted = false;
+
+    DBDirectClient dbClient(opCtx);
+    FindCommandRequest findCollectionsRequest{CollectionType::ConfigNS};
+    findCollectionsRequest.setFilter(
+        BSON(CollectionTypeBase::kChunksAlreadySplitForDowngradeFieldName
+             << BSON("$not" << BSON("$eq" << true))));
+    auto unprocessedCollections = dbClient.find(std::move(findCollectionsRequest));
+    uassert(ErrorCodes::OperationFailed,
+            "Failed to establish a cursor for accessing config.collections",
+            unprocessedCollections);
+
     while (!stateInspectionCompleted) {
         // Try to get the next action from the current subset of collections being processed.
         for (auto it = _collectionsBeingProcessed.begin();
@@ -307,9 +308,9 @@ boost::optional<DefragmentationAction> ClusterChunksResizePolicyImpl::getNextStr
         }
 
         if (_collectionsBeingProcessed.size() < kMaxCollectionsBeingProcessed &&
-            _unprocessedCollections->more()) {
+            unprocessedCollections->more()) {
             // Start processing a new collection
-            auto nextDoc = _unprocessedCollections->next();
+            auto nextDoc = unprocessedCollections->next();
             CollectionType coll(nextDoc);
             auto initialCollState = _buildInitialStateFor(opCtx, coll);
             if (initialCollState) {
@@ -322,25 +323,35 @@ boost::optional<DefragmentationAction> ClusterChunksResizePolicyImpl::getNextStr
         }
     }
 
-    if (_collectionsBeingProcessed.empty() && !_unprocessedCollections->more()) {
+    if (_collectionsBeingProcessed.empty() && !unprocessedCollections->more()) {
         LOGV2(6417104, "Cluster chunks resize process completed. Clearing up internal state");
-        PersistentTaskStore<CollectionType> store(CollectionType::ConfigNS);
         try {
-            BSONObj allDocsQuery;
-            store.update(opCtx,
-                         allDocsQuery,
-                         BSON("$unset" << BSON(
-                                  CollectionType::kChunksAlreadySplitForDowngradeFieldName << "")),
-                         WriteConcerns::kMajorityWriteConcernNoTimeout);
-        } catch (const ExceptionFor<ErrorCodes::NoMatchingDocument>&) {
-            // ignore
+            DBDirectClient dbClient(opCtx);
+            auto ignoreWriteResponse = write_ops::checkWriteErrors(dbClient.update([&] {
+                write_ops::UpdateCommandRequest updateOp(CollectionType::ConfigNS);
+                BSONObj allDocsQuery;
+                auto unsetResizeField = write_ops::UpdateModification::parseFromClassicUpdate(
+                    BSON("$unset" << BSON(CollectionType::kChunksAlreadySplitForDowngradeFieldName
+                                          << "")));
+                write_ops::UpdateOpEntry updateEntry(allDocsQuery, unsetResizeField);
+                updateEntry.setMulti(true);
+                updateEntry.setUpsert(false);
+
+                updateOp.setUpdates({updateEntry});
+                return updateOp;
+            }()));
+
+            WriteConcernResult ignoreResult;
+            auto latestOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+            uassertStatusOK(waitForWriteConcern(
+                opCtx, latestOpTime, WriteConcerns::kMajorityWriteConcernNoTimeout, &ignoreResult));
         } catch (const DBException& e) {
             LOGV2_WARNING(
                 6417105,
                 "Failed to clear persisted state while ending cluster chunks resize process",
                 "err"_attr = redact(e));
         }
-        _unprocessedCollections = nullptr;
+
         _activeRequestPromise->setFrom(Status::OK());
         _activeRequestPromise = boost::none;
     }

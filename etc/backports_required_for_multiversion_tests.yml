@@ -21,6 +21,8 @@
 #
 last-continuous:
   all:
+  - test_file: src/mongo/db/modules/enterprise/jstests/fcbis/fcbis_pauses_watchdog_checks_during_storage_change.js
+    ticket: SERVER-83508
   - test_file: jstests/sharding/query/find_and_modify_with_partial_shard_key.js
     ticket: SERVER-44422
   - test_file: jstests/sharding/query/delete_with_partial_shard_key.js
@@ -321,9 +323,17 @@ last-continuous:
     ticket: SERVER-83119
   - test_file: jstests/change_streams/split_large_event_with_other_stages.js
     ticket: SERVER-85848
+  - test_file: jstests/core/txns/out_not_blocked_by_txn.js
+    ticket: SERVER-72703
+  - test_file: jstests/core/query/bittest.js
+    ticket: SERVER-86419
+  - test_file: jstests/core/query/internal_strip_invalid_assignment.js
+    ticket: SERVER-82717
   suites: null
 last-lts:
   all:
+  - test_file: src/mongo/db/modules/enterprise/jstests/fcbis/fcbis_pauses_watchdog_checks_during_storage_change.js
+    ticket: SERVER-83508
   - test_file: jstests/core/query/null_query_semantics.js
     ticket: SERVER-21929
   - test_file: jstests/core/or_to_in.js
@@ -688,4 +698,10 @@ last-lts:
     ticket: SERVER-83119
   - test_file: jstests/change_streams/split_large_event_with_other_stages.js
     ticket: SERVER-85848
+  - test_file: jstests/core/txns/out_not_blocked_by_txn.js
+    ticket: SERVER-72703
+  - test_file: jstests/core/query/bittest.js
+    ticket: SERVER-86419
+  - test_file: jstests/core/query/internal_strip_invalid_assignment.js
+    ticket: SERVER-82717
   suites: null

@@ -37,6 +37,7 @@
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/curop.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/optime.h"
@@ -97,28 +98,34 @@ StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* opCtx,
     bool clientSuppliedWriteConcern = !writeConcern.usedDefaultConstructedWC;
     bool customDefaultWasApplied = false;
 
+    // WriteConcern defaults can only be applied on regular replica set members.
+    // Operations received by shard and config servers should always have WC explicitly specified.
+    bool canApplyDefaultWC = serverGlobalParams.clusterRole == ClusterRole::None &&
+        repl::ReplicationCoordinator::get(opCtx)->isReplEnabled() &&
+        (!opCtx->inMultiDocumentTransaction() ||
+         isTransactionCommand(cmdObj.firstElementFieldName())) &&
+        !opCtx->getClient()->isInDirectClient() && !isInternalClient;
+
     // If no write concern is specified in the command, then use the cluster-wide default WC (if
-    // there is one), or else the default WC {w:1}.
-    if (!clientSuppliedWriteConcern) {
-        writeConcern = ([&]() {
-            // WriteConcern defaults can only be applied on regular replica set members.  Operations
-            // received by shard and config servers should always have WC explicitly specified.
-            if (serverGlobalParams.clusterRole != ClusterRole::ShardServer &&
-                serverGlobalParams.clusterRole != ClusterRole::ConfigServer &&
-                repl::ReplicationCoordinator::get(opCtx)->isReplEnabled() &&
-                (!opCtx->inMultiDocumentTransaction() ||
-                 isTransactionCommand(cmdObj.firstElementFieldName())) &&
-                !opCtx->getClient()->isInDirectClient() && !isInternalClient) {
+    // there is one), or else the default implicit WC:
+    // (if [(#arbiters > 0) AND (#arbiters >= ½(#voting nodes) - 1)] then {w:1} else {w:majority}).
+    if (canApplyDefaultWC) {
+        auto getDefaultWC = ([&]() {
+            auto rwcDefaults =
+                ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
+            auto wcDefault = rwcDefaults.getDefaultWriteConcern();
+            const auto defaultWriteConcernSource = rwcDefaults.getDefaultWriteConcernSource();
+            customDefaultWasApplied = defaultWriteConcernSource &&
+                defaultWriteConcernSource == DefaultWriteConcernSourceEnum::kGlobal;
+            return wcDefault;
+        });
 
-                const auto rwcDefaults =
-                    ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
-                auto wcDefault = rwcDefaults.getDefaultWriteConcern();
+
+        if (!clientSuppliedWriteConcern) {
+            writeConcern = ([&]() {
+                auto wcDefault = getDefaultWC();
+                // Default WC can be 'boost::none' if the implicit default is used and set to 'w:1'.
                 if (wcDefault) {
-                    const auto defaultWriteConcernSource =
-                        rwcDefaults.getDefaultWriteConcernSource();
-                    customDefaultWasApplied = defaultWriteConcernSource &&
-                        defaultWriteConcernSource == DefaultWriteConcernSourceEnum::kGlobal;
-
                     LOGV2_DEBUG(22548,
                                 2,
                                 "Applying default writeConcern on {cmdObj_firstElementFieldName} "
@@ -128,15 +135,22 @@ StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* opCtx,
                                 "wcDefault"_attr = wcDefault->toBSON());
                     return *wcDefault;
                 }
-            }
-            return writeConcern;
-        })();
-
-        if (writeConcern.isUnacknowledged()) {
-            writeConcern.w = 1;
+                return writeConcern;
+            })();
+            writeConcern.notExplicitWValue = true;
         }
-
-        writeConcern.notExplicitWValue = true;
+        // Client supplied a write concern object without 'w' field.
+        else if (writeConcern.isExplicitWithoutWField()) {
+            auto wcDefault = getDefaultWC();
+            // Default WC can be 'boost::none' if the implicit default is used and set to 'w:1'.
+            if (wcDefault) {
+                clientSuppliedWriteConcern = false;
+                writeConcern.w = wcDefault->w;
+                if (writeConcern.syncMode == WriteConcernOptions::SyncMode::UNSET) {
+                    writeConcern.syncMode = wcDefault->syncMode;
+                }
+            }
+        }
     }
 
     // It's fine for clients to provide any provenance value to mongod. But if they haven't, then an
@@ -271,6 +285,10 @@ Status waitForWriteConcern(OperationContext* opCtx,
                 "Waiting for write concern. OpTime: {replOpTime}, write concern: {writeConcern}",
                 "replOpTime"_attr = replOpTime,
                 "writeConcern"_attr = writeConcern.toBSON());
+
+    // Add time waiting for write concern to CurOp.
+    CurOp::get(opCtx)->beginWaitForWriteConcernTimer();
+    ScopeGuard finishTiming([&] { CurOp::get(opCtx)->stopWaitForWriteConcernTimer(); });
 
     auto* const storageEngine = opCtx->getServiceContext()->getStorageEngine();
     auto const replCoord = repl::ReplicationCoordinator::get(opCtx);

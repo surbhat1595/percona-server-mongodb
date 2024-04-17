@@ -332,9 +332,9 @@ install_deps() {
       yum -y install perl
       install_mongodbtoolchain
       if [ x"$ARCH" = "xx86_64" ]; then
-      #  if [ "$RHEL" -lt 9 ]; then
-      #    add_percona_yum_repo
-      #  fi
+        #if [ "$RHEL" -lt 9 ]; then
+        #  add_percona_yum_repo
+       # fi
         yum install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm
         percona-release enable tools testing
         yum clean all
@@ -440,7 +440,6 @@ install_deps() {
 }
 
 install_mongodbtoolchain(){
-    #curl -o toolchain_installer.sh https://jenkins.percona.com/downloads/mongodbtoolchain/installer.sh
     curl -O https://downloads.percona.com/downloads/TESTING/issue-CUSTO83/toolchain_installer.tar.gz
     tar -zxvf toolchain_installer.tar.gz
     if [ ! -z "${RHEL}" ]; then
@@ -449,7 +448,6 @@ install_mongodbtoolchain(){
         OS_CODE_NAME=${DEBIAN}
     fi
     export USER=$(whoami)
-    #bash -x ./toolchain_installer.sh -k --download-url https://jenkins.percona.com/downloads/mongodbtoolchain/${OS_CODE_NAME}_mongodbtoolchain_${ARCH}.tar.gz || exit 1
     bash -x ./installer.sh -k --download-url https://downloads.percona.com/downloads/TESTING/issue-CUSTO83/${OS_CODE_NAME}_mongodbtoolchain_${ARCH}.tar.gz || exit 1
     export PATH=/opt/mongodbtoolchain/v4/bin/:$PATH
 }
@@ -866,6 +864,8 @@ build_deb(){
             cat call-home.sh >> percona-server-mongodb-server-pro.postinst
             echo "CALLHOME" >> percona-server-mongodb-server-pro.postinst
             echo 'bash +x /tmp/call-home.sh -f "PRODUCT_FAMILY_PSMDB" -v '"${PSM_VER}-${PSM_RELEASE}"' -d "PACKAGE" &>/dev/null || :' >> percona-server-mongodb-server-pro.postinst
+            echo "chgrp percona-telemetry /usr/local/percona/telemetry_uuid" >> percona-server-mongodb-server-pro.postinst
+            echo "chmod 664 /usr/local/percona/telemetry_uuid" >> percona-server-mongodb-server-pro.postinst
             echo "rm -rf /tmp/call-home.sh" >> percona-server-mongodb-server-pro.postinst
             echo "exit 0" >> percona-server-mongodb-server-pro.postinst
         else
@@ -874,6 +874,8 @@ build_deb(){
             cat call-home.sh >> percona-server-mongodb-server.postinst
             echo "CALLHOME" >> percona-server-mongodb-server.postinst
             echo 'bash +x /tmp/call-home.sh -f "PRODUCT_FAMILY_PSMDB" -v '"${PSM_VER}-${PSM_RELEASE}"' -d "PACKAGE" &>/dev/null || :' >> percona-server-mongodb-server.postinst
+            echo "chgrp percona-telemetry /usr/local/percona/telemetry_uuid" >> percona-server-mongodb-server.postinst
+            echo "chmod 664 /usr/local/percona/telemetry_uuid" >> percona-server-mongodb-server.postinst
             echo "rm -rf /tmp/call-home.sh" >> percona-server-mongodb-server.postinst
             echo "exit 0" >> percona-server-mongodb-server.postinst
         fi

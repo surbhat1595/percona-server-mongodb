@@ -1,5 +1,6 @@
 #
 %define         mongo_home /var/lib/mongo
+%define         psmdb_telemetry /usr/local/percona/telemetry/psmdb
 %if 0%{?rhel} >= 8
 %undefine _debugsource_packages
 %endif
@@ -92,6 +93,7 @@ This metapackage will install the mongo shell, import/export tools, other client
 %package mongos
 Group:          Applications/Databases
 Summary:        Percona Server for MongoDB sharded cluster query router
+Requires: percona-telemetry-agent
 Conflicts: Percona-Server-MongoDB-mongos Percona-Server-MongoDB-32-mongos Percona-Server-MongoDB-34-mongos Percona-Server-MongoDB-36-mongos mongodb-org-mongos
 %description mongos
 This package contains mongos - the Percona Server for MongoDB sharded cluster query router
@@ -100,7 +102,7 @@ This package contains mongos - the Percona Server for MongoDB sharded cluster qu
 Group:          Applications/Databases
 Summary:        Percona Server for MongoDB database server
 Requires: policycoreutils
-Requires: percona-mongodb-mongosh
+Requires: percona-mongodb-mongosh, percona-telemetry-agent
 Conflicts: Percona-Server-MongoDB-server Percona-Server-MongoDB-32-server Percona-Server-MongoDB-34-server Percona-Server-MongoDB-36-server mongodb-org-server
 %description server
 This package contains the Percona Server for MongoDB server software, default configuration files and init.d scripts
@@ -394,9 +396,23 @@ fi
 %endif
     fi
 fi
+mkdir -p %{psmdb_telemetry}
+chown mongod:percona-telemetry /usr/local/percona/telemetry/psmdb
+chmod 775 /usr/local/percona/telemetry/psmdb
+chmod g+s /usr/local/percona/telemetry/psmdb
+chmod u+s /usr/local/percona/telemetry/psmdb
 cp %SOURCE999 /tmp/ 2>/dev/null || :
 bash /tmp/call-home.sh -f "PRODUCT_FAMILY_PSMDB" -v "@@VERSION@@-@@RELEASE@@" -d "PACKAGE" &>/dev/null || :
+chgrp percona-telemetry /usr/local/percona/telemetry_uuid
+chmod 664 /usr/local/percona/telemetry_uuid
 rm -f /tmp/call-home.sh
+
+%post mongos
+mkdir -p %{psmdb_telemetry}
+chown mongod:percona-telemetry /usr/local/percona/telemetry/psmdb
+chmod 775 /usr/local/percona/telemetry/psmdb
+chmod g+s /usr/local/percona/telemetry/psmdb
+chmod u+s /usr/local/percona/telemetry/psmdb
 
 %preun server
 %if 0%{?rhel} >= 7
@@ -411,6 +427,14 @@ fi
 %if 0%{?rhel} >= 7
 %systemd_postun mongod.service
 %endif
+if [ -d %{psmdb_telemetry} ]; then
+  rm -rf %{psmdb_telemetry}
+fi
+
+%postun mongos
+if [ -d %{psmdb_telemetry} ]; then
+  rm -rf %{psmdb_telemetry}
+fi
 
 #
 %changelog

@@ -2345,6 +2345,7 @@ tasks:
       - "./version_info_mongod.txt"
   - command: s3.put
     params:
+      optional: true
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       local_file: src/version_info_mongod.txt
@@ -6825,7 +6826,11 @@ tasks:
     vars:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
+    vars:
+      <<: *powercycle_remote_credentials
   - func: "run powercycle test"
+    vars:
+      <<: *powercycle_remote_credentials
     timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_kill_mongod
@@ -6839,7 +6844,11 @@ tasks:
     vars:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
+    vars:
+      <<: *powercycle_remote_credentials
   - func: "run powercycle test"
+    vars:
+      <<: *powercycle_remote_credentials
     timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_last_lts_fcv
@@ -6853,7 +6862,11 @@ tasks:
     vars:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
+    vars:
+      <<: *powercycle_remote_credentials
   - func: "run powercycle test"
+    vars:
+      <<: *powercycle_remote_credentials
     timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_replication
@@ -6867,7 +6880,11 @@ tasks:
     vars:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
+    vars:
+      <<: *powercycle_remote_credentials
   - func: "run powercycle test"
+    vars:
+      <<: *powercycle_remote_credentials
     timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_replication_smalloplog
@@ -6881,7 +6898,11 @@ tasks:
     vars:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
+    vars:
+      <<: *powercycle_remote_credentials
   - func: "run powercycle test"
+    vars:
+      <<: *powercycle_remote_credentials
     timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_syncdelay
@@ -6895,7 +6916,11 @@ tasks:
     vars:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
+    vars:
+      <<: *powercycle_remote_credentials
   - func: "run powercycle test"
+    vars:
+      <<: *powercycle_remote_credentials
     timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_write_concern_majority
@@ -6909,7 +6934,11 @@ tasks:
     vars:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
+    vars:
+      <<: *powercycle_remote_credentials
   - func: "run powercycle test"
+    vars:
+      <<: *powercycle_remote_credentials
     timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: selinux_rhel8_org

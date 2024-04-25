@@ -48,7 +48,6 @@
 #include "mongo/db/storage/deferred_drop_record_store.h"
 #include "mongo/db/storage/durable_catalog_impl.h"
 #include "mongo/db/storage/durable_history_pin.h"
-#include "mongo/db/storage/historical_ident_tracker.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/storage_repair_observer.h"
@@ -107,12 +106,6 @@ StorageEngineImpl::StorageEngineImpl(OperationContext* opCtx,
           TimestampMonitor::TimestampType::kMinOfCheckpointAndOldest,
           [this](OperationContext* opCtx, Timestamp timestamp) {
               _onMinOfCheckpointAndOldestTimestampChanged(opCtx, timestamp);
-          }),
-      _historicalIdentTimestampListener(
-          TimestampMonitor::TimestampType::kCheckpoint,
-          [serviceContext = opCtx->getServiceContext()](OperationContext* opCtx,
-                                                        Timestamp timestamp) {
-              HistoricalIdentTracker::get(opCtx).removeEntriesOlderThan(timestamp);
           }),
       _collectionCatalogCleanupTimestampListener(
           TimestampMonitor::TimestampType::kOldest,
@@ -310,7 +303,7 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
     // Use the stable timestamp as minValid. We know for a fact that the collection exist at
     // this point and is in sync. If we use an earlier timestamp than replication rollback we
     // may be out-of-order for the collection catalog managing this namespace.
-    Timestamp minValidTs = stableTs ? *stableTs : Timestamp::min();
+    const Timestamp minValidTs = stableTs ? *stableTs : Timestamp::min();
     CollectionCatalog::write(opCtx, [&minValidTs](CollectionCatalog& catalog) {
         // Let the CollectionCatalog know that we are maintaining timestamps from minValidTs
         catalog.cleanupForCatalogReopen(minValidTs);
@@ -400,6 +393,7 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
         }
 
         Timestamp minVisibleTs = Timestamp::min();
+        auto collectionMinValidTs = minValidTs;
         // If there's no recovery timestamp, every collection is available.
         if (boost::optional<Timestamp> recoveryTs = _engine->getRecoveryTimestamp()) {
             // Otherwise choose a minimum visible timestamp that's at least as large as the true
@@ -418,14 +412,19 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
             // server starts (e.g. resharding). It is likely only safe for tests which don't run
             // operations that bump the minimum visible timestamp and can guarantee the collection
             // always exists for the atClusterTime value(s).
-            setMinVisibleForAllCollectionsToOldestOnStartup.execute(
-                [this, &minVisibleTs](const BSONObj& data) {
-                    minVisibleTs = _engine->getOldestTimestamp();
-                });
+            setMinVisibleForAllCollectionsToOldestOnStartup.execute([&](const BSONObj& data) {
+                minVisibleTs = _engine->getOldestTimestamp();
+                if (collectionMinValidTs > minVisibleTs)
+                    collectionMinValidTs = minVisibleTs;
+            });
         }
 
-        _initCollection(
-            opCtx, entry.catalogId, entry.nss, _options.forRepair, minVisibleTs, minValidTs);
+        _initCollection(opCtx,
+                        entry.catalogId,
+                        entry.nss,
+                        _options.forRepair,
+                        minVisibleTs,
+                        collectionMinValidTs);
 
         if (entry.nss.isOrphanCollection()) {
             LOGV2(22248, "Orphaned collection found", logAttrs(entry.nss));
@@ -907,7 +906,6 @@ void StorageEngineImpl::startTimestampMonitor() {
         _engine.get(), getGlobalServiceContext()->getPeriodicRunner());
 
     _timestampMonitor->addListener(&_minOfCheckpointAndOldestTimestampListener);
-    _timestampMonitor->addListener(&_historicalIdentTimestampListener);
     _timestampMonitor->addListener(&_collectionCatalogCleanupTimestampListener);
 }
 

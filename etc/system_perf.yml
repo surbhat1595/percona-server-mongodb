@@ -1,5 +1,7 @@
 command_type: system
 stepback: false
+exec_timeout_secs: 21600
+timeout_secs: 7200
 
 include:
   - filename: etc/evergreen_yml_components/variants/task_generation.yml
@@ -179,43 +181,6 @@ functions:
     - command: expansions.update
       params:
         updates: *_expansion_updates
-  f_run_dsi_workload:
-    - command: git.get_project
-      params:
-        directory: *src_dir
-        clone_depth: 1000
-        revisions:
-          dsi: ${dsi_rev}
-          genny: ${genny_rev}
-          linkbench: ${linkbench_rev}
-          linkbench2: ${linkbench2_rev}
-          tsbs: ${tsbs_rev}
-          workloads: ${workloads_rev}
-          mongo-perf: ${mongo-perf_rev}
-          YCSB: ${YCSB_rev}
-          py-tpcc: ${py-tpcc_rev}
-          flamegraph: ${flamegraph_rev}
-          # mongo: ${mongo_rev}
-          PrivateWorkloads: ${PrivateWorkloads_rev}
-    - command: expansions.write
-      params:
-        file: ./expansions.yml
-        redacted: true
-    - command: shell.exec
-      params:
-        script: ./src/dsi/run-dsi run_workload
-    - command: shell.exec
-      type: system
-      params:
-        script: ./src/dsi/run-dsi determine_failure -m SYSTEM
-    - command: shell.exec
-      type: setup
-      params:
-        script: ./src/dsi/run-dsi determine_failure -m SETUP
-    - command: shell.exec
-      type: test
-      params:
-        script: ./src/dsi/run-dsi determine_failure -m TEST
   f_dsi_post_run:
     - command: shell.exec
       params:
@@ -353,30 +318,26 @@ functions:
       params:
         working_dir: src
         script: |
-          if [ -z "${reuse_compile_from}" ] || [ "${is_patch|false}" = "false" ]; then
-            set -o errexit
-            set -o verbose
+          set -o errexit
+          set -o verbose
 
-            source "${workdir}/compile_venv/bin/activate"
+          source "${workdir}/compile_venv/bin/activate"
 
-            # We get the raw version string (r1.2.3-45-gabcdef) from git
-            # And append "-sys-perf" at the end
-            export MONGO_VERSION=$(git describe --abbrev=7)
-            MONGO_VERSION="$MONGO_VERSION-sys-perf"
+          # We get the raw version string (r1.2.3-45-gabcdef) from git
+          # And append "-sys-perf" at the end
+          export MONGO_VERSION=$(git describe --abbrev=7)
+          MONGO_VERSION="$MONGO_VERSION-sys-perf"
 
-            # If this is a patch build, we add the patch version id to the version string so we know
-            # this build was a patch, and which evergreen task it came from
-            if [ "${is_patch|false}" = "true" ]; then
-              MONGO_VERSION="$MONGO_VERSION-patch-${version_id}"
-            fi
-
-            # This script handles sanitizing the version string for use during SCons build
-            # and when pushing artifacts up to S3.
-            IS_PATCH=${is_patch|false} IS_COMMIT_QUEUE=${is_commit_queue|false} \
-              buildscripts/generate_version_expansions.py --out version_expansions.yml
-          else
-            touch version_expansions.yml
+          # If this is a patch build, we add the patch version id to the version string so we know
+          # this build was a patch, and which evergreen task it came from
+          if [ "${is_patch|false}" = "true" ]; then
+            MONGO_VERSION="$MONGO_VERSION-patch-${version_id}"
           fi
+
+          # This script handles sanitizing the version string for use during SCons build
+          # and when pushing artifacts up to S3.
+          IS_PATCH=${is_patch|false} IS_COMMIT_QUEUE=${is_commit_queue|false} \
+            buildscripts/generate_version_expansions.py --out version_expansions.yml
     - command: expansions.update
       params:
         file: src/version_expansions.yml
@@ -408,59 +369,67 @@ functions:
       params:
         working_dir: src/mongo-tools/src/github.com/mongodb/mongo-tools
         script: |
-          if [ -z "${reuse_compile_from}" ] || [ "${is_patch|false}" = "false" ]; then
-            set -o verbose
-            set -o errexit
+          set -o verbose
+          set -o errexit
 
-            # make sure newlines in the scripts are handled correctly by windows
-            if [ "Windows_NT" = "$OS" ]; then
-              set -o igncr
-            fi;
+          # make sure newlines in the scripts are handled correctly by windows
+          if [ "Windows_NT" = "$OS" ]; then
+            set -o igncr
+          fi;
 
-            # set_goenv provides set_goenv()
-            . ./set_goenv.sh
-            GOROOT="" set_goenv || exit
-            go version
+          export cleanup=false
 
-            build_tools="bsondump mongostat mongofiles mongoexport mongoimport mongorestore mongodump mongotop"
-            if [ "${build_mongoreplay}" = "true" ]; then
-                build_tools="$build_tools mongoreplay"
-            fi
-            for i in $build_tools; do
-                go build -o "../../../../../mongodb/bin/$i${exe|}" $i/main/$i.go
-                "../../../../../mongodb/bin/$i${exe|}" --version
-            done
+          # install go for tools if required (al2023 for now).
+          if [ ! -d "/opt/golang/go1.19" ]; then
+            cleanup=true
+            echo -n "go-lang missing downloading ..."
+            go_file=./go1.19.8.tar.gz
+            wget --quiet https://go.dev/dl/go1.19.8.linux$(echo ${compile_variant} | sed 's/^-al202.//').tar.gz -O "$go_file"
+            echo -n " installing ..."
+            sudo mkdir -p /opt/golang/go1.19
+            sudo tar -C /opt/golang/go1.19 -xzf "$go_file" --strip-components=1
+            [ -e "$go_file" ] && rm -f "$go_file"
+            echo  "done"
+          fi
+
+          # set_goenv provides set_goenv()
+          . ./set_goenv.sh
+          GOROOT="" set_goenv || exit
+          go version
+
+          build_tools="bsondump mongostat mongofiles mongoexport mongoimport mongorestore mongodump mongotop"
+          if [ "${build_mongoreplay}" = "true" ]; then
+              build_tools="$build_tools mongoreplay"
           fi
           for i in $build_tools; do
-              go build -ldflags "$(print_ldflags)" ${args} -tags "$(print_tags ${tooltags})" -o "../../../../../mongodb/bin/$i${exe|}" $i/main/$i.go
+              go build -o "../../../../../mongodb/bin/$i${exe|}" $i/main/$i.go
               "../../../../../mongodb/bin/$i${exe|}" --version
           done
+          if "$cleanup"; then
+            sudo rm -rf "/opt/golang/go1.19"
+          fi
   generate feature flag list:
     - command: shell.exec
       params:
         working_dir: src
         script: |
-          if [ -z "${reuse_compile_from}" ] || [ "${is_patch|false}" = "false" ]; then
-            set -o errexit
-            set -o verbose
-            source "${workdir}/compile_venv/bin/activate"
-            python ./buildscripts/idl/gen_all_feature_flag_list.py
-            mkdir -p mongodb/feature_flags
-            cp ./all_feature_flags.txt mongodb/feature_flags
-          fi
+          set -o errexit
+          set -o verbose
+          source "${workdir}/compile_venv/bin/activate"
+          python ./buildscripts/idl/gen_all_feature_flag_list.py
+          mkdir -p mongodb/feature_flags
+          cp ./all_feature_flags.txt mongodb/feature_flags
   generate server params list:
     - command: shell.exec
       params:
         working_dir: src
         script: |
-          if [ -z "${reuse_compile_from}" ] || [ "${is_patch|false}" = "false" ]; then
-            set -o errexit
-            set -o verbose
-            source "${workdir}/compile_venv/bin/activate"
-            python ./buildscripts/idl/gen_all_server_params_list.py
-            mkdir -p mongodb/server_params
-            cp ./all_server_params.txt mongodb/server_params
-          fi
+          set -o errexit
+          set -o verbose
+          source "${workdir}/compile_venv/bin/activate"
+          python ./buildscripts/idl/gen_all_server_params_list.py
+          mkdir -p mongodb/server_params
+          cp ./all_server_params.txt mongodb/server_params
   compile mongodb:
     - command: shell.exec
       params:
@@ -477,7 +446,6 @@ functions:
       params:
         working_dir: src
         script: |
-          if [ -z "${reuse_compile_from}" ] || [ "${is_patch|false}" = "false" ]; then
             set -o errexit
             set -o verbose
             wget --quiet https://s3.amazonaws.com/mciuploads/${project}/${compile_variant}/${version_id}/binaries/mongo-${revision_order_id}.${ext|tgz}
@@ -486,63 +454,36 @@ functions:
             mv ./dist-test/bin/mongos mongodb/bin
             mv ./dist-test/bin/mongod mongodb/bin
             mv ./dist-test/bin/mongocryptd mongodb/bin
-          fi
+            # Copy libs folder if it exists
+            [ ! -d ./dist-test/lib ] || mv ./dist-test/lib mongodb
   download jstests:
     - command: shell.exec
       params:
         working_dir: src
         script: |
-          if [ -z "${reuse_compile_from}" ] || [ "${is_patch|false}" = "false" ]; then
-            set -o errexit
-            set -o verbose
-            mkdir -p mongodb/jstests/hooks
-            if [ -d jstests/hooks ]
-            then
-              echo "Fetching JS test DB correctness checks from directory jstests"
-              cp -a jstests/* mongodb/jstests
+          set -o errexit
+          set -o verbose
+          mkdir -p mongodb/jstests/hooks
+          if [ -d jstests/hooks ]
+          then
+            echo "Fetching JS test DB correctness checks from directory jstests"
+            cp -a jstests/* mongodb/jstests
 
-              echo "Now adding our own special run_validate_collections.js wrapper"
-              mv mongodb/jstests/hooks/run_validate_collections.js mongodb/jstests/hooks/run_validate_collections.actual.js
+            echo "Now adding our own special run_validate_collections.js wrapper"
+            mv mongodb/jstests/hooks/run_validate_collections.js mongodb/jstests/hooks/run_validate_collections.actual.js
 
-              cat << EOF > mongodb/jstests/hooks/run_validate_collections.js
-              print("NOTE: run_validate_collections.js will skip the oplog!");
-              TestData = { skipValidationNamespaces: ['local.oplog.rs'] };
-              await import("jstests/hooks/run_validate_collections.actual.js");
+            cat << EOF > mongodb/jstests/hooks/run_validate_collections.js
+            print("NOTE: run_validate_collections.js will skip the oplog!");
+            TestData = { skipValidationNamespaces: ['local.oplog.rs'] };
+            await import("jstests/hooks/run_validate_collections.actual.js");
           EOF
-            fi
           fi
   package binary:
     - command: shell.exec
       params:
         working_dir: src
         script: |
-          if [ -z "${reuse_compile_from}" ] || [ "${is_patch|false}" = "false" ]; then
-            tar czf mongodb${compile_variant|}.tar.gz mongodb
-          fi
-    - command: shell.exec
-      params:
-        working_dir: src
-        script: |
-          if [ -n "${reuse_compile_from}" ] && [ "${is_patch|false}" = "true" ]; then
-            set -o errexit
-            set -o verbose
-
-            source "${workdir}/compile_venv/bin/activate"
-            python buildscripts/download_sys_perf_binaries.py -v ${reuse_compile_from} -b ${build_variant} -u ${evergreen_api_user} -k ${evergreen_api_key}
-            mv binary.tar.gz mongodb${compile_variant|}.tar.gz
-          fi
-  package old debugsymbols:
-    - command: shell.exec
-      params:
-        working_dir: src
-        script: |
-          if [ -z "${reuse_compile_from}" ] || [ "${is_patch|false}" = "false" ]; then
-            set -o errexit
-            set -o verbose
-            # Put all matching mongo debug from the build directory in an archive in the same location
-            # as the library archive (i.e. mongodb/bin).
-            tar czvf mongodb${compile_variant|}-debugsymbols.tar.gz $(find ./build/cached -name mongo\*.debug -type f) --xform 's:^.*/:mongodb/bin/:'
-          fi
+          tar czf mongodb${compile_variant|}.tar.gz mongodb
   upload binary:
     - command: s3.put
       params:
@@ -554,18 +495,6 @@ functions:
         permissions: public-read
         content_type: ${content_type|application/x-gzip}
         display_name: mongodb${compile_variant|}.tar.gz
-  upload old debugsymbols:
-    - command: s3.put
-      params:
-        aws_key: ${aws_key}
-        aws_secret: ${aws_secret}
-        local_file: src/mongodb${compile_variant|}-debugsymbols.tar.gz
-        remote_file: ${project_dir}/${version_id}/${revision}/${platform}/mongodb${compile_variant|}-${version_id}-debugsymbols.tar.gz
-        bucket: mciuploads
-        permissions: public-read
-        optional: true
-        content_type: ${content_type|application/x-gzip}
-        display_name: mongo-debugsymbols.tgz
   ###
 
   ###
@@ -667,19 +596,19 @@ tasks:
   - name: smoke_test
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: short
   - name: canaries_only
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: canaries
   - name: smoke_test_ssl
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: short
           mongodb_setup: replica-ssl
@@ -687,7 +616,7 @@ tasks:
   - name: smoke_test_standalone_auth
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: short
           mongodb_setup: standalone-auth
@@ -695,7 +624,7 @@ tasks:
   - name: smoke_test_replset_auth
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: short
           mongodb_setup: replica-auth
@@ -703,32 +632,13 @@ tasks:
   - name: smoke_test_shard_lite_auth
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: short
           mongodb_setup: shard-lite-auth
           infrastructure_provisioning: shard-lite
 
   ###
-
-  - name: compile
-    commands:
-      - command: manifest.load
-      - command: git.get_project
-        params:
-          directory: src
-          revisions:
-            mongo-tools: ${mongo-tools_rev}
-      - func: "compile prep"
-      - func: "compile mongo tools"
-      - func: "generate feature flag list"
-      - func: "generate server params list"
-      - func: "compile mongodb"
-      - func: "download jstests"
-      - func: "package binary"
-      - func: "upload binary"
-      - func: "package old debugsymbols"
-      - func: "upload old debugsymbols"
 
   - name: package_new_compile
     commands:
@@ -759,35 +669,35 @@ tasks:
   - name: linkbench
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "linkbench"
 
   - name: linkbench_stepdowns
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "linkbench_stepdowns"
 
   - name: linkbench_rolling_restarts
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "linkbench_rolling_restarts"
 
   - name: linkbench_non_retryable_writes_stepdowns
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "linkbench_non_retryable_writes_stepdowns"
 
   - name: linkbench_non_retryable_writes_rolling_restarts
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "linkbench_non_retryable_writes_rolling_restarts"
 
@@ -795,7 +705,7 @@ tasks:
     priority: 5
     exec_timeout_secs: 43200 # 12 hours
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "linkbench2"
           additional_tfvars: "tags: {expire-on-delta: 12}"
@@ -803,21 +713,21 @@ tasks:
   - name: tsbs_load
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tsbs_load"
 
   - name: tsbs_query
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tsbs_query"
 
   - name: tsbs_query_finance
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tsbs_query_finance"
 
@@ -825,49 +735,49 @@ tasks:
     priority: 5
     exec_timeout_secs: 432000 # 5 days
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tsbs_query_high_cardinality"
 
   - name: tsbs_query_sharded
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tsbs_query_sharded"
 
   - name: tsbs_query_finance_sharded
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tsbs_query_finance_sharded"
 
   - name: tsbs_query_sharded_balancer
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tsbs_query_sharded_balancer"
 
   - name: tsbs_query_finance_sharded_balancer
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tsbs_query_finance_sharded_balancer"
 
   - name: tsbs_query_manual_bucketing
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tsbs_query_manual_bucketing"
 
   - name: tsbs-query-genny
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tsbs_query_genny"
           test_control_params: |
@@ -877,7 +787,7 @@ tasks:
   - name: tsbs-query-optimizations
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tsbs_query_genny"
           test_control_params: |
@@ -887,105 +797,105 @@ tasks:
   - name: tpcc
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tpcc"
 
   - name: tpcc_majority
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tpcc_majority"
 
   - name: industry_benchmarks
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "ycsb"
 
   - name: ycsb_60GB
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "ycsb-60GB"
 
   - name: ycsb.load
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "ycsb.load"
 
   - name: ycsb_60GB.long
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "ycsb-60GB.long"
 
   - name: industry_benchmarks_secondary_reads
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "ycsb-secondary-reads"
 
   - name: industry_benchmarks_w1
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "ycsb-w1.2023-02"
 
   - name: industry_benchmarks_stepdowns
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "ycsb_stepdowns"
 
   - name: industry_benchmarks_rolling_restarts
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "ycsb_rolling_restarts"
 
   - name: industry_benchmarks_non_retryable_writes_stepdowns
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "ycsb_non_retryable_writes_stepdowns"
 
   - name: industry_benchmarks_non_retryable_writes_rolling_restarts
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "ycsb_non_retryable_writes_rolling_restarts"
 
   - name: crud_workloads_w1
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "crud_workloads_w1.2023-02"
 
   - name: crud_workloads_majority
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "crud_workloads_majority"
 
   - name: cursor_manager
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "cursor_manager"
 
@@ -993,35 +903,35 @@ tasks:
   # - name: mixed_workloads
   #   priority: 5
   #   commands:
-  #     - func: f_run_dsi_workload
+  #     - func: f_dsi_run_workload
   #       vars:
   #         test_control: "mixed_workloads"
 
   - name: mixed_workloads_genny_stepdowns
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "mixed_workloads_genny_stepdowns"
 
   - name: mixed_workloads_genny_rolling_restarts
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "mixed_workloads_genny_rolling_restarts"
 
   - name: big_update_10k
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "BigUpdate10k"
 
   - name: misc_workloads
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "misc_workloads"
 
@@ -1029,84 +939,84 @@ tasks:
   - name: map_reduce_workloads
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "map_reduce_workloads"
 
   - name: genny_canaries
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "genny_canaries"
 
   - name: retryable_writes_workloads
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "retryable_writes"
 
   - name: snapshot_reads
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "snapshot_reads"
 
   - name: secondary_reads
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "secondary_reads"
 
   - name: bestbuy_agg
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "bestbuy_agg"
 
   - name: bestbuy_agg_merge_same_db
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "bestbuy_agg_merge_same_db"
 
   - name: bestbuy_agg_merge_different_db
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "bestbuy_agg_merge_different_db"
 
   - name: bestbuy_agg_merge_target_hashed
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "bestbuy_agg_merge_target_hashed"
 
   - name: bestbuy_agg_merge_wordcount
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "bestbuy_agg_merge_wordcount"
 
   - name: bestbuy_query
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "bestbuy_query"
 
   - name: bestbuy_4_analytics
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "bestbuy_analytics"
           test_control_params: |
@@ -1116,7 +1026,7 @@ tasks:
   - name: bestbuy_4_analytics_columnstore
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "bestbuy_analytics"
           test_control_params: |
@@ -1127,7 +1037,7 @@ tasks:
   - name: external_data_source_1
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           mongodb_setup: "external_data_source"
           test_control: "external_data_source_1"
@@ -1136,7 +1046,7 @@ tasks:
   - name: external_data_source_4
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           mongodb_setup: "external_data_source"
           test_control: "external_data_source_4"
@@ -1145,7 +1055,7 @@ tasks:
   - name: tpch_1_normalized
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tpch"
           test_control_params: |
@@ -1155,7 +1065,7 @@ tasks:
   - name: tpch_1_denormalized
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tpch"
           test_control_params: |
@@ -1166,7 +1076,7 @@ tasks:
     priority: 5
     exec_timeout_secs: 43200 # 12 hours
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tpch"
           test_control_params: |
@@ -1177,7 +1087,7 @@ tasks:
     priority: 5
     exec_timeout_secs: 43200 # 12 hours
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "tpch"
           test_control_params: |
@@ -1187,7 +1097,7 @@ tasks:
   - name: ssb_column_store_comparison
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "ssb_column_store_index"
           test_control_params: |
@@ -1196,7 +1106,7 @@ tasks:
     priority: 5
     exec_timeout_secs: 43200 # 12 hours
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "column_store_tpch"
           test_control_params: |
@@ -1207,7 +1117,7 @@ tasks:
     priority: 5
     exec_timeout_secs: 43200 # 12 hours
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "column_store_tpch"
           test_control_params: |
@@ -1218,70 +1128,70 @@ tasks:
   - name: mixed_workloads_genny_rate_limited_high_value
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mixed_workloads_genny_rate_limited
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/scale/MixedWorkloadsGennyRateLimited.yml
   - name: load_test_high_value
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: load_test
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/scale/LoadTest.yml
   - name: majority_reads10_k_threads_high_value
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: majority_reads10_k_threads
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/scale/MajorityReads10KThreads.yml
   - name: large_indexed_ins_high_value
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: large_indexed_ins
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/scale/LargeIndexedIns.yml
   - name: expressive_queries_high_value
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: expressive_queries
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/query/ExpressiveQueries.yml
   - name: time_series_sort_high_value
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: time_series_sort
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/query/TimeSeriesSort.yml
   - name: medical_workload_diagnosis_50_50_high_value
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: medical_workload_diagnosis_50_50
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/encrypted/medical_workload-diagnosis-50-50.yml
   - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: ycsb_like_queryable_encrypt1_cfdefault
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/encrypted/YCSBLikeQueryableEncrypt1Cfdefault.yml
   - name: filter_with_complex_logical_expression_high_value
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: filter_with_complex_logical_expression
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/query/FilterWithComplexLogicalExpression.yml
   - name: array_traversal_high_value
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: array_traversal
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/query/ArrayTraversal.yml
@@ -1290,7 +1200,7 @@ tasks:
   - name: column_store_index_charts_events_1G
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "charts_events"
           test_control_params: |
@@ -1299,7 +1209,7 @@ tasks:
   - name: column_store_index_charts_events_10G
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "charts_events"
           test_control_params: |
@@ -1309,63 +1219,63 @@ tasks:
   - name: bestbuy_4_inserts
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "bestbuy_4_inserts"
 
   - name: non_sharded_workloads
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "non_sharded"
 
   - name: mongos_workloads
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "mongos"
 
   - name: mongos_large_catalog_workloads
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "mongos_large_catalog"
 
   - name: move_chunk_workloads
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "move_chunk"
 
   - name: move_chunk_waiting_workloads
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "move_chunk_waiting"
 
   - name: move_chunk_large_chunk_map_workloads
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "move_chunk_large_chunk_map"
 
   - name: refine_shard_key_transaction_stress
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "refine_shard_key_transaction_stress"
 
   - name: secondary_performance
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           # Unfortunately the dash/underscore style is different for mongodb_setup and test_control
           test_control: "secondary_performance"
@@ -1374,14 +1284,14 @@ tasks:
   - name: initialsync
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "initialsync"
 
   - name: initialsync-fcbis
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "initialsync"
           mongodb_setup: "replica-2node-fcbis"
@@ -1390,7 +1300,7 @@ tasks:
     priority: 5
     exec_timeout_secs: 43200 # 12 hours
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         timeout_secs: 43200 # 12 hours
         vars:
           test_control: "initialsync-logkeeper"
@@ -1399,7 +1309,7 @@ tasks:
     priority: 5
     exec_timeout_secs: 43200 # 12 hours
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         timeout_secs: 43200 # 12 hours
         vars:
           test_control: "initialsync-logkeeper"
@@ -1413,21 +1323,21 @@ tasks:
     priority: 5
     exec_timeout_secs: 216000 # 2.5 days
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "initialsync-logkeeper-snapshot-update"
 
   - name: initialsync-large
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "initialsync-large"
 
   - name: initialsync-large-fcbis
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "initialsync-large"
           mongodb_setup: "replica-2node-fcbis"
@@ -1435,53 +1345,53 @@ tasks:
   - name: change_streams_latency
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "change_streams_latency"
 
   - name: change_streams_preimage_throughput
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "change_streams_preimage_throughput"
 
   - name: change_streams_preimage_latency
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "change_streams_preimage_latency"
 
   - name: change_streams_listen_throughput
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "change_streams_listen_throughput"
 
   - name: change_streams_multi_mongos
     priority: 5
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: "change_streams_multi_mongos"
 
   - name: genny_execution_UserAcquisition
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: auto_genny_workload
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/execution/UserAcquisition.yml
   - name: genny_scale_InsertRemove
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: auto_genny_workload
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/scale/InsertRemove.yml
   - name: query_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1492,7 +1402,7 @@ tasks:
              read_cmd: 'true'}
   - name: query_read_commands_large_dataset
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1504,7 +1414,7 @@ tasks:
              share_dataset: 'true'}
   - name: big_collection
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1515,7 +1425,7 @@ tasks:
              read_cmd: 'true'}
   - name: views-query
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1526,7 +1436,7 @@ tasks:
              read_cmd: 'true'}
   - name: views-aggregation
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1537,7 +1447,7 @@ tasks:
              read_cmd: 'true'}
   - name: where_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1548,7 +1458,7 @@ tasks:
              read_cmd: 'true'}
   - name: update_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1559,7 +1469,7 @@ tasks:
              read_cmd: 'true'}
   - name: insert_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1570,7 +1480,7 @@ tasks:
              read_cmd: 'true'}
   - name: compound_wildcard_index_write_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1581,7 +1491,7 @@ tasks:
              read_cmd: 'true'}
   - name: compound_wildcard_index_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1592,7 +1502,7 @@ tasks:
              read_cmd: 'true'}
   - name: wildcard-index-read_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1603,7 +1513,7 @@ tasks:
              read_cmd: 'true'}
   - name: wildcard-index-write_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1614,7 +1524,7 @@ tasks:
              read_cmd: 'true'}
   - name: geo_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1625,7 +1535,7 @@ tasks:
              read_cmd: 'true'}
   - name: misc_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1636,7 +1546,7 @@ tasks:
              read_cmd: 'true'}
   - name: misc_custom_filter_default_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           mongodb_setup: mongo-perf-standalone-custom-filter-default.2023-02
@@ -1648,7 +1558,7 @@ tasks:
              read_cmd: 'true'}
   - name: misc_custom_filter_slow_or_sample_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           mongodb_setup: mongo-perf-standalone-custom-filter-slow-or-sample.2023-02
@@ -1660,7 +1570,7 @@ tasks:
              read_cmd: 'true'}
   - name: misc_custom_filter_complex_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           mongodb_setup: mongo-perf-standalone-custom-filter-complex.2023-02
@@ -1672,7 +1582,7 @@ tasks:
              read_cmd: 'true'}
   - name: misc_custom_filter_whole_doc_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           mongodb_setup: mongo-perf-standalone-custom-filter-whole-doc.2023-02
@@ -1684,7 +1594,7 @@ tasks:
              read_cmd: 'true'}
   - name: misc_slowms_everything_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           mongodb_setup: mongo-perf-standalone-slowms-everything.2023-02
@@ -1696,7 +1606,7 @@ tasks:
              read_cmd: 'true'}
   - name: singleThreaded_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1707,7 +1617,7 @@ tasks:
              read_cmd: 'true'}
   - name: aggregation_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1718,7 +1628,7 @@ tasks:
              read_cmd: 'true'}
   - name: aggregation_read_commands_large_dataset
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1730,7 +1640,7 @@ tasks:
              share_dataset: 'true'}
   - name: agg-query-comparison_read_commands
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1741,7 +1651,7 @@ tasks:
              read_cmd: 'true'}
   - name: pipeline-updates
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1752,7 +1662,7 @@ tasks:
              read_cmd: 'true'}
   - name: javascript
     commands:
-      - func: f_run_dsi_workload
+      - func: f_dsi_run_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
@@ -1850,6 +1760,7 @@ buildvariants:
         --ssl
         MONGO_DISTMOD=amazon2
         -j$(grep -c ^processor /proc/cpuinfo)
+        --release
         --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
         --use-diagnostic-latches=off
     run_on:
@@ -1875,6 +1786,7 @@ buildvariants:
         --ssl
         MONGO_DISTMOD=amazon2
         -j$(grep -c ^processor /proc/cpuinfo)
+        --release
         --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
         --use-diagnostic-latches=off
     run_on:
@@ -1900,6 +1812,7 @@ buildvariants:
         --ssl
         MONGO_DISTMOD=rhel82
         -j$(grep -c ^processor /proc/cpuinfo)
+        --release
         --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
     run_on:
       - amazon2023.0-arm64-large

@@ -44,9 +44,12 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+
 namespace mongo {
 
 MONGO_FAIL_POINT_DEFINE(SleepDbCheckInBatch);
+MONGO_FAIL_POINT_DEFINE(hangAfterGeneratingHashForExtraIndexKeysCheck);
 
 namespace {
 
@@ -444,6 +447,14 @@ Status dbCheckBatchOnSecondary(OperationContext* opCtx,
             // every N batches.
             HealthLogInterface::get(opCtx)->log(*logEntry);
         }
+
+        if (MONGO_unlikely(hangAfterGeneratingHashForExtraIndexKeysCheck.shouldFail())) {
+            LOGV2_DEBUG(3083200,
+                        3,
+                        "Hanging due to hangAfterGeneratingHashForExtraIndexKeysCheck failpoint");
+            // hangAfterGeneratingHashForExtraIndexKeysCheck.pauseWhileSet(opCtx);
+            opCtx->sleepFor(Milliseconds(1000));
+        }
     } catch (const DBException& exception) {
         // In case of an error, report it to the health log,
         auto logEntry = dbCheckErrorHealthLogEntry(
@@ -471,10 +482,59 @@ Status dbCheckOplogCommand(OperationContext* opCtx,
     }
     const auto type = OplogEntries_parse(IDLParserContext("type"), cmd.getStringField("type"));
     const IDLParserContext ctx("o", false /*apiStrict*/, entry.getTid());
+    auto skipDbCheck = mode != OplogApplication::Mode::kSecondary;
+    std::string oplogApplicationMode;
+    if (mode == OplogApplication::Mode::kInitialSync) {
+        oplogApplicationMode = "initial sync";
+    } else if (mode == OplogApplication::Mode::kUnstableRecovering) {
+        oplogApplicationMode = "unstable recovering";
+    } else if (mode == OplogApplication::Mode::kStableRecovering) {
+        oplogApplicationMode = "stable recovering";
+    } else if (mode == OplogApplication::Mode::kApplyOpsCmd) {
+        oplogApplicationMode = "applyOps";
+    } else {
+        oplogApplicationMode = "secondary";
+    }
     switch (type) {
         case OplogEntriesEnum::Batch: {
             const auto invocation = DbCheckOplogBatch::parse(ctx, cmd);
-            return dbCheckBatchOnSecondary(opCtx, opTime, invocation);
+
+            /*
+            // TODO SERVER-78399: Clean up handling minKey/maxKey once feature flag is removed.
+            // If the dbcheck oplog entry doesn't contain batchStart, convert minKey to a BSONObj to
+            // be used as batchStart.
+            BSONObj batchStart, batchEnd;
+            if (!invocation.getBatchStart()) {
+                batchStart = BSON("_id" << invocation.getMinKey().elem());
+            } else {
+                batchStart = invocation.getBatchStart().get();
+            }
+            if (!invocation.getBatchEnd()) {
+                batchEnd = BSON("_id" << invocation.getMaxKey().elem());
+            } else {
+                batchEnd = invocation.getBatchEnd().get();
+            }
+            */
+
+            if (!skipDbCheck) {
+                return dbCheckBatchOnSecondary(opCtx, opTime, invocation);
+            }
+
+            /*
+            BSONObjBuilder data;
+            data.append("batchStart", batchStart);
+            data.append("batchEnd", batchEnd);
+            */
+
+            auto healthLogEntry = mongo::dbCheckHealthLogEntry(
+                boost::none /*nss*/,
+                SeverityEnum::Warning,
+                "cannot execute dbcheck due to ongoing " + oplogApplicationMode,
+                type,
+                boost::none /*data*/);
+            HealthLogInterface::get(Client::getCurrent()->getServiceContext())
+                ->log(*healthLogEntry);
+            return Status::OK();
         }
         case OplogEntriesEnum::Collection: {
             // TODO SERVER-61963.
@@ -484,8 +544,11 @@ Status dbCheckOplogCommand(OperationContext* opCtx,
             [[fallthrough]];
         case OplogEntriesEnum::Stop:
             const auto healthLogEntry = mongo::dbCheckHealthLogEntry(
-                boost::none /*nss*/, SeverityEnum::Info, "", type, boost::none /*data*/
-            );
+                boost::none /*nss*/,
+                skipDbCheck ? SeverityEnum::Warning : SeverityEnum::Info,
+                skipDbCheck ? "cannot execute dbcheck due to ongoing " + oplogApplicationMode : "",
+                type,
+                boost::none /*data*/);
             HealthLogInterface::get(Client::getCurrent()->getServiceContext())
                 ->log(*healthLogEntry);
             return Status::OK();

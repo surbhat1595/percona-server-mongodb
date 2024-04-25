@@ -2195,6 +2195,25 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewObj(ArityType
     return {true, tag, val};
 }
 
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewBsonObj(ArityType arity) {
+    UniqueBSONObjBuilder bob;
+
+    for (ArityType idx = 0; idx < arity; idx += 2) {
+        auto [_, nameTag, nameVal] = getFromStack(idx);
+        auto [__, fieldTag, fieldVal] = getFromStack(idx + 1);
+        if (!value::isString(nameTag)) {
+            return {false, value::TypeTags::Nothing, 0};
+        }
+
+        auto name = value::getStringView(nameTag, nameVal);
+        bson::appendValueToBsonObj(bob, name, fieldTag, fieldVal);
+    }
+
+    bob.doneFast();
+    char* data = bob.bb().release().release();
+    return {true, value::TypeTags::bsonObject, value::bitcastFrom<char*>(data)};
+}
+
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinKeyStringToString(ArityType arity) {
     auto [owned, tagInKey, valInKey] = getFromStack(0);
 
@@ -3614,12 +3633,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBitTestPosition(
             // If position to test is longer than the data to test against, zero-extend.
             isBitSet = false;
         } else {
-            // Convert the bit position to a byte position within a byte. Note that byte positions
-            // start at position 0 in the document's value BinData array representation, and bit
-            // positions start at the least significant bit.
-            auto byteIdx = bitPosition / 8;
-            auto currentBit = bitPosition % 8;
-            auto currentByte = binData[byteIdx];
+            // Convert 'bitPosition' to 'currentByte' and 'currentBit'. Note that bit positions are
+            // 0-based starting at the right-most bit in 'binData'.
+            int currentByte = binData[(binDataSize - (bitPosition / 8)) - 1];
+            int currentBit = bitPosition % 8;
 
             isBitSet = currentByte & (1 << currentBit);
         }
@@ -6063,6 +6080,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinNewArrayFromRange(arity);
         case Builtin::newObj:
             return builtinNewObj(arity);
+        case Builtin::newBsonObj:
+            return builtinNewBsonObj(arity);
         case Builtin::ksToString:
             return builtinKeyStringToString(arity);
         case Builtin::newKs:
@@ -6332,6 +6351,8 @@ std::string builtinToString(Builtin b) {
             return "newArrayFromRange";
         case Builtin::newObj:
             return "newObj";
+        case Builtin::newBsonObj:
+            return "newBsonObj";
         case Builtin::ksToString:
             return "ksToString";
         case Builtin::newKs:

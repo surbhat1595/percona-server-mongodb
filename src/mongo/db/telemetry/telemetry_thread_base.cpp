@@ -315,12 +315,11 @@ Status TelemetryThreadBase::_writeMetrics(ServiceContext* serviceContext) try {
     std::ofstream ofs(tmpName);
     ofs << obj.jsonString(ExtendedCanonicalV2_0_0, 1 /* pretty */) << "\n";
     ofs.close();
-    // tweak permissions if Telemetry Agent does not run as root
-    // boost::filesystem::permissions(
-    //    tmpName,
-    //    boost::filesystem::owner_read | boost::filesystem::owner_write |
-    //        boost::filesystem::group_read | boost::filesystem::group_write |
-    //        boost::filesystem::others_read | boost::filesystem::others_write);
+    // set file permissions tp 660 to allow telemetry agent access
+    boost::filesystem::permissions(tmpName,
+                                   boost::filesystem::owner_read | boost::filesystem::owner_write |
+                                       boost::filesystem::group_read |
+                                       boost::filesystem::group_write);
     boost::filesystem::rename(tmpName, telePath / fmt::format("{}-{}.json", ts, _metricFileSuffix));
     return Status::OK();
 } catch (...) {

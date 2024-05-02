@@ -146,6 +146,7 @@
 #include "mongo/db/s/config/configsvr_coordinator_service.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/config_server_op_observer.h"
+#include "mongo/db/s/migration_chunk_cloner_source_op_observer.h"
 #include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/move_primary/move_primary_donor_service.h"
 #include "mongo/db/s/move_primary/move_primary_recipient_service.h"
@@ -1305,6 +1306,7 @@ void setUpObservers(ServiceContext* serviceContext) {
             ->registerPin(std::make_unique<ReshardingHistoryHook>());
         opObserverRegistry->addObserver(std::make_unique<OpObserverShardingImpl>(
             std::make_unique<OplogWriterTransactionProxy>(std::make_unique<OplogWriterImpl>())));
+        opObserverRegistry->addObserver(std::make_unique<MigrationChunkClonerSourceOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ShardServerOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ReshardingOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<repl::TenantMigrationDonorOpObserver>());
@@ -1589,7 +1591,10 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     LOGV2_OPTIONS(4784918, {LogComponent::kNetwork}, "Shutting down the ReplicaSetMonitor");
     ReplicaSetMonitor::shutdown();
 
-    if (auto sr = Grid::get(serviceContext)->shardRegistry()) {
+    auto sr = Grid::get(serviceContext)->isInitialized()
+        ? Grid::get(serviceContext)->shardRegistry()
+        : nullptr;
+    if (sr) {
         LOGV2_OPTIONS(4784919, {LogComponent::kSharding}, "Shutting down the shard registry");
         sr->shutdown();
     }
@@ -1606,7 +1611,10 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         validator->shutDown();
     }
 
-    if (auto pool = Grid::get(serviceContext)->getExecutorPool()) {
+    auto pool = Grid::get(serviceContext)->isInitialized()
+        ? Grid::get(serviceContext)->getExecutorPool()
+        : nullptr;
+    if (pool) {
         LOGV2_OPTIONS(6773200, {LogComponent::kSharding}, "Shutting down the ExecutorPool");
         pool->shutdownAndJoin();
     }

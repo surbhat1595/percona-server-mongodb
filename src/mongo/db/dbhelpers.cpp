@@ -179,8 +179,9 @@ bool Helpers::findById(OperationContext* opCtx,
     if (indexFound)
         *indexFound = 1;
 
-    auto recordId = catalog->getEntry(desc)->accessMethod()->asSortedData()->findSingle(
-        opCtx, CollectionPtr(collection), query["_id"].wrap());
+    const IndexCatalogEntry* entry = catalog->getEntry(desc);
+    auto recordId = entry->accessMethod()->asSortedData()->findSingle(
+        opCtx, CollectionPtr(collection), entry, query["_id"].wrap());
     if (recordId.isNull())
         return false;
     result = collection->docFor(opCtx, recordId).value();
@@ -190,7 +191,7 @@ bool Helpers::findById(OperationContext* opCtx,
 RecordId Helpers::findById(OperationContext* opCtx,
                            const CollectionPtr& collection,
                            const BSONObj& idquery) {
-    verify(collection);
+    MONGO_verify(collection);
     const IndexCatalog* catalog = collection->getIndexCatalog();
     const IndexDescriptor* desc = catalog->findIdIndex(opCtx);
     if (!desc && clustered_util::isClusteredOnId(collection->getClusteredInfo())) {
@@ -201,8 +202,9 @@ RecordId Helpers::findById(OperationContext* opCtx,
     }
 
     uassert(13430, "no _id index", desc);
-    return catalog->getEntry(desc)->accessMethod()->asSortedData()->findSingle(
-        opCtx, collection, idquery["_id"].wrap());
+    const IndexCatalogEntry* entry = catalog->getEntry(desc);
+    return entry->accessMethod()->asSortedData()->findSingle(
+        opCtx, collection, entry, idquery["_id"].wrap());
 }
 
 // Acquires necessary locks to read the collection with the given namespace. If this is an oplog
@@ -275,7 +277,7 @@ UpdateResult Helpers::upsert(OperationContext* opCtx,
                              const BSONObj& o,
                              bool fromMigrate) {
     BSONElement e = o["_id"];
-    verify(e.type());
+    MONGO_verify(e.type());
     BSONObj id = e.wrap();
     return upsert(opCtx, coll, id, o, fromMigrate);
 }

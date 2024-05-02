@@ -318,8 +318,7 @@ void CmdFindAndModify::Invocation::doCheckAuthorization(OperationContext* opCtx)
         actions.addAction(ActionType::bypassDocumentValidation);
     }
 
-    ResourcePattern resource(
-        CommandHelpers::resourcePatternForNamespace(request.getNamespace().toString()));
+    ResourcePattern resource(CommandHelpers::resourcePatternForNamespace(request.getNamespace()));
     uassert(17138,
             "Invalid target namespace " + resource.toString(),
             resource.isExactNamespacePattern());
@@ -403,9 +402,7 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
                 str::stream() << "database " << dbName.toStringForErrorMsg() << " does not exist",
                 DatabaseHolder::get(opCtx)->getDb(opCtx, nss.dbName()));
 
-        const ExtensionsCallbackReal extensionsCallback(opCtx, &updateRequest.getNamespaceString());
-        ParsedUpdate parsedUpdate(
-            opCtx, &updateRequest, extensionsCallback, collection.getCollectionPtr());
+        ParsedUpdate parsedUpdate(opCtx, &updateRequest, collection.getCollectionPtr());
         uassertStatusOK(parsedUpdate.parseRequest());
 
         CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
@@ -549,21 +546,10 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                     return buildResponse(updateResult, req.getRemove().value_or(false), docFound);
 
                 } catch (const ExceptionFor<ErrorCodes::DuplicateKey>& ex) {
-                    const ExtensionsCallbackReal extensionsCallback(
-                        opCtx, &updateRequest.getNamespaceString());
-
-                    // We are only using this to check if we should retry the command, so we don't
-                    // need to pass it a real collection object.
-                    ParsedUpdate parsedUpdate(
-                        opCtx, &updateRequest, extensionsCallback, CollectionPtr::null);
-                    uassertStatusOK(parsedUpdate.parseRequest());
-
-                    if (!parsedUpdate.hasParsedQuery()) {
-                        uassertStatusOK(parsedUpdate.parseQueryToCQ());
-                    }
-
+                    auto cq = uassertStatusOK(
+                        parseWriteQueryToCQ(opCtx, nullptr /* expCtx */, updateRequest));
                     if (!write_ops_exec::shouldRetryDuplicateKeyException(
-                            parsedUpdate, *ex.extraInfo<DuplicateKeyErrorInfo>())) {
+                            updateRequest, *cq, *ex.extraInfo<DuplicateKeyErrorInfo>())) {
                         throw;
                     }
 

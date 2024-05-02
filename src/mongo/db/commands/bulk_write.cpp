@@ -641,21 +641,10 @@ bool handleUpdateOp(OperationContext* opCtx,
                     responses.addUpdateReply(currentOpIdx, result, docFound, boost::none);
                     return true;
                 } catch (const ExceptionFor<ErrorCodes::DuplicateKey>& ex) {
-                    const ExtensionsCallbackReal extensionsCallback(
-                        opCtx, &updateRequest.getNamespaceString());
-
-                    // We are only using this to check if we should retry the command, so we don't
-                    // need to pass it a real collection object.
-                    ParsedUpdate parsedUpdate(
-                        opCtx, &updateRequest, extensionsCallback, CollectionPtr::null);
-                    uassertStatusOK(parsedUpdate.parseRequest());
-
-                    if (!parsedUpdate.hasParsedQuery()) {
-                        uassertStatusOK(parsedUpdate.parseQueryToCQ());
-                    }
-
+                    auto cq = uassertStatusOK(
+                        parseWriteQueryToCQ(opCtx, nullptr /* expCtx */, updateRequest));
                     if (!write_ops_exec::shouldRetryDuplicateKeyException(
-                            parsedUpdate, *ex.extraInfo<DuplicateKeyErrorInfo>())) {
+                            updateRequest, *cq, *ex.extraInfo<DuplicateKeyErrorInfo>())) {
                         throw;
                     }
 

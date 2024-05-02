@@ -36,7 +36,6 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/json.h"
 #include "mongo/db/prepare_conflict_tracker.h"
 #include "mongo/db/profile_filter.h"
@@ -346,7 +345,7 @@ void CurOp::setGenericOpRequestDetails(NamespaceString nss,
 void CurOp::setEndOfOpMetrics(long long nreturned) {
     _debug.additiveMetrics.nreturned = nreturned;
     // executionTime is set with the final executionTime in completeAndLogOperation, but for
-    // telemetry collection we want it set before incrementing cursor metrics using OpDebug's
+    // query stats collection we want it set before incrementing cursor metrics using OpDebug's
     // AdditiveMetrics. The value set here will be overwritten later in
     // completeAndLogOperation.
     _debug.additiveMetrics.executionTime = elapsedTimeExcludingPauses();
@@ -359,7 +358,7 @@ void CurOp::setMessage_inlock(StringData message) {
                     "Updating message",
                     "old"_attr = redact(_message),
                     "new"_attr = redact(message));
-        verify(!_progressMeter.isActive());
+        MONGO_verify(!_progressMeter.isActive());
     }
     _message = message.toString();  // copy
 }

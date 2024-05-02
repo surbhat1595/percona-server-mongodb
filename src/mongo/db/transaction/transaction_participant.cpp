@@ -413,14 +413,14 @@ void updateSessionEntry(OperationContext* opCtx,
                       << NamespaceString::kSessionTransactionsTableNamespace.toStringForErrorMsg(),
         idIndex);
 
-    auto indexAccess =
-        collection->getIndexCatalog()->getEntry(idIndex)->accessMethod()->asSortedData();
+    const IndexCatalogEntry* entry = collection->getIndexCatalog()->getEntry(idIndex);
+    auto indexAccess = entry->accessMethod()->asSortedData();
     // Since we are looking up a key inside the _id index, create a key object consisting of only
     // the _id field.
     auto idToFetch = updateRequest.getQuery().firstElement();
     auto toUpdateIdDoc = idToFetch.wrap();
     dassert(idToFetch.fieldNameStringData() == "_id"_sd);
-    auto recordId = indexAccess->findSingle(opCtx, *collection, toUpdateIdDoc);
+    auto recordId = indexAccess->findSingle(opCtx, *collection, entry, toUpdateIdDoc);
     auto startingSnapshotId = opCtx->recoveryUnit()->getSnapshotId();
 
     if (recordId.isNull()) {
@@ -3464,8 +3464,7 @@ void TransactionParticipant::Participant::handleWouldChangeOwningShardError(
         invariant(wouldChangeOwningShardInfo->getUuid());
         operation.setNss(*wouldChangeOwningShardInfo->getNs());
         operation.setUuid(*wouldChangeOwningShardInfo->getUuid());
-        ShardingWriteRouter shardingWriteRouter(
-            opCtx, *wouldChangeOwningShardInfo->getNs(), Grid::get(opCtx)->catalogCache());
+        ShardingWriteRouter shardingWriteRouter(opCtx, *wouldChangeOwningShardInfo->getNs());
         operation.setDestinedRecipient(shardingWriteRouter.getReshardingDestinedRecipient(
             wouldChangeOwningShardInfo->getPreImage()));
 

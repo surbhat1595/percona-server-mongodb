@@ -85,26 +85,26 @@ std::unique_ptr<QuerySolution> createQuerySolution() {
 class QueryStageMultiPlanTest : public unittest::Test {
 public:
     QueryStageMultiPlanTest() : _client(_opCtx.get()) {
-        dbtests::WriteContextForTests ctx(_opCtx.get(), nss.ns());
+        dbtests::WriteContextForTests ctx(_opCtx.get(), nss.ns_forTest());
         _client.dropCollection(nss);
     }
 
     virtual ~QueryStageMultiPlanTest() {
-        dbtests::WriteContextForTests ctx(_opCtx.get(), nss.ns());
+        dbtests::WriteContextForTests ctx(_opCtx.get(), nss.ns_forTest());
         _client.dropCollection(nss);
     }
 
     void addIndex(const BSONObj& obj) {
-        ASSERT_OK(dbtests::createIndex(_opCtx.get(), nss.ns(), obj));
+        ASSERT_OK(dbtests::createIndex(_opCtx.get(), nss.ns_forTest(), obj));
     }
 
     void insert(const BSONObj& obj) {
-        dbtests::WriteContextForTests ctx(_opCtx.get(), nss.ns());
+        dbtests::WriteContextForTests ctx(_opCtx.get(), nss.ns_forTest());
         _client.insert(nss, obj);
     }
 
     void remove(const BSONObj& obj) {
-        dbtests::WriteContextForTests ctx(_opCtx.get(), nss.ns());
+        dbtests::WriteContextForTests ctx(_opCtx.get(), nss.ns_forTest());
         _client.remove(nss, obj);
     }
 
@@ -393,7 +393,7 @@ TEST_F(QueryStageMultiPlanTest, MPSBackupPlan) {
     findCommand->setFilter(BSON("a" << 1 << "b" << 1));
     findCommand->setSort(BSON("b" << 1));
     auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(findCommand));
-    verify(statusWithCQ.isOK());
+    MONGO_verify(statusWithCQ.isOK());
     unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
     ASSERT(nullptr != cq.get());
     auto key = plan_cache_key_factory::make<PlanCacheKey>(*cq, collection.getCollection());

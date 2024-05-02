@@ -29,35 +29,26 @@
 
 #pragma once
 
-#include "mongo/db/pipeline/aggregate_command_gen.h"
-#include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/query/request_shapifier.h"
+#include "mongo/db/concurrency/locker_impl.h"
+#include "mongo/db/service_context.h"
 
-namespace mongo::query_stats {
+namespace mongo {
 
 /**
- * Handles shapification for AggregateCommandRequests. Requires a pre-parsed pipeline in order to
- * avoid parsing the raw pipeline multiple times, but users should be sure to provide a
- * non-optimized pipeline.
+ * ServiceContext hook that ensures OperationContexts are created with a valid Locker instance.
  */
-class AggregateRequestShapifier final : public RequestShapifier {
+class LockerImplClientObserver : public ServiceContext::ClientObserver {
 public:
-    AggregateRequestShapifier(const AggregateCommandRequest& request,
-                              const Pipeline& pipeline,
-                              OperationContext* opCtx,
-                              const boost::optional<std::string> applicationName = boost::none)
-        : RequestShapifier(opCtx, applicationName), _request(request), _pipeline(pipeline) {}
+    LockerImplClientObserver();
+    ~LockerImplClientObserver();
 
-    virtual ~AggregateRequestShapifier() = default;
+    void onCreateClient(Client* client) final {}
 
-    BSONObj makeQueryStatsKey(const SerializationOptions& opts,
-                              OperationContext* opCtx) const final;
+    void onDestroyClient(Client* client) final {}
 
-    BSONObj makeQueryStatsKey(const SerializationOptions& opts,
-                              const boost::intrusive_ptr<ExpressionContext>& expCtx) const final;
+    void onCreateOperationContext(OperationContext* opCtx) override;
 
-private:
-    const AggregateCommandRequest& _request;
-    const Pipeline& _pipeline;
+    void onDestroyOperationContext(OperationContext* opCtx) final {}
 };
-}  // namespace mongo::query_stats
+
+}  // namespace mongo

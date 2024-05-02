@@ -195,7 +195,7 @@ public:
             auto collName = coll->ns();
             ResourceId rid(RESOURCE_COLLECTION, collName);
 
-            ASSERT_NE(ResourceCatalog::get(getServiceContext()).name(rid), boost::none);
+            ASSERT_NE(ResourceCatalog::get().name(rid), boost::none);
             numEntries++;
         }
         ASSERT_EQ(5, numEntries);
@@ -237,20 +237,20 @@ TEST_F(CollectionCatalogResourceTest, RemoveAllResources) {
 
     const DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "resourceDb");
     auto rid = ResourceId(RESOURCE_DATABASE, dbName);
-    ASSERT_EQ(boost::none, ResourceCatalog::get(getServiceContext()).name(rid));
+    ASSERT_EQ(boost::none, ResourceCatalog::get().name(rid));
 
     for (int i = 0; i < 5; i++) {
         NamespaceString nss = NamespaceString::createNamespaceString_forTest(
             "resourceDb", "coll" + std::to_string(i));
         rid = ResourceId(RESOURCE_COLLECTION, nss);
-        ASSERT_EQ(boost::none, ResourceCatalog::get(getServiceContext()).name(rid));
+        ASSERT_EQ(boost::none, ResourceCatalog::get().name(rid));
     }
 }
 
 TEST_F(CollectionCatalogResourceTest, LookupDatabaseResource) {
     const DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "resourceDb");
     auto rid = ResourceId(RESOURCE_DATABASE, dbName);
-    auto ridStr = ResourceCatalog::get(getServiceContext()).name(rid);
+    auto ridStr = ResourceCatalog::get().name(rid);
 
     ASSERT(ridStr);
     ASSERT(ridStr->find(dbName.toStringWithTenantId_forTest()) != std::string::npos);
@@ -259,14 +259,14 @@ TEST_F(CollectionCatalogResourceTest, LookupDatabaseResource) {
 TEST_F(CollectionCatalogResourceTest, LookupMissingDatabaseResource) {
     const DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "missingDb");
     auto rid = ResourceId(RESOURCE_DATABASE, dbName);
-    ASSERT(!ResourceCatalog::get(getServiceContext()).name(rid));
+    ASSERT(!ResourceCatalog::get().name(rid));
 }
 
 TEST_F(CollectionCatalogResourceTest, LookupCollectionResource) {
     const NamespaceString collNs =
         NamespaceString::createNamespaceString_forTest(boost::none, "resourceDb.coll1");
     auto rid = ResourceId(RESOURCE_COLLECTION, collNs);
-    auto ridStr = ResourceCatalog::get(getServiceContext()).name(rid);
+    auto ridStr = ResourceCatalog::get().name(rid);
 
     ASSERT(ridStr);
     ASSERT(ridStr->find(collNs.toStringWithTenantId_forTest()) != std::string::npos);
@@ -276,7 +276,7 @@ TEST_F(CollectionCatalogResourceTest, LookupMissingCollectionResource) {
     const NamespaceString nss =
         NamespaceString::createNamespaceString_forTest(boost::none, "resourceDb.coll5");
     auto rid = ResourceId(RESOURCE_COLLECTION, nss);
-    ASSERT(!ResourceCatalog::get(getServiceContext()).name(rid));
+    ASSERT(!ResourceCatalog::get().name(rid));
 }
 
 TEST_F(CollectionCatalogResourceTest, RemoveCollection) {
@@ -285,7 +285,7 @@ TEST_F(CollectionCatalogResourceTest, RemoveCollection) {
     auto coll = catalog.lookupCollectionByNamespace(opCtx.get(), NamespaceString(collNs));
     catalog.deregisterCollection(opCtx.get(), coll->uuid(), /*isDropPending=*/false, boost::none);
     auto rid = ResourceId(RESOURCE_COLLECTION, collNs);
-    ASSERT(!ResourceCatalog::get(getServiceContext()).name(rid));
+    ASSERT(!ResourceCatalog::get().name(rid));
 }
 
 // Create an iterator over the CollectionCatalog and assert that all collections are present.
@@ -1125,11 +1125,11 @@ private:
         writableCollection->getAllIndexes(&indexNames);
         for (const auto& indexName : indexNames) {
             IndexCatalog* indexCatalog = writableCollection->getIndexCatalog();
-            auto indexDescriptor = indexCatalog->findIndexByName(
+            auto writableEntry = indexCatalog->getWritableEntryByName(
                 opCtx, indexName, IndexCatalog::InclusionPolicy::kReady);
 
             // This also adds the index ident to the drop-pending reaper.
-            ASSERT_OK(indexCatalog->dropIndex(opCtx, writableCollection, indexDescriptor));
+            ASSERT_OK(indexCatalog->dropIndexEntry(opCtx, writableCollection, writableEntry));
         }
 
         // Add the collection ident to the drop-pending reaper.
@@ -1184,11 +1184,11 @@ private:
         Collection* writableCollection = collection.getWritableCollection(opCtx);
 
         IndexCatalog* indexCatalog = writableCollection->getIndexCatalog();
-        auto indexDescriptor =
-            indexCatalog->findIndexByName(opCtx, indexName, IndexCatalog::InclusionPolicy::kReady);
+        auto writableEntry = indexCatalog->getWritableEntryByName(
+            opCtx, indexName, IndexCatalog::InclusionPolicy::kReady);
 
         // This also adds the index ident to the drop-pending reaper.
-        ASSERT_OK(indexCatalog->dropIndex(opCtx, writableCollection, indexDescriptor));
+        ASSERT_OK(indexCatalog->dropIndexEntry(opCtx, writableCollection, writableEntry));
     }
 
     /**
@@ -3009,36 +3009,57 @@ TEST_F(CollectionCatalogTimestampTest, ResolveNamespaceStringOrUUIDAtLatest) {
     }
 }
 
-TEST_F(CollectionCatalogTimestampTest, MixedModeWrites) {
-    // This test simulates the creation and dropping of system.profile collections. This collection
-    // is created untimestamped, but dropped with a timestamp.
-    // TODO SERVER-75740: Remove this test.
-    NamespaceString nss = NamespaceString::createNamespaceString_forTest("system.profile");
-
-    // Initialize the oldest timestamp.
-    CollectionCatalog::write(opCtx.get(), [](CollectionCatalog& catalog) {
-        catalog.catalogIdTracker().cleanup(Timestamp(1, 1));
-    });
-
-    // Create and drop the collection. We have a time window where the namespace exists.
-    createCollection(opCtx.get(), nss, Timestamp::min());
-    dropCollection(opCtx.get(), nss, Timestamp(10, 10));
-
-    // Before performing cleanup, re-create the collection.
+TEST_F(CollectionCatalogTimestampTest, IndexCatalogEntryCopying) {
+    const NamespaceString nss("test.abc");
     createCollection(opCtx.get(), nss, Timestamp::min());
 
-    // Perform collection catalog cleanup.
-    CollectionCatalog::write(opCtx.get(), [](CollectionCatalog& catalog) {
-        catalog.catalogIdTracker().cleanup(Timestamp(20, 20));
-    });
+    {
+        // Start but do not finish an index build.
+        IndexSpec spec;
+        spec.version(1).name("x_1").addKeys(BSON("x" << 1));
+        auto desc = IndexDescriptor(IndexNames::BTREE, spec.toBSON());
+        AutoGetCollection autoColl(opCtx.get(), nss, MODE_X);
+        WriteUnitOfWork wuow(opCtx.get());
+        auto collWriter = autoColl.getWritableCollection(opCtx.get());
+        ASSERT_OK(collWriter->prepareForIndexBuild(opCtx.get(), &desc, boost::none, false));
+        collWriter->getIndexCatalog()->createIndexEntry(
+            opCtx.get(), collWriter, std::move(desc), CreateIndexEntryFlags::kNone);
+        wuow.commit();
+    }
 
-    // Drop the re-created collection.
-    dropCollection(opCtx.get(), nss, Timestamp(30, 30));
+    // In a different client, open the latest collection instance and verify the index is not ready.
+    auto newClient = opCtx->getServiceContext()->makeClient("alternativeClient");
+    auto newOpCtx = newClient->makeOperationContext();
+    auto latestCatalog = CollectionCatalog::latest(newOpCtx.get());
+    auto latestColl =
+        latestCatalog->establishConsistentCollection(newOpCtx.get(), nss, boost::none);
 
-    // Cleanup again.
-    CollectionCatalog::write(opCtx.get(), [](CollectionCatalog& catalog) {
-        catalog.catalogIdTracker().cleanup(Timestamp(25, 25));
-    });
+    ASSERT_EQ(1, latestColl->getIndexCatalog()->numIndexesTotal());
+    ASSERT_EQ(0, latestColl->getIndexCatalog()->numIndexesReady());
+    ASSERT_EQ(1, latestColl->getIndexCatalog()->numIndexesInProgress());
+    const IndexDescriptor* desc = latestColl->getIndexCatalog()->findIndexByName(
+        newOpCtx.get(), "x_1", IndexCatalog::InclusionPolicy::kUnfinished);
+    const IndexCatalogEntry* entry = latestColl->getIndexCatalog()->getEntry(desc);
+    ASSERT(!entry->isReady());
+
+    {
+        // Now finish the index build on the original client.
+        AutoGetCollection autoColl(opCtx.get(), nss, MODE_X);
+        WriteUnitOfWork wuow(opCtx.get());
+        auto collWriter = autoColl.getWritableCollection(opCtx.get());
+        auto writableEntry = collWriter->getIndexCatalog()->getWritableEntryByName(
+            opCtx.get(), "x_1", IndexCatalog::InclusionPolicy::kUnfinished);
+        ASSERT_NOT_EQUALS(desc, writableEntry->descriptor());
+        collWriter->getIndexCatalog()->indexBuildSuccess(opCtx.get(), collWriter, writableEntry);
+        ASSERT(writableEntry->isReady());
+        wuow.commit();
+    }
+
+    // The index entry in the different client remains untouched.
+    ASSERT_EQ(1, latestColl->getIndexCatalog()->numIndexesTotal());
+    ASSERT_EQ(0, latestColl->getIndexCatalog()->numIndexesReady());
+    ASSERT_EQ(1, latestColl->getIndexCatalog()->numIndexesInProgress());
+    ASSERT(!entry->isReady());
 }
 }  // namespace
 }  // namespace mongo

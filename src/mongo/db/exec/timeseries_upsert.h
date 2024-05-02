@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2021-present MongoDB, Inc.
+ *    Copyright (C) 2023-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,31 +27,38 @@
  *    it in the license file.
  */
 
+
 #pragma once
 
-#include "mongo/db/service_context.h"
-#include "mongo/s/concurrency/locker_mongos.h"
+#include "mongo/db/exec/timeseries_modify.h"
 
 namespace mongo {
 
 /**
- * ServiceContext hook that ensures OperationContexts are created with a valid
- * Locker instance. Intended for use in mongos.
+ * Execution stage for timeseries update requests with {upsert:true}. This is a specialized
+ * TimeseriesModifyStage which, in the event that no documents match the update request's query,
+ * generates and inserts a new document into the collection. All logic related to the insertion
+ * phase is implemented by this class.
  */
-class LockerMongosClientObserver : public ServiceContext::ClientObserver {
+class TimeseriesUpsertStage final : public TimeseriesModifyStage {
 public:
-    LockerMongosClientObserver() = default;
-    ~LockerMongosClientObserver() = default;
+    TimeseriesUpsertStage(ExpressionContext* expCtx,
+                          TimeseriesModifyParams&& params,
+                          WorkingSet* ws,
+                          std::unique_ptr<PlanStage> child,
+                          const ScopedCollectionAcquisition& coll,
+                          BucketUnpacker bucketUnpacker,
+                          std::unique_ptr<MatchExpression> residualPredicate,
+                          const UpdateRequest& request);
 
-    void onCreateClient(Client* client) final {}
+    bool isEOF() final;
+    PlanStage::StageState doWork(WorkingSetID* id) final;
 
-    void onDestroyClient(Client* client) final {}
+private:
+    BSONObj _produceNewDocumentForInsert();
+    void _performInsert(BSONObj newDocument);
 
-    void onCreateOperationContext(OperationContext* opCtx) final {
-        opCtx->setLockState(std::make_unique<LockerMongos>());
-    }
-
-    void onDestroyOperationContext(OperationContext* opCtx) final {}
+    // The original update request.
+    const UpdateRequest& _request;
 };
-
-}  // namespace mongo
+}  //  namespace mongo

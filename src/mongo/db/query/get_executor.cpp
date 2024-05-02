@@ -55,6 +55,7 @@
 #include "mongo/db/exec/subplan.h"
 #include "mongo/db/exec/timeseries/bucket_unpacker.h"
 #include "mongo/db/exec/timeseries_modify.h"
+#include "mongo/db/exec/timeseries_upsert.h"
 #include "mongo/db/exec/upsert_stage.h"
 #include "mongo/db/index/columns_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -108,6 +109,7 @@
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/timeseries/timeseries_options.h"
+#include "mongo/db/timeseries/timeseries_update_delete_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/shard_key_pattern_query_util.h"
 #include "mongo/scripting/engine.h"
@@ -225,8 +227,8 @@ IndexEntry indexEntryFromIndexCatalogEntry(OperationContext* opCtx,
     const WildcardProjection* wildcardProjection = nullptr;
     std::set<FieldRef> multikeyPathSet;
     if (desc->getIndexType() == IndexType::INDEX_WILDCARD) {
-        auto wam = static_cast<const WildcardAccessMethod*>(accessMethod);
-        wildcardProjection = wam->getWildcardProjection();
+        wildcardProjection =
+            static_cast<const WildcardAccessMethod*>(accessMethod)->getWildcardProjection();
         if (isMultikey) {
             MultikeyMetadataAccessStats mkAccessStats;
 
@@ -242,9 +244,9 @@ IndexEntry indexEntryFromIndexCatalogEntry(OperationContext* opCtx,
                 }
 
                 multikeyPathSet =
-                    getWildcardMultikeyPathSet(wam, opCtx, projectedFields, &mkAccessStats);
+                    getWildcardMultikeyPathSet(opCtx, &ice, projectedFields, &mkAccessStats);
             } else {
-                multikeyPathSet = getWildcardMultikeyPathSet(wam, opCtx, &mkAccessStats);
+                multikeyPathSet = getWildcardMultikeyPathSet(opCtx, &ice, &mkAccessStats);
             }
 
             LOGV2_DEBUG(20920,
@@ -1416,7 +1418,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
                                        std::move(yieldPolicy),
                                        planningResult->isRecoveredFromPlanCache(),
                                        false /* generatedByBonsai */);
-}
+}  // getSlotBasedExecutor
 
 /**
  * Checks if the result of query planning is SBE compatible. If any of the query solutions in
@@ -1742,8 +1744,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
     OpDebug* opDebug,
     const ScopedCollectionAcquisition& coll,
     ParsedDelete* parsedDelete,
-    boost::optional<ExplainOptions::Verbosity> verbosity,
-    DeleteStageParams::DocumentCounter&& documentCounter) {
+    boost::optional<ExplainOptions::Verbosity> verbosity) {
     const auto& collectionPtr = coll.getCollectionPtr();
 
     auto expCtx = parsedDelete->expCtx();
@@ -1792,7 +1793,12 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
     deleteStageParams->sort = request->getSort();
     deleteStageParams->opDebug = opDebug;
     deleteStageParams->stmtId = request->getStmtId();
-    deleteStageParams->numStatsForDoc = std::move(documentCounter);
+
+    if (parsedDelete->isRequestToTimeseries() &&
+        !parsedDelete->isEligibleForArbitraryTimeseriesDelete()) {
+        deleteStageParams->numStatsForDoc = timeseries::numMeasurementsForBucketCounter(
+            collectionPtr->getTimeseriesOptions()->getTimeField());
+    }
 
     std::unique_ptr<WorkingSet> ws = std::make_unique<WorkingSet>();
     const auto policy = parsedDelete->yieldPolicy();
@@ -1969,8 +1975,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
     OpDebug* opDebug,
     const ScopedCollectionAcquisition& coll,
     ParsedUpdate* parsedUpdate,
-    boost::optional<ExplainOptions::Verbosity> verbosity,
-    UpdateStageParams::DocumentCounter&& documentCounter) {
+    boost::optional<ExplainOptions::Verbosity> verbosity) {
     const auto& collectionPtr = coll.getCollectionPtr();
 
     auto expCtx = parsedUpdate->expCtx();
@@ -2007,6 +2012,15 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
     }
 
     const auto policy = parsedUpdate->yieldPolicy();
+
+    auto documentCounter = [&] {
+        if (parsedUpdate->isRequestToTimeseries() &&
+            !parsedUpdate->isEligibleForArbitraryTimeseriesUpdate()) {
+            return timeseries::numMeasurementsForBucketCounter(
+                collectionPtr->getTimeseriesOptions()->getTimeField());
+        }
+        return UpdateStageParams::DocumentCounter{};
+    }();
 
     std::unique_ptr<WorkingSet> ws = std::make_unique<WorkingSet>();
     UpdateStageParams updateStageParams(request, driver, opDebug, std::move(documentCounter));
@@ -2105,23 +2119,35 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
 
     updateStageParams.canonicalQuery = cq.get();
     const bool isUpsert = updateStageParams.request->isUpsert();
-    if (isUpsert) {
-        root = std::make_unique<UpsertStage>(
-            cq->getExpCtxRaw(), updateStageParams, ws.get(), coll, root.release());
-    } else if (parsedUpdate->isEligibleForArbitraryTimeseriesUpdate()) {
+    if (parsedUpdate->isEligibleForArbitraryTimeseriesUpdate()) {
         if (request->isMulti()) {
             // If this is a multi-update, we need to spool the data before beginning to apply
             // updates, in order to avoid the Halloween problem.
             root = std::make_unique<SpoolStage>(cq->getExpCtxRaw(), ws.get(), std::move(root));
         }
-        root = std::make_unique<TimeseriesModifyStage>(
-            cq->getExpCtxRaw(),
-            TimeseriesModifyParams(&updateStageParams),
-            ws.get(),
-            std::move(root),
-            coll,
-            BucketUnpacker(*collectionPtr->getTimeseriesOptions()),
-            parsedUpdate->releaseResidualExpr());
+        if (isUpsert) {
+            root = std::make_unique<TimeseriesUpsertStage>(
+                cq->getExpCtxRaw(),
+                TimeseriesModifyParams(&updateStageParams),
+                ws.get(),
+                std::move(root),
+                coll,
+                BucketUnpacker(*collectionPtr->getTimeseriesOptions()),
+                parsedUpdate->releaseResidualExpr(),
+                *request);
+        } else {
+            root = std::make_unique<TimeseriesModifyStage>(
+                cq->getExpCtxRaw(),
+                TimeseriesModifyParams(&updateStageParams),
+                ws.get(),
+                std::move(root),
+                coll,
+                BucketUnpacker(*collectionPtr->getTimeseriesOptions()),
+                parsedUpdate->releaseResidualExpr());
+        }
+    } else if (isUpsert) {
+        root = std::make_unique<UpsertStage>(
+            cq->getExpCtxRaw(), updateStageParams, ws.get(), coll, root.release());
     } else {
         root = std::make_unique<UpdateStage>(
             cq->getExpCtxRaw(), updateStageParams, ws.get(), coll, root.release());

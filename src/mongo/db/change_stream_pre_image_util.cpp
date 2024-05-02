@@ -102,6 +102,13 @@ RecordIdBound getAbsoluteMaxPreImageRecordIdBoundForNs(const UUID& nsUUID) {
         ChangeStreamPreImageId(nsUUID, Timestamp::max(), std::numeric_limits<int64_t>::max())));
 }
 
+UUID getPreImageNsUUID(const BSONObj& preImageObj) {
+    auto parsedUUID = UUID::parse(preImageObj[ChangeStreamPreImage::kIdFieldName]
+                                      .Obj()[ChangeStreamPreImageId::kNsUUIDFieldName]);
+    tassert(7027400, "Pre-image collection UUID must be of UUID type", parsedUUID.isOK());
+    return std::move(parsedUUID.getValue());
+}
+
 boost::optional<UUID> findNextCollectionUUID(OperationContext* opCtx,
                                              const CollectionPtr* preImagesCollPtr,
                                              boost::optional<UUID> currentNsUUID,
@@ -125,16 +132,13 @@ boost::optional<UUID> findNextCollectionUUID(OperationContext* opCtx,
     if (planExecutor->getNext(&preImageObj, nullptr) == PlanExecutor::IS_EOF) {
         return boost::none;
     }
-    auto parsedUUID = UUID::parse(preImageObj["_id"].Obj()["nsUUID"]);
-    tassert(7027400, "Pre-image collection UUID must be of UUID type", parsedUUID.isOK());
 
     firstDocWallTime = preImageObj[ChangeStreamPreImage::kOperationTimeFieldName].date();
-
-    return {std::move(parsedUUID.getValue())};
+    return getPreImageNsUUID(preImageObj);
 }
 
-Date_t getCurrentTimeForPreImageRemoval() {
-    auto currentTime = Date_t::now();
+Date_t getCurrentTimeForPreImageRemoval(OperationContext* opCtx) {
+    auto currentTime = opCtx->getServiceContext()->getFastClockSource()->now();
     changeStreamPreImageRemoverCurrentTime.execute([&](const BSONObj& data) {
         // Populate the current time for time based expiration of pre-images.
         if (auto currentTimeElem = data["currentTimeForTimeBasedExpiration"]) {

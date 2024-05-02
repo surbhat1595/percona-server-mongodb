@@ -182,7 +182,7 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
         matchDetails.requestElemMatchKey();
 
         dassert(cq);
-        verify(cq->root()->matchesBSON(oldObjValue, &matchDetails));
+        MONGO_verify(cq->root()->matchesBSON(oldObjValue, &matchDetails));
 
         std::string matchedField;
         if (matchDetails.hasElemMatchKey())
@@ -727,8 +727,7 @@ void UpdateStage::checkUpdateChangesShardKeyFields(const boost::optional<BSONObj
 
     // It is possible that both the existing and new shard keys are being updated, so we do not want
     // to short-circuit checking whether either is being modified.
-    ShardingWriteRouter shardingWriteRouter(
-        opCtx(), collection()->ns(), Grid::get(opCtx())->catalogCache());
+    ShardingWriteRouter shardingWriteRouter(opCtx(), collection()->ns());
     checkUpdateChangesExistingShardKey(newObj, oldObj);
     checkUpdateChangesReshardingKey(shardingWriteRouter, newObj, oldObj);
 }

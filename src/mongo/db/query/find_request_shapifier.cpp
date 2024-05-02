@@ -29,6 +29,7 @@
 
 #include "mongo/db/query/find_request_shapifier.h"
 
+#include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/query/projection_ast_util.h"
 #include "mongo/db/query/projection_parser.h"
 #include "mongo/db/query/query_request_helper.h"
@@ -60,26 +61,17 @@ void addNonShapeObjCmdLiterals(BSONObjBuilder* bob,
 
 BSONObj FindRequestShapifier::makeQueryStatsKey(const SerializationOptions& opts,
                                                 OperationContext* opCtx) const {
-    auto expCtx = make_intrusive<ExpressionContext>(
-        opCtx, _request, nullptr /* collator doesn't matter here.*/, false /* mayDbProfile */);
-    expCtx->maxFeatureCompatibilityVersion = boost::none;  // Ensure all features are allowed.
-    // Expression counters are reported in serverStatus to indicate how often clients use certain
-    // expressions/stages, so it's a side effect tied to parsing. We must stop expression counters
-    // before re-parsing to avoid adding to the counters more than once per a given query.
-    expCtx->stopExpressionCounters();
-    return makeQueryStatsKey(opts, expCtx);
+    return makeQueryStatsKey(opts, makeDummyExpCtx(opCtx, _request));
 }
 
 BSONObj FindRequestShapifier::makeQueryStatsKey(
-    const SerializationOptions& opts, const boost::intrusive_ptr<ExpressionContext>& expCtx) const {
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const ParsedFindCommand& parsedRequest,
+    const SerializationOptions& opts) const {
     BSONObjBuilder bob;
 
-    bob.append("queryShape", query_shape::extractQueryShape(_request, opts, expCtx));
+    bob.append("queryShape", query_shape::extractQueryShape(parsedRequest, opts, expCtx));
 
-    if (auto optObj = _request.getReadConcern()) {
-        // Read concern should not be considered a literal.
-        bob.append(FindCommandRequest::kReadConcernFieldName, optObj.get());
-    }
     // has_value() returns true if allowParitalResults was populated by the original query.
     if (_request.getAllowPartialResults().has_value()) {
         // Note we are intentionally avoiding opts.appendLiteral() here and want to keep the exact
@@ -92,14 +84,65 @@ BSONObj FindRequestShapifier::makeQueryStatsKey(
 
     // Fields for literal redaction. Adds batchSize, maxTimeMS, and noCursorTimeOut.
     addNonShapeObjCmdLiterals(&bob, _request, opts, expCtx);
+
     if (_comment) {
         opts.appendLiteral(&bob, "comment", *_comment);
     }
+
     if (_applicationName.has_value()) {
         bob.append("applicationName", _applicationName.value());
     }
 
 
+    if (const auto& apiVersion = _apiParams->getAPIVersion()) {
+        bob.append("apiVersion", apiVersion.value());
+    }
+
+    if (const auto& apiStrict = _apiParams->getAPIStrict()) {
+        bob.append("apiStrict", apiStrict.value());
+    }
+
+    if (const auto& apiDeprecationErrors = _apiParams->getAPIDeprecationErrors()) {
+        bob.append("apiDeprecationErrors", apiDeprecationErrors.value());
+    }
+
+    if (auto optObj = _request.getReadConcern()) {
+        // afterClusterTime is distinct for every operation with causal consistency enabled. We
+        // normalize it in order not to blow out the telemetry store cache.
+        if (optObj.get()["afterClusterTime"]) {
+            BSONObjBuilder subObj = bob.subobjStart(FindCommandRequest::kReadConcernFieldName);
+
+            if (auto levelElem = optObj.get()["level"]) {
+                subObj.append(levelElem);
+            }
+            opts.appendLiteral(&subObj, "afterClusterTime", optObj.get()["afterClusterTime"]);
+            subObj.done();
+        } else {
+            bob.append(FindCommandRequest::kReadConcernFieldName, optObj.get());
+        }
+    }
+
+    if (_readPreference) {
+        bob.append("$readPreference", *_readPreference);
+    }
+
     return bob.obj();
+}
+
+BSONObj FindRequestShapifier::makeQueryStatsKey(
+    const SerializationOptions& opts, const boost::intrusive_ptr<ExpressionContext>& expCtx) const {
+    if (_initialQueryStatsKey && opts == SerializationOptions::kDefaultQueryShapeSerializeOptions) {
+        auto tmp = std::move(*_initialQueryStatsKey);
+        _initialQueryStatsKey = boost::none;
+        return tmp;
+    }
+    // Note this makes a copy of the find command request since the shapifier outlives the request
+    // in the query stats store.
+    auto parsedRequest = uassertStatusOK(
+        parsed_find_command::parse(expCtx,
+                                   std::make_unique<FindCommandRequest>(_request),
+                                   ExtensionsCallbackNoop(),
+                                   MatchExpressionParser::kAllowAllSpecialFeatures));
+    return makeQueryStatsKey(expCtx, *parsedRequest, opts);
 }
 }  // namespace mongo::query_stats

@@ -401,6 +401,8 @@ private:
 
     WT_SESSION* _waitUntilDurableSession = nullptr;  // owned, and never explicitly closed
                                                      // (uses connection close to clean up)
+    // Tracks the time since the last _waitUntilDurableSession reset().
+    Timer _timeSinceLastDurabilitySessionReset;
 
     WT_SESSION* _keyDBSession = nullptr;  // keyDB analog of _waitUntilDurableSession
 

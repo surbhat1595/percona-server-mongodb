@@ -54,7 +54,7 @@ static const NamespaceString nss("unittests.QueryStageDelete");
 class QueryStageDeleteBase {
 public:
     QueryStageDeleteBase() : _client(&_opCtx) {
-        dbtests::WriteContextForTests ctx(&_opCtx, nss.ns());
+        dbtests::WriteContextForTests ctx(&_opCtx, nss.ns_forTest());
 
         for (size_t i = 0; i < numObj(); ++i) {
             BSONObjBuilder bob;
@@ -65,7 +65,7 @@ public:
     }
 
     virtual ~QueryStageDeleteBase() {
-        dbtests::WriteContextForTests ctx(&_opCtx, nss.ns());
+        dbtests::WriteContextForTests ctx(&_opCtx, nss.ns_forTest());
         _client.dropCollection(nss);
     }
 
@@ -89,7 +89,7 @@ public:
             PlanStage::StageState state = scan->work(&id);
             if (PlanStage::ADVANCED == state) {
                 WorkingSetMember* member = ws.get(id);
-                verify(member->hasRecordId());
+                MONGO_verify(member->hasRecordId());
                 out->push_back(member->recordId);
             }
         }

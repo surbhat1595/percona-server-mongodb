@@ -30,6 +30,16 @@ export const logQueries = {
         severity: "warning",
         "msg": "abandoning dbCheck extra index keys check because index no longer exists"
     },
+    duringInitialSyncStart: {
+        severity: "warning",
+        "msg": "cannot execute dbcheck due to ongoing initial sync",
+        "operation": "dbCheckStart"
+    },
+    duringInitialSyncBatch: {
+        severity: "warning",
+        "msg": "cannot execute dbcheck due to ongoing initial sync",
+        "operation": "dbCheckBatch"
+    },
     duringInitialSyncQuery:
         {severity: "warning", "msg": "cannot execute dbcheck due to ongoing initial sync"},
     duringStableRecovery:
@@ -45,6 +55,12 @@ export const logQueries = {
             {"operation": "dbCheckStart", "severity": "info"},
             {"operation": "dbCheckStop", "severity": "info"}
         ]
+    },
+    writeConcernErrorQuery: {severity: "error", "msg": "dbCheck failed waiting for writeConcern"},
+    skipApplyingBatchOnSecondaryQuery: {
+        severity: "warning",
+        "msg":
+            "skipping applying dbcheck batch because the 'skipApplyingDbCheckBatchOnSecondary' parameter is on",
     },
 };
 

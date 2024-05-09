@@ -64,7 +64,6 @@ namespace mongo {
 namespace {
 
 constexpr StringData kParamName = "perconaTelemetry"_sd;
-constexpr StringData kTelemetryPath = "/usr/local/percona/telemetry/psmdb"_sd;
 
 constexpr StringData kFalse = "false"_sd;
 constexpr StringData kTrue = "true"_sd;
@@ -253,12 +252,12 @@ Status TelemetryThreadBase::_advance(ServiceContext* serviceContext) try {
 Status TelemetryThreadBase::_cleanupTelemetryDir() try {
     namespace fs = boost::filesystem;
     const auto ts = Date_t::now().toMillisSinceEpoch() / 1000;
-    const auto telePath = sdPath(kTelemetryPath);
+    const auto telePath = sdPath(perconaTelemetryPath);
     // We do not create any directories
     if (!fs::is_directory(telePath)) {
         return {ErrorCodes::NonExistentPath,
                 fmt::format("telemetry directory doesn't exist or isn't a directory: {}",
-                            kTelemetryPath)};
+                            perconaTelemetryPath)};
     }
 
     // clear outdated files
@@ -299,7 +298,7 @@ Status TelemetryThreadBase::_cleanupTelemetryDir() try {
 // write metrics file
 Status TelemetryThreadBase::_writeMetrics(ServiceContext* serviceContext) try {
     const auto ts = Date_t::now().toMillisSinceEpoch() / 1000;
-    const auto telePath = sdPath(kTelemetryPath);
+    const auto telePath = sdPath(perconaTelemetryPath);
 
     // dump new metrics file
     const auto tmpName = telePath / fmt::format("{}-{}.tmp", ts, _metricFileSuffix);

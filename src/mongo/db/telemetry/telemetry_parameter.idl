@@ -42,6 +42,12 @@ server_parameters:
             data: AtomicWord<bool>
             override_set: true
         default: true
+    perconaTelemetryPath:
+        description: "Path to the directory where metric files are created"
+        set_at: startup
+        cpp_varname: perconaTelemetryPath
+        cpp_vartype: std::string
+        default: "/usr/local/percona/telemetry/psmdb"
     perconaTelemetryGracePeriod:
         description: >-
             First telemetry metrics file won't be created during the grace period after

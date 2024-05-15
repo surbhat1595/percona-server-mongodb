@@ -31,6 +31,9 @@ Copyright (C) 2021-present Percona and/or its affiliates. All rights reserved.
 
 #pragma once
 
+#include <boost/none.hpp>
+
+#include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/pipeline/document_source.h"
 
 namespace mongo {
@@ -52,7 +55,7 @@ public:
 
         PrivilegeVector requiredPrivileges(bool isMongos,
                                            bool bypassDocumentValidation) const final {
-            return {Privilege(ResourcePattern::forClusterResource(), ActionType::fsync)};
+            return {Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::fsync)};
         }
 
         bool isInitialSource() const final {

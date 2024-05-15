@@ -84,8 +84,12 @@ namespace mongo {
                                      const DatabaseName& dbname,
                                      const BSONObj& cmdObj) const override {
             auto authzSess = AuthorizationSession::get(opCtx->getClient());
-            if (authzSess->isAuthorizedForPrivilege(Privilege{ResourcePattern::forAnyNormalResource(), ActionType::logApplicationMessage}) ||
-                authzSess->isAuthorizedForPrivilege(Privilege{ResourcePattern::forClusterResource(), ActionType::applicationMessage}))
+            if (authzSess->isAuthorizedForPrivilege(
+                    Privilege{ResourcePattern::forAnyNormalResource(dbname.tenantId()),
+                              ActionType::logApplicationMessage}) ||
+                authzSess->isAuthorizedForPrivilege(
+                    Privilege{ResourcePattern::forClusterResource(dbname.tenantId()),
+                              ActionType::applicationMessage}))
                 return Status::OK();
             return Status(ErrorCodes::Unauthorized, "unauthorized");
         }

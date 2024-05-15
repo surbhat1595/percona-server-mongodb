@@ -61,8 +61,9 @@ public:
                                  const DatabaseName& dbname,
                                  const BSONObj& cmdObj) const override {
         return AuthorizationSession::get(opCtx->getClient())
-                   ->isAuthorizedForActionsOnResource(ResourcePattern::forAnyNormalResource(),
-                                                      ActionType::startBackup)
+                   ->isAuthorizedForActionsOnResource(
+                       ResourcePattern::forAnyNormalResource(dbname.tenantId()),
+                       ActionType::startBackup)
             ? Status::OK()
             : Status(ErrorCodes::Unauthorized, "Unauthorized");
     }

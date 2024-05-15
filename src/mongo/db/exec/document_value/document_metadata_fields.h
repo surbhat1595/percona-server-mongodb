@@ -30,10 +30,21 @@
 #pragma once
 
 #include <bitset>
+#include <cstddef>
+#include <iosfwd>
+#include <memory>
+#include <utility>
+
+#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/record_id.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/bufreader.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 /**
@@ -68,6 +79,7 @@ public:
         kTimeseriesBucketMinTime,
         kTimeseriesBucketMaxTime,
         kSearchSortValues,
+        kVectorSearchDistance,
 
         // New fields must be added before the kNumFields sentinel.
         kNumFields
@@ -330,6 +342,21 @@ public:
         _holder->searchSortValues = vals.getOwned();
     }
 
+    bool hasVectorSearchDistance() const {
+        return _holder && _holder->metaFields.test(MetaType::kVectorSearchDistance);
+    }
+
+    double getVectorSearchDistance() const {
+        tassert(
+            7828400, "vectorSearchDistance must be present in metadata", hasVectorSearchDistance());
+        return _holder->vectorSearchDistance;
+    }
+
+    void setVectorSearchDistance(double vectorSearchDistance) {
+        _setCommon(MetaType::kVectorSearchDistance);
+        _holder->vectorSearchDistance = vectorSearchDistance;
+    }
+
     void serializeForSorter(BufBuilder& buf) const;
 
     bool isModified() const {
@@ -376,6 +403,7 @@ private:
         Date_t timeseriesBucketMinTime;
         Date_t timeseriesBucketMaxTime;
         BSONObj searchSortValues;
+        double vectorSearchDistance{0.0};
     };
 
     // Null until the first setter is called, at which point a MetadataHolder struct is allocated.

@@ -11,10 +11,8 @@
  *   requires_wiredtiger,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/core/timeseries/libs/timeseries.js");
+import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const minWiredTigerCacheSizeGB = 0.256;
 const cacheSize = minWiredTigerCacheSizeGB * 1000 * 1000 * 1000;  // 256 MB
@@ -36,6 +34,10 @@ replSet.startSet({setParameter: {timeseriesBucketMaxSize: defaultBucketMaxSize}}
 replSet.initiate();
 
 const db = replSet.getPrimary().getDB(jsTestName());
+
+const alwaysUseCompressedBuckets =
+    FeatureFlagUtil.isEnabled(db, "TimeseriesAlwaysUseCompressedBuckets");
+
 const coll = db.getCollection('t');
 coll.drop();
 assert.commandWorked(db.createCollection(
@@ -45,7 +47,7 @@ if (!TimeseriesTest.timeseriesScalabilityImprovementsEnabled(db)) {
     replSet.stopSet();
     jsTestLog(
         'Skipping test because the TimeseriesScalabilityImprovements feature flag is disabled.');
-    return;
+    quit();
 }
 
 // Helper to log timeseries stats.
@@ -115,7 +117,11 @@ while (bucketsClosedDueToSize == 0) {
 // buckets should be closed due to cache pressure.
 assert.eq(bucketsClosedDueToSize, cardinalityForCachePressure, formatStatsLog(timeseriesStats));
 assert.eq(bucketsClosedDueToCachePressure, 0, formatStatsLog(timeseriesStats));
-assert.eq(compressedBuckets, cardinalityForCachePressure, formatStatsLog(timeseriesStats));
+if (alwaysUseCompressedBuckets) {
+    assert.eq(compressedBuckets, 0, formatStatsLog(timeseriesStats));
+} else {
+    assert.eq(compressedBuckets, cardinalityForCachePressure, formatStatsLog(timeseriesStats));
+}
 
 // If we pass the cardinality point to simulate cache pressure, we will begin to see buckets closed
 // due to 'CachePressure' and not 'DueToSize'.
@@ -145,9 +151,12 @@ assert.eq(bucketsClosedDueToSize, cardinalityForCachePressure, formatStatsLog(ti
 assert.eq(
     bucketsClosedDueToCachePressure, cardinalityForCachePressure, formatStatsLog(timeseriesStats));
 
-// We expect the number of compressed buckets to double (independent to whether the buckets were
-// closed due to size or cache pressure).
-assert.eq(compressedBuckets, 2 * cardinalityForCachePressure, formatStatsLog(timeseriesStats));
+if (alwaysUseCompressedBuckets) {
+    assert.eq(compressedBuckets, 0, formatStatsLog(timeseriesStats));
+} else {
+    // We expect the number of compressed buckets to double (independent to whether the buckets were
+    // closed due to size or cache pressure).
+    assert.eq(compressedBuckets, 2 * cardinalityForCachePressure, formatStatsLog(timeseriesStats));
+}
 
 replSet.stopSet();
-})();

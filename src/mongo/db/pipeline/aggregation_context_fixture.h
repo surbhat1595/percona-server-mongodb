@@ -33,7 +33,6 @@
 #include <memory>
 #include <vector>
 
-#include "mongo/db/concurrency/locker_noop_client_observer.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/service_context_test_fixture.h"
@@ -52,9 +51,6 @@ public:
               boost::none, "unittests", "pipeline_test")) {}
 
     AggregationContextFixture(NamespaceString nss) {
-        auto service = getServiceContext();
-        service->registerClientObserver(
-            std::make_unique<LockerNoopClientObserverWithReplacementPolicy>());
         _opCtx = makeOperationContext();
         _expCtx = make_intrusive<ExpressionContextForTest>(_opCtx.get(), nss);
         unittest::TempDir tempDir("AggregationContextFixture");
@@ -84,12 +80,10 @@ public:
         options.verbosity = verbosity;
         if (performRedaction) {
             options.literalPolicy = LiteralSerializationPolicy::kToDebugTypeString;
-            // TODO SERVER-75399 Use only 'literalPolicy.'
-            options.replacementForLiteralArgs = "?";
-            options.identifierHmacPolicy = [](StringData s) -> std::string {
+            options.transformIdentifiersCallback = [](StringData s) -> std::string {
                 return str::stream() << "HASH<" << s << ">";
             };
-            options.applyHmacToIdentifiers = true;
+            options.transformIdentifiers = true;
         }
         std::vector<Value> serialized;
         docSource.serializeToArray(serialized, options);
@@ -101,13 +95,11 @@ public:
                                      bool performRedaction = true) {
         SerializationOptions options;
         if (performRedaction) {
-            // TODO SERVER-75399 Use only 'literalPolicy.'
-            options.replacementForLiteralArgs = "?";
             options.literalPolicy = LiteralSerializationPolicy::kToDebugTypeString;
-            options.identifierHmacPolicy = [](StringData s) -> std::string {
+            options.transformIdentifiersCallback = [](StringData s) -> std::string {
                 return str::stream() << "HASH<" << s << ">";
             };
-            options.applyHmacToIdentifiers = true;
+            options.transformIdentifiers = true;
         }
         std::vector<Value> serialized;
         docSource.serializeToArray(serialized, options);

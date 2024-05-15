@@ -27,10 +27,15 @@
  *    it in the license file.
  */
 
+#include <memory>
+
+#include <boost/optional/optional.hpp>
+
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/platform/atomic_word.h"
 
 namespace mongo {
 namespace {
@@ -71,6 +76,13 @@ void recordCurOpMetrics(OperationContext* opCtx) {
     lookupPushdownCounters.incrementLookupCounters(CurOp::get(opCtx)->debug());
     sortCounters.incrementSortCounters(debug);
     queryFrameworkCounters.incrementQueryEngineCounters(CurOp::get(opCtx));
+}
+
+void recordCurOpMetricsOplogApplication(OperationContext* opCtx) {
+    const OpDebug& debug = CurOp::get(opCtx)->debug();
+    if (auto n = debug.additiveMetrics.writeConflicts.load(); n > 0) {
+        writeConflictsCounter.increment(n);
+    }
 }
 
 }  // namespace mongo

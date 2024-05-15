@@ -7,12 +7,9 @@
  * @tags: [
  *   does_not_support_transactions,
  *   requires_fcv_70,
+ *   references_foreign_collection,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/analyze_plan.js");         // For 'isCollscan()' and similar.
 load("jstests/aggregation/extras/utils.js");  // For 'resultsEq().'
 
 const coll = db.lookup_using_hash_key;
@@ -46,4 +43,3 @@ let results = coll.aggregate(
 // We essentially just looked up ourselves for each document.
 let expected = allDocs.map(doc => Object.merge(doc, {relookup: [doc]}));
 assert(resultsEq(results, expected, true), [results, expected]);
-}());

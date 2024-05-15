@@ -28,8 +28,24 @@
  */
 
 #include "mongo/db/query/optimizer/reference_tracker.h"
+
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/container/node_hash_set.h>
+#include <absl/meta/type_traits.h>
+
+#include "mongo/base/string_data.h"
+#include "mongo/db/query/optimizer/algebra/polyvalue.h"
+#include "mongo/db/query/optimizer/comparison_op.h"
+#include "mongo/db/query/optimizer/rewrites/const_eval.h"
+#include "mongo/db/query/optimizer/syntax/path.h"
+#include "mongo/db/query/optimizer/utils/strong_alias.h"
+#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/unittest/framework.h"
 #include "mongo/util/assert_util.h"
 
 
@@ -198,6 +214,73 @@ TEST(ReferenceTrackerTest, BuildLetWithFreeVariable) {
     // The "evalProj" referenced by the let correctly cannot be resolved.
     auto env = VariableEnvironment::build(evalNode);
     ASSERT(env.hasFreeVariables());
+}
+
+TEST(ReferenceTrackerTest, GetDefinitionsForRIDUnion) {
+    const ProjectionName scanProjectionName = "p0";
+    const ProjectionName boundProjectionName = "pBound";
+
+    ABT path = make<PathGet>("a", make<PathIdentity>());
+    IntervalReqExpr::Node interval =
+        *IntervalReqExpr::Builder{}
+             .pushDisj()
+             .pushConj()
+             .atom({{true, Constant::int64(10)}, {true, Constant::int64(20)}})
+             .finish();
+
+    PartialSchemaKey partialSchemaKey{scanProjectionName, path};
+
+    PSRExpr::Node leftNode =
+        *PSRExprBuilder{}
+             .pushDisj()
+             .pushConj()
+             .atom({partialSchemaKey, {boundProjectionName, interval, false /*isPerfOnly*/}})
+             .atom({{scanProjectionName, make<PathGet>("b", make<PathIdentity>())},
+                    {boost::none /*boundProjectionName*/, interval, false /*isPerfOnly*/}})
+             .finish();
+    PartialSchemaRequirements leftReqs(std::move(leftNode));
+    ABT leftChild = make<SargableNode>(std::move(leftReqs),
+                                       std::vector<CandidateIndexEntry>{} /*candidateIndexes*/,
+                                       boost::none /*scanParams*/,
+                                       IndexReqTarget::Index,
+                                       make<ScanNode>("p0", "test1"));
+
+    PSRExpr::Node rightNode =
+        *PSRExprBuilder{}
+             .pushDisj()
+             .pushConj()
+             .atom({partialSchemaKey, {boundProjectionName, interval, false /*isPerfOnly*/}})
+             .atom({{scanProjectionName, make<PathGet>("b", make<PathIdentity>())},
+                    {ProjectionName{"pRightOnly"}, interval, false /*isPerfOnly*/}})
+             .finish();
+    PartialSchemaRequirements rightReqs(std::move(rightNode));
+    ABT rightChild = make<SargableNode>(std::move(rightReqs),
+                                        std::vector<CandidateIndexEntry>{} /*candidateIndexes*/,
+                                        boost::none /*scanParams*/,
+                                        IndexReqTarget::Seek,
+                                        make<ScanNode>("p0", "test1"));
+
+    ABT unionNode = make<RIDUnionNode>(scanProjectionName,
+                                       ProjectionNameVector{"p0", "pBound"},
+                                       std::move(leftChild),
+                                       std::move(rightChild));
+
+    auto env = VariableEnvironment::build(unionNode);
+    ASSERT(!env.hasFreeVariables());
+
+    // The union only propagates the specified projections.
+    auto unionProjs = env.getProjections(unionNode.ref());
+    ProjectionNameSet expectedSet = {scanProjectionName, boundProjectionName};
+    ASSERT(expectedSet == unionProjs);
+    auto unionDefs = env.getDefinitions(unionNode.ref());
+    ASSERT_EQ(unionDefs.size(), 2);
+    ASSERT(unionDefs.find("p0") != unionDefs.end());
+    ASSERT(unionDefs.find("p0")->second.definedBy == unionNode.ref());
+    ASSERT_TRUE(unionDefs.find("p0")->second.definition.is<Source>());
+    ASSERT(unionDefs.find("pBound") != unionDefs.end());
+    ASSERT(unionDefs.find("pBound")->second.definedBy == unionNode.ref());
+    ASSERT_TRUE(unionDefs.find("pBound")->second.definition.is<Source>());
+    ASSERT(unionDefs.find("pRightOnly") == unionDefs.end());
 }
 
 TEST(ReferenceTrackerTest, GetDefinitionsForUnion) {

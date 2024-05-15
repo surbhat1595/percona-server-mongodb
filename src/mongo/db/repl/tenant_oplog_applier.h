@@ -29,17 +29,42 @@
 
 #pragma once
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <cstddef>
+#include <map>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/repl/abstract_async_component.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_buffer.h"
 #include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/oplog_entry_or_grouped_inserts.h"
+#include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/tenant_oplog_batcher.h"
 #include "mongo/db/serverless/serverless_types_gen.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/executor/task_executor.h"
+#include "mongo/platform/mutex.h"
+#include "mongo/stdx/unordered_set.h"
+#include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/future.h"
+#include "mongo/util/future_impl.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 class ThreadPool;
@@ -73,10 +98,32 @@ public:
         OpTime recipientOpTime;
     };
 
+    /**
+     * Used to configure behavior of this TenantOplogApplier.
+     **/
+    struct Options {
+        explicit Options(OplogApplication::Mode inputMode)
+            : mode(inputMode),
+              allowNamespaceNotFoundErrorsOnCrudOps(inputMode !=
+                                                    OplogApplication::Mode::kSecondary),
+              isDataConsistent(inputMode == OplogApplication::Mode::kSecondary) {
+
+            // Safety rail to prevent incorrect values for 'isDataConsistent' &
+            // 'allowNamespaceNotFoundErrorsOnCrudOps' for future oplog application modes.
+            invariant(mode == OplogApplication::Mode::kInitialSync ||
+                      mode == OplogApplication::Mode::kSecondary);
+        }
+
+        const OplogApplication::Mode mode;
+        const bool allowNamespaceNotFoundErrorsOnCrudOps;
+        const bool isDataConsistent;
+    };
+
     TenantOplogApplier(const UUID& migrationUuid,
                        const MigrationProtocolEnum& protocol,
+                       const OpTime& StartApplyingAfterOpTime,
+                       const OpTime& cloneFinishedRecipientOpTime,
                        boost::optional<std::string> tenantId,
-                       OpTime StartApplyingAfterOpTime,
                        RandomAccessOplogBuffer* oplogBuffer,
                        std::shared_ptr<executor::TaskExecutor> executor,
                        ThreadPool* writerPool,
@@ -97,11 +144,6 @@ public:
         stdx::lock_guard lk(_mutex);
         return _numOpsApplied;
     }
-
-    /**
-     * This should only be called once before the applier starts.
-     */
-    void setCloneFinishedRecipientOpTime(OpTime cloneFinishedRecipientOpTime);
 
     /**
      * Returns the optime the applier will start applying from.
@@ -127,6 +169,19 @@ private:
     void _applyOplogBatch(TenantOplogBatch* batch);
     Status _applyOplogBatchPerWorker(std::vector<ApplierOperation>* ops);
     void _checkNsAndUuidsBelongToTenant(OperationContext* opCtx, const TenantOplogBatch& batch);
+    void _writeTransactionEntryNoOp(OperationContext* opCtx,
+                                    MutableOplogEntry& noopEntry,
+                                    const OplogEntry& entry);
+    void _writeRetryableWriteEntryNoOp(OperationContext* opCtx,
+                                       MutableOplogEntry& noopEntry,
+                                       const OplogEntry& entry,
+                                       const boost::optional<MutableOplogEntry>& prePostImageEntry,
+                                       const OpTime& originalPrePostImageOpTime);
+    void _writeSessionNoOp(OperationContext* opCtx,
+                           MutableOplogEntry& noopEntry,
+                           boost::optional<SessionTxnRecord> sessionTxnRecord = boost::none,
+                           std::vector<StmtId> stmtIds = {},
+                           boost::optional<MutableOplogEntry> prePostImageEntry = boost::none);
     OpTimePair _writeNoOpEntries(OperationContext* opCtx, const TenantOplogBatch& batch);
 
     using TenantNoOpEntry = std::pair<ApplierOperation, std::vector<OplogSlot>::iterator>;
@@ -174,21 +229,24 @@ private:
     std::shared_ptr<TenantOplogBatcher> _oplogBatcher;  // (R)
     const UUID _migrationUuid;                          // (R)
     const MigrationProtocolEnum _protocol;              // (R)
+    const OpTime _startApplyingAfterOpTime;             // (R)
+    // All no-op entries written by this migration should have OpTime greater than this
+    // OpTime.
+    const OpTime _cloneFinishedRecipientOpTime;  // (R)
     // For multi-tenant migration protocol, _tenantId is set.
     // But, for shard merge protcol, _tenantId is empty.
-    const boost::optional<std::string> _tenantId;       // (R)
-    const OpTime _startApplyingAfterOpTime;             // (R)
-    RandomAccessOplogBuffer* _oplogBuffer;              // (R)
-    std::shared_ptr<executor::TaskExecutor> _executor;  // (R)
-    // All no-op entries written by this tenant migration should have OpTime greater than this
-    // OpTime.
-    OpTime _cloneFinishedRecipientOpTime = OpTime();  // (R)
+    const boost::optional<std::string> _tenantId;  // (R)
+
+    RandomAccessOplogBuffer* _oplogBuffer;  // (R)
+    std::shared_ptr<executor::TaskExecutor>
+        _executor;  // (R)
+                    // Pool of worker threads for writing ops to the databases.
+    // Not owned by us.
+    ThreadPool* const _writerPool;  // (S)
     // Keeps track of last applied donor and recipient optimes by the tenant oplog applier.
     // This gets updated only on batch boundaries.
     OpTimePair _lastAppliedOpTimesUpToLastBatch;  // (M)
-    // Pool of worker threads for writing ops to the databases.
-    // Not owned by us.
-    ThreadPool* const _writerPool;  // (S)
+
     // The timestamp to resume batching from. A null timestamp indicates that the oplog applier
     // is starting fresh (not a retry), and will start batching from the beginning of the oplog
     // buffer.
@@ -198,6 +256,7 @@ private:
     stdx::unordered_set<UUID, UUID::Hash> _knownGoodUuids;                // (X)
     bool _applyLoopApplyingBatch = false;                                 // (M)
     size_t _numOpsApplied{0};                                             // (M)
+    const Options _options;                                               // (R)
 };
 
 /**

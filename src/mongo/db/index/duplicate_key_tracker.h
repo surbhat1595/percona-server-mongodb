@@ -30,13 +30,19 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <string>
 #include <vector>
 
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/key_string.h"
+#include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/temporary_record_store.h"
+#include "mongo/platform/atomic_word.h"
 
 namespace mongo {
 
@@ -75,7 +81,7 @@ public:
      */
     Status recordKey(OperationContext* opCtx,
                      const IndexCatalogEntry* indexCatalogEntry,
-                     const KeyString::Value& key);
+                     const key_string::Value& key);
 
     /**
      * Returns Status::OK if all previously recorded duplicate key constraint violations have been

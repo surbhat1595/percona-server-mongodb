@@ -37,9 +37,11 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
+#include "mongo/db/pipeline/query_request_conversion.h"
 #include "mongo/db/query/cursor_response.h"
-#include "mongo/db/query/find_request_shapifier.h"
+#include "mongo/db/query/query_shape.h"
 #include "mongo/db/query/query_stats.h"
+#include "mongo/db/query/query_stats_find_key_generator.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -47,7 +49,6 @@
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/commands/cluster_explain.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/is_mongos.h"
 #include "mongo/s/query/cluster_aggregate.h"
 #include "mongo/s/query/cluster_find.h"
 
@@ -153,11 +154,11 @@ public:
                 Timer timer;
                 const auto cri =
                     uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(
-                        opCtx, *findCommand->getNamespaceOrUUID().nss()));
+                        opCtx, findCommand->getNamespaceOrUUID().nss()));
                 shardResponses = scatterGatherVersionedTargetByRoutingTable(
                     opCtx,
-                    findCommand->getNamespaceOrUUID().nss()->db(),
-                    *findCommand->getNamespaceOrUUID().nss(),
+                    findCommand->getNamespaceOrUUID().nss().db_forSharding(),
+                    findCommand->getNamespaceOrUUID().nss(),
                     cri,
                     explainCmd,
                     ReadPreferenceSetting::get(opCtx),
@@ -183,17 +184,9 @@ public:
                 auto bodyBuilder = result->getBodyBuilder();
                 bodyBuilder.resetToEmpty();
 
-                auto aggCmdOnView =
-                    uassertStatusOK(query_request_helper::asAggregationCommand(*findCommand));
-                auto viewAggregationCommand =
-                    OpMsgRequest::fromDBAndBody(_dbName.db(), aggCmdOnView).body;
-
-                auto aggRequestOnView = aggregation_request_helper::parseFromBSON(
-                    opCtx,
-                    ns(),
-                    viewAggregationCommand,
-                    verbosity,
-                    APIParameters::get(opCtx).getAPIStrict().value_or(false));
+                auto aggRequestOnView =
+                    query_request_conversion::asAggregateCommandRequest(*findCommand);
+                aggRequestOnView.setExplain(verbosity);
 
                 // An empty PrivilegeVector is acceptable because these privileges are only checked
                 // on getMore and explain will not open a cursor.
@@ -222,8 +215,13 @@ public:
             auto& parsedFind = parsedFindResult.second;
 
             if (!_didDoFLERewrite) {
-                query_stats::registerRequest(expCtx, expCtx->ns, [&]() {
-                    return std::make_unique<query_stats::FindRequestShapifier>(opCtx, *parsedFind);
+                BSONObj queryShape = query_shape::extractQueryShape(
+                    *parsedFind,
+                    SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+                    expCtx);
+                query_stats::registerRequest(opCtx, expCtx->ns, [&]() {
+                    return std::make_unique<query_stats::FindKeyGenerator>(
+                        expCtx, *parsedFind, std::move(queryShape));
                 });
             }
             auto cq = uassertStatusOK(CanonicalQuery::canonicalize(expCtx, std::move(parsedFind)));
@@ -252,17 +250,8 @@ public:
             } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& ex) {
                 result->reset();
 
-                auto aggCmdOnView = uassertStatusOK(
-                    query_request_helper::asAggregationCommand(cq->getFindCommandRequest()));
-                auto viewAggregationCommand =
-                    OpMsgRequest::fromDBAndBody(_dbName.db(), aggCmdOnView).body;
-
-                auto aggRequestOnView = aggregation_request_helper::parseFromBSON(
-                    opCtx,
-                    ns(),
-                    viewAggregationCommand,
-                    boost::none,
-                    APIParameters::get(opCtx).getAPIStrict().value_or(false));
+                auto aggRequestOnView = query_request_conversion::asAggregateCommandRequest(
+                    cq->getFindCommandRequest());
 
                 auto bodyBuilder = result->getBodyBuilder();
                 uassertStatusOK(ClusterAggregate::retryOnViewError(
@@ -302,11 +291,11 @@ public:
                     !findCommand->getLegacyRuntimeConstants());
 
             if (shouldDoFLERewrite(findCommand)) {
-                invariant(findCommand->getNamespaceOrUUID().nss());
+                invariant(findCommand->getNamespaceOrUUID().isNamespaceString());
 
                 if (!findCommand->getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                     processFLEFindS(
-                        opCtx, findCommand->getNamespaceOrUUID().nss().get(), findCommand.get());
+                        opCtx, findCommand->getNamespaceOrUUID().nss(), findCommand.get());
                     _didDoFLERewrite = true;
                 }
 

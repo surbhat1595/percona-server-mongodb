@@ -27,12 +27,17 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <memory>
 
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands/rwc_defaults_commands_gen.h"
 #include "mongo/db/commands/server_status.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/server_options.h"
 
 namespace mongo {
 namespace {
@@ -42,12 +47,12 @@ public:
     ReadWriteConcernDefaultsServerStatus() : ServerStatusSection("defaultRWConcern") {}
 
     bool includeByDefault() const override {
-        return !serverGlobalParams.clusterRole.exclusivelyHasShardRole();
+        return !serverGlobalParams.clusterRole.hasExclusively(ClusterRole::ShardServer);
     }
 
     BSONObj generateSection(OperationContext* opCtx,
                             const BSONElement& configElement) const override {
-        if (serverGlobalParams.clusterRole.exclusivelyHasShardRole() ||
+        if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::ShardServer) ||
             !repl::ReplicationCoordinator::get(opCtx)->isReplEnabled()) {
             return {};
         }

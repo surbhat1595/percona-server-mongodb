@@ -27,13 +27,19 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <utility>
 
-#include "mongo/db/matcher/schema/expression_internal_schema_eq.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/matcher/path.h"
+#include "mongo/db/matcher/schema/expression_internal_schema_eq.h"
 
 namespace mongo {
 
@@ -62,17 +68,16 @@ void InternalSchemaEqMatchExpression::debugString(StringBuilder& debug,
     _debugStringAttachTagInfo(&debug);
 }
 
-BSONObj InternalSchemaEqMatchExpression::getSerializedRightHandSide(
-    SerializationOptions opts) const {
+void InternalSchemaEqMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, SerializationOptions opts) const {
     if (opts.literalPolicy != LiteralSerializationPolicy::kUnchanged && _rhsElem.isABSONObj()) {
-        BSONObjBuilder eqObj;
-        BSONObjBuilder exprSpec(eqObj.subobjStart(kName));
+        BSONObjBuilder exprSpec(bob->subobjStart(kName));
         opts.addHmacedObjToBuilder(&exprSpec, _rhsElem.Obj());
-        exprSpec.done();
-        return eqObj.obj();
+        exprSpec.doneFast();
+        return;
     }
     // If the element is not an object it must be a literal.
-    return BSON(kName << opts.serializeLiteral(_rhsElem));
+    opts.appendLiteral(bob, kName, _rhsElem);
 }
 
 bool InternalSchemaEqMatchExpression::equivalent(const MatchExpression* other) const {

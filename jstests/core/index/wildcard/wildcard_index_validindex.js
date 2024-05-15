@@ -4,14 +4,12 @@
  *   # Uses index building in background
  *   requires_background_index,
  *   does_not_support_stepdowns,
+ *   does_not_support_transactions,
  * ]
  */
-(function() {
-"use strict";
-
 load("jstests/libs/index_catalog_helpers.js");     // For "IndexCatalogHelpers."
 load("jstests/libs/collection_drop_recreate.js");  // For "assertDropCollection."
-load("jstests/libs/feature_flag_util.js");         // For "FeatureFlagUtil"
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const kCollectionName = "wildcard_validindex";
 const coll = db.getCollection(kCollectionName);
@@ -31,12 +29,6 @@ IndexCatalogHelpers.createIndexAndVerifyWithDrop(coll, {"a.$**": 1}, {name: kInd
 // Can create a wildcard index with partialFilterExpression.
 IndexCatalogHelpers.createIndexAndVerifyWithDrop(
     coll, {"$**": 1}, {name: kIndexName, partialFilterExpression: {a: {"$gt": 0}}});
-
-// Can create a wildcard index with foreground & background construction.
-IndexCatalogHelpers.createIndexAndVerifyWithDrop(
-    coll, {"$**": 1}, {background: false, name: kIndexName});
-IndexCatalogHelpers.createIndexAndVerifyWithDrop(
-    coll, {"$**": 1}, {background: true, name: kIndexName});
 
 // Can create a wildcard index with index level collation.
 IndexCatalogHelpers.createIndexAndVerifyWithDrop(
@@ -174,4 +166,3 @@ assert.commandFailedWithCode(
 assert.commandFailedWithCode(
     db.runCommand({create: clusteredCollName, clusteredIndex: {key: {"$**": 1}, unique: true}}),
     ErrorCodes.InvalidIndexSpecificationOption);
-})();

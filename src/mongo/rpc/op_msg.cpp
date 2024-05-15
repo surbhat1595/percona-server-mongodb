@@ -28,24 +28,39 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/rpc/op_msg.h"
-
 #include <bitset>
+#include <boost/cstdint.hpp>
+#include <fmt/format.h>
+#include <memory>
 #include <set>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
 #include "mongo/base/data_type_endian.h"
-#include "mongo/config.h"
-#include "mongo/db/auth/security_token_gen.h"
+#include "mongo/base/data_type_validated.h"
+#include "mongo/base/data_view.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/bson/dotted_path_support.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/serverless/multitenancy_check.h"
 #include "mongo/logv2/log.h"
-#include "mongo/rpc/object_check.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/redaction.h"
+#include "mongo/rpc/object_check.h"  // IWYU pragma: keep
+#include "mongo/rpc/op_msg.h"
 #include "mongo/util/bufreader.h"
 #include "mongo/util/database_name_util.h"
+#include "mongo/util/debug_util.h"
 #include "mongo/util/hex.h"
+#include "mongo/util/str.h"
 
 #ifdef MONGO_CONFIG_WIREDTIGER_ENABLED
 #include <wiredtiger.h>
@@ -73,8 +88,8 @@ enum class Section : uint8_t {
 constexpr int kCrc32Size = 4;
 
 #ifdef MONGO_CONFIG_WIREDTIGER_ENABLED
-// All fields including size, requestId, and responseTo must already be set. The size must already
-// include the final 4-byte checksum.
+// All fields including size, requestId, and responseTo must already be set. The size must
+// already include the final 4-byte checksum.
 uint32_t calculateChecksum(const Message& message) {
     if (message.operation() != dbMsg) {
         return 0;
@@ -158,7 +173,8 @@ OpMsg OpMsg::parse(const Message& message, Client* client) try {
     // The sections begin after the flags and before the checksum (if present).
     BufReader sectionsBuf(message.singleData().data() + sizeof(flags), dataSize);
 
-    // TODO some validation may make more sense in the IDL parser. I've tagged them with comments.
+    // TODO some validation may make more sense in the IDL parser. I've tagged them with
+    // comments.
     bool haveBody = false;
     OpMsg msg;
     BSONObj securityToken;
@@ -170,16 +186,17 @@ OpMsg OpMsg::parse(const Message& message, Client* client) try {
                 haveBody = true;
                 msg.body = sectionsBuf.read<Validated<BSONObj>>();
 
-                uassert(ErrorCodes::InvalidOptions,
-                        "Multitenancy not enabled, cannot set $tenant in command body",
-                        gMultitenancySupport || !msg.body["$tenant"_sd]);
+                if (auto* multitenancyCheck = MultitenancyCheck::getPtr()) {
+                    multitenancyCheck->checkDollarTenantField(msg.body);
+                }
                 break;
             }
 
             case Section::kDocSequence: {
-                // We use an O(N^2) algorithm here and an O(N*M) algorithm below. These are fastest
-                // for the current small values of N, but would be problematic if it is large.
-                // If we need more document sequences, raise the limit and use a better algorithm.
+                // We use an O(N^2) algorithm here and an O(N*M) algorithm below. These are
+                // fastest for the current small values of N, but would be problematic if it is
+                // large. If we need more document sequences, raise the limit and use a better
+                // algorithm.
                 uassert(ErrorCodes::TooManyDocumentSequences,
                         "Too many document sequences in OP_MSG",
                         msg.sequences.size() < 2);  // Limit is <=2 since we are about to add one.
@@ -248,13 +265,22 @@ OpMsg OpMsg::parse(const Message& message, Client* client) try {
         "invalid message: {ex_code} {ex} -- {hexdump_message_singleData_view2ptr_message_size}",
         "ex_code"_attr = ex.code(),
         "ex"_attr = redact(ex),
+        // Using std::min to reduce the size of the output and ensure we do not throw in hexdump()
+        // because of the exceeded length.
         "hexdump_message_singleData_view2ptr_message_size"_attr =
-            redact(hexdump(message.singleData().view2ptr(), message.size())));
+            redact(hexdump(message.singleData().view2ptr(),
+                           std::min(static_cast<size_t>(message.size()), kHexDumpMaxSize - 1))));
     throw;
 }
 
+OpMsgRequest OpMsgRequest::fromDBAndBody(const DatabaseName& db,
+                                         BSONObj body,
+                                         const BSONObj& extraFields) {
+    return OpMsgRequestBuilder::create(db, std::move(body), extraFields);
+}
+
 OpMsgRequest OpMsgRequest::fromDBAndBody(StringData db, BSONObj body, const BSONObj& extraFields) {
-    return OpMsgRequestBuilder::create(
+    return fromDBAndBody(
         DatabaseNameUtil::deserialize(boost::none, db), std::move(body), extraFields);
 }
 
@@ -264,6 +290,24 @@ boost::optional<TenantId> parseDollarTenant(const BSONObj body) {
     } else {
         return boost::none;
     }
+}
+
+DatabaseName OpMsgRequest::getDbName() const {
+    if (!gMultitenancySupport) {
+        return DatabaseNameUtil::deserialize(boost::none, getDatabase());
+    }
+
+    SerializationContext sc = SerializationContext::stateCommandRequest();
+    auto tenantId = getValidatedTenantId();
+    if (!tenantId) {
+        tenantId = parseDollarTenant(body);
+    }
+    sc.setTenantIdSource(tenantId ? true : false);
+
+    if (auto const expectPrefix = body.getField("expectPrefix")) {
+        sc.setPrefixState(expectPrefix.boolean());
+    }
+    return DatabaseNameUtil::deserialize(tenantId, getDatabase(), sc);
 }
 
 bool appendDollarTenant(BSONObjBuilder& builder,
@@ -292,7 +336,7 @@ void appendDollarDbAndTenant(BSONObjBuilder& builder,
                              boost::optional<TenantId> existingDollarTenant = boost::none) {
     if (!dbName.tenantId() ||
         appendDollarTenant(builder, dbName.tenantId().value(), existingDollarTenant)) {
-        builder.append("$db", dbName.db());
+        builder.append("$db", dbName.serializeWithoutTenantPrefix_UNSAFE());
     } else {
         builder.append("$db", DatabaseNameUtil::serialize(dbName));
     }
@@ -334,10 +378,36 @@ OpMsgRequest OpMsgRequestBuilder::createWithValidatedTenancyScope(
     request.validatedTenancyScope = validatedTenancyScope;
     return request;
 }
+namespace {
+std::string compactStr(const std::string& input) {
+    if (input.length() > 2024) {
+        return input.substr(0, 1000) + " ... " + input.substr(input.length() - 1000);
+    }
+    return input;
+}
+}  // namespace
 
 OpMsgRequest OpMsgRequestBuilder::create(const DatabaseName& dbName,
                                          BSONObj body,
                                          const BSONObj& extraFields) {
+    int bodySize = body.objsize();
+    int extraFieldsSize = extraFields.objsize();
+
+    // Log a warning if the sum of the sizes of 'body' and 'extraFields' exceeds
+    // 'BSONObjMaxInternalSize'.
+    if (bodySize + extraFieldsSize > BSONObjMaxInternalSize) {
+        LOGV2_WARNING(
+            6491800,
+            "Request body exceeded limit with body.objsize() = {bodySize} bytes, "
+            "extraFields.objsize() = {extraFieldsSize} bytes, body.toString() = {body}, db = "
+            "{db}, extraFields.toString() = {extraFields}",
+            "bodySize"_attr = bodySize,
+            "extraFieldsSize"_attr = extraFieldsSize,
+            "body"_attr = compactStr(body.toString()),
+            "db"_attr = dbName.toStringForErrorMsg(),
+            "extraFields"_attr = compactStr(extraFields.toString()));
+    }
+
     auto dollarTenant = parseDollarTenant(body);
     BSONObjBuilder bodyBuilder(std::move(body));
     bodyBuilder.appendElements(extraFields);

@@ -28,22 +28,37 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/db/auth/user_cache_invalidator_job.h"
-
 #include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/user_cache_invalidator_job.h"
 #include "mongo/db/auth/user_cache_invalidator_job_parameters_gen.h"
 #include "mongo/db/client.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/grid.h"
+#include "mongo/stdx/variant.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
-#include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
@@ -142,12 +157,13 @@ void UserCacheInvalidator::start(ServiceContext* serviceCtx, OperationContext* o
     auto periodicRunner = serviceCtx->getPeriodicRunner();
     invariant(periodicRunner);
 
+    // This job is killable. When interrupted, we will warn, and retry after the configured
+    // interval.
     PeriodicRunner::PeriodicJob job(
         "UserCacheInvalidator",
         [serviceCtx](Client* client) { getUserCacheInvalidator(serviceCtx)->run(); },
         loadInterval(),
-        // TODO(SERVER-74660): Please revisit if this periodic job could be made killable.
-        false /*isKillableByStepdown*/);
+        true /*isKillableByStepdown*/);
 
     invalidator->_job =
         std::make_unique<PeriodicJobAnchor>(periodicRunner->makeJob(std::move(job)));
@@ -157,7 +173,7 @@ void UserCacheInvalidator::start(ServiceContext* serviceCtx, OperationContext* o
     getUserCacheInvalidator(serviceCtx)->_job->start();
 }
 
-void UserCacheInvalidator::run() {
+void UserCacheInvalidator::run() try {
     auto opCtx = cc().makeOperationContext();
     auto swCurrentGeneration = getCurrentCacheGeneration(opCtx.get());
     if (!swCurrentGeneration.isOK()) {
@@ -207,6 +223,8 @@ void UserCacheInvalidator::run() {
             }
         }
     }
+} catch (const DBException& e) {
+    LOGV2_WARNING(7466000, "Error invalidating user cache", "error"_attr = e.toStatus());
 }
 
 }  // namespace mongo

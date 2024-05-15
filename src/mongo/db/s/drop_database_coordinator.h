@@ -29,8 +29,26 @@
 
 #pragma once
 
+#include <boost/optional/optional.hpp>
+#include <memory>
+
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/ops/write_ops.h"
 #include "mongo/db/s/drop_database_coordinator_document_gen.h"
 #include "mongo/db/s/sharding_ddl_coordinator.h"
+#include "mongo/db/s/sharding_ddl_coordinator_gen.h"
+#include "mongo/db/s/sharding_ddl_coordinator_service.h"
+#include "mongo/executor/scoped_task_executor.h"
+#include "mongo/s/catalog/type_collection.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/cancellation.h"
+#include "mongo/util/future.h"
 
 namespace mongo {
 
@@ -44,7 +62,7 @@ public:
 
     DropDatabaseCoordinator(ShardingDDLCoordinatorService* service, const BSONObj& initialState)
         : RecoverableShardingDDLCoordinator(service, "DropDatabaseCoordinator", initialState),
-          _dbName(nss().db()),
+          _dbName(nss().db_forSharding()),
           _critSecReason(BSON("dropDatabase" << _dbName)) {}
     ~DropDatabaseCoordinator() = default;
 

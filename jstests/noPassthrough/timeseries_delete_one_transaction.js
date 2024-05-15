@@ -1,10 +1,6 @@
 /**
  * Tests the deleteOne command on time-series collections in multi-document transactions.
  */
-(function() {
-"use strict";
-
-load("jstests/core/timeseries/libs/timeseries.js");
 load("jstests/libs/fail_point_util.js");
 load('jstests/libs/parallel_shell_helpers.js');
 
@@ -161,7 +157,7 @@ const initializeData = function() {
     const deleteFilter = {_id: 1, [metaFieldName]: 0};
     assert.commandWorked(sessionColl.deleteOne(deleteFilter));
 
-    // Note: there is a change the parallel shell runs after the transcation is committed and that
+    // Note: there is a change the parallel shell runs after the transaction is committed and that
     // is fine as both interleavings should succeed.
     const awaitTestDelete = startParallelShell(
         funWithArgs(function(dbName, collName, filter) {
@@ -265,4 +261,3 @@ const initializeData = function() {
 })();
 
 rst.stopSet();
-})();

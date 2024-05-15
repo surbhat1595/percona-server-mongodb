@@ -29,13 +29,41 @@
 
 #include "mongo/db/query/optimizer/cascades/implementers.h"
 
+#include <absl/container/node_hash_map.h>
+#include <absl/container/node_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <cstddef>
+#include <map>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "mongo/db/query/optimizer/algebra/polyvalue.h"
+#include "mongo/db/query/optimizer/bool_expression.h"
+#include "mongo/db/query/optimizer/cascades/rewrite_queues.h"
 #include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
+#include "mongo/db/query/optimizer/containers.h"
+#include "mongo/db/query/optimizer/index_bounds.h"
+#include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
+#include "mongo/db/query/optimizer/node_defs.h"
+#include "mongo/db/query/optimizer/partial_schema_requirements.h"
 #include "mongo/db/query/optimizer/props.h"
 #include "mongo/db/query/optimizer/reference_tracker.h"
+#include "mongo/db/query/optimizer/syntax/expr.h"
+#include "mongo/db/query/optimizer/syntax/syntax.h"
 #include "mongo/db/query/optimizer/utils/ce_math.h"
 #include "mongo/db/query/optimizer/utils/interval_utils.h"
 #include "mongo/db/query/optimizer/utils/memo_utils.h"
+#include "mongo/db/query/optimizer/utils/physical_plan_builder.h"
 #include "mongo/db/query/optimizer/utils/reftracker_utils.h"
+#include "mongo/db/query/optimizer/utils/strong_alias.h"
+#include "mongo/util/assert_util.h"
 
 
 namespace mongo::optimizer::cascades {
@@ -68,23 +96,30 @@ static bool propertyAffectsProjection(const PhysProps& props,
 // SortedMerge and MergeJoin to produce a stream of sorted RIDs, allowing us to potentially
 // deduplicate with a streaming Unique.
 static bool canReturnSortedOutput(const CompoundIntervalReqExpr::Node& intervals) {
+    using CIQExpr = CompoundIntervalReqExpr;
     bool canBeSorted = true;
-    // TODO SERVER-73828 this pattern could use early return.
-    CompoundIntervalReqExpr::visitDisjuncts(
-        intervals, [&](const CompoundIntervalReqExpr::Node& conj, size_t) {
-            CompoundIntervalReqExpr::visitConjuncts(
-                conj, [&](const CompoundIntervalReqExpr::Node& atom, size_t i) {
-                    if (i > 0) {
+    CIQExpr::visitDisjuncts(
+        intervals, [&](const CIQExpr::Node& conj, const CIQExpr::VisitorContext& disjCtx) {
+            CIQExpr::visitConjuncts(
+                conj, [&](const CIQExpr::Node& atom, const CIQExpr::VisitorContext& conjCtx) {
+                    if (conjCtx.getChildIndex() > 0) {
                         canBeSorted = false;
                     } else {
-                        CompoundIntervalReqExpr::visitAtom(
-                            atom, [&](const CompoundIntervalRequirement& req) {
-                                if (!req.isEquality()) {
-                                    canBeSorted = false;
-                                }
-                            });
+                        CIQExpr::visitAtom(atom,
+                                           [&](const CompoundIntervalRequirement& req,
+                                               const CIQExpr::VisitorContext&) {
+                                               if (!req.isEquality()) {
+                                                   canBeSorted = false;
+                                               }
+                                           });
+                    }
+                    if (!canBeSorted) {
+                        conjCtx.returnEarly();
                     }
                 });
+            if (!canBeSorted) {
+                disjCtx.returnEarly();
+            }
         });
     // We shouldn't use a SortedMerge for a singleton disjunction, because with one child there is
     // nothing to sort-merge.
@@ -114,6 +149,11 @@ public:
         if (hasProperty<CollationRequirement>(_physProps)) {
             // Regular scan cannot satisfy any collation requirement.
             // TODO: consider rid?
+            return;
+        }
+        if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
+            // Cannot satisfy remove orphans. The enforcer for a group representing a scan will
+            // produce an alternative which performs shard filtering.
             return;
         }
 
@@ -400,6 +440,10 @@ public:
             // Cannot satisfy limit-skip.
             return;
         }
+        if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
+            // TODO SERVER-78507: Implement this implementer.
+            return;
+        }
 
         const IndexingAvailability& indexingAvailability =
             getPropertyConst<IndexingAvailability>(_logicalProps);
@@ -457,16 +501,10 @@ public:
         const ProjectionName& scanProjectionName = indexingAvailability.getScanProjection();
 
         // We can only satisfy partial schema requirements using our root projection.
-        {
-            bool anyNonRoot = false;
-            PSRExpr::visitAnyShape(reqMap.getRoot(), [&](const PartialSchemaEntry& e) {
-                if (e.first._projectionName != scanProjectionName) {
-                    anyNonRoot = true;
-                }
-            });
-            if (anyNonRoot) {
-                return;
-            }
+        if (PSRExpr::any(reqMap.getRoot(), [&](const PartialSchemaEntry& e) {
+                return e.first._projectionName != scanProjectionName;
+            })) {
+            return;
         }
 
         const auto& requiredProjections =
@@ -561,7 +599,9 @@ public:
                     std::set<size_t> residIndexes;
                     if (residualReqs) {
                         ResidualRequirements::visitDNF(
-                            *residualReqs, [&](const ResidualRequirement& residReq) {
+                            *residualReqs,
+                            [&](const ResidualRequirement& residReq,
+                                const ResidualRequirements::VisitorContext&) {
                                 residIndexes.emplace(residReq._entryIndex);
                             });
                     }
@@ -573,13 +613,17 @@ public:
                         std::vector<SelectivityType> atomSels;
                         std::vector<SelectivityType> conjuctionSels;
                         PSRExpr::visitDisjuncts(
-                            reqMap.getRoot(), [&](const PSRExpr::Node& child, const size_t) {
+                            reqMap.getRoot(),
+                            [&](const PSRExpr::Node& child, const PSRExpr::VisitorContext&) {
                                 atomSels.clear();
 
                                 PSRExpr::visitConjuncts(
-                                    child, [&](const PSRExpr::Node& atom, const size_t) {
+                                    child,
+                                    [&](const PSRExpr::Node& atom, const PSRExpr::VisitorContext&) {
                                         PSRExpr::visitAtom(
-                                            atom, [&](const PartialSchemaEntry& entry) {
+                                            atom,
+                                            [&](const PartialSchemaEntry& entry,
+                                                const PSRExpr::VisitorContext&) {
                                                 if (residIndexes.count(entryIndex) == 0) {
                                                     const SelectivityType sel =
                                                         partialSchemaKeyCE.at(entryIndex).second /
@@ -762,6 +806,11 @@ public:
     }
 
     void operator()(const ABT& /*n*/, const RIDIntersectNode& node) {
+        if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
+            // TODO SERVER-78508: Implement this implementer.
+            return;
+        }
+
         const auto& indexingAvailability = getPropertyConst<IndexingAvailability>(_logicalProps);
         const std::string& scanDefName = indexingAvailability.getScanDefName();
         {
@@ -1008,8 +1057,8 @@ public:
         const IndexingRequirement& requirements = getPropertyConst<IndexingRequirement>(_physProps);
         const bool dedupRID = requirements.getDedupRID();
         const IndexReqTarget indexReqTarget = requirements.getIndexReqTarget();
-        if (indexReqTarget != IndexReqTarget::Index) {
-            // We only allow index target.
+        if (indexReqTarget == IndexReqTarget::Seek) {
+            // We allow target to be either Index or Complete.
             return;
         }
 
@@ -1038,17 +1087,13 @@ public:
             return;
         }
 
-        const auto& required = getPropertyConst<ProjectionRequirement>(_physProps).getProjections();
-        if (required.getVector().size() != 1 || !required.find(ridProjName)) {
-            // For now we can only satisfy requirement for ridProjection.
-            return;
-        }
+        // Require left and right children share the projection names. The RID projection name needs
+        // to be preserved for RID deduplication.
+        auto required = getPropertyConst<ProjectionRequirement>(_physProps).getProjections();
+        required.emplace_back(ridProjName);
 
-        ProjectionNameOrderPreservingSet leftChildProjections;
-        leftChildProjections.emplace_back(ridProjName);
-
-        ProjectionNameOrderPreservingSet rightChildProjections;
-        rightChildProjections.emplace_back(ridProjName);
+        ProjectionNameOrderPreservingSet leftChildProjections = required;
+        ProjectionNameOrderPreservingSet rightChildProjections = required;
 
         if (hasProperty<CollationRequirement>(_physProps)) {
             // For now we cannot satisfy collation requirement.
@@ -1070,10 +1115,12 @@ public:
             {IndexReqTarget::Index,
              false /*dedupRID*/,
              requirements.getSatisfiedPartialIndexesGroupId()});
+        // If 'indexReqTarget' is IndexReqTarget::Complete, the right child might need fetching and
+        // require RID deduplication.
         setPropertyOverwrite<IndexingRequirement>(
             rightPhysProps,
-            {IndexReqTarget::Index,
-             false /*dedupRID*/,
+            {indexReqTarget,
+             indexReqTarget == IndexReqTarget::Complete /*dedupRID*/,
              requirements.getSatisfiedPartialIndexesGroupId()});
 
         setPropertyOverwrite<ProjectionRequirement>(leftPhysProps, std::move(leftChildProjections));

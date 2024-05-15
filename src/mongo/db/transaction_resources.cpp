@@ -29,6 +29,21 @@
 
 #include "mongo/db/transaction_resources.h"
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <ostream>
+#include <string>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/db/logical_time.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/str.h"
+
 namespace mongo {
 
 const PlacementConcern AcquisitionPrerequisites::kPretendUnsharded =
@@ -36,6 +51,9 @@ const PlacementConcern AcquisitionPrerequisites::kPretendUnsharded =
 
 namespace shard_role_details {
 namespace {
+
+auto getTransactionResources = OperationContext::declareDecoration<
+    std::unique_ptr<shard_role_details::TransactionResources>>();
 
 /**
  * This method ensures that two read concerns are equivalent for the purposes of acquiring a
@@ -59,10 +77,33 @@ TransactionResources::TransactionResources() = default;
 
 TransactionResources::~TransactionResources() {
     invariant(!locker);
-    invariant(!yieldedLocker);
-    invariant(!yieldedRecoveryUnit);
     invariant(acquiredCollections.empty());
     invariant(acquiredViews.empty());
+    invariant(collectionAcquisitionReferences == 0);
+    invariant(viewAcquisitionReferences == 0);
+    invariant(!yielded);
+}
+
+TransactionResources& TransactionResources::get(OperationContext* opCtx) {
+    auto& transactionResources = getTransactionResources(opCtx);
+    invariant(transactionResources,
+              "Cannot obtain TransactionResources as they've been detached from the opCtx in order "
+              "to yield");
+    return *transactionResources;
+}
+
+std::unique_ptr<TransactionResources> TransactionResources::detachFromOpCtx(
+    OperationContext* opCtx) {
+    auto& transactionResources = getTransactionResources(opCtx);
+    invariant(transactionResources);
+    return std::move(transactionResources);
+}
+
+void TransactionResources::attachToOpCtx(
+    OperationContext* opCtx, std::unique_ptr<TransactionResources> newTransactionResources) {
+    auto& transactionResources = getTransactionResources(opCtx);
+    invariant(!transactionResources);
+    transactionResources = std::move(newTransactionResources);
 }
 
 AcquiredCollection& TransactionResources::addAcquiredCollection(
@@ -70,22 +111,36 @@ AcquiredCollection& TransactionResources::addAcquiredCollection(
     if (!readConcern) {
         readConcern = acquiredCollection.prerequisites.readConcern;
     }
+
+    invariant(state != State::FAILED, "Cannot make a new acquisition in the FAILED state");
+    invariant(state != State::YIELDED, "Cannot make a new acquisition in the YIELDED state");
+
     assertReadConcernsAreEquivalent(*readConcern, acquiredCollection.prerequisites.readConcern);
+
+    if (state == State::EMPTY) {
+        state = State::ACTIVE;
+    }
 
     return acquiredCollections.emplace_back(std::move(acquiredCollection));
 }
 
 const AcquiredView& TransactionResources::addAcquiredView(AcquiredView&& acquiredView) {
+    invariant(state != State::FAILED, "Cannot make a new acquisition in the FAILED state");
+    invariant(state != State::YIELDED, "Cannot make a new acquisition in the YIELDED state");
+
+    if (state == State::EMPTY) {
+        state = State::ACTIVE;
+    }
+
     return acquiredViews.emplace_back(std::move(acquiredView));
 }
 
 void TransactionResources::releaseAllResourcesOnCommitOrAbort() noexcept {
     readConcern.reset();
     locker.reset();
-    yieldedLocker.reset();
-    yieldedRecoveryUnit.reset();
     acquiredCollections.clear();
     acquiredViews.clear();
+    yielded.reset();
 }
 
 void TransactionResources::assertNoAcquiredCollections() const {

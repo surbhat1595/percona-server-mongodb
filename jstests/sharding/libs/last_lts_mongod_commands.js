@@ -8,6 +8,8 @@ const commandsRemovedFromMongodSinceLastLTS = [
     "_configsvrMoveChunk",
     "_configsvrRepairShardedCollectionChunksHistory",
     "_configsvrTransitionToCatalogShard",
+    "_configsvrRenameCollectionMetadata",
+    "_shardsvrDropCollectionIfUUIDNotMatching",
     "mapreduce.shardedfinish",
     "getLastError",
     "driverOIDTest",
@@ -18,6 +20,7 @@ const commandsRemovedFromMongodSinceLastLTS = [
 const commandsAddedToMongodSinceLastLTS = [
     "clusterAbortTransaction",
     "clusterAggregate",
+    "clusterBulkWrite",
     "clusterCommitTransaction",
     "clusterCount",
     "clusterDelete",
@@ -36,6 +39,8 @@ const commandsAddedToMongodSinceLastLTS = [
     "rotateCertificates",
     "setChangeStreamState",
     "setClusterParameter",
+    "setQuerySettings",     // TODO (SERVER-73309): Remove once 7.0 becomes last LTS.
+    "removeQuerySettings",  // TODO (SERVER-73309): Remove once 7.0 becomes last LTS.
     "setUserWriteBlockMode",
     "updateSearchIndex",  // TODO (SERVER-73309): Remove once 7.0 becomes last LTS.
 ];

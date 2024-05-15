@@ -28,63 +28,84 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/s/commands/strategy.h"
-
+#include <boost/optional.hpp>
+#include <boost/smart_ptr.hpp>
 #include <fmt/format.h>
+#include <mutex>
+#include <string>
+#include <utility>
 
-#include "mongo/base/data_cursor.h"
-#include "mongo/base/init.h"
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
-#include "mongo/bson/util/bson_extract.h"
-#include "mongo/bson/util/builder.h"
-#include "mongo/db/audit.h"
-#include "mongo/db/auth/action_type.h"
-#include "mongo/db/auth/authorization_checks.h"
-#include "mongo/db/auth/authorization_session.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/client/read_preference.h"
+#include "mongo/db/api_parameters.h"
+#include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/error_labels.h"
 #include "mongo/db/initialize_api_parameters.h"
 #include "mongo/db/initialize_operation_session_info.h"
+#include "mongo/db/logical_time.h"
 #include "mongo/db/logical_time_validator.h"
-#include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/operation_time_tracker.h"
-#include "mongo/db/ops/write_ops.h"
-#include "mongo/db/query/find_common.h"
-#include "mongo/db/query/getmore_command_gen.h"
+#include "mongo/db/query/max_time_ms_parser.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/read_write_concern_defaults.h"
-#include "mongo/db/repl/repl_server_parameters_gen.h"
-#include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/read_write_concern_defaults_gen.h"
+#include "mongo/db/read_write_concern_provenance.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/stats/api_version_metrics.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/vector_clock.h"
-#include "mongo/db/views/resolved_view.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/redaction.h"
+#include "mongo/platform/compiler.h"
 #include "mongo/rpc/check_allowed_op_query_cmd.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/rpc/message.h"
+#include "mongo/rpc/metadata.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/metadata/tracking_metadata.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/rpc/op_msg_rpc_impls.h"
+#include "mongo/rpc/protocol.h"
+#include "mongo/rpc/reply_builder_interface.h"
 #include "mongo/rpc/rewrite_state_change_errors.h"
+#include "mongo/rpc/topology_version_gen.h"
+#include "mongo/s/analyze_shard_key_role.h"
 #include "mongo/s/catalog_cache.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/commands/cluster_explain.h"
+#include "mongo/s/commands/strategy.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/is_mongos.h"
 #include "mongo/s/load_balancer_support.h"
 #include "mongo/s/mongos_topology_coordinator.h"
-#include "mongo/s/query/cluster_cursor_manager.h"
-#include "mongo/s/query/cluster_find.h"
 #include "mongo/s/query_analysis_sampler.h"
 #include "mongo/s/session_catalog_router.h"
 #include "mongo/s/shard_invalidated_for_targeting_exception.h"
@@ -93,16 +114,21 @@
 #include "mongo/transport/hello_metrics.h"
 #include "mongo/transport/service_executor.h"
 #include "mongo/transport/session.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/future_impl.h"
 #include "mongo/util/future_util.h"
+#include "mongo/util/namespace_string_util.h"
 #include "mongo/util/scopeguard.h"
-#include "mongo/util/str.h"
-#include "mongo/util/timer.h"
+#include "mongo/util/string_map.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
 namespace {
+
 MONGO_FAIL_POINT_DEFINE(hangBeforeCheckingMongosShutdownInterrupt);
 const auto kOperationTime = "operationTime"_sd;
 
@@ -416,7 +442,7 @@ private:
 
     std::shared_ptr<CommandInvocation> _invocation;
     boost::optional<std::string> _ns;
-    boost::optional<OperationSessionInfoFromClient> _osi;
+    OperationSessionInfoFromClient _osi;
     boost::optional<WriteConcernOptions> _wc;
     boost::optional<bool> _isHello;
 };
@@ -481,30 +507,28 @@ void ParseAndRunCommand::_updateStatsAndApplyErrorLabels(const Status& status) {
     auto opCtx = _rec->getOpCtx();
     const auto command = _rec->getCommand();
 
-    if (command)
-        command->incrementCommandsFailed();
     NotPrimaryErrorTracker::get(opCtx->getClient()).recordError(status.code());
+
+    if (!command)
+        return;
+
+    command->incrementCommandsFailed();
+
     // WriteConcern error (wcCode) is set to boost::none because:
     // 1. TransientTransaction error label handling for commitTransaction command in mongos is
     //    delegated to the shards. Mongos simply propagates the shard's response up to the client.
     // 2. For other commands in a transaction, they shouldn't get a writeConcern error so this
     //    setting doesn't apply.
-
-    if (_osi.has_value()) {
-
-        auto errorLabels = getErrorLabels(opCtx,
-                                          *_osi,
-                                          command->getName(),
-                                          status.code(),
-                                          boost::none,
-                                          false /* isInternalClient */,
-                                          true /* isMongos */,
-                                          repl::OpTime{},
-                                          repl::OpTime{});
-
-
-        _errorBuilder->appendElements(errorLabels);
-    }
+    auto errorLabels = getErrorLabels(opCtx,
+                                      _osi,
+                                      command->getName(),
+                                      status.code(),
+                                      boost::none,
+                                      false /* isInternalClient */,
+                                      true /* isMongos */,
+                                      repl::OpTime{},
+                                      repl::OpTime{});
+    _errorBuilder->appendElements(errorLabels);
 }
 void ParseAndRunCommand::_parseCommand() {
     auto opCtx = _rec->getOpCtx();
@@ -574,20 +598,20 @@ void ParseAndRunCommand::_parseCommand() {
     // the command does not define a fully-qualified namespace, set CurOp to the generic command
     // namespace db.$cmd.
     _ns.emplace(NamespaceStringUtil::serialize(_invocation->ns()));
-    auto nss =
-        (request.getDatabase() == *_ns ? NamespaceString(*_ns, "$cmd") : NamespaceString(*_ns));
+    const auto nss = (request.getDatabase() == *_ns
+                          ? NamespaceString::makeCommandNamespace(_invocation->ns().dbName())
+                          : _invocation->ns());
 
     // Fill out all currentOp details.
     CurOp::get(opCtx)->setGenericOpRequestDetails(nss, command, request.body, _opType);
 
-    _osi.emplace(initializeOperationSessionInfo(opCtx,
-                                                request.body,
-                                                command->requiresAuth(),
-                                                command->attachLogicalSessionsToOpCtx(),
-                                                true));
+    _osi = initializeOperationSessionInfo(
+        opCtx, request, command->requiresAuth(), command->attachLogicalSessionsToOpCtx(), true);
 
-    auto allowTransactionsOnConfigDatabase = !isMongos() || client->isFromSystemConnection();
-    validateSessionOptions(*_osi, command->getName(), nss, allowTransactionsOnConfigDatabase);
+    auto allowTransactionsOnConfigDatabase =
+        !serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer) ||
+        client->isFromSystemConnection();
+    validateSessionOptions(_osi, command->getName(), nss, allowTransactionsOnConfigDatabase);
 
     _wc.emplace(uassertStatusOK(WriteConcernOptions::extractWCFromCommand(request.body)));
 
@@ -664,7 +688,7 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
 
     CommandHelpers::evaluateFailCommandFailPoint(opCtx, invocation.get());
     bool startTransaction = false;
-    if (_parc->_osi->getAutocommit()) {
+    if (_parc->_osi.getAutocommit()) {
         _routerSession.emplace(opCtx);
 
         load_balancer_support::setMruSession(opCtx->getClient(), *opCtx->getLogicalSessionId());
@@ -676,7 +700,7 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
         invariant(txnNumber);
 
         auto transactionAction = ([&] {
-            auto startTxnSetting = _parc->_osi->getStartTransaction();
+            auto startTxnSetting = _parc->_osi.getStartTransaction();
             if (startTxnSetting && *startTxnSetting) {
                 return TransactionRouter::TransactionActions::kStart;
             }
@@ -1156,8 +1180,6 @@ Future<void> ParseAndRunCommand::run() {
         });
 }
 
-}  // namespace
-
 // Maintains the state required to execute client commands, and provides the interface to construct
 // a future-chain that runs the command against the database.
 class ClientCommand final {
@@ -1314,6 +1336,8 @@ Future<DbResponse> ClientCommand::run() {
         .onError([this](Status status) { return _handleException(std::move(status)); })
         .then([this] { return _produceResponse(); });
 }
+
+}  // namespace
 
 Future<DbResponse> Strategy::clientCommand(std::shared_ptr<RequestExecutionContext> rec) {
     return future_util::makeState<ClientCommand>(std::move(rec)).thenWithState([](auto* runner) {

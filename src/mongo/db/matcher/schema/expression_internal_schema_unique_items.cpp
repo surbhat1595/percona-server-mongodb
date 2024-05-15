@@ -27,8 +27,9 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <boost/move/utility_core.hpp>
 
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/matcher/schema/expression_internal_schema_unique_items.h"
 
 namespace mongo {
@@ -53,11 +54,9 @@ bool InternalSchemaUniqueItemsMatchExpression::equivalent(const MatchExpression*
     return path() == other->path();
 }
 
-BSONObj InternalSchemaUniqueItemsMatchExpression::getSerializedRightHandSide(
-    SerializationOptions opts) const {
-    BSONObjBuilder bob;
-    bob.append(kName, true);
-    return bob.obj();
+void InternalSchemaUniqueItemsMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, SerializationOptions opts) const {
+    bob->append(kName, true);
 }
 
 std::unique_ptr<MatchExpression> InternalSchemaUniqueItemsMatchExpression::clone() const {

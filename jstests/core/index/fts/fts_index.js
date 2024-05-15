@@ -78,6 +78,17 @@ assert.eq(0,
               })
               .length);
 
+// $-prefixed fields cannot be indexed.
+coll = db.getCollection(collNamePrefix + collCount++);
+coll.drop();
+assert.commandFailed(coll.createIndex({"a.$custom": "text"}, {name: indexName}));
+assert.eq(0,
+          coll.getIndexes()
+              .filter(function(z) {
+                  return z.name == indexName;
+              })
+              .length);
+
 // SERVER-19519 Spec fails if '_fts' is specified on a non-text index.
 coll = db.getCollection(collNamePrefix + collCount++);
 coll.drop();
@@ -141,7 +152,7 @@ assert.commandWorked(coll.createIndex({a: 1, b: "text", c: 1}));
 assert.eq(2, coll.getIndexes().length);
 assert.commandWorked(coll.createIndex({a: 1, b: "text", c: 1}));
 assert.eq(2, coll.getIndexes().length);
-assert.commandWorked(coll.createIndex({a: 1, b: "text", c: 1}, {background: true}));
+assert.commandWorked(coll.createIndex({a: 1, b: "text", c: 1}));
 assert.eq(2, coll.getIndexes().length);
 assert.commandFailedWithCode(coll.createIndex({a: 1, b: 1, c: "text"}),
                              ErrorCodes.CannotCreateIndex);

@@ -444,8 +444,6 @@ def _inject_hidden_command_fields(command):
     expect_prefix_field.type.type_name = "bool"
     expect_prefix_field.cpp_name = "expectPrefix"
     expect_prefix_field.optional = True
-    # we must extract expectPrefix before any other fields that may consume it
-    expect_prefix_field.preparse = True
 
     command.fields.append(expect_prefix_field)
 
@@ -927,7 +925,7 @@ def _bind_expression(expr, allow_literal_string=True):
     node.export = True
 
     # bool
-    if (expr.literal == "true") or (expr.literal == "false"):
+    if expr.literal in ["true", "false"]:
         node.expr = expr.literal
         return node
 
@@ -1054,7 +1052,6 @@ def _bind_field(ctxt, parsed_spec, field):
     # to provide compatibility support.
     ast_field.stability = field.stability
     ast_field.always_serialize = field.always_serialize
-    ast_field.preparse = field.preparse
 
     if field.query_shape is not None:
         ast_field.query_shape = ast.QueryShapeFieldType.bind(field.query_shape)
@@ -1230,14 +1227,17 @@ def _bind_chained_struct(ctxt, parsed_spec, ast_struct, chained_struct):
             ast_struct.fields.append(ast_field)
 
 
-def _bind_globals(parsed_spec):
-    # type: (syntax.IDLSpec) -> ast.Global
+def _bind_globals(ctxt, parsed_spec):
+    # type: (errors.ParserContext, syntax.IDLSpec) -> ast.Global
     """Bind the globals object from the idl.syntax tree into the idl.ast tree by doing a deep copy."""
     if parsed_spec.globals:
         ast_global = ast.Global(parsed_spec.globals.file_name, parsed_spec.globals.line,
                                 parsed_spec.globals.column)
         ast_global.cpp_namespace = parsed_spec.globals.cpp_namespace
         ast_global.cpp_includes = parsed_spec.globals.cpp_includes
+
+        if not ast_global.cpp_namespace.startswith("mongo"):
+            ctxt.add_bad_cpp_namespace(ast_global, ast_global.cpp_namespace)
 
         configs = parsed_spec.globals.configs
         if configs:
@@ -1276,15 +1276,6 @@ def _validate_enum_int(ctxt, idl_enum):
             ctxt.add_enum_value_not_int_error(idl_enum, idl_enum.name, enum_value.value,
                                               str(value_error))
             return
-
-    # Check the values are continuous so they can be static_cast.
-    min_value = min(int_values_set)
-    max_value = max(int_values_set)
-
-    valid_int = set(range(min_value, max_value + 1))
-
-    if valid_int != int_values_set:
-        ctxt.add_enum_non_continuous_range_error(idl_enum, idl_enum.name)
 
 
 def _bind_enum(ctxt, idl_enum):
@@ -1639,7 +1630,7 @@ def bind(parsed_spec):
 
     bound_spec = ast.IDLAST()
 
-    bound_spec.globals = _bind_globals(parsed_spec)
+    bound_spec.globals = _bind_globals(ctxt, parsed_spec)
 
     _validate_types(ctxt, parsed_spec)
 

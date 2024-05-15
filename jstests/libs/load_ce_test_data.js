@@ -1,5 +1,3 @@
-load("jstests/libs/ce_stats_utils.js");
-
 /**
  * Analyze all fields and create statistics.
  * Create single-field indexes on the fields with indexed flag.
@@ -49,7 +47,7 @@ function importDataset(dbName, dataDir, dbMetadata) {
  */
 function loadJSONDataset(db, dataSet, dataDir, dbMetadata) {
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "tryBonsai"}));
+        db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "tryBonsaiExperimental"}));
 
     for (const collMetadata of dbMetadata) {
         let coll = db[collMetadata.collectionName];

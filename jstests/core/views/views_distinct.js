@@ -5,15 +5,18 @@
  *   assumes_unsharded_collection,
  *   # Explain of a resolved view must be executed by mongos.
  *   directly_against_shardsvrs_incompatible,
+ *   requires_fcv_71,
  * ]
  */
-
-(function() {
-"use strict";
 
 // For arrayEq. We don't use array.eq as it does an ordered comparison on arrays but we don't
 // care about order in the distinct response.
 load("jstests/aggregation/extras/utils.js");
+import {getWinningPlan, getPlanStage} from "jstests/libs/analyze_plan.js";
+import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
+
+// TODO SERVER-72549: Remove 'featureFlagSbeFull' used by SBE Pushdown feature here and below.
+const featureFlagSbeFull = checkSBEEnabled(db, ["featureFlagSbeFull"]);
 
 var viewsDB = db.getSiblingDB("views_distinct");
 assert.commandWorked(viewsDB.dropDatabase());
@@ -74,7 +77,10 @@ assert.commandWorked(identityView.explain().distinct("_id"));
 assert.commandWorked(largePopView.explain().distinct("pop", {state: "CA"}));
 let explainPlan = largePopView.explain().count({foo: "bar"});
 assert.commandWorked(explainPlan);
-assert.eq(explainPlan["stages"][0]["$cursor"]["queryPlanner"]["namespace"], "views_distinct.coll");
+if (!featureFlagSbeFull) {
+    explainPlan = explainPlan.stages[0].$cursor;
+}
+assert.eq(explainPlan.queryPlanner.namespace, "views_distinct.coll");
 
 // Distinct with explicit explain modes works on a view.
 explainPlan = assert.commandWorked(largePopView.explain("queryPlanner").distinct("pop"));
@@ -92,6 +98,27 @@ assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace, "views_distinct.
 assert(explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"));
 assert.eq(explainPlan.stages[0].$cursor.executionStats.nReturned, 2);
 assert(explainPlan.stages[0].$cursor.executionStats.hasOwnProperty("allPlansExecution"));
+
+// Distinct with hints work on views.
+assert.commandWorked(viewsDB.coll.createIndex({state: 1}));
+
+explainPlan = largePopView.explain().distinct("pop", {}, {hint: {state: 1}});
+assert(getPlanStage(explainPlan.stages[0].$cursor, "FETCH"));
+assert(getPlanStage(explainPlan.stages[0].$cursor, "IXSCAN"));
+
+explainPlan = largePopView.explain().distinct("pop");
+assert.neq(getWinningPlan(explainPlan.stages[0].$cursor.queryPlanner).stage,
+           "IXSCAN",
+           tojson(explainPlan));
+
+// Make sure that the hint produces the right results.
+assert(arrayEq([10, 7], largePopView.distinct("pop", {}, {hint: {state: 1}})));
+
+explainPlan =
+    largePopView.runCommand("distinct", {"key": "a", query: {a: 1, b: 2}, hint: {bad: 1, hint: 1}});
+assert.commandFailedWithCode(explainPlan, ErrorCodes.BadValue, tojson(explainPlan));
+var regex = new RegExp("hint provided does not correspond to an existing index");
+assert(regex.test(explainPlan.errmsg));
 
 // Distinct commands fail when they try to change the collation of a view.
 assert.commandFailedWithCode(
@@ -146,4 +173,3 @@ assertIdentityViewDistinctMatchesCollection("a");
 assertIdentityViewDistinctMatchesCollection("a.b");
 assertIdentityViewDistinctMatchesCollection("a.b.c");
 assertIdentityViewDistinctMatchesCollection("a.b.c.d");
-}());

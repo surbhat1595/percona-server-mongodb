@@ -28,31 +28,68 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
+#include <absl/container/flat_hash_map.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+// IWYU pragma: no_include "cxxabi.h"
+#include <algorithm>
+#include <compare>
+#include <functional>
+#include <initializer_list>
 #include <map>
+#include <memory>
+#include <ratio>
 #include <set>
+#include <system_error>
+#include <tuple>
+#include <utility>
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/client/remote_command_targeter_mock.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/txn_retry_counter_too_old_info.h"
+#include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/vector_clock.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/logv2/log.h"
-#include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/db/write_concern_options.h"
+#include "mongo/executor/network_interface_mock.h"
+#include "mongo/executor/network_test_env.h"
+#include "mongo/executor/remote_command_request.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/log_severity.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/router_transactions_metrics.h"
 #include "mongo/s/session_catalog_router.h"
+#include "mongo/s/shard_version.h"
 #include "mongo/s/sharding_router_test_fixture.h"
+#include "mongo/s/stale_exception.h"
 #include "mongo/s/transaction_router.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/framework.h"
 #include "mongo/unittest/log_test.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/clock_source.h"
 #include "mongo/util/clock_source_mock.h"
+#include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/socket_utils.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/tick_source_mock.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
@@ -1192,9 +1229,8 @@ TEST_F(TransactionRouterTestWithDefaultSession,
     ASSERT(expectedHostAndPorts == seenHostAndPorts);
 }
 
-// TODO (SERVER-48340): Re-enable the single-write-shard transaction commit optimization.
 TEST_F(TransactionRouterTestWithDefaultSession,
-       SendCoordinateCommitForMultipleParticipantsOnlyOneDidAWrite) {
+       SendCommitDirectlyToReadOnlyShardsThenWriteShardForMultipleParticipantsOnlyOneDidAWrite) {
     TxnNumber txnNum{3};
     operationContext()->setTxnNumber(txnNum);
 
@@ -1222,19 +1258,21 @@ TEST_F(TransactionRouterTestWithDefaultSession,
         ASSERT_EQ("admin", request.dbname);
 
         auto cmdName = request.cmdObj.firstElement().fieldNameStringData();
-        ASSERT_EQ(cmdName, "coordinateCommitTransaction");
-
-        std::set<std::string> expectedParticipants = {shard1.toString(), shard2.toString()};
-        auto participantElements = request.cmdObj["participants"].Array();
-        ASSERT_EQ(expectedParticipants.size(), participantElements.size());
-
-        for (const auto& element : participantElements) {
-            auto shardId = element["shardId"].str();
-            ASSERT_EQ(1ull, expectedParticipants.count(shardId));
-            expectedParticipants.erase(shardId);
-        }
+        ASSERT_EQ(cmdName, "commitTransaction");
 
         checkSessionDetails(request.cmdObj, getSessionId(), txnNum, true /* isCoordinator */);
+
+        return BSON("ok" << 1);
+    });
+
+    onCommand([&](const RemoteCommandRequest& request) {
+        ASSERT_EQ(hostAndPort2, request.target);
+        ASSERT_EQ("admin", request.dbname);
+
+        auto cmdName = request.cmdObj.firstElement().fieldNameStringData();
+        ASSERT_EQ(cmdName, "commitTransaction");
+
+        checkSessionDetails(request.cmdObj, getSessionId(), txnNum, false /* isCoordinator */);
 
         return BSON("ok" << 1);
     });
@@ -1289,6 +1327,85 @@ TEST_F(TransactionRouterTestWithDefaultSession,
     });
 
     future.default_timed_get();
+}
+
+TEST(TransactionRouterTest, AppendFieldsForStartTransactionDefaultRC) {
+    repl::ReadConcernArgs defaultRCArgs;
+    auto result = TransactionRouter::appendFieldsForStartTransaction(
+        BSON("MyCmd" << 1), defaultRCArgs, boost::none, true /* doAppendStartTransaction */);
+
+    ASSERT_EQ(result["MyCmd"].numberLong(), 1);
+    ASSERT_BSONOBJ_EQ(result["readConcern"].Obj(), BSONObj());
+    ASSERT_EQ(result["startTransaction"].boolean(), true);
+}
+
+TEST(TransactionRouterTest, AppendFieldsForStartTransactionDefaultRCMajority) {
+    repl::ReadConcernArgs defaultRCArgs(repl::ReadConcernLevel::kMajorityReadConcern);
+    auto result = TransactionRouter::appendFieldsForStartTransaction(
+        BSON("MyCmd" << 1), defaultRCArgs, boost::none, true /* doAppendStartTransaction */);
+
+    ASSERT_EQ(result["MyCmd"].numberLong(), 1);
+    repl::ReadConcernArgs resultArgs;
+    ASSERT_OK(resultArgs.parse(result["readConcern"].Obj()));
+    ASSERT_EQ(result["readConcern"]["level"].valueStringData(), "majority");
+    ASSERT(!result["readConcern"]["atClusterTime"]);
+    ASSERT_EQ(result["startTransaction"].boolean(), true);
+}
+
+TEST(TransactionRouterTest, AppendFieldsForStartTransactionDefaultRCCommandSpecifiesRCLocal) {
+    repl::ReadConcernArgs defaultRCArgs(repl::ReadConcernLevel::kLocalReadConcern);
+    auto result =
+        TransactionRouter::appendFieldsForStartTransaction(BSON("MyCmd" << 1 << "readConcern"
+                                                                        << BSON("level"
+                                                                                << "local")),
+                                                           defaultRCArgs,
+                                                           boost::none,
+                                                           true /* doAppendStartTransaction */);
+
+    ASSERT_EQ(result["MyCmd"].numberLong(), 1);
+    repl::ReadConcernArgs resultArgs;
+    ASSERT_OK(resultArgs.parse(result["readConcern"].Obj()));
+    ASSERT_EQ(result["readConcern"]["level"].valueStringData(), "local");
+    ASSERT_EQ(result["startTransaction"].boolean(), true);
+}
+
+TEST(TransactionRouterTest, AppendFieldsForStartTransactionDefaultRCCommandSpecifiesRCSnapshot) {
+    repl::ReadConcernArgs defaultRCArgs(repl::ReadConcernLevel::kSnapshotReadConcern);
+    auto result =
+        TransactionRouter::appendFieldsForStartTransaction(BSON("MyCmd" << 1 << "readConcern"
+                                                                        << BSON("level"
+                                                                                << "snapshot")),
+                                                           defaultRCArgs,
+                                                           LogicalTime(Timestamp(1, 2)),
+                                                           false /* doAppendStartTransaction */);
+
+    ASSERT_EQ(result["MyCmd"].numberLong(), 1);
+    repl::ReadConcernArgs resultArgs;
+    ASSERT_OK(resultArgs.parse(result["readConcern"].Obj()));
+    ASSERT_EQ(result["readConcern"]["level"].valueStringData(), "snapshot");
+    ASSERT_EQ(result["readConcern"]["atClusterTime"].timestamp(), Timestamp(1, 2));
+    ASSERT(!result["startTransaction"]);
+}
+
+TEST(TransactionRouterTest,
+     AppendFieldsForStartTransactionDefaultRCCommandSpecifiesRCSnapshotAndAtClusterTime) {
+    repl::ReadConcernArgs defaultRCArgs(repl::ReadConcernLevel::kSnapshotReadConcern);
+    defaultRCArgs.setArgsAtClusterTimeForSnapshot(Timestamp(1, 2));
+    auto result = TransactionRouter::appendFieldsForStartTransaction(
+        BSON("MyCmd" << 1 << "readConcern"
+                     << BSON("level"
+                             << "snapshot"
+                             << "atClusterTime" << Timestamp(1, 2))),
+        defaultRCArgs,
+        LogicalTime(Timestamp(1, 2)),
+        false /* doAppendStartTransaction */);
+
+    ASSERT_EQ(result["MyCmd"].numberLong(), 1);
+    repl::ReadConcernArgs resultArgs;
+    ASSERT_OK(resultArgs.parse(result["readConcern"].Obj()));
+    ASSERT_EQ(result["readConcern"]["level"].valueStringData(), "snapshot");
+    ASSERT_EQ(result["readConcern"]["atClusterTime"].timestamp(), Timestamp(1, 2));
+    ASSERT(!result["startTransaction"]);
 }
 
 TEST_F(TransactionRouterTest, CommitWithRecoveryTokenWithNoParticipants) {
@@ -2575,14 +2692,14 @@ TEST_F(TransactionRouterTestWithDefaultSession, NonSnapshotReadConcernHasNoAtClu
             operationContext(), txnNum++, TransactionRouter::TransactionActions::kStart);
 
         // No atClusterTime is placed on the router by default.
-        ASSERT_FALSE(txnRouter.mustUseAtClusterTime());
+        ASSERT(!txnRouter.getSelectedAtClusterTime());
 
         // Can't compute and set an atClusterTime.
         txnRouter.setDefaultAtClusterTime(operationContext());
-        ASSERT_FALSE(txnRouter.mustUseAtClusterTime());
+        ASSERT(!txnRouter.getSelectedAtClusterTime());
 
         // Can't continue on snapshot errors.
-        ASSERT_FALSE(txnRouter.canContinueOnSnapshotError());
+        ASSERT(!txnRouter.canContinueOnSnapshotError());
     }
 }
 
@@ -3385,7 +3502,8 @@ protected:
         startCapturingLogMessages();
         auto future = launchAsync(
             [&] { txnRouter().commitTransaction(operationContext(), kDummyRecoveryToken); });
-        expectCoordinateCommitTransaction();
+        expectCommitTransaction();
+        expectCommitTransaction();
         future.default_timed_get();
         stopCapturingLogMessages();
     }
@@ -3778,17 +3896,18 @@ TEST_F(TransactionRouterMetricsTest, SlowLoggingCommitType_SingleShard) {
     ASSERT_EQUALS(0, countTextFormatLogLinesContaining("coordinator:"));
 }
 
-// TODO (SERVER-48340): Re-enable the single-write-shard transaction commit optimization.
 TEST_F(TransactionRouterMetricsTest, SlowLoggingCommitType_SingleWriteShard) {
     beginSlowTxnWithDefaultTxnNumber();
     runSingleWriteShardCommit();
 
-    ASSERT_EQUALS(1,
-                  countBSONFormatLogLinesIsSubset(
-                      BSON("attr" << BSON("commitType"
-                                          << "twoPhaseCommit"
-                                          << "numParticipants" << 2 << "commitDurationMicros"
-                                          << BSONUndefined << "coordinator" << BSONUndefined))));
+    ASSERT_EQUALS(
+        1,
+        countBSONFormatLogLinesIsSubset(BSON(
+            "attr" << BSON("commitType"
+                           << "singleWriteShard"
+                           << "numParticipants" << 2 << "commitDurationMicros" << BSONUndefined))));
+
+    ASSERT_EQUALS(0, countTextFormatLogLinesContaining("coordinator:"));
 }
 
 TEST_F(TransactionRouterMetricsTest, SlowLoggingCommitType_ReadOnly) {

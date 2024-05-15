@@ -26,23 +26,53 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+// IWYU pragma: no_include "ext/alloc_traits.h"
+#include <absl/container/node_hash_map.h>
+#include <algorithm>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/keypattern.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mock.h"
+#include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/config/config_server_test_fixture.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
+#include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_cache_noop.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_id.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
+#include "mongo/s/catalog/type_chunk.h"
+#include "mongo/s/catalog/type_collection.h"
+#include "mongo/s/catalog/type_index_catalog_gen.h"
 #include "mongo/s/catalog/type_namespace_placement_gen.h"
+#include "mongo/s/catalog/type_shard.h"
+#include "mongo/s/chunk_version.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -177,8 +207,6 @@ void assertSameHistoricalPlacement(HistoricalPlacement historicalPlacement,
 
 // ######################## PlacementHistory: Query by collection ##########################
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForCollAtClusterTime_ShardedCollection) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Quering the placementHistory for a sharded collection should return the shards that owned the
      * collection at the given clusterTime*/
     auto opCtx = operationContext();
@@ -253,8 +281,6 @@ TEST_F(CatalogClientAggregationsTest,
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForCollAtClusterTime_DifferentTimestamp) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Query the placementHistory at different timestamp should return different results*/
     auto opCtx = operationContext();
 
@@ -295,8 +321,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForCollAtClusterTime_D
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForCollAtClusterTime_SameTimestamp) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Having different namespaces for the same timestamp should not influece the expected result*/
     auto opCtx = operationContext();
 
@@ -328,8 +352,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForCollAtClusterTime_S
 
 TEST_F(CatalogClientAggregationsTest,
        GetShardsThatOwnDataForCollAtClusterTime_InvertedTimestampOrder) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Ordering of document insertion into config.placementHistory must not matter*/
     auto opCtx = operationContext();
 
@@ -350,8 +372,6 @@ TEST_F(CatalogClientAggregationsTest,
 
 TEST_F(CatalogClientAggregationsTest,
        GetShardsThatOwnDataForCollAtClusterTime_ReturnPrimaryShardWhenNoShards) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Quering the placementHistory must report only the primary shard when an empty list of shards
      * is reported for the collection*/
     auto opCtx = operationContext();
@@ -378,8 +398,6 @@ TEST_F(CatalogClientAggregationsTest,
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForCollAtClusterTime_AddPrimaryShard) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Quering the placementHistory must report the primary shard in addition to the list of shards
      * related to db.collection. Primary shards must always be returned*/
     auto opCtx = operationContext();
@@ -406,8 +424,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForCollAtClusterTime_A
 
 TEST_F(CatalogClientAggregationsTest,
        GetShardsThatOwnDataForCollAtClusterTime_AddPrimaryShardAtSameTimestamp) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Quering the placementHistory must report the primary shard in addition to the list of shards
      * related to db.collection. Primary shards must always be returned*/
     auto opCtx = operationContext();
@@ -428,16 +444,14 @@ TEST_F(CatalogClientAggregationsTest,
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForCollAtClusterTime_WithMarkers) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     auto opCtx = operationContext();
     PlacementDescriptor _startFcvMarker = {
         Timestamp(1, 0),
-        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString(),
+        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString_forTest(),
         {"shard1", "shard2", "shard3", "shard4", "shard5"}};
     PlacementDescriptor _endFcvMarker = {
         Timestamp(3, 0),
-        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString(),
+        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString_forTest(),
         {}};
 
     // initialization
@@ -461,25 +475,23 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForCollAtClusterTime_W
     // Asking for a timestamp before the closing marker should return the shards from the first
     // marker of the fcv upgrade. As result, "isExact" is expected to be false
     auto historicalPlacement = catalogClient()->getShardsThatOwnDataForCollAtClusterTime(
-        opCtx, NamespaceString("db.collection1"), Timestamp(2, 0));
+        opCtx, NamespaceString::createNamespaceString_forTest("db.collection1"), Timestamp(2, 0));
     assertSameHistoricalPlacement(
         historicalPlacement, {"shard1", "shard2", "shard3", "shard4", "shard5"}, false);
 
     // Asking for a timestamp after the closing marker should return the expected shards
     historicalPlacement = catalogClient()->getShardsThatOwnDataForCollAtClusterTime(
-        opCtx, NamespaceString("db.collection1"), Timestamp(3, 0));
+        opCtx, NamespaceString::createNamespaceString_forTest("db.collection1"), Timestamp(3, 0));
     assertSameHistoricalPlacement(
         historicalPlacement, {"shard1", "shard2", "shard3", "shard4"}, true);
 
     historicalPlacement = catalogClient()->getShardsThatOwnDataForCollAtClusterTime(
-        opCtx, NamespaceString("db.collection1"), Timestamp(6, 0));
+        opCtx, NamespaceString::createNamespaceString_forTest("db.collection1"), Timestamp(6, 0));
     assertSameHistoricalPlacement(historicalPlacement, {"shard1"}, true);
 }
 
 // ######################## PlacementHistory: Query by database ############################
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForDbAtClusterTime_SingleDatabase) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Quering the placementHistory must report all the shards for every collection belonging to
      * the input db*/
     auto opCtx = operationContext();
@@ -499,8 +511,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForDbAtClusterTime_Sin
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForDbAtClusterTime_MultipleDatabases) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Quering the placementHistory must report all the shards for every collection belonging to
      * the input db*/
     auto opCtx = operationContext();
@@ -531,8 +541,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForDbAtClusterTime_Mul
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForDbAtClusterTime_DifferentTimestamp) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Query the placementHistory at different timestamp should return different results*/
     auto opCtx = operationContext();
 
@@ -573,8 +581,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForDbAtClusterTime_Dif
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForDbAtClusterTime_SameTimestamp) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Having different namespaces for the same timestamp should not influece the expected result*/
     auto opCtx = operationContext();
 
@@ -602,8 +608,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForDbAtClusterTime_Sam
 
 TEST_F(CatalogClientAggregationsTest,
        GetShardsThatOwnDataForDbAtClusterTime_InvertedTimestampOrder) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Ordering of document insertion into config.placementHistory must not matter*/
     auto opCtx = operationContext();
 
@@ -623,8 +627,6 @@ TEST_F(CatalogClientAggregationsTest,
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForDbAtClusterTime_NoShardsForDb) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Quering the placementHistory must report no shards if the list of shards belonging to every
      * collection and the db is empty*/
     auto opCtx = operationContext();
@@ -651,8 +653,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForDbAtClusterTime_NoS
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForDbAtClusterTime_NewShardForDb) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Quering the placementHistory must correctly identify a new primary for the db*/
     auto opCtx = operationContext();
 
@@ -677,16 +677,14 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForDbAtClusterTime_New
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForDbAtClusterTime_WithMarkers) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     auto opCtx = operationContext();
     PlacementDescriptor _startFcvMarker = {
         Timestamp(1, 0),
-        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString(),
+        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString_forTest(),
         {"shard1", "shard2", "shard3", "shard4", "shard5"}};
     PlacementDescriptor _endFcvMarker = {
         Timestamp(3, 0),
-        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString(),
+        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString_forTest(),
         {}};
 
     // initialization
@@ -710,25 +708,23 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataForDbAtClusterTime_Wit
     // Asking for a timestamp before the closing marker should return the shards from the first
     // marker of the fcv upgrade. As result, "isExact" is expected to be false
     auto historicalPlacement = catalogClient()->getShardsThatOwnDataForDbAtClusterTime(
-        opCtx, NamespaceString("db"), Timestamp(2, 0));
+        opCtx, NamespaceString::createNamespaceString_forTest("db"), Timestamp(2, 0));
     assertSameHistoricalPlacement(
         historicalPlacement, {"shard1", "shard2", "shard3", "shard4", "shard5"}, false);
 
     // Asking for a timestamp after the closing marker should return the expected shards
     historicalPlacement = catalogClient()->getShardsThatOwnDataForDbAtClusterTime(
-        opCtx, NamespaceString("db"), Timestamp(3, 0));
+        opCtx, NamespaceString::createNamespaceString_forTest("db"), Timestamp(3, 0));
     assertSameHistoricalPlacement(
         historicalPlacement, {"shard1", "shard2", "shard3", "shard4"}, true);
 
     historicalPlacement = catalogClient()->getShardsThatOwnDataForDbAtClusterTime(
-        opCtx, NamespaceString("db"), Timestamp(7, 0));
+        opCtx, NamespaceString::createNamespaceString_forTest("db"), Timestamp(7, 0));
     assertSameHistoricalPlacement(historicalPlacement, {"shard1", "shard2", "shard3"}, true);
 }
 
 // ######################## PlacementHistory: Query the entire cluster ##################
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_SingleDatabase) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Quering the placementHistory must report all the shards for every collection and db*/
     auto opCtx = operationContext();
 
@@ -747,8 +743,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_SingleDa
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_MultipleDatabases) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Quering the placementHistory must report all the shards for every collection and db*/
     auto opCtx = operationContext();
 
@@ -770,8 +764,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_Multiple
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_DifferentTimestamp) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Query the placementHistory at different timestamp should return different results*/
     auto opCtx = operationContext();
 
@@ -812,8 +804,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_Differen
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_SameTimestamp) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Having different namespaces for the same timestamp should not influence the expected
      * result*/
     auto opCtx = operationContext();
@@ -837,8 +827,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_SameTime
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_InvertedTimestampOrder) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Ordering of document insertion into config.placementHistory must not matter*/
     auto opCtx = operationContext();
 
@@ -860,8 +848,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_Inverted
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_NoShards) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Quering the placementHistory must report no shards if the list of shards belonging to
      * every db.collection and db is empty*/
     auto opCtx = operationContext();
@@ -888,16 +874,14 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_NoShards
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_WithMarkers) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     auto opCtx = operationContext();
     PlacementDescriptor _startFcvMarker = {
         Timestamp(1, 0),
-        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString(),
+        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString_forTest(),
         {"shard1", "shard2", "shard3", "shard4"}};
     PlacementDescriptor _endFcvMarker = {
         Timestamp(3, 0),
-        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString(),
+        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString_forTest(),
         {}};
 
     // initialization
@@ -936,8 +920,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_WithMark
 
 // ######################## PlacementHistory: Regex Stage #####################
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_RegexStage_ConfigSystem) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*The regex stage must match correctly the config.system.namespaces collection*/
     auto opCtx = operationContext();
 
@@ -959,8 +941,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_RegexSta
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_RegexStage_NssWithPrefix) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*The regex stage must match correctly the input namespaces*/
     auto opCtx = operationContext();
 
@@ -1010,8 +990,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_RegexSta
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_RegexStage_DbWithSymbols) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*The regex stage must correctly escape special character*/
     auto opCtx = operationContext();
 
@@ -1047,8 +1025,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_RegexSta
 
 // ######################## PlacementHistory: EmptyHistory #####################
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_EmptyHistory) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     // Setup a shard to perform a write into the config DB and initialize a committed OpTime
     // (required to perform a snapshot read of the placementHistory).
     setupShards({ShardType("shardName", "host01")});
@@ -1076,8 +1052,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_EmptyHis
 
 // ######################## PlacementHistory: InvalidOptions #####################
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_InvalidOptions) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
     /*Testing input validation*/
     auto opCtx = operationContext();
 
@@ -1110,9 +1084,6 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_InvalidO
 
 // ######################## PlacementHistory: Clean-up #####################
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_CleanUp) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
-
     auto opCtx = operationContext();
 
     // Insert the initial content
@@ -1194,17 +1165,14 @@ TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_CleanUp)
 }
 
 TEST_F(CatalogClientAggregationsTest, GetShardsThatOwnDataAtClusterTime_CleanUp_NewMarkers) {
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
-
     auto opCtx = operationContext();
     PlacementDescriptor startFcvMarker = {
         Timestamp(1, 0),
-        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString(),
+        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString_forTest(),
         {"shard1", "shard2", "shard3", "shard4"}};
     PlacementDescriptor endFcvMarker = {
         Timestamp(3, 0),
-        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString(),
+        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString_forTest(),
         {}};
 
     // initialization

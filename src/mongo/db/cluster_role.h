@@ -29,39 +29,59 @@
 
 #pragma once
 
+#include <cstdint>
+#include <initializer_list>
+
 namespace mongo {
+
 /**
- * ClusterRole is not mutually exclusive when featureFlagCatalogShard is true. In this mode, a
- * config server cluster role is also a shard server cluster role.
+ * Represents the role this node plays in a sharded cluster, based on its startup arguments. Roles
+ * are not mutually exclusive since a node can play different roles at the same time.
  */
 class ClusterRole {
 public:
-    enum Value {
-        None,
-        ShardServer,
-        ConfigServer,
+    enum Value : uint8_t {
+        /**
+         * The node is not part of a sharded cluster.
+         */
+        None = 0x00,
+
+        /**
+         * The node acts as a shard server (the process was started with --shardsvr argument.) This
+         * is implicitly set when the node is configured to act as a config server (the process was
+         * started with --configsvr argument).
+         */
+        ShardServer = 0x01,
+
+        /**
+         * The node acts as a config server (the process was started with --configsvr argument).
+         */
+        ConfigServer = 0x02,
+
+        /**
+         * The node acts as a router server (the process was started with --router argument).
+         */
+        RouterServer = 0x04
     };
 
-    ClusterRole(Value v = ClusterRole::None) : _value(v) {}
+    ClusterRole(Value role = ClusterRole::None);
+    ClusterRole(std::initializer_list<Value> roles);
+    ClusterRole& operator=(const ClusterRole& rhs);
+    ClusterRole& operator+=(Value role);
 
-    ClusterRole& operator=(const ClusterRole& rhs) {
-        if (this != &rhs) {
-            _value = rhs._value;
-        }
-        return *this;
-    }
+    /**
+     * Returns `true` if this node plays the given role, `false` otherwise. Even if the node plays
+     * the given role, it is not excluded that it also plays others.
+     */
+    bool has(const ClusterRole& role) const;
 
-    bool has(const ClusterRole& other) const;
-
-    // Returns true if this mongod was started with --shardsvr, false otherwise.
-    bool exclusivelyHasShardRole();
-
-    // Returns true if this mongod was started with --configsvr in a non-config shard topology,
-    // false otherwise.
-    // TODO SERVER-75391: Remove.
-    bool exclusivelyHasConfigRole();
+    /**
+     * Returns `true` if this node plays only the given role, `false` otherwise.
+     */
+    bool hasExclusively(const ClusterRole& role) const;
 
 private:
-    Value _value;
+    uint8_t _roleMask;
 };
+
 }  // namespace mongo

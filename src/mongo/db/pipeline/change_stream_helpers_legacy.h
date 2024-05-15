@@ -29,8 +29,17 @@
 
 #pragma once
 
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <set>
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/document_source_change_stream_gen.h"
+#include "mongo/db/pipeline/expression_context.h"
 
 namespace mongo::change_stream_legacy {
 
@@ -71,7 +80,5 @@ void populateInternalOperationFilter(const boost::intrusive_ptr<ExpressionContex
  * {..., <op name>: <namespace>}. Does nothing if the 'type' field is not present inside 'o2'.
  */
 Document convertFromLegacyOplogFormat(const Document& legacyO2Entry, const NamespaceString& nss);
-
-StringData getNewShardDetectedOpName(const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
 }  // namespace mongo::change_stream_legacy

@@ -28,17 +28,38 @@
  */
 
 
-#include "mongo/platform/basic.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <memory>
+#include <string>
+#include <utility>
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/shim.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/auth/privilege.h"
+#include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/cluster_server_parameter_cmds_gen.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/set_cluster_parameter_invocation.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_feature_flags_gen.h"
-#include "mongo/idl/cluster_server_parameter_gen.h"
-#include "mongo/logv2/log.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/write_concern_options.h"
+#include "mongo/rpc/op_msg.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -46,10 +67,41 @@
 namespace mongo {
 
 namespace {
+MONGO_FAIL_POINT_DEFINE(hangInSetClusterParameter);
 
 const WriteConcernOptions kMajorityWriteConcern{WriteConcernOptions::kMajority,
                                                 WriteConcernOptions::SyncMode::UNSET,
                                                 WriteConcernOptions::kNoTimeout};
+
+void setClusterParameterImpl(OperationContext* opCtx, const SetClusterParameter& request) {
+    uassert(ErrorCodes::ErrorCodes::NotImplemented,
+            "setClusterParameter can only run on mongos in sharded clusters",
+            (serverGlobalParams.clusterRole.has(ClusterRole::None)));
+
+    if (!feature_flags::gFeatureFlagAuditConfigClusterParameter.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        uassert(ErrorCodes::IllegalOperation,
+                str::stream() << SetClusterParameter::kCommandName
+                              << " cannot be run on standalones",
+                repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
+                    repl::ReplicationCoordinator::modeNone);
+    }
+
+    // setClusterParameter is serialized against setFeatureCompatibilityVersion.
+    FixedFCVRegion fcvRegion(opCtx);
+
+    hangInSetClusterParameter.pauseWhileSet();
+
+    std::unique_ptr<ServerParameterService> parameterService =
+        std::make_unique<ClusterParameterService>();
+
+    DBDirectClient dbClient(opCtx);
+    ClusterParameterDBClientService dbService(dbClient);
+
+    SetClusterParameterInvocation invocation{std::move(parameterService), dbService};
+
+    invocation.invoke(opCtx, request, boost::none, kMajorityWriteConcern);
+}
 
 class SetClusterParameterCommand final : public TypedCommand<SetClusterParameterCommand> {
 public:
@@ -76,27 +128,7 @@ public:
         using InvocationBase::InvocationBase;
 
         void typedRun(OperationContext* opCtx) {
-            uassert(ErrorCodes::ErrorCodes::NotImplemented,
-                    "setClusterParameter can only run on mongos in sharded clusters",
-                    (serverGlobalParams.clusterRole.has(ClusterRole::None)));
-
-            if (!feature_flags::gFeatureFlagAuditConfigClusterParameter.isEnabled(
-                    serverGlobalParams.featureCompatibility)) {
-                uassert(ErrorCodes::IllegalOperation,
-                        str::stream() << Request::kCommandName << " cannot be run on standalones",
-                        repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
-                            repl::ReplicationCoordinator::modeNone);
-            }
-
-            std::unique_ptr<ServerParameterService> parameterService =
-                std::make_unique<ClusterParameterService>();
-
-            DBDirectClient dbClient(opCtx);
-            ClusterParameterDBClientService dbService(dbClient);
-
-            SetClusterParameterInvocation invocation{std::move(parameterService), dbService};
-
-            invocation.invoke(opCtx, request(), boost::none, kMajorityWriteConcern);
+            setClusterParameterImpl(opCtx, request());
         }
 
     private:
@@ -112,11 +144,15 @@ public:
             uassert(ErrorCodes::Unauthorized,
                     "Unauthorized",
                     AuthorizationSession::get(opCtx->getClient())
-                        ->isAuthorizedForPrivilege(Privilege{ResourcePattern::forClusterResource(),
-                                                             ActionType::setClusterParameter}));
+                        ->isAuthorizedForPrivilege(Privilege{
+                            ResourcePattern::forClusterResource(request().getDbName().tenantId()),
+                            ActionType::setClusterParameter}));
         }
     };
 } setClusterParameterCommand;
+
+auto setClusterParameterRegistration =
+    MONGO_WEAK_FUNCTION_REGISTRATION(setClusterParameter, setClusterParameterImpl);
 
 }  // namespace
 }  // namespace mongo

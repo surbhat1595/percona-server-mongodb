@@ -4,17 +4,13 @@
  * @tags: [requires_fcv_62]
  */
 
-(function() {
-"use strict";
-
 // For configureFailPoint.
 load("jstests/libs/fail_point_util.js");
 // For assertDropAndRecreateCollection.
 load("jstests/libs/collection_drop_recreate.js");
 // For ChangeStreamMultitenantReplicaSetTest.
 load("jstests/serverless/libs/change_collection_util.js");
-// For FeatureFlagUtil.
-load("jstests/libs/feature_flag_util.js");
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const getTenantConnection = ChangeStreamMultitenantReplicaSetTest.getTenantConnection;
 
@@ -138,9 +134,10 @@ assert.commandWorked(citiesTenantConnPrimary.getDB("admin").runCommand(
     {setClusterParameter: {changeStreams: {expireAfterSeconds: kExpireAfterSeconds}}}));
 
 // Get tenants respective collections for testing.
-const stocksTestDb = stocksTenantConnPrimary.getDB(jsTestName());
-const citiesTestDb = citiesTenantConnPrimary.getDB(jsTestName());
-const notUsedTestDb = notUsedTenantConnPrimary.getDB(jsTestName());
+const dbName = "change_coll_expired_doc_remover";
+const stocksTestDb = stocksTenantConnPrimary.getDB(dbName);
+const citiesTestDb = citiesTenantConnPrimary.getDB(dbName);
+const notUsedTestDb = notUsedTenantConnPrimary.getDB(dbName);
 
 const stocksColl = assertDropAndRecreateCollection(stocksTestDb, "stocks");
 const citiesColl = assertDropAndRecreateCollection(citiesTestDb, "cities");
@@ -308,6 +305,4 @@ assertChangeCollectionDocuments(
 
 fpHangBeforeRemovingDocsPrimary.off();
 fpHangBeforeRemovingDocsSecondary.off();
-
 replSet.stopSet();
-})();

@@ -27,30 +27,56 @@
  *    it in the license file.
  */
 
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <ostream>
+#include <tuple>
+#include <type_traits>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/repl/primary_only_service_test_fixture.h"
+#include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/service_context_d_test_fixture.h"
-#include "mongo/executor/network_interface.h"
+#include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
+#include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
+#include "mongo/rpc/metadata/metadata_hook.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/stdx/type_traits.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/log_test.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/unittest/framework.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
+#include "mongo/util/future_impl.h"
 #include "mongo/util/future_util.h"
+#include "mongo/util/time_support.h"
 
 using namespace mongo;
 using namespace mongo::repl;
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace {
 constexpr StringData kTestServiceName = "TestService"_sd;
@@ -61,6 +87,7 @@ MONGO_FAIL_POINT_DEFINE(TestServiceHangDuringStateTwo);
 MONGO_FAIL_POINT_DEFINE(TestServiceHangDuringCompletion);
 MONGO_FAIL_POINT_DEFINE(TestServiceHangBeforeMakingOpCtx);
 MONGO_FAIL_POINT_DEFINE(TestServiceHangAfterMakingOpCtx);
+MONGO_FAIL_POINT_DEFINE(TestServiceFailRebuildService);
 }  // namespace
 
 class TestService final : public PrimaryOnlyService {
@@ -288,6 +315,9 @@ public:
 private:
     ExecutorFuture<void> _rebuildService(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                          const CancellationToken& token) override {
+        if (TestServiceFailRebuildService.shouldFail()) {
+            uassertStatusOK(Status(ErrorCodes::InternalError, "_rebuildService error"));
+        }
         auto nss = getStateDocumentsNS();
 
         AllowOpCtxWhenServiceRebuildingBlock allowOpCtxBlock(Client::getCurrent());
@@ -527,16 +557,21 @@ TEST_F(PrimaryOnlyServiceTest, LookupInstance) {
     ASSERT(instance.get());
     ASSERT_EQ(0, instance->getID());
 
-    auto instance2 = TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0)).value();
+    auto [instance2, isPausedOrShutdown2] =
+        TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
+    ASSERT_TRUE(instance2);
+    ASSERT_FALSE(isPausedOrShutdown2);
 
-    ASSERT_EQ(instance.get(), instance2.get());
+    ASSERT_EQ(instance.get(), instance2.value().get());
 
     TestServiceHangDuringInitialization.setMode(FailPoint::off);
     instance->getCompletionFuture().get();
 
     // Shouldn't be able to look up instance after it has completed running.
-    auto instance3 = TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
-    ASSERT_FALSE(instance3.has_value());
+    auto [instance3, isPausedOrShutdown3] =
+        TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
+    ASSERT_FALSE(instance3);
+    ASSERT_FALSE(isPausedOrShutdown3);
 }
 
 TEST_F(PrimaryOnlyServiceTest, LookupInstanceInterruptible) {
@@ -571,9 +606,11 @@ TEST_F(PrimaryOnlyServiceTest, LookupInstanceHoldingISLock) {
         opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
         ASSERT_FALSE(opCtx->lockState()->wasGlobalLockTakenInModeConflictingWithWrites());
 
-        auto instance2 =
-            TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0)).value();
-        ASSERT_EQ(instance.get(), instance2.get());
+        auto [instance2, isPausedOrShutdown] =
+            TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
+        ASSERT_TRUE(instance2);
+        ASSERT_FALSE(isPausedOrShutdown);
+        ASSERT_EQ(instance.get(), instance2.value().get());
     }
 
     TestServiceHangDuringInitialization.setMode(FailPoint::off);
@@ -593,9 +630,11 @@ TEST_F(PrimaryOnlyServiceTest, LookupInstanceHoldingIXLock) {
     {
         Lock::GlobalLock lk(opCtx.get(), MODE_IX);
         ASSERT_FALSE(opCtx->shouldAlwaysInterruptAtStepDownOrUp());
-        auto instance2 =
-            TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0)).value();
-        ASSERT_EQ(instance.get(), instance2.get());
+        auto [instance2, isPausedOrShutdown] =
+            TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
+        ASSERT_TRUE(instance2);
+        ASSERT_FALSE(isPausedOrShutdown);
+        ASSERT_EQ(instance.get(), instance2.value().get());
     }
 
     TestServiceHangDuringInitialization.setMode(FailPoint::off);
@@ -638,9 +677,11 @@ TEST_F(PrimaryOnlyServiceTest, LookupInstanceAfterStepDownReturnsNone) {
 
     stepDown();
 
-    auto instance2 = TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
+    auto [instance2, isPausedOrShutdown] =
+        TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
 
-    ASSERT_EQ(instance2, boost::none);
+    ASSERT_FALSE(instance2);
+    ASSERT_TRUE(isPausedOrShutdown);
 
     TestServiceHangDuringInitialization.setMode(FailPoint::off);
     ASSERT_EQ(ErrorCodes::Interrupted, instance->getCompletionFuture().getNoThrow());
@@ -661,9 +702,11 @@ TEST_F(PrimaryOnlyServiceTest, LookupInstanceAfterShutDownReturnsNone) {
 
     shutdown();
 
-    auto instance2 = TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
+    auto [instance2, isPausedOrShutdown] =
+        TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
 
-    ASSERT_EQ(instance2, boost::none);
+    ASSERT_FALSE(instance2);
+    ASSERT_TRUE(isPausedOrShutdown);
 
     ASSERT_EQ(ErrorCodes::Interrupted, instance->getCompletionFuture().getNoThrow());
 }
@@ -845,8 +888,10 @@ TEST_F(PrimaryOnlyServiceTest, StepDownBeforePersisted) {
 
     auto opCtx = makeOperationContext();
     // Since the Instance never wrote its state document, it shouldn't be recreated on stepUp.
-    auto recreatedInstance = TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
-    ASSERT(!recreatedInstance.has_value());
+    auto [recreatedInstance, isPausedOrShutdown] =
+        TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
+    ASSERT_FALSE(recreatedInstance);
+    ASSERT_FALSE(isPausedOrShutdown);
 }
 
 TEST_F(PrimaryOnlyServiceTest, RecreateInstanceOnStepUp) {
@@ -872,11 +917,13 @@ TEST_F(PrimaryOnlyServiceTest, RecreateInstanceOnStepUp) {
 
     {
         auto opCtx = makeOperationContext();
-        auto recreatedInstance =
-            TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0)).value();
-        ASSERT_EQ(TestService::State::kOne, recreatedInstance->getInitialState());
+        auto [recreatedInstance, isPausedOrShutdown] =
+            TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
+        ASSERT_TRUE(recreatedInstance);
+        ASSERT_FALSE(isPausedOrShutdown);
+        ASSERT_EQ(TestService::State::kOne, (*recreatedInstance)->getInitialState());
         TestServiceHangDuringStateTwo.waitForTimesEntered(++stateTwoFPTimesEntered);
-        ASSERT_EQ(TestService::State::kTwo, recreatedInstance->getState());
+        ASSERT_EQ(TestService::State::kTwo, (*recreatedInstance)->getState());
     }
 
     stepDown();
@@ -890,17 +937,19 @@ TEST_F(PrimaryOnlyServiceTest, RecreateInstanceOnStepUp) {
 
     {
         auto opCtx = makeOperationContext();
-        auto recreatedInstance =
-            TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0)).value();
-        ASSERT_EQ(TestService::State::kTwo, recreatedInstance->getInitialState());
-        TestServiceHangDuringStateOne.setMode(FailPoint::off);
-        recreatedInstance->getCompletionFuture().get();
-        ASSERT_EQ(TestService::State::kDone, recreatedInstance->getState());
-
-
-        auto nonExistentInstance =
+        auto [recreatedInstance, isPausedOrShutdown1] =
             TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
-        ASSERT(!nonExistentInstance.has_value());
+        ASSERT_TRUE(recreatedInstance);
+        ASSERT_FALSE(isPausedOrShutdown1);
+        ASSERT_EQ(TestService::State::kTwo, (*recreatedInstance)->getInitialState());
+        TestServiceHangDuringStateOne.setMode(FailPoint::off);
+        (*recreatedInstance)->getCompletionFuture().get();
+        ASSERT_EQ(TestService::State::kDone, (*recreatedInstance)->getState());
+
+        auto [nonExistentInstance, isPausedOrShutdown2] =
+            TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
+        ASSERT_FALSE(nonExistentInstance);
+        ASSERT_FALSE(isPausedOrShutdown2);
     }
 
     stepDown();
@@ -910,9 +959,10 @@ TEST_F(PrimaryOnlyServiceTest, RecreateInstanceOnStepUp) {
         auto opCtx = makeOperationContext();
         // No Instance should be recreated since the previous run completed successfully and deleted
         // its state document.
-        auto nonExistentInstance =
+        auto [nonExistentInstance, isPausedOrShutdown] =
             TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
-        ASSERT(!nonExistentInstance.has_value());
+        ASSERT_FALSE(nonExistentInstance);
+        ASSERT_FALSE(isPausedOrShutdown);
     }
 }
 
@@ -968,13 +1018,16 @@ TEST_F(PrimaryOnlyServiceTest, StepDownBeforeRebuildingInstances) {
     TestServiceHangDuringStateOne.waitForTimesEntered(++stateOneFPTimesEntered);
 
     auto opCtx = makeOperationContext();
-    auto instance = TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0)).value();
-    ASSERT_EQ(TestService::State::kOne, instance->getInitialState());
-    ASSERT_EQ(TestService::State::kOne, instance->getState());
+    auto [instance, isPausedOrShutdown] =
+        TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
+    ASSERT_TRUE(instance);
+    ASSERT_FALSE(isPausedOrShutdown);
+    ASSERT_EQ(TestService::State::kOne, (*instance)->getInitialState());
+    ASSERT_EQ(TestService::State::kOne, (*instance)->getState());
 
     TestServiceHangDuringStateOne.setMode(FailPoint::off);
 
-    instance->getCompletionFuture().get();
+    (*instance)->getCompletionFuture().get();
 }
 
 TEST_F(PrimaryOnlyServiceTest, RecreateInstancesFails) {
@@ -1018,8 +1071,10 @@ TEST_F(PrimaryOnlyServiceTest, RecreateInstancesFails) {
         // After stepping down we are in a consistent state again, but cannot create or lookup
         // instances because we are not primary.
         auto opCtx = makeOperationContext();
-        ASSERT_FALSE(
-            TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0)).has_value());
+        auto [instance, isPausedOrShutdown] =
+            TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
+        ASSERT_FALSE(instance);
+        ASSERT_TRUE(isPausedOrShutdown);
         ASSERT_THROWS_CODE(TestService::Instance::getOrCreate(
                                opCtx.get(), _service, BSON("_id" << 0 << "state" << 0)),
                            DBException,
@@ -1036,13 +1091,15 @@ TEST_F(PrimaryOnlyServiceTest, RecreateInstancesFails) {
     {
         // Instance should be recreated successfully.
         auto opCtx = makeOperationContext();
-        auto instance =
-            TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0)).value();
-        ASSERT_EQ(TestService::State::kOne, instance->getInitialState());
-        ASSERT_EQ(TestService::State::kOne, instance->getState());
+        auto [instance, isPausedOrShutdown] =
+            TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
+        ASSERT_TRUE(instance);
+        ASSERT_FALSE(isPausedOrShutdown);
+        ASSERT_EQ(TestService::State::kOne, (*instance)->getInitialState());
+        ASSERT_EQ(TestService::State::kOne, (*instance)->getState());
         TestServiceHangDuringStateOne.setMode(FailPoint::off);
-        instance->getCompletionFuture().get();
-        ASSERT_EQ(TestService::State::kDone, instance->getState());
+        (*instance)->getCompletionFuture().get();
+        ASSERT_EQ(TestService::State::kDone, (*instance)->getState());
     }
 }
 
@@ -1214,4 +1271,50 @@ TEST_F(PrimaryOnlyServiceTest, PrimaryOnlyServiceLogSlowServices) {
     doStepUpWithHang(repl::slowTotalOnStepUpCompleteThresholdMS.load() + 1);
     stopCapturingLogMessages();
     ASSERT_EQ(1, countTextFormatLogLinesContaining(slowTotalTimeStepUpCompleteMsg));
+}
+
+TEST_F(PrimaryOnlyServiceTest, RebuildServiceFailsShouldSetStateFromRebuilding) {
+    /**
+     * (1) onStepUp changes state to kRebuilding. lookupInstanceThread blocks waiting for state
+     * not rebuilding.
+     * (2) PrimaryOnlyService::_rebuildService fails due to fail point, causing rebuilding to
+     * fail, despite no stepDown/shutDown occurring.
+     * (3) Failure _rebuildService results in state change to kRebuildFailed.
+     * (4) lookupInstanceThread notified of the state change, unblocks and sees error that
+     * caused _rebuildService to fail.
+     */
+    stepDown();
+    stdx::thread stepUpThread;
+    stdx::thread lookUpInstanceThread;
+    Status lookupError = Status::OK();
+    FailPointEnableBlock failRebuildServiceFailPoint("TestServiceFailRebuildService");
+
+    {
+        FailPointEnableBlock stepUpFailpoint("PrimaryOnlyServiceHangBeforeLaunchingStepUpLogic");
+        stepUpThread = stdx::thread([this] {
+            ThreadClient tc("StepUpThread", getServiceContext());
+            stepUp();
+        });
+
+        stepUpFailpoint->waitForTimesEntered(stepUpFailpoint.initialTimesEntered() + 1);
+
+        lookUpInstanceThread = stdx::thread([this, &lookupError] {
+            try {
+                ThreadClient tc("LookUpInstanceThread", getServiceContext());
+                auto opCtx = makeOperationContext();
+                TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
+            } catch (DBException& ex) {
+                lookupError = ex.toStatus();
+            }
+        });
+    }
+
+    failRebuildServiceFailPoint->waitForTimesEntered(
+        failRebuildServiceFailPoint.initialTimesEntered() + 1);
+    stepUpThread.join();
+    lookUpInstanceThread.join();
+
+    ASSERT(!lookupError.isOK()) << "lookup thread did not receive an error";
+    ASSERT_EQ(lookupError.code(), ErrorCodes::InternalError);
+    ASSERT_EQ(lookupError.reason(), "_rebuildService error");
 }

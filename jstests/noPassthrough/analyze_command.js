@@ -1,7 +1,4 @@
-(function() {
-"use strict";
-
-load("jstests/libs/sbe_util.js");  // For checkSBEEnabled.
+import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
 const conn = MongoRunner.runMongod({setParameter: {featureFlagCommonQueryFramework: true}});
 assert.neq(null, conn, "mongod was unable to start up");
@@ -11,11 +8,11 @@ const db = conn.getDB(jsTestName());
 if (!checkSBEEnabled(db)) {
     jsTestLog("Skipping test because SBE is not enabled");
     MongoRunner.stopMongod(conn);
-    return;
+    quit();
 }
 
 assert.commandWorked(
-    db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "tryBonsai"}));
+    db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "tryBonsaiExperimental"}));
 
 const coll = db.cqf_analyze;
 const syscoll = db.system.statistics.cqf_analyze;
@@ -179,4 +176,3 @@ assert.eq(100, syscoll.find({_id: "a"})[0].statistics.scalarHistogram.buckets.le
 cleanup();
 
 MongoRunner.stopMongod(conn);
-}());

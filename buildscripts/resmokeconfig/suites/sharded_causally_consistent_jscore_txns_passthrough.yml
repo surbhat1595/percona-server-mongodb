@@ -37,15 +37,17 @@ selector:
 executor:
   archive:
     hooks:
+      - CheckMetadataConsistencyInBackground
       - ValidateCollections
   config:
     shell_options:
       eval: >-
-        var testingReplication = true;
+        globalThis.testingReplication = true;
         load('jstests/libs/override_methods/enable_causal_consistency_without_read_pref.js');
   hooks:
   # We don't execute dbHash or oplog consistency checks since there is only a single replica set
   # node.
+  - class: CheckMetadataConsistencyInBackground
   - class: ValidateCollections
   - class: CheckOrphansDeleted
   - class: CleanEveryN

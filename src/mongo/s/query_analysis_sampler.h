@@ -29,12 +29,24 @@
 
 #pragma once
 
+#include "mongo/idl/mutable_observer_registry.h"
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <map>
+#include <mutex>
+
+#include "mongo/base/string_data.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
+#include "mongo/platform/mutex.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
 #include "mongo/s/analyze_shard_key_role.h"
 #include "mongo/s/analyze_shard_key_server_parameters_gen.h"
+#include "mongo/util/assert_util_core.h"
 #include "mongo/util/periodic_runner.h"
+#include "mongo/util/tick_source.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 namespace analyze_shard_key {
@@ -89,8 +101,6 @@ public:
     private:
         double _calculateExponentialMovingAverage(double prevAvg, long long newVal) const;
 
-        const double _smoothingFactor = gQueryAnalysisQueryStatsSmoothingFactor;
-
         // The counts for update, delete and find are already tracked by the OpCounters.
         long long _lastFindAndModifyQueriesCount = 0;
         long long _lastAggregateQueriesCount = 0;
@@ -133,7 +143,7 @@ public:
             return _collUuid;
         }
 
-        double getRate() const {
+        double getSamplesPerSecond() const {
             return _numTokensPerSecond;
         }
 
@@ -153,7 +163,7 @@ public:
          * Sets a new rate. Causes the bucket to be refilled with tokens created since last refill
          * time according to the previous rate.
          */
-        void refreshRate(double numTokensPerSecond);
+        void refreshSamplesPerSecond(double numTokensPerSecond);
 
     private:
         /**
@@ -190,12 +200,15 @@ public:
     static QueryAnalysisSampler& get(OperationContext* opCtx);
     static QueryAnalysisSampler& get(ServiceContext* serviceContext);
 
+    static inline MutableObserverRegistry<int32_t>
+        observeQueryAnalysisSamplerConfigurationRefreshSecs;
+
     void onStartup();
 
     void onShutdown();
 
     void gotCommand(const StringData& cmdName) {
-        stdx::lock_guard<Latch> lk(_mutex);
+        stdx::lock_guard<Latch> lk(_queryStatsMutex);
         _queryStats.gotCommand(cmdName);
     }
 
@@ -215,7 +228,7 @@ public:
     }
 
     QueryStats getQueryStatsForTest() const {
-        stdx::lock_guard<Latch> lk(_mutex);
+        stdx::lock_guard<Latch> lk(_queryStatsMutex);
         return _queryStats;
     }
 
@@ -224,11 +237,18 @@ public:
     }
 
     std::map<NamespaceString, SampleRateLimiter> getRateLimitersForTest() const {
-        stdx::lock_guard<Latch> lk(_mutex);
+        stdx::lock_guard<Latch> lk(_sampleRateLimitersMutex);
         return _sampleRateLimiters;
     }
 
 private:
+    static constexpr size_t srlBloomFilterLg2NumBits = 9u;
+    static constexpr size_t srlBloomFilterNumBitsPerBlock = 64u;
+
+    static constexpr size_t srlBloomFilterNumBits = 1ull << srlBloomFilterLg2NumBits;
+    static constexpr size_t srlBloomFilterNumBlocks =
+        srlBloomFilterNumBits / srlBloomFilterNumBitsPerBlock;
+
     void _refreshQueryStats();
 
     void _refreshConfigurations(OperationContext* opCtx);
@@ -237,13 +257,16 @@ private:
                             const NamespaceString& nss,
                             SampledCommandNameEnum cmdName);
 
-    mutable Mutex _mutex = MONGO_MAKE_LATCH("QueryAnalysisSampler::_mutex");
+    mutable Mutex _sampleRateLimitersMutex =
+        MONGO_MAKE_LATCH("QueryAnalysisSampler::_sampleRateLimitersMutex");
+    mutable Mutex _queryStatsMutex = MONGO_MAKE_LATCH("QueryAnalysisSampler::_queryStatsMutex");
 
     PeriodicJobAnchor _periodicQueryStatsRefresher;
     QueryStats _queryStats;
 
-    PeriodicJobAnchor _periodicConfigurationsRefresher;
+    std::shared_ptr<PeriodicJobAnchor> _periodicConfigurationsRefresher;
     std::map<NamespaceString, SampleRateLimiter> _sampleRateLimiters;
+    std::array<AtomicWord<uint64_t>, srlBloomFilterNumBlocks> _srlBloomFilter{};
 };
 
 }  // namespace analyze_shard_key

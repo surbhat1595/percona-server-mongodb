@@ -27,13 +27,20 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <cstdint>
+#include <utility>
 
-#include "mongo/db/matcher/schema/expression_internal_schema_fmod.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
+#include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/matcher/schema/expression_internal_schema_fmod.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -71,10 +78,10 @@ void InternalSchemaFmodMatchExpression::debugString(StringBuilder& debug,
     _debugStringAttachTagInfo(&debug);
 }
 
-BSONObj InternalSchemaFmodMatchExpression::getSerializedRightHandSide(
-    SerializationOptions opts) const {
-    return BSON("$_internalSchemaFmod"_sd << BSON_ARRAY(opts.serializeLiteral(_divisor)
-                                                        << opts.serializeLiteral(_remainder)));
+void InternalSchemaFmodMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, SerializationOptions opts) const {
+    bob->append("$_internalSchemaFmod"_sd,
+                BSON_ARRAY(opts.serializeLiteral(_divisor) << opts.serializeLiteral(_remainder)));
 }
 
 bool InternalSchemaFmodMatchExpression::equivalent(const MatchExpression* other) const {

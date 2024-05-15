@@ -27,23 +27,45 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/s/write_ops/batch_write_op.h"
-
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <numeric>
+#include <string>
+#include <utility>
 
 #include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/bson/util/builder_fwd.h"
+#include "mongo/crypto/fle_field_schema_gen.h"
+#include "mongo/db/basic_types.h"
 #include "mongo/db/catalog/collection_uuid_mismatch_info.h"
-#include "mongo/db/internal_transactions_feature_flag_gen.h"
+#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops.h"
+#include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/stats/counters.h"
-#include "mongo/s/client/num_hosts_targeted_metrics.h"
+#include "mongo/db/write_concern_options.h"
 #include "mongo/s/collection_uuid_mismatch.h"
 #include "mongo/s/transaction_router.h"
+#include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/write_without_shard_key_util.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
 #include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 namespace {
@@ -54,28 +76,6 @@ struct WriteErrorComp {
         return errorA.getIndex() < errorB.getIndex();
     }
 };
-
-/**
- * Returns a new write concern that has the copy of every field from the original
- * document but with a w set to 1. This is intended for upgrading { w: 0 } write
- * concern to { w: 1 }.
- */
-BSONObj upgradeWriteConcern(const BSONObj& origWriteConcern) {
-    BSONObjIterator iter(origWriteConcern);
-    BSONObjBuilder newWriteConcern;
-
-    while (iter.more()) {
-        BSONElement elem(iter.next());
-
-        if (strncmp(elem.fieldName(), "w", 2) == 0) {
-            newWriteConcern.append("w", 1);
-        } else {
-            newWriteConcern.append(elem);
-        }
-    }
-
-    return newWriteConcern.obj();
-}
 
 /**
  * Helper to determine whether a number of targeted writes require a new targeted batch.
@@ -214,13 +214,18 @@ int getEncryptionInformationSize(const BatchedCommandRequest& req) {
 
 }  // namespace
 
-StatusWith<bool> targetWriteOps(OperationContext* opCtx,
-                                std::vector<WriteOp>& writeOps,
-                                bool ordered,
-                                bool recordTargetErrors,
-                                GetTargeterFn getTargeterFn,
-                                GetWriteSizeFn getWriteSizeFn,
-                                TargetedBatchMap& batchMap) {
+// 'baseCommandSizeBytes' specifies the base size of a batch command request prior to adding any
+// individual operations to it. This function will ensure that 'baseCommandSizeBytes' plus the
+// result of calling 'getWriteSizeFn' on each write added to a batch will not result in a command
+// over BSONObjMaxUserSize.
+StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
+                                     std::vector<WriteOp>& writeOps,
+                                     bool ordered,
+                                     bool recordTargetErrors,
+                                     GetTargeterFn getTargeterFn,
+                                     GetWriteSizeFn getWriteSizeFn,
+                                     int baseCommandSizeBytes,
+                                     TargetedBatchMap& batchMap) {
     //
     // Targeting of unordered batches is fairly simple - each remaining write op is targeted,
     // and each of those targeted writes are grouped into a batch for a particular shard
@@ -254,7 +259,7 @@ StatusWith<bool> targetWriteOps(OperationContext* opCtx,
     //  [{ skey : y }, { skey : z }]
     //
 
-    bool isWriteWithoutShardKeyOrId = false;
+    WriteType writeType = WriteType::Ordinary;
 
     std::map<NamespaceString, std::set<const ShardEndpoint*, EndpointComp>> nsEndpointMap;
     std::map<NamespaceString, std::set<ShardId>> nsShardIdMap;
@@ -264,9 +269,10 @@ StatusWith<bool> targetWriteOps(OperationContext* opCtx,
         if (writeOp.getWriteState() != WriteOpState_Ready)
             continue;
 
-        // If we got a write without shard key in the previous iteration, it should be sent in its
-        // own batch.
-        if (isWriteWithoutShardKeyOrId) {
+        // If we got a write without shard key or a time-series retryable update in the previous
+        // iteration, it should be sent in its own batch.
+        if (writeType == WriteType::WithoutShardKeyOrId ||
+            writeType == WriteType::TimeseriesRetryableUpdate) {
             break;
         }
 
@@ -316,7 +322,7 @@ StatusWith<bool> targetWriteOps(OperationContext* opCtx,
                 writeOp.setOpError(targetError);
 
                 if (ordered)
-                    return isWriteWithoutShardKeyOrId;
+                    return writeType;
 
                 continue;
             } else {
@@ -353,6 +359,12 @@ StatusWith<bool> targetWriteOps(OperationContext* opCtx,
             isNewBatchRequiredUnordered(targeter.getNS(), writes, nsShardIdMap, nsEndpointMap)) {
             writeOp.cancelWrites(nullptr);
             break;
+        }
+
+        if (targeter.isShardedTimeSeriesBucketsNamespace() &&
+            writeOp.getWriteItem().getOpType() == BatchedCommandRequest::BatchType_Update &&
+            opCtx->isRetryableWrite() && !opCtx->inMultiDocumentTransaction() && batchMap.empty()) {
+            writeType = WriteType::TimeseriesRetryableUpdate;
         }
 
         // Check if an updateOne or deleteOne necessitates using the two phase write in the case
@@ -400,7 +412,7 @@ StatusWith<bool> targetWriteOps(OperationContext* opCtx,
                         deleteOneNonTargetedShardedCount.increment(1);
                     }
 
-                    isWriteWithoutShardKeyOrId = true;
+                    writeType = WriteType::WithoutShardKeyOrId;
                 }
             };
         }
@@ -410,7 +422,7 @@ StatusWith<bool> targetWriteOps(OperationContext* opCtx,
             const auto& shardId = write->endpoint.shardName;
             TargetedBatchMap::iterator batchIt = batchMap.find(shardId);
             if (batchIt == batchMap.end()) {
-                auto newBatch = std::make_unique<TargetedWriteBatch>(shardId);
+                auto newBatch = std::make_unique<TargetedWriteBatch>(shardId, baseCommandSizeBytes);
                 batchIt = batchMap.emplace(shardId, std::move(newBatch)).first;
             }
 
@@ -429,7 +441,24 @@ StatusWith<bool> targetWriteOps(OperationContext* opCtx,
             break;
     }
 
-    return isWriteWithoutShardKeyOrId;
+    return writeType;
+}
+
+BSONObj upgradeWriteConcern(const BSONObj& origWriteConcern) {
+    BSONObjIterator iter(origWriteConcern);
+    BSONObjBuilder newWriteConcern;
+
+    while (iter.more()) {
+        BSONElement elem(iter.next());
+
+        if (strncmp(elem.fieldName(), "w", 2) == 0) {
+            newWriteConcern.append("w", 1);
+        } else {
+            newWriteConcern.append(elem);
+        }
+    }
+
+    return newWriteConcern.obj();
 }
 
 BatchWriteOp::BatchWriteOp(OperationContext* opCtx, const BatchedCommandRequest& clientRequest)
@@ -445,9 +474,9 @@ BatchWriteOp::BatchWriteOp(OperationContext* opCtx, const BatchedCommandRequest&
     }
 }
 
-StatusWith<bool> BatchWriteOp::targetBatch(const NSTargeter& targeter,
-                                           bool recordTargetErrors,
-                                           TargetedBatchMap* targetedBatches) {
+StatusWith<WriteType> BatchWriteOp::targetBatch(const NSTargeter& targeter,
+                                                bool recordTargetErrors,
+                                                TargetedBatchMap* targetedBatches) {
     const bool ordered = _clientRequest.getWriteCommandRequestBase().getOrdered();
 
     auto targetStatus = targetWriteOps(
@@ -463,12 +492,12 @@ StatusWith<bool> BatchWriteOp::targetBatch(const NSTargeter& targeter,
             // corresponding to the statements that got routed to each individual shard, so they
             // need to be accounted in the potential request size so it does not exceed the max BSON
             // size.
-            //
-            // The constant 4 is chosen as the size of the BSON representation of the stmtId.
-            const int writeSizeBytes = writeOp.getWriteItem().getWriteSizeBytes() +
+            const int writeSizeBytes = writeOp.getWriteItem().getSizeForBatchWriteBytes() +
                 getEncryptionInformationSize(_clientRequest) +
                 write_ops::kWriteCommandBSONArrayPerElementOverheadBytes +
-                (_batchTxnNum ? write_ops::kWriteCommandBSONArrayPerElementOverheadBytes + 4 : 0);
+                (_batchTxnNum ? write_ops::kStmtIdSize +
+                         write_ops::kWriteCommandBSONArrayPerElementOverheadBytes
+                              : 0);
 
             // For unordered writes, the router must return an entry for each failed write. This
             // constant is a pessimistic attempt to ensure that if a request to a shard hits
@@ -482,6 +511,8 @@ StatusWith<bool> BatchWriteOp::targetBatch(const NSTargeter& targeter,
                 ordered ? 0 : write_ops::kWriteCommandBSONArrayPerElementOverheadBytes + 272;
             return std::max(writeSizeBytes, errorResponsePotentialSizeBytes);
         },
+        // TODO SERVER-77653: Account for the size of top-level command fields here.
+        0 /* baseCommandSizeBytes */,
         *targetedBatches);
 
     if (!targetStatus.isOK()) {

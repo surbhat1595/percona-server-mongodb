@@ -27,24 +27,48 @@
  *    it in the license file.
  */
 
+#include <absl/container/flat_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
+#include <ostream>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/sbe/abt/abt_lower.h"
 #include "mongo/db/exec/sbe/abt/named_slots_mock.h"
+#include "mongo/db/exec/sbe/util/debug_print.h"
+#include "mongo/db/query/optimizer/algebra/polyvalue.h"
+#include "mongo/db/query/optimizer/comparison_op.h"
+#include "mongo/db/query/optimizer/containers.h"
 #include "mongo/db/query/optimizer/defs.h"
 #include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/metadata.h"
-#include "mongo/db/query/optimizer/node.h"
+#include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
 #include "mongo/db/query/optimizer/node_defs.h"
 #include "mongo/db/query/optimizer/props.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
 #include "mongo/db/query/optimizer/rewrites/path_lower.h"
 #include "mongo/db/query/optimizer/syntax/expr.h"
+#include "mongo/db/query/optimizer/syntax/path.h"
+#include "mongo/db/query/optimizer/utils/strong_alias.h"
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
+#include "mongo/db/query/optimizer/utils/utils.h"
+#include "mongo/platform/decimal128.h"
+#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/framework.h"
 #include "mongo/unittest/golden_test.h"
-#include "mongo/unittest/unittest.h"
-#include <vector>
+#include "mongo/unittest/golden_test_base.h"
+#include "mongo/util/str.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo::optimizer {
 namespace {
@@ -143,7 +167,7 @@ protected:
         DistributionAndPaths dnp(DistributionType::Centralized);
         bool exists = true;
         CEType ce{false};
-        return ScanDefinition(opts, indexDefs, trie, dnp, exists, ce);
+        return ScanDefinition(opts, indexDefs, trie, dnp, exists, ce, ShardingMetadata{});
     }
 
     // Does not add the node to the Node map, must be called inside '_node()'.
@@ -394,8 +418,7 @@ TEST_F(ABTPlanGeneration, LowerExchangeNode) {
 
         runNodeVariation(
             ctx,
-            str::stream() << "Lower exchange node of type "
-                          << DistributionTypeEnum::toString[static_cast<int>(exchangeType)],
+            str::stream() << "Lower exchange node of type " << toStringData(exchangeType),
             _node(make<ExchangeNode>(distReq, std::move(evalNode2)), exchangeNodeProp));
     }
 }
@@ -431,8 +454,7 @@ TEST_F(ABTPlanGeneration, LowerGroupByNode) {
     for (const auto& groupType : groupTypes) {
         runNodeVariation(
             ctx,
-            str::stream() << "GroupByNode one output with type "
-                          << GroupNodeTypeEnum::toString[static_cast<int>(groupType)],
+            str::stream() << "GroupByNode one output with type " << toStringData(groupType),
             _node(make<GroupByNode>(
                 ProjectionNameVector{"key1", "key2"},
                 ProjectionNameVector{"outFunc1"},
@@ -442,8 +464,7 @@ TEST_F(ABTPlanGeneration, LowerGroupByNode) {
 
         runNodeVariation(
             ctx,
-            str::stream() << "GroupByNode multiple outputs with type "
-                          << GroupNodeTypeEnum::toString[static_cast<int>(groupType)],
+            str::stream() << "GroupByNode multiple outputs with type " << toStringData(groupType),
             _node(make<GroupByNode>(
                 ProjectionNameVector{"key1", "key2"},
                 ProjectionNameVector{"outFunc1", "outFunc2"},
@@ -601,7 +622,7 @@ TEST_F(ABTPlanGeneration, LowerMergeJoinNode) {
             "scan1");
         runNodeVariation(ctx,
                          str::stream() << "Lower merge join with one projection (collation="
-                                       << CollationOpEnum::toString[static_cast<int>(op)] << ")",
+                                       << toStringData(op) << ")",
                          _node(make<MergeJoinNode>(ProjectionNameVector{ProjectionName{"proj0"}},
                                                    ProjectionNameVector{ProjectionName{"proj1"}},
                                                    std::vector<CollationOp>{op},
@@ -626,8 +647,7 @@ TEST_F(ABTPlanGeneration, LowerMergeJoinNode) {
             runNodeVariation(
                 ctx,
                 str::stream() << "Lower merge join with two projections (collation="
-                              << CollationOpEnum::toString[static_cast<int>(op1)] << ", "
-                              << CollationOpEnum::toString[static_cast<int>(op2)] << ")",
+                              << toStringData(op1) << ", " << toStringData(op2) << ")",
                 _node(make<MergeJoinNode>(
                     ProjectionNameVector{ProjectionName{"proj0"}, ProjectionName{"proj2"}},
                     ProjectionNameVector{ProjectionName{"proj1"}, ProjectionName{"proj3"}},
@@ -651,7 +671,7 @@ TEST_F(ABTPlanGeneration, LowerMergeJoinNode) {
             {ProjectionName{"proj3"}});
         runNodeVariation(ctx,
                          str::stream() << "Lower merge join with required projection (collation="
-                                       << CollationOpEnum::toString[static_cast<int>(op1)] << ")",
+                                       << toStringData(op1) << ")",
                          _node(make<FilterNode>(makeEquals("proj3", Constant::str("NYC")),
                                                 _node(make<MergeJoinNode>(
                                                     ProjectionNameVector{ProjectionName{"proj0"}},
@@ -692,8 +712,8 @@ TEST_F(ABTPlanGeneration, LowerNestedLoopJoinNode) {
 
         runNodeVariation(
             ctx,
-            str::stream() << "Nested loop join with equality predicate ("
-                          << JoinTypeEnum::toString[static_cast<int>(joinType)] << " join)",
+            str::stream() << "Nested loop join with equality predicate (" << toStringData(joinType)
+                          << " join)",
             _node(make<FilterNode>(makeEquals("proj2", Constant::int32(10024)), std::move(nlj))));
     }
 }
@@ -803,15 +823,13 @@ TEST_F(ABTPlanGeneration, LowerSortedMergeNode) {
         runVariations(properties::CollationRequirement(
                           ProjectionCollationSpec({{ProjectionName{"proj0"}, op}})),
                       op,
-                      str::stream()
-                          << "sorted on `a` " << CollationOpEnum::toString[static_cast<int>(op)]);
+                      str::stream() << "sorted on `a` " << toStringData(op));
         for (auto& op2 : ops) {
             runVariations(properties::CollationRequirement(ProjectionCollationSpec(
                               {{ProjectionName{"proj0"}, op}, {ProjectionName{"proj1"}, op2}})),
                           op,
-                          str::stream()
-                              << "sorted on `a` " << CollationOpEnum::toString[static_cast<int>(op)]
-                              << " and `b` " << CollationOpEnum::toString[static_cast<int>(op2)]);
+                          str::stream() << "sorted on `a` " << toStringData(op) << " and `b` "
+                                        << toStringData(op2));
         }
     }
 }
@@ -835,11 +853,8 @@ TEST_F(ABTPlanGeneration, LowerSpoolNodes) {
                 _node(make<SpoolConsumerNode>(spoolConsumeType, 1, ProjectionNameVector{"proj0"}));
             runNodeVariation(
                 ctx,
-                str::stream() << "Spool in union with "
-                              << SpoolProducerTypeEnum::toString[static_cast<int>(spoolProdType)]
-                              << " producer and "
-                              << SpoolConsumerTypeEnum::toString[static_cast<int>(spoolConsumeType)]
-                              << " consumer",
+                str::stream() << "Spool in union with " << toStringData(spoolProdType)
+                              << " producer and " << toStringData(spoolConsumeType) << " consumer",
                 _node(make<UnionNode>(ProjectionNameVector{"proj0"},
                                       makeSeq(std::move(leftTree), std::move(rightTree)))));
         }

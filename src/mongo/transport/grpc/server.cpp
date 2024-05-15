@@ -73,7 +73,7 @@ std::shared_ptr<::grpc::ServerCredentials> _makeServerCredentials(const Server::
 
     ::grpc::SslServerCredentialsOptions sslOps{clientCertPolicy};
     ::grpc::SslServerCredentialsOptions::PemKeyCertPair certPair;
-    sslOps.pem_key_cert_pairs = {parsePEMKeyFile(options.tlsPEMKeyFile)};
+    sslOps.pem_key_cert_pairs = {util::parsePEMKeyFile(options.tlsPEMKeyFile)};
     if (options.tlsCAFile) {
         sslOps.pem_root_certs = uassertStatusOK(ssl_util::readPEMFile(*options.tlsCAFile));
     }
@@ -90,13 +90,8 @@ void Server::start() {
     auto credentials = _makeServerCredentials(_options);
 
     for (auto& address : _options.addresses) {
-        std::string fullAddress;
-        if (!isUnixDomainSocket(address)) {
-            fullAddress = fmt::format("{}:{}", address, _options.port);
-        } else {
-            fullAddress = fmt::format("unix://{}", address);
-        }
-        builder.AddListeningPort(fullAddress, credentials);
+        builder.AddListeningPort(
+            util::formatHostAndPortForGRPC(HostAndPort(address, _options.port)), credentials);
     }
     for (auto& service : _services) {
         builder.RegisterService(service.get());

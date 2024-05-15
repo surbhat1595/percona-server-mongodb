@@ -5,13 +5,18 @@
  * @tags: [
  *   does_not_support_stepdowns,
  *   requires_replication,
- *   requires_sharding
+ *   requires_sharding,
+ *   # Tests running with experimental CQF behavior require test commands to be enabled.
+ *   cqf_experimental_incompatible,
  *  ]
  */
-(function() {
-'use strict';
-
-load('jstests/libs/cluster_server_parameter_utils.js');
+import {
+    setupNode,
+    setupReplicaSet,
+    setupSharded,
+    testDisabledClusterParameters
+} from "jstests/libs/cluster_server_parameter_utils.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 // Verifies that test-only parameters are disabled and excluded when enableTestCommands is false.
 TestData.enableTestCommands = false;
@@ -54,4 +59,3 @@ setupSharded(st);
 // Check that the same behavior for disabled cluster server parameters holds on sharded clusters.
 testDisabledClusterParameters(st);
 st.stop();
-}());

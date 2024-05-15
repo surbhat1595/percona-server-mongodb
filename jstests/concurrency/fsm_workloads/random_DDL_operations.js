@@ -1,5 +1,3 @@
-'use strict';
-
 /**
  * Concurrently performs DDL commands and verifies guarantees are not broken.
  *
@@ -11,7 +9,7 @@
  */
 
 load("jstests/concurrency/fsm_workload_helpers/state_transition_utils.js");
-load('jstests/libs/feature_flag_util.js');
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const dbPrefix = jsTestName() + '_DB_';
 const dbCount = 2;
@@ -31,7 +29,7 @@ function getRandomShard(connCache) {
     return shards[Random.randInt(shards.length)];
 }
 
-var $config = (function() {
+export const $config = (function() {
     let states = {
         create: function(db, collName, connCache) {
             db = getRandomDb(db);
@@ -73,10 +71,7 @@ var $config = (function() {
                 db.adminCommand({movePrimary: db.getName(), to: shardId}), [
                     ErrorCodes.ConflictingOperationInProgress,
                     // The cloning phase has failed (e.g. as a result of a stepdown). When a failure
-                    // occurs at this phase, the movePrimary operation does not recover. Either of
-                    // the following error codes could be seen depending on if the failover was on
-                    // the donor or recipient node.
-                    ErrorCodes.MovePrimaryAborted,
+                    // occurs at this phase, the movePrimary operation does not recover.
                     7120202
                 ]);
         },

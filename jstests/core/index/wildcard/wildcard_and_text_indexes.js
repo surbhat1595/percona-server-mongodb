@@ -6,13 +6,15 @@
  *   does_not_support_stepdowns,
  * ]
  */
-(function() {
-"use strict";
-
 load("jstests/aggregation/extras/utils.js");  // For arrayEq.
-load("jstests/libs/analyze_plan.js");         // For getPlanStages and planHasStage.
-load("jstests/libs/feature_flag_util.js");    // For "FeatureFlagUtil"
-load("jstests/libs/fixture_helpers.js");      // For isMongos.
+import {
+    getWinningPlan,
+    getPlanStages,
+    getRejectedPlans,
+    planHasStage
+} from "jstests/libs/analyze_plan.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+load("jstests/libs/fixture_helpers.js");  // For isMongos.
 
 const assertArrayEq = (l, r) => assert(arrayEq(l, r), tojson(l) + " != " + tojson(r));
 
@@ -78,9 +80,6 @@ if (allowCompoundWildcardIndexes) {
 
 assertWildcardQuery({_fts: {$gt: 0, $lt: 4}}, {'_fts': 1}, false /* isCompound */);
 if (allowCompoundWildcardIndexes) {
-    // The expanded CWI key pattern shouldn't have '_fts'. The query is a $and query and 'pre' field
-    // is the prefix of the CWI, so it's basically a query on the non-wildcard prefix field of a
-    // CWI. The only eligible expanded CWI is with key pattern {"pre": 1, "$_path": 1}.
     assertWildcardQuery({_fts: 10, pre: 1}, {'pre': 1, '$_path': 1}, true /* isCompound */);
 }
 
@@ -129,4 +128,3 @@ for (let textIndex of [{'$**': 'text'}, {a: 1, '$**': 'text'}]) {
     // Drop the index so that a different text index can be created.
     assert.commandWorked(coll.dropIndex("textIndex"));
 }
-})();

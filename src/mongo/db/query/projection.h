@@ -29,8 +29,16 @@
 
 #pragma once
 
+#include <bitset>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/base/string_data.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
+#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/query/projection_ast.h"
+#include "mongo/util/assert_util_core.h"
 #include "mongo/util/str.h"
 
 namespace mongo {
@@ -59,9 +67,10 @@ struct ProjectionDependencies {
 };
 
 /**
- * Used to represent a projection for dependency analysis and query planning.
+ * Used to represent a projection for dependency analysis and query planning. 'kAddition' is for
+ * $addFields, which is implemented as a variant of projection.
  */
-enum class ProjectType { kInclusion, kExclusion };
+enum class ProjectType { kInclusion, kExclusion, kAddition };
 class Projection {
 public:
     Projection(ProjectionPathASTNode root, ProjectType type);
@@ -98,7 +107,6 @@ public:
      * not needed. Includes _id explicitly if it is required - implicitily or explicitly.
      */
     const OrderedPathSet& getRequiredFields() const {
-        invariant(_type == ProjectType::kInclusion);
         return *_deps.paths;
     }
 
@@ -128,11 +136,12 @@ public:
     /**
      * A projection is considered "simple" if it operates only on top-level fields,
      * has no positional projection or expressions, and doesn't require metadata.
-     * Both exclusion and inclusion projections can be simple.
+     * Both exclusion and inclusion projections can be simple but not addition projections.
      */
     bool isSimple() const {
         return !_deps.hasDottedPath && !_deps.requiresMatchDetails &&
-            !_deps.metadataRequested.any() && !_deps.hasExpressions;
+            !_deps.metadataRequested.any() && !_deps.hasExpressions &&
+            _type != ProjectType::kAddition;
     }
 
     /**

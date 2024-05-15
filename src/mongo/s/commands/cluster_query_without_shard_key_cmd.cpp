@@ -26,30 +26,89 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+#include <cstdint>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/client/read_preference.h"
+#include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/basic_types_gen.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/explain_gen.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
-#include "mongo/db/matcher/extensions_callback_noop.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/ops/update_request.h"
+#include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/db/ops/write_ops_parsers.h"
+#include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_project.h"
 #include "mongo/db/pipeline/document_source_sort.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/cursor_response.h"
+#include "mongo/db/query/explain_options.h"
+#include "mongo/db/query/sort_pattern.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_id.h"
+#include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/update/update_util.h"
+#include "mongo/executor/remote_command_response.h"
+#include "mongo/executor/task_executor_pool.h"
+#include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/rpc/op_msg.h"
+#include "mongo/rpc/reply_builder_interface.h"
+#include "mongo/s/async_requests_sender.h"
+#include "mongo/s/catalog_cache.h"
+#include "mongo/s/chunk_manager.h"
+#include "mongo/s/client/shard.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/commands/cluster_explain.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/is_mongos.h"
 #include "mongo/s/multi_statement_transaction_requests_sender.h"
+#include "mongo/s/query/async_results_merger_params_gen.h"
+#include "mongo/s/query/cluster_query_result.h"
+#include "mongo/s/query/router_exec_stage.h"
 #include "mongo/s/query/router_stage_merge.h"
 #include "mongo/s/query/router_stage_remove_metadata_fields.h"
 #include "mongo/s/request_types/cluster_commands_without_shard_key_gen.h"
 #include "mongo/s/shard_key_pattern_query_util.h"
-#include "mongo/s/write_ops/batch_write_op.h"
+#include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/s/write_ops/write_without_shard_key_util.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/str.h"
+#include "mongo/util/timer.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -209,6 +268,7 @@ ParsedCommandInfo parseWriteCommand(OperationContext* opCtx, const BSONObj& writ
 
         if ((parsedInfo.upsert = updateRequest.getUpdates().front().getUpsert())) {
             parsedInfo.updateRequest = updateRequest.getUpdates().front();
+            parsedInfo.updateRequest->setNamespaceString(updateRequest.getNamespace());
         }
 
         if (auto parsedCollation = updateRequest.getUpdates().front().getCollation()) {
@@ -272,7 +332,7 @@ public:
         Response typedRun(OperationContext* opCtx) {
             uassert(ErrorCodes::IllegalOperation,
                     "_clusterQueryWithoutShardKey can only be run on Mongos",
-                    isMongos());
+                    serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer));
 
             LOGV2(6962300,
                   "Running read phase for a write without a shard key.",
@@ -289,7 +349,7 @@ public:
 
             // Parse into OpMsgRequest to append the $db field, which is required for command
             // parsing.
-            const auto opMsgRequest = OpMsgRequest::fromDBAndBody(ns().db(), writeCmdObj);
+            const auto opMsgRequest = OpMsgRequest::fromDBAndBody(ns().dbName(), writeCmdObj);
             auto parsedInfoFromRequest = parseWriteCommand(opCtx, opMsgRequest.body);
 
             auto allShardsContainingChunksForNs =
@@ -399,9 +459,19 @@ public:
             // If there are no targetable documents and {upsert: true}, create the document to
             // upsert.
             if (!res.getTargetDoc() && parsedInfoFromRequest.upsert) {
-                res.setTargetDoc(write_without_shard_key::generateUpsertDocument(
-                    opCtx, parsedInfoFromRequest.updateRequest.get()));
+                auto [upsertDoc, userUpsertDoc] = write_without_shard_key::generateUpsertDocument(
+                    opCtx,
+                    parsedInfoFromRequest.updateRequest.get(),
+                    timeseriesFields
+                        ? boost::make_optional(timeseriesFields->getTimeseriesOptions())
+                        : boost::none,
+                    cri.cm.getDefaultCollator());
+                res.setTargetDoc(upsertDoc);
                 res.setUpsertRequired(true);
+
+                if (timeseriesFields) {
+                    res.setUserUpsertDocForTimeseries(userUpsertDoc);
+                }
             }
 
             return res;
@@ -414,7 +484,7 @@ public:
             const auto writeCmdObj = [&] {
                 const auto explainCmdObj = request().getWriteCmd();
                 const auto opMsgRequestExplainCmd =
-                    OpMsgRequest::fromDBAndBody(ns().db(), explainCmdObj);
+                    OpMsgRequest::fromDBAndBody(ns().dbName(), explainCmdObj);
                 auto explainRequest = ExplainCommandRequest::parse(
                     IDLParserContext("_clusterQueryWithoutShardKeyExplain"),
                     opMsgRequestExplainCmd.body);
@@ -428,7 +498,8 @@ public:
 
             // Parse into OpMsgRequest to append the $db field, which is required for command
             // parsing.
-            const auto opMsgRequestWriteCmd = OpMsgRequest::fromDBAndBody(ns().db(), writeCmdObj);
+            const auto opMsgRequestWriteCmd =
+                OpMsgRequest::fromDBAndBody(ns().dbName(), writeCmdObj);
             auto parsedInfoFromRequest = parseWriteCommand(opCtx, opMsgRequestWriteCmd.body);
 
             auto allShardsContainingChunksForNs =
@@ -488,8 +559,9 @@ public:
             uassert(ErrorCodes::Unauthorized,
                     "Unauthorized",
                     AuthorizationSession::get(opCtx->getClient())
-                        ->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
-                                                           ActionType::internal));
+                        ->isAuthorizedForActionsOnResource(
+                            ResourcePattern::forClusterResource(request().getDbName().tenantId()),
+                            ActionType::internal));
         }
     };
 

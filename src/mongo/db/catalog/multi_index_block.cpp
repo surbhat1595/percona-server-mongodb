@@ -29,35 +29,79 @@
 
 #include "mongo/db/catalog/multi_index_block.h"
 
+#include <algorithm>
+#include <boost/container/flat_set.hpp>
+#include <boost/container/small_vector.hpp>
+#include <boost/container/vector.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <mutex>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 #include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonelement.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_yield_restore.h"
 #include "mongo/db/catalog/multi_index_block_gen.h"
 #include "mongo/db/client.h"
+#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/locker.h"
+#include "mongo/db/curop.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/multikey_paths.h"
+#include "mongo/db/index/skipped_record_tracker.h"
 #include "mongo/db/multi_key_path_tracker.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/get_executor.h"
-#include "mongo/db/repl/repl_set_config.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_conflict_info.h"
-#include "mongo/db/storage/durable_catalog.h"
-#include "mongo/db/storage/storage_options.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/ident.h"
+#include "mongo/db/storage/key_format.h"
+#include "mongo/db/storage/key_string.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/storage/temporary_record_store.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/log_severity.h"
+#include "mongo/logv2/redaction.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/with_lock.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/log_and_backoff.h"
 #include "mongo/util/progress_meter.h"
-#include "mongo/util/quick_exit.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/util/str.h"
+#include "mongo/util/timer.h"
 #include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
@@ -198,7 +242,7 @@ void MultiIndexBlock::abortIndexBuild(OperationContext* opCtx,
             wunit.commit();
             _buildIsCleanedUp = true;
             return;
-        } catch (const WriteConflictException&) {
+        } catch (const StorageUnavailableException&) {
             continue;
         } catch (const DBException& e) {
             if (e.toStatus() == ErrorCodes::ExceededMemoryLimit)
@@ -377,7 +421,7 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
                 return status;
 
             auto indexCatalogEntry =
-                index.block->getEntry(opCtx, collection.getWritableCollection(opCtx));
+                index.block->getWritableEntry(opCtx, collection.getWritableCollection(opCtx));
             index.real = indexCatalogEntry->accessMethod();
             status = index.real->initializeAsEmpty(opCtx);
             if (!status.isOK())
@@ -386,7 +430,7 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
             index.bulk = index.real->initiateBulk(indexCatalogEntry,
                                                   eachIndexBuildMaxMemoryUsageBytes,
                                                   stateInfo,
-                                                  collection->ns().db());
+                                                  collection->ns().dbName());
 
             const IndexDescriptor* descriptor = indexCatalogEntry->descriptor();
 
@@ -434,8 +478,7 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
 
         wunit.commit();
         return indexInfoObjs;
-    } catch (const WriteConflictException&) {
-        // Avoid converting WCE to Status.
+    } catch (const StorageUnavailableException&) {
         throw;
     } catch (const ExceptionForCat<ErrorCategory::TenantMigrationConflictError>&) {
         // Avoid converting TenantMigrationConflict errors to Status.
@@ -459,7 +502,7 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(
     const CollectionPtr& collection,
     const boost::optional<RecordId>& resumeAfterRecordId) {
     invariant(!_buildIsCleanedUp);
-    invariant(opCtx->lockState()->isNoop() || !opCtx->lockState()->inAWriteUnitOfWork());
+    invariant(!opCtx->lockState()->inAWriteUnitOfWork());
 
     // UUIDs are not guaranteed during startup because the check happens after indexes are rebuilt.
     if (_collectionUUID) {
@@ -558,7 +601,7 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(
                 index.real->initiateBulk(indexCatalogEntry,
                                          getEachIndexBuildMaxMemoryUsageBytes(_indexes.size()),
                                          /*stateInfo=*/boost::none,
-                                         collection->ns().db());
+                                         collection->ns().dbName());
         }
     };
 
@@ -789,12 +832,22 @@ Status MultiIndexBlock::_insert(
         }
     }
 
+    // Cache the collection and index catalog entry pointers during the collection scan phase. This
+    // is necessary for index build performance to avoid looking up the index catalog entry for each
+    // insertion into the index table.
+    if (_collForScan != collection.get()) {
+        _collForScan = collection.get();
+
+        // Reset cached index catalog entry pointers.
+        for (size_t i = 0; i < _indexes.size(); i++) {
+            _indexes[i].entryForScan = _indexes[i].block->getEntry(opCtx, collection);
+        }
+    }
+
     for (size_t i = 0; i < _indexes.size(); i++) {
         if (_indexes[i].filterExpression && !_indexes[i].filterExpression->matchesBSON(doc)) {
             continue;
         }
-
-        auto indexCatalogEntry = _indexes[i].block->getEntry(opCtx, collection);
 
         Status idxStatus = Status::OK();
 
@@ -803,7 +856,7 @@ Status MultiIndexBlock::_insert(
         try {
             idxStatus = _indexes[i].bulk->insert(opCtx,
                                                  collection,
-                                                 indexCatalogEntry,
+                                                 _indexes[i].entryForScan,
                                                  doc,
                                                  loc,
                                                  _indexes[i].options,
@@ -833,7 +886,7 @@ Status MultiIndexBlock::dumpInsertsFromBulk(
     const IndexAccessMethod::RecordIdHandlerFn& onDuplicateRecord) {
     opCtx->checkForInterrupt();
     invariant(!_buildIsCleanedUp);
-    invariant(opCtx->lockState()->isNoop() || !opCtx->lockState()->inAWriteUnitOfWork());
+    invariant(!opCtx->lockState()->inAWriteUnitOfWork());
 
     // Initial sync adds documents to the sorter using
     // insertSingleDocumentForInitialSyncOrRecovery() instead of delegating to
@@ -874,7 +927,7 @@ Status MultiIndexBlock::dumpInsertsFromBulk(
                 entry,
                 dupsAllowed,
                 kYieldIterations,
-                [=, this](const KeyString::Value& duplicateKey) {
+                [=, this](const key_string::Value& duplicateKey) {
                     // Do not record duplicates when explicitly ignored. This may be the case on
                     // secondaries.
                     return writeConflictRetry(
@@ -1047,7 +1100,7 @@ Status MultiIndexBlock::commit(OperationContext* opCtx,
         // catalog entry. The interceptor will write multikey metadata keys into the index during
         // IndexBuildInterceptor::sideWrite, so we only need to pass the cached MultikeyPaths into
         // IndexCatalogEntry::setMultikey here.
-        auto indexCatalogEntry = _indexes[i].block->getEntry(opCtx, collection);
+        auto indexCatalogEntry = _indexes[i].block->getWritableEntry(opCtx, collection);
         auto interceptor = indexCatalogEntry->indexBuildInterceptor();
         if (interceptor) {
             auto multikeyPaths = interceptor->getMultikeyPaths();
@@ -1114,7 +1167,8 @@ void MultiIndexBlock::abortWithoutCleanup(OperationContext* opCtx,
                                           const CollectionPtr& collection,
                                           bool isResumable) {
     invariant(!_buildIsCleanedUp);
-    // TODO (SERVER-71610): Fix to be interruptible or document exception.
+    // Aborting without cleanup is done during shutdown. At this point the operation context is
+    // killed, but acquiring locks must succeed.
     UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
     // Lock if it's not already locked, to ensure storage engine cannot be destructed out from
     // underneath us.

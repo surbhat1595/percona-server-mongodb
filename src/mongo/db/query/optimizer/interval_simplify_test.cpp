@@ -27,23 +27,54 @@
  *    it in the license file.
  */
 
+#include <bitset>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "mongo/db/concurrency/locker_noop_service_context_test_fixture.h"
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/base/string_data.h"
+#include "mongo/db/query/cost_model/cost_model_gen.h"
+#include "mongo/db/query/optimizer/algebra/operator.h"
+#include "mongo/db/query/optimizer/algebra/polyvalue.h"
+#include "mongo/db/query/optimizer/bool_expression.h"
+#include "mongo/db/query/optimizer/containers.h"
 #include "mongo/db/query/optimizer/defs.h"
 #include "mongo/db/query/optimizer/explain.h"
+#include "mongo/db/query/optimizer/index_bounds.h"
+#include "mongo/db/query/optimizer/metadata.h"
 #include "mongo/db/query/optimizer/metadata_factory.h"
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
+#include "mongo/db/query/optimizer/syntax/expr.h"
+#include "mongo/db/query/optimizer/syntax/syntax.h"
 #include "mongo/db/query/optimizer/utils/bool_expression_printer.h"
 #include "mongo/db/query/optimizer/utils/ce_math.h"
 #include "mongo/db/query/optimizer/utils/interval_utils.h"
+#include "mongo/db/query/optimizer/utils/strong_alias.h"
 #include "mongo/db/query/optimizer/utils/unit_test_abt_literals.h"
 #include "mongo/db/query/optimizer/utils/unit_test_pipeline_utils.h"
+#include "mongo/db/query/optimizer/utils/unit_test_utils.h"
+#include "mongo/db/query/optimizer/utils/utils.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/platform/random.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/unittest/inline_auto_update.h"
+#include "mongo/util/assert_util_core.h"
 #include "mongo/util/processinfo.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo::optimizer {
 namespace {
@@ -71,7 +102,7 @@ ABT optimizedQueryPlan(const std::string& query,
     return optimized;
 }
 
-class IntervalIntersection : public LockerNoopServiceContextTest {};
+class IntervalIntersection : public ServiceContextTest {};
 
 TEST_F(IntervalIntersection, SingleFieldIntersection) {
     opt::unordered_map<std::string, IndexDefinition> testIndex = {
@@ -1083,6 +1114,90 @@ TEST(IntervalSimplification, IsIntervalEmpty) {
     ASSERT_FALSE(isEmpty({{false, Constant::minKey()}, {true, Constant::maxKey()}}));
     ASSERT_FALSE(isEmpty({{true, Constant::minKey()}, {false, Constant::maxKey()}}));
     ASSERT_FALSE(isEmpty({{true, Constant::minKey()}, {true, Constant::maxKey()}}));
+}
+
+TEST(IntervalExcludeNull, FullyOpen) {
+    auto node = _interval(_minusInf(), _plusInf());
+    ASSERT_TRUE(node.cast<IntervalReqExpr::Atom>()->getExpr().isFullyOpen());
+    auto result = splitNull(node, ConstEval::constFold);
+    ASSERT_TRUE(result);
+    ASSERT_TRUE(checkMaybeHasNull(node, ConstEval::constFold));
+    ASSERT_FALSE(checkMaybeHasNull(result->first, ConstEval::constFold));
+    ASSERT_TRUE(checkMaybeHasNull(result->second, ConstEval::constFold));
+    ASSERT_INTERVAL_AUTO("{>Const [null]}\n", result->first);
+    ASSERT_INTERVAL_AUTO("{<=Const [null]}\n", result->second);
+}
+
+TEST(IntervalExcludeNull, RightBounded) {
+    auto node = _interval(_minusInf(), _incl(_cnull()));
+    auto result = splitNull(node, ConstEval::constFold);
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(checkMaybeHasNull(node, ConstEval::constFold));
+}
+
+TEST(IntervalExcludeNull, LeftBounded) {
+    auto node = _interval(_incl(_cnull()), _plusInf());
+    auto result = splitNull(node, ConstEval::constFold);
+    ASSERT_TRUE(result);
+    ASSERT_TRUE(checkMaybeHasNull(node, ConstEval::constFold));
+    ASSERT_FALSE(checkMaybeHasNull(result->first, ConstEval::constFold));
+    ASSERT_TRUE(checkMaybeHasNull(result->second, ConstEval::constFold));
+    ASSERT_INTERVAL_AUTO("{>Const [null]}\n", result->first);
+    ASSERT_INTERVAL_AUTO("{=Const [null]}\n", result->second);
+}
+
+TEST(IntervalExcludeNull, PointNull) {
+    auto node = _interval(_incl(_cnull()), _incl(_cnull()));
+    auto result = splitNull(node, ConstEval::constFold);
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(checkMaybeHasNull(node, ConstEval::constFold));
+}
+
+TEST(IntervalExcludeNull, Var) {
+    auto node = _disj(_conj(_interval(_incl("1"_cint32), _incl("3"_cint32))),
+                      _conj(_interval(_incl(_cnull()), _incl("5"_cint32))),
+                      _conj(_interval(_minusInf(), _incl("v1"_var))),
+                      _conj(_interval(_incl("v2"_var), _incl("v3"_var))),
+                      _conj(_interval(_excl("8"_cint32), _excl("8"_cint32))));
+
+    auto result = splitNull(node, ConstEval::constFold);
+    ASSERT_FALSE(result);
+    ASSERT_TRUE(checkMaybeHasNull(node, ConstEval::constFold));
+}
+
+TEST(IntervalExcludeNull, Complex) {
+    auto node = _disj(_conj(_interval(_incl("1"_cint32), _incl("3"_cint32))),
+                      _conj(_interval(_incl(_cnull()), _incl("5"_cint32))),
+                      _conj(_interval(_minusInf(), _incl("7"_cint32))),
+                      _conj(_interval(_excl("8"_cint32), _excl("8"_cint32))));
+
+    auto result = splitNull(node, ConstEval::constFold);
+    ASSERT_TRUE(result);
+    ASSERT_TRUE(checkMaybeHasNull(node, ConstEval::constFold));
+    ASSERT_FALSE(checkMaybeHasNull(result->first, ConstEval::constFold));
+    ASSERT_TRUE(checkMaybeHasNull(result->second, ConstEval::constFold));
+    ASSERT_INTERVAL_AUTO(
+        "{\n"
+        "    {{[Const [1], Const [3]]}}\n"
+        " U \n"
+        "    {{(Const [null], Const [5]]}}\n"
+        " U \n"
+        "    {{(Const [null], Const [7]]}}\n"
+        " U \n"
+        "    {{(Const [8], Const [8])}}\n"
+        "}\n",
+        result->first);
+    ASSERT_INTERVAL_AUTO(
+        "{\n"
+        "    {{[Const [1], Const [3]]}}\n"
+        " U \n"
+        "    {{=Const [null]}}\n"
+        " U \n"
+        "    {{<=Const [null]}}\n"
+        " U \n"
+        "    {{(Const [8], Const [8])}}\n"
+        "}\n",
+        result->second);
 }
 
 }  // namespace

@@ -1,7 +1,6 @@
 // Test that a pipeline of the form [{$changeStream: {}}, {$match: ...}] can rewrite the $match and
 // apply it to oplog-format documents in order to filter out results as early as possible.
 // @tags: [
-//   featureFlagChangeStreamsRewrite,
 //   requires_fcv_51,
 //   requires_pipeline_optimization,
 //   requires_sharding,
@@ -10,10 +9,11 @@
 //   assumes_unsharded_collection,
 //   assumes_read_preference_unchanged
 // ]
-(function() {
-"use strict";
-
-load("jstests/libs/change_stream_rewrite_util.js");  // For rewrite helpers.
+import {
+    assertNumChangeStreamDocsReturnedFromShard,
+    assertNumMatchingOplogEventsForShard,
+    createShardedCollection,
+} from "jstests/libs/change_stream_rewrite_util.js";
 
 const dbName = "change_stream_match_pushdown_and_rewrite";
 const collName = "coll1";
@@ -184,4 +184,3 @@ assert.eq(stringValues.slice(0, 2), ["Value", "vAlue"]);
 assert.sameMembers(stringValues.slice(2, 4), ["vaLue", "valUe"]);
 
 st.stop();
-})();

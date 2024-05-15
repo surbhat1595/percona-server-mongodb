@@ -27,21 +27,36 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <boost/move/utility_core.hpp>
+#include <fmt/format.h>
 
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/dbdirectclient.h"
-#include "mongo/db/ops/write_ops.h"
+#include "mongo/db/cluster_role.h"
+#include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/query/cursor_response.h"
+#include "mongo/db/repl/member_state.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/s/shard_local.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/storage/snapshot_manager.h"
+#include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/write_concern_options.h"
-#include "mongo/s/client/shard_registry.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
 
 namespace mongo {
 namespace {
@@ -82,7 +97,7 @@ private:
 void ShardLocalTest::setUp() {
     ServiceContextMongoDTest::setUp();
     _opCtx = getGlobalServiceContext()->makeOperationContext(&cc());
-    serverGlobalParams.clusterRole = ClusterRole::ConfigServer;
+    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
     _shardLocal = std::make_unique<ShardLocal>(ShardId::kConfigServerId);
     const repl::ReplSettings replSettings = {};
     repl::ReplicationCoordinator::set(
@@ -123,7 +138,7 @@ StatusWith<Shard::CommandResponse> ShardLocalTest::runFindAndModifyRunCommand(Na
     return _shardLocal->runCommandWithFixedRetryAttempts(
         _opCtx.get(),
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        nss.db().toString(),
+        nss.db_forTest().toString(),
         findAndModifyRequest.toBSON({}),
         Shard::RetryPolicy::kNoRetry);
 }
@@ -132,7 +147,7 @@ StatusWith<std::vector<BSONObj>> ShardLocalTest::getIndexes(NamespaceString nss)
     auto response = _shardLocal->runCommandWithFixedRetryAttempts(
         _opCtx.get(),
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        nss.db().toString(),
+        nss.db_forTest().toString(),
         BSON("listIndexes" << nss.coll().toString()),
         Shard::RetryPolicy::kIdempotent);
     if (!response.isOK()) {

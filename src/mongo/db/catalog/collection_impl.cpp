@@ -29,44 +29,85 @@
 
 #include "mongo/db/catalog/collection_impl.h"
 
-#include "mongo/bson/ordering.h"
-#include "mongo/bson/simple_bsonelement_comparator.h"
-#include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/crypto/fle_crypto.h"
+#include <absl/container/flat_hash_map.h>
+#include <algorithm>
+#include <boost/container/flat_set.hpp>
+#include <boost/container/small_vector.hpp>
+#include <boost/container/vector.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
+#include <map>
+#include <mutex>
+// IWYU pragma: no_include "ext/alloc_traits.h"
+// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/crypto/encryption_fields_gen.h"
+#include "mongo/db/api_parameters.h"
+#include "mongo/db/basic_types_gen.h"
 #include "mongo/db/catalog/catalog_stats.h"
+#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/index_catalog_impl.h"
 #include "mongo/db/catalog/index_key_validate.h"
-#include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/catalog/uncommitted_multikey.h"
-#include "mongo/db/catalog_shard_feature_flag_gen.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/curop.h"
+#include "mongo/db/catalog_shard_feature_flag_gen.h"  // IWYU pragma: keep
+#include "mongo/db/client.h"
+#include "mongo/db/cluster_role.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/locker.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/keypattern.h"
+#include "mongo/db/index_names.h"
 #include "mongo/db/matcher/doc_validation_error.h"
 #include "mongo/db/matcher/doc_validation_util.h"
-#include "mongo/db/matcher/expression_always_boolean.h"
+#include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_parser.h"
+#include "mongo/db/matcher/expression_tree.h"
+#include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/matcher/implicit_validator.h"
-#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/collection_query_info.h"
+#include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/capped_snapshots.h"
 #include "mongo/db/storage/durable_catalog.h"
+#include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/ttl_collection_cache.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/log_tag.h"
+#include "mongo/logv2/redaction.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/str.h"
+#include "mongo/util/string_map.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -127,39 +168,6 @@ Status checkValidationOptionsCanBeUsed(const CollectionOptions& opts,
         return Status(ErrorCodes::BadValue,
                       "Validation action of 'warn' is not allowed on encrypted collections");
     }
-    return Status::OK();
-}
-
-Status validateIsNotInDbs(const NamespaceString& ns,
-                          const std::vector<DatabaseName>& disallowedDbs,
-                          StringData optionName) {
-    if (std::find(disallowedDbs.begin(), disallowedDbs.end(), ns.dbName()) != disallowedDbs.end()) {
-        return {ErrorCodes::InvalidOptions,
-                str::stream() << optionName << " collection option is not supported on the "
-                              << ns.dbName().toStringForErrorMsg() << " database"};
-    }
-
-    return Status::OK();
-}
-
-// Validates that the option is not used on admin, local or config db as well as not being used on
-// config servers.
-Status validateChangeStreamPreAndPostImagesOptionIsPermitted(const NamespaceString& ns) {
-    const auto validationStatus =
-        validateIsNotInDbs(ns,
-                           {DatabaseName::kAdmin, DatabaseName::kLocal, DatabaseName::kConfig},
-                           "changeStreamPreAndPostImages");
-    if (validationStatus != Status::OK()) {
-        return validationStatus;
-    }
-
-    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-        !gFeatureFlagCatalogShard.isEnabled(serverGlobalParams.featureCompatibility)) {
-        return {
-            ErrorCodes::InvalidOptions,
-            "changeStreamPreAndPostImages collection option is not supported on config servers"};
-    }
-
     return Status::OK();
 }
 
@@ -304,22 +312,14 @@ CollectionImpl::SharedState::~SharedState() {
 CollectionImpl::CollectionImpl(OperationContext* opCtx,
                                const NamespaceString& nss,
                                RecordId catalogId,
-                               const CollectionOptions& options,
+                               std::shared_ptr<BSONCollectionCatalogEntry::MetaData> metadata,
                                std::unique_ptr<RecordStore> recordStore)
     : _ns(nss),
       _catalogId(std::move(catalogId)),
-      _uuid(options.uuid.value()),
-      _shared(std::make_shared<SharedState>(this, std::move(recordStore), options)),
+      _uuid(metadata->options.uuid.value()),
+      _shared(std::make_shared<SharedState>(this, std::move(recordStore), metadata->options)),
+      _metadata(std::move(metadata)),
       _indexCatalog(std::make_unique<IndexCatalogImpl>()) {}
-
-CollectionImpl::CollectionImpl(OperationContext* opCtx,
-                               const NamespaceString& nss,
-                               RecordId catalogId,
-                               std::shared_ptr<BSONCollectionCatalogEntry::MetaData> metadata,
-                               std::unique_ptr<RecordStore> recordStore)
-    : CollectionImpl(opCtx, nss, std::move(catalogId), metadata->options, std::move(recordStore)) {
-    _metadata = std::move(metadata);
-}
 
 CollectionImpl::~CollectionImpl() = default;
 
@@ -333,16 +333,6 @@ std::shared_ptr<Collection> CollectionImpl::FactoryImpl::make(
     OperationContext* opCtx,
     const NamespaceString& nss,
     RecordId catalogId,
-    const CollectionOptions& options,
-    std::unique_ptr<RecordStore> rs) const {
-    return std::make_shared<CollectionImpl>(
-        opCtx, nss, std::move(catalogId), options, std::move(rs));
-}
-
-std::shared_ptr<Collection> CollectionImpl::FactoryImpl::make(
-    OperationContext* opCtx,
-    const NamespaceString& nss,
-    RecordId catalogId,
     std::shared_ptr<BSONCollectionCatalogEntry::MetaData> metadata,
     std::unique_ptr<RecordStore> rs) const {
     return std::make_shared<CollectionImpl>(
@@ -350,10 +340,7 @@ std::shared_ptr<Collection> CollectionImpl::FactoryImpl::make(
 }
 
 std::shared_ptr<Collection> CollectionImpl::clone() const {
-    auto cloned = std::make_shared<CollectionImpl>(*this);
-    // We are per definition committed if we get cloned
-    cloned->_cachedCommitted = true;
-    return cloned;
+    return std::make_shared<CollectionImpl>(*this);
 }
 
 SharedCollectionDecorations* CollectionImpl::getSharedDecorations() const {
@@ -361,7 +348,6 @@ SharedCollectionDecorations* CollectionImpl::getSharedDecorations() const {
 }
 
 void CollectionImpl::init(OperationContext* opCtx) {
-    _metadata = DurableCatalog::get(opCtx)->getMetaData(opCtx, getCatalogId());
     const auto& collectionOptions = _metadata->options;
 
     _initShared(opCtx, collectionOptions);
@@ -394,9 +380,6 @@ Status CollectionImpl::initFromExisting(OperationContext* opCtx,
                                         const std::shared_ptr<const Collection>& collection,
                                         const DurableCatalogEntry& catalogEntry,
                                         boost::optional<Timestamp> readTimestamp) {
-    // We are per definition committed if we initialize from an existing collection.
-    _cachedCommitted = true;
-
     if (collection) {
         // Use the shared state from the existing collection.
         LOGV2_DEBUG(
@@ -499,22 +482,6 @@ void CollectionImpl::_initCommon(OperationContext* opCtx) {
 
 bool CollectionImpl::isInitialized() const {
     return _initialized;
-}
-
-bool CollectionImpl::isCommitted() const {
-    return _cachedCommitted || _shared->_committed.load();
-}
-
-void CollectionImpl::setCommitted(bool val) {
-    bool previous = isCommitted();
-    invariant((!previous && val) || (previous && !val));
-    _shared->_committed.store(val);
-
-    // Going from false->true need to be synchronized by an atomic. Leave this as false and read
-    // from the atomic in the shared state that will be flipped to true at first clone.
-    if (!val) {
-        _cachedCommitted = val;
-    }
 }
 
 bool CollectionImpl::requiresIdIndex() const {
@@ -812,6 +779,21 @@ boost::optional<bool> CollectionImpl::getTimeseriesBucketsMayHaveMixedSchemaData
     return _metadata->timeseriesBucketsMayHaveMixedSchemaData;
 }
 
+bool CollectionImpl::timeseriesBucketingParametersMayHaveChanged() const {
+    return _metadata->timeseriesBucketingParametersHaveChanged
+        ? *_metadata->timeseriesBucketingParametersHaveChanged
+        : true;
+}
+
+void CollectionImpl::setTimeseriesBucketingParametersChanged(OperationContext* opCtx,
+                                                             boost::optional<bool> value) {
+    tassert(7625800, "This is not a time-series collection", _metadata->options.timeseries);
+
+    _writeMetadata(opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) {
+        md.timeseriesBucketingParametersHaveChanged = value;
+    });
+}
+
 void CollectionImpl::setTimeseriesBucketsMayHaveMixedSchemaData(OperationContext* opCtx,
                                                                 boost::optional<bool> setting) {
     uassert(6057500, "This is not a time-series collection", _metadata->options.timeseries);
@@ -986,7 +968,7 @@ void CollectionImpl::registerCappedInserts(OperationContext* opCtx,
     // we never get here while holding an uninterruptible, read-ticketed lock. That would indicate
     // that we are operating with the wrong global lock semantics, and either hold too weak a lock
     // (e.g. IS) or that we upgraded in a way we shouldn't (e.g. IS -> IX).
-    invariant(opCtx->lockState()->isNoop() || !opCtx->lockState()->hasReadTicket() ||
+    invariant(!opCtx->lockState()->hasReadTicket() ||
               !opCtx->lockState()->uninterruptibleLocksRequested());
 
     auto* uncommitted =
@@ -1545,7 +1527,9 @@ bool CollectionImpl::isIndexMultikey(OperationContext* opCtx,
     // We need to read from the durable catalog if there are concurrent multikey writers to avoid
     // reading between the multikey write committing in the storage engine but before its onCommit
     // handler made the write visible for readers.
-    auto snapshotMetadata = DurableCatalog::get(opCtx)->getMetaData(opCtx, getCatalogId());
+    const auto catalogEntry =
+        DurableCatalog::get(opCtx)->getParsedCatalogEntry(opCtx, getCatalogId());
+    const auto snapshotMetadata = catalogEntry->metadata;
     int snapshotOffset = snapshotMetadata->findIndexOffset(indexName);
     invariant(snapshotOffset >= 0,
               str::stream() << "cannot get multikey for index " << indexName << " @ "
@@ -1650,7 +1634,9 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
         // collection. We cannot use the cached metadata in this collection as we may have just
         // committed a multikey change concurrently to the storage engine without being able to
         // observe it if its onCommit handlers haven't run yet.
-        auto metadataLocal = *DurableCatalog::get(opCtx)->getMetaData(opCtx, getCatalogId());
+        const auto catalogEntry =
+            DurableCatalog::get(opCtx)->getParsedCatalogEntry(opCtx, getCatalogId());
+        auto metadataLocal = *catalogEntry->metadata;
         // When reading from the durable catalog the index offsets are different because when
         // removing indexes in-memory just zeros out the slot instead of actually removing it. We
         // must adjust the entries so they match how they are stored in _metadata so we can rely on

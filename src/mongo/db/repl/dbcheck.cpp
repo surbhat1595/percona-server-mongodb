@@ -27,22 +27,47 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <algorithm>
+#include <boost/move/utility_core.hpp>
+#include <utility>
+#include <vector>
 
-#include "mongo/bson/simple_bsonelement_comparator.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/database_holder.h"
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/data_range.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/catalog/clustered_collection_options_gen.h"
 #include "mongo/db/catalog/health_log_interface.h"
 #include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/catalog_raii.h"
+#include "mongo/db/client.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/exec/collection_scan_common.h"
+#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/internal_plans.h"
+#include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/record_id_bound.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/dbcheck.h"
 #include "mongo/db/repl/dbcheck_gen.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/debug_util.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/md5.hpp"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 
@@ -123,6 +148,7 @@ std::string renderForHealthLog(OplogEntriesEnum op) {
  * Fills in the timestamp and scope, which are always the same for dbCheck's entries.
  */
 std::unique_ptr<HealthLogEntry> dbCheckHealthLogEntry(const boost::optional<NamespaceString>& nss,
+                                                      const boost::optional<UUID>& collectionUUID,
                                                       SeverityEnum severity,
                                                       const std::string& msg,
                                                       OplogEntriesEnum operation,
@@ -130,6 +156,9 @@ std::unique_ptr<HealthLogEntry> dbCheckHealthLogEntry(const boost::optional<Name
     auto entry = std::make_unique<HealthLogEntry>();
     if (nss) {
         entry->setNss(*nss);
+    }
+    if (collectionUUID) {
+        entry->setCollectionUUID(*collectionUUID);
     }
     entry->setTimestamp(Date_t::now());
     entry->setSeverity(severity);
@@ -147,23 +176,28 @@ std::unique_ptr<HealthLogEntry> dbCheckHealthLogEntry(const boost::optional<Name
  */
 std::unique_ptr<HealthLogEntry> dbCheckErrorHealthLogEntry(
     const boost::optional<NamespaceString>& nss,
+    const boost::optional<UUID>& collectionUUID,
     const std::string& msg,
     OplogEntriesEnum operation,
     const Status& err,
     const BSONObj& context) {
     return dbCheckHealthLogEntry(
         nss,
+        collectionUUID,
         SeverityEnum::Error,
         msg,
         operation,
         BSON("success" << false << "error" << err.toString() << "context" << context));
 }
 
-std::unique_ptr<HealthLogEntry> dbCheckWarningHealthLogEntry(const NamespaceString& nss,
-                                                             const std::string& msg,
-                                                             OplogEntriesEnum operation,
-                                                             const Status& err) {
+std::unique_ptr<HealthLogEntry> dbCheckWarningHealthLogEntry(
+    const NamespaceString& nss,
+    const boost::optional<UUID>& collectionUUID,
+    const std::string& msg,
+    OplogEntriesEnum operation,
+    const Status& err) {
     return dbCheckHealthLogEntry(nss,
+                                 collectionUUID,
                                  SeverityEnum::Warning,
                                  msg,
                                  operation,
@@ -175,6 +209,7 @@ std::unique_ptr<HealthLogEntry> dbCheckWarningHealthLogEntry(const NamespaceStri
  */
 std::unique_ptr<HealthLogEntry> dbCheckBatchEntry(
     const NamespaceString& nss,
+    const boost::optional<UUID>& collectionUUID,
     int64_t count,
     int64_t bytes,
     const std::string& expectedHash,
@@ -219,7 +254,8 @@ std::unique_ptr<HealthLogEntry> dbCheckBatchEntry(
     std::string msg =
         "dbCheck batch " + (hashesMatch ? std::string("consistent") : std::string("inconsistent"));
 
-    return dbCheckHealthLogEntry(nss, severity, msg, OplogEntriesEnum::Batch, builder.obj());
+    return dbCheckHealthLogEntry(
+        nss, collectionUUID, severity, msg, OplogEntriesEnum::Batch, builder.obj());
 }
 
 DbCheckHasher::DbCheckHasher(OperationContext* opCtx,
@@ -390,23 +426,8 @@ Status dbCheckBatchOnSecondary(OperationContext* opCtx,
 
     // Set up the hasher,
     boost::optional<DbCheckHasher> hasher;
-    try {
-        // We may not have a read timestamp if the dbCheck command was run on an older version of
-        // the server with snapshotRead:false. Since we don't implement this feature, we'll log an
-        // error about skipping the batch to ensure an operator notices.
-        if (!entry.getReadTimestamp().has_value()) {
-            auto logEntry =
-                dbCheckErrorHealthLogEntry(entry.getNss(),
-                                           "dbCheck failed",
-                                           OplogEntriesEnum::Batch,
-                                           Status{ErrorCodes::Error(6769502),
-                                                  "no readTimestamp in oplog entry. Ensure dbCheck "
-                                                  "command is not using snapshotRead:false"},
-                                           entry.toBSON());
-            HealthLogInterface::get(opCtx)->log(*logEntry);
-            return Status::OK();
-        }
 
+    try {
         opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kProvided,
                                                       entry.getReadTimestamp());
 
@@ -416,6 +437,7 @@ Status dbCheckBatchOnSecondary(OperationContext* opCtx,
         if (!collection) {
             const auto msg = "Collection under dbCheck no longer exists";
             auto logEntry = dbCheckHealthLogEntry(entry.getNss(),
+                                                  boost::none,
                                                   SeverityEnum::Info,
                                                   "dbCheck failed",
                                                   OplogEntriesEnum::Batch,
@@ -431,6 +453,7 @@ Status dbCheckBatchOnSecondary(OperationContext* opCtx,
         std::string found = hasher->total();
 
         auto logEntry = dbCheckBatchEntry(entry.getNss(),
+                                          collection->uuid(),
                                           hasher->docsSeen(),
                                           hasher->bytesSeen(),
                                           expected,
@@ -450,8 +473,12 @@ Status dbCheckBatchOnSecondary(OperationContext* opCtx,
         }
     } catch (const DBException& exception) {
         // In case of an error, report it to the health log,
-        auto logEntry = dbCheckErrorHealthLogEntry(
-            entry.getNss(), msg, OplogEntriesEnum::Batch, exception.toStatus(), entry.toBSON());
+        auto logEntry = dbCheckErrorHealthLogEntry(entry.getNss(),
+                                                   boost::none,
+                                                   msg,
+                                                   OplogEntriesEnum::Batch,
+                                                   exception.toStatus(),
+                                                   entry.toBSON());
         HealthLogInterface::get(opCtx)->log(*logEntry);
         return Status::OK();
     }
@@ -487,8 +514,12 @@ Status dbCheckOplogCommand(OperationContext* opCtx,
         case OplogEntriesEnum::Start:
             [[fallthrough]];
         case OplogEntriesEnum::Stop:
-            const auto healthLogEntry = mongo::dbCheckHealthLogEntry(
-                boost::none /*nss*/, SeverityEnum::Info, "", type, boost::none /*data*/
+            const auto healthLogEntry = mongo::dbCheckHealthLogEntry(boost::none /*nss*/,
+                                                                     boost::none /*collectionUUID*/,
+                                                                     SeverityEnum::Info,
+                                                                     "",
+                                                                     type,
+                                                                     boost::none /*data*/
             );
             HealthLogInterface::get(Client::getCurrent()->getServiceContext())
                 ->log(*healthLogEntry);

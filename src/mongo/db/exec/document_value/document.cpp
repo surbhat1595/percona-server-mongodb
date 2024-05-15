@@ -29,12 +29,23 @@
 
 #include "mongo/db/exec/document_value/document.h"
 
-#include <boost/functional/hash.hpp>
+#include <absl/container/node_hash_map.h>
+#include <boost/container_hash/extensions.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <cstdint>
+#include <memory>
 
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/base/data_type_endian.h"
+#include "mongo/base/error_codes.h"
 #include "mongo/bson/bson_depth.h"
-#include "mongo/db/jsobj.h"
+#include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/pipeline/field_path.h"
-#include "mongo/db/pipeline/resume_token.h"
+#include "mongo/stdx/variant.h"
 #include "mongo/util/str.h"
 
 namespace mongo {
@@ -79,7 +90,7 @@ getNestedFieldHelperBSON(BSONElement elt, const FieldPath& fp, size_t level) {
 }
 }  // namespace
 
-const DocumentStorage DocumentStorage::kEmptyDoc;
+const DocumentStorage DocumentStorage::kEmptyDoc{ConstructorTag::InitApproximateSize};
 
 const StringDataSet Document::allMetadataFieldNames{Document::metaFieldTextScore,
                                                     Document::metaFieldRandVal,
@@ -90,7 +101,8 @@ const StringDataSet Document::allMetadataFieldNames{Document::metaFieldTextScore
                                                     Document::metaFieldSearchHighlights,
                                                     Document::metaFieldSearchSortValues,
                                                     Document::metaFieldIndexKey,
-                                                    Document::metaFieldSearchScoreDetails};
+                                                    Document::metaFieldSearchScoreDetails,
+                                                    Document::metaFieldVectorSearchDistance};
 
 DocumentStorageIterator::DocumentStorageIterator(DocumentStorage* storage, BSONObjIterator bsonIt)
     : _bsonIt(std::move(bsonIt)),
@@ -410,6 +422,7 @@ void DocumentStorage::reset(const BSONObj& bson, bool bsonHasMetadata) {
 
     // Clean metadata.
     _metadataFields = DocumentMetadataFields{};
+    _metadataFields.setModified(false);
 }
 
 void DocumentStorage::fillCache() const {
@@ -467,6 +480,8 @@ void DocumentStorage::loadLazyMetadata() const {
                 _metadataFields.setSearchScoreDetails(elem.Obj());
             } else if (fieldName == Document::metaFieldSearchSortValues) {
                 _metadataFields.setSearchSortValues(elem.Obj());
+            } else if (fieldName == Document::metaFieldVectorSearchDistance) {
+                _metadataFields.setVectorSearchDistance(elem.Double());
             }
         }
     }
@@ -477,7 +492,7 @@ void DocumentStorage::loadLazyMetadata() const {
 
 Document::Document(const BSONObj& bson) {
     MutableDocument md;
-    md.newStorageWithBson(bson, false);
+    md.reset(bson, false);
 
     *this = md.freeze();
 }
@@ -537,6 +552,7 @@ constexpr StringData Document::metaFieldSearchScore;
 constexpr StringData Document::metaFieldSearchHighlights;
 constexpr StringData Document::metaFieldSearchScoreDetails;
 constexpr StringData Document::metaFieldSearchSortValues;
+constexpr StringData Document::metaFieldVectorSearchDistance;
 
 void Document::toBsonWithMetaData(BSONObjBuilder* builder) const {
     toBson(builder);
@@ -567,11 +583,14 @@ void Document::toBsonWithMetaData(BSONObjBuilder* builder) const {
     if (metadata().hasSearchSortValues()) {
         builder->append(metaFieldSearchSortValues, metadata().getSearchSortValues());
     }
+    if (metadata().hasVectorSearchDistance()) {
+        builder->append(metaFieldVectorSearchDistance, metadata().getVectorSearchDistance());
+    }
 }
 
 Document Document::fromBsonWithMetaData(const BSONObj& bson) {
     MutableDocument md;
-    md.newStorageWithBson(bson, true);
+    md.reset(bson, true);
 
     return md.freeze();
 }

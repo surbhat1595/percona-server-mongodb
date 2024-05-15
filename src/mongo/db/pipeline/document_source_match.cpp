@@ -27,17 +27,25 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/db/pipeline/document_source_match.h"
-
+#include <absl/container/flat_hash_map.h>
+// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 #include <algorithm>
+#include <boost/preprocessor/control/iif.hpp>
+#include <cstddef>
+#include <iterator>
+#include <list>
 #include <memory>
+#include <type_traits>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/jsobj.h"
+#include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_array.h"
 #include "mongo/db/matcher/expression_leaf.h"
@@ -45,11 +53,12 @@
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/matcher/match_expression_dependencies.h"
 #include "mongo/db/pipeline/document_path_support.h"
-#include "mongo/db/pipeline/expression.h"
+#include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/semantic_analysis.h"
+#include "mongo/db/query/allowed_contexts.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/ctype.h"
-#include "mongo/util/str.h"
 
 namespace mongo {
 
@@ -64,13 +73,46 @@ REGISTER_DOCUMENT_SOURCE(match,
                          DocumentSourceMatch::createFromBson,
                          AllowedWithApiStrict::kAlways);
 
+DocumentSourceMatch::DocumentSourceMatch(std::unique_ptr<MatchExpression> expr,
+                                         const boost::intrusive_ptr<ExpressionContext>& expCtx)
+    : DocumentSource(kStageName, expCtx) {
+    auto bsonObj = expr->serialize();
+    rebuild(std::move(bsonObj), std::move(expr));
+}
+
+DocumentSourceMatch::DocumentSourceMatch(const BSONObj& query,
+                                         const intrusive_ptr<ExpressionContext>& expCtx)
+    : DocumentSource(kStageName, expCtx) {
+    rebuild(query);
+}
+
+void DocumentSourceMatch::rebuild(BSONObj predicate) {
+    predicate = predicate.getOwned();
+    auto expr = uassertStatusOK(MatchExpressionParser::parse(
+        predicate, pExpCtx, ExtensionsCallbackNoop(), Pipeline::kAllowedMatcherFeatures));
+    rebuild(std::move(predicate), std::move(expr));
+}
+
+void DocumentSourceMatch::rebuild(BSONObj predicate, std::unique_ptr<MatchExpression> expr) {
+    invariant(predicate.isOwned());
+    _predicate = std::move(predicate);
+    _isTextQuery = DocumentSourceMatch::isTextQuery(_predicate);
+    DepsTracker dependencies =
+        DepsTracker(_isTextQuery ? DepsTracker::kAllMetadata & ~DepsTracker::kOnlyTextScore
+                                 : DepsTracker::kAllMetadata);
+    getDependencies(expr.get(), &dependencies);
+    _matchProcessor.emplace(MatchProcessor(std::move(expr), std::move(dependencies)));
+}
+
 const char* DocumentSourceMatch::getSourceName() const {
     return kStageName.rawData();
 }
 
 Value DocumentSourceMatch::serialize(SerializationOptions opts) const {
-    if (opts.verbosity || opts.applyHmacToIdentifiers || opts.replacementForLiteralArgs) {
-        return Value(DOC(getSourceName() << Document(_expression->serialize(opts))));
+    if (opts.verbosity || opts.transformIdentifiers ||
+        opts.literalPolicy != LiteralSerializationPolicy::kUnchanged) {
+        return Value(
+            DOC(getSourceName() << Document(_matchProcessor->getExpression()->serialize(opts))));
     }
     return Value(DOC(getSourceName() << Document(getQuery())));
 }
@@ -80,7 +122,8 @@ intrusive_ptr<DocumentSource> DocumentSourceMatch::optimize() {
         return nullptr;
     }
 
-    _expression = MatchExpression::optimize(std::move(_expression));
+    _matchProcessor->setExpression(
+        MatchExpression::optimize(std::move(_matchProcessor->getExpression())));
 
     return this;
 }
@@ -91,15 +134,7 @@ DocumentSource::GetNextResult DocumentSourceMatch::doGetNext() {
 
     auto nextInput = pSource->getNext();
     for (; nextInput.isAdvanced(); nextInput = pSource->getNext()) {
-        // MatchExpression only takes BSON documents, so we have to make one. As an optimization,
-        // only serialize the fields we need to do the match. Specify BSONObj::LargeSizeTrait so
-        // that matching against a large document mid-pipeline does not throw a BSON max-size error.
-        BSONObj toMatch = _dependencies.needWholeDocument
-            ? nextInput.getDocument().toBson<BSONObj::LargeSizeTrait>()
-            : document_path_support::documentToBsonWithPaths<BSONObj::LargeSizeTrait>(
-                  nextInput.getDocument(), _dependencies.fields);
-
-        if (_expression->matchesBSON(toMatch)) {
+        if (_matchProcessor->process(nextInput.getDocument())) {
             return nextInput;
         }
 
@@ -421,14 +456,15 @@ DocumentSourceMatch::splitSourceByFunc(const OrderedPathSet& fields,
                                        const StringMap<std::string>& renames,
                                        expression::ShouldSplitExprFunc func) && {
     pair<unique_ptr<MatchExpression>, unique_ptr<MatchExpression>> newExpr(
-        expression::splitMatchExpressionBy(std::move(_expression), fields, renames, func));
+        expression::splitMatchExpressionBy(
+            std::move(_matchProcessor->getExpression()), fields, renames, func));
 
     invariant(newExpr.first || newExpr.second);
 
     if (!newExpr.first) {
         // The entire $match depends on 'fields'. It cannot be split or moved, so we return this
         // stage without modification as the second stage in the pair.
-        _expression = std::move(newExpr.second);
+        _matchProcessor->setExpression(std::move(newExpr.second));
         return {nullptr, this};
     }
 
@@ -436,7 +472,7 @@ DocumentSourceMatch::splitSourceByFunc(const OrderedPathSet& fields,
         // This $match is entirely independent of 'fields' and there were no renames to apply. In
         // this case, the current stage can swap with its predecessor without modification. We
         // simply return this as the first stage in the pair.
-        _expression = std::move(newExpr.first);
+        _matchProcessor->setExpression(std::move(newExpr.first));
         return {this, nullptr};
     }
 
@@ -503,7 +539,7 @@ DocumentSourceMatch::splitMatchByModifiedFields(
             // This stage modifies all paths, so cannot be swapped with a $match at all.
             return {nullptr, match};
         case DocumentSource::GetModPathsReturn::Type::kFiniteSet:
-            modifiedPaths = std::move(modifiedPathsRet.paths);
+            modifiedPaths = modifiedPathsRet.paths;
             break;
         case DocumentSource::GetModPathsReturn::Type::kAllExcept: {
             DepsTracker depsTracker;
@@ -542,8 +578,13 @@ BSONObj DocumentSourceMatch::getQuery() const {
 }
 
 DepsTracker::State DocumentSourceMatch::getDependencies(DepsTracker* deps) const {
+    return getDependencies(_matchProcessor->getExpression().get(), deps);
+}
+
+DepsTracker::State DocumentSourceMatch::getDependencies(const MatchExpression* expr,
+                                                        DepsTracker* deps) const {
     // Get all field or variable dependencies.
-    match_expression::addDependencies(_expression.get(), deps);
+    match_expression::addDependencies(expr, deps);
 
     if (isTextQuery()) {
         // A $text aggregation field should return EXHAUSTIVE_FIELDS, since we don't necessarily
@@ -557,24 +598,7 @@ DepsTracker::State DocumentSourceMatch::getDependencies(DepsTracker* deps) const
 }
 
 void DocumentSourceMatch::addVariableRefs(std::set<Variables::Id>* refs) const {
-    match_expression::addVariableRefs(_expression.get(), refs);
-}
-
-DocumentSourceMatch::DocumentSourceMatch(const BSONObj& query,
-                                         const intrusive_ptr<ExpressionContext>& expCtx)
-    : DocumentSource(kStageName, expCtx) {
-    rebuild(query);
-}
-
-void DocumentSourceMatch::rebuild(BSONObj filter) {
-    _predicate = filter.getOwned();
-    _expression = uassertStatusOK(MatchExpressionParser::parse(
-        _predicate, pExpCtx, ExtensionsCallbackNoop(), Pipeline::kAllowedMatcherFeatures));
-    _isTextQuery = isTextQuery(_predicate);
-    _dependencies =
-        DepsTracker(_isTextQuery ? DepsTracker::kAllMetadata & ~DepsTracker::kOnlyTextScore
-                                 : DepsTracker::kAllMetadata);
-    getDependencies(&_dependencies);
+    match_expression::addVariableRefs(_matchProcessor->getExpression().get(), refs);
 }
 
 }  // namespace mongo

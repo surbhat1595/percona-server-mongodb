@@ -29,9 +29,34 @@
 
 #pragma once
 
+#include <cstddef>
+#include <memory>
+#include <sys/types.h>
+#include <type_traits>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/clonable_ptr.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/bson/util/builder_fwd.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
+#include "mongo/db/matcher/expression_visitor.h"
+#include "mongo/db/matcher/match_details.h"
 #include "mongo/db/matcher/matcher_type_set.h"
+#include "mongo/db/matcher/path.h"
+#include "mongo/db/query/serialization_options.h"
+#include "mongo/idl/idl_parser.h"
 
 namespace mongo {
 
@@ -76,8 +101,8 @@ public:
         _debugStringAttachTagInfo(&debug);
     }
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final {
-        return BSON(name() << opts.serializeLiteral(_typeSet.toBSONArray()));
+    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final {
+        bob->appendArray(name(), _typeSet.toBSONArray());
     }
 
     bool equivalent(const MatchExpression* other) const final {
@@ -238,16 +263,16 @@ public:
         _debugStringAttachTagInfo(&debug);
     }
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final {
+    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final {
         if (opts.literalPolicy == LiteralSerializationPolicy::kUnchanged) {
-            return BSON(name() << _binDataSubType);
+            bob->append(name(), _binDataSubType);
         } else {
             // There is some fancy serialization logic to get the above BSONObjBuilder append to
             // work. We just want to make sure we're doing the same thing here.
             static_assert(BSONObjAppendFormat<decltype(_binDataSubType)>::value == NumberInt,
                           "Expecting that the BinData sub type should be specified and serialized "
                           "as an int.");
-            return BSON(name() << opts.serializeLiteral(static_cast<int>(_binDataSubType)));
+            opts.appendLiteral(bob, name(), static_cast<int>(_binDataSubType));
         }
     }
 

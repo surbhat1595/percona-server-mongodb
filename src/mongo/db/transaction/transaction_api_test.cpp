@@ -27,34 +27,64 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
+// IWYU pragma: no_include "cxxabi.h"
+#include <absl/container/node_hash_map.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr.hpp>
+#include <cstddef>
+#include <cstdint>
+#include <future>
+#include <mutex>
 #include <queue>
+#include <system_error>
 
-#include "mongo/config.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/api_parameters_gen.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/error_labels.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/tenant_id.h"
 #include "mongo/db/transaction/internal_transaction_metrics.h"
 #include "mongo/db/transaction/transaction_api.h"
+#include "mongo/db/write_concern_options.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/is_mongos.h"
+#include "mongo/s/database_version.h"
+#include "mongo/s/shard_version.h"
+#include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/future.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/unittest/assert.h"
 #include "mongo/unittest/barrier.h"
+#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/clock_source.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/concurrency/thread_pool.h"
-#include "mongo/util/executor_test_util.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/future_impl.h"
 #include "mongo/util/scopeguard.h"
 
 namespace mongo {
@@ -422,13 +452,13 @@ protected:
                                                                   _inlineExecutor,
                                                                   std::move(mockClient));
 
-        // The bulk of the API tests are for the non-local transaction cases, so set isMongos=true
-        // by default.
-        setMongos(true);
+        // The bulk of the API tests are for the non-local transaction cases, so set router role by
+        // default.
+        serverGlobalParams.clusterRole = ClusterRole::RouterServer;
     }
 
     void tearDown() override {
-        setMongos(false);
+        serverGlobalParams.clusterRole = ClusterRole::None;
 
         _executor->shutdown();
         _executor->join();
@@ -2384,8 +2414,8 @@ TEST_F(TxnAPITest, CanBeUsedWithinShardedOperationsIfClientSupportsIt) {
 }
 
 TEST_F(TxnAPITest, DoNotAllowCrossShardTransactionsOnShardWhenInClientTransaction) {
-    setMongos(false);
-    ON_BLOCK_EXIT([&] { setMongos(true); });
+    serverGlobalParams.clusterRole = ClusterRole::None;
+    ON_BLOCK_EXIT([&] { serverGlobalParams.clusterRole = ClusterRole::RouterServer; });
 
     opCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
     opCtx()->setTxnNumber(5);
@@ -2397,8 +2427,8 @@ TEST_F(TxnAPITest, DoNotAllowCrossShardTransactionsOnShardWhenInClientTransactio
 }
 
 TEST_F(TxnAPITest, AllowCrossShardTransactionsOnMongosWhenInRetryableWrite) {
-    setMongos(true);
-    ON_BLOCK_EXIT([&] { setMongos(false); });
+    serverGlobalParams.clusterRole = ClusterRole::RouterServer;
+    ON_BLOCK_EXIT([&] { serverGlobalParams.clusterRole = ClusterRole::None; });
 
     opCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
     opCtx()->setTxnNumber(5);
@@ -2406,8 +2436,8 @@ TEST_F(TxnAPITest, AllowCrossShardTransactionsOnMongosWhenInRetryableWrite) {
 }
 
 TEST_F(TxnAPITest, AllowCrossShardTransactionsOnMongosWhenInClientTransaction) {
-    setMongos(true);
-    ON_BLOCK_EXIT([&] { setMongos(false); });
+    serverGlobalParams.clusterRole = ClusterRole::RouterServer;
+    ON_BLOCK_EXIT([&] { serverGlobalParams.clusterRole = ClusterRole::None; });
 
     opCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
     opCtx()->setTxnNumber(5);
@@ -2416,8 +2446,9 @@ TEST_F(TxnAPITest, AllowCrossShardTransactionsOnMongosWhenInClientTransaction) {
 }
 
 TEST_F(TxnAPITest, FailoverAndShutdownErrorsAreFatalForLocalTransactionBodyError) {
-    setMongos(false);
-    ON_BLOCK_EXIT([&] { setMongos(true); });
+    serverGlobalParams.clusterRole = ClusterRole::None;
+    ON_BLOCK_EXIT([&] { serverGlobalParams.clusterRole = ClusterRole::RouterServer; });
+
     auto runTest = [&](bool expectSuccess, Status status) {
         resetTxnWithRetries();
 
@@ -2466,8 +2497,9 @@ TEST_F(TxnAPITest, FailoverAndShutdownErrorsAreFatalForLocalTransactionBodyError
 }
 
 TEST_F(TxnAPITest, FailoverAndShutdownErrorsAreFatalForLocalTransactionCommandError) {
-    setMongos(false);
-    ON_BLOCK_EXIT([&] { setMongos(true); });
+    serverGlobalParams.clusterRole = ClusterRole::None;
+    ON_BLOCK_EXIT([&] { serverGlobalParams.clusterRole = ClusterRole::RouterServer; });
+
     auto runTest = [&](bool expectSuccess, Status status) {
         resetTxnWithRetries();
 
@@ -2515,8 +2547,9 @@ TEST_F(TxnAPITest, FailoverAndShutdownErrorsAreFatalForLocalTransactionCommandEr
 }
 
 TEST_F(TxnAPITest, FailoverAndShutdownErrorsAreFatalForLocalTransactionWCError) {
-    setMongos(false);
-    ON_BLOCK_EXIT([&] { setMongos(true); });
+    serverGlobalParams.clusterRole = ClusterRole::None;
+    ON_BLOCK_EXIT([&] { serverGlobalParams.clusterRole = ClusterRole::RouterServer; });
+
     auto runTest = [&](bool expectSuccess, Status status) {
         resetTxnWithRetries();
 

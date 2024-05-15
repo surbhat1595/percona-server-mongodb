@@ -4,63 +4,21 @@
  * @tags: [
  *   # We need a timeseries collection.
  *   requires_timeseries,
- *   featureFlagTimeseriesUpdatesSupport,
- *   # TODO SERVER-73726 Remove this tag.
- *   assumes_unsharded_collection,
- *   # TODO SERVER-76454 Remove the following two tags.
- *   does_not_support_retryable_writes,
- *   requires_non_retryable_writes,
+ *   requires_fcv_71,
+ *   # TODO SERVER-78683: Remove this tag.
+ *   # Internal transaction api might not handle stepdowns correctly and time-series retryable
+ *   # updates use internal transaction api.
+ *   does_not_support_stepdowns
  * ]
  */
 
-(function() {
-"use strict";
-
-load("jstests/core/timeseries/libs/timeseries_writes_util.js");
-
-const testDB = getTestDB();
-
-/**
- * Ensure the updateOne command operates correctly by examining documents after the update.
- */
-function testUpdateOne({
-    initialDocList,
-    updateQuery,
-    updateObj,
-    resultDocList,
-    nMatched,
-    nModified = nMatched,
-    upsert = false,
-    failCode
-}) {
-    const collName = getCallerName();
-    jsTestLog(`Running ${collName}(${tojson(arguments[0])})`);
-
-    const coll = testDB.getCollection(collName);
-    prepareCollection({collName, initialDocList});
-
-    const updateCommand = {
-        update: coll.getName(),
-        updates: [{q: updateQuery, u: updateObj, multi: false, upsert: upsert}]
-    };
-    const res = failCode ? assert.commandFailedWithCode(testDB.runCommand(updateCommand), failCode)
-                         : assert.commandWorked(testDB.runCommand(updateCommand));
-    if (!failCode) {
-        if (upsert) {
-            assert.eq(1, res.n, tojson(res));
-            assert.eq(0, res.nModified, tojson(res));
-        } else {
-            assert.eq(nMatched, res.n, tojson(res));
-            assert.eq(nModified, res.nModified, tojson(res));
-        }
-    }
-
-    if (resultDocList) {
-        assert.sameMembers(resultDocList,
-                           coll.find().toArray(),
-                           "Collection contents did not match expected after update");
-    }
-}
+import {
+    getTestDB,
+    metaFieldName,
+    prepareCollection,
+    testUpdateOne,
+    timeFieldName
+} from "jstests/core/timeseries/libs/timeseries_writes_util.js";
 
 /**
  * Tests op-style updates.
@@ -238,19 +196,22 @@ function testUpdateOne({
         {[timeFieldName]: timestamp2022, [metaFieldName]: 2, _id: 1, a: 1, "newField": 42};
 
     // Update timeField, metaField and add a new field.
-    (function testPipelineUpdateSetMultipleFields() {
-        testUpdateOne({
-            initialDocList: [doc_2023_m1_a1],
-            updateQuery: {a: {$eq: 1}, [metaFieldName]: {$eq: 1}},
-            updateObj: [
-                {$set: {[timeFieldName]: timestamp2022}},
-                {$set: {[metaFieldName]: 2}},
-                {$set: {"newField": 42}},
-            ],
-            resultDocList: [doc_2022_m2_a1_newField],
-            nMatched: 1
-        });
-    })();
+    // Skip tests changing the shard key value in sharding.
+    if (!db.getMongo().isMongos()) {
+        (function testPipelineUpdateSetMultipleFields() {
+            testUpdateOne({
+                initialDocList: [doc_2023_m1_a1],
+                updateQuery: {a: {$eq: 1}, [metaFieldName]: {$eq: 1}},
+                updateObj: [
+                    {$set: {[timeFieldName]: timestamp2022}},
+                    {$set: {[metaFieldName]: 2}},
+                    {$set: {"newField": 42}},
+                ],
+                resultDocList: [doc_2022_m2_a1_newField],
+                nMatched: 1
+            });
+        })();
+    }
 
     // Expect removal of the timeField to fail.
     (function testRemoveTimeField() {
@@ -285,30 +246,44 @@ function testUpdateOne({
     const doc_t2022_m2_id2_a2 = {[timeFieldName]: timestamp2022, [metaFieldName]: 2, _id: 2, a: 2};
     const doc_t2022_m2_noId_a2 = {[timeFieldName]: timestamp2022, [metaFieldName]: 2, a: 2};
 
-    // Full measurement replacement: update every field in the document, including the _id.
-    (function testReplacementUpdateChangeId() {
-        testUpdateOne({
-            initialDocList: [doc_t2023_m1_id1_a1],
-            updateQuery: {},
-            updateObj: doc_t2022_m2_id2_a2,
-            resultDocList: [doc_t2022_m2_id2_a2],
-            nMatched: 1
-        });
-    })();
+    // Skip tests changing the shard key value in sharding.
+    if (!db.getMongo().isMongos()) {
+        // Full measurement replacement: update every field in the document, including the _id.
+        (function testReplacementUpdateChangeId() {
+            testUpdateOne({
+                initialDocList: [doc_t2023_m1_id1_a1],
+                updateQuery: {},
+                updateObj: doc_t2022_m2_id2_a2,
+                resultDocList: [doc_t2022_m2_id2_a2],
+                nMatched: 1
+            });
+        })();
 
-    // Full measurement replacement: update every field in the document, except the _id.
-    (function testReplacementUpdateNoId() {
-        testUpdateOne({
-            initialDocList: [doc_t2023_m1_id1_a1, doc_t2022_m2_id2_a2],
-            updateQuery: {_id: 1},
-            updateObj: doc_t2022_m2_noId_a2,
-            resultDocList: [
-                doc_t2022_m2_id2_a2,
-                {[timeFieldName]: timestamp2022, [metaFieldName]: 2, a: 2, _id: 1},
-            ],
-            nMatched: 1
-        });
-    })();
+        // Full measurement replacement: update every field in the document, except the _id.
+        (function testReplacementUpdateNoId() {
+            testUpdateOne({
+                initialDocList: [doc_t2023_m1_id1_a1, doc_t2022_m2_id2_a2],
+                updateQuery: {_id: 1},
+                updateObj: doc_t2022_m2_noId_a2,
+                resultDocList: [
+                    doc_t2022_m2_id2_a2,
+                    {[timeFieldName]: timestamp2022, [metaFieldName]: 2, a: 2, _id: 1},
+                ],
+                nMatched: 1
+            });
+        })();
+
+        // Replacement that results in two duplicate measurements.
+        (function testReplacementUpdateDuplicateIds() {
+            testUpdateOne({
+                initialDocList: [doc_t2023_m1_id1_a1, doc_t2022_m2_id2_a2],
+                updateQuery: {_id: 1},
+                updateObj: doc_t2022_m2_id2_a2,
+                resultDocList: [doc_t2022_m2_id2_a2, doc_t2022_m2_id2_a2],
+                nMatched: 1,
+            });
+        })();
+    }
 
     // Replacement with no time field.
     (function testReplacementUpdateNoTimeField() {
@@ -332,17 +307,6 @@ function testUpdateOne({
         });
     })();
 
-    // Replacement that results in two duplicate measurements.
-    (function testReplacementUpdateDuplicateIds() {
-        testUpdateOne({
-            initialDocList: [doc_t2023_m1_id1_a1, doc_t2022_m2_id2_a2],
-            updateQuery: {_id: 1},
-            updateObj: doc_t2022_m2_id2_a2,
-            resultDocList: [doc_t2022_m2_id2_a2, doc_t2022_m2_id2_a2],
-            nMatched: 1,
-        });
-    })();
-
     // Replacement that only references the meta field. Still fails because of the missing time
     // field.
     (function testReplacementMetaOnly() {
@@ -361,8 +325,9 @@ function testUpdateOne({
             initialDocList: [doc_t2023_m1_id1_a1],
             updateQuery: {[metaFieldName]: {$eq: 2}},
             updateObj: doc_t2022_m2_id2_a2,
-            resultDocList: [doc_t2023_m1_id1_a1, doc_t2022_m2_id2_a2],
-            upsert: true
+            resultDocList: [doc_t2023_m1_id1_a1],
+            upsert: true,
+            upsertedDoc: doc_t2022_m2_id2_a2,
         });
     })();
 
@@ -378,6 +343,152 @@ function testUpdateOne({
             upsert: true
         });
     })();
+
+    // Run a replacement upsert that includes an _id in the query.
+    (function testReplacementUpsertWithId() {
+        testUpdateOne({
+            initialDocList: [doc_t2023_m1_id1_a1],
+            updateQuery: {_id: 100},
+            updateObj: {[timeFieldName]: ISODate("2023-02-06T19:19:01Z"), a: 5},
+            upsert: true,
+            upsertedDoc: {_id: 100, [timeFieldName]: ISODate("2023-02-06T19:19:01Z"), a: 5},
+            resultDocList: [doc_t2023_m1_id1_a1],
+        });
+    })();
+}
+
+/**
+ * Tests upsert with multi:false.
+ */
+{
+    const dateTime = ISODate("2021-07-12T16:00:00Z");
+    const dateTimeUpdated = ISODate("2023-01-27T16:00:00Z");
+    const doc_id_1_a_b_no_metrics = {
+        _id: 1,
+        [timeFieldName]: dateTime,
+        [metaFieldName]: {a: "A", b: "B"},
+    };
+
+    // Run an upsert that doesn't include an _id.
+    (function testUpsertWithNoId() {
+        testUpdateOne({
+            initialDocList: [doc_id_1_a_b_no_metrics],
+            updateQuery: {[metaFieldName]: {z: "Z"}},
+            updateObj: {$set: {[timeFieldName]: dateTime}},
+            upsert: true,
+            upsertedDoc: {[metaFieldName]: {z: "Z"}, [timeFieldName]: dateTime},
+            resultDocList: [
+                doc_id_1_a_b_no_metrics,
+            ],
+        });
+    })();
+
+    // Run an upsert that includes an _id.
+    (function testUpsertWithId() {
+        testUpdateOne({
+            initialDocList: [doc_id_1_a_b_no_metrics],
+            updateQuery: {_id: 100},
+            updateObj: {$set: {[timeFieldName]: dateTime}},
+            upsert: true,
+            upsertedDoc: {_id: 100, [timeFieldName]: dateTime},
+            resultDocList: [
+                doc_id_1_a_b_no_metrics,
+            ],
+        });
+    })();
+
+    // Run an upsert that updates documents and skips the upsert.
+    (function testUpsertUpdatesDocs() {
+        testUpdateOne({
+            initialDocList: [doc_id_1_a_b_no_metrics],
+            updateQuery: {[metaFieldName + ".a"]: "A"},
+            updateObj: {$set: {f: 10}},
+            upsert: true,
+            resultDocList: [
+                {
+                    _id: 1,
+                    [timeFieldName]: dateTime,
+                    [metaFieldName]: {a: "A", b: "B"},
+                    f: 10,
+                },
+            ],
+            nMatched: 1,
+        });
+    })();
+
+    // Run an upsert that matches a bucket but no documents in it, and inserts the document into a
+    // bucket with the same parameters.
+    (function testUpsertIntoMatchedBucket() {
+        testUpdateOne({
+            initialDocList: [doc_id_1_a_b_no_metrics],
+            updateQuery: {[metaFieldName]: {a: "A", b: "B"}, f: 111},
+            updateObj: {$set: {[timeFieldName]: dateTime}},
+            upsert: true,
+            upsertedDoc: {[metaFieldName]: {a: "A", b: "B"}, [timeFieldName]: dateTime, f: 111},
+            resultDocList: [
+                doc_id_1_a_b_no_metrics,
+            ],
+        });
+    })();
+
+    // Run an upsert that doesn't insert a time field.
+    (function testUpsertNoTimeField() {
+        testUpdateOne({
+            initialDocList: [doc_id_1_a_b_no_metrics],
+            updateQuery: {[metaFieldName]: {z: "Z"}},
+            updateObj: {$set: {f: 10}},
+            upsert: true,
+            resultDocList: [
+                doc_id_1_a_b_no_metrics,
+            ],
+            failCode: ErrorCodes.BadValue,
+        });
+    })();
+
+    // Run an upsert where the time field is provided in the query.
+    (function testUpsertQueryOnTimeField() {
+        testUpdateOne({
+            initialDocList: [doc_id_1_a_b_no_metrics],
+            updateQuery: {[timeFieldName]: dateTimeUpdated},
+            updateObj: {$set: {f: 10}},
+            upsert: true,
+            upsertedDoc: {[timeFieldName]: dateTimeUpdated, f: 10},
+            resultDocList: [
+                doc_id_1_a_b_no_metrics,
+            ],
+        });
+    })();
+
+    // Run an upsert where a document to insert is supplied by the request.
+    (function testUpsertSupplyDoc() {
+        testUpdateOne({
+            initialDocList: [doc_id_1_a_b_no_metrics],
+            updateQuery: {[timeFieldName]: dateTimeUpdated},
+            updateObj: [{$set: {f: 10}}],
+            upsert: true,
+            upsertedDoc: {[timeFieldName]: dateTime, f: 100},
+            c: {new: {[timeFieldName]: dateTime, f: 100}},
+            resultDocList: [
+                doc_id_1_a_b_no_metrics,
+            ],
+        });
+    })();
+
+    // Run an upsert where a document to insert is supplied by the request and does not have a time
+    // field.
+    (function testUpsertSupplyDocNoTimeField() {
+        testUpdateOne({
+            initialDocList: [doc_id_1_a_b_no_metrics],
+            updateQuery: {[timeFieldName]: dateTimeUpdated},
+            updateObj: [{$set: {f: 10}}],
+            upsert: true,
+            c: {new: {[metaFieldName]: {a: "A"}, f: 100}},
+            resultDocList: [
+                doc_id_1_a_b_no_metrics,
+            ],
+            failCode: ErrorCodes.BadValue,
+        });
+    })();
 }
 
 /**
@@ -385,6 +496,7 @@ function testUpdateOne({
  * bytes).
  */
 (function testUpdateExceedsBucketSizeLimit() {
+    const testDB = getTestDB();
     const collName = "testUpdateExceedsBucketSizeLimit";
     const coll = testDB.getCollection(collName);
     prepareCollection({collName, initialDocList: []});
@@ -395,7 +507,8 @@ function testUpdateOne({
     while (batchNum < 4) {
         let batch = [];
         for (let i = 0; i < 30; i++) {
-            const doc = {_id: i, [timeFieldName]: ISODate(), value: "a".repeat(1000)};
+            const doc =
+                {_id: i, [timeFieldName]: ISODate("2023-07-13T17:00:00Z"), value: "a".repeat(1000)};
             batch.push(doc);
         }
 
@@ -404,11 +517,11 @@ function testUpdateOne({
     }
 
     // Update any of the measurements with a document which will exceed the 128000 byte threshold.
-    const chunkyDoc = {_id: 128000, [timeFieldName]: ISODate(), value: "a".repeat(10000)};
+    const chunkyDoc =
+        {_id: 128000, [timeFieldName]: ISODate("2023-07-13T17:00:00Z"), value: "a".repeat(10000)};
 
     const updateCommand = {update: collName, updates: [{q: {}, u: chunkyDoc, multi: false}]};
     const res = assert.commandWorked(testDB.runCommand(updateCommand));
     assert.eq(1, res.n, tojson(res));
     assert.eq(1, res.nModified, tojson(res));
-})();
 })();

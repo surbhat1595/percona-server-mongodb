@@ -29,48 +29,63 @@
 
 #include "mongo/db/repl/storage_interface_impl.h"
 
-#include <algorithm>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 #include <boost/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <limits>
+#include <mutex>
 #include <utility>
 
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/util/bson_extract.h"
-#include "mongo/db/auth/authorization_manager.h"
-#include "mongo/db/catalog/coll_mod.h"
-#include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/catalog/clustered_collection_options_gen.h"
 #include "mongo/db/catalog/collection_catalog_helper.h"
 #include "mongo/db/catalog/collection_write_path.h"
+#include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/change_stream_change_collection_manager.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/exec/delete_stage.h"
 #include "mongo/db/exec/update_stage.h"
-#include "mongo/db/exec/working_set_common.h"
+#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds_coordinator.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/delete_request_gen.h"
+#include "mongo/db/ops/parsed_delete.h"
 #include "mongo/db/ops/parsed_update.h"
 #include "mongo/db/ops/update_request.h"
+#include "mongo/db/ops/write_ops_parsers.h"
+#include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/internal_plans.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/record_id_bound.h"
+#include "mongo/db/record_id.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/collection_bulk_loader_impl.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/rollback_gen.h"
 #include "mongo/db/service_context.h"
@@ -79,10 +94,23 @@
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/control/storage_control.h"
 #include "mongo/db/storage/oplog_cap_maintainer_thread.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_util.h"
+#include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/transaction_resources.h"
+#include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/redaction.h"
+#include "mongo/platform/mutex.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/background.h"
+#include "mongo/util/concurrency/admission_context.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
@@ -92,7 +120,6 @@ namespace repl {
 
 MONGO_FAIL_POINT_DEFINE(holdStableTimestampAtSpecificTimestamp);
 
-const char StorageInterfaceImpl::kDefaultRollbackIdNamespace[] = "local.system.rollback.id";
 const char StorageInterfaceImpl::kRollbackIdFieldName[] = "rollbackId";
 const char StorageInterfaceImpl::kRollbackIdDocumentId[] = "rollbackId";
 
@@ -104,7 +131,7 @@ const auto kIdIndexName = "_id_"_sd;
 }  // namespace
 
 StorageInterfaceImpl::StorageInterfaceImpl()
-    : _rollbackIdNss(StorageInterfaceImpl::kDefaultRollbackIdNamespace) {}
+    : _rollbackIdNss(NamespaceString::kDefaultRollbackIdNamespace) {}
 
 StatusWith<int> StorageInterfaceImpl::getRollbackID(OperationContext* opCtx) {
     BSONObjBuilder bob;
@@ -219,8 +246,8 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
     private:
         ServiceContext::UniqueClient _stashedClient;
     } stash;
-    Client::setCurrent(
-        getGlobalServiceContext()->makeClient(str::stream() << nss.ns() << " loader"));
+    Client::setCurrent(getGlobalServiceContext()->makeClient(
+        str::stream() << NamespaceStringUtil::serialize(nss) << " loader"));
     auto opCtx = cc().makeOperationContext();
     opCtx->setEnforceConstraints(false);
 
@@ -343,8 +370,7 @@ Status insertDocumentsSingleBatch(OperationContext* opCtx,
     boost::optional<AutoGetOplog> autoOplog;
     const CollectionPtr* collection;
 
-    auto nss = nsOrUUID.nss();
-    if (nss && nss->isOplog()) {
+    if (nsOrUUID.isNamespaceString() && nsOrUUID.nss().isOplog()) {
         // Simplify locking rules for oplog collection.
         autoOplog.emplace(opCtx, OplogAccessMode::kWrite);
         collection = &autoOplog->getCollection();
@@ -401,7 +427,7 @@ Status StorageInterfaceImpl::dropReplicatedDatabases(OperationContext* opCtx) {
     auto databaseHolder = DatabaseHolder::get(opCtx);
     auto hasLocalDatabase = false;
     for (const auto& dbName : dbNames) {
-        if (dbName.db() == DatabaseName::kLocal.db()) {
+        if (dbName.isLocalDB()) {
             hasLocalDatabase = true;
             continue;
         }
@@ -525,7 +551,7 @@ Status StorageInterfaceImpl::dropCollection(OperationContext* opCtx, const Names
                 return Status::OK();
             }
             WriteUnitOfWork wunit(opCtx);
-            const auto status = autoDb.getDb()->dropCollectionEvenIfSystem(opCtx, nss);
+            auto status = autoDb.getDb()->dropCollectionEvenIfSystem(opCtx, nss);
             if (!status.isOK()) {
                 return status;
             }
@@ -548,7 +574,7 @@ Status StorageInterfaceImpl::truncateCollection(OperationContext* opCtx,
         }
 
         WriteUnitOfWork wunit(opCtx);
-        const auto status = autoColl.getWritableCollection(opCtx)->truncate(opCtx);
+        auto status = autoColl.getWritableCollection(opCtx)->truncate(opCtx);
         if (!status.isOK()) {
             return status;
         }
@@ -578,7 +604,7 @@ Status StorageInterfaceImpl::renameCollection(OperationContext* opCtx,
                               << fromNS.dbName().toStringForErrorMsg() << " not found.");
         }
         WriteUnitOfWork wunit(opCtx);
-        const auto status = autoDB.getDb()->renameCollection(opCtx, fromNS, toNS, stayTemp);
+        auto status = autoDB.getDb()->renameCollection(opCtx, fromNS, toNS, stayTemp);
         if (!status.isOK()) {
             return status;
         }
@@ -682,8 +708,9 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
                               collectionAccessMode);
         if (!collection.exists()) {
             return Status{ErrorCodes::NamespaceNotFound,
-                          str::stream() << "Collection [" << nsOrUUID.toString() << "] not found. "
-                                        << "Unable to proceed with " << opStr << "."};
+                          str::stream()
+                              << "Collection [" << nsOrUUID.toStringForErrorMsg() << "] not found. "
+                              << "Unable to proceed with " << opStr << "."};
         }
 
         auto isForward = scanDirection == StorageInterface::ScanDirection::kForward;
@@ -834,8 +861,7 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
                     docs.push_back(out.getOwned());
                 }
             }
-        } catch (const WriteConflictException&) {
-            // Re-throw the WCE, since it will get caught be a retry loop at a higher level.
+        } catch (const StorageUnavailableException&) {
             throw;
         } catch (const DBException&) {
             return exceptionToStatus();
@@ -985,7 +1011,7 @@ Status _updateWithQuery(OperationContext* opCtx,
         if (!collection.exists()) {
             return Status{ErrorCodes::NamespaceNotFound,
                           str::stream()
-                              << "Collection [" << nss.toString() << "] not found. "
+                              << "Collection [" << nss.toStringForErrorMsg() << "] not found. "
                               << "Unable to update documents in " << nss.toStringForErrorMsg()
                               << " using query " << request.getQuery()};
         }
@@ -1015,8 +1041,7 @@ Status _updateWithQuery(OperationContext* opCtx,
         try {
             // The update result is ignored.
             [[maybe_unused]] auto updateResult = planExecutor->executeUpdate();
-        } catch (const WriteConflictException&) {
-            // Re-throw the WCE, since it will get caught and retried at a higher level.
+        } catch (const StorageUnavailableException&) {
             throw;
         } catch (const DBException&) {
             return exceptionToStatus();
@@ -1048,8 +1073,9 @@ Status StorageInterfaceImpl::upsertById(OperationContext* opCtx,
                               MODE_IX);
         if (!collection.exists()) {
             return Status{ErrorCodes::NamespaceNotFound,
-                          str::stream() << "Collection [" << nsOrUUID.toString() << "] not found. "
-                                        << "Unable to update document."};
+                          str::stream()
+                              << "Collection [" << nsOrUUID.toStringForErrorMsg() << "] not found. "
+                              << "Unable to update document."};
         }
 
         // We can create an UpdateRequest now that the collection's namespace has been resolved, in
@@ -1092,8 +1118,7 @@ Status StorageInterfaceImpl::upsertById(OperationContext* opCtx,
         try {
             // The update result is ignored.
             [[maybe_unused]] auto updateResult = planExecutor->executeUpdate();
-        } catch (const WriteConflictException&) {
-            // Re-throw the WCE, since it will get caught and retried at a higher level.
+        } catch (const StorageUnavailableException&) {
             throw;
         } catch (const DBException&) {
             return exceptionToStatus();
@@ -1147,9 +1172,10 @@ Status StorageInterfaceImpl::deleteByFilter(OperationContext* opCtx,
             MODE_IX);
         if (!collection.exists()) {
             return Status{ErrorCodes::NamespaceNotFound,
-                          str::stream() << "Collection [" << nss.toString() << "] not found. "
-                                        << "Unable to delete documents in "
-                                        << nss.toStringForErrorMsg() << " using filter " << filter};
+                          str::stream()
+                              << "Collection [" << nss.toStringForErrorMsg() << "] not found. "
+                              << "Unable to delete documents in " << nss.toStringForErrorMsg()
+                              << " using filter " << filter};
         }
 
         // ParsedDelete needs to be inside the write conflict retry loop because it may create a
@@ -1171,8 +1197,7 @@ Status StorageInterfaceImpl::deleteByFilter(OperationContext* opCtx,
         try {
             // The count of deleted documents is ignored.
             [[maybe_unused]] auto nDeleted = planExecutor->executeDelete();
-        } catch (const WriteConflictException&) {
-            // Re-throw the WCE, since it will get caught and retried at a higher level.
+        } catch (const StorageUnavailableException&) {
             throw;
         } catch (const DBException&) {
             return exceptionToStatus();
@@ -1224,13 +1249,13 @@ boost::optional<BSONObj> StorageInterfaceImpl::findOplogEntryLessThanOrEqualToTi
     while (true) {
         try {
             return findOplogEntryLessThanOrEqualToTimestamp(opCtx, oplogCollection, timestamp);
-        } catch (const WriteConflictException&) {
+        } catch (const StorageUnavailableException&) {
             // This will log a message about the conflict initially and then every 5 seconds, with
             // the current rather arbitrary settings.
             if (retries % 10 == 0) {
-                LOGV2(4795900,
-                      "Reading the oplog collection conflicts with a validate cmd. Continuing to "
-                      "retry.",
+                LOGV2(7754201,
+                      "Got a StorageUnavailableException while reading the oplog. This "
+                      "could be due to conflict with a validate cmd. Continuing to retry.",
                       "retries"_attr = retries);
             }
 
@@ -1485,7 +1510,7 @@ boost::optional<Timestamp> StorageInterfaceImpl::getLastStableRecoveryTimestamp(
         return boost::none;
     }
 
-    const auto ret = serviceCtx->getStorageEngine()->getLastStableRecoveryTimestamp();
+    auto ret = serviceCtx->getStorageEngine()->getLastStableRecoveryTimestamp();
     if (ret == boost::none) {
         return Timestamp::min();
     }

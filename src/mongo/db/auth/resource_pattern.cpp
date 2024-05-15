@@ -27,11 +27,8 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include <iostream>
-
 #include "mongo/db/auth/resource_pattern.h"
+#include "mongo/util/namespace_string_util.h"
 
 
 namespace mongo {
@@ -43,22 +40,22 @@ std::string ResourcePattern::toString() const {
         case MatchTypeEnum::kMatchClusterResource:
             return "<system resource>";
         case MatchTypeEnum::kMatchDatabaseName:
-            return "<database " + _ns.db().toString() + ">";
+            return "<database " + DatabaseNameUtil::serializeForAuth(_ns.dbName()) + ">";
         case MatchTypeEnum::kMatchCollectionName:
             return "<collection " + _ns.coll().toString() + " in any database>";
         case MatchTypeEnum::kMatchExactNamespace:
-            return "<" + _ns.ns() + ">";
+            return "<" + NamespaceStringUtil::serializeForAuth(_ns) + ">";
         case MatchTypeEnum::kMatchAnyNormalResource:
             return "<all normal resources>";
         case MatchTypeEnum::kMatchAnyResource:
             return "<all resources>";
         case MatchTypeEnum::kMatchExactSystemBucketResource:
-            return "<" + _ns.db().toString() + ".system.bucket" + _ns.coll().toString() +
-                " resources>";
+            return "<" + DatabaseNameUtil::serializeForAuth(_ns.dbName()) + ".system.bucket" +
+                _ns.coll().toString() + " resources>";
         case MatchTypeEnum::kMatchSystemBucketInAnyDBResource:
             return "<any system.bucket." + _ns.coll().toString() + ">";
         case MatchTypeEnum::kMatchAnySystemBucketInDBResource:
-            return "<" + _ns.db().toString() + "system.bucket.*>";
+            return "<" + DatabaseNameUtil::serializeForAuth(_ns.dbName()) + "system.bucket.*>";
         case MatchTypeEnum::kMatchAnySystemBucketResource:
             return "<any system.bucket resources>";
         default:

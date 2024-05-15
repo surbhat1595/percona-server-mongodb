@@ -264,7 +264,7 @@ executor:
   config:
     shell_options:
       eval: >-
-        testingReplication = true;
+        globalThis.testingReplication = true;
         load('jstests/libs/override_methods/inject_tenant_prefix.js');
         load('jstests/libs/override_methods/enable_sessions.js');
         load('jstests/libs/override_methods/txn_passthrough_cmd_massage.js');
@@ -328,9 +328,6 @@ executor:
         # so. Therefore, the garbage collection delay doesn't need to be large.
         tenantMigrationGarbageCollectionDelayMS: 1
         ttlMonitorSleepSecs: 1
-        # Tenant migrations is not currently compatible with implicitly replicated retryable
-        # findAndModify images.
-        storeFindAndModifyImagesInSideCollection: false
         minSnapshotHistoryWindowInSeconds: 30
       tlsMode: allowTLS
       tlsCAFile: jstests/libs/ca.pem

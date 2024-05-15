@@ -3,17 +3,12 @@
  *
  * @tags: [
  *  requires_sharding,
- *  requires_fcv_70,
+ *  requires_fcv_71,
  *  uses_transactions,
  *  uses_multi_shard_transaction,
- *  featureFlagUpdateOneWithoutShardKey,
  * ]
  */
 
-(function() {
-"use strict";
-
-load("jstests/libs/feature_flag_util.js");
 load("jstests/sharding/updateOne_without_shard_key/libs/write_without_shard_key_test_util.js");
 
 // Make sure we're testing with no implicit session.
@@ -104,4 +99,3 @@ configurations.forEach(config => {
 });
 
 st.stop();
-})();

@@ -30,13 +30,21 @@
 
 #pragma once
 
+#include <memory>
+#include <string>
+#include <vector>
+
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/catalog/multi_index_block.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/record_id.h"
 #include "mongo/db/repl/collection_bulk_loader.h"
 #include "mongo/db/repl/storage_interface.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/shard_role.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 namespace repl {
@@ -73,9 +81,6 @@ public:
 
     CollectionBulkLoaderImpl::Stats getStats() const;
 
-    virtual std::string toString() const override;
-    virtual BSONObj toBSON() const override;
-
 private:
     void _releaseResources();
 
@@ -103,7 +108,7 @@ private:
 
     ServiceContext::UniqueClient _client;
     ServiceContext::UniqueOperationContext _opCtx;
-    ScopedCollectionAcquisition _acquisition;
+    CollectionAcquisition _acquisition;
     NamespaceString _nss;
     std::unique_ptr<MultiIndexBlock> _idIndexBlock;
     std::unique_ptr<MultiIndexBlock> _secondaryIndexesBlock;

@@ -29,6 +29,12 @@
 
 #pragma once
 
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -38,10 +44,15 @@
 
 #include "mongo/db/query/optimizer/algebra/operator.h"
 #include "mongo/db/query/optimizer/defs.h"
+#include "mongo/db/query/optimizer/index_bounds.h"
 #include "mongo/db/query/optimizer/metadata.h"
+#include "mongo/db/query/optimizer/partial_schema_requirements.h"
 #include "mongo/db/query/optimizer/props.h"
 #include "mongo/db/query/optimizer/syntax/expr.h"
 #include "mongo/db/query/optimizer/syntax/path.h"
+#include "mongo/db/query/optimizer/syntax/syntax.h"
+#include "mongo/db/query/util/named_enum.h"
+#include "mongo/util/assert_util.h"
 
 
 namespace mongo::optimizer {
@@ -430,11 +441,14 @@ private:
  * RID union node.
  * This is a logical node representing index-index unioning. Used for index OR-ing.
  */
-class RIDUnionNode final : public ABTOpFixedArity<2>, public ExclusivelyLogicalNode {
-    using Base = ABTOpFixedArity<2>;
+class RIDUnionNode final : public ABTOpFixedArity<4>, public ExclusivelyLogicalNode {
+    using Base = ABTOpFixedArity<4>;
 
 public:
-    RIDUnionNode(ProjectionName scanProjectionName, ABT leftChild, ABT rightChild);
+    RIDUnionNode(ProjectionName scanProjectionName,
+                 ProjectionNameVector unionProjectionNames,
+                 ABT leftChild,
+                 ABT rightChild);
 
     bool operator==(const RIDUnionNode& other) const;
 
@@ -443,6 +457,8 @@ public:
 
     const ABT& getRightChild() const;
     ABT& getRightChild();
+
+    const ExpressionBinder& binder() const;
 
     const ProjectionName& getScanProjectionName() const;
 
@@ -534,8 +550,7 @@ private:
     F(Right)         \
     F(Full)
 
-MAKE_PRINTABLE_ENUM(JoinType, JOIN_TYPE);
-MAKE_PRINTABLE_ENUM_STRING_ARRAY(JoinTypeEnum, JoinType, JOIN_TYPE);
+QUERY_UTIL_NAMED_ENUM_DEFINE(JoinType, JOIN_TYPE);
 #undef JOIN_TYPE
 
 /**
@@ -762,8 +777,7 @@ private:
     F(Local)                     \
     F(Global)
 
-MAKE_PRINTABLE_ENUM(GroupNodeType, GROUPNODETYPE_OPNAMES);
-MAKE_PRINTABLE_ENUM_STRING_ARRAY(GroupNodeTypeEnum, GroupNodeType, GROUPNODETYPE_OPNAMES);
+QUERY_UTIL_NAMED_ENUM_DEFINE(GroupNodeType, GROUPNODETYPE_OPNAMES);
 #undef GROUPNODETYPE_OPNAMES
 
 /**
@@ -912,10 +926,7 @@ private:
     F(Eager)                           \
     F(Lazy)
 
-MAKE_PRINTABLE_ENUM(SpoolProducerType, SPOOL_PRODUCER_TYPE_OPNAMES);
-MAKE_PRINTABLE_ENUM_STRING_ARRAY(SpoolProducerTypeEnum,
-                                 SpoolProducerType,
-                                 SPOOL_PRODUCER_TYPE_OPNAMES);
+QUERY_UTIL_NAMED_ENUM_DEFINE(SpoolProducerType, SPOOL_PRODUCER_TYPE_OPNAMES);
 #undef SPOOL_PRODUCER_TYPE_OPNAMES
 
 /**
@@ -967,10 +978,7 @@ private:
     F(Stack)                           \
     F(Regular)
 
-MAKE_PRINTABLE_ENUM(SpoolConsumerType, SPOOL_CONSUMER_TYPE_OPNAMES);
-MAKE_PRINTABLE_ENUM_STRING_ARRAY(SpoolConsumerTypeEnum,
-                                 SpoolConsumerType,
-                                 SPOOL_CONSUMER_TYPE_OPNAMES);
+QUERY_UTIL_NAMED_ENUM_DEFINE(SpoolConsumerType, SPOOL_CONSUMER_TYPE_OPNAMES);
 #undef SPOOL_CONSUMER_TYPE_OPNAMES
 
 /**

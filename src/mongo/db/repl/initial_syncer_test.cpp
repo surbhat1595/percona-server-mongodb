@@ -28,57 +28,94 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <functional>
 #include <iosfwd>
+#include <list>
+#include <map>
 #include <memory>
 #include <ostream>
+#include <ratio>
+#include <utility>
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/client.h"
+#include "mongo/db/cursor_id.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/feature_compatibility_version_document_gen.h"
-#include "mongo/db/feature_compatibility_version_parser.h"
+#include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/index_builds_coordinator_mongod.h"
-#include "mongo/db/json.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/repl/collection_cloner.h"
 #include "mongo/db/repl/data_replicator_external_state_mock.h"
 #include "mongo/db/repl/initial_syncer.h"
-#include "mongo/db/repl/member_state.h"
+#include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/oplog_fetcher.h"
 #include "mongo/db/repl/oplog_fetcher_mock.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/repl/repl_server_parameters_gen.h"
+#include "mongo/db/repl/repl_set_config.h"
+#include "mongo/db/repl/replication_consistency_markers.h"
 #include "mongo/db/repl/replication_consistency_markers_impl.h"
 #include "mongo/db/repl/replication_consistency_markers_mock.h"
+#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/replication_recovery_mock.h"
-#include "mongo/db/repl/reporter.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_mock.h"
-#include "mongo/db/repl/sync_source_resolver.h"
 #include "mongo/db/repl/sync_source_selector.h"
 #include "mongo/db/repl/sync_source_selector_mock.h"
 #include "mongo/db/repl/task_executor_mock.h"
-#include "mongo/db/repl/update_position_args.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/server_parameter.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_id.h"
+#include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_engine_mock.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/dbtests/mock/mock_dbclient_connection.h"
+#include "mongo/dbtests/mock/mock_remote_db_server.h"
 #include "mongo/executor/mock_network_fixture.h"
+#include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_mock.h"
+#include "mongo/executor/remote_command_request.h"
+#include "mongo/executor/remote_command_response.h"
+#include "mongo/executor/task_executor_test_fixture.h"
+#include "mongo/executor/thread_pool_mock.h"
+#include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
+#include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
 #include "mongo/platform/mutex.h"
+#include "mongo/rpc/metadata/oplog_query_metadata.h"
+#include "mongo/rpc/metadata/repl_set_metadata.h"
+#include "mongo/stdx/type_traits.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/bson_test_util.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/clock_source.h"
 #include "mongo/util/clock_source_mock.h"
-#include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
+#include "mongo/util/uuid.h"
 #include "mongo/util/version/releases.h"
-
-#include "mongo/logv2/log.h"
-#include "mongo/unittest/barrier.h"
-#include "mongo/unittest/unittest.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -361,6 +398,11 @@ protected:
         };
 
         auto* service = getGlobalServiceContext();
+
+        auto replSettings = createServerlessReplSettings();
+        auto replCoord = std::make_unique<repl::ReplicationCoordinatorMock>(service, replSettings);
+        repl::ReplicationCoordinator::set(service, std::move(replCoord));
+
         service->setFastClockSource(std::make_unique<ClockSourceMock>());
         service->setPreciseClockSource(std::make_unique<ClockSourceMock>());
         ThreadPool::Options dbThreadPoolOptions;
@@ -392,8 +434,7 @@ protected:
         _mockServer->setCommandReply("listDatabases", makeListDatabasesResponse({}));
         _options1.uuid = UUID::gen();
 
-        _mockServer->insert(NamespaceString::createNamespaceString_forTest(
-                                ReplicationConsistencyMarkersImpl::kDefaultInitialSyncIdNamespace),
+        _mockServer->insert(NamespaceString::kDefaultInitialSyncIdNamespace,
                             BSON("_id" << UUID::gen()));
 
         reset();
@@ -2987,7 +3028,7 @@ TEST_F(
             const NamespaceStringOrUUID& nsOrUUID,
             const TimestampedBSONObj& doc,
             long long term) {
-            insertDocumentNss = *nsOrUUID.nss();
+            insertDocumentNss = nsOrUUID.nss();
             insertDocumentDoc = doc;
             insertDocumentTerm = term;
             return Status(ErrorCodes::OperationFailed, "failed to insert oplog entry");
@@ -3056,7 +3097,7 @@ TEST_F(
             const NamespaceStringOrUUID& nsOrUUID,
             const TimestampedBSONObj& doc,
             long long term) {
-            insertDocumentNss = *nsOrUUID.nss();
+            insertDocumentNss = nsOrUUID.nss();
             insertDocumentDoc = doc;
             insertDocumentTerm = term;
             initialSyncer->shutdown().transitional_ignore();
@@ -3601,7 +3642,7 @@ TEST_F(InitialSyncerTest, LastOpTimeShouldBeSetEvenIfNoOperationsAreAppliedAfter
         // sync source.  We must do this setup before responding to the FCV, to avoid a race.
         NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.a");
         _mockServer->setCommandReply("listDatabases",
-                                     makeListDatabasesResponse({nss.db().toString()}));
+                                     makeListDatabasesResponse({nss.db_forTest().toString()}));
 
         // Set up data for "a"
         _mockServer->assignCollectionUuid(nss.ns_forTest(), *_options1.uuid);
@@ -4291,7 +4332,7 @@ TEST_F(InitialSyncerTest,
         // sync source.  We must do this setup before responding to the FCV, to avoid a race.
         NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.a");
         _mockServer->setCommandReply("listDatabases",
-                                     makeListDatabasesResponse({nss.db().toString()}));
+                                     makeListDatabasesResponse({nss.db_forTest().toString()}));
 
 
         // Set up data for "a"
@@ -4498,7 +4539,7 @@ TEST_F(InitialSyncerTest, TestRemainingInitialSyncEstimatedMillisMetric) {
         // We do not populate database 'b' with data as we don't actually complete initial sync in
         // this test.
         _mockServer->setCommandReply("listDatabases",
-                                     makeListDatabasesResponse({nss.db().toString(), "b"}));
+                                     makeListDatabasesResponse({nss.db_forTest().toString(), "b"}));
         // The AllDatabaseCloner post stage calls dbStats to record initial sync progress
         // metrics. This will be used to calculate both the data size of "a" and "b".
         _mockServer->setCommandReply("dbStats", BSON("dataSize" << dbSize));
@@ -4745,7 +4786,7 @@ TEST_F(InitialSyncerTest, GetInitialSyncProgressReturnsCorrectProgress) {
         // listDatabases: a
         NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.a");
         _mockServer->setCommandReply("listDatabases",
-                                     makeListDatabasesResponse({nss.db().toString()}));
+                                     makeListDatabasesResponse({nss.db_forTest().toString()}));
         // The AllDatabaseCloner post stage calls dbStats to record initial sync progress metrics.
         _mockServer->setCommandReply("dbStats", BSON("dataSize" << 10));
 
@@ -5122,7 +5163,7 @@ TEST_F(InitialSyncerTest, GetInitialSyncProgressOmitsClonerStatsIfClonerStatsExc
             // listDatabases
             NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.a");
             _mockServer->setCommandReply("listDatabases",
-                                         makeListDatabasesResponse({nss.db().toString()}));
+                                         makeListDatabasesResponse({nss.db_forTest().toString()}));
 
             // listCollections for "a"
             // listCollections data has to be broken up or it will trigger BSONObjTooLarge

@@ -2,7 +2,6 @@
 // involving the 'updateDescription' field can push down the $match and rewrite the $match and make
 // it part of the oplog cursor's filter in order to filter out results as early as possible.
 // @tags: [
-//   featureFlagChangeStreamsRewrite,
 //   requires_fcv_51,
 //   requires_pipeline_optimization,
 //   requires_sharding,
@@ -11,10 +10,10 @@
 //   assumes_unsharded_collection,
 //   assumes_read_preference_unchanged
 // ]
-(function() {
-"use strict";
-
-load("jstests/libs/change_stream_rewrite_util.js");  // For rewrite helpers.
+import {
+    createShardedCollection,
+    verifyChangeStreamOnWholeCluster
+} from "jstests/libs/change_stream_rewrite_util.js";
 
 const dbName = "change_stream_match_pushdown_updateDescription_rewrite";
 const collName = "change_stream_match_pushdown_updateDescription_rewrite";
@@ -267,4 +266,3 @@ verifyOnWholeCluster(
     [1, 0] /*expectedChangeStreamDocsForEachShard*/);
 
 st.stop();
-})();

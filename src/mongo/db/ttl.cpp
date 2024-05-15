@@ -30,42 +30,105 @@
 
 #include "mongo/db/ttl.h"
 
+// IWYU pragma: no_include "cxxabi.h"
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr.hpp>
+#include <cstdint>
+#include <limits>
+#include <mutex>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/oid.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/auth/user_name.h"
 #include "mongo/db/catalog/coll_mod.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/client.h"
+#include "mongo/db/coll_mod_gen.h"
 #include "mongo/db/commands/fsync_locked.h"
 #include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/exec/batched_delete_stage.h"
+#include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/exec/delete_stage.h"
+#include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/index_names.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/insert.h"
+#include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/find_command.h"
+#include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/internal_plans.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/record_id_bound.h"
 #include "mongo/db/record_id_helpers.h"
+#include "mongo/db/repl/member_state.h"
+#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/tenant_migration_access_blocker.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_registry.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
+#include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/db/ttl_collection_cache.h"
 #include "mongo/db/ttl_gen.h"
+#include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/s/catalog_cache.h"
+#include "mongo/s/chunk_version.h"
+#include "mongo/s/database_version.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/index_version.h"
+#include "mongo/s/shard_version.h"
 #include "mongo/s/shard_version_factory.h"
+#include "mongo/s/sharding_index_catalog_cache.h"
+#include "mongo/s/stale_exception.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/background.h"
+#include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/future.h"
+#include "mongo/util/future_impl.h"
 #include "mongo/util/log_with_sampling.h"
+#include "mongo/util/scopeguard.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/timer.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
 
@@ -74,11 +137,6 @@ namespace mongo {
 
 namespace {
 const auto getTTLMonitor = ServiceContext::declareDecoration<std::unique_ptr<TTLMonitor>>();
-
-bool isBatchingEnabled() {
-    return feature_flags::gBatchMultiDeletes.isEnabled(serverGlobalParams.featureCompatibility) &&
-        ttlMonitorBatchDeletes.load();
-}
 
 // When batching is enabled, returns BatchedDeleteStageParams that limit the amount of work done in
 // a delete such that it is possible not all expired documents will be removed. Returns nullptr
@@ -394,9 +452,9 @@ void TTLMonitor::run() {
         }
 
         try {
-            _doTTLPass();
-        } catch (const WriteConflictException&) {
-            LOGV2_DEBUG(22531, 1, "got WriteConflictException");
+            const auto opCtxPtr = cc().makeOperationContext();
+            writeConflictRetry(
+                opCtxPtr.get(), "TTL pass", NamespaceString(), [&] { _doTTLPass(opCtxPtr.get()); });
         } catch (const DBException& ex) {
             LOGV2_WARNING(22537,
                           "TTLMonitor was interrupted, waiting before doing another pass",
@@ -417,9 +475,7 @@ void TTLMonitor::shutdown() {
     LOGV2(3684101, "Finished shutting down TTL collection monitor thread");
 }
 
-void TTLMonitor::_doTTLPass() {
-    const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
-    OperationContext* opCtx = opCtxPtr.get();
+void TTLMonitor::_doTTLPass(OperationContext* opCtx) {
 
     hangTTLMonitorBetweenPasses.pauseWhileSet(opCtx);
 
@@ -509,13 +565,7 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
                                    TTLCollectionCache* ttlCollectionCache,
                                    const UUID& uuid,
                                    const TTLCollectionCache::Info& info) {
-    // Skip collections that have not been made visible yet. The TTLCollectionCache
-    // already has the index information available, so we want to avoid removing it
-    // until the collection is visible.
     auto collectionCatalog = CollectionCatalog::get(opCtx);
-    if (collectionCatalog->isCollectionAwaitingVisibility(uuid)) {
-        return false;
-    }
 
     // The collection was dropped.
     auto nss = collectionCatalog->lookupNSSByUUID(opCtx, uuid);
@@ -560,10 +610,12 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
         if (!coll.exists() || coll.uuid() != uuid)
             return false;
 
-        // Allow TTL deletion on non-capped collections, and on capped clustered collections.
         const auto& collectionPtr = coll.getCollectionPtr();
-        invariant(!collectionPtr->isCapped() ||
-                  (collectionPtr->isCapped() && collectionPtr->isClustered()));
+        if (!feature_flags::gFeatureFlagTTLIndexesOnCappedCollections.isEnabled(
+                serverGlobalParams.featureCompatibility) &&
+            collectionPtr->isCapped() && !collectionPtr->isClustered()) {
+            return false;
+        }
 
         if (MONGO_unlikely(hangTTLMonitorWithLock.shouldFail())) {
             LOGV2(22534,
@@ -657,7 +709,7 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
 
 bool TTLMonitor::_deleteExpiredWithIndex(OperationContext* opCtx,
                                          TTLCollectionCache* ttlCollectionCache,
-                                         const ScopedCollectionAcquisition& collection,
+                                         const CollectionAcquisition& collection,
                                          std::string indexName) {
     const auto& collectionPtr = collection.getCollectionPtr();
     if (!collectionPtr->isIndexPresent(indexName)) {
@@ -710,7 +762,7 @@ bool TTLMonitor::_deleteExpiredWithIndex(OperationContext* opCtx,
     // Maintain a consistent view of whether batching is enabled - batching depends on
     // parameters that can be set at runtime, and it is illegal to try to get
     // BatchedDeleteStageStats from a non-batched delete.
-    bool batchingEnabled = isBatchingEnabled();
+    const bool batchingEnabled = ttlMonitorBatchDeletes.load();
 
     Timer timer;
     auto exec = InternalPlanner::deleteWithIndexScan(opCtx,
@@ -756,7 +808,7 @@ bool TTLMonitor::_deleteExpiredWithIndex(OperationContext* opCtx,
 
 bool TTLMonitor::_deleteExpiredWithCollscan(OperationContext* opCtx,
                                             TTLCollectionCache* ttlCollectionCache,
-                                            const ScopedCollectionAcquisition& collection) {
+                                            const CollectionAcquisition& collection) {
     const auto& collectionPtr = collection.getCollectionPtr();
     const auto& collOptions = collectionPtr->getCollectionOptions();
     uassert(5400701,
@@ -783,7 +835,7 @@ bool TTLMonitor::_deleteExpiredWithCollscan(OperationContext* opCtx,
     // Maintain a consistent view of whether batching is enabled - batching depends on
     // parameters that can be set at runtime, and it is illegal to try to get
     // BatchedDeleteStageStats from a non-batched delete.
-    bool batchingEnabled = isBatchingEnabled();
+    const bool batchingEnabled = ttlMonitorBatchDeletes.load();
 
     // Deletes records using a bounded collection scan from the beginning of time to the
     // expiration time (inclusive).
@@ -848,9 +900,6 @@ void TTLMonitor::onStepUp(OperationContext* opCtx) {
     auto ttlInfos = ttlCollectionCache.getTTLInfos();
     for (const auto& [uuid, infos] : ttlInfos) {
         auto collectionCatalog = CollectionCatalog::get(opCtx);
-        if (collectionCatalog->isCollectionAwaitingVisibility(uuid)) {
-            continue;
-        }
 
         // The collection was dropped.
         auto nss = collectionCatalog->lookupNSSByUUID(opCtx, uuid);

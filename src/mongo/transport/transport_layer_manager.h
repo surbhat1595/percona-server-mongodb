@@ -29,17 +29,38 @@
 
 #pragma once
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
+#include <memory>
+#include <mutex>
+#include <utility>
 #include <vector>
 
 #include "mongo/base/status.h"
-#include "mongo/config.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/baton.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/wire_version.h"
+#include "mongo/executor/connection_metrics.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/transport/session.h"
+#include "mongo/transport/ssl_connection_context.h"
 #include "mongo/transport/transport_layer.h"
+#include "mongo/util/assert_util_core.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/future.h"
 #include "mongo/util/hierarchical_acquisition.h"
+#include "mongo/util/net/hostandport.h"
+#include "mongo/util/net/ssl_manager.h"
+#include "mongo/util/net/ssl_options.h"
 #include "mongo/util/time_support.h"
-
-#include <boost/optional.hpp>
 
 namespace mongo {
 struct ServerGlobalParams;
@@ -58,12 +79,14 @@ class TransportLayerManager final : public TransportLayer {
     TransportLayerManager& operator=(const TransportLayerManager&) = delete;
 
 public:
+    /**
+     * connect() and the other egress related methods will use the provided egressLayer argument
+     * for egress networking. This pointer must be associated with one of the layers in the provided
+     * list.
+     */
     explicit TransportLayerManager(std::vector<std::unique_ptr<TransportLayer>> tls,
-                                   const WireSpec& wireSpec = WireSpec::instance())
-        : TransportLayer(wireSpec), _tls(std::move(tls)) {}
-
-    explicit TransportLayerManager(const WireSpec& wireSpec = WireSpec::instance())
-        : TransportLayer(wireSpec) {}
+                                   TransportLayer* egressLayer,
+                                   const WireSpec& wireSpec = WireSpec::instance());
 
     StatusWith<std::shared_ptr<Session>> connect(
         HostAndPort peer,
@@ -84,6 +107,10 @@ public:
     void appendStatsForServerStatus(BSONObjBuilder* bob) const override;
     void appendStatsForFTDC(BSONObjBuilder& bob) const override;
 
+    /**
+     * Gets a handle to the reactor assoicated with the transport layer that is configured for
+     * egress networking.
+     */
     ReactorHandle getReactor(WhichReactor which) override;
 
     // TODO This method is not called anymore, but may be useful to add new TransportLayers
@@ -106,11 +133,12 @@ public:
 
     static std::unique_ptr<TransportLayer> makeAndStartDefaultEgressTransportLayer();
 
+    /**
+     * Makes a baton using the transport layer that is configured for egress networking.
+     */
     BatonHandle makeBaton(OperationContext* opCtx) const override {
         stdx::lock_guard<Latch> lk(_tlsMutex);
-        // TODO: figure out what to do about managers with more than one transport layer.
-        invariant(_tls.size() == 1);
-        return _tls[0]->makeBaton(opCtx);
+        return _egressLayer->makeBaton(opCtx);
     }
 
 #ifdef MONGO_CONFIG_SSL
@@ -127,6 +155,7 @@ private:
     mutable Mutex _tlsMutex =
         MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(1), "TransportLayerManager::_tlsMutex");
     std::vector<std::unique_ptr<TransportLayer>> _tls;
+    TransportLayer* const _egressLayer;
 };
 
 }  // namespace transport

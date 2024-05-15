@@ -28,11 +28,17 @@
  */
 
 #include "mongo/db/fts/fts_element_iterator.h"
-#include "mongo/db/fts/fts_spec.h"
-#include "mongo/db/fts/fts_util.h"
-#include "mongo/util/str.h"
 
+#include <map>
+#include <ostream>
 #include <stack>
+#include <utility>
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/fts/fts_spec.h"
+#include "mongo/util/str.h"
 
 namespace mongo {
 
@@ -106,6 +112,11 @@ FTSIteratorValue FTSElementIterator::advance() {
 
         // Skip "language" specifier fields if wildcard.
         if (_spec.wildcard() && _spec.languageOverrideField() == fieldName) {
+            continue;
+        }
+
+        // SERVER-78238: fields whose name contains a dot or starts with a '$' are not indexable.
+        if (fieldName.find_first_of('.') != string::npos || fieldName.starts_with('$')) {
             continue;
         }
 

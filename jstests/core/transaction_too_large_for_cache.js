@@ -7,6 +7,7 @@
  *   requires_persistence,
  *   requires_non_retryable_writes,
  *   requires_wiredtiger,
+ *   // TODO (SERVER-72880): Fix SELinux Test Executor Failures
  *   no_selinux
  * ]
  */
@@ -24,6 +25,7 @@ if (!storageEngineIsWiredTiger()) {
 const doc = {
     x: []
 };
+// Approximate the max BSON object size (16MB)
 for (var j = 0; j < 334000; j++) {
     doc.x.push("" + Math.random() + Math.random());
 }

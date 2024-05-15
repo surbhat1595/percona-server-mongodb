@@ -6,10 +6,7 @@
  *   requires_sharding,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/config_shard_util.js");
+import {ConfigShardUtil} from "jstests/libs/config_shard_util.js";
 
 const kDBName = "foo";
 const kCollName = "bar";
@@ -29,6 +26,7 @@ const clusterCommandsCases = [
     },
     {cmd: {clusterInsert: kCollName, documents: [{x: 1}]}},
     {cmd: {clusterUpdate: kCollName, updates: [{q: {doesNotExist: 1}, u: {x: 1}}]}},
+    // TODO SERVER-52419 add test for bulkWrite.
 ];
 
 function runTestCaseExpectFail(conn, testCase, code) {
@@ -95,20 +93,11 @@ function runTestCaseExpectSuccess(conn, testCase) {
         runTestCaseExpectFail(st.s, testCase, ErrorCodes.CommandNotFound);
     }
 
-    //
-    // Cluster commands are allowed on a config shard enabled config server.
-    //
-
-    const isConfigShardEnabled = ConfigShardUtil.isEnabledIgnoringFCV(st);
     for (let testCase of clusterCommandsCases) {
-        if (isConfigShardEnabled) {
-            if (testCase.expectedErr) {
-                runTestCaseExpectFail(st.rs0.getPrimary(), testCase, testCase.expectedErr);
-            } else {
-                runTestCaseExpectSuccess(st.rs0.getPrimary(), testCase);
-            }
+        if (testCase.expectedErr) {
+            runTestCaseExpectFail(st.rs0.getPrimary(), testCase, testCase.expectedErr);
         } else {
-            runTestCaseExpectFail(st.configRS.getPrimary(), testCase, ErrorCodes.NoShardingEnabled);
+            runTestCaseExpectSuccess(st.rs0.getPrimary(), testCase);
         }
     }
 
@@ -126,4 +115,3 @@ function runTestCaseExpectSuccess(conn, testCase) {
 
     st.stop();
 }
-}());

@@ -28,40 +28,81 @@
  */
 
 
-#include <algorithm>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <cstddef>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <tuple>
+#include <type_traits>
+#include <variant>
+
+#include <boost/optional/optional.hpp>
 
 #include "mongo/base/data_range.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/bsontypes.h"
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/crypto/fle_crypto.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
+#include "mongo/crypto/fle_stats_gen.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/auth/validated_tenancy_scope.h"
+#include "mongo/db/basic_types.h"
+#include "mongo/db/client.h"
 #include "mongo/db/commands/fle2_get_count_info_command_gen.h"
+#include "mongo/db/curop.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/fle_crud.h"
+#include "mongo/db/logical_time.h"
+#include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/operation_time_tracker.h"
+#include "mongo/db/ops/write_ops.h"
 #include "mongo/db/ops/write_ops_gen.h"
 #include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
+#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/find_command.h"
+#include "mongo/db/query/fle/query_rewriter_interface.h"
 #include "mongo/db/query/fle/server_rewrite.h"
-#include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/repl/optime.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/tenant_id.h"
 #include "mongo/db/transaction/transaction_api.h"
+#include "mongo/executor/task_executor_pool.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/rpc/factory.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/rpc/reply_interface.h"
+#include "mongo/rpc/unique_message.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/transaction_router_resource_yielder.h"
 #include "mongo/s/write_ops/batch_write_exec.h"
+#include "mongo/s/write_ops/batched_upsert_detail.h"
+#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/future.h"
+#include "mongo/util/namespace_string_util.h"
+#include "mongo/util/out_of_line_executor.h"
+#include "mongo/util/str.h"
+#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
 
@@ -290,6 +331,20 @@ EncryptionInformation makeEmptyProcessEncryptionInformation() {
     return encryptionInformation;
 }
 
+void assertTransactionCompatibilty(OperationContext* opCtx) {
+    // TODO SERVER-77506: On any node in a shard, we only permit snapshot transactions with QE
+    //
+    if (!serverGlobalParams.clusterRole.has(ClusterRole::None) &&
+        opCtx->inMultiDocumentTransaction()) {
+        auto readConcern = repl::ReadConcernArgs::get(opCtx);
+
+        uassert(7885501,
+                "Queryable Encryption operations are only permitted in transactions with "
+                "readConcern snapshot",
+                readConcern.getLevel() == repl::ReadConcernLevel::kSnapshotReadConcern);
+    }
+}
+
 }  // namespace
 
 using VTS = auth::ValidatedTenancyScope;
@@ -413,6 +468,8 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
                 FLEBatchResult::kNotProcessed, write_ops::InsertCommandReply()};
         }
     }
+
+    assertTransactionCompatibilty(opCtx);
 
     for (auto& document : documents) {
         const auto& [swResult, reply] =
@@ -560,6 +617,8 @@ write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
                 updateOpEntry.getU().type() == write_ops::UpdateModification::Type::kModifier ||
                     updateOpEntry.getU().type() ==
                         write_ops::UpdateModification::Type::kReplacement);
+
+        assertTransactionCompatibilty(opCtx);
     }
 
     CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
@@ -1056,16 +1115,15 @@ write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
     // Fail if we could not find the new document
     uassert(6371505, "Could not find pre-image document by _id", !newDocument.isEmpty());
 
-    if (hasIndexedFieldsInSchema(efc.getFields())) {
-        // Check the user did not remove/destroy the __safeContent__ array. If there are no
-        // indexed fields, then there will not be a safeContent array in the document.
-        FLEClientCrypto::validateTagsArray(newDocument);
-    }
-
     // Step 5 ----
     auto originalFields = EDCServerCollection::getEncryptedIndexedFields(originalDocument);
     auto newFields = EDCServerCollection::getEncryptedIndexedFields(newDocument);
 
+    if (hasIndexedFieldsInSchema(efc.getFields()) && !(newFields.empty())) {
+        // Check the user did not remove/destroy the __safeContent__ array. If there are no
+        // indexed fields, then there will not be a safeContent array in the document.
+        FLEClientCrypto::validateTagsArray(newDocument);
+    }
 
     // Step 6 ----
     // GarbageCollect steps:
@@ -1107,9 +1165,20 @@ FLEBatchResult processFLEBatch(OperationContext* opCtx,
     if (request.getBatchType() == BatchedCommandRequest::BatchType_Insert) {
         auto insertRequest = request.getInsertRequest();
 
+        auto readConcern = repl::ReadConcernArgs::get(opCtx);
+
+        // TODO SERVER-77506 - Until SERVER-77506 is fixed, force snapshot readConcern for sharded
+        // transactions
+        if (!opCtx->inMultiDocumentTransaction()) {
+            repl::ReadConcernArgs::get(opCtx) =
+                repl::ReadConcernArgs(repl::ReadConcernLevel::kSnapshotReadConcern);
+        }
+
         auto [batchResult, insertReply] =
             processInsert(opCtx, insertRequest, &getTransactionWithRetriesForMongoS);
         if (batchResult == FLEBatchResult::kNotProcessed) {
+            // Restore the original read concern when this is not QE insert
+            repl::ReadConcernArgs::get(opCtx) = readConcern;
             return FLEBatchResult::kNotProcessed;
         }
 
@@ -1126,6 +1195,13 @@ FLEBatchResult processFLEBatch(OperationContext* opCtx,
         return FLEBatchResult::kProcessed;
 
     } else if (request.getBatchType() == BatchedCommandRequest::BatchType_Update) {
+
+        // TODO SERVER-77506 - Until SERVER-77506 is fixed, force snapshot readConcern for sharded
+        // transactions
+        if (!opCtx->inMultiDocumentTransaction()) {
+            repl::ReadConcernArgs::get(opCtx) =
+                repl::ReadConcernArgs(repl::ReadConcernLevel::kSnapshotReadConcern);
+        }
 
         auto updateRequest = request.getUpdateRequest();
 
@@ -1213,6 +1289,8 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
     boost::intrusive_ptr<ExpressionContext> expCtx,
     FLEQueryInterface* queryImpl,
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest) {
+
+    assertTransactionCompatibilty(expCtx->opCtx);
 
     CurOp::get(expCtx->opCtx)->debug().shouldOmitDiagnosticInformation = true;
     auto edcNss = findAndModifyRequest.getNamespace();
@@ -1319,15 +1397,15 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
     // Fail if we could not find the new document
     uassert(7293302, "Could not find pre-image document by _id", !newDocument.isEmpty());
 
-    if (hasIndexedFieldsInSchema(efc.getFields())) {
+    // Step 5 ----
+    auto originalFields = EDCServerCollection::getEncryptedIndexedFields(originalDocument);
+    auto newFields = EDCServerCollection::getEncryptedIndexedFields(newDocument);
+
+    if (hasIndexedFieldsInSchema(efc.getFields()) && !(newFields.empty())) {
         // Check the user did not remove/destroy the __safeContent__ array. If there are no
         // indexed fields, then there will not be a safeContent array in the document.
         FLEClientCrypto::validateTagsArray(newDocument);
     }
-
-    // Step 5 ----
-    auto originalFields = EDCServerCollection::getEncryptedIndexedFields(originalDocument);
-    auto newFields = EDCServerCollection::getEncryptedIndexedFields(newDocument);
 
     // Step 6 ----
     // GarbageCollect steps:
@@ -1397,6 +1475,13 @@ FLEBatchResult processFLEFindAndModify(OperationContext* opCtx,
         return FLEBatchResult::kNotProcessed;
     }
 
+    // TODO SERVER-77506 - Until SERVER-77506 is fixed, force snapshot readConcern for sharded
+    // transactions
+    if (!opCtx->inMultiDocumentTransaction()) {
+        repl::ReadConcernArgs::get(opCtx) =
+            repl::ReadConcernArgs(repl::ReadConcernLevel::kSnapshotReadConcern);
+    }
+
     CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
 
     // FLE2 Mongos CRUD operations loopback through MongoS with EncryptionInformation as
@@ -1455,13 +1540,9 @@ BSONObj FLEQueryInterfaceImpl::getById(const NamespaceString& nss, BSONElement e
 
 uint64_t FLEQueryInterfaceImpl::countDocuments(const NamespaceString& nss) {
     // Since count() does not work in a transaction, call count() by bypassing the transaction api
+    // Allow the thread to be killable. If interrupted, the call to runCommand will fail with the
+    // interruption.
     auto client = _serviceContext->makeClient("SEP-int-fle-crud");
-
-    // TODO(SERVER-74660): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(*client.get());
-        client.get()->setSystemOperationUnkillableByStepdown(lk);
-    }
 
     AlternativeClientRegion clientRegion(client);
     auto opCtx = cc().makeOperationContext();
@@ -1800,13 +1881,9 @@ std::vector<std::vector<FLEEdgeCountInfo>> FLETagNoTXNQuery::getTags(
     invariant(!_opCtx->inMultiDocumentTransaction());
 
     // Pop off the current op context so we can get a fresh set of read concern settings
+    // Allow the thread to be killable. If interrupted, the call to runCommand will fail with the
+    // interruption.
     auto client = _opCtx->getServiceContext()->makeClient("FLETagNoTXNQuery");
-
-    // TODO(SERVER-74660): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(*client.get());
-        client.get()->setSystemOperationUnkillableByStepdown(lk);
-    }
 
     AlternativeClientRegion clientRegion(client);
     auto opCtx = cc().makeOperationContext();

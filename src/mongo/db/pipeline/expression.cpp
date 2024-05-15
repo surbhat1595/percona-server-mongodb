@@ -27,41 +27,79 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
 
-#include "mongo/db/pipeline/expression.h"
-
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/node_hash_map.h>
+#include <absl/container/node_hash_set.h>
+#include <absl/meta/type_traits.h>
 #include <algorithm>
-#include <boost/algorithm/string.hpp>
+#include <array>
+#include <boost/algorithm/string/case_conv.hpp>
+#include <boost/iterator/iterator_facade.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <cmath>
 #include <cstdint>
-#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <system_error>
+#include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
+// IWYU pragma: no_include <pstl/glue_algorithm_defs.h>
+// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 
+#include "mongo/base/data_range.h"
+#include "mongo/base/parse_number.h"
+#include "mongo/bson/bsonelement_comparator_interface.h"
 #include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
+#include "mongo/bson/bsontypes_util.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/bson/util/builder_fwd.h"
 #include "mongo/crypto/fle_crypto.h"
+#include "mongo/crypto/fle_field_schema_gen.h"
+#include "mongo/db/api_parameters.h"
+#include "mongo/db/basic_types.h"
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/feature_compatibility_version_documentation.h"
+#include "mongo/db/field_ref.h"
 #include "mongo/db/hasher.h"
-#include "mongo/db/jsobj.h"
+#include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_parser_gen.h"
 #include "mongo/db/pipeline/variable_validation.h"
+#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/datetime/date_time_support.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/sort_pattern.h"
+#include "mongo/db/query/str_trim_utils.h"
 #include "mongo/db/query/util/make_data_structure.h"
+#include "mongo/db/record_id.h"
 #include "mongo/db/stats/counters.h"
-#include "mongo/platform/bits.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/platform/decimal128.h"
+#include "mongo/platform/overflow_arithmetic.h"
+#include "mongo/platform/random.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/stdx/unordered_set.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/pcre.h"
 #include "mongo/util/pcre_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
-#include "mongo/util/summation.h"
 
 
 namespace mongo {
@@ -85,7 +123,7 @@ Value ExpressionConstant::serializeConstant(const SerializationOptions& opts, Va
     // Other serialization policies need to include this $const in order to be unambiguous for
     // re-parsing this output later. If for example the constant was '$cashMoney' - we don't want to
     // misinterpret it as a field path when parsing.
-    return opts.serializeLiteral(Value(DOC("$const" << val)));
+    return Value(DOC("$const" << opts.serializeLiteral(val)));
 }
 
 /* --------------------------- Expression ------------------------------ */
@@ -788,7 +826,7 @@ Value ExpressionObjectToArray::evaluate(const Document& root, Variables* variabl
         output.push_back(keyvalue.freezeToValue());
     }
 
-    return Value(output);
+    return Value(std::move(output));
 }
 
 REGISTER_STABLE_EXPRESSION(objectToArray, ExpressionObjectToArray::parse);
@@ -1017,7 +1055,7 @@ intrusive_ptr<Expression> ExpressionCompare::parse(ExpressionContext* const expC
     intrusive_ptr<ExpressionCompare> expr = new ExpressionCompare(expCtx, op);
     ExpressionVector args = parseArguments(expCtx, bsonExpr, vps);
     expr->validateArguments(args);
-    expr->_children = args;
+    expr->_children = std::move(args);
     return expr;
 }
 
@@ -2048,7 +2086,8 @@ Value ExpressionDateToString::evaluate(const Document& root, Variables* variable
             timeZone->formatDate(formatValue.getStringData(), date.coerceToDate())));
     }
 
-    return Value(uassertStatusOK(timeZone->formatDate(kISOFormatString, date.coerceToDate())));
+    return Value(uassertStatusOK(timeZone->formatDate(
+        timeZone->isUtcZone() ? kIsoFormatStringZ : kIsoFormatStringNonZ, date.coerceToDate())));
 }
 
 /* ----------------------- ExpressionDateDiff ---------------------------- */
@@ -2591,7 +2630,7 @@ Value ExpressionFieldPath::serialize(SerializationOptions options) const {
     auto [prefix, path] = getPrefixAndPath(_fieldPath);
     // First handles special cases for redaction of system variables. User variables will fall
     // through to the default full redaction case.
-    if (options.applyHmacToIdentifiers && prefix.length() == 2) {
+    if (options.transformIdentifiers && prefix.length() == 2) {
         if (path.getPathLength() == 1 && Variables::isBuiltin(_variable)) {
             // Nothing to redact for builtin variables.
             return Value(prefix + path.fullPath());
@@ -2623,6 +2662,14 @@ Expression::ComputedPaths ExpressionFieldPath::getComputedPaths(const std::strin
     if (_variable == renamingVar && _fieldPath.getPathLength() == 2u) {
         outputPaths.renames[exprFieldPath] = _fieldPath.tail().fullPath();
     } else {
+        // Add dotted renames also to complex renames, to be used prospectively in optimizations
+        // (e.g., pushDotRenamedMatch).
+        // We only include dotted rename paths of length 3, as current optimization are constrained
+        // to accepting only such paths to avoid semantic errors from array flattening.
+        if (_variable == renamingVar && _fieldPath.getPathLength() == 3u) {
+            outputPaths.complexRenames[exprFieldPath] = _fieldPath.tail().fullPath();
+        }
+
         outputPaths.paths.insert(exprFieldPath);
     }
 
@@ -2770,7 +2817,7 @@ Value ExpressionFilter::serialize(SerializationOptions options) const {
 
 Value ExpressionFilter::evaluate(const Document& root, Variables* variables) const {
     // We are guaranteed at parse time that this isn't using our _varId.
-    const Value inputVal = _children[_kInput]->evaluate(root, variables);
+    Value inputVal = _children[_kInput]->evaluate(root, variables);
 
     if (inputVal.nullish())
         return Value(BSONNULL);
@@ -2954,8 +3001,8 @@ Value ExpressionLet::serialize(SerializationOptions options) const {
     for (VariableMap::const_iterator it = _variables.begin(), end = _variables.end(); it != end;
          ++it) {
         auto key = it->second.name;
-        if (options.applyHmacToIdentifiers) {
-            key = options.identifierHmacPolicy(key);
+        if (options.transformIdentifiers) {
+            key = options.transformIdentifiersCallback(key);
         }
         vars[key] = it->second.expression->serialize(options);
     }
@@ -3049,7 +3096,7 @@ Value ExpressionMap::serialize(SerializationOptions options) const {
 
 Value ExpressionMap::evaluate(const Document& root, Variables* variables) const {
     // guaranteed at parse time that this isn't using our _varId
-    const Value inputVal = _children[_kInput]->evaluate(root, variables);
+    Value inputVal = _children[_kInput]->evaluate(root, variables);
     if (inputVal.nullish())
         return Value(BSONNULL);
 
@@ -3128,9 +3175,11 @@ const std::string sortKeyName = "sortKey";
 const std::string searchScoreDetailsName = "searchScoreDetails";
 const std::string timeseriesBucketMinTimeName = "timeseriesBucketMinTime";
 const std::string timeseriesBucketMaxTimeName = "timeseriesBucketMaxTime";
+const std::string vectorSearchDistanceName = "vectorSearchDistance";
 
 using MetaType = DocumentMetadataFields::MetaType;
 const StringMap<DocumentMetadataFields::MetaType> kMetaNameToMetaType = {
+    {vectorSearchDistanceName, MetaType::kVectorSearchDistance},
     {geoNearDistanceName, MetaType::kGeoNearDist},
     {geoNearPointName, MetaType::kGeoNearPoint},
     {indexKeyName, MetaType::kIndexKey},
@@ -3146,6 +3195,7 @@ const StringMap<DocumentMetadataFields::MetaType> kMetaNameToMetaType = {
 };
 
 const stdx::unordered_map<DocumentMetadataFields::MetaType, StringData> kMetaTypeToMetaName = {
+    {MetaType::kVectorSearchDistance, vectorSearchDistanceName},
     {MetaType::kGeoNearDist, geoNearDistanceName},
     {MetaType::kGeoNearPoint, geoNearPointName},
     {MetaType::kIndexKey, indexKeyName},
@@ -3201,6 +3251,9 @@ Value ExpressionMeta::serialize(SerializationOptions options) const {
 Value ExpressionMeta::evaluate(const Document& root, Variables* variables) const {
     const auto& metadata = root.metadata();
     switch (_metaType) {
+        case MetaType::kVectorSearchDistance:
+            return metadata.hasVectorSearchDistance() ? Value(metadata.getVectorSearchDistance())
+                                                      : Value();
         case MetaType::kTextScore:
             return metadata.hasTextScore() ? Value(metadata.getTextScore()) : Value();
         case MetaType::kRandVal:
@@ -3535,7 +3588,7 @@ Value ExpressionIndexOfArray::evaluate(const Document& root, Variables* variable
                           << typeName(arrayArg.getType()),
             arrayArg.isArray());
 
-    std::vector<Value> array = arrayArg.getArray();
+    const std::vector<Value>& array = arrayArg.getArray();
     auto args = evaluateAndValidateArguments(root, _children, array.size(), variables);
     for (int i = args.startIndex; i < args.endIndex; i++) {
         if (getExpressionContext()->getValueComparator().evaluate(array[i] ==
@@ -3630,7 +3683,7 @@ intrusive_ptr<Expression> ExpressionIndexOfArray::optimize() {
                               << "argument is of type: " << typeName(valueArray.getType()),
                 valueArray.isArray());
 
-        auto arr = valueArray.getArray();
+        const auto& arr = valueArray.getArray();
 
         // To handle the case of duplicate values the values need to map to a vector of indecies.
         auto indexMap =
@@ -4007,7 +4060,7 @@ Value ExpressionInternalFLEBetween::serialize(SerializationOptions options) cons
     }
     return Value(Document{{kInternalFleBetween,
                            Document{{"field", _children[0]->serialize(options)},
-                                    {"server", Value(serverDerivedValues)}}}});
+                                    {"server", Value(std::move(serverDerivedValues))}}}});
 }
 
 Value ExpressionInternalFLEBetween::evaluate(const Document& root, Variables* variables) const {
@@ -4808,7 +4861,7 @@ Value ExpressionReverseArray::evaluate(const Document& root, Variables* variable
 
     std::vector<Value> array = input.getArray();
     std::reverse(array.begin(), array.end());
-    return Value(array);
+    return Value(std::move(array));
 }
 
 REGISTER_STABLE_EXPRESSION(reverseArray, ExpressionReverseArray::parse);
@@ -4904,7 +4957,7 @@ Value ExpressionSortArray::evaluate(const Document& root, Variables* variables) 
 
     std::vector<Value> array = input.getArray();
     std::sort(array.begin(), array.end(), _sortBy);
-    return Value(array);
+    return Value(std::move(array));
 }
 
 REGISTER_STABLE_EXPRESSION(sortArray, ExpressionSortArray::parse);
@@ -5238,7 +5291,7 @@ Value ExpressionInternalFindAllValuesAtPath::evaluate(const Document& root,
         outputVals.push_back(Value(elt));
     }
 
-    return Value(outputVals);
+    return Value(std::move(outputVals));
 }
 // This expression is not part of the stable API, but can always be used. It is
 // an internal expression used only for distinct.
@@ -5708,12 +5761,12 @@ StatusWith<Value> ExpressionSubtract::apply(Value lhs, Value rhs) {
                 long long longDiff = lhs.getDate().toMillisSinceEpoch();
                 double doubleRhs = rhs.coerceToDouble();
                 // check the doubleRhs should not exceed int64 limit and result will not overflow
-                if (doubleRhs < static_cast<double>(limits::min()) ||
-                    doubleRhs >= static_cast<double>(limits::max()) ||
-                    overflow::sub(longDiff, llround(doubleRhs), &longDiff)) {
-                    return Status(ErrorCodes::Overflow, str::stream() << "date overflow");
+                if (doubleRhs >= static_cast<double>(limits::min()) &&
+                    doubleRhs < static_cast<double>(limits::max()) &&
+                    !overflow::sub(longDiff, llround(doubleRhs), &longDiff)) {
+                    return Value(Date_t::fromMillisSinceEpoch(longDiff));
                 }
-                return Value(Date_t::fromMillisSinceEpoch(longDiff));
+                return Status(ErrorCodes::Overflow, str::stream() << "date overflow");
             }
             case NumberDecimal: {
                 long long longDiff = lhs.getDate().toMillisSinceEpoch();
@@ -5908,11 +5961,12 @@ Value ExpressionSwitch::serialize(SerializationOptions options) const {
 
     if (defaultExpr()) {
         return Value(Document{{"$switch",
-                               Document{{"branches", Value(serializedBranches)},
+                               Document{{"branches", Value(std::move(serializedBranches))},
                                         {"default", defaultExpr()->serialize(options)}}}});
     }
 
-    return Value(Document{{"$switch", Document{{"branches", Value(serializedBranches)}}}});
+    return Value(
+        Document{{"$switch", Document{{"branches", Value(std::move(serializedBranches))}}}});
 }
 
 /* ------------------------- ExpressionToLower ----------------------------- */
@@ -5984,74 +6038,6 @@ intrusive_ptr<Expression> ExpressionTrim::parse(ExpressionContext* const expCtx,
     return new ExpressionTrim(expCtx, trimType, name, input, characters);
 }
 
-namespace {
-const std::vector<StringData> kDefaultTrimWhitespaceChars = {
-    "\0"_sd,      // Null character. Avoid using "\u0000" syntax to work around a gcc bug:
-                  // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=53690.
-    "\u0020"_sd,  // Space
-    "\u0009"_sd,  // Horizontal tab
-    "\u000A"_sd,  // Line feed/new line
-    "\u000B"_sd,  // Vertical tab
-    "\u000C"_sd,  // Form feed
-    "\u000D"_sd,  // Horizontal tab
-    "\u00A0"_sd,  // Non-breaking space
-    "\u1680"_sd,  // Ogham space mark
-    "\u2000"_sd,  // En quad
-    "\u2001"_sd,  // Em quad
-    "\u2002"_sd,  // En space
-    "\u2003"_sd,  // Em space
-    "\u2004"_sd,  // Three-per-em space
-    "\u2005"_sd,  // Four-per-em space
-    "\u2006"_sd,  // Six-per-em space
-    "\u2007"_sd,  // Figure space
-    "\u2008"_sd,  // Punctuation space
-    "\u2009"_sd,  // Thin space
-    "\u200A"_sd   // Hair space
-};
-
-/**
- * Assuming 'charByte' is the beginning of a UTF-8 code point, returns the number of bytes that
- * should be used to represent the code point. Said another way, computes how many continuation
- * bytes are expected to be present after 'charByte' in a UTF-8 encoded string.
- */
-inline size_t numberOfBytesForCodePoint(char charByte) {
-    if ((charByte & 0b11111000) == 0b11110000) {
-        return 4;
-    } else if ((charByte & 0b11110000) == 0b11100000) {
-        return 3;
-    } else if ((charByte & 0b11100000) == 0b11000000) {
-        return 2;
-    } else {
-        return 1;
-    }
-}
-
-/**
- * Returns a vector with one entry per code point to trim, or throws an exception if 'utf8String'
- * contains invalid UTF-8.
- */
-std::vector<StringData> extractCodePointsFromChars(StringData utf8String,
-                                                   StringData expressionName) {
-    std::vector<StringData> codePoints;
-    std::size_t i = 0;
-    while (i < utf8String.size()) {
-        uassert(50698,
-                str::stream() << "Failed to parse \"chars\" argument to " << expressionName
-                              << ": Detected invalid UTF-8. Got continuation byte when expecting "
-                                 "the start of a new code point.",
-                !str::isUTF8ContinuationByte(utf8String[i]));
-        codePoints.push_back(utf8String.substr(i, numberOfBytesForCodePoint(utf8String[i])));
-        i += numberOfBytesForCodePoint(utf8String[i]);
-    }
-    uassert(50697,
-            str::stream()
-                << "Failed to parse \"chars\" argument to " << expressionName
-                << ": Detected invalid UTF-8. Missing expected continuation byte at end of string.",
-            i <= utf8String.size());
-    return codePoints;
-}
-}  // namespace
-
 Value ExpressionTrim::evaluate(const Document& root, Variables* variables) const {
     auto unvalidatedInput = _children[_kInput]->evaluate(root, variables);
     if (unvalidatedInput.nullish()) {
@@ -6065,7 +6051,11 @@ Value ExpressionTrim::evaluate(const Document& root, Variables* variables) const
     const StringData input(unvalidatedInput.getStringData());
 
     if (!_children[_kCharacters]) {
-        return Value(doTrim(input, kDefaultTrimWhitespaceChars));
+        return Value(
+            str_trim_utils::doTrim(input,
+                                   str_trim_utils::kDefaultTrimWhitespaceChars,
+                                   _trimType == TrimType::kBoth || _trimType == TrimType::kLeft,
+                                   _trimType == TrimType::kBoth || _trimType == TrimType::kRight));
     }
     auto unvalidatedUserChars = _children[_kCharacters]->evaluate(root, variables);
     if (unvalidatedUserChars.nullish()) {
@@ -6077,65 +6067,11 @@ Value ExpressionTrim::evaluate(const Document& root, Variables* variables) const
                           << typeName(unvalidatedUserChars.getType()) << ") instead.",
             unvalidatedUserChars.getType() == BSONType::String);
 
-    return Value(
-        doTrim(input, extractCodePointsFromChars(unvalidatedUserChars.getStringData(), _name)));
-}
-
-bool ExpressionTrim::codePointMatchesAtIndex(const StringData& input,
-                                             std::size_t indexOfInput,
-                                             const StringData& testCP) {
-    for (size_t i = 0; i < testCP.size(); ++i) {
-        if (indexOfInput + i >= input.size() || input[indexOfInput + i] != testCP[i]) {
-            return false;
-        }
-    }
-    return true;
-};
-
-StringData ExpressionTrim::trimFromLeft(StringData input, const std::vector<StringData>& trimCPs) {
-    std::size_t bytesTrimmedFromLeft = 0u;
-    while (bytesTrimmedFromLeft < input.size()) {
-        // Look for any matching code point to trim.
-        auto matchingCP = std::find_if(trimCPs.begin(), trimCPs.end(), [&](auto& testCP) {
-            return codePointMatchesAtIndex(input, bytesTrimmedFromLeft, testCP);
-        });
-        if (matchingCP == trimCPs.end()) {
-            // Nothing to trim, stop here.
-            break;
-        }
-        bytesTrimmedFromLeft += matchingCP->size();
-    }
-    return input.substr(bytesTrimmedFromLeft);
-}
-
-StringData ExpressionTrim::trimFromRight(StringData input, const std::vector<StringData>& trimCPs) {
-    std::size_t bytesTrimmedFromRight = 0u;
-    while (bytesTrimmedFromRight < input.size()) {
-        std::size_t indexToTrimFrom = input.size() - bytesTrimmedFromRight;
-        auto matchingCP = std::find_if(trimCPs.begin(), trimCPs.end(), [&](auto& testCP) {
-            if (indexToTrimFrom < testCP.size()) {
-                // We've gone off the left of the string.
-                return false;
-            }
-            return codePointMatchesAtIndex(input, indexToTrimFrom - testCP.size(), testCP);
-        });
-        if (matchingCP == trimCPs.end()) {
-            // Nothing to trim, stop here.
-            break;
-        }
-        bytesTrimmedFromRight += matchingCP->size();
-    }
-    return input.substr(0, input.size() - bytesTrimmedFromRight);
-}
-
-StringData ExpressionTrim::doTrim(StringData input, const std::vector<StringData>& trimCPs) const {
-    if (_trimType == TrimType::kBoth || _trimType == TrimType::kLeft) {
-        input = trimFromLeft(input, trimCPs);
-    }
-    if (_trimType == TrimType::kBoth || _trimType == TrimType::kRight) {
-        input = trimFromRight(input, trimCPs);
-    }
-    return input;
+    return Value(str_trim_utils::doTrim(
+        input,
+        str_trim_utils::extractCodePointsFromChars(unvalidatedUserChars.getStringData()),
+        _trimType == TrimType::kBoth || _trimType == TrimType::kLeft,
+        _trimType == TrimType::kBoth || _trimType == TrimType::kRight));
 }
 
 boost::intrusive_ptr<Expression> ExpressionTrim::optimize() {
@@ -6431,7 +6367,7 @@ Value ExpressionZip::evaluate(const Document& root, Variables* variables) const 
         output.push_back(Value(outputChild));
     }
 
-    return Value(output);
+    return Value(std::move(output));
 }
 
 boost::intrusive_ptr<Expression> ExpressionZip::optimize() {
@@ -6555,7 +6491,7 @@ public:
         table[BSONType::Date][BSONType::String] = [](ExpressionContext* const expCtx,
                                                      Value inputValue) {
             auto dateString = uassertStatusOK(
-                TimeZoneDatabase::utcZone().formatDate(kISOFormatString, inputValue.getDate()));
+                TimeZoneDatabase::utcZone().formatDate(kIsoFormatStringZ, inputValue.getDate()));
             return Value(dateString);
         };
         table[BSONType::Date][BSONType::Bool] = [](ExpressionContext* const expCtx,
@@ -7176,7 +7112,7 @@ Value ExpressionRegex::nextMatch(RegexExecutionState* regexState) const {
     MutableDocument match;
     match.addField("match", Value(m[0]));
     match.addField("idx", Value(regexState->startCodePointPos));
-    match.addField("captures", Value(captures));
+    match.addField("captures", Value(std::move(captures)));
     return match.freezeToValue();
 }
 
@@ -7375,7 +7311,7 @@ Value ExpressionRegexFindAll::evaluate(const Document& root, Variables* variable
     std::vector<Value> output;
     auto executionState = buildInitialState(root, variables);
     if (executionState.nullish()) {
-        return Value(output);
+        return Value(std::move(output));
     }
     StringData input = *(executionState.input);
     size_t totalDocSize = 0;
@@ -7417,7 +7353,7 @@ Value ExpressionRegexFindAll::evaluate(const Document& root, Variables* variable
         invariant(executionState.startCodePointPos > 0);
         invariant(executionState.startCodePointPos <= executionState.startBytePos);
     } while (static_cast<size_t>(executionState.startBytePos) < input.size());
-    return Value(output);
+    return Value(std::move(output));
 }
 
 /* -------------------------- ExpressionRegexMatch ------------------------------ */
@@ -8232,11 +8168,7 @@ Value ExpressionBitNot::evaluateNumericArg(const Value& numericArg) const {
     }
 }
 
-REGISTER_EXPRESSION_WITH_FEATURE_FLAG(bitNot,
-                                      ExpressionBitNot::parse,
-                                      AllowedWithApiStrict::kNeverInVersion1,
-                                      AllowedWithClientType::kAny,
-                                      feature_flags::gFeatureFlagBitwise);
+REGISTER_STABLE_EXPRESSION(bitNot, ExpressionBitNot::parse);
 
 const char* ExpressionBitNot::getOpName() const {
     return "$bitNot";
@@ -8244,21 +8176,9 @@ const char* ExpressionBitNot::getOpName() const {
 
 /* ------------------------- $bitAnd, $bitOr, and $bitXor ------------------------ */
 
-REGISTER_EXPRESSION_WITH_FEATURE_FLAG(bitAnd,
-                                      ExpressionBitAnd::parse,
-                                      AllowedWithApiStrict::kNeverInVersion1,
-                                      AllowedWithClientType::kAny,
-                                      feature_flags::gFeatureFlagBitwise);
-REGISTER_EXPRESSION_WITH_FEATURE_FLAG(bitOr,
-                                      ExpressionBitOr::parse,
-                                      AllowedWithApiStrict::kNeverInVersion1,
-                                      AllowedWithClientType::kAny,
-                                      feature_flags::gFeatureFlagBitwise);
-REGISTER_EXPRESSION_WITH_FEATURE_FLAG(bitXor,
-                                      ExpressionBitXor::parse,
-                                      AllowedWithApiStrict::kNeverInVersion1,
-                                      AllowedWithClientType::kAny,
-                                      feature_flags::gFeatureFlagBitwise);
+REGISTER_STABLE_EXPRESSION(bitAnd, ExpressionBitAnd::parse);
+REGISTER_STABLE_EXPRESSION(bitOr, ExpressionBitOr::parse);
+REGISTER_STABLE_EXPRESSION(bitXor, ExpressionBitXor::parse);
 
 MONGO_INITIALIZER_GROUP(BeginExpressionRegistration, ("default"), ("EndExpressionRegistration"))
 MONGO_INITIALIZER_GROUP(EndExpressionRegistration, ("BeginExpressionRegistration"), ())

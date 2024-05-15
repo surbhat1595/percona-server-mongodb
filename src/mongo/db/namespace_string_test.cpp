@@ -27,29 +27,70 @@
  *    it in the license file.
  */
 
-#include <boost/optional.hpp>
+#include <memory>
 
-#include "mongo/platform/basic.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
-#include "mongo/db/multitenancy_gen.h"
+#include "mongo/base/status.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/util/namespace_string_util.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/duration.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo {
+
+class NamespaceStringTest : public unittest::Test {
+protected:
+    NamespaceString makeNamespaceString(boost::optional<TenantId> tenantId, StringData ns) {
+        return NamespaceString(tenantId, ns);
+    }
+
+    NamespaceString makeNamespaceString(const DatabaseName& dbName, StringData coll) {
+        return NamespaceString(dbName, coll);
+    }
+
+    NamespaceString makeNamespaceString(boost::optional<TenantId> tenantId,
+                                        StringData db,
+                                        StringData coll) {
+        return NamespaceString(tenantId, db, coll);
+    }
+};
+
 namespace {
 
 using namespace fmt::literals;
 
-TEST(NamespaceStringTest, CheckNamespaceStringLogAttrs) {
+TEST_F(NamespaceStringTest, createNamespaceString_forTest) {
+    TenantId tenantId(OID::gen());
+    ASSERT_EQ(NamespaceString::createNamespaceString_forTest(boost::none, "ns"),
+              makeNamespaceString(boost::none, "ns"));
+    ASSERT_EQ(NamespaceString::createNamespaceString_forTest(tenantId, "ns"),
+              makeNamespaceString(tenantId, "ns"));
+
+    ASSERT_EQ(NamespaceString::createNamespaceString_forTest(boost::none, "db", "coll"),
+              makeNamespaceString(boost::none, "db", "coll"));
+    ASSERT_EQ(NamespaceString::createNamespaceString_forTest(tenantId, "db", "coll"),
+              makeNamespaceString(tenantId, "db", "coll"));
+
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(tenantId, "foo");
+    ASSERT_EQ(NamespaceString::createNamespaceString_forTest(dbName, "coll"),
+              makeNamespaceString(dbName, "coll"));
+}
+
+TEST_F(NamespaceStringTest, CheckNamespaceStringLogAttrs) {
     TenantId tenantId(OID::gen());
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(tenantId, "foo");
-    NamespaceString nss = NamespaceString::createNamespaceString_forTest(dbName, "bar");
+    NamespaceString nss = makeNamespaceString(dbName, "bar");
 
     startCapturingLogMessages();
     LOGV2(7311500, "Msg nss:", logAttrs(nss));
@@ -61,7 +102,7 @@ TEST(NamespaceStringTest, CheckNamespaceStringLogAttrs) {
     stopCapturingLogMessages();
 }
 
-TEST(NamespaceStringTest, Oplog) {
+TEST_F(NamespaceStringTest, Oplog) {
     ASSERT(!NamespaceString::oplog("a"));
     ASSERT(!NamespaceString::oplog("a.b"));
 
@@ -71,7 +112,7 @@ TEST(NamespaceStringTest, Oplog) {
     ASSERT(NamespaceString::oplog("local.oplog.$foo"));
 }
 
-TEST(NamespaceStringTest, DatabaseValidNames) {
+TEST_F(NamespaceStringTest, DatabaseValidNames) {
     ASSERT(NamespaceString::validDBName("foo", NamespaceString::DollarInDbNameBehavior::Allow));
     ASSERT(NamespaceString::validDBName("foo$bar", NamespaceString::DollarInDbNameBehavior::Allow));
     ASSERT(
@@ -124,138 +165,171 @@ TEST(NamespaceStringTest, DatabaseValidNames) {
         "WhileThisDatabaseNameExceedsTheMaximumLengthForDatabaseNamesof63"));
 
     ASSERT_THROWS_CODE(
-        NamespaceString{"WhileThisDatabaseNameExceedsTheMaximumLengthForDatabaseNamesof63"},
+        makeNamespaceString(boost::none,
+                            "WhileThisDatabaseNameExceedsTheMaximumLengthForDatabaseNamesof63"),
         AssertionException,
         ErrorCodes::InvalidNamespace);
+
+    const TenantId tenantId(OID::gen());
+    ASSERT(!NamespaceString::validDBName(DatabaseName::createDatabaseName_forTest(
+        tenantId, "ATenantDBNameWithValidLength38ButHasA$")));
 }
 
-TEST(NamespaceStringTest, ListCollectionsCursorNS) {
-    ASSERT(NamespaceString("test.$cmd.listCollections").isListCollectionsCursorNS());
+TEST_F(NamespaceStringTest, ListCollectionsCursorNS) {
+    ASSERT(
+        makeNamespaceString(boost::none, "test.$cmd.listCollections").isListCollectionsCursorNS());
 
-    ASSERT(!NamespaceString("test.foo").isListCollectionsCursorNS());
-    ASSERT(!NamespaceString("test.foo.$cmd.listCollections").isListCollectionsCursorNS());
-    ASSERT(!NamespaceString("test.$cmd.").isListCollectionsCursorNS());
-    ASSERT(!NamespaceString("test.$cmd.foo.").isListCollectionsCursorNS());
-    ASSERT(!NamespaceString("test.$cmd.listCollections.").isListCollectionsCursorNS());
-    ASSERT(!NamespaceString("test.$cmd.listIndexes").isListCollectionsCursorNS());
-    ASSERT(!NamespaceString("test.$cmd.listIndexes.foo").isListCollectionsCursorNS());
+    ASSERT(!makeNamespaceString(boost::none, "test.foo").isListCollectionsCursorNS());
+    ASSERT(!makeNamespaceString(boost::none, "test.foo.$cmd.listCollections")
+                .isListCollectionsCursorNS());
+    ASSERT(!makeNamespaceString(boost::none, "test.$cmd.").isListCollectionsCursorNS());
+    ASSERT(!makeNamespaceString(boost::none, "test.$cmd.foo.").isListCollectionsCursorNS());
+    ASSERT(!makeNamespaceString(boost::none, "test.$cmd.listCollections.")
+                .isListCollectionsCursorNS());
+    ASSERT(!makeNamespaceString(boost::none, "test.$cmd.listIndexes").isListCollectionsCursorNS());
+    ASSERT(
+        !makeNamespaceString(boost::none, "test.$cmd.listIndexes.foo").isListCollectionsCursorNS());
 }
 
-TEST(NamespaceStringTest, IsCollectionlessCursorNamespace) {
-    ASSERT_TRUE(NamespaceString{"test.$cmd.aggregate.foo"}.isCollectionlessCursorNamespace());
-    ASSERT_TRUE(NamespaceString{"test.$cmd.listIndexes.foo"}.isCollectionlessCursorNamespace());
-    ASSERT_TRUE(NamespaceString{"test.$cmd.otherCommand.foo"}.isCollectionlessCursorNamespace());
-    ASSERT_TRUE(NamespaceString{"test.$cmd.listCollections"}.isCollectionlessCursorNamespace());
-    ASSERT_TRUE(NamespaceString{"test.$cmd.otherCommand"}.isCollectionlessCursorNamespace());
-    ASSERT_TRUE(NamespaceString{"test.$cmd.aggregate"}.isCollectionlessCursorNamespace());
-    ASSERT_TRUE(NamespaceString{"test.$cmd.listIndexes"}.isCollectionlessCursorNamespace());
+TEST_F(NamespaceStringTest, IsCollectionlessCursorNamespace) {
+    ASSERT_TRUE(makeNamespaceString(boost::none, "test.$cmd.aggregate.foo")
+                    .isCollectionlessCursorNamespace());
+    ASSERT_TRUE(makeNamespaceString(boost::none, "test.$cmd.listIndexes.foo")
+                    .isCollectionlessCursorNamespace());
+    ASSERT_TRUE(makeNamespaceString(boost::none, "test.$cmd.otherCommand.foo")
+                    .isCollectionlessCursorNamespace());
+    ASSERT_TRUE(makeNamespaceString(boost::none, "test.$cmd.listCollections")
+                    .isCollectionlessCursorNamespace());
+    ASSERT_TRUE(makeNamespaceString(boost::none, "test.$cmd.otherCommand")
+                    .isCollectionlessCursorNamespace());
+    ASSERT_TRUE(
+        makeNamespaceString(boost::none, "test.$cmd.aggregate").isCollectionlessCursorNamespace());
+    ASSERT_TRUE(makeNamespaceString(boost::none, "test.$cmd.listIndexes")
+                    .isCollectionlessCursorNamespace());
 
-    ASSERT_FALSE(NamespaceString{"test.foo"}.isCollectionlessCursorNamespace());
-    ASSERT_FALSE(NamespaceString{"test.$cmd"}.isCollectionlessCursorNamespace());
+    ASSERT_FALSE(makeNamespaceString(boost::none, "test.foo").isCollectionlessCursorNamespace());
+    ASSERT_FALSE(makeNamespaceString(boost::none, "test.$cmd").isCollectionlessCursorNamespace());
 
-    ASSERT_FALSE(NamespaceString{"$cmd.aggregate.foo"}.isCollectionlessCursorNamespace());
-    ASSERT_FALSE(NamespaceString{"$cmd.listCollections"}.isCollectionlessCursorNamespace());
+    ASSERT_FALSE(
+        makeNamespaceString(boost::none, "$cmd.aggregate.foo").isCollectionlessCursorNamespace());
+    ASSERT_FALSE(
+        makeNamespaceString(boost::none, "$cmd.listCollections").isCollectionlessCursorNamespace());
 }
 
-TEST(NamespaceStringTest, IsLegalClientSystemNamespace) {
+TEST_F(NamespaceStringTest, IsLegalClientSystemNamespace) {
     const auto& currentFCV = serverGlobalParams.featureCompatibility;
-    ASSERT_TRUE(NamespaceString{"test.system.buckets.1234"}.isLegalClientSystemNS(currentFCV));
-    ASSERT_TRUE(NamespaceString{"test.system.buckets.abcde"}.isLegalClientSystemNS(currentFCV));
-    ASSERT_FALSE(NamespaceString{"test.system.buckets..1234"}.isLegalClientSystemNS(currentFCV));
-    ASSERT_FALSE(NamespaceString{"test.system.buckets.a234$"}.isLegalClientSystemNS(currentFCV));
-    ASSERT_FALSE(NamespaceString{"test.system.buckets."}.isLegalClientSystemNS(currentFCV));
+    ASSERT_TRUE(makeNamespaceString(boost::none, "test.system.buckets.1234")
+                    .isLegalClientSystemNS(currentFCV));
+    ASSERT_TRUE(makeNamespaceString(boost::none, "test.system.buckets.abcde")
+                    .isLegalClientSystemNS(currentFCV));
+    ASSERT_FALSE(makeNamespaceString(boost::none, "test.system.buckets..1234")
+                     .isLegalClientSystemNS(currentFCV));
+    ASSERT_FALSE(makeNamespaceString(boost::none, "test.system.buckets.a234$")
+                     .isLegalClientSystemNS(currentFCV));
+    ASSERT_FALSE(
+        makeNamespaceString(boost::none, "test.system.buckets.").isLegalClientSystemNS(currentFCV));
 }
 
-TEST(NamespaceStringTest, IsDropPendingNamespace) {
-    ASSERT_TRUE(NamespaceString{"test.system.drop.0i0t-1.foo"}.isDropPendingNamespace());
-    ASSERT_TRUE(NamespaceString{"test.system.drop.1234567i8t9.foo"}.isDropPendingNamespace());
-    ASSERT_TRUE(NamespaceString{"test.system.drop.1234.foo"}.isDropPendingNamespace());
-    ASSERT_TRUE(NamespaceString{"test.system.drop.foo"}.isDropPendingNamespace());
+TEST_F(NamespaceStringTest, IsDropPendingNamespace) {
+    ASSERT_TRUE(
+        makeNamespaceString(boost::none, "test.system.drop.0i0t-1.foo").isDropPendingNamespace());
+    ASSERT_TRUE(makeNamespaceString(boost::none, "test.system.drop.1234567i8t9.foo")
+                    .isDropPendingNamespace());
+    ASSERT_TRUE(
+        makeNamespaceString(boost::none, "test.system.drop.1234.foo").isDropPendingNamespace());
+    ASSERT_TRUE(makeNamespaceString(boost::none, "test.system.drop.foo").isDropPendingNamespace());
 
-    ASSERT_FALSE(NamespaceString{"test.system.drop"}.isDropPendingNamespace());
-    ASSERT_FALSE(NamespaceString{"test.drop.1234.foo"}.isDropPendingNamespace());
-    ASSERT_FALSE(NamespaceString{"test.drop.foo"}.isDropPendingNamespace());
-    ASSERT_FALSE(NamespaceString{"test.foo"}.isDropPendingNamespace());
-    ASSERT_FALSE(NamespaceString{"test.$cmd"}.isDropPendingNamespace());
+    ASSERT_FALSE(makeNamespaceString(boost::none, "test.system.drop").isDropPendingNamespace());
+    ASSERT_FALSE(makeNamespaceString(boost::none, "test.drop.1234.foo").isDropPendingNamespace());
+    ASSERT_FALSE(makeNamespaceString(boost::none, "test.drop.foo").isDropPendingNamespace());
+    ASSERT_FALSE(makeNamespaceString(boost::none, "test.foo").isDropPendingNamespace());
+    ASSERT_FALSE(makeNamespaceString(boost::none, "test.$cmd").isDropPendingNamespace());
 
-    ASSERT_FALSE(NamespaceString{"$cmd.aggregate.foo"}.isDropPendingNamespace());
-    ASSERT_FALSE(NamespaceString{"$cmd.listCollections"}.isDropPendingNamespace());
+    ASSERT_FALSE(makeNamespaceString(boost::none, "$cmd.aggregate.foo").isDropPendingNamespace());
+    ASSERT_FALSE(makeNamespaceString(boost::none, "$cmd.listCollections").isDropPendingNamespace());
 }
 
-TEST(NamespaceStringTest, MakeDropPendingNamespace) {
-    ASSERT_EQUALS(NamespaceString{"test.system.drop.0i0t-1.foo"},
-                  NamespaceString{"test.foo"}.makeDropPendingNamespace(repl::OpTime()));
-    ASSERT_EQUALS(NamespaceString{"test.system.drop.1234567i8t9.foo"},
-                  NamespaceString{"test.foo"}.makeDropPendingNamespace(
-                      repl::OpTime(Timestamp(Seconds(1234567), 8U), 9LL)));
+TEST_F(NamespaceStringTest, MakeDropPendingNamespace) {
+    ASSERT_EQUALS(
+        makeNamespaceString(boost::none, "test.system.drop.0i0t-1.foo"),
+        makeNamespaceString(boost::none, "test.foo").makeDropPendingNamespace(repl::OpTime()));
+    ASSERT_EQUALS(
+        makeNamespaceString(boost::none, "test.system.drop.1234567i8t9.foo"),
+        makeNamespaceString(boost::none, "test.foo")
+            .makeDropPendingNamespace(repl::OpTime(Timestamp(Seconds(1234567), 8U), 9LL)));
 
     std::string collName(NamespaceString::MaxNsCollectionLen, 't');
-    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", collName);
-    ASSERT_EQUALS(NamespaceString{"test.system.drop.1234567i8t9." + collName},
+    NamespaceString nss = makeNamespaceString(boost::none, "test", collName);
+    ASSERT_EQUALS(makeNamespaceString(boost::none, "test.system.drop.1234567i8t9." + collName),
                   nss.makeDropPendingNamespace(repl::OpTime(Timestamp(Seconds(1234567), 8U), 9LL)));
 }
 
-TEST(NamespaceStringTest, GetDropPendingNamespaceOpTime) {
+TEST_F(NamespaceStringTest, GetDropPendingNamespaceOpTime) {
     // Null optime is acceptable.
     ASSERT_EQUALS(
         repl::OpTime(),
-        unittest::assertGet(
-            NamespaceString{"test.system.drop.0i0t-1.foo"}.getDropPendingNamespaceOpTime()));
+        unittest::assertGet(makeNamespaceString(boost::none, "test.system.drop.0i0t-1.foo")
+                                .getDropPendingNamespaceOpTime()));
 
     // Valid optime.
     ASSERT_EQUALS(
         repl::OpTime(Timestamp(Seconds(1234567), 8U), 9LL),
-        unittest::assertGet(
-            NamespaceString{"test.system.drop.1234567i8t9.foo"}.getDropPendingNamespaceOpTime()));
+        unittest::assertGet(makeNamespaceString(boost::none, "test.system.drop.1234567i8t9.foo")
+                                .getDropPendingNamespaceOpTime()));
 
     // Original collection name is optional.
     ASSERT_EQUALS(
         repl::OpTime(Timestamp(Seconds(1234567), 8U), 9LL),
-        unittest::assertGet(
-            NamespaceString{"test.system.drop.1234567i8t9"}.getDropPendingNamespaceOpTime()));
+        unittest::assertGet(makeNamespaceString(boost::none, "test.system.drop.1234567i8t9")
+                                .getDropPendingNamespaceOpTime()));
 
     // No system.drop. prefix.
-    ASSERT_EQUALS(ErrorCodes::BadValue,
-                  NamespaceString{"test.1234.foo"}.getDropPendingNamespaceOpTime());
+    ASSERT_EQUALS(
+        ErrorCodes::BadValue,
+        makeNamespaceString(boost::none, "test.1234.foo").getDropPendingNamespaceOpTime());
 
     // Missing 'i' separator.
     ASSERT_EQUALS(ErrorCodes::FailedToParse,
-                  NamespaceString{"test.system.drop.1234t8.foo"}.getDropPendingNamespaceOpTime());
+                  makeNamespaceString(boost::none, "test.system.drop.1234t8.foo")
+                      .getDropPendingNamespaceOpTime());
 
     // Missing 't' separator.
     ASSERT_EQUALS(ErrorCodes::FailedToParse,
-                  NamespaceString{"test.system.drop.1234i56.foo"}.getDropPendingNamespaceOpTime());
+                  makeNamespaceString(boost::none, "test.system.drop.1234i56.foo")
+                      .getDropPendingNamespaceOpTime());
 
     // Timestamp seconds is not a number.
-    ASSERT_EQUALS(
-        ErrorCodes::FailedToParse,
-        NamespaceString{"test.system.drop.wwwi56t123.foo"}.getDropPendingNamespaceOpTime());
+    ASSERT_EQUALS(ErrorCodes::FailedToParse,
+                  makeNamespaceString(boost::none, "test.system.drop.wwwi56t123.foo")
+                      .getDropPendingNamespaceOpTime());
 
     // Timestamp increment is not a number.
-    ASSERT_EQUALS(
-        ErrorCodes::FailedToParse,
-        NamespaceString{"test.system.drop.1234iaaat123.foo"}.getDropPendingNamespaceOpTime());
+    ASSERT_EQUALS(ErrorCodes::FailedToParse,
+                  makeNamespaceString(boost::none, "test.system.drop.1234iaaat123.foo")
+                      .getDropPendingNamespaceOpTime());
 
     // Timestamp increment must be an unsigned number.
-    ASSERT_EQUALS(
-        ErrorCodes::FailedToParse,
-        NamespaceString{"test.system.drop.1234i-100t123.foo"}.getDropPendingNamespaceOpTime());
+    ASSERT_EQUALS(ErrorCodes::FailedToParse,
+                  makeNamespaceString(boost::none, "test.system.drop.1234i-100t123.foo")
+                      .getDropPendingNamespaceOpTime());
 
     // Term is not a number.
-    ASSERT_EQUALS(
-        ErrorCodes::FailedToParse,
-        NamespaceString{"test.system.drop.1234i111taaa.foo"}.getDropPendingNamespaceOpTime());
+    ASSERT_EQUALS(ErrorCodes::FailedToParse,
+                  makeNamespaceString(boost::none, "test.system.drop.1234i111taaa.foo")
+                      .getDropPendingNamespaceOpTime());
 }
 
-TEST(NamespaceStringTest, CollectionComponentValidNames) {
-    ASSERT(NamespaceString::validCollectionComponent("a.b"));
-    ASSERT(NamespaceString::validCollectionComponent("a.b"));
-    ASSERT(!NamespaceString::validCollectionComponent("a."));
-    ASSERT(!NamespaceString::validCollectionComponent("a..foo"));
-    ASSERT(NamespaceString::validCollectionComponent("a.b."));  // TODO: should this change?
+TEST_F(NamespaceStringTest, CollectionComponentValidNamesWithNamespaceString) {
+    ASSERT(NamespaceString::validCollectionComponent(makeNamespaceString(boost::none, "a.b")));
+    ASSERT(!NamespaceString::validCollectionComponent(makeNamespaceString(boost::none, "a.")));
+    ASSERT_THROWS_CODE(
+        NamespaceString::validCollectionComponent(makeNamespaceString(boost::none, "a..foo")),
+        AssertionException,
+        ErrorCodes::InvalidNamespace);
+    ASSERT(NamespaceString::validCollectionComponent(makeNamespaceString(boost::none, "a.b.")));
 }
 
-TEST(NamespaceStringTest, CollectionValidNames) {
+TEST_F(NamespaceStringTest, CollectionValidNames) {
     ASSERT(NamespaceString::validCollectionName("a"));
     ASSERT(NamespaceString::validCollectionName("a.b"));
     ASSERT(NamespaceString::validCollectionName("a."));    // TODO: should this change?
@@ -267,7 +341,7 @@ TEST(NamespaceStringTest, CollectionValidNames) {
     ASSERT(!NamespaceString::validCollectionName("a\0b"_sd));
 }
 
-TEST(NamespaceStringTest, nsToDatabase1) {
+TEST_F(NamespaceStringTest, nsToDatabase1) {
     ASSERT_EQUALS("foo", nsToDatabaseSubstring("foo.bar"));
     ASSERT_EQUALS("foo", nsToDatabaseSubstring("foo"));
     ASSERT_EQUALS("foo", nsToDatabase("foo.bar"));
@@ -276,76 +350,76 @@ TEST(NamespaceStringTest, nsToDatabase1) {
     ASSERT_EQUALS("foo", nsToDatabase(std::string("foo")));
 }
 
-TEST(NamespaceStringTest, NamespaceStringParse1) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest("a.b");
-    ASSERT_EQUALS(std::string("a"), ns.db());
+TEST_F(NamespaceStringTest, NamespaceStringParse1) {
+    NamespaceString ns = makeNamespaceString(boost::none, "a.b");
+    ASSERT_EQUALS(std::string("a"), ns.db_forTest());
     ASSERT_EQUALS(std::string("b"), ns.coll());
 }
 
-TEST(NamespaceStringTest, NamespaceStringParse2) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest("a.b.c");
-    ASSERT_EQUALS(std::string("a"), ns.db());
+TEST_F(NamespaceStringTest, NamespaceStringParse2) {
+    NamespaceString ns = makeNamespaceString(boost::none, "a.b.c");
+    ASSERT_EQUALS(std::string("a"), ns.db_forTest());
     ASSERT_EQUALS(std::string("b.c"), ns.coll());
 }
 
-TEST(NamespaceStringTest, NamespaceStringParse3) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest("abc");
-    ASSERT_EQUALS(std::string("abc"), ns.db());
+TEST_F(NamespaceStringTest, NamespaceStringParse3) {
+    NamespaceString ns = makeNamespaceString(boost::none, "abc");
+    ASSERT_EQUALS(std::string("abc"), ns.db_forTest());
     ASSERT_EQUALS(std::string(""), ns.coll());
 }
 
-TEST(NamespaceStringTest, NamespaceStringParse4) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest("abc.");
-    ASSERT_EQUALS(std::string("abc"), ns.db());
+TEST_F(NamespaceStringTest, NamespaceStringParse4) {
+    NamespaceString ns = makeNamespaceString(boost::none, "abc.");
+    ASSERT_EQUALS(std::string("abc"), ns.db_forTest());
     ASSERT(ns.coll().empty());
 }
 
-TEST(NamespaceStringTest, NamespaceStringParse5) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest("abc", "");
-    ASSERT_EQUALS(std::string("abc"), ns.db());
+TEST_F(NamespaceStringTest, NamespaceStringParse5) {
+    NamespaceString ns = makeNamespaceString(boost::none, "abc", "");
+    ASSERT_EQUALS(std::string("abc"), ns.db_forTest());
     ASSERT(ns.coll().empty());
 }
 
-TEST(NamespaceStringTest, makeListCollectionsNSIsCorrect) {
+TEST_F(NamespaceStringTest, makeListCollectionsNSIsCorrect) {
     NamespaceString ns = NamespaceString::makeListCollectionsNSS(
         DatabaseName::createDatabaseName_forTest(boost::none, "DB"));
-    ASSERT_EQUALS("DB", ns.db());
+    ASSERT_EQUALS("DB", ns.db_forTest());
     ASSERT_EQUALS("$cmd.listCollections", ns.coll());
     ASSERT(ns.isValid());
     ASSERT(ns.isListCollectionsCursorNS());
 }
 
-TEST(NamespaceStringTest, EmptyNSStringReturnsEmptyColl) {
+TEST_F(NamespaceStringTest, EmptyNSStringReturnsEmptyColl) {
     NamespaceString nss{};
     ASSERT_TRUE(nss.isEmpty());
     ASSERT_EQ(nss.coll(), StringData{});
 }
 
-TEST(NamespaceStringTest, EmptyNSStringReturnsEmptyDb) {
+TEST_F(NamespaceStringTest, EmptyNSStringReturnsEmptyDb) {
     NamespaceString nss{};
     ASSERT_TRUE(nss.isEmpty());
-    ASSERT_EQ(nss.db(), StringData{});
+    ASSERT_EQ(nss.db_forTest(), StringData{});
 }
 
-TEST(NamespaceStringTest, EmptyDbWithColl) {
-    NamespaceString nss{"", "coll"};
-    ASSERT_EQ(nss.db(), StringData{});
+TEST_F(NamespaceStringTest, EmptyDbWithColl) {
+    NamespaceString nss = makeNamespaceString(boost::none, "", "coll");
+    ASSERT_EQ(nss.db_forTest(), StringData{});
     ASSERT_EQ(nss.coll(), "coll");
 }
 
-TEST(NamespaceStringTest, NSSWithTenantId) {
+TEST_F(NamespaceStringTest, NSSWithTenantId) {
     TenantId tenantId(OID::gen());
 
     {
         std::string tenantNsStr = str::stream() << tenantId.toString() << "_foo.bar";
-        NamespaceString nss = NamespaceString::createNamespaceString_forTest(tenantId, "foo.bar");
+        NamespaceString nss = makeNamespaceString(tenantId, "foo.bar");
         ASSERT_EQ(nss.size(), 7);
         ASSERT_EQ(nss.ns_forTest(), "foo.bar");
         ASSERT_EQ(nss.toString_forTest(), "foo.bar");
         ASSERT_EQ(nss.toStringWithTenantId_forTest(), tenantNsStr);
-        ASSERT_EQ(nss.db(), "foo");
+        ASSERT_EQ(nss.db_forTest(), "foo");
         ASSERT_EQ(nss.coll(), "bar");
-        ASSERT_EQ(nss.dbName().db(), "foo");
+        ASSERT_EQ(nss.dbName().toString_forTest(), "foo");
         ASSERT_EQ(nss.size(), 7);
         ASSERT(nss.tenantId());
         ASSERT(nss.dbName().tenantId());
@@ -355,14 +429,14 @@ TEST(NamespaceStringTest, NSSWithTenantId) {
 
     {
         std::string tenantNsStr = str::stream() << tenantId.toString() << "_foo";
-        NamespaceString nss = NamespaceString::createNamespaceString_forTest(tenantId, "foo");
+        NamespaceString nss = makeNamespaceString(tenantId, "foo");
         ASSERT_EQ(nss.size(), 3);
         ASSERT_EQ(nss.ns_forTest(), "foo");
         ASSERT_EQ(nss.toString_forTest(), "foo");
         ASSERT_EQ(nss.toStringWithTenantId_forTest(), tenantNsStr);
-        ASSERT_EQ(nss.db(), "foo");
+        ASSERT_EQ(nss.db_forTest(), "foo");
         ASSERT_EQ(nss.coll(), "");
-        ASSERT_EQ(nss.dbName().db(), "foo");
+        ASSERT_EQ(nss.dbName().toString_forTest(), "foo");
         ASSERT_EQ(nss.size(), 3);
         ASSERT(nss.tenantId());
         ASSERT(nss.dbName().tenantId());
@@ -373,14 +447,14 @@ TEST(NamespaceStringTest, NSSWithTenantId) {
     {
         std::string tenantNsStr = str::stream() << tenantId.toString() << "_foo.bar";
         DatabaseName dbName = DatabaseName::createDatabaseName_forTest(tenantId, "foo");
-        NamespaceString nss2 = NamespaceString::createNamespaceString_forTest(dbName, "bar");
+        NamespaceString nss2 = makeNamespaceString(dbName, "bar");
         ASSERT_EQ(nss2.size(), 7);
         ASSERT_EQ(nss2.ns_forTest(), "foo.bar");
         ASSERT_EQ(nss2.toString_forTest(), "foo.bar");
         ASSERT_EQ(nss2.toStringWithTenantId_forTest(), tenantNsStr);
-        ASSERT_EQ(nss2.db(), "foo");
+        ASSERT_EQ(nss2.db_forTest(), "foo");
         ASSERT_EQ(nss2.coll(), "bar");
-        ASSERT_EQ(nss2.dbName().db(), "foo");
+        ASSERT_EQ(nss2.dbName().toString_forTest(), "foo");
         ASSERT(nss2.tenantId());
         ASSERT(nss2.dbName().tenantId());
         ASSERT_EQ(*nss2.tenantId(), tenantId);
@@ -389,14 +463,14 @@ TEST(NamespaceStringTest, NSSWithTenantId) {
 
     {
         std::string tenantNsStr = str::stream() << tenantId.toString() << "_foo.bar";
-        NamespaceString nss3("foo", "bar", tenantId);
+        NamespaceString nss3 = makeNamespaceString(tenantId, "foo", "bar");
         ASSERT_EQ(nss3.size(), 7);
         ASSERT_EQ(nss3.ns_forTest(), "foo.bar");
         ASSERT_EQ(nss3.toString_forTest(), "foo.bar");
         ASSERT_EQ(nss3.toStringWithTenantId_forTest(), tenantNsStr);
-        ASSERT_EQ(nss3.db(), "foo");
+        ASSERT_EQ(nss3.db_forTest(), "foo");
         ASSERT_EQ(nss3.coll(), "bar");
-        ASSERT_EQ(nss3.dbName().db(), "foo");
+        ASSERT_EQ(nss3.dbName().toString_forTest(), "foo");
         ASSERT(nss3.tenantId());
         ASSERT(nss3.dbName().tenantId());
         ASSERT_EQ(*nss3.tenantId(), tenantId);
@@ -410,9 +484,9 @@ TEST(NamespaceStringTest, NSSWithTenantId) {
         ASSERT_EQ(nss4.ns_forTest(), "foo");
         ASSERT_EQ(nss4.toString_forTest(), "foo");
         ASSERT_EQ(nss4.toStringWithTenantId_forTest(), "{}_foo"_format(tenantId.toString()));
-        ASSERT_EQ(nss4.db(), "foo");
+        ASSERT_EQ(nss4.db_forTest(), "foo");
         ASSERT_EQ(nss4.coll(), "");
-        ASSERT_EQ(nss4.dbName().db(), "foo");
+        ASSERT_EQ(nss4.dbName().toString_forTest(), "foo");
         ASSERT(nss4.tenantId());
         ASSERT(nss4.dbName().tenantId());
         ASSERT_EQ(*nss4.tenantId(), tenantId);
@@ -420,16 +494,16 @@ TEST(NamespaceStringTest, NSSWithTenantId) {
     }
 
     {
-        NamespaceString multiNss("config.system.change_collection", tenantId);
+        NamespaceString multiNss = makeNamespaceString(tenantId, "config.system.change_collection");
         ASSERT(multiNss.isConfigDB());
         ASSERT_EQ(multiNss.size(), 31);
         ASSERT_EQ(multiNss.ns_forTest(), "config.system.change_collection");
         ASSERT_EQ(multiNss.toString_forTest(), "config.system.change_collection");
         ASSERT_EQ(multiNss.toStringWithTenantId_forTest(),
                   "{}_config.system.change_collection"_format(tenantId.toString()));
-        ASSERT_EQ(multiNss.db(), "config");
+        ASSERT_EQ(multiNss.db_forTest(), "config");
         ASSERT_EQ(multiNss.coll(), "system.change_collection");
-        ASSERT_EQ(multiNss.dbName().db(), "config");
+        ASSERT_EQ(multiNss.dbName().toString_forTest(), "config");
         ASSERT(multiNss.tenantId());
         ASSERT(multiNss.dbName().tenantId());
         ASSERT_EQ(*multiNss.tenantId(), tenantId);
@@ -439,28 +513,24 @@ TEST(NamespaceStringTest, NSSWithTenantId) {
     {
         NamespaceString empty{};
         ASSERT_EQ(empty.size(), 0);
-        ASSERT_EQ(empty.db(), "");
         ASSERT_EQ(empty.coll(), "");
         ASSERT_EQ(empty.tenantId(), boost::none);
         ASSERT_EQ(empty.toString_forTest(), "");
         ASSERT_EQ(empty.toStringWithTenantId_forTest(), "");
-        ASSERT_EQ(empty.dbName().db(), "");
         ASSERT_EQ(empty.dbName().tenantId(), boost::none);
         ASSERT_EQ(empty.dbName().toString_forTest(), "");
         ASSERT_EQ(empty.dbName().toStringWithTenantId_forTest(), "");
     }
 
     {
-        NamespaceString emptyWithTenant{"", tenantId};
+        NamespaceString emptyWithTenant = makeNamespaceString(tenantId, "");
         ASSERT_EQ(emptyWithTenant.size(), 0);
-        ASSERT_EQ(emptyWithTenant.db(), "");
         ASSERT_EQ(emptyWithTenant.coll(), "");
         ASSERT(emptyWithTenant.tenantId());
         ASSERT_EQ(*emptyWithTenant.tenantId(), tenantId);
         ASSERT_EQ(emptyWithTenant.toString_forTest(), "");
         ASSERT_EQ(emptyWithTenant.toStringWithTenantId_forTest(),
                   "{}_"_format(tenantId.toString()));
-        ASSERT_EQ(emptyWithTenant.dbName().db(), "");
         ASSERT(emptyWithTenant.dbName().tenantId());
         ASSERT_EQ(emptyWithTenant.dbName().tenantId(), tenantId);
         ASSERT_EQ(emptyWithTenant.dbName().toString_forTest(), "");
@@ -469,30 +539,26 @@ TEST(NamespaceStringTest, NSSWithTenantId) {
     }
 
     {
-        NamespaceString dbWithoutColl{"foo"};
+        NamespaceString dbWithoutColl = makeNamespaceString(boost::none, "foo");
         ASSERT_EQ(dbWithoutColl.size(), 3);
-        ASSERT_EQ(dbWithoutColl.db(), "foo");
         ASSERT_EQ(dbWithoutColl.coll(), "");
         ASSERT_FALSE(dbWithoutColl.tenantId());
         ASSERT_EQ(dbWithoutColl.toString_forTest(), "foo");
         ASSERT_EQ(dbWithoutColl.toStringWithTenantId_forTest(), "foo");
-        ASSERT_EQ(dbWithoutColl.dbName().db(), "foo");
         ASSERT_FALSE(dbWithoutColl.dbName().tenantId());
         ASSERT_EQ(dbWithoutColl.dbName().toString_forTest(), "foo");
         ASSERT_EQ(dbWithoutColl.dbName().toStringWithTenantId_forTest(), "foo");
     }
 
     {
-        NamespaceString dbWithoutCollWithTenant{"foo", tenantId};
+        NamespaceString dbWithoutCollWithTenant = makeNamespaceString(tenantId, "foo");
         ASSERT_EQ(dbWithoutCollWithTenant.size(), 3);
-        ASSERT_EQ(dbWithoutCollWithTenant.db(), "foo");
         ASSERT_EQ(dbWithoutCollWithTenant.coll(), "");
         ASSERT(dbWithoutCollWithTenant.tenantId());
         ASSERT_EQ(*dbWithoutCollWithTenant.tenantId(), tenantId);
         ASSERT_EQ(dbWithoutCollWithTenant.toString_forTest(), "foo");
         ASSERT_EQ(dbWithoutCollWithTenant.toStringWithTenantId_forTest(),
                   fmt::format("{}_foo", tenantId.toString()));
-        ASSERT_EQ(dbWithoutCollWithTenant.dbName().db(), "foo");
         ASSERT(dbWithoutCollWithTenant.dbName().tenantId());
         ASSERT_EQ(dbWithoutCollWithTenant.dbName().tenantId(), tenantId);
         ASSERT_EQ(dbWithoutCollWithTenant.dbName().toString_forTest(), "foo");
@@ -501,11 +567,11 @@ TEST(NamespaceStringTest, NSSWithTenantId) {
     }
 }
 
-TEST(NamespaceStringTest, NSSNoCollectionWithTenantId) {
+TEST_F(NamespaceStringTest, NSSNoCollectionWithTenantId) {
     TenantId tenantId(OID::gen());
     std::string tenantNsStr = str::stream() << tenantId.toString() << "_foo";
 
-    NamespaceString nss = NamespaceString::createNamespaceString_forTest(tenantId, "foo");
+    NamespaceString nss = makeNamespaceString(tenantId, "foo");
 
     ASSERT_EQ(nss.ns_forTest(), "foo");
     ASSERT_EQ(nss.toString_forTest(), "foo");
@@ -514,66 +580,52 @@ TEST(NamespaceStringTest, NSSNoCollectionWithTenantId) {
     ASSERT_EQ(*nss.tenantId(), tenantId);
 
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(tenantId, "foo");
-    NamespaceString nss2 = NamespaceString::createNamespaceString_forTest(dbName, "");
+    NamespaceString nss2 = makeNamespaceString(dbName, "");
     ASSERT(nss2.tenantId());
     ASSERT_EQ(*nss2.tenantId(), tenantId);
 
-    NamespaceString nss3("foo", "", tenantId);
+    NamespaceString nss3 = makeNamespaceString(tenantId, "foo", "");
     ASSERT(nss3.tenantId());
     ASSERT_EQ(*nss3.tenantId(), tenantId);
 }
 
-TEST(NamespaceStringTest, ParseNSSWithTenantId) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-
-    TenantId tenantId(OID::gen());
-    std::string tenantNsStr = str::stream() << tenantId.toString() << "_foo.bar";
-
-    NamespaceString nss =
-        NamespaceString::parseFromStringExpectTenantIdInMultitenancyMode(tenantNsStr);
-    ASSERT_EQ(nss.ns_forTest(), "foo.bar");
-    ASSERT_EQ(nss.toStringWithTenantId_forTest(), tenantNsStr);
-    ASSERT(nss.tenantId());
-    ASSERT_EQ(*nss.tenantId(), tenantId);
-}
-
-TEST(NamespaceStringTest, CompareNSSWithTenantId) {
+TEST_F(NamespaceStringTest, CompareNSSWithTenantId) {
     TenantId tenantIdMin(OID("000000000000000000000000"));
     TenantId tenantIdMax(OID::max());
 
-    ASSERT(NamespaceString::createNamespaceString_forTest(tenantIdMin, "foo.bar") ==
-           NamespaceString::createNamespaceString_forTest(tenantIdMin, "foo.bar"));
+    ASSERT(makeNamespaceString(tenantIdMin, "foo.bar") ==
+           makeNamespaceString(tenantIdMin, "foo.bar"));
 
-    ASSERT(NamespaceString::createNamespaceString_forTest(tenantIdMin, "foo.bar") !=
-           NamespaceString::createNamespaceString_forTest(tenantIdMax, "foo.bar"));
-    ASSERT(NamespaceString::createNamespaceString_forTest(tenantIdMin, "foo.bar") !=
-           NamespaceString::createNamespaceString_forTest(tenantIdMin, "zoo.bar"));
+    ASSERT(makeNamespaceString(tenantIdMin, "foo.bar") !=
+           makeNamespaceString(tenantIdMax, "foo.bar"));
+    ASSERT(makeNamespaceString(tenantIdMin, "foo.bar") !=
+           makeNamespaceString(tenantIdMin, "zoo.bar"));
 
-    ASSERT(NamespaceString::createNamespaceString_forTest(tenantIdMin, "foo.bar") <
-           NamespaceString::createNamespaceString_forTest(tenantIdMax, "foo.bar"));
-    ASSERT(NamespaceString::createNamespaceString_forTest(tenantIdMin, "foo.bar") <
-           NamespaceString::createNamespaceString_forTest(tenantIdMin, "zoo.bar"));
-    ASSERT(NamespaceString::createNamespaceString_forTest(tenantIdMin, "zoo.bar") <
-           NamespaceString::createNamespaceString_forTest(tenantIdMax, "foo.bar"));
+    ASSERT(makeNamespaceString(tenantIdMin, "foo.bar") <
+           makeNamespaceString(tenantIdMax, "foo.bar"));
+    ASSERT(makeNamespaceString(tenantIdMin, "foo.bar") <
+           makeNamespaceString(tenantIdMin, "zoo.bar"));
+    ASSERT(makeNamespaceString(tenantIdMin, "zoo.bar") <
+           makeNamespaceString(tenantIdMax, "foo.bar"));
 
-    ASSERT(NamespaceString::createNamespaceString_forTest(tenantIdMax, "foo.bar") >
-           NamespaceString::createNamespaceString_forTest(tenantIdMin, "foo.bar"));
-    ASSERT(NamespaceString::createNamespaceString_forTest(tenantIdMin, "zoo.bar") >
-           NamespaceString::createNamespaceString_forTest(tenantIdMin, "foo.bar"));
-    ASSERT(NamespaceString::createNamespaceString_forTest(tenantIdMax, "foo.bar") >
-           NamespaceString::createNamespaceString_forTest(tenantIdMin, "zoo.bar"));
+    ASSERT(makeNamespaceString(tenantIdMax, "foo.bar") >
+           makeNamespaceString(tenantIdMin, "foo.bar"));
+    ASSERT(makeNamespaceString(tenantIdMin, "zoo.bar") >
+           makeNamespaceString(tenantIdMin, "foo.bar"));
+    ASSERT(makeNamespaceString(tenantIdMax, "foo.bar") >
+           makeNamespaceString(tenantIdMin, "zoo.bar"));
 
-    ASSERT(NamespaceString::createNamespaceString_forTest(tenantIdMin, "foo.bar") <=
-           NamespaceString::createNamespaceString_forTest(tenantIdMin, "foo.bar"));
-    ASSERT(NamespaceString::createNamespaceString_forTest(tenantIdMin, "foo.bar") >=
-           NamespaceString::createNamespaceString_forTest(tenantIdMin, "foo.bar"));
+    ASSERT(makeNamespaceString(tenantIdMin, "foo.bar") <=
+           makeNamespaceString(tenantIdMin, "foo.bar"));
+    ASSERT(makeNamespaceString(tenantIdMin, "foo.bar") >=
+           makeNamespaceString(tenantIdMin, "foo.bar"));
 
 
     TenantId tenantId1(OID::gen());
     TenantId tenantId2(OID::gen());
-    auto ns1 = NamespaceString::createNamespaceString_forTest(boost::none, "foo.bar");
-    auto ns2 = NamespaceString::createNamespaceString_forTest(tenantId1, "foo.bar");
-    auto ns3 = NamespaceString::createNamespaceString_forTest(tenantId2, "foo.bar");
+    auto ns1 = makeNamespaceString(boost::none, "foo.bar");
+    auto ns2 = makeNamespaceString(tenantId1, "foo.bar");
+    auto ns3 = makeNamespaceString(tenantId2, "foo.bar");
     ASSERT_LT(ns1, ns2);
     ASSERT_LT(ns1, ns3);
     ASSERT_GT(ns3, ns2);

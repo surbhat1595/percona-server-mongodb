@@ -29,31 +29,61 @@
 
 #include "mongo/db/commands/test_commands.h"
 
+#include <algorithm>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <memory>
+#include <ostream>
 #include <string>
 
-#include "mongo/base/init.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/init.h"  // IWYU pragma: keep
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/catalog/capped_collection_maintenance.h"
 #include "mongo/db/catalog/capped_utils.h"
-#include "mongo/db/catalog/collection_write_path.h"
-#include "mongo/db/catalog/collection_yield_restore.h"
-#include "mongo/db/client.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/catalog/database.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/test_commands_enabled.h"
+#include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/query/internal_plans.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role.h"
+#include "mongo/db/storage/record_data.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 namespace mongo {
 namespace {
 
-const NamespaceString kDurableHistoryTestNss("mdb_testing.pinned_timestamp");
 const std::string kTestingDurableHistoryPinName = "_testing";
 
 using repl::UnreplicatedWritesBlock;
@@ -102,19 +132,21 @@ public:
         OldClientContext ctx(opCtx, nss);
         Database* db = ctx.db();
 
+        auto collection = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
+
         WriteUnitOfWork wunit(opCtx);
         UnreplicatedWritesBlock unreplicatedWritesBlock(opCtx);
-        CollectionPtr collection(
-            CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss));
-        if (!collection) {
-            collection = CollectionPtr(db->createCollection(opCtx, nss));
-            uassert(ErrorCodes::CannotCreateCollection, "could not create collection", collection);
+        if (!collection.exists()) {
+            ScopedLocalCatalogWriteFence scopedLocalCatalogWriteFence(opCtx, &collection);
+            db->createCollection(opCtx, nss);
         }
-        collection.makeYieldable(opCtx, LockedCollectionYieldRestore(opCtx, collection));
+        uassert(
+            ErrorCodes::CannotCreateCollection, "could not create collection", collection.exists());
 
-        OpDebug* const nullOpDebug = nullptr;
-        Status status = collection_internal::insertDocument(
-            opCtx, collection, InsertStatement(obj), nullOpDebug, false);
+        Status status = Helpers::insert(opCtx, collection, obj);
         if (status.isOK()) {
             wunit.commit();
         }
@@ -152,7 +184,8 @@ public:
         const NamespaceString fullNs = CommandHelpers::parseNsCollectionRequired(dbName, cmdObj);
         if (!fullNs.isValid()) {
             uasserted(ErrorCodes::InvalidNamespace,
-                      str::stream() << "collection name " << fullNs.ns() << " is not valid");
+                      str::stream()
+                          << "collection name " << fullNs.toStringForErrorMsg() << " is not valid");
         }
 
         int n = cmdObj.getIntField("n");
@@ -166,7 +199,8 @@ public:
         AutoGetCollection collection(opCtx, fullNs, MODE_X);
         if (!collection) {
             uasserted(ErrorCodes::NamespaceNotFound,
-                      str::stream() << "collection " << fullNs.ns() << " does not exist");
+                      str::stream()
+                          << "collection " << fullNs.toStringForErrorMsg() << " does not exist");
         }
 
         if (!collection->isCapped()) {
@@ -175,9 +209,9 @@ public:
 
         RecordId end;
         {
-            // Scan backwards through the collection to find the document to start truncating from.
-            // We will remove 'n' documents, so start truncating from the (n + 1)th document to the
-            // end.
+            // Scan backwards through the collection to find the document to start truncating
+            // from. We will remove 'n' documents, so start truncating from the (n + 1)th
+            // document to the end.
             auto exec = InternalPlanner::collectionScan(opCtx,
                                                         &collection.getCollection(),
                                                         PlanYieldPolicy::YieldPolicy::NO_YIELD,
@@ -273,36 +307,42 @@ public:
         const Timestamp requestedPinTs = cmdObj.firstElement().timestamp();
         const bool round = cmdObj["round"].booleanSafe();
 
-        AutoGetDb autoDb(opCtx, kDurableHistoryTestNss.dbName(), MODE_IX);
-        Lock::CollectionLock collLock(opCtx, kDurableHistoryTestNss, MODE_IX);
+        AutoGetDb autoDb(opCtx, NamespaceString::kDurableHistoryTestNamespace.dbName(), MODE_IX);
+        Lock::CollectionLock collLock(
+            opCtx, NamespaceString::kDurableHistoryTestNamespace, MODE_IX);
         if (!CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
                 opCtx,
-                kDurableHistoryTestNss)) {  // someone else may have beat us to it.
-            uassertStatusOK(userAllowedCreateNS(opCtx, kDurableHistoryTestNss));
+                NamespaceString::kDurableHistoryTestNamespace)) {  // someone else may have beat us
+                                                                   // to it.
+            uassertStatusOK(
+                userAllowedCreateNS(opCtx, NamespaceString::kDurableHistoryTestNamespace));
             WriteUnitOfWork wuow(opCtx);
             CollectionOptions defaultCollectionOptions;
             auto db = autoDb.ensureDbExists(opCtx);
-            uassertStatusOK(
-                db->userCreateNS(opCtx, kDurableHistoryTestNss, defaultCollectionOptions));
+            uassertStatusOK(db->userCreateNS(
+                opCtx, NamespaceString::kDurableHistoryTestNamespace, defaultCollectionOptions));
             wuow.commit();
         }
 
-        AutoGetCollection autoColl(opCtx, kDurableHistoryTestNss, MODE_IX);
+        const auto collection = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(
+                opCtx,
+                static_cast<const NamespaceString&>(NamespaceString::kDurableHistoryTestNamespace),
+                AcquisitionPrerequisites::kWrite),
+            MODE_IX);
         WriteUnitOfWork wuow(opCtx);
 
-        // Note, this write will replicate to secondaries, but a secondary will not in-turn pin the
-        // oldest timestamp. The write otherwise must be timestamped in a storage engine table with
-        // logging disabled. This is to test that rolling back the written document also results in
-        // the pin being lifted.
+        // Note, this write will replicate to secondaries, but a secondary will not in-turn pin
+        // the oldest timestamp. The write otherwise must be timestamped in a storage engine
+        // table with logging disabled. This is to test that rolling back the written document
+        // also results in the pin being lifted.
         Timestamp pinTs =
             uassertStatusOK(opCtx->getServiceContext()->getStorageEngine()->pinOldestTimestamp(
                 opCtx, kTestingDurableHistoryPinName, requestedPinTs, round));
 
-        uassertStatusOK(collection_internal::insertDocument(
-            opCtx,
-            *autoColl,
-            InsertStatement(fixDocumentForInsert(opCtx, BSON("pinTs" << pinTs)).getValue()),
-            nullptr));
+        uassertStatusOK(Helpers::insert(
+            opCtx, collection, fixDocumentForInsert(opCtx, BSON("pinTs" << pinTs)).getValue()));
         wuow.commit();
 
         result.append("requestedPinTs", requestedPinTs);
@@ -320,7 +360,7 @@ std::string TestingDurableHistoryPin::getName() {
 }
 
 boost::optional<Timestamp> TestingDurableHistoryPin::calculatePin(OperationContext* opCtx) {
-    AutoGetCollectionForRead autoColl(opCtx, kDurableHistoryTestNss);
+    AutoGetCollectionForRead autoColl(opCtx, NamespaceString::kDurableHistoryTestNamespace);
     if (!autoColl) {
         return boost::none;
     }

@@ -29,23 +29,48 @@
 
 #include "mongo/shell/bench.h"
 
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+// IWYU pragma: no_include "cxxabi.h"
+// IWYU pragma: no_include "ext/alloc_traits.h"
+#include <exception>
+#include <mutex>
 #include <string>
+#include <utility>
 
 #include "mongo/base/shim.h"
-#include "mongo/client/dbclient_cursor.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/json.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/client/read_preference.h"
+#include "mongo/client/read_preference_gen.h"
+#include "mongo/db/basic_types.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/dbmessage.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/cursor_response.h"
+#include "mongo/db/query/find_command.h"
 #include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
 #include "mongo/scripting/bson_template_evaluator.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/util/md5.h"
 #include "mongo/util/pcre.h"
 #include "mongo/util/pcre_util.h"
+#include "mongo/util/scopeguard.h"
+#include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
-#include "mongo/util/version.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -134,23 +159,24 @@ bool runCommandWithSession(DBClientBase* conn,
     for (const auto& cmdArg : cmdObj) {
         uassert(ErrorCodes::IllegalOperation,
                 "Command cannot contain session id",
-                cmdArg.fieldName() != OperationSessionInfo::kSessionIdFieldName);
+                cmdArg.fieldName() != OperationSessionInfoFromClient::kSessionIdFieldName);
         uassert(ErrorCodes::IllegalOperation,
                 "Command cannot contain transaction id",
-                cmdArg.fieldName() != OperationSessionInfo::kTxnNumberFieldName);
+                cmdArg.fieldName() != OperationSessionInfoFromClient::kTxnNumberFieldName);
 
         cmdObjWithLsidBuilder.append(cmdArg);
     }
 
     {
         BSONObjBuilder lsidBuilder(
-            cmdObjWithLsidBuilder.subobjStart(OperationSessionInfo::kSessionIdFieldName));
+            cmdObjWithLsidBuilder.subobjStart(OperationSessionInfoFromClient::kSessionIdFieldName));
         lsid->serialize(&lsidBuilder);
         lsidBuilder.doneFast();
     }
 
     if (txnNumber) {
-        cmdObjWithLsidBuilder.append(OperationSessionInfo::kTxnNumberFieldName, *txnNumber);
+        cmdObjWithLsidBuilder.append(OperationSessionInfoFromClient::kTxnNumberFieldName,
+                                     *txnNumber);
     }
 
     if (options & kMultiStatementTransactionOption) {
@@ -209,8 +235,7 @@ int runQueryWithReadCommands(DBClientBase* conn,
                              Milliseconds delayBeforeGetMore,
                              BSONObj readPrefObj,
                              BSONObj* objOut) {
-    const auto dbName =
-        findCommand->getNamespaceOrUUID().nss().value_or(NamespaceString()).dbName();
+    const auto dbName = findCommand->getNamespaceOrUUID().dbName();
 
     BSONObj findCommandResult;
     BSONObj findCommandObj = findCommand->toBSON(readPrefObj);
@@ -243,9 +268,10 @@ int runQueryWithReadCommands(DBClientBase* conn,
     while (cursorResponse.getCursorId() != 0) {
         sleepFor(delayBeforeGetMore);
 
+        invariant(findCommand->getNamespaceOrUUID().isNamespaceString());
         GetMoreCommandRequest getMoreRequest(
             cursorResponse.getCursorId(),
-            findCommand->getNamespaceOrUUID().nss().value_or(NamespaceString()).coll().toString());
+            findCommand->getNamespaceOrUUID().nss().coll().toString());
         getMoreRequest.setBatchSize(findCommand->getBatchSize());
         BSONObj getMoreCommandResult;
         uassert(ErrorCodes::CommandFailed,

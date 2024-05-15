@@ -35,14 +35,23 @@
  *   does_not_support_stepdowns,
  *   # The SBE plan cache was first enabled in 6.3.
  *   requires_fcv_63,
+ *   references_foreign_collection,
  * ]
  */
 
-(function() {
-load("jstests/libs/analyze_plan.js");
+import {
+    getPlanCacheKeyFromPipeline,
+    getPlanCacheKeyFromShape,
+    getPlanStage,
+    getWinningPlan,
+    isClusteredIxscan,
+    isCollscan,
+    isIdhack,
+    isIxscan,
+} from "jstests/libs/analyze_plan.js";
 load("jstests/libs/clustered_collections/clustered_collection_util.js");
 load("jstests/libs/fixture_helpers.js");  // For 'FixtureHelpers'.
-load("jstests/libs/sbe_util.js");         // For checkSBEEnabled.
+import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
 const coll = db.jstests_index_filter_commands;
 
@@ -474,4 +483,3 @@ if (checkSBEEnabled(db)) {
     planCacheEntry = planCacheEntryForPipeline(pipeline);
     assert.eq(null, planCacheEntry, coll.getPlanCache().list());
 }
-}());

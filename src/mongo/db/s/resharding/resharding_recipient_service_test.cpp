@@ -28,18 +28,45 @@
  */
 
 
-#include "mongo/platform/basic.h"
+#include <absl/container/node_hash_map.h>
+#include <boost/cstdint.hpp>
+#include <boost/none.hpp>
+#include <initializer_list>
+#include <ostream>
+#include <string>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/client/dbclient_cursor.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/catalog_raii.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/op_observer/op_observer_noop.h"
+#include "mongo/db/keypattern.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/persistent_task_store.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/find_command.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
+#include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/primary_only_service_test_fixture.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_mock.h"
+#include "mongo/db/s/migration_destination_manager.h"
+#include "mongo/db/s/resharding/donor_oplog_id_gen.h"
 #include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_data_replication.h"
@@ -47,11 +74,31 @@
 #include "mongo/db/s/resharding/resharding_recipient_service.h"
 #include "mongo/db/s/resharding/resharding_recipient_service_external_state.h"
 #include "mongo/db/s/resharding/resharding_service_test_helpers.h"
+#include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/service_context.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/executor/task_executor.h"
+#include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/s/catalog/type_chunk.h"
+#include "mongo/s/catalog/type_index_catalog_gen.h"
+#include "mongo/s/catalog_cache.h"
+#include "mongo/s/chunk_manager.h"
+#include "mongo/s/chunk_version.h"
+#include "mongo/s/database_version.h"
+#include "mongo/s/index_version.h"
+#include "mongo/s/sharding_index_catalog_cache.h"
+#include "mongo/s/type_collection_common_types_gen.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/clock_source.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/functional.h"
+#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -269,7 +316,7 @@ public:
             UUID::gen(),
             sourceNss,
             sourceUUID,
-            resharding::constructTemporaryReshardingNss(sourceNss.db(), sourceUUID),
+            resharding::constructTemporaryReshardingNss(sourceNss.db_forTest(), sourceUUID),
             newShardKeyPattern());
         commonMetadata.setStartTime(getServiceContext()->getFastClockSource()->now());
 
@@ -460,9 +507,10 @@ TEST_F(ReshardingRecipientServiceTest, StepDownStepUpEachTransition) {
                     RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
                     return RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
                 } else {
-                    auto maybeRecipient =
+                    auto [maybeRecipient, isPausedOrShutdown] =
                         RecipientStateMachine::lookup(opCtx.get(), _service, instanceId);
-                    ASSERT_TRUE(bool(maybeRecipient));
+                    ASSERT_TRUE(maybeRecipient);
+                    ASSERT_FALSE(isPausedOrShutdown);
 
                     // Allow the transition to prevState to succeed on this primary-only service
                     // instance.
@@ -508,8 +556,10 @@ TEST_F(ReshardingRecipientServiceTest, StepDownStepUpEachTransition) {
         }
 
         // Finally complete the operation and ensure its success.
-        auto maybeRecipient = RecipientStateMachine::lookup(opCtx.get(), _service, instanceId);
-        ASSERT_TRUE(bool(maybeRecipient));
+        auto [maybeRecipient, isPausedOrShutdown] =
+            RecipientStateMachine::lookup(opCtx.get(), _service, instanceId);
+        ASSERT_TRUE(maybeRecipient);
+        ASSERT_FALSE(isPausedOrShutdown);
 
         auto recipient = *maybeRecipient;
 
@@ -554,8 +604,10 @@ TEST_F(ReshardingRecipientServiceTest, OpCtxKilledWhileRestoringMetrics) {
         stepUp(opCtx.get());
 
         // After the failpoint is disabled, the operation should succeed.
-        auto maybeRecipient = RecipientStateMachine::lookup(opCtx.get(), _service, instanceId);
-        ASSERT_TRUE(bool(maybeRecipient));
+        auto [maybeRecipient, isPausedOrShutdown] =
+            RecipientStateMachine::lookup(opCtx.get(), _service, instanceId);
+        ASSERT_TRUE(maybeRecipient);
+        ASSERT_FALSE(isPausedOrShutdown);
         recipient = *maybeRecipient;
         notifyReshardingCommitting(opCtx.get(), *recipient, doc);
         ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
@@ -614,8 +666,10 @@ TEST_F(ReshardingRecipientServiceTest, DropsTemporaryReshardingCollectionOnAbort
         recipient.reset();
         stepUp(opCtx.get());
 
-        auto maybeRecipient = RecipientStateMachine::lookup(opCtx.get(), _service, instanceId);
-        ASSERT_TRUE(bool(maybeRecipient));
+        auto [maybeRecipient, isPausedOrShutdown] =
+            RecipientStateMachine::lookup(opCtx.get(), _service, instanceId);
+        ASSERT_TRUE(maybeRecipient);
+        ASSERT_FALSE(isPausedOrShutdown);
         recipient = *maybeRecipient;
 
         doneTransitionGuard.reset();
@@ -859,9 +913,10 @@ TEST_F(ReshardingRecipientServiceTest, RestoreMetricsAfterStepUp) {
                 RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
                 return RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
             } else {
-                auto maybeRecipient =
+                auto [maybeRecipient, isPausedOrShutdown] =
                     RecipientStateMachine::lookup(opCtx.get(), _service, instanceId);
-                ASSERT_TRUE(bool(maybeRecipient));
+                ASSERT_TRUE(maybeRecipient);
+                ASSERT_FALSE(isPausedOrShutdown);
 
                 // Allow the transition to prevState to succeed on this primary-only service
                 // instance.

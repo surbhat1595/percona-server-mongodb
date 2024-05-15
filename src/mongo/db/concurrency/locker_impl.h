@@ -29,16 +29,31 @@
 
 #pragma once
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 #include <queue>
+#include <thread>
 
 #include "mongo/db/concurrency/fast_map_noalloc.h"
+#include "mongo/db/concurrency/flow_control_ticketholder.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/lock_stats.h"
 #include "mongo/db/concurrency/locker.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/storage/ticketholder_manager.h"
+#include "mongo/db/tenant_id.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/platform/mutex.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/concurrency/spin_lock.h"
 #include "mongo/util/concurrency/ticketholder.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 
@@ -94,7 +109,8 @@ private:
  * All instances reference a single global lock manager.
  *
  */
-class LockerImpl : public Locker {
+// TODO (SERVER-26879): Get rid of LockerImpl, devirtualise Locker and make it final
+class LockerImpl final : public Locker {
 public:
     /**
      * Instantiates new locker. Must be given a unique identifier for disambiguation. Lockers
@@ -219,6 +235,8 @@ public:
     void getFlowControlTicket(OperationContext* opCtx, LockMode lockMode) override;
 
     FlowControlTicketholder::CurOp getFlowControlStats() const override;
+
+    std::vector<LogDegugInfo> getLockInfoFromResourceHolders(ResourceId resId);
 
     //
     // Below functions are for testing only.

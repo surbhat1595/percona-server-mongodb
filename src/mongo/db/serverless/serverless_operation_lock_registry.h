@@ -29,12 +29,15 @@
 
 #pragma once
 
+#include <boost/optional/optional.hpp>
+#include <set>
+
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/util/uuid.h"
-
-#include <set>
 
 namespace mongo {
 
@@ -88,6 +91,8 @@ public:
     boost::optional<ServerlessOperationLockRegistry::LockType> getActiveOperationType_forTest();
 
 private:
+    std::string printActiveOperations(WithLock lock) const;
+
     mutable Mutex _mutex = MONGO_MAKE_LATCH("ServerlessMutualExclusionRegistry::_mutex");
     boost::optional<LockType> _activeLockType;
     std::set<UUID> _activeOperations;

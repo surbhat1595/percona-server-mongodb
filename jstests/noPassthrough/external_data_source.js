@@ -7,10 +7,7 @@
  * requires_external_data_source
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/analyze_plan.js");  // for aggPlanHasStage()
+import {aggPlanHasStage} from "jstests/libs/analyze_plan.js";
 
 // Runs tests on a standalone mongod.
 let conn = MongoRunner.runMongod({setParameter: {enableComputeMode: true}});
@@ -158,6 +155,17 @@ assert.throwsWithCode(() => {
             });
         }, 7239302);
     });
+})();
+
+(function testCollectionlessAgg() {
+    const docs = [{a: 1}, {a: 2}, {a: 3}];
+    assert.sameMembers(docs, db.aggregate([{$documents: docs}]).toArray());
+})();
+
+(function testCollectionlessAggWithExternalDataSources() {
+    assert.throwsWithCode(() => {
+        db.aggregate([{$documents: [{a: 1}]}], {$_externalDataSources: []});
+    }, 7604400);
 })();
 
 //
@@ -492,4 +500,3 @@ if (hostInfo.os.type != "Windows") {
         }, "Expected mongod died due to an error", 120 * 1000);
     })();
 }
-})();

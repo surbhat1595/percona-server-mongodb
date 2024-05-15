@@ -30,14 +30,27 @@
 
 #include "mongo/db/storage/devnull/ephemeral_catalog_record_store.h"
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <cstring>
+#include <iterator>
 #include <memory>
+#include <numeric>
+#include <shared_mutex>
+#include <utility>
 
-#include "mongo/db/jsobj.h"
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr/shared_array.hpp>
+
+#include "mongo/base/error_codes.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
 #include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
@@ -261,15 +274,18 @@ private:
 // RecordStore
 //
 
-EphemeralForTestRecordStore::EphemeralForTestRecordStore(StringData ns,
+EphemeralForTestRecordStore::EphemeralForTestRecordStore(const NamespaceString& ns,
                                                          boost::optional<UUID> uuid,
                                                          StringData identName,
                                                          std::shared_ptr<void>* dataInOut,
                                                          bool isCapped)
     : RecordStore(uuid, identName, isCapped),
       _isCapped(isCapped),
-      _data(*dataInOut ? static_cast<Data*>(dataInOut->get())
-                       : new Data(ns, NamespaceString::oplog(ns))) {
+      _data(*dataInOut ? static_cast<Data*>(dataInOut->get()) : new Data(ns, ns.isOplog())) {
+    // TODO SERVER-78731 We should remove `ns` in the line above.
+    // NOTE : The static_cast here assumes that `dataInOut`, which is a void pointer, contains a
+    // NamespaceString object. As of now, DevNullKVEngine constructs a EphemeralForTestRecordStore
+    // by passing `_catalogInfo` to this method.
     if (!*dataInOut) {
         dataInOut->reset(_data);  // takes ownership
     }

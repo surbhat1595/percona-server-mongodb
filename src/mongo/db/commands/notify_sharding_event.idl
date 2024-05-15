@@ -32,18 +32,13 @@ global:
     cpp_namespace: "mongo"
     cpp_includes:
         - "mongo/client/connection_string.h"
+        - "mongo/db/commands/notify_sharding_event_utils.h"
 
 imports:
     - "mongo/db/basic_types.idl"
     - "mongo/s/sharding_types.idl"
 
 enums:
-    EventType:
-        description: "The type of sharding event"
-        type: string
-        values:
-            kDatabasesAdded : "databasesAdded"
-
     CommitPhase:
         description: "Specifies the phase of the event being generated
                       (For Sharding DDL commits described through 2-phase notifications)."
@@ -75,6 +70,41 @@ structs:
             phase:
                 description: "The sub-phase of the event being notified."
                 type: CommitPhase
+
+    CollectionResharded:
+        description: "Event describing the details of a reshardCollection operation."
+        strict: false
+        fields:
+            nss:
+                description: "The namespace of the resharded collection."
+                type: namespacestring
+            sourceUUID:
+                description: "The original UUID of the collection."
+                type: uuid
+            reshardingUUID:
+                description: "The UUID of the resharded collection."
+                type: uuid
+            sourceKey:
+                description: "The original shard key of the collection
+                              (defined as optional for retro compatibility)."
+                type: object_owned
+                optional: true
+            unique:
+                type: bool
+                description: "The user-specified value for the unique request field."
+                optional: true
+            collation:
+                type: object_owned
+                description: "The user-specified value for the collation request field."
+                optional: true
+            reshardingKey:
+                description: "The shard key of the resharded collection."
+                type: object_owned
+            numInitialChunks:
+                type: long
+                description: "The number of chunks the new collection should have after resharding."
+                optional: true
+
                 
 commands:
     _shardsvrNotifyShardingEvent:
@@ -88,7 +118,11 @@ commands:
         reply_type: OkReply
         fields:
             eventType:
-                type: EventType
+                type: string
+                description: "The type of sharding event"
+                validator: { callback: "notify_sharding_event::validateEventType" }
             details:
                 type: object_owned
+                description: "A descriptor of the sharding event 
+                             (to be serialized and interpreted based on the value of eventType)."
 

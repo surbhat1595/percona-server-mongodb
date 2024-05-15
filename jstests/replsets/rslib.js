@@ -130,13 +130,13 @@ reconnect = function(conn) {
         try {
             // Make this work with either dbs or connections.
             if (typeof (conn.getDB) == "function") {
-                db = conn.getDB('foo');
+                db = conn.getDB('config');
             } else {
                 db = conn;
             }
 
             // Run a simple command to re-establish connection.
-            db.bar.stats();
+            db.settings.stats();
 
             // SERVER-4241: Shell connections don't re-authenticate on reconnect.
             if (jsTest.options().keyFile) {
@@ -533,8 +533,8 @@ reInitiateWithoutThrowingOnAbortedMember = function(replSetTest) {
     try {
         replSetTest.reInitiate();
     } catch (e) {
-        // reInitiate can throw because it tries to run an ismaster command on
-        // all secondaries, including the new one that may have already aborted
+        // reInitiate can throw because it tries to run a "hello" command on all secondaries,
+        // including the new one that may have already aborted
         const errMsg = tojson(e);
         if (isNetworkError(e)) {
             // Ignore these exceptions, which are indicative of an aborted node
@@ -588,7 +588,7 @@ awaitRSClientHosts = function(conn, host, hostOk, rs, timeout) {
                 // Check that *all* host properties are set correctly
                 var propOk = true;
                 for (var prop in hostOk) {
-                    // Use special comparator for tags because isMaster can return the fields in
+                    // Use special comparator for tags because hello can return the fields in
                     // different order. The fields of the tags should be treated like a set of
                     // strings and 2 tags should be considered the same if the set is equal.
                     if (prop == 'tags') {

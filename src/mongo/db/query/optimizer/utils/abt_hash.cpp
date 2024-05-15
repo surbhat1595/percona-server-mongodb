@@ -29,8 +29,30 @@
 
 #include "mongo/db/query/optimizer/utils/abt_hash.h"
 
-#include "mongo/db/query/optimizer/node.h"
+#include <cstdint>
+#include <functional>
+#include <set>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/query/optimizer/algebra/operator.h"
+#include "mongo/db/query/optimizer/algebra/polyvalue.h"
+#include "mongo/db/query/optimizer/comparison_op.h"
+#include "mongo/db/query/optimizer/defs.h"
+#include "mongo/db/query/optimizer/index_bounds.h"
+#include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
+#include "mongo/db/query/optimizer/partial_schema_requirements.h"
+#include "mongo/db/query/optimizer/syntax/expr.h"
+#include "mongo/db/query/optimizer/syntax/path.h"
+#include "mongo/db/query/optimizer/utils/strong_alias.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo::optimizer {
 
@@ -222,10 +244,16 @@ public:
                                   rightChildResult);
     }
 
-    size_t transport(const RIDUnionNode& node, size_t leftChildResult, size_t rightChildResult) {
+    size_t transport(const RIDUnionNode& node,
+                     size_t leftChildResult,
+                     size_t rightChildResult,
+                     size_t bindResult,
+                     size_t refsResult) {
         return computeHashSeq<47>(ProjectionName::Hasher()(node.getScanProjectionName()),
                                   leftChildResult,
-                                  rightChildResult);
+                                  rightChildResult,
+                                  bindResult,
+                                  refsResult);
     }
 
     size_t transport(const BinaryJoinNode& node,
@@ -460,6 +488,11 @@ public:
 
     size_t operator()(const properties::PhysProperty&, const properties::LimitEstimate& prop) {
         return computeHashSeq<7>(CEType::Hasher()(prop.getEstimate()));
+    }
+
+    size_t operator()(const properties::PhysProperty&,
+                      const properties::RemoveOrphansRequirement& prop) {
+        return computeHashSeq<8>(std::hash<bool>()(prop.mustRemove()));
     }
 
     static size_t computeHash(const properties::PhysProps& props) {

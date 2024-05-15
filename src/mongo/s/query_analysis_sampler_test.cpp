@@ -29,20 +29,46 @@
 
 #include "mongo/s/query_analysis_sampler.h"
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "cxxabi.h"
+#include <future>
+#include <initializer_list>
+#include <limits>
+#include <memory>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+#include "mongo/client/remote_command_targeter_mock.h"
+#include "mongo/db/client.h"
+#include "mongo/db/cluster_role.h"
+#include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/executor/remote_command_request.h"
+#include "mongo/idl/idl_parser.h"
 #include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/logv2/log.h"
+#include "mongo/rpc/op_msg.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
-#include "mongo/s/is_mongos.h"
 #include "mongo/s/refresh_query_analyzer_configuration_cmd_gen.h"
 #include "mongo/s/sharding_router_test_fixture.h"
+#include "mongo/stdx/future.h"
+#include "mongo/transport/session.h"
 #include "mongo/transport/transport_layer_mock.h"
+#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/util/assert_util.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/clock_source.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/net/hostandport.h"
 #include "mongo/util/periodic_runner_factory.h"
 #include "mongo/util/tick_source_mock.h"
+#include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -52,7 +78,7 @@ namespace {
 
 using QuerySamplingOptions = OperationContext::QuerySamplingOptions;
 
-const auto smoothingFactor = gQueryAnalysisQueryStatsSmoothingFactor;
+const auto smoothingFactor = gQueryAnalysisQueryStatsSmoothingFactor.load();
 
 class QueryAnalysisSamplerRateLimiterTest : public ServiceContextTest {
 public:
@@ -83,19 +109,19 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, BurstMultiplierEqualToOne) {
     // multiplier * rate > 1
     auto rateLimiter0 =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 5);
-    ASSERT_EQ(rateLimiter0.getRate(), 5);
+    ASSERT_EQ(rateLimiter0.getSamplesPerSecond(), 5);
     ASSERT_EQ(rateLimiter0.getBurstCapacity(), 5);
 
     // multiplier * rate = 1
     auto rateLimiter1 =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 1);
-    ASSERT_EQ(rateLimiter1.getRate(), 1);
+    ASSERT_EQ(rateLimiter1.getSamplesPerSecond(), 1);
     ASSERT_EQ(rateLimiter1.getBurstCapacity(), 1);
 
     // multiplier * rate < 1
     auto rateLimiter2 =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 0.1);
-    ASSERT_EQ(rateLimiter2.getRate(), 0.1);
+    ASSERT_EQ(rateLimiter2.getSamplesPerSecond(), 0.1);
     ASSERT_EQ(rateLimiter2.getBurstCapacity(), 1);
 }
 
@@ -106,19 +132,19 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, BurstMultiplierGreaterThanOne) {
     // multiplier * rate > 1
     auto rateLimiter0 =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 5);
-    ASSERT_EQ(rateLimiter0.getRate(), 5);
+    ASSERT_EQ(rateLimiter0.getSamplesPerSecond(), 5);
     ASSERT_EQ(rateLimiter0.getBurstCapacity(), 12.5);
 
     // multiplier * rate = 1
     auto rateLimiter1 =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 0.4);
-    ASSERT_EQ(rateLimiter1.getRate(), 0.4);
+    ASSERT_EQ(rateLimiter1.getSamplesPerSecond(), 0.4);
     ASSERT_EQ(rateLimiter1.getBurstCapacity(), 1);
 
     // multiplier * rate < 1
     auto rateLimiter2 =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 0.1);
-    ASSERT_EQ(rateLimiter2.getRate(), 0.1);
+    ASSERT_EQ(rateLimiter2.getSamplesPerSecond(), 0.1);
     ASSERT_EQ(rateLimiter2.getBurstCapacity(), 1);
 }
 
@@ -128,7 +154,7 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, ConsumeAfterOneSecond) {
 
     auto rateLimiter =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 2);
-    ASSERT_EQ(rateLimiter.getRate(), 2);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 2);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 2);
     // There are no token available in the bucket initially.
     ASSERT_FALSE(rateLimiter.tryConsume());
@@ -146,7 +172,7 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, ConsumeAfterLessThanOneSecond) {
 
     auto rateLimiter =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 4);
-    ASSERT_EQ(rateLimiter.getRate(), 4);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 4);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 4);
     // There are no token available in the bucket initially.
     ASSERT_FALSE(rateLimiter.tryConsume());
@@ -164,7 +190,7 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, ConsumeAfterMoreThanOneSecond) {
 
     auto rateLimiter =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 0.5);
-    ASSERT_EQ(rateLimiter.getRate(), 0.5);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 0.5);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 1);
     // There are no token available in the bucket initially.
     ASSERT_FALSE(rateLimiter.tryConsume());
@@ -181,7 +207,7 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, ConsumeEpsilonAbove) {
 
     auto rateLimiter =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 1);
-    ASSERT_EQ(rateLimiter.getRate(), 1);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 1);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 1);
     ASSERT_GTE(QueryAnalysisSampler::SampleRateLimiter::kEpsilon, 0.001);
     // There are no token available in the bucket initially.
@@ -199,7 +225,7 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, ConsumeRemainingTokens) {
 
     auto rateLimiter =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 2);
-    ASSERT_EQ(rateLimiter.getRate(), 2);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 2);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 2);
     // There are no token available in the bucket initially.
     ASSERT_FALSE(rateLimiter.tryConsume());
@@ -221,7 +247,7 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, ConsumeBurstCapacity) {
 
     auto rateLimiter =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 1);
-    ASSERT_EQ(rateLimiter.getRate(), 1);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 1);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 2);
     // There are no token available in the bucket initially.
     ASSERT_FALSE(rateLimiter.tryConsume());
@@ -239,7 +265,7 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, ConsumeAboveBurstCapacity) {
 
     auto rateLimiter =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 1);
-    ASSERT_EQ(rateLimiter.getRate(), 1);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 1);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 2);
     // There are no token available in the bucket initially.
     ASSERT_FALSE(rateLimiter.tryConsume());
@@ -257,7 +283,7 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, ConsumeBelowBurstCapacity) {
 
     auto rateLimiter =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 1);
-    ASSERT_EQ(rateLimiter.getRate(), 1);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 1);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 2);
     // There are no token available in the bucket initially.
     ASSERT_FALSE(rateLimiter.tryConsume());
@@ -278,7 +304,7 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, ConsumeAfterRefresh_RateIncreased) {
 
     auto rateLimiter =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 0.1);
-    ASSERT_EQ(rateLimiter.getRate(), 0.1);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 0.1);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 1);
     // There are no token available in the bucket initially.
     ASSERT_FALSE(rateLimiter.tryConsume());
@@ -286,8 +312,8 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, ConsumeAfterRefresh_RateIncreased) {
     advanceTime(Milliseconds(20000));
     // The number of tokens available in the bucket right after the refill is 2 (note that this is
     // greater than the pre-refresh capacity).
-    rateLimiter.refreshRate(1);
-    ASSERT_EQ(rateLimiter.getRate(), 1);
+    rateLimiter.refreshSamplesPerSecond(1);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 1);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 2);
     ASSERT(rateLimiter.tryConsume());
     ASSERT(rateLimiter.tryConsume());
@@ -307,7 +333,7 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, ConsumeAfterRefresh_RateDecreased) {
 
     auto rateLimiter =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 1);
-    ASSERT_EQ(rateLimiter.getRate(), 1);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 1);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 2);
     // There are no token available in the bucket initially.
     ASSERT_FALSE(rateLimiter.tryConsume());
@@ -315,8 +341,8 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, ConsumeAfterRefresh_RateDecreased) {
     advanceTime(Milliseconds(2000));
     // The number of tokens available in the bucket right after the refill is 1 (note that this is
     // less than the pre-refresh capacity).
-    rateLimiter.refreshRate(0.1);
-    ASSERT_EQ(rateLimiter.getRate(), 0.1);
+    rateLimiter.refreshSamplesPerSecond(0.1);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 0.1);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 1);
     ASSERT(rateLimiter.tryConsume());
     ASSERT_FALSE(rateLimiter.tryConsume());
@@ -338,15 +364,15 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, ConsumeAfterRefresh_RateUnchanged) {
 
     auto rateLimiter =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 1);
-    ASSERT_EQ(rateLimiter.getRate(), 1);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 1);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 2);
     // There are no token available in the bucket initially.
     ASSERT_FALSE(rateLimiter.tryConsume());
 
     advanceTime(Milliseconds(1000));
     // The number of tokens available in the bucket right after the refill is 1.
-    rateLimiter.refreshRate(1);
-    ASSERT_EQ(rateLimiter.getRate(), 1);
+    rateLimiter.refreshSamplesPerSecond(1);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 1);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 2);
 
     advanceTime(Milliseconds(1000));
@@ -362,7 +388,7 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, MicrosecondResolution) {
 
     auto rateLimiter =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 1e6);
-    ASSERT_EQ(rateLimiter.getRate(), 1e6);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 1e6);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 1e6);
     // There are no token available in the bucket initially.
     ASSERT_FALSE(rateLimiter.tryConsume());
@@ -379,7 +405,7 @@ TEST_F(QueryAnalysisSamplerRateLimiterTest, NanosecondsResolution) {
 
     auto rateLimiter =
         QueryAnalysisSampler::SampleRateLimiter(getServiceContext(), nss, collUuid, 1e9);
-    ASSERT_EQ(rateLimiter.getRate(), 1e9);
+    ASSERT_EQ(rateLimiter.getSamplesPerSecond(), 1e9);
     ASSERT_EQ(rateLimiter.getBurstCapacity(), 1e9);
     // There are no token available in the bucket initially.
     ASSERT_FALSE(rateLimiter.tryConsume());
@@ -394,8 +420,7 @@ class QueryAnalysisSamplerTest : public ShardingTestFixture {
 public:
     void setUp() override {
         ShardingTestFixture::setUp();
-        _originalIsMongos = isMongos();
-        setMongos(true);
+        serverGlobalParams.clusterRole = ClusterRole::RouterServer;
         setRemote(HostAndPort("ClientHost", 12345));
 
         // Set up the RemoteCommandTargeter for the config shard.
@@ -412,13 +437,11 @@ public:
 
     void tearDown() override {
         ShardingTestFixture::tearDown();
-        setMongos(_originalIsMongos);
         serverGlobalParams.clusterRole = ClusterRole::None;
     }
 
-    void setUpRole(ClusterRole role, bool isReplEnabled = true) {
-        setMongos(false);
-        serverGlobalParams.clusterRole = role;
+    void setUpRole(std::initializer_list<ClusterRole::Value> roles, bool isReplEnabled = true) {
+        serverGlobalParams.clusterRole = roles;
 
         auto replCoord = [&] {
             if (isReplEnabled) {
@@ -501,28 +524,25 @@ protected:
     const UUID collUuid0 = UUID::gen();
     const UUID collUuid1 = UUID::gen();
     const UUID collUuid2 = UUID::gen();
-
-private:
-    bool _originalIsMongos;
 };
 
 TEST_F(QueryAnalysisSamplerTest, CanGetOnShardServer) {
-    setUpRole(ClusterRole::ShardServer);
+    setUpRole({ClusterRole::ShardServer});
     QueryAnalysisSampler::get(operationContext());
 }
 
 TEST_F(QueryAnalysisSamplerTest, CanGetOnStandaloneReplicaSet) {
-    setUpRole(ClusterRole::None);
+    setUpRole({ClusterRole::None});
     QueryAnalysisSampler::get(operationContext());
 }
 
 TEST_F(QueryAnalysisSamplerTest, CanGetOnConfigServer) {
-    setUpRole(ClusterRole::ConfigServer);
+    setUpRole({ClusterRole::ShardServer, ClusterRole::ConfigServer});
     QueryAnalysisSampler::get(operationContext());
 }
 
 DEATH_TEST_F(QueryAnalysisSamplerTest, CannotGetOnStandaloneMongod, "invariant") {
-    setUpRole(ClusterRole::None, false /* isReplEnabled */);
+    setUpRole({ClusterRole::None}, false /* isReplEnabled */);
     QueryAnalysisSampler::get(operationContext());
 }
 
@@ -714,113 +734,113 @@ TEST_F(QueryAnalysisSamplerQueryStatsTest,
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest,
        RefreshQueryStatsReplSetMongod_NotCountInsertsTrackedByOpCounters) {
-    setUpRole(ClusterRole::None);
+    setUpRole({ClusterRole::None});
     testInsertsTrackedByOpCounters(false /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest,
        RefreshQueryStatsReplSetMongod_CountUpdatesTrackedByOpCounters) {
-    setUpRole(ClusterRole::None);
+    setUpRole({ClusterRole::None});
     testUpdatesTrackedByOpCounters(true /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest, RefreshQueryStatsReplSetMongod_CountFindAndModify) {
-    setUpRole(ClusterRole::None);
+    setUpRole({ClusterRole::None});
     testFindAndModify(true /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest,
        RefreshQueryStatsReplSetMongod_CountDeletesTrackedByOpCounters) {
-    setUpRole(ClusterRole::None);
+    setUpRole({ClusterRole::None});
     testDeletesTrackedByOpCounters(true /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest,
        RefreshQueryStatsReplSetMongod_CountQueriesTrackedByOpCounters) {
-    setUpRole(ClusterRole::None);
+    setUpRole({ClusterRole::None});
     testQueriesTrackedByOpCounters(true /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest,
        RefreshQueryStatsReplSetMongod_NotCountCommandsTrackedByOpCounters) {
-    setUpRole(ClusterRole::None);
+    setUpRole({ClusterRole::None});
     testCommandsTrackedByOpCounters(false /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest, RefreshQueryStatsReplSetMongod_CountAggregates) {
-    setUpRole(ClusterRole::None);
+    setUpRole({ClusterRole::None});
     testAggregates(true /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest, RefreshQueryStatsReplSetMongod_CountCounts) {
-    setUpRole(ClusterRole::None);
+    setUpRole({ClusterRole::None});
     testCounts(true /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest, RefreshQueryStatsReplSetMongod_CountDistincts) {
-    setUpRole(ClusterRole::None);
+    setUpRole({ClusterRole::None});
     testDistincts(true /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest,
        RefreshQueryStatsReplSetMongod_NotCountNestedAggregatesTrackedByOpCounters) {
-    setUpRole(ClusterRole::None);
+    setUpRole({ClusterRole::None});
     testNestedAggregates(false /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest,
        RefreshQueryStatsShardSvrMongod_NotCountInsertsTrackedByOpCounters) {
-    setUpRole(ClusterRole::ShardServer);
+    setUpRole({ClusterRole::ShardServer});
     testInsertsTrackedByOpCounters(false /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest,
        RefreshQueryStatsShardSvrMongod_NotCountUpdatesTrackedByOpCounters) {
-    setUpRole(ClusterRole::ShardServer);
+    setUpRole({ClusterRole::ShardServer});
     testUpdatesTrackedByOpCounters(false /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest,
        RefreshQueryStatsShardSvrMongod_NotCountDeletesTrackedByOpCounters) {
-    setUpRole(ClusterRole::ShardServer);
+    setUpRole({ClusterRole::ShardServer});
     testDeletesTrackedByOpCounters(false /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest, RefreshQueryStatsShardSvrMongod_NotCountFindAndModify) {
-    setUpRole(ClusterRole::ShardServer);
+    setUpRole({ClusterRole::ShardServer});
     testFindAndModify(false /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest,
        RefreshQueryStatsShardSvrMongod_NotCountQueriesTrackedByOpCounters) {
-    setUpRole(ClusterRole::ShardServer);
+    setUpRole({ClusterRole::ShardServer});
     testQueriesTrackedByOpCounters(false /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest,
        RefreshQueryStatsShardSvrMongod_NotCountCommandsTrackedByOpCounters) {
-    setUpRole(ClusterRole::ShardServer);
+    setUpRole({ClusterRole::ShardServer});
     testCommandsTrackedByOpCounters(false /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest, RefreshQueryStatsShardSvrMongod_NotCountAggregates) {
-    setUpRole(ClusterRole::ShardServer);
+    setUpRole({ClusterRole::ShardServer});
     testAggregates(false /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest, RefreshQueryStatsShardSvrMongod_NotCountCounts) {
-    setUpRole(ClusterRole::ShardServer);
+    setUpRole({ClusterRole::ShardServer});
     testCounts(false /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest, RefreshQueryStatsShardSvrMongod_NotCountDistincts) {
-    setUpRole(ClusterRole::ShardServer);
+    setUpRole({ClusterRole::ShardServer});
     testDistincts(false /* shouldCount */);
 }
 
 TEST_F(QueryAnalysisSamplerQueryStatsTest,
        RefreshQueryStatsShardSvrMongod_CountNestedAggregatesTrackedByOpCounters) {
-    setUpRole(ClusterRole::ShardServer);
+    setUpRole({ClusterRole::ShardServer});
     testNestedAggregates(true /* shouldCount */);
 }
 
@@ -869,12 +889,12 @@ TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsAndConfigurations) {
     auto it0 = rateLimiters1.find(refreshedConfigurations1[0].getNs());
     ASSERT(it0 != rateLimiters1.end());
     ASSERT_EQ(it0->second.getCollectionUuid(), refreshedConfigurations1[0].getCollectionUuid());
-    ASSERT_EQ(it0->second.getRate(), refreshedConfigurations1[0].getSampleRate());
+    ASSERT_EQ(it0->second.getSamplesPerSecond(), refreshedConfigurations1[0].getSamplesPerSecond());
 
     auto it1 = rateLimiters1.find(refreshedConfigurations1[1].getNs());
     ASSERT(it1 != rateLimiters1.end());
     ASSERT_EQ(it1->second.getCollectionUuid(), refreshedConfigurations1[1].getCollectionUuid());
-    ASSERT_EQ(it1->second.getRate(), refreshedConfigurations1[1].getSampleRate());
+    ASSERT_EQ(it1->second.getSamplesPerSecond(), refreshedConfigurations1[1].getSamplesPerSecond());
 
     // The per-second counts after: [0, 2].
     globalOpCounters.gotUpdate();
@@ -906,7 +926,7 @@ TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsAndConfigurations) {
     auto it = rateLimiters2.find(refreshedConfigurations2[0].getNs());
     ASSERT(it != rateLimiters2.end());
     ASSERT_EQ(it->second.getCollectionUuid(), refreshedConfigurations2[0].getCollectionUuid());
-    ASSERT_EQ(it->second.getRate(), refreshedConfigurations2[0].getSampleRate());
+    ASSERT_EQ(it->second.getSamplesPerSecond(), refreshedConfigurations2[0].getSamplesPerSecond());
 
     // The per-second counts after: [0, 2, 5].
     globalOpCounters.gotQuery();
@@ -1048,7 +1068,7 @@ TEST_F(QueryAnalysisSamplerTest, RefreshConfigurationsNewCollectionUuid) {
     auto oldIt = oldRateLimiters.find(oldConfigurations[0].getNs());
     ASSERT(oldIt != oldRateLimiters.end());
     ASSERT_EQ(oldIt->second.getCollectionUuid(), oldConfigurations[0].getCollectionUuid());
-    ASSERT_EQ(oldIt->second.getRate(), oldConfigurations[0].getSampleRate());
+    ASSERT_EQ(oldIt->second.getSamplesPerSecond(), oldConfigurations[0].getSamplesPerSecond());
 
     advanceTime(Milliseconds(1000));
     // The number of tokens available in the bucket right after the refill is 0 + 2.
@@ -1072,7 +1092,7 @@ TEST_F(QueryAnalysisSamplerTest, RefreshConfigurationsNewCollectionUuid) {
     auto newIt = newRateLimiters.find(newConfigurations[0].getNs());
     ASSERT(newIt != newRateLimiters.end());
     ASSERT_EQ(newIt->second.getCollectionUuid(), newConfigurations[0].getCollectionUuid());
-    ASSERT_EQ(newIt->second.getRate(), newConfigurations[0].getSampleRate());
+    ASSERT_EQ(newIt->second.getSamplesPerSecond(), newConfigurations[0].getSamplesPerSecond());
 
     // Cannot sample if time has not elapsed. There should be no tokens available in the bucket
     // right after the refill unless the one token from the previous configurations was

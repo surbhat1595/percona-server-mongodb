@@ -28,16 +28,33 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/db/session/session_catalog.h"
-
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/cstdint.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <type_traits>
 
-#include "mongo/db/server_options.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/session/session_catalog.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/scopeguard.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
 
@@ -369,6 +386,8 @@ void SessionCatalog::_releaseSession(
             return willReap;
         });
 
+        sri->lastClientTxnNumberStarted = txnNumber;
+
         LOGV2_DEBUG(6685200,
                     4,
                     "Erased child sessions",
@@ -420,16 +439,9 @@ SessionCatalog::KillToken ObservableSession::kill(ErrorCodes::Error reason) cons
     ++_sri->killsRequested;
 
     if (firstKiller && hasCurrentOperation()) {
-        // Interrupt the current OperationContext if its running on the transaction session
-        // that is being killed or if we are killing the parent transaction session.
         invariant(_clientLock.owns_lock());
-        const auto checkedOutLsid = _sri->checkoutOpCtx->getLogicalSessionId();
-        const auto lsidToKill = getSessionId();
-        const bool isKillingParentSession = isParentSessionId(lsidToKill);
-        if (isKillingParentSession || (checkedOutLsid == lsidToKill)) {
-            const auto serviceContext = _sri->checkoutOpCtx->getServiceContext();
-            serviceContext->killOperation(_clientLock, _sri->checkoutOpCtx, reason);
-        }
+        const auto serviceContext = _sri->checkoutOpCtx->getServiceContext();
+        serviceContext->killOperation(_clientLock, _sri->checkoutOpCtx, reason);
     }
 
     return SessionCatalog::KillToken(getSessionId());

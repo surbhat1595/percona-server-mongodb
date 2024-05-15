@@ -29,57 +29,80 @@
 
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
 
+#include <absl/container/node_hash_map.h>
+#include <algorithm>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <cstdint>
 #include <fmt/format.h>
-#include <iomanip>
+#include <iterator>
+#include <type_traits>
+#include <variant>
 
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bson_field.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/client/remote_command_targeter.h"
 #include "mongo/db/catalog_shard_feature_flag_gen.h"
+#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
-#include "mongo/db/pipeline/document_source_add_fields.h"
 #include "mongo/db/pipeline/document_source_facet.h"
 #include "mongo/db/pipeline/document_source_group.h"
+#include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_project.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/document_source_union_with.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/session/logical_session_cache.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/vector_clock.h"
-#include "mongo/executor/network_interface.h"
+#include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/rpc/metadata/repl_set_metadata.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
+#include "mongo/s/catalog/type_collection_gen.h"
 #include "mongo/s/catalog/type_config_version.h"
 #include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog/type_namespace_placement_gen.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog/type_tags.h"
 #include "mongo/s/client/shard.h"
+#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/client/shard_remote_gen.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/s/shard_util.h"
-#include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
+#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/net/hostandport.h"
-#include "mongo/util/pcre.h"
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/namespace_string_util.h"
 #include "mongo/util/pcre_util.h"
 #include "mongo/util/str.h"
-#include "mongo/util/time_support.h"
+#include "mongo/util/string_map.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -323,6 +346,45 @@ AggregateCommandRequest makeCollectionAndIndexesAggregation(OperationContext* op
     return AggregateCommandRequest(CollectionType::ConfigNS, std::move(serializedPipeline));
 }
 
+/**
+ * Returns keys for the given purpose and have an expiresAt value greater than newerThanThis on the
+ * given shard.
+ */
+template <typename KeyDocumentType>
+StatusWith<std::vector<KeyDocumentType>> _getNewKeys(OperationContext* opCtx,
+                                                     std::shared_ptr<Shard> shard,
+                                                     const NamespaceString& nss,
+                                                     StringData purpose,
+                                                     const LogicalTime& newerThanThis,
+                                                     repl::ReadConcernLevel readConcernLevel) {
+    BSONObjBuilder queryBuilder;
+    queryBuilder.append("purpose", purpose);
+    queryBuilder.append("expiresAt", BSON("$gt" << newerThanThis.asTimestamp()));
+
+    auto findStatus = shard->exhaustiveFindOnConfig(opCtx,
+                                                    kConfigReadSelector,
+                                                    readConcernLevel,
+                                                    nss,
+                                                    queryBuilder.obj(),
+                                                    BSON("expiresAt" << 1),
+                                                    boost::none);
+    if (!findStatus.isOK()) {
+        return findStatus.getStatus();
+    }
+    const auto& objs = findStatus.getValue().docs;
+
+    std::vector<KeyDocumentType> keyDocs;
+    keyDocs.reserve(objs.size());
+    for (auto&& obj : objs) {
+        try {
+            keyDocs.push_back(KeyDocumentType::parse(IDLParserContext("keyDoc"), obj));
+        } catch (...) {
+            return exceptionToStatus();
+        }
+    }
+    return keyDocs;
+}
+
 }  // namespace
 
 ShardingCatalogClientImpl::ShardingCatalogClientImpl(std::shared_ptr<Shard> overrideConfigShard)
@@ -457,14 +519,6 @@ std::vector<BSONObj> ShardingCatalogClientImpl::runCatalogAggregation(
     aggRequest.setWriteConcern(WriteConcernOptions());
 
     const auto readPref = [&]() -> ReadPreferenceSetting {
-        // (Ignore FCV check): Config servers always use ShardRemote for themselves in 7.0.
-        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-            !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
-            // When the feature flag is on, the config server may read from any node in its replica
-            // set, so we should use the typical config server read preference.
-            return {};
-        }
-
         const auto vcTime = VectorClock::get(opCtx)->getTime();
         ReadPreferenceSetting readPref{kConfigReadSelector};
         readPref.minClusterTime = vcTime.configTime().asTimestamp();
@@ -512,7 +566,8 @@ CollectionType ShardingCatalogClientImpl::getCollection(OperationContext* opCtx,
                                                 kConfigReadSelector,
                                                 readConcernLevel,
                                                 CollectionType::ConfigNS,
-                                                BSON(CollectionType::kNssFieldName << nss.ns()),
+                                                BSON(CollectionType::kNssFieldName
+                                                     << NamespaceStringUtil::serialize(nss)),
                                                 BSONObj(),
                                                 1))
             .value;
@@ -812,13 +867,14 @@ ShardingCatalogClientImpl::getCollectionAndShardingIndexCatalogEntries(
 
 StatusWith<std::vector<TagsType>> ShardingCatalogClientImpl::getTagsForCollection(
     OperationContext* opCtx, const NamespaceString& nss) {
-    auto findStatus = _exhaustiveFindOnConfig(opCtx,
-                                              kConfigReadSelector,
-                                              repl::ReadConcernLevel::kMajorityReadConcern,
-                                              TagsType::ConfigNS,
-                                              BSON(TagsType::ns(nss.ns().toString())),
-                                              BSON(TagsType::min() << 1),
-                                              boost::none);  // no limit
+    auto findStatus =
+        _exhaustiveFindOnConfig(opCtx,
+                                kConfigReadSelector,
+                                repl::ReadConcernLevel::kMajorityReadConcern,
+                                TagsType::ConfigNS,
+                                BSON(TagsType::ns(NamespaceStringUtil::serialize(nss))),
+                                BSON(TagsType::min() << 1),
+                                boost::none);  // no limit
     if (!findStatus.isOK()) {
         return findStatus.getStatus().withContext("Failed to load tags");
     }
@@ -879,16 +935,8 @@ std::vector<NamespaceString> ShardingCatalogClientImpl::getAllNssThatHaveZonesFo
 
     // Run the aggregation
     const auto readConcern = [&]() -> repl::ReadConcernArgs {
-        // (Ignore FCV check): Config servers always use ShardRemote for themselves in 7.0.
-        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-            !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
-            // When the feature flag is on, the config server may read from a secondary which may
-            // need to wait for replication, so we should use afterClusterTime.
-            return {repl::ReadConcernLevel::kMajorityReadConcern};
-        } else {
-            const auto time = VectorClock::get(opCtx)->getTime();
-            return {time.configTime(), repl::ReadConcernLevel::kMajorityReadConcern};
-        }
+        const auto time = VectorClock::get(opCtx)->getTime();
+        return {time.configTime(), repl::ReadConcernLevel::kMajorityReadConcern};
     }();
 
     auto aggResult = runCatalogAggregation(opCtx, aggRequest, readConcern);
@@ -896,7 +944,8 @@ std::vector<NamespaceString> ShardingCatalogClientImpl::getAllNssThatHaveZonesFo
     // Parse the result
     std::vector<NamespaceString> nssList;
     for (const auto& doc : aggResult) {
-        nssList.push_back(NamespaceString(doc.getField("_id").String()));
+        nssList.push_back(
+            NamespaceStringUtil::deserialize(boost::none, doc.getField("_id").String()));
     }
     return nssList;
 }
@@ -1178,7 +1227,7 @@ Status ShardingCatalogClientImpl::removeConfigDocuments(OperationContext* opCtx,
                                                         const BSONObj& query,
                                                         const WriteConcernOptions& writeConcern,
                                                         boost::optional<BSONObj> hint) {
-    invariant(nss.db() == DatabaseName::kConfig.db());
+    invariant(nss.isConfigDB());
 
     BatchedCommandRequest request([&] {
         write_ops::DeleteCommandRequest deleteOp(nss);
@@ -1219,42 +1268,31 @@ ShardingCatalogClientImpl::_exhaustiveFindOnConfig(OperationContext* opCtx,
                                                   response.getValue().opTime);
 }
 
-StatusWith<std::vector<KeysCollectionDocument>> ShardingCatalogClientImpl::getNewKeys(
+StatusWith<std::vector<KeysCollectionDocument>> ShardingCatalogClientImpl::getNewInternalKeys(
     OperationContext* opCtx,
     StringData purpose,
     const LogicalTime& newerThanThis,
     repl::ReadConcernLevel readConcernLevel) {
-    BSONObjBuilder queryBuilder;
-    queryBuilder.append("purpose", purpose);
-    queryBuilder.append("expiresAt", BSON("$gt" << newerThanThis.asTimestamp()));
-
-    auto findStatus =
-        _getConfigShard(opCtx)->exhaustiveFindOnConfig(opCtx,
-                                                       kConfigReadSelector,
-                                                       readConcernLevel,
-                                                       NamespaceString::kKeysCollectionNamespace,
-                                                       queryBuilder.obj(),
-                                                       BSON("expiresAt" << 1),
-                                                       boost::none);
-
-    if (!findStatus.isOK()) {
-        return findStatus.getStatus();
-    }
-
-    const auto& keyDocs = findStatus.getValue().docs;
-    std::vector<KeysCollectionDocument> keys;
-    keys.reserve(keyDocs.size());
-    for (auto&& keyDoc : keyDocs) {
-        try {
-            keys.push_back(KeysCollectionDocument::parse(IDLParserContext("keyDoc"), keyDoc));
-        } catch (...) {
-            return exceptionToStatus();
-        }
-    }
-
-    return keys;
+    return _getNewKeys<KeysCollectionDocument>(opCtx,
+                                               _getConfigShard(opCtx),
+                                               NamespaceString::kKeysCollectionNamespace,
+                                               purpose,
+                                               newerThanThis,
+                                               readConcernLevel);
 }
 
+StatusWith<std::vector<ExternalKeysCollectionDocument>>
+ShardingCatalogClientImpl::getAllExternalKeys(OperationContext* opCtx,
+                                              StringData purpose,
+                                              repl::ReadConcernLevel readConcernLevel) {
+    return _getNewKeys<ExternalKeysCollectionDocument>(
+        opCtx,
+        _getConfigShard(opCtx),
+        NamespaceString::kExternalKeysCollectionNamespace,
+        purpose,
+        LogicalTime(),
+        readConcernLevel);
+}
 
 HistoricalPlacement ShardingCatalogClientImpl::getShardsThatOwnDataForCollAtClusterTime(
     OperationContext* opCtx, const NamespaceString& collName, const Timestamp& clusterTime) {
@@ -1276,7 +1314,7 @@ HistoricalPlacement ShardingCatalogClientImpl::getShardsThatOwnDataForDbAtCluste
 
     uassert(ErrorCodes::InvalidOptions,
             "A full db namespace must be specified",
-            dbName.coll().empty() && !dbName.db().empty());
+            dbName.coll().empty() && !dbName.isEmpty());
 
     if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         return getHistoricalPlacement(opCtx, clusterTime, dbName);
@@ -1433,8 +1471,8 @@ HistoricalPlacement ShardingCatalogClientImpl::getHistoricalPlacement(
     // Build the pipeline for the exact placement data.
     // 1. Get all the history entries prior to the requested time concerning either the collection
     // or the parent database.
-    const auto& kMarkerNss =
-        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.ns();
+    const auto& kMarkerNss = NamespaceStringUtil::serialize(
+        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker);
     auto matchStage = [&]() {
         bool isClusterSearch = !nss.has_value();
         if (isClusterSearch)
@@ -1443,10 +1481,10 @@ HistoricalPlacement ShardingCatalogClientImpl::getHistoricalPlacement(
                                                           << BSON("$lte" << atClusterTime)),
                                                expCtx);
 
-        bool isCollectionSearch = !nss->db().empty() && !nss->coll().empty();
+        bool isCollectionSearch = !nss->db_forSharding().empty() && !nss->coll().empty();
         auto collMatchExpression = isCollectionSearch ? pcre_util::quoteMeta(nss->coll()) : ".*";
-        auto regexString =
-            "^" + pcre_util::quoteMeta(nss->db()) + "(\\." + collMatchExpression + ")?$";
+        auto regexString = "^" + pcre_util::quoteMeta(nss->db_forSharding()) + "(\\." +
+            collMatchExpression + ")?$";
         return DocumentSourceMatch::create(BSON("nss" << BSON("$regex" << regexString)
                                                       << "timestamp"
                                                       << BSON("$lte" << atClusterTime)),
@@ -1521,16 +1559,8 @@ HistoricalPlacement ShardingCatalogClientImpl::getHistoricalPlacement(
 
     // Run the aggregation
     const auto readConcern = [&]() -> repl::ReadConcernArgs {
-        // (Ignore FCV check): Config servers always use ShardRemote for themselves in 7.0.
-        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-            !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
-            // When the feature flag is on, the config server may read from a secondary which may
-            // need to wait for replication, so we should use afterClusterTime.
-            return {repl::ReadConcernLevel::kSnapshotReadConcern};
-        } else {
-            const auto vcTime = VectorClock::get(opCtx)->getTime();
-            return {vcTime.configTime(), repl::ReadConcernLevel::kSnapshotReadConcern};
-        }
+        const auto vcTime = VectorClock::get(opCtx)->getTime();
+        return {vcTime.configTime(), repl::ReadConcernLevel::kSnapshotReadConcern};
     }();
 
     auto aggrResult = runCatalogAggregation(opCtx, aggRequest, readConcern);

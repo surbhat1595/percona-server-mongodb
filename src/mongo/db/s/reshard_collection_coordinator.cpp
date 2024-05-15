@@ -28,79 +28,61 @@
  */
 
 
-#include "mongo/platform/basic.h"
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr.hpp>
+#include <cstdint>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
 
-#include "mongo/db/catalog/collection_uuid_mismatch.h"
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/client/read_preference.h"
+#include "mongo/db/catalog_raii.h"
+#include "mongo/db/client.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/keypattern.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/db/s/forwardable_operation_metadata.h"
 #include "mongo/db/s/reshard_collection_coordinator.h"
-#include "mongo/logv2/log.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/s/catalog_cache.h"
+#include "mongo/s/chunk_manager.h"
+#include "mongo/s/client/shard.h"
+#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/reshard_collection_gen.h"
+#include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
+#include "mongo/s/shard_key_pattern.h"
+#include "mongo/util/future_impl.h"
+#include "mongo/util/namespace_string_util.h"
+#include "mongo/util/str.h"
+#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 
 namespace mongo {
-
-namespace {
-
-void notifyChangeStreamsOnReshardCollectionComplete(OperationContext* opCtx,
-                                                    const NamespaceString& collNss,
-                                                    const ReshardCollectionCoordinatorDocument& doc,
-                                                    const UUID& reshardUUID) {
-
-    const std::string oMessage = str::stream()
-        << "Reshard collection " << collNss.toStringForErrorMsg() << " with shard key "
-        << doc.getKey().toString();
-
-    BSONObjBuilder cmdBuilder;
-    tassert(6590800, "Did not set old collectionUUID", doc.getOldCollectionUUID());
-    tassert(6590801, "Did not set old ShardKey", doc.getOldShardKey());
-    UUID collUUID = *doc.getOldCollectionUUID();
-    cmdBuilder.append("reshardCollection", collNss.ns());
-    reshardUUID.appendToBuilder(&cmdBuilder, "reshardUUID");
-    cmdBuilder.append("shardKey", doc.getKey());
-    cmdBuilder.append("oldShardKey", *doc.getOldShardKey());
-
-    cmdBuilder.append("unique", doc.getUnique().get_value_or(false));
-    if (doc.getNumInitialChunks()) {
-        cmdBuilder.append("numInitialChunks", doc.getNumInitialChunks().value());
-    }
-    if (doc.getCollation()) {
-        cmdBuilder.append("collation", doc.getCollation().value());
-    }
-
-    if (doc.getZones()) {
-        BSONArrayBuilder zonesBSON(cmdBuilder.subarrayStart("zones"));
-        for (const auto& zone : *doc.getZones()) {
-            zonesBSON.append(zone.toBSON());
-        }
-        zonesBSON.doneFast();
-    }
-
-    auto const serviceContext = opCtx->getClient()->getServiceContext();
-
-    const auto cmd = cmdBuilder.obj();
-
-    writeConflictRetry(opCtx, "ReshardCollection", NamespaceString::kRsOplogNamespace, [&] {
-        AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
-        WriteUnitOfWork uow(opCtx);
-        serviceContext->getOpObserver()->onInternalOpMessage(opCtx,
-                                                             collNss,
-                                                             collUUID,
-                                                             BSON("msg" << oMessage),
-                                                             cmd,
-                                                             boost::none,
-                                                             boost::none,
-                                                             boost::none,
-                                                             boost::none);
-        uow.commit();
-    });
-}
-}  // namespace
 
 ReshardCollectionCoordinator::ReshardCollectionCoordinator(ShardingDDLCoordinatorService* service,
                                                            const BSONObj& initialState)
@@ -175,9 +157,13 @@ ExecutorFuture<void> ReshardCollectionCoordinator::_runImpl(
                     ErrorCodes::InvalidOptions,
                     "Resharding improvements is not enabled, reject forceRedistribution parameter",
                     !_doc.getForceRedistribution().has_value());
+                uassert(ErrorCodes::InvalidOptions,
+                        "Resharding improvements is not enabled, reject reshardingUUID parameter",
+                        !_doc.getReshardingUUID().has_value());
             }
             configsvrReshardCollection.setShardDistribution(_doc.getShardDistribution());
             configsvrReshardCollection.setForceRedistribution(_doc.getForceRedistribution());
+            configsvrReshardCollection.setReshardingUUID(_doc.getReshardingUUID());
 
             const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
 
@@ -189,18 +175,6 @@ ExecutorFuture<void> ReshardCollectionCoordinator::_runImpl(
                                                            opCtx->getWriteConcern()),
                 Shard::RetryPolicy::kIdempotent));
             uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(std::move(cmdResponse)));
-
-            // Report command completion to the oplog.
-            const auto cm =
-                uassertStatusOK(
-                    Grid::get(opCtx)
-                        ->catalogCache()
-                        ->getShardedCollectionRoutingInfoWithPlacementRefresh(opCtx, nss()))
-                    .cm;
-
-            if (_doc.getOldCollectionUUID() && _doc.getOldCollectionUUID() != cm.getUUID()) {
-                notifyChangeStreamsOnReshardCollectionComplete(opCtx, nss(), _doc, cm.getUUID());
-            }
         }));
 }
 

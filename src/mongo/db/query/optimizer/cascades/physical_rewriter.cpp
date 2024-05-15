@@ -29,10 +29,26 @@
 
 #include "mongo/db/query/optimizer/cascades/physical_rewriter.h"
 
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
+#include <iostream>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include "mongo/db/query/optimizer/algebra/polyvalue.h"
 #include "mongo/db/query/optimizer/cascades/enforcers.h"
 #include "mongo/db/query/optimizer/cascades/implementers.h"
+#include "mongo/db/query/optimizer/cascades/rewrite_queues.h"
 #include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
 #include "mongo/db/query/optimizer/explain.h"
+#include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
+#include "mongo/util/assert_util.h"
 
 namespace mongo::optimizer::cascades {
 
@@ -69,6 +85,10 @@ public:
         return true;
     }
 
+    bool operator()(const PhysProperty&, const DistributionRequirement& requiredProp) {
+        return getPropertyConst<DistributionRequirement>(_availableProps) == requiredProp;
+    }
+
     bool operator()(const PhysProperty&, const IndexingRequirement& requiredProp) {
         const auto& available = getPropertyConst<IndexingRequirement>(_availableProps);
         return available.getIndexReqTarget() == requiredProp.getIndexReqTarget() &&
@@ -77,9 +97,20 @@ public:
             requiredProp.getSatisfiedPartialIndexesGroupId();
     }
 
-    template <class T>
-    bool operator()(const PhysProperty&, const T& requiredProp) {
-        return getPropertyConst<T>(_availableProps) == requiredProp;
+    bool operator()(const PhysProperty&, const RepetitionEstimate& requiredProp) {
+        return getPropertyConst<RepetitionEstimate>(_availableProps) == requiredProp;
+    }
+
+    bool operator()(const PhysProperty&, const LimitEstimate& requiredProp) {
+        return getPropertyConst<LimitEstimate>(_availableProps) == requiredProp;
+    }
+
+    bool operator()(const PhysProperty&, const RemoveOrphansRequirement& requiredProp) {
+        const auto& available = getPropertyConst<RemoveOrphansRequirement>(_availableProps);
+        // If the winner's circle contains a plan that removes orphans, then it doesn't matter what
+        // the required property is. Otherwise, the required property must not require removing
+        // orphans.
+        return available.mustRemove() || !requiredProp.mustRemove();
     }
 
     static bool propertiesCompatible(const PhysProps& requiredProps,
@@ -250,11 +281,21 @@ PhysicalRewriter::OptimizeGroupResult PhysicalRewriter::optimizeGroup(const Grou
 
     Group& group = _memo.getGroup(groupId);
     const LogicalProps& logicalProps = group._logicalProperties;
-    if (hasProperty<IndexingAvailability>(logicalProps) &&
-        !hasProperty<IndexingRequirement>(physProps)) {
-        // Re-optimize under complete scan indexing requirements.
-        setPropertyOverwrite(
-            physProps, IndexingRequirement{IndexReqTarget::Complete, true /*dedupRID*/, groupId});
+    if (hasProperty<IndexingAvailability>(logicalProps)) {
+        if (!hasProperty<IndexingRequirement>(physProps)) {
+            // Re-optimize under complete scan indexing requirements.
+            setPropertyOverwrite(
+                physProps,
+                IndexingRequirement{IndexReqTarget::Complete, true /*dedupRID*/, groupId});
+        }
+        if (!hasProperty<RemoveOrphansRequirement>(physProps)) {
+            // Re-optimize with RemoveOrphansRequirement. Only require orphan filtering if the
+            // metadata for the scan definition indicates that the collection may contain orphans.
+            auto& scanDef = _metadata._scanDefs.at(
+                getPropertyConst<IndexingAvailability>(logicalProps).getScanDefName());
+            setPropertyOverwrite(
+                physProps, RemoveOrphansRequirement{scanDef.shardingMetadata().mayContainOrphans});
+        }
     }
 
     auto& physicalNodes = group._physicalNodes;
@@ -348,8 +389,13 @@ PhysicalRewriter::OptimizeGroupResult PhysicalRewriter::optimizeGroup(const Grou
     // Enforcement rewrites run just once, and are independent of the logical nodes.
     if (groupId != _rootGroupId) {
         // Verify properties can be enforced and add enforcers if necessary.
-        addEnforcers(
-            groupId, _metadata, _ridProjections, queue._queue, bestResult._physProps, logicalProps);
+        addEnforcers(groupId,
+                     _metadata,
+                     _ridProjections,
+                     queue._queue,
+                     bestResult._physProps,
+                     logicalProps,
+                     _prefixId);
     }
 
     // Iterate until we perform all logical for the group and physical rewrites for our best plan.

@@ -29,7 +29,24 @@
 
 #include "mongo/db/s/collection_sharding_state.h"
 
-#include "mongo/logv2/log.h"
+#include <absl/container/flat_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/none.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <mutex>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/db/cluster_role.h"
+#include "mongo/db/concurrency/locker.h"
+#include "mongo/db/server_options.h"
+#include "mongo/platform/mutex.h"
+#include "mongo/util/assert_util_core.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/namespace_string_util.h"
 #include "mongo/util/string_map.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
@@ -66,11 +83,11 @@ public:
 
     CSSAndLock* getOrCreate(const NamespaceString& nss) noexcept {
         stdx::lock_guard<Latch> lg(_mutex);
-
-        auto it = _collections.find(nss.ns());
+        const auto nssStr = NamespaceStringUtil::serialize(nss);
+        auto it = _collections.find(nssStr);
         if (it == _collections.end()) {
-            auto inserted = _collections.try_emplace(
-                nss.ns(), std::make_unique<CSSAndLock>(_factory->make(nss)));
+            auto inserted =
+                _collections.try_emplace(nssStr, std::make_unique<CSSAndLock>(_factory->make(nss)));
             invariant(inserted.second);
             it = std::move(inserted.first);
         }
@@ -96,7 +113,7 @@ public:
         std::vector<NamespaceString> result;
         result.reserve(_collections.size());
         for (const auto& [ns, _] : _collections) {
-            result.emplace_back(ns);
+            result.emplace_back(NamespaceStringUtil::deserialize(boost::none, ns));
         }
         return result;
     }

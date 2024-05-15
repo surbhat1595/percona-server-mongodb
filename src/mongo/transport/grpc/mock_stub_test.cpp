@@ -30,7 +30,7 @@
 #include <memory>
 #include <vector>
 
-#include "mongo/db/concurrency/locker_noop_service_context_test_fixture.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/rpc/message.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/grpc/mock_client_context.h"
@@ -45,7 +45,7 @@
 
 namespace mongo::transport::grpc {
 
-class MockStubTest : public LockerNoopServiceContextTest {
+class MockStubTest : public ServiceContextTest {
 public:
     void setUp() override {
         _fixtures = std::make_unique<MockStubTestFixtures>();
@@ -61,20 +61,27 @@ public:
 
     void runEchoTest(std::function<std::shared_ptr<ClientStream>(MockClientContext&)> makeStream) {
         unittest::threadAssertionMonitoredTest([&](unittest::ThreadAssertionMonitor& monitor) {
-            getServer().start(monitor, [](auto& rpc) {
-                ASSERT_EQ(rpc.serverCtx->getRemote().toString(),
-                          MockStubTestFixtures::kClientAddress);
-                auto msg = rpc.serverStream->read();
-                ASSERT_TRUE(msg);
-                ASSERT_TRUE(rpc.serverStream->write(*msg));
-                return ::grpc::Status::OK;
-            });
+            getServer().start(
+                monitor,
+                [](auto session) {
+                    ASSERT_EQ(session->remote().toString(), MockStubTestFixtures::kClientAddress);
+                    auto msg = uassertStatusOK(session->sourceMessage());
+                    ASSERT_OK(session->sinkMessage(msg));
+                    session->end();
+                },
+                std::make_shared<WireVersionProvider>());
 
             std::vector<stdx::thread> clientThreads;
             for (int i = 0; i < 10; i++) {
                 clientThreads.push_back(monitor.spawn([&]() {
                     auto clientMessage = makeUniqueMessage();
                     MockClientContext ctx;
+                    ctx.addMetadataEntry(
+                        util::constants::kWireVersionKey.toString(),
+                        std::to_string(
+                            WireSpec::instance().get()->incomingExternalClient.maxWireVersion));
+                    ctx.addMetadataEntry(util::constants::kAuthenticationTokenKey.toString(),
+                                         "my-token");
                     auto stream = makeStream(ctx);
                     ASSERT_TRUE(stream->write(clientMessage.sharedBuffer()));
 

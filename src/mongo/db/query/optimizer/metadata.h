@@ -28,10 +28,19 @@
  */
 
 #pragma once
-
+#include <cstddef>
+#include <cstdint>
 #include <map>
+#include <string>
+#include <vector>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/db/query/optimizer/containers.h"
+#include "mongo/db/query/optimizer/defs.h"
 #include "mongo/db/query/optimizer/partial_schema_requirements.h"
+#include "mongo/db/query/optimizer/syntax/syntax.h"
 
 
 namespace mongo::optimizer {
@@ -117,7 +126,7 @@ struct MultikeynessTrie {
     void merge(const MultikeynessTrie& other);
     void add(const ABT& path);
 
-    opt::unordered_map<FieldNameType, MultikeynessTrie, FieldNameType::Hasher> children;
+    std::map<FieldNameType, MultikeynessTrie> children;
     // An empty trie doesn't know whether anything is multikey.
     // 'true' means "not sure" while 'false' means "definitely no arrays".
     bool isMultiKey = true;
@@ -173,6 +182,14 @@ using IndexDefinitions = opt::unordered_map<std::string, IndexDefinition>;
 using ScanDefOptions = opt::unordered_map<std::string, std::string>;
 
 /**
+ * Metadata associated with the sharding state of a collection.
+ */
+struct ShardingMetadata {
+    // Whether the collection may contain orphans.
+    bool mayContainOrphans{false};
+};
+
+/**
  * Parameters to a scan node, including distribution information, associated index definitions,
  * and multikeyness information. Also includes any ScanDefOptions we might have, such as which
  * database the collection is associated with, the origin of the collection (mongod or a BSON file),
@@ -187,7 +204,8 @@ public:
                    MultikeynessTrie multikeynessTrie,
                    DistributionAndPaths distributionAndPaths,
                    bool exists,
-                   boost::optional<CEType> ce);
+                   boost::optional<CEType> ce,
+                   ShardingMetadata shardingMetadata);
 
     const ScanDefOptions& getOptionsMap() const;
 
@@ -201,6 +219,8 @@ public:
     bool exists() const;
 
     const boost::optional<CEType>& getCE() const;
+
+    ShardingMetadata shardingMetadata() const;
 
 private:
     ScanDefOptions _options;
@@ -220,6 +240,8 @@ private:
 
     // If positive, estimated number of docs in the collection.
     boost::optional<CEType> _ce;
+
+    ShardingMetadata _shardingMetadata;
 };
 
 /**

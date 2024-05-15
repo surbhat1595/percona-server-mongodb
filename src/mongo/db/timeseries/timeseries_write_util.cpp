@@ -29,23 +29,70 @@
 
 #include "mongo/db/timeseries/timeseries_write_util.h"
 
+#include <absl/container/flat_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/container/small_vector.hpp>
+#include <boost/container/vector.hpp>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <cstdint>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+#include "timeseries_index_schema_conversion_functions.h"
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/client/dbclient_cursor.h"
+#include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/ops/write_ops_exec_util.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
-#include "mongo/db/query/collection_query_info.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/record_id_helpers.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_decoration.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/storage/snapshot.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog_helpers.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog_internal.h"
+#include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
+#include "mongo/db/timeseries/bucket_catalog/bucket_metadata.h"
+#include "mongo/db/timeseries/bucket_catalog/execution_stats.h"
+#include "mongo/db/timeseries/bucket_catalog/flat_bson.h"
+#include "mongo/db/timeseries/bucket_catalog/reopening.h"
+#include "mongo/db/timeseries/bucket_compression.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/update/document_diff_applier.h"
+#include "mongo/db/update/document_diff_serialization.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
-#include "timeseries_index_schema_conversion_functions.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/variant.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/decimal_counter.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/scopeguard.h"
+#include "mongo/util/str.h"
+#include "mongo/util/string_map.h"
 
 namespace mongo::timeseries {
 namespace {
@@ -141,7 +188,7 @@ write_ops::WriteCommandRequestBase makeTimeseriesWriteOpBase(std::vector<StmtId>
 // Builds the delta update oplog entry from a time-series insert write batch.
 write_ops::UpdateOpEntry makeTimeseriesUpdateOpEntry(
     OperationContext* opCtx,
-    std::shared_ptr<timeseries::bucket_catalog::WriteBatch> batch,
+    std::shared_ptr<bucket_catalog::WriteBatch> batch,
     const BSONObj& metadata) {
     BSONObjBuilder updateBuilder;
     {
@@ -266,7 +313,32 @@ void updateTimeseriesDocument(OperationContext* opCtx,
                                         opDebug,
                                         &args);
 }
+
+std::shared_ptr<bucket_catalog::WriteBatch>& extractFromSelf(
+    std::shared_ptr<bucket_catalog::WriteBatch>& batch) {
+    return batch;
+}
 }  // namespace
+
+write_ops::UpdateCommandRequest buildSingleUpdateOp(const write_ops::UpdateCommandRequest& wholeOp,
+                                                    size_t opIndex) {
+    write_ops::UpdateCommandRequest singleUpdateOp(wholeOp.getNamespace(),
+                                                   {wholeOp.getUpdates()[opIndex]});
+    auto commandBase = singleUpdateOp.getWriteCommandRequestBase();
+    commandBase.setOrdered(wholeOp.getOrdered());
+    commandBase.setBypassDocumentValidation(wholeOp.getBypassDocumentValidation());
+
+    return singleUpdateOp;
+}
+
+void assertTimeseriesBucketsCollection(const Collection* bucketsColl) {
+    uassert(ErrorCodes::NamespaceNotFound,
+            "Could not find time-series buckets collection for write",
+            bucketsColl);
+    uassert(ErrorCodes::InvalidOptions,
+            "Time-series buckets collection is missing time-series options",
+            bucketsColl->getTimeseriesOptions());
+}
 
 BSONObj makeNewDocumentForWrite(std::shared_ptr<bucket_catalog::WriteBatch> batch,
                                 const BSONObj& metadata) {
@@ -276,6 +348,29 @@ BSONObj makeNewDocumentForWrite(std::shared_ptr<bucket_catalog::WriteBatch> batc
 
     return makeNewDocument(
         batch->bucketHandle.bucketId.oid, metadata, batch->min, batch->max, dataBuilders);
+}
+
+BSONObj makeNewCompressedDocumentForWrite(std::shared_ptr<bucket_catalog::WriteBatch> batch,
+                                          const BSONObj& metadata,
+                                          const NamespaceString& nss,
+                                          StringData timeField) {
+    // Builds the data field of a bucket document.
+    StringDataMap<BSONObjBuilder> dataBuilders;
+    processTimeseriesMeasurements(
+        {batch->measurements.begin(), batch->measurements.end()}, metadata, dataBuilders);
+
+    BSONObj uncompressedDoc = makeNewDocument(
+        batch->bucketHandle.bucketId.oid, metadata, batch->min, batch->max, dataBuilders);
+
+    const bool validateCompression = gValidateTimeseriesCompression.load();
+    auto compressed =
+        timeseries::compressBucket(uncompressedDoc, timeField, nss, validateCompression);
+    if (compressed.compressedBucket) {
+        return *compressed.compressedBucket;
+    }
+
+    // Return the uncompressed document if compression has failed.
+    return uncompressedDoc;
 }
 
 BSONObj makeNewDocumentForWrite(
@@ -293,23 +388,17 @@ BSONObj makeNewDocumentForWrite(
     return makeNewDocument(bucketId, metadata, minmax->min(), minmax->max(), dataBuilders);
 }
 
-std::vector<write_ops::InsertCommandRequest> makeInsertsToNewBuckets(
-    const std::vector<BSONObj>& measurements,
-    const NamespaceString& nss,
-    const TimeseriesOptions& options,
-    const StringData::ComparatorInterface* comparator) {
+BSONObj makeBucketDocument(const std::vector<BSONObj>& measurements,
+                           const NamespaceString& nss,
+                           const TimeseriesOptions& options,
+                           const StringData::ComparatorInterface* comparator) {
     std::vector<write_ops::InsertCommandRequest> insertOps;
-    for (const auto& measurement : measurements) {
-        auto res = uassertStatusOK(bucket_catalog::internal::extractBucketingParameters(
-            nss, comparator, options, measurement));
-        auto time = res.second;
-        auto [oid, _] = bucket_catalog::internal::generateBucketOID(time, options);
-        insertOps.push_back(
-            {nss,
-             {makeNewDocumentForWrite(
-                 oid, {measurement}, res.first.metadata.toBSON(), options, comparator)}});
-    }
-    return insertOps;
+    auto res = uassertStatusOK(bucket_catalog::internal::extractBucketingParameters(
+        nss, comparator, options, measurements[0]));
+    auto time = res.second;
+    auto [oid, _] = bucket_catalog::internal::generateBucketOID(time, options);
+    return makeNewDocumentForWrite(
+        oid, measurements, res.first.metadata.toBSON(), options, comparator);
 }
 
 stdx::variant<write_ops::UpdateCommandRequest, write_ops::DeleteCommandRequest> makeModificationOp(
@@ -329,7 +418,7 @@ stdx::variant<write_ops::UpdateCommandRequest, write_ops::DeleteCommandRequest> 
         auto metaField = measurements[0].getField(*metaFieldName);
         return metaField ? metaField.wrap() : BSONObj();
     }();
-    auto replaceBucket = timeseries::makeNewDocumentForWrite(
+    auto replaceBucket = makeNewDocumentForWrite(
         bucketId, measurements, metadata, timeseriesOptions, coll->getDefaultCollator());
 
     write_ops::UpdateModification u(replaceBucket);
@@ -364,7 +453,7 @@ void getOpTimeAndElectionId(OperationContext* opCtx,
 }
 
 write_ops::InsertCommandRequest makeTimeseriesInsertOp(
-    std::shared_ptr<timeseries::bucket_catalog::WriteBatch> batch,
+    std::shared_ptr<bucket_catalog::WriteBatch> batch,
     const NamespaceString& bucketsNs,
     const BSONObj& metadata,
     std::vector<StmtId>&& stmtIds) {
@@ -375,7 +464,7 @@ write_ops::InsertCommandRequest makeTimeseriesInsertOp(
 
 write_ops::UpdateCommandRequest makeTimeseriesUpdateOp(
     OperationContext* opCtx,
-    std::shared_ptr<timeseries::bucket_catalog::WriteBatch> batch,
+    std::shared_ptr<bucket_catalog::WriteBatch> batch,
     const NamespaceString& bucketsNs,
     const BSONObj& metadata,
     std::vector<StmtId>&& stmtIds) {
@@ -387,7 +476,7 @@ write_ops::UpdateCommandRequest makeTimeseriesUpdateOp(
 
 write_ops::UpdateCommandRequest makeTimeseriesDecompressAndUpdateOp(
     OperationContext* opCtx,
-    std::shared_ptr<timeseries::bucket_catalog::WriteBatch> batch,
+    std::shared_ptr<bucket_catalog::WriteBatch> batch,
     const NamespaceString& bucketsNs,
     const BSONObj& metadata,
     std::vector<StmtId>&& stmtIds) {
@@ -418,7 +507,7 @@ write_ops::UpdateCommandRequest makeTimeseriesDecompressAndUpdateOp(
     return op;
 }
 
-StatusWith<timeseries::bucket_catalog::InsertResult> attemptInsertIntoBucket(
+StatusWith<bucket_catalog::InsertResult> attemptInsertIntoBucket(
     OperationContext* opCtx,
     bucket_catalog::BucketCatalog& bucketCatalog,
     const NamespaceString& viewNs,
@@ -427,19 +516,21 @@ StatusWith<timeseries::bucket_catalog::InsertResult> attemptInsertIntoBucket(
     const BSONObj& measurementDoc,
     bucket_catalog::CombineWithInsertsFromOtherClients combine,
     bool fromUpdates) {
-    StatusWith<timeseries::bucket_catalog::InsertResult> swResult =
+    StatusWith<bucket_catalog::InsertResult> swResult =
         Status{ErrorCodes::BadValue, "Uninitialized InsertResult"};
     do {
+        // Avoids reopening existing buckets for the inserts of the updated measurements from
+        // time-series user updates.
         if (!fromUpdates &&
             feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
                 serverGlobalParams.featureCompatibility)) {
-            swResult = timeseries::bucket_catalog::tryInsert(opCtx,
-                                                             bucketCatalog,
-                                                             viewNs,
-                                                             bucketsColl->getDefaultCollator(),
-                                                             timeSeriesOptions,
-                                                             measurementDoc,
-                                                             combine);
+            swResult = bucket_catalog::tryInsert(opCtx,
+                                                 bucketCatalog,
+                                                 viewNs,
+                                                 bucketsColl->getDefaultCollator(),
+                                                 timeSeriesOptions,
+                                                 measurementDoc,
+                                                 combine);
 
             if (swResult.isOK()) {
                 const auto& insertResult = swResult.getValue();
@@ -447,7 +538,7 @@ StatusWith<timeseries::bucket_catalog::InsertResult> attemptInsertIntoBucket(
                 // If the InsertResult doesn't contain a batch, we failed to insert the
                 // measurement into an open bucket and need to create/reopen a bucket.
                 if (!insertResult.batch) {
-                    timeseries::bucket_catalog::BucketFindResult bucketFindResult;
+                    bucket_catalog::BucketFindResult bucketFindResult;
                     BSONObj suitableBucket;
 
                     if (auto* bucketId = stdx::get_if<OID>(&insertResult.candidate)) {
@@ -464,7 +555,7 @@ StatusWith<timeseries::bucket_catalog::InsertResult> attemptInsertIntoBucket(
                         // collection before performing the query. Without the index we
                         // will perform a full collection scan which could cause us to
                         // take a performance hit.
-                        if (timeseries::collectionHasIndexSupportingReopeningQuery(
+                        if (collectionHasIndexSupportingReopeningQuery(
                                 opCtx, bucketsColl->getIndexCatalog(), timeSeriesOptions)) {
 
                             // Run an aggregation to find a suitable bucket to reopen.
@@ -484,38 +575,37 @@ StatusWith<timeseries::bucket_catalog::InsertResult> attemptInsertIntoBucket(
                         }
                     }
 
-                    boost::optional<timeseries::bucket_catalog::BucketToReopen> bucketToReopen =
-                        boost::none;
+                    boost::optional<bucket_catalog::BucketToReopen> bucketToReopen = boost::none;
                     if (!suitableBucket.isEmpty()) {
                         auto validator = [&](OperationContext * opCtx,
                                              const BSONObj& bucketDoc) -> auto {
                             return bucketsColl->checkValidation(opCtx, bucketDoc);
                         };
-                        auto bucketToReopen = timeseries::bucket_catalog::BucketToReopen{
+                        auto bucketToReopen = bucket_catalog::BucketToReopen{
                             suitableBucket, validator, insertResult.catalogEra};
                         bucketFindResult.bucketToReopen = std::move(bucketToReopen);
                     }
 
-                    swResult = timeseries::bucket_catalog::insert(opCtx,
-                                                                  bucketCatalog,
-                                                                  viewNs,
-                                                                  bucketsColl->getDefaultCollator(),
-                                                                  timeSeriesOptions,
-                                                                  measurementDoc,
-                                                                  combine,
-                                                                  std::move(bucketFindResult));
+                    swResult = bucket_catalog::insert(opCtx,
+                                                      bucketCatalog,
+                                                      viewNs,
+                                                      bucketsColl->getDefaultCollator(),
+                                                      timeSeriesOptions,
+                                                      measurementDoc,
+                                                      combine,
+                                                      std::move(bucketFindResult));
                 }
             }
         } else {
-            timeseries::bucket_catalog::BucketFindResult bucketFindResult;
-            swResult = timeseries::bucket_catalog::insert(opCtx,
-                                                          bucketCatalog,
-                                                          viewNs,
-                                                          bucketsColl->getDefaultCollator(),
-                                                          timeSeriesOptions,
-                                                          measurementDoc,
-                                                          combine,
-                                                          bucketFindResult);
+            bucket_catalog::BucketFindResult bucketFindResult;
+            swResult = bucket_catalog::insert(opCtx,
+                                              bucketCatalog,
+                                              viewNs,
+                                              bucketsColl->getDefaultCollator(),
+                                              timeSeriesOptions,
+                                              measurementDoc,
+                                              combine,
+                                              bucketFindResult);
         }
 
         // If there is an era offset (between the bucket we want to reopen and the
@@ -532,29 +622,51 @@ void makeWriteRequest(OperationContext* opCtx,
                       const NamespaceString& bucketsNs,
                       std::vector<write_ops::InsertCommandRequest>* insertOps,
                       std::vector<write_ops::UpdateCommandRequest>* updateOps) {
-    if (batch.get()->numPreviouslyCommittedMeasurements == 0) {
-        insertOps->push_back(
-            makeTimeseriesInsertOp(batch,
-                                   bucketsNs,
-                                   metadata,
-                                   std::move(stmtIds[batch.get()->bucketHandle.bucketId.oid])));
+    if (batch->numPreviouslyCommittedMeasurements == 0) {
+        insertOps->push_back(makeTimeseriesInsertOp(
+            batch, bucketsNs, metadata, std::move(stmtIds[batch->bucketHandle.bucketId.oid])));
         return;
     }
-    if (batch.get()->decompressed.has_value()) {
+    if (batch->decompressed.has_value()) {
         updateOps->push_back(makeTimeseriesDecompressAndUpdateOp(
             opCtx,
             batch,
             bucketsNs,
             metadata,
-            std::move(stmtIds[batch.get()->bucketHandle.bucketId.oid])));
+            std::move(stmtIds[batch->bucketHandle.bucketId.oid])));
     } else {
         updateOps->push_back(
             makeTimeseriesUpdateOp(opCtx,
                                    batch,
                                    bucketsNs,
                                    metadata,
-                                   std::move(stmtIds[batch.get()->bucketHandle.bucketId.oid])));
+                                   std::move(stmtIds[batch->bucketHandle.bucketId.oid])));
     }
+}
+
+TimeseriesBatches insertIntoBucketCatalogForUpdate(OperationContext* opCtx,
+                                                   bucket_catalog::BucketCatalog& bucketCatalog,
+                                                   const CollectionPtr& bucketsColl,
+                                                   const std::vector<BSONObj>& measurements,
+                                                   const NamespaceString& bucketsNs,
+                                                   TimeseriesOptions& timeSeriesOptions) {
+    TimeseriesBatches batches;
+    auto viewNs = bucketsNs.getTimeseriesViewNamespace();
+
+    for (const auto& measurement : measurements) {
+        auto insertResult = uassertStatusOK(
+            attemptInsertIntoBucket(opCtx,
+                                    bucketCatalog,
+                                    viewNs,
+                                    bucketsColl.get(),
+                                    timeSeriesOptions,
+                                    measurement,
+                                    bucket_catalog::CombineWithInsertsFromOtherClients::kDisallow,
+                                    /*fromUpdates=*/true));
+        batches.emplace_back(std::move(insertResult.batch));
+    }
+
+    return batches;
 }
 
 void performAtomicWrites(
@@ -564,6 +676,7 @@ void performAtomicWrites(
     const boost::optional<stdx::variant<write_ops::UpdateCommandRequest,
                                         write_ops::DeleteCommandRequest>>& modificationOp,
     const std::vector<write_ops::InsertCommandRequest>& insertOps,
+    const std::vector<write_ops::UpdateCommandRequest>& updateOps,
     bool fromMigrate,
     StmtId stmtId) {
     tassert(
@@ -582,8 +695,8 @@ void performAtomicWrites(
 
     // Groups all operations in one or several chained oplog entries to ensure the writes are
     // replicated atomically.
-    // TODO(SERVER-76432): Handle the updateOne case for retryable writes.
-    auto groupOplogEntries = !opCtx->getTxnNumber() && !insertOps.empty() && modificationOp;
+    auto groupOplogEntries =
+        !opCtx->getTxnNumber() && (!insertOps.empty() || !updateOps.empty()) && modificationOp;
     WriteUnitOfWork wuow{opCtx, groupOplogEntries};
 
     if (modificationOp) {
@@ -607,10 +720,19 @@ void performAtomicWrites(
         std::vector<InsertStatement> insertStatements;
         for (auto& op : insertOps) {
             invariant(op.getDocuments().size() == 1);
-            insertStatements.emplace_back(op.getDocuments().front());
+            if (modificationOp) {
+                insertStatements.emplace_back(op.getDocuments().front());
+            } else {
+                // Appends the stmtId for upsert.
+                insertStatements.emplace_back(stmtId, op.getDocuments().front());
+            }
         }
         uassertStatusOK(collection_internal::insertDocuments(
             opCtx, coll, insertStatements.begin(), insertStatements.end(), &curOp->debug()));
+    }
+
+    for (auto& updateOp : updateOps) {
+        updateTimeseriesDocument(opCtx, coll, updateOp, &curOp->debug(), fromMigrate, stmtId);
     }
 
     wuow.commit();
@@ -618,4 +740,119 @@ void performAtomicWrites(
     lastOpFixer.finishedOpSuccessfully();
 }
 
+void commitTimeseriesBucketsAtomically(
+    OperationContext* opCtx,
+    bucket_catalog::BucketCatalog& sideBucketCatalog,
+    const CollectionPtr& coll,
+    const RecordId& recordId,
+    const boost::optional<stdx::variant<write_ops::UpdateCommandRequest,
+                                        write_ops::DeleteCommandRequest>>& modificationOp,
+    TimeseriesBatches* batches,
+    const NamespaceString& bucketsNs,
+    bool fromMigrate,
+    StmtId stmtId,
+    std::set<OID>* bucketIds) {
+    auto batchesToCommit = determineBatchesToCommit(*batches, extractFromSelf);
+    if (batchesToCommit.empty()) {
+        return;
+    }
+
+    Status abortStatus = Status::OK();
+    ScopeGuard batchGuard{[&] {
+        for (auto batch : batchesToCommit) {
+            if (batch.get()) {
+                abort(sideBucketCatalog, batch, abortStatus);
+            }
+        }
+    }};
+
+    try {
+        std::vector<write_ops::InsertCommandRequest> insertOps;
+        std::vector<write_ops::UpdateCommandRequest> updateOps;
+
+        auto& mainBucketCatalog = bucket_catalog::BucketCatalog::get(opCtx);
+        for (auto batch : batchesToCommit) {
+            auto metadata = getMetadata(sideBucketCatalog, batch.get()->bucketHandle);
+            auto prepareCommitStatus = prepareCommit(sideBucketCatalog, batch);
+            if (!prepareCommitStatus.isOK()) {
+                abortStatus = prepareCommitStatus;
+                return;
+            }
+
+            TimeseriesStmtIds emptyStmtIds = {};
+            makeWriteRequest(
+                opCtx, batch, metadata, emptyStmtIds, bucketsNs, &insertOps, &updateOps);
+
+            // Starts tracking the newly inserted bucket in the main bucket catalog as a direct
+            // write to prevent other writers from modifying it.
+            if (batch.get()->numPreviouslyCommittedMeasurements == 0) {
+                auto bucketId = batch.get()->bucketHandle.bucketId.oid;
+                directWriteStart(mainBucketCatalog.bucketStateRegistry,
+                                 bucketsNs.getTimeseriesViewNamespace(),
+                                 bucketId);
+                bucketIds->insert(bucketId);
+            }
+        }
+
+        performAtomicWrites(
+            opCtx, coll, recordId, modificationOp, insertOps, updateOps, fromMigrate, stmtId);
+
+        boost::optional<repl::OpTime> opTime;
+        boost::optional<OID> electionId;
+        getOpTimeAndElectionId(opCtx, &opTime, &electionId);
+
+        for (auto batch : batchesToCommit) {
+            finish(sideBucketCatalog, batch, bucket_catalog::CommitInfo{opTime, electionId});
+            batch.get().reset();
+        }
+    } catch (const DBException& ex) {
+        abortStatus = ex.toStatus();
+        throw;
+    }
+
+    batchGuard.dismiss();
+}
+
+void performAtomicWritesForDelete(OperationContext* opCtx,
+                                  const CollectionPtr& coll,
+                                  const RecordId& recordId,
+                                  const std::vector<BSONObj>& unchangedMeasurements,
+                                  bool fromMigrate,
+                                  StmtId stmtId) {
+    OID bucketId = record_id_helpers::toBSONAs(recordId, "_id")["_id"].OID();
+    auto modificationOp = makeModificationOp(bucketId, coll, unchangedMeasurements);
+    performAtomicWrites(opCtx, coll, recordId, modificationOp, {}, {}, fromMigrate, stmtId);
+}
+
+void performAtomicWritesForUpdate(
+    OperationContext* opCtx,
+    const CollectionPtr& coll,
+    const RecordId& recordId,
+    const boost::optional<std::vector<BSONObj>>& unchangedMeasurements,
+    const std::vector<BSONObj>& modifiedMeasurements,
+    bucket_catalog::BucketCatalog& sideBucketCatalog,
+    bool fromMigrate,
+    StmtId stmtId,
+    std::set<OID>* bucketIds) {
+    auto timeSeriesOptions = *coll->getTimeseriesOptions();
+    auto batches = insertIntoBucketCatalogForUpdate(
+        opCtx, sideBucketCatalog, coll, modifiedMeasurements, coll->ns(), timeSeriesOptions);
+
+    auto modificationRequest = unchangedMeasurements
+        ? boost::make_optional(
+              makeModificationOp(record_id_helpers::toBSONAs(recordId, "_id")["_id"].OID(),
+                                 coll,
+                                 *unchangedMeasurements))
+        : boost::none;
+    commitTimeseriesBucketsAtomically(opCtx,
+                                      sideBucketCatalog,
+                                      coll,
+                                      recordId,
+                                      modificationRequest,
+                                      &batches,
+                                      coll->ns(),
+                                      fromMigrate,
+                                      stmtId,
+                                      bucketIds);
+}
 }  // namespace mongo::timeseries

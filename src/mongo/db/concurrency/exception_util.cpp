@@ -29,10 +29,16 @@
 
 #include "mongo/db/concurrency/exception_util.h"
 
+#include <cstddef>
+
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/concurrency/exception_util_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/log_severity.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/log_and_backoff.h"
@@ -46,7 +52,7 @@ MONGO_FAIL_POINT_DEFINE(skipWriteConflictRetries);
 void logWriteConflictAndBackoff(int attempt,
                                 StringData operation,
                                 StringData reason,
-                                StringData ns) {
+                                const NamespaceStringOrUUID& nssOrUUID) {
     logAndBackoff(4640401,
                   logv2::LogComponent::kWrite,
                   logv2::LogSeverity::Debug(1),
@@ -54,7 +60,7 @@ void logWriteConflictAndBackoff(int attempt,
                   "Caught WriteConflictException",
                   "operation"_attr = operation,
                   "reason"_attr = reason,
-                  logAttrs(NamespaceString(ns)));
+                  "namespace"_attr = toStringForLogging(nssOrUUID));
 }
 
 namespace {
@@ -71,24 +77,32 @@ CounterMetric transactionTooLargeForCacheErrorsConvertedToWriteConflict{
 
 }  // namespace
 
-void handleTemporarilyUnavailableException(OperationContext* opCtx,
-                                           int attempts,
-                                           StringData opStr,
-                                           StringData ns,
-                                           const TemporarilyUnavailableException& e) {
+void handleTemporarilyUnavailableException(
+    OperationContext* opCtx,
+    int attempts,
+    StringData opStr,
+    const NamespaceStringOrUUID& nssOrUUID,
+    const ExceptionFor<ErrorCodes::TemporarilyUnavailable>& e) {
     CurOp::get(opCtx)->debug().additiveMetrics.incrementTemporarilyUnavailableErrors(1);
 
     opCtx->recoveryUnit()->abandonSnapshot();
     temporarilyUnavailableErrors.increment(1);
-    if (opCtx->getClient()->isFromUserConnection() &&
-        attempts > gTemporarilyUnavailableExceptionMaxRetryAttempts.load()) {
+
+    // Internal operations cannot escape a TUE to the client. Convert them to write conflict
+    // exceptions for unbounded retriability.
+    if (!opCtx->getClient()->isFromUserConnection()) {
+        convertToWCEAndRethrow(opCtx, opStr, e);
+    }
+    invariant(opCtx->getClient()->isFromUserConnection());
+
+    if (attempts > gTemporarilyUnavailableExceptionMaxRetryAttempts.load()) {
         LOGV2_DEBUG(6083901,
                     1,
                     "Too many TemporarilyUnavailableException's, giving up",
                     "reason"_attr = e.reason(),
                     "attempts"_attr = attempts,
                     "operation"_attr = opStr,
-                    logAttrs(NamespaceString(ns)));
+                    "namespace"_attr = toStringForLogging(nssOrUUID));
         temporarilyUnavailableErrorsEscaped.increment(1);
         throw e;
     }
@@ -103,27 +117,29 @@ void handleTemporarilyUnavailableException(OperationContext* opCtx,
                 "attempts"_attr = attempts,
                 "operation"_attr = opStr,
                 "sleepFor"_attr = sleepFor,
-                logAttrs(NamespaceString(ns)));
+                "namespace"_attr = toStringForLogging(nssOrUUID));
     opCtx->sleepFor(sleepFor);
 }
 
-void handleTemporarilyUnavailableExceptionInTransaction(OperationContext* opCtx,
-                                                        StringData opStr,
-                                                        StringData ns,
-                                                        const TemporarilyUnavailableException& e) {
-    // Since WriteConflicts are tagged as TransientTransactionErrors and TemporarilyUnavailable
-    // errors are not, we convert the error to a WriteConflict to allow users of multi-document
-    // transactions to retry without changing any behavior. Otherwise, we let the error escape as
-    // usual.
+void convertToWCEAndRethrow(OperationContext* opCtx,
+                            StringData opStr,
+                            const ExceptionFor<ErrorCodes::TemporarilyUnavailable>& e) {
+    // For multi-document transactions, since WriteConflicts are tagged as
+    // TransientTransactionErrors and TemporarilyUnavailable errors are not, convert the error to a
+    // WriteConflict to allow users of multi-document transactions to retry without changing
+    // any behavior.
+    // For internal system operations, convert a temporarily unavailable error into a write
+    // conflict, because unlike user operations, the error cannot eventually escape to the client.
     temporarilyUnavailableErrorsConvertedToWriteConflict.increment(1);
     throwWriteConflictException(e.reason());
 }
 
-void handleTransactionTooLargeForCacheException(OperationContext* opCtx,
-                                                int* writeConflictAttempts,
-                                                StringData opStr,
-                                                StringData ns,
-                                                const TransactionTooLargeForCacheException& e) {
+void handleTransactionTooLargeForCacheException(
+    OperationContext* opCtx,
+    int* writeConflictAttempts,
+    StringData opStr,
+    const NamespaceStringOrUUID& nssOrUUID,
+    const ExceptionFor<ErrorCodes::TransactionTooLargeForCache>& e) {
     transactionTooLargeForCacheErrors.increment(1);
     if (opCtx->writesAreReplicated()) {
         // Surface error on primaries.
@@ -137,7 +153,8 @@ void handleTransactionTooLargeForCacheException(OperationContext* opCtx,
 
     // Handle as write conflict.
     CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
-    logWriteConflictAndBackoff(*writeConflictAttempts, opStr, e.reason(), ns);
+    logWriteConflictAndBackoff(
+        *writeConflictAttempts, opStr, e.reason(), NamespaceStringOrUUID(nssOrUUID));
     ++(*writeConflictAttempts);
     opCtx->recoveryUnit()->abandonSnapshot();
 }

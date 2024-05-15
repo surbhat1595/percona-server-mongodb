@@ -27,12 +27,44 @@
  *    it in the license file.
  */
 
-#include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/rpc/op_msg_rpc_impls.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/unittest.h"
+// IWYU pragma: no_include "ext/alloc_traits.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/smart_ptr.hpp>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "pinned_connection_task_executor_test_fixture.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/executor/network_interface_mock.h"
+#include "mongo/executor/pinned_connection_task_executor.h"
+#include "mongo/executor/remote_command_request.h"
+#include "mongo/executor/task_executor.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/rpc/message.h"
+#include "mongo/rpc/op_msg.h"
+#include "mongo/rpc/op_msg_rpc_impls.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/bson_test_util.h"
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/unittest/thread_assertion_monitor.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/future.h"
+#include "mongo/util/future_impl.h"
+#include "mongo/util/net/hostandport.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo::executor {
 namespace {
@@ -377,5 +409,54 @@ TEST_F(PinnedConnectionTaskExecutorTest, StreamFailureShutsDownAndCancels) {
     ASSERT_EQ(_indicateFailureCalls.load(), 1);
     pinnedTE->join();
 }
+
+/**
+ * We want to test the following sequence:
+ *  (1) A command is scheduled.
+ *  (2) The command fails due to a network error.
+ *  (3) The command is notified of the failure (its onResponse callback is invoked).
+ *
+ *  We want to ensure that the stream used by PCTE is destroyed _before_ the command is
+ *  notified of the failure. This allows the underlying NetworkInterface to
+ *  observe the failure on the initial stream & correctly update internally before it might
+ *  be asked to provide another stream to i.e. retry the command.
+ */
+TEST_F(PinnedConnectionTaskExecutorTest, EnsureStreamDestroyedBeforeCommandCompleted) {
+    auto pinnedTE = makePinnedConnTaskExecutor();
+    HostAndPort remote("mock");
+
+    auto rcr = makeRCR(remote, BSON("forTest" << 0));
+    auto pf = makePromiseFuture<void>();
+    ASSERT_EQ(_streamDestroyedCalls.load(), 0);
+    unittest::ThreadAssertionMonitor monitor;
+    auto completionCallback = [&](const TaskExecutor::RemoteCommandCallbackArgs& args) {
+        monitor.exec([&]() {
+            // Ensure the stream was destroyed before we are notified of the command completing.
+            ASSERT_EQ(_streamDestroyedCalls.load(), 1);
+            pf.promise.setWith([&] { return args.response.status; });
+            monitor.notifyDone();
+        });
+    };
+
+    ASSERT_OK(pinnedTE->scheduleRemoteCommand(rcr, std::move(completionCallback)));
+
+    int32_t responseToId;
+    expectSinkMessage([&](Message m) {
+        responseToId = m.header().getId();
+        assertMessageBodyAndDBName(m, BSON("hello" << 1), BSON("forTest" << 0), "admin");
+        return Status::OK();
+    });
+
+    // Fail the first request
+    Status testFailure{ErrorCodes::BadValue, "test failure"};
+    expectSourceMessage([&]() { return testFailure; });
+
+    // Ensure we ran the completion callback.
+    monitor.wait();
+
+    auto localErr = pf.future.getNoThrow();
+    ASSERT_EQ(localErr, testFailure);
+}
+
 }  // namespace
 }  // namespace mongo::executor

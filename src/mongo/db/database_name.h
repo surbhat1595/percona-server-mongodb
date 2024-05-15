@@ -30,13 +30,28 @@
 #pragma once
 #include <algorithm>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 #include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <cstdint>
+#include <cstring>
+#include <fmt/format.h>
+#include <iosfwd>
+#include <mutex>
 #include <string>
+#include <utility>
 
+#include "mongo/base/data_view.h"
+#include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log_attr.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/static_immortal.h"
+#include "mongo/util/str.h"
 
 namespace mongo {
 
@@ -87,13 +102,6 @@ public:
             return _get().toString();
         }
 
-        friend std::ostream& operator<<(std::ostream& stream, const ConstantProxy& dbName) {
-            return stream << dbName.toString();
-        }
-        friend StringBuilder& operator<<(StringBuilder& builder, const ConstantProxy& dbName) {
-            return builder << dbName.toString();
-        }
-
     private:
         const DatabaseName& _get() const {
             return _sharedState->get();
@@ -104,9 +112,11 @@ public:
 
 #define DBNAME_CONSTANT(id, db) static const ConstantProxy id;
 #include "database_name_reserved.def.h"  // IWYU pragma: keep
+
 #undef DBNAME_CONSTANT
 
     static constexpr size_t kMaxDatabaseNameLength = 63;
+    static constexpr size_t kMaxTenantDatabaseNameLength = 38;
 
     /**
      * Constructs an empty DatabaseName.
@@ -142,14 +152,41 @@ public:
 
         return TenantId{OID::from(&_data[kDataOffset])};
     }
-
+    /**
+     * This function is deprecated. TODO SERVER-77537 Make db() private.
+     */
     StringData db() const {
         auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
         return StringData{_data.data() + offset, _data.size() - offset};
     }
 
+    size_t size() const {
+        auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
+        return _data.size() - offset;
+    }
+
     bool isEmpty() const {
-        return _data.size() == kDataOffset;
+        return size() == 0;
+    }
+    bool isAdminDB() const {
+        return db() == DatabaseName::kAdmin.db();
+    }
+    bool isLocalDB() const {
+        return db() == DatabaseName::kLocal.db();
+    }
+    bool isConfigDB() const {
+        return db() == DatabaseName::kConfig.db();
+    }
+    bool isExternalDB() const {
+        return db() == DatabaseName::kExternal.db();
+    }
+
+    /**
+     * Returns a db name string without tenant id.  Only to be used when a tenant id cannot be
+     * tolerated in the serialized output, and should otherwise be avoided whenever possible.
+     */
+    std::string serializeWithoutTenantPrefix_UNSAFE() const {
+        return db().toString();
     }
 
     /**
@@ -196,14 +233,6 @@ public:
         return StringData{_data.data() + kDataOffset, _data.size() - kDataOffset}
             .equalCaseInsensitive(
                 StringData{other._data.data() + kDataOffset, other._data.size() - kDataOffset});
-    }
-
-    friend std::ostream& operator<<(std::ostream& stream, const DatabaseName& tdb) {
-        return stream << tdb.toString();
-    }
-
-    friend StringBuilder& operator<<(StringBuilder& builder, const DatabaseName& tdb) {
-        return builder << tdb.toString();
     }
 
     int compare(const DatabaseName& other) const {
@@ -259,7 +288,7 @@ private:
 
     /**
      * Constructs a DatabaseName from the given tenantId and database name.
-     * "dbName" is expected only consist of a db name. It is the caller's responsibility to ensure
+     * "dbString" is expected only consist of a db name. It is the caller's responsibility to ensure
      * the dbName is a valid db name.
      */
     DatabaseName(boost::optional<TenantId> tenantId, StringData dbString) {
@@ -269,11 +298,12 @@ private:
         uassert(ErrorCodes::InvalidNamespace,
                 "database names cannot have embedded null characters",
                 dbString.find('\0') == std::string::npos);
+
+        size_t maxLen = tenantId ? kMaxTenantDatabaseNameLength : kMaxDatabaseNameLength;
         uassert(ErrorCodes::InvalidNamespace,
-                fmt::format("db name must be at most {} characters, found: {}",
-                            kMaxDatabaseNameLength,
-                            dbString.size()),
-                dbString.size() <= kMaxDatabaseNameLength);
+                fmt::format(
+                    "db name must be at most {} characters, found: {}", maxLen, dbString.size()),
+                dbString.size() <= maxLen);
 
         uint8_t details = dbString.size() & kDatabaseNameOffsetEndMask;
         size_t dbStartIndex = kDataOffset;
@@ -321,12 +351,17 @@ private:
     std::string _data{'\0'};
 };
 
+inline std::string stringifyForAssert(const DatabaseName& dbName) {
+    return toStringForLogging(dbName);
+}
+
 // The `constexpr` definitions for `DatabaseName::ConstantProxy` static data members are below. See
 // `constexpr` definitions for the `NamespaceString::ConstantProxy` static data members of NSS in
 // namespace_string.h for more details.
 namespace dbname_detail::const_proxy_shared_states {
 #define DBNAME_CONSTANT(id, db) constexpr inline DatabaseName::ConstantProxy::SharedState id{db};
 #include "database_name_reserved.def.h"  // IWYU pragma: keep
+
 #undef DBNAME_CONSTANT
 }  // namespace dbname_detail::const_proxy_shared_states
 
@@ -334,6 +369,7 @@ namespace dbname_detail::const_proxy_shared_states {
     constexpr inline DatabaseName::ConstantProxy DatabaseName::id{ \
         &dbname_detail::const_proxy_shared_states::id};
 #include "database_name_reserved.def.h"  // IWYU pragma: keep
+
 #undef DBNAME_CONSTANT
 
 }  // namespace mongo

@@ -9,11 +9,8 @@
  *   requires_non_retryable_writes,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/feature_flag_util.js");  // For "FeatureFlagUtil"
-load("jstests/libs/fixture_helpers.js");    // For 'isSharded'.
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+load("jstests/libs/fixture_helpers.js");  // For 'isSharded'.
 
 const testDB = db.getSiblingDB(jsTestName());
 const coll = testDB.test;
@@ -143,7 +140,7 @@ assert.commandFailedWithCode(coll.createIndex(keyPattern, partialFilterUnsortedL
                              ErrorCodes.IndexKeySpecsConflict);
 
 // Verifies that non-signature options cannot distinguish a new index from an existing index.
-const nonSignatureOptions = [{expireAfterSeconds: 10}, {background: true}];
+const nonSignatureOptions = [{expireAfterSeconds: 10}];
 
 // Builds a new, basic index on {a: 1}, since some of the options we intend to test are not
 // compatible with the partialFilterExpression on the existing {a: 1} indexes.
@@ -249,4 +246,3 @@ if (allowCompoundWildcardIndexes) {
                          {name: "cwi_a_sub_b_c_1", wildcardProjection: {"a.c": 1, "a.b": 1}}),
         ErrorCodes.IndexOptionsConflict);
 }
-})();

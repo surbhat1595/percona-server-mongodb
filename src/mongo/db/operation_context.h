@@ -29,14 +29,29 @@
 
 #pragma once
 
+#include <algorithm>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 #include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <memory>
+#include <utility>
 
+#include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/baton.h"
 #include "mongo/db/client.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/db/operation_id.h"
 #include "mongo/db/query/datetime/date_time_support.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_options.h"
@@ -50,6 +65,7 @@
 #include "mongo/util/cancellation.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/decorable.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/interruptible.h"
 #include "mongo/util/lockable_adapter.h"
@@ -89,7 +105,7 @@ extern FailPoint maxTimeNeverTimeOut;
  * (RecoveryUnitState) to reduce complexity and duplication in the storage-engine specific
  * RecoveryUnit and to allow better invariant checking.
  */
-class OperationContext : public Interruptible, public Decorable<OperationContext> {
+class OperationContext final : public Interruptible, public Decorable<OperationContext> {
     OperationContext(const OperationContext&) = delete;
     OperationContext& operator=(const OperationContext&) = delete;
 
@@ -210,6 +226,9 @@ public:
      */
     void releaseOperationKey();
 
+    // TODO (SERVER-77506): BEGIN Expose OperationSessionInfoFromClient as a decoration instead of
+    // projecting all its fields as properties
+
     /**
      * Returns the session ID associated with this operation, if there is one.
      */
@@ -232,11 +251,52 @@ public:
     }
 
     /**
+     * Associates a transaction number with this operation context. May only be called once for the
+     * lifetime of the operation and the operation must have a logical session id assigned.
+     */
+    void setTxnNumber(TxnNumber txnNumber);
+
+    /**
      * Returns the txnRetryCounter associated with this operation.
      */
     boost::optional<TxnRetryCounter> getTxnRetryCounter() const {
         return _txnRetryCounter;
     }
+
+    /**
+     * Associates a txnRetryCounter with this operation context. May only be called once for the
+     * lifetime of the operation and the operation must have a logical session id and a transaction
+     * number assigned.
+     */
+    void setTxnRetryCounter(TxnRetryCounter txnRetryCounter);
+
+    /**
+     * Returns whether this operation is part of a multi-document transaction. Specifically, it
+     * indicates whether the user asked for a multi-document transaction.
+     */
+    bool inMultiDocumentTransaction() const {
+        return _inMultiDocumentTransaction;
+    }
+
+    /**
+     * Sets that this operation is part of a multi-document transaction. Once this is set, it cannot
+     * be unset.
+     */
+    void setInMultiDocumentTransaction() {
+        _inMultiDocumentTransaction = true;
+        if (!_txnRetryCounter.has_value()) {
+            _txnRetryCounter = 0;
+        }
+    }
+
+    bool isRetryableWrite() const {
+        return _txnNumber &&
+            (!_inMultiDocumentTransaction ||
+             isInternalSessionForRetryableWrite(*getLogicalSessionId()));
+    }
+
+    // TODO (SERVER-77506): END Expose OperationSessionInfoFromClient as a decoration instead of
+    // projecting all its fields as properties
 
     /**
      * Returns a CancellationToken that will be canceled when the OperationContext is killed via
@@ -260,19 +320,6 @@ public:
     const BatonHandle& getBaton() const {
         return _baton;
     }
-
-    /**
-     * Associates a transaction number with this operation context. May only be called once for the
-     * lifetime of the operation and the operation must have a logical session id assigned.
-     */
-    void setTxnNumber(TxnNumber txnNumber);
-
-    /**
-     * Associates a txnRetryCounter with this operation context. May only be called once for the
-     * lifetime of the operation and the operation must have a logical session id and a transaction
-     * number assigned.
-     */
-    void setTxnRetryCounter(TxnRetryCounter txnRetryCounter);
 
     /**
      * Returns the top-level WriteUnitOfWork associated with this operation context, if any.
@@ -442,31 +489,6 @@ public:
     bool isIgnoringInterrupts() const;
 
     /**
-     * Returns whether this operation is part of a multi-document transaction. Specifically, it
-     * indicates whether the user asked for a multi-document transaction.
-     */
-    bool inMultiDocumentTransaction() const {
-        return _inMultiDocumentTransaction;
-    }
-
-    bool isRetryableWrite() const {
-        return _txnNumber &&
-            (!_inMultiDocumentTransaction ||
-             isInternalSessionForRetryableWrite(*getLogicalSessionId()));
-    }
-
-    /**
-     * Sets that this operation is part of a multi-document transaction. Once this is set, it cannot
-     * be unset.
-     */
-    void setInMultiDocumentTransaction() {
-        _inMultiDocumentTransaction = true;
-        if (!_txnRetryCounter.has_value()) {
-            _txnRetryCounter = 0;
-        }
-    }
-
-    /**
      * Some operations coming into the system must be validated to ensure they meet constraints,
      * such as collection namespace length limits or unique index key constraints. However,
      * operations being performed from a source of truth such as during initial sync and oplog
@@ -561,6 +583,10 @@ public:
     boost::optional<BSONElement> getComment() {
         // The '_comment' object, if present, will only ever have one field.
         return _comment ? boost::optional<BSONElement>(_comment->firstElement()) : boost::none;
+    }
+
+    boost::optional<BSONObj> getCommentOwnedCopy() const {
+        return _comment.has_value() ? boost::optional<BSONObj>{_comment->copy()} : boost::none;
     }
 
     /**
@@ -890,12 +916,25 @@ class LockFreeReadsBlock {
     LockFreeReadsBlock& operator=(const LockFreeReadsBlock&) = delete;
 
 public:
+    // Allow move operators.
+    LockFreeReadsBlock(LockFreeReadsBlock&& rhs) : _opCtx(rhs._opCtx) {
+        rhs._opCtx = nullptr;
+    };
+    LockFreeReadsBlock& operator=(LockFreeReadsBlock&& rhs) {
+        _opCtx = rhs._opCtx;
+        rhs._opCtx = nullptr;
+
+        return *this;
+    };
+
     LockFreeReadsBlock(OperationContext* opCtx) : _opCtx(opCtx) {
         _opCtx->incrementLockFreeReadOpCount();
     }
 
     ~LockFreeReadsBlock() {
-        _opCtx->decrementLockFreeReadOpCount();
+        if (_opCtx) {
+            _opCtx->decrementLockFreeReadOpCount();
+        }
     }
 
 private:

@@ -29,24 +29,35 @@
 
 #pragma once
 
-#include <wiredtiger.h>
-
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 #include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <memory>
 #include <stack>
 #include <vector>
+#include <wiredtiger.h>
 
 #include "mongo/base/checked_cast.h"
+#include "mongo/base/status.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/storage_stats.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_begin_transaction_block.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_snapshot_manager.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_stats.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/util/assert_util_core.h"
 #include "mongo/util/timer.h"
+
 namespace mongo {
 
 using RoundUpPreparedTimestamps = WiredTigerBeginTxnBlock::RoundUpPreparedTimestamps;
@@ -77,7 +88,6 @@ public:
     bool waitUntilUnjournaledWritesDurable(OperationContext* opCtx, bool stableCheckpoint) override;
 
     void preallocateSnapshot() override;
-    void preallocateSnapshotForOplogRead() override;
 
     Status majorityCommittedSnapshotAvailable() const override;
 
@@ -155,13 +165,6 @@ public:
     // ---- WT STUFF
 
     WiredTigerSession* getSession();
-    void setIsOplogReader() {
-        _isOplogReader = true;
-    }
-
-    bool getIsOplogReader() const {
-        return _isOplogReader;
-    }
 
     /**
      * Enter a period of wait or computation during which there are no WT calls.
@@ -191,6 +194,7 @@ public:
     void setTxnModified();
 
     boost::optional<int64_t> getOplogVisibilityTs() override;
+    void setOplogVisibilityTs(boost::optional<int64_t> oplogVisibilityTs) override;
 
     static WiredTigerRecoveryUnit* get(OperationContext* opCtx) {
         return checked_cast<WiredTigerRecoveryUnit*>(opCtx->recoveryUnit());
@@ -284,7 +288,9 @@ private:
     UntimestampedWriteAssertionLevel _untimestampedWriteAssertionLevel =
         UntimestampedWriteAssertionLevel::kEnforce;
     std::unique_ptr<Timer> _timer;
-    bool _isOplogReader = false;
+    // The guaranteed 'no holes' point in the oplog. Forward cursor oplog reads can only read up to
+    // this timestamp if they want to avoid missing any entries in the oplog that may not yet have
+    // committed ('holes'). @see WiredTigerOplogManager::getOplogReadTimestamp
     boost::optional<int64_t> _oplogVisibleTs = boost::none;
     bool _gatherWriteContextForDebugging = false;
     std::vector<BSONObj> _writeContextForDebugging;

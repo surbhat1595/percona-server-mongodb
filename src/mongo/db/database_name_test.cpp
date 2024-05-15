@@ -28,11 +28,22 @@
  */
 
 #include "mongo/db/database_name.h"
-#include "mongo/db/server_feature_flags_gen.h"
+
+#include <absl/container/node_hash_map.h>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -43,14 +54,12 @@ TEST(DatabaseNameTest, MultitenancySupportDisabled) {
     DatabaseName dbnWithoutTenant1 = DatabaseName::createDatabaseName_forTest(boost::none, "a");
 
     ASSERT(!dbnWithoutTenant1.tenantId());
-    ASSERT_EQUALS(std::string("a"), dbnWithoutTenant1.db());
     ASSERT_EQUALS(std::string("a"), dbnWithoutTenant1.toString_forTest());
 
     TenantId tenantId(OID::gen());
     DatabaseName dbnWithTenant = DatabaseName::createDatabaseName_forTest(tenantId, "a");
     ASSERT(dbnWithTenant.tenantId());
     ASSERT_EQUALS(tenantId, *dbnWithTenant.tenantId());
-    ASSERT_EQUALS(std::string("a"), dbnWithTenant.db());
     ASSERT_EQUALS(std::string("a"), dbnWithoutTenant1.toString_forTest());
     ASSERT_EQUALS(std::string(tenantId.toString() + "_a"),
                   dbnWithTenant.toStringWithTenantId_forTest());
@@ -62,14 +71,12 @@ TEST(DatabaseNameTest, MultitenancySupportEnabledTenantIDNotRequired) {
 
     DatabaseName dbnWithoutTenant = DatabaseName::createDatabaseName_forTest(boost::none, "a");
     ASSERT(!dbnWithoutTenant.tenantId());
-    ASSERT_EQUALS(std::string("a"), dbnWithoutTenant.db());
     ASSERT_EQUALS(std::string("a"), dbnWithoutTenant.toString_forTest());
 
     TenantId tenantId(OID::gen());
     DatabaseName dbnWithTenant = DatabaseName::createDatabaseName_forTest(tenantId, "a");
     ASSERT(dbnWithTenant.tenantId());
     ASSERT_EQUALS(tenantId, *dbnWithTenant.tenantId());
-    ASSERT_EQUALS(std::string("a"), dbnWithTenant.db());
     ASSERT_EQUALS(std::string("a"), dbnWithTenant.toString_forTest());
     ASSERT_EQUALS(std::string(tenantId.toString() + "_a"),
                   dbnWithTenant.toStringWithTenantId_forTest());
@@ -163,21 +170,18 @@ TEST(DatabaseNameTest, CheckDatabaseNameLogAttrs) {
 
 TEST(DatabaseNameTest, EmptyDbString) {
     DatabaseName empty{};
-    ASSERT_EQ(empty.db(), "");
     ASSERT_FALSE(empty.tenantId());
     ASSERT_EQ(empty.toString_forTest(), "");
     ASSERT_EQ(empty.toStringWithTenantId_forTest(), "");
 
     DatabaseName emptyFromStringData =
         DatabaseName::createDatabaseName_forTest(boost::none, StringData());
-    ASSERT_EQ(emptyFromStringData.db(), "");
     ASSERT_FALSE(emptyFromStringData.tenantId());
     ASSERT_EQ(emptyFromStringData.toString_forTest(), "");
     ASSERT_EQ(emptyFromStringData.toStringWithTenantId_forTest(), "");
 
     TenantId tenantId(OID::gen());
     DatabaseName emptyWithTenantId = DatabaseName::createDatabaseName_forTest(tenantId, "");
-    ASSERT_EQ(emptyWithTenantId.db(), "");
     ASSERT(emptyWithTenantId.tenantId());
     ASSERT_EQ(emptyWithTenantId.toString_forTest(), "");
     ASSERT_EQ(emptyWithTenantId.toStringWithTenantId_forTest(),
@@ -185,11 +189,38 @@ TEST(DatabaseNameTest, EmptyDbString) {
 }
 
 TEST(DatabaseNameTest, FromDataEquality) {
-    NamespaceString test{"foo"};
+    NamespaceString test = NamespaceString::createNamespaceString_forTest("foo");
     ASSERT_EQ(test.dbName(), DatabaseName::createDatabaseName_forTest(boost::none, "foo"));
     NamespaceString testTwo{DatabaseName::createDatabaseName_forTest(boost::none, "foo")};
     ASSERT_EQ(testTwo.dbName(), DatabaseName::createDatabaseName_forTest(boost::none, "foo"));
 }
 
+TEST(DatabaseNameTest, Size) {
+    const std::string kMaxSizeDb(DatabaseName::kMaxDatabaseNameLength, 'a');
+    const std::string kMaxSizeTenantDb(DatabaseName::kMaxTenantDatabaseNameLength, 'a');
+
+    const auto checkDbSize = [](std::vector<std::string> dbs, boost::optional<TenantId> tenantId) {
+        for (size_t i = 0; i < dbs.size(); i++) {
+            const auto dbName = DatabaseName::createDatabaseName_forTest(tenantId, dbs[i]);
+            ASSERT_EQ(dbName.size(), dbs[i].size());
+        }
+    };
+
+    checkDbSize({"", "myDb", kMaxSizeDb}, boost::none);
+    checkDbSize({"", "myDb", kMaxSizeTenantDb}, TenantId(OID::gen()));
+}
+
+TEST(DatabaseNameTest, ValidDbNameLength) {
+    const std::string kInvalidDbName(DatabaseName::kMaxDatabaseNameLength + 1, 'a');
+    ASSERT_THROWS_CODE(DatabaseName::createDatabaseName_forTest(boost::none, kInvalidDbName),
+                       DBException,
+                       ErrorCodes::InvalidNamespace);
+
+    const TenantId tenantId(OID::gen());
+    const std::string kInvalidTenantDbName(DatabaseName::kMaxTenantDatabaseNameLength + 1, 'a');
+    ASSERT_THROWS_CODE(DatabaseName::createDatabaseName_forTest(tenantId, kInvalidTenantDbName),
+                       DBException,
+                       ErrorCodes::InvalidNamespace);
+}
 }  // namespace
 }  // namespace mongo

@@ -80,6 +80,9 @@ selector:
   # This test looks for the presence of a log line that contains a db name. Injecting a tenantId in
   # the requests causes the test to fails due to a mismatch.
   - jstests/core/api//apitest_db_profile_level.js
+  # Queryable encryption test requires an internal connection for the keyvault that does not
+  # inject a $tenant.
+  - jstests/core/queryable_encryption/**/*.js
 
 executor:
   archive:
@@ -94,7 +97,7 @@ executor:
       <<: *authOptions
       eval: |
         jsTest.authenticate(db.getMongo());
-        testingReplication = true;
+        globalThis.testingReplication = true;
         load('jstests/libs/override_methods/inject_dollar_tenant.js');
       global_vars:
         TestData: &TestData
@@ -112,19 +115,19 @@ executor:
     shell_options:
       global_vars:
         TestData: *TestData
-        eval: jsTest.authenticate(db.getMongo())
+      eval: jsTest.authenticate(db.getMongo())
       <<: *authOptions
   - class: CheckReplDBHash
     shell_options:
       global_vars:
         TestData: *TestData
-        eval: jsTest.authenticate(db.getMongo())
+      eval: jsTest.authenticate(db.getMongo())
       <<: *authOptions
   - class: ValidateCollections
     shell_options:
       global_vars:
         TestData: *TestData
-        eval: jsTest.authenticate(db.getMongo())
+      eval: jsTest.authenticate(db.getMongo())
       <<: *authOptions
   - class: CleanEveryN
     n: 20

@@ -28,22 +28,36 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
+#include <boost/cstdint.hpp>
+#include <initializer_list>
+#include <ostream>
+#include <string>
 #include <utility>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/client/dbclient_cursor.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/catalog_raii.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/op_observer/op_observer_noop.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
-#include "mongo/db/ops/update.h"
-#include "mongo/db/ops/update_request.h"
 #include "mongo/db/persistent_task_store.h"
+#include "mongo/db/query/find_command.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/primary_only_service_test_fixture.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_mock.h"
-#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_donor_service.h"
@@ -51,10 +65,21 @@
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/s/sharding_recovery_service.h"
 #include "mongo/db/service_context.h"
+#include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/clock_source.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -148,13 +173,14 @@ public:
                                      isAlsoRecipient ? donorShardId : ShardId{"recipient2"},
                                      ShardId{"recipient3"}});
 
-        NamespaceString sourceNss("sourcedb.sourcecollection");
+        NamespaceString sourceNss =
+            NamespaceString::createNamespaceString_forTest("sourcedb.sourcecollection");
         auto sourceUUID = UUID::gen();
         auto commonMetadata = CommonReshardingMetadata(
             UUID::gen(),
             sourceNss,
             sourceUUID,
-            resharding::constructTemporaryReshardingNss(sourceNss.db(), sourceUUID),
+            resharding::constructTemporaryReshardingNss(sourceNss.db_forTest(), sourceUUID),
             BSON("newKey" << 1));
         commonMetadata.setStartTime(getServiceContext()->getFastClockSource()->now());
 
@@ -272,7 +298,8 @@ TEST_F(ReshardingDonorServiceTest, WritesNoOpOplogEntryOnReshardingBegin) {
               ErrorCodes::InterruptedDueToReplStateChange);
 
     DBDirectClient client(opCtx.get());
-    NamespaceString sourceNss("sourcedb", "sourcecollection");
+    NamespaceString sourceNss =
+        NamespaceString::createNamespaceString_forTest("sourcedb", "sourcecollection");
     FindCommandRequest findRequest{NamespaceString::kRsOplogNamespace};
     findRequest.setFilter(BSON("ns" << sourceNss.toString_forTest()));
     auto cursor = client.find(std::move(findRequest));
@@ -418,8 +445,10 @@ TEST_F(ReshardingDonorServiceTest, StepDownStepUpEachTransition) {
                     DonorStateMachine::insertStateDocument(opCtx.get(), doc);
                     return DonorStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
                 } else {
-                    auto maybeDonor = DonorStateMachine::lookup(opCtx.get(), _service, instanceId);
-                    ASSERT_TRUE(bool(maybeDonor));
+                    auto [maybeDonor, isPausedOrShutdown] =
+                        DonorStateMachine::lookup(opCtx.get(), _service, instanceId);
+                    ASSERT_TRUE(maybeDonor);
+                    ASSERT_FALSE(isPausedOrShutdown);
 
                     // Allow the transition to prevState to succeed on this primary-only service
                     // instance.
@@ -480,8 +509,10 @@ TEST_F(ReshardingDonorServiceTest, StepDownStepUpEachTransition) {
         }
 
         // Finally complete the operation and ensure its success.
-        auto maybeDonor = DonorStateMachine::lookup(opCtx.get(), _service, instanceId);
-        ASSERT_TRUE(bool(maybeDonor));
+        auto [maybeDonor, isPausedOrShutdown] =
+            DonorStateMachine::lookup(opCtx.get(), _service, instanceId);
+        ASSERT_TRUE(maybeDonor);
+        ASSERT_FALSE(isPausedOrShutdown);
 
         auto donor = *maybeDonor;
         stateTransitionsGuard.unset(DonorStateEnum::kDone);
@@ -611,8 +642,10 @@ TEST_F(ReshardingDonorServiceTest, CompletesWithStepdownAfterAbort) {
         donor.reset();
         stepUp(opCtx.get());
 
-        auto maybeDonor = DonorStateMachine::lookup(opCtx.get(), _service, instanceId);
-        ASSERT_TRUE(bool(maybeDonor));
+        auto [maybeDonor, isPausedOrShutdown] =
+            DonorStateMachine::lookup(opCtx.get(), _service, instanceId);
+        ASSERT_TRUE(maybeDonor);
+        ASSERT_FALSE(isPausedOrShutdown);
 
         donor = *maybeDonor;
         doneTransitionGuard.reset();
@@ -751,13 +784,13 @@ TEST_F(ReshardingDonorServiceTest, RestoreMetricsOnKBlockingWrites) {
     // This acquires the critical section required by resharding donor machine when it is in
     // kBlockingWrites.
     ShardingRecoveryService::get(opCtx.get())
-        ->acquireRecoverableCriticalSectionBlockWrites(opCtx.get(),
-                                                       doc.getSourceNss(),
-                                                       BSON("command"
-                                                            << "resharding_donor"
-                                                            << "collection"
-                                                            << doc.getSourceNss().toString()),
-                                                       ShardingCatalogClient::kLocalWriteConcern);
+        ->acquireRecoverableCriticalSectionBlockWrites(
+            opCtx.get(),
+            doc.getSourceNss(),
+            BSON("command"
+                 << "resharding_donor"
+                 << "collection" << doc.getSourceNss().toString_forTest()),
+            ShardingCatalogClient::kLocalWriteConcern);
 
     auto donor = DonorStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
     notifyReshardingCommitting(opCtx.get(), *donor, doc);

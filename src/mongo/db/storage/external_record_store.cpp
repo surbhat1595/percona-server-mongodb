@@ -29,13 +29,18 @@
 
 #include "mongo/db/storage/external_record_store.h"
 
+#include <boost/move/utility_core.hpp>
+
+#include <boost/optional/optional.hpp>
+
+#include "mongo/db/operation_context.h"
 #include "mongo/db/storage/multi_bson_stream_cursor.h"
 #include "mongo/db/storage/record_store.h"
 
 namespace mongo {
 // 'ident' is an identifer to WT table and a virtual collection does not have any persistent data
 // in WT. So, we set the "dummy" ident for a virtual collection.
-ExternalRecordStore::ExternalRecordStore(StringData ns,
+ExternalRecordStore::ExternalRecordStore(const NamespaceString& ns,
                                          boost::optional<UUID> uuid,
                                          const VirtualCollectionOptions& vopts)
     : RecordStore(uuid, /*identName=*/"dummy"_sd, /*isCapped=*/false), _vopts(vopts), _ns(ns) {}

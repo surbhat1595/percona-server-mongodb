@@ -28,10 +28,26 @@
  */
 
 #include "mongo/db/serverless/serverless_operation_lock_registry.h"
+
+#include <boost/move/utility_core.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <mutex>
+#include <string>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/repl/tenant_migration_state_machine_gen.h"
 #include "mongo/db/serverless/shard_split_state_machine_gen.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/fail_point.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTenantMigration
 
@@ -50,7 +66,11 @@ void ServerlessOperationLockRegistry::acquireLock(
     // Verify there is no serverless operation in progress or it is the same type as the one
     // acquiring the lock.
     uassert(ErrorCodes::ConflictingServerlessOperation,
-            "Conflicting serverless operation in progress",
+            str::stream()
+                << "Conflicting serverless operation in progress. Trying to acquire lock for '"
+                << lockType << "' and operationId '" << operationId
+                << "' but it is already used by '" << *_activeLockType << "' for operations "
+                << printActiveOperations(lg),
             !_activeLockType || _activeLockType.get() == lockType);
     invariant(_activeOperations.find(operationId) == _activeOperations.end(),
               "Cannot acquire the serverless lock twice for the same operationId.");
@@ -213,5 +233,15 @@ ServerlessOperationLockRegistry::getActiveOperationType_forTest() {
     return _activeLockType;
 }
 
+std::string ServerlessOperationLockRegistry::printActiveOperations(WithLock lock) const {
+    StringBuilder sb;
+    sb << "[";
+    for (const auto& uuid : _activeOperations) {
+        sb << uuid << ",";
+    }
+    sb << "]";
+
+    return sb.str();
+}
 
 }  // namespace mongo

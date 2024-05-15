@@ -27,18 +27,31 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <absl/container/node_hash_set.h>
+#include <boost/smart_ptr.hpp>
+#include <initializer_list>
 
-#include "mongo/unittest/bson_test_util.h"
-#include <boost/intrusive_ptr.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
+#include "mongo/bson/json.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
+#include "mongo/db/exec/document_value/value_comparator.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/document_source_merge.h"
-#include "mongo/db/pipeline/document_source_mock.h"
-#include "mongo/db/pipeline/process_interface/non_shardsvr_process_interface.h"
+#include "mongo/db/pipeline/document_source_merge_gen.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
+#include "mongo/db/tenant_id.h"
 #include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
 
 namespace mongo {
 namespace {
@@ -98,39 +111,39 @@ public:
 };
 
 TEST_F(DocumentSourceMergeTest, CorrectlyParsesIfMergeSpecIsString) {
-    const auto& defaultDb = getExpCtx()->ns.db();
+    const auto& defaultDb = getExpCtx()->ns.db_forTest();
     const std::string targetColl = "target_collection";
     auto spec = BSON("$merge" << targetColl);
     auto mergeStage = createMergeStage(spec);
     ASSERT(mergeStage);
-    ASSERT_EQ(mergeStage->getOutputNs().db(), defaultDb);
+    ASSERT_EQ(mergeStage->getOutputNs().db_forTest(), defaultDb);
     ASSERT_EQ(mergeStage->getOutputNs().coll(), targetColl);
 }
 
 TEST_F(DocumentSourceMergeTest, CorrectlyParsesIfIntoIsString) {
-    const auto& defaultDb = getExpCtx()->ns.db();
+    const auto& defaultDb = getExpCtx()->ns.db_forTest();
     const std::string targetColl = "target_collection";
     auto spec = BSON("$merge" << BSON("into" << targetColl));
     auto mergeStage = createMergeStage(spec);
     ASSERT(mergeStage);
-    ASSERT_EQ(mergeStage->getOutputNs().db(), defaultDb);
+    ASSERT_EQ(mergeStage->getOutputNs().db_forTest(), defaultDb);
     ASSERT_EQ(mergeStage->getOutputNs().coll(), targetColl);
 }
 
 TEST_F(DocumentSourceMergeTest, CorrectlyParsesIfIntoIsObject) {
-    const auto& defaultDb = getExpCtx()->ns.db();
+    const auto& defaultDb = getExpCtx()->ns.db_forTest();
     const std::string targetDb = "target_db";
     const std::string targetColl = "target_collection";
     auto spec = BSON("$merge" << BSON("into" << BSON("coll" << targetColl)));
     auto mergeStage = createMergeStage(spec);
     ASSERT(mergeStage);
-    ASSERT_EQ(mergeStage->getOutputNs().db(), defaultDb);
+    ASSERT_EQ(mergeStage->getOutputNs().db_forTest(), defaultDb);
     ASSERT_EQ(mergeStage->getOutputNs().coll(), targetColl);
 
     spec = BSON("$merge" << BSON("into" << BSON("db" << targetDb << "coll" << targetColl)));
     mergeStage = createMergeStage(spec);
     ASSERT(mergeStage);
-    ASSERT_EQ(mergeStage->getOutputNs().db(), targetDb);
+    ASSERT_EQ(mergeStage->getOutputNs().db_forTest(), targetDb);
     ASSERT_EQ(mergeStage->getOutputNs().coll(), targetColl);
 }
 
@@ -150,7 +163,7 @@ TEST_F(DocumentSourceMergeTest, CorrectlyParsesIfWhenMatchedIsStringOrArray) {
 TEST_F(DocumentSourceMergeTest, CorrectlyParsesIfTargetAndAggregationNamespacesAreSame) {
     const auto targetNsSameAsAggregationNs = getExpCtx()->ns;
     const auto targetColl = targetNsSameAsAggregationNs.coll();
-    const auto targetDb = targetNsSameAsAggregationNs.db();
+    const auto targetDb = targetNsSameAsAggregationNs.db_forTest();
 
     auto spec = BSON("$merge" << BSON("into" << BSON("coll" << targetColl << "db" << targetDb)));
     ASSERT(createMergeStage(spec));
@@ -398,13 +411,13 @@ TEST_F(DocumentSourceMergeTest, FailsToParseIfOnFieldIsNotStringOrArrayOfStrings
 }
 
 TEST_F(DocumentSourceMergeTest, CorrectlyUsesTargetDbThatMatchesAggregationDb) {
-    const auto targetDbSameAsAggregationDb = getExpCtx()->ns.db();
+    const auto targetDbSameAsAggregationDb = getExpCtx()->ns.db_forTest();
     const auto targetColl = "target_collection";
     auto spec = BSON("$merge" << BSON("into" << BSON("coll" << targetColl << "db"
                                                             << targetDbSameAsAggregationDb)));
 
     auto mergeStage = createMergeStage(spec);
-    ASSERT_EQ(mergeStage->getOutputNs().db(), targetDbSameAsAggregationDb);
+    ASSERT_EQ(mergeStage->getOutputNs().db_forTest(), targetDbSameAsAggregationDb);
     ASSERT_EQ(mergeStage->getOutputNs().coll(), targetColl);
 }
 
@@ -491,7 +504,7 @@ TEST_F(DocumentSourceMergeTest, SerializeDottedPathOnFieldsSharedPrefix) {
 }
 
 TEST_F(DocumentSourceMergeTest, SerializeIntoWhenMergeSpecIsStringNotDotted) {
-    const auto aggregationDb = getExpCtx()->ns.db();
+    const auto aggregationDb = getExpCtx()->ns.db_forTest();
     auto spec = BSON("$merge"
                      << "target_collection");
     auto mergeStage = createMergeStage(spec);
@@ -501,7 +514,7 @@ TEST_F(DocumentSourceMergeTest, SerializeIntoWhenMergeSpecIsStringNotDotted) {
 }
 
 TEST_F(DocumentSourceMergeTest, SerializeIntoWhenMergeSpecIsStringDotted) {
-    const auto aggregationDb = getExpCtx()->ns.db();
+    const auto aggregationDb = getExpCtx()->ns.db_forTest();
     auto spec = BSON("$merge"
                      << "my.target_collection");
     auto mergeStage = createMergeStage(spec);
@@ -511,7 +524,7 @@ TEST_F(DocumentSourceMergeTest, SerializeIntoWhenMergeSpecIsStringDotted) {
 }
 
 TEST_F(DocumentSourceMergeTest, SerializeIntoWhenIntoIsStringNotDotted) {
-    const auto aggregationDb = getExpCtx()->ns.db();
+    const auto aggregationDb = getExpCtx()->ns.db_forTest();
     auto spec = BSON("$merge" << BSON("into"
                                       << "target_collection"));
     auto mergeStage = createMergeStage(spec);
@@ -521,7 +534,7 @@ TEST_F(DocumentSourceMergeTest, SerializeIntoWhenIntoIsStringNotDotted) {
 }
 
 TEST_F(DocumentSourceMergeTest, SerializeIntoWhenIntoIsStringDotted) {
-    const auto aggregationDb = getExpCtx()->ns.db();
+    const auto aggregationDb = getExpCtx()->ns.db_forTest();
     auto spec = BSON("$merge" << BSON("into"
                                       << "my.target_collection"));
     auto mergeStage = createMergeStage(spec);
@@ -531,7 +544,7 @@ TEST_F(DocumentSourceMergeTest, SerializeIntoWhenIntoIsStringDotted) {
 }
 
 TEST_F(DocumentSourceMergeTest, SerializeIntoWhenIntoIsObjectWithCollNotDotted) {
-    const auto aggregationDb = getExpCtx()->ns.db();
+    const auto aggregationDb = getExpCtx()->ns.db_forTest();
     auto spec = BSON("$merge" << BSON("into" << BSON("coll"
                                                      << "target_collection")));
     auto mergeStage = createMergeStage(spec);
@@ -541,7 +554,7 @@ TEST_F(DocumentSourceMergeTest, SerializeIntoWhenIntoIsObjectWithCollNotDotted) 
 }
 
 TEST_F(DocumentSourceMergeTest, SerializeIntoWhenIntoIsObjectWithCollDotted) {
-    const auto aggregationDb = getExpCtx()->ns.db();
+    const auto aggregationDb = getExpCtx()->ns.db_forTest();
     auto spec = BSON("$merge" << BSON("into" << BSON("coll"
                                                      << "my.target_collection")));
     auto mergeStage = createMergeStage(spec);

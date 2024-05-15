@@ -28,24 +28,66 @@
  */
 
 
-#include "mongo/platform/basic.h"
+#include <absl/container/flat_hash_set.h>
+#include <algorithm>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <cstdint>
+#include <memory>
+#include <type_traits>
 
-#include "mongo/db/s/transaction_coordinator_util.h"
-
-#include "mongo/client/remote_command_retry_scheduler.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/bson/util/builder_fwd.h"
+#include "mongo/client/dbclient_cursor.h"
+#include "mongo/client/read_preference.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/commands/txn_two_phase_commit_cmds_gen.h"
-#include "mongo/db/curop.h"
+#include "mongo/db/concurrency/locker.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/ops/write_ops.h"
+#include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/db/ops/write_ops_parsers.h"
+#include "mongo/db/query/collation/collator_factory_interface.h"
+#include "mongo/db/query/find_command.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/transaction_coordinator_futures_util.h"
+#include "mongo/db/s/transaction_coordinator_util.h"
 #include "mongo/db/s/transaction_coordinator_worker_curop_repository.h"
-#include "mongo/db/storage/flow_control.h"
-#include "mongo/db/write_concern.h"
+#include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/write_concern_options.h"
+#include "mongo/executor/task_executor.h"
+#include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/redaction.h"
+#include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/rpc/reply_interface.h"
+#include "mongo/rpc/unique_message.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/admission_context.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/future_impl.h"
+#include "mongo/util/str.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTransaction
 
@@ -218,6 +260,7 @@ void PrepareVoteConsensus::registerVote(const PrepareResponse& vote) {
     if (vote.vote == PrepareVote::kCommit) {
         ++_numCommitVotes;
         _maxPrepareTimestamp = std::max(_maxPrepareTimestamp, *vote.prepareTimestamp);
+        _affectedNamespaces.insert(vote.affectedNamespaces.begin(), vote.affectedNamespaces.end());
     } else {
         vote.vote == PrepareVote::kAbort ? ++_numAbortVotes : ++_numNoVotes;
 
@@ -255,7 +298,7 @@ Future<PrepareVoteConsensus> sendPrepare(ServiceContext* service,
                                    << WriteConcernOptions::Majority));
     if (auto txnRetryCounter = txnNumberAndRetryCounter.getTxnRetryCounter();
         txnRetryCounter && !isDefaultTxnRetryCounter(*txnRetryCounter)) {
-        bob.append(OperationSessionInfo::kTxnRetryCounterFieldName, *txnRetryCounter);
+        bob.append(OperationSessionInfoFromClient::kTxnRetryCounterFieldName, *txnRetryCounter);
     }
     apiParams.appendInfo(&bob);
     auto prepareObj = prepareTransaction.toBSON(bob.obj());
@@ -327,8 +370,9 @@ namespace {
 repl::OpTime persistDecisionBlocking(OperationContext* opCtx,
                                      const LogicalSessionId& lsid,
                                      const TxnNumberAndRetryCounter& txnNumberAndRetryCounter,
-                                     const std::vector<ShardId>& participantList,
-                                     const txn::CoordinatorCommitDecision& decision) {
+                                     std::vector<ShardId> participantList,
+                                     const txn::CoordinatorCommitDecision& decision,
+                                     std::vector<NamespaceString> affectedNamespaces) {
     const bool isCommit = decision.getDecision() == txn::CommitDecision::kCommit;
     LOGV2_DEBUG(22467,
                 3,
@@ -387,6 +431,11 @@ repl::OpTime persistDecisionBlocking(OperationContext* opCtx,
                 doc.setId(sessionInfo);
                 doc.setParticipants(std::move(participantList));
                 doc.setDecision(decision);
+                if (decision.getDecision() == CommitDecision::kCommit &&
+                    feature_flags::gFeatureFlagEndOfTransactionChangeEvent.isEnabled(
+                        serverGlobalParams.featureCompatibility)) {
+                    doc.setAffectedNamespaces(std::move(affectedNamespaces));
+                }
                 return doc.toBSON();
             }()));
 
@@ -433,14 +482,16 @@ Future<repl::OpTime> persistDecision(txn::AsyncWorkScheduler& scheduler,
                                      const LogicalSessionId& lsid,
                                      const TxnNumberAndRetryCounter& txnNumberAndRetryCounter,
                                      const txn::ParticipantsList& participants,
-                                     const txn::CoordinatorCommitDecision& decision) {
+                                     const txn::CoordinatorCommitDecision& decision,
+                                     const std::vector<NamespaceString>& affectedNamespaces) {
     return txn::doWhile(
         scheduler,
         boost::none /* no need for a backoff */,
         [](const StatusWith<repl::OpTime>& s) { return shouldRetryPersistingCoordinatorState(s); },
-        [&scheduler, lsid, txnNumberAndRetryCounter, participants, decision] {
+        [&scheduler, lsid, txnNumberAndRetryCounter, participants, decision, affectedNamespaces] {
             return scheduler.scheduleWork(
-                [lsid, txnNumberAndRetryCounter, participants, decision](OperationContext* opCtx) {
+                [lsid, txnNumberAndRetryCounter, participants, decision, affectedNamespaces](
+                    OperationContext* opCtx) {
                     // Do not acquire a storage ticket in order to avoid unnecessary serialization
                     // with other prepared transactions that are holding a storage ticket
                     // themselves; see SERVER-60682.
@@ -448,8 +499,12 @@ Future<repl::OpTime> persistDecision(txn::AsyncWorkScheduler& scheduler,
                         opCtx->lockState(), AdmissionContext::Priority::kImmediate);
                     getTransactionCoordinatorWorkerCurOpRepository()->set(
                         opCtx, lsid, txnNumberAndRetryCounter, CoordinatorAction::kWritingDecision);
-                    return persistDecisionBlocking(
-                        opCtx, lsid, txnNumberAndRetryCounter, participants, decision);
+                    return persistDecisionBlocking(opCtx,
+                                                   lsid,
+                                                   txnNumberAndRetryCounter,
+                                                   std::move(participants),
+                                                   decision,
+                                                   std::move(affectedNamespaces));
                 });
         });
 }
@@ -470,7 +525,7 @@ Future<void> sendCommit(ServiceContext* service,
                                    << WriteConcernOptions::Majority));
     if (auto txnRetryCounter = txnNumberAndRetryCounter.getTxnRetryCounter();
         txnRetryCounter && !isDefaultTxnRetryCounter(*txnRetryCounter)) {
-        bob.append(OperationSessionInfo::kTxnRetryCounterFieldName, *txnRetryCounter);
+        bob.append(OperationSessionInfoFromClient::kTxnRetryCounterFieldName, *txnRetryCounter);
     }
     apiParams.appendInfo(&bob);
     auto commitObj = commitTransaction.toBSON(bob.obj());
@@ -514,7 +569,7 @@ Future<void> sendAbort(ServiceContext* service,
                                    << WriteConcernOptions::Majority));
     if (auto txnRetryCounter = txnNumberAndRetryCounter.getTxnRetryCounter();
         txnRetryCounter && !isDefaultTxnRetryCounter(*txnRetryCounter)) {
-        bob.append(OperationSessionInfo::kTxnRetryCounterFieldName, *txnRetryCounter);
+        bob.append(OperationSessionInfoFromClient::kTxnRetryCounterFieldName, *txnRetryCounter);
     }
     apiParams.appendInfo(&bob);
     auto abortObj = abortTransaction.toBSON(bob.obj());
@@ -720,9 +775,9 @@ Future<PrepareResponse> sendPrepareToShard(ServiceContext* service,
                     }
 
                     if (status.isOK()) {
-                        auto prepareTimestampField = response.data["prepareTimestamp"];
-                        if (prepareTimestampField.eoo() ||
-                            prepareTimestampField.timestamp().isNull()) {
+                        auto reply =
+                            PrepareReply::parse(IDLParserContext("PrepareReply"), response.data);
+                        if (!reply.getPrepareTimestamp()) {
                             Status abortStatus(ErrorCodes::Error(50993),
                                                str::stream()
                                                    << "Coordinator shard received an OK response "
@@ -739,7 +794,7 @@ Future<PrepareResponse> sendPrepareToShard(ServiceContext* service,
                                   "error"_attr = redact(abortStatus));
 
                             return PrepareResponse{
-                                shardId, PrepareVote::kAbort, boost::none, abortStatus};
+                                shardId, PrepareVote::kAbort, boost::none, {}, abortStatus};
                         }
 
                         LOGV2_DEBUG(
@@ -752,12 +807,15 @@ Future<PrepareResponse> sendPrepareToShard(ServiceContext* service,
                             "sessionId"_attr = lsid,
                             "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
                             "shardId"_attr = shardId,
-                            "prepareTimestampField"_attr = prepareTimestampField.timestamp());
+                            "prepareTimestamp"_attr = reply.getPrepareTimestamp(),
+                            "affectedNamespaces"_attr = reply.getAffectedNamespaces());
 
-                        return PrepareResponse{shardId,
-                                               PrepareVote::kCommit,
-                                               prepareTimestampField.timestamp(),
-                                               boost::none};
+                        return PrepareResponse{
+                            shardId,
+                            PrepareVote::kCommit,
+                            *reply.getPrepareTimestamp(),
+                            reply.getAffectedNamespaces().value_or(std::vector<NamespaceString>{}),
+                            boost::none};
                     }
 
                     LOGV2_DEBUG(22479,
@@ -776,6 +834,7 @@ Future<PrepareResponse> sendPrepareToShard(ServiceContext* service,
                             shardId,
                             PrepareVote::kAbort,
                             boost::none,
+                            {},
                             status.withContext(str::stream() << "from shard " << shardId)};
                     }
 
@@ -792,7 +851,7 @@ Future<PrepareResponse> sendPrepareToShard(ServiceContext* service,
                     // treat ShardNotFound as a vote to abort, which is always safe since the node
                     // must then send abort.
                     return Future<PrepareResponse>::makeReady(
-                        {shardId, CommitDecision::kAbort, boost::none, status});
+                        {shardId, CommitDecision::kAbort, boost::none, {}, status});
                 });
         });
 
@@ -809,6 +868,7 @@ Future<PrepareResponse> sendPrepareToShard(ServiceContext* service,
             return PrepareResponse{shardId,
                                    boost::none,
                                    boost::none,
+                                   {},
                                    Status(ErrorCodes::NoSuchTransaction, status.reason())};
         });
 }

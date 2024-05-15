@@ -30,11 +30,13 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo {
-class ScopedCollectionAcquisition;
+class CollectionAcquisition;
 }
 
 namespace mongo::global_index {
@@ -79,7 +81,7 @@ void insertKey(OperationContext* opCtx,
  * the above, this variant requires the call to be wrapped inside a writeConflictRetry.
  */
 void insertKey(OperationContext* opCtx,
-               const CollectionPtr& container,
+               const CollectionAcquisition& container,
                const BSONObj& key,
                const BSONObj& docKey);
 
@@ -98,7 +100,7 @@ void deleteKey(OperationContext* opCtx,
  * the above, this variant requires the call to be wrapped inside a writeConflictRetry.
  */
 void deleteKey(OperationContext* opCtx,
-               const ScopedCollectionAcquisition& container,
+               const CollectionAcquisition& container,
                const BSONObj& key,
                const BSONObj& docKey);
 

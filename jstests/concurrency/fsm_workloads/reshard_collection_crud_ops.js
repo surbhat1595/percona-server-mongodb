@@ -1,12 +1,12 @@
-'use strict';
-
 /**
  * Runs reshardCollection and CRUD operations concurrently.
  *
  * @tags: [requires_sharding]
  */
 
-var $config = (function() {
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+
+export const $config = (function() {
     const shardKeys = [
         {a: 1},
         {b: 1},
@@ -32,17 +32,19 @@ var $config = (function() {
         return documents;
     }
 
-    function executeReshardCommand(db, collName, newShardKey) {
+    function executeReshardCommand(db, collName, newShardKey, forceRedistribution) {
         const coll = db.getCollection(collName);
         print(`Started Resharding Collection ${coll.getFullName()}. New Shard Key ${
-            tojson(newShardKey)}`);
+            tojson(newShardKey)}, Same key resharding ${forceRedistribution}`);
+        let reshardCollectionCmd = {reshardCollection: coll.getFullName(), key: newShardKey};
+        if (forceRedistribution) {
+            reshardCollectionCmd.forceRedistribution = forceRedistribution;
+        }
         if (TestData.runningWithShardStepdowns) {
-            assert.commandWorkedOrFailedWithCode(
-                db.adminCommand({reshardCollection: coll.getFullName(), key: newShardKey}),
-                [ErrorCodes.SnapshotUnavailable]);
+            assert.commandWorkedOrFailedWithCode(db.adminCommand(reshardCollectionCmd),
+                                                 [ErrorCodes.SnapshotUnavailable]);
         } else {
-            assert.commandWorked(
-                db.adminCommand({reshardCollection: coll.getFullName(), key: newShardKey}));
+            assert.commandWorked(db.adminCommand(reshardCollectionCmd));
         }
         print(`Finished Resharding Collection ${coll.getFullName()}. New Shard Key ${
             tojson(newShardKey)}`);
@@ -66,11 +68,28 @@ var $config = (function() {
                 const newIndex = (currentShardKeyIndex + 1) % shardKeys.length;
                 const shardKey = shardKeys[newIndex];
 
-                executeReshardCommand(db, collName, shardKey);
+                executeReshardCommand(db, collName, shardKey, false /*forceRedistribution*/);
                 // If resharding fails with SnapshopUnavailable, then this will be incorrect. But
                 // its fine since reshardCollection will succeed if the new shard key matches the
                 // existing one.
                 this.currentShardKeyIndex = shardKeyIndex;
+                this.reshardingCount += 1;
+            }
+        },
+        reshardCollectionSameKey: function reshardCollectionSameKey(db, collName) {
+            const shouldContinueResharding = this.reshardingCount <= kMaxReshardingExecutions;
+            if (this.tid === 0 && shouldContinueResharding) {
+                const currentShardKeyIndex = this.currentShardKeyIndex;
+                const newIndex = this._allowSameKeyResharding
+                    ? currentShardKeyIndex
+                    : (currentShardKeyIndex + 1) % shardKeys.length;
+                const shardKey = shardKeys[newIndex];
+
+                executeReshardCommand(db, collName, shardKey, this._allowSameKeyResharding);
+                // If resharding fails with SnapshopUnavailable, then this will be incorrect. But
+                // its fine since reshardCollection will succeed if the new shard key matches the
+                // existing one.
+                this.currentShardKeyIndex = newIndex;
                 this.reshardingCount += 1;
             }
         }
@@ -78,12 +97,15 @@ var $config = (function() {
 
     const transitions = {
         reshardCollection: {insert: 1},
-        insert: {insert: .5, reshardCollection: .5}
+        reshardCollectionSameKey: {insert: 1},
+        insert: {insert: .5, reshardCollection: .25, reshardCollectionSameKey: .25}
     };
 
     function setup(db, collName, _cluster) {
         const coll = db.getCollection(collName);
         assert.commandWorked(coll.insert(createDocuments(kTotalWorkingDocuments)));
+        this._allowSameKeyResharding =
+            FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), 'ReshardingImprovements');
     }
 
     return {

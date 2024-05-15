@@ -28,13 +28,18 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
-
+#include <cerrno>
+#include <cstdlib>
 #include <memory>
+#include <mutex>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <wiredtiger.h>
 
 #include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
 #include "mongo/db/audit/audit.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/global_settings.h"
@@ -42,10 +47,14 @@
 #include "mongo/db/storage/journal_listener.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_parameters_gen.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/logv2/log.h"
-#include "mongo/stdx/thread.h"
-#include "mongo/util/scopeguard.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 

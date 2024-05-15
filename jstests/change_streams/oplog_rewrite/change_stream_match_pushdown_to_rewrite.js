@@ -1,7 +1,6 @@
 // Test that a pipeline of the form [{$changeStream: {}}, {$match: ...}] can rewrite the 'to' and
 // apply it to oplog-format documents in order to filter out results as early as possible.
 // @tags: [
-//   featureFlagChangeStreamsRewrite,
 //   requires_fcv_51,
 //   requires_pipeline_optimization,
 //   requires_sharding,
@@ -10,11 +9,11 @@
 //   assumes_unsharded_collection,
 //   assumes_read_preference_unchanged
 // ]
-(function() {
-"use strict";
-
-load("jstests/libs/change_stream_rewrite_util.js");  // For rewrite helpers.
-load("jstests/libs/fixture_helpers.js");             // For FixtureHelpers.
+import {
+    createShardedCollection,
+    verifyChangeStreamOnWholeCluster
+} from "jstests/libs/change_stream_rewrite_util.js";
+load("jstests/libs/fixture_helpers.js");  // For FixtureHelpers.
 
 const dbName = "change_stream_match_pushdown_and_rewrite";
 
@@ -672,4 +671,3 @@ verifyOnWholeCluster({
                      4 /* expectedOplogRetDocsForEachShard*/);
 
 st.stop();
-})();

@@ -29,19 +29,37 @@
 
 #pragma once
 
+#include <boost/none.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/plan_stats.h"
+#include "mongo/db/exec/sbe/stages/stages.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/classic_plan_cache.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_cache.h"
+#include "mongo/db/query/plan_cache_callbacks.h"
 #include "mongo/db/query/plan_cache_debug_info.h"
 #include "mongo/db/query/plan_cache_key_factory.h"
 #include "mongo/db/query/plan_explainer_factory.h"
+#include "mongo/db/query/plan_ranker.h"
+#include "mongo/db/query/plan_ranking_decision.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/sbe_plan_cache.h"
 #include "mongo/db/query/sbe_plan_ranker.h"
 #include "mongo/db/query/sbe_stage_builder.h"
+#include "mongo/db/service_context.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/clock_source.h"
 
 namespace mongo {
 /**
@@ -183,7 +201,8 @@ void updatePlanCacheFromCandidates(
 
     // Store the choice we just made in the cache, if the query is of a type that is safe to
     // cache.
-    if (canCache && shouldCacheQuery(query)) {
+    QuerySolution* solution = winningPlan.solution.get();
+    if (canCache && shouldCacheQuery(query) && solution->isEligibleForPlanCache()) {
         const CollectionPtr& collection = collections.getMainCollection();
         auto rankingDecision = ranking.get();
         auto cacheClassicPlan = [&]() {
@@ -220,15 +239,6 @@ void updatePlanCacheFromCandidates(
                     std::move(winningPlan.clonedPlan->first),
                     std::move(winningPlan.clonedPlan->second.stageData));
                 cachedPlan->indexFilterApplied = winningPlan.solution->indexFilterApplied;
-
-                // Clustered collection scans need to cache 'ccCollator' for bounds computation.
-                stage_builder::PlanStageData& stageData = cachedPlan->planStageData;
-                if (stageData.doSbeClusteredCollectionScan) {
-                    const CollatorInterface* ccCollator = collection->getDefaultCollator();
-                    if (ccCollator) {
-                        stageData.ccCollator = ccCollator->cloneShared();
-                    }
-                }
 
                 auto buildDebugInfoFn =
                     [soln = winningPlan.solution.get()]() -> plan_cache_debug_info::DebugInfoSBE {

@@ -29,35 +29,90 @@
 
 #pragma once
 
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr.hpp>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
+#include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/client/connection_string.h"
+#include "mongo/client/read_preference.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/repl/delayable_timeout_callback.h"
+#include "mongo/db/repl/hello_response.h"
 #include "mongo/db/repl/initial_syncer.h"
 #include "mongo/db/repl/initial_syncer_interface.h"
+#include "mongo/db/repl/last_vote.h"
+#include "mongo/db/repl/member_config.h"
+#include "mongo/db/repl/member_data.h"
+#include "mongo/db/repl/member_id.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_set_config.h"
+#include "mongo/db/repl/repl_set_heartbeat_args_v1.h"
+#include "mongo/db/repl/repl_set_heartbeat_response.h"
+#include "mongo/db/repl/repl_set_request_votes_args.h"
+#include "mongo/db/repl/repl_set_tag.h"
+#include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_external_state.h"
+#include "mongo/db/repl/replication_metrics_gen.h"
+#include "mongo/db/repl/replication_process.h"
+#include "mongo/db/repl/split_horizon.h"
+#include "mongo/db/repl/split_prepare_session_manager.h"
+#include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/sync_source_resolver.h"
+#include "mongo/db/repl/sync_source_selector.h"
 #include "mongo/db/repl/topology_coordinator.h"
 #include "mongo/db/repl/update_position_args.h"
 #include "mongo/db/repl/vote_requester.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/platform/mutex.h"
 #include "mongo/platform/random.h"
+#include "mongo/rpc/metadata/oplog_query_metadata.h"
+#include "mongo/rpc/metadata/repl_set_metadata.h"
+#include "mongo/rpc/topology_version_gen.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/util/assert_util_core.h"
 #include "mongo/util/concurrency/with_lock.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/future.h"
+#include "mongo/util/future_impl.h"
+#include "mongo/util/interruptible.h"
 #include "mongo/util/net/hostandport.h"
+#include "mongo/util/string_map.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 
@@ -238,6 +293,8 @@ public:
     virtual Milliseconds getConfigElectionTimeoutPeriod() const override;
 
     virtual std::vector<MemberConfig> getConfigVotingMembers() const override;
+
+    virtual size_t getNumConfigVotingMembers() const override;
 
     virtual std::int64_t getConfigTerm() const override;
 
@@ -429,6 +486,15 @@ public:
 
     virtual SplitPrepareSessionManager* getSplitPrepareSessionManager() override;
 
+    // ==================== Private API ===================
+    // Called by AutoGetRstlForStepUpStepDown before taking RSTL when making stepdown transitions
+    void autoGetRstlEnterStepDown();
+
+    // Called by AutoGetRstlForStepUpStepDown before releasing RSTL when making stepdown
+    // transitions.  Also called in case of failure to acquire RSTL.  There will be one call to this
+    // method for each call to autoGetRSTLEnterStepDown.
+    void autoGetRstlExitStepDown();
+
     // ================== Test support API ===================
 
     /**
@@ -594,6 +660,8 @@ public:
 
     bool isRetryableWrite(OperationContext* opCtx) const override;
 
+    boost::optional<UUID> getInitialSyncId(OperationContext* opCtx) override;
+
 private:
     using CallbackFn = executor::TaskExecutor::CallbackFn;
 
@@ -658,6 +726,8 @@ private:
             OperationContext* opCtx,
             ReplicationCoordinator::OpsKillingStateTransitionEnum stateTransition,
             Date_t deadline = Date_t::max());
+
+        ~AutoGetRstlForStepUpStepDown();
 
         // Disallows copying.
         AutoGetRstlForStepUpStepDown(const AutoGetRstlForStepUpStepDown&) = delete;
@@ -1724,8 +1794,8 @@ private:
     // Set to true when we are in the process of shutting down replication.
     bool _inShutdown;  // (M)
 
-    // Election ID of the last election that resulted in this node becoming primary.
-    OID _electionId;  // (M)
+    // The term of the last election that resulted in this node becoming primary.
+    AtomicWord<int64_t> _electionIdTerm;  // (S)
 
     // Used to signal threads waiting for changes to _memberState.
     stdx::condition_variable _memberStateChange;  // (M)
@@ -1833,10 +1903,10 @@ private:
 
     AtomicWord<bool> _startedSteadyStateReplication{false};
 
-    // If we're waiting to get the RSTL at stepdown and therefore should claim we don't allow
+    // If we're in stepdown code and therefore should claim we don't allow
     // writes.  This is a counter rather than a flag because there are scenarios where multiple
     // stepdowns are attempted at once.
-    short _waitingForRSTLAtStepDown = 0;
+    short _stepDownPending = 0;
 
     // If we're in terminal shutdown.  If true, we'll refuse to vote in elections.
     bool _inTerminalShutdown = false;  // (M)

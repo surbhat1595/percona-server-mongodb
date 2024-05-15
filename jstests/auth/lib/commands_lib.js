@@ -424,13 +424,13 @@ export const authCommandsLib = {
               {runOnDb: secondDbName, roles: {}}
           ]
         },
+        // transitionFromDedicatedConfigServer and transitionToDedicatedConfigServer should be together
+        // so that we are not in a scenario where the config server is a shard since this interferes with
+        // other test cases.
         {
           testname: 'transitionFromDedicatedConfigServer',
           command: {transitionFromDedicatedConfigServer: 1},
           skipUnlessSharded: true,
-          skipTest: (conn) => {
-            return !TestData.setParameters.featureFlagCatalogShard;
-          },
           testcases: [
             {
               runOnDb: adminDbName,
@@ -445,9 +445,36 @@ export const authCommandsLib = {
           testname: "_configsvrTransitionFromDedicatedConfigServer",
           command: {_configsvrTransitionFromDedicatedConfigServer: 1},
           skipSharded: true,
-          skipTest: (conn) => {
-            return !TestData.setParameters.featureFlagCatalogShard;
-          },
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true
+              },
+              {runOnDb: firstDbName, roles: {}},
+              {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
+          testname: "transitionToDedicatedConfigServer",
+          command: { transitionToDedicatedConfigServer: 1 },
+          skipUnlessSharded: true,
+          testcases: [
+            {
+              runOnDb: adminDbName,
+              roles: roles_clusterManager,
+              expectFail: true,
+              privileges: [{resource: {cluster: true}, actions: ["transitionToDedicatedConfigServer"]}]
+            },
+            {runOnDb: firstDbName, roles: {}},
+            {runOnDb: secondDbName, roles: {}},
+          ]
+        },
+        {
+          testname: "_configsvrTransitionToDedicatedConfigServer",
+          command: {_configsvrTransitionToDedicatedConfigServer: 1},
+          skipSharded: true,
           testcases: [
               {
                 runOnDb: adminDbName,
@@ -4987,6 +5014,25 @@ export const authCommandsLib = {
           ]
         },
         {
+          testname: "clusterBulkWrite",
+          command: {
+            clusterBulkWrite: 1,
+            ops: [
+              {insert: 0, document: {skey: "MongoDB"}},
+              {insert: 1, document: {skey: "MongoDB"}}],
+            nsInfo: [{ns: firstDbName + ".coll"}, {ns: secondDbName + ".coll1"}],
+          },
+          skipSharded: true,
+          testcases: [
+            {
+              runOnDb: adminDbName,
+              roles: {__system: 1},
+              privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+              expectFail: true,
+            },
+          ]
+        },
+        {
           testname: "clusterDelete",
           command: {clusterDelete: "foo", deletes: [{q: {}, limit: 1}]},
           skipSharded: true,
@@ -5657,14 +5703,14 @@ export const authCommandsLib = {
           testcases: [
               {
                 runOnDb: firstDbName,
-                roles: Object.extend({restore: 1}, roles_dbAdmin),
+                roles: Object.extend({restore: 1}, roles_writeDbAdmin),
                 privileges:
                     [{resource: {db: firstDbName, collection: "foo"}, actions: ["updateSearchIndex"]}],
                 expectFail: true,
               },
               {
                 runOnDb: secondDbName,
-                roles: Object.extend({restore: 1}, roles_dbAdminAny),
+                roles: Object.extend({restore: 1}, roles_writeDbAdminAny),
                 privileges:
                     [{resource: {db: secondDbName, collection: "foo"}, actions: ["updateSearchIndex"]}],
                 expectFail: true,
@@ -6153,36 +6199,6 @@ export const authCommandsLib = {
                 runOnDb: adminDbName,
                 roles: roles_clusterManager,
                 privileges: [{resource: {cluster: true}, actions: ["removeShard"]}],
-                expectFail: true
-              },
-              {runOnDb: firstDbName, roles: {}},
-              {runOnDb: secondDbName, roles: {}}
-          ]
-        },
-        {
-          testname: "transitionToDedicatedConfigServer",
-          command: { transitionToDedicatedConfigServer: 1 },
-          skipUnlessSharded: true,
-          testcases: [
-            {
-              runOnDb: adminDbName,
-              roles: roles_clusterManager,
-              expectFail: true,
-              privileges: [{resource: {cluster: true}, actions: ["transitionToDedicatedConfigServer"]}]
-            },
-            {runOnDb: firstDbName, roles: {}},
-            {runOnDb: secondDbName, roles: {}},
-          ]
-        },
-        {
-          testname: "_configsvrTransitionToDedicatedConfigServer",
-          command: {_configsvrTransitionToDedicatedConfigServer: 1},
-          skipSharded: true,
-          testcases: [
-              {
-                runOnDb: adminDbName,
-                roles: {__system: 1},
-                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
                 expectFail: true
               },
               {runOnDb: firstDbName, roles: {}},

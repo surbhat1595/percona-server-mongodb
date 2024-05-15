@@ -29,9 +29,10 @@
 
 #include "mongo/s/analyze_shard_key_role.h"
 
+#include "mongo/db/cluster_role.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/s/is_mongos.h"
+#include "mongo/db/server_options.h"
 
 namespace mongo {
 namespace analyze_shard_key {
@@ -39,7 +40,7 @@ namespace analyze_shard_key {
 namespace {
 
 bool isReplEnabled(ServiceContext* serviceContext) {
-    if (isMongos()) {
+    if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer)) {
         return false;
     }
     auto replCoord = repl::ReplicationCoordinator::get(serviceContext);
@@ -49,7 +50,7 @@ bool isReplEnabled(ServiceContext* serviceContext) {
 }  // namespace
 
 bool supportsCoordinatingQueryAnalysis(bool isReplEnabled) {
-    if (isMongos()) {
+    if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer)) {
         return false;
     }
     return isReplEnabled && !gMultitenancySupport &&
@@ -62,7 +63,7 @@ bool supportsCoordinatingQueryAnalysis(OperationContext* opCtx) {
 }
 
 bool supportsPersistingSampledQueries(bool isReplEnabled) {
-    if (isMongos()) {
+    if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer)) {
         return false;
     }
     return isReplEnabled && !gMultitenancySupport &&
@@ -75,7 +76,7 @@ bool supportsPersistingSampledQueries(OperationContext* opCtx) {
 }
 
 bool supportsSamplingQueries(bool isReplEnabled) {
-    if (isMongos()) {
+    if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer)) {
         return true;
     }
     return isReplEnabled && !gMultitenancySupport &&

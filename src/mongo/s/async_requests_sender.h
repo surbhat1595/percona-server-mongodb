@@ -29,19 +29,29 @@
 
 #pragma once
 
+#include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
+#include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/baton.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/resource_yielder.h"
 #include "mongo/db/shard_id.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/scoped_task_executor.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/s/client/shard.h"
+#include "mongo/util/future.h"
 #include "mongo/util/interruptible.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/producer_consumer_queue.h"
@@ -127,9 +137,14 @@ public:
         boost::optional<HostAndPort> shardHostAndPort;
     };
 
+    typedef stdx::unordered_map<ShardId, HostAndPort> ShardHostMap;
+
     /**
      * Constructs a new AsyncRequestsSender. The OperationContext* and TaskExecutor* must remain
      * valid for the lifetime of the ARS.
+     *
+     * The designatedHostsMap overrides the read preference for the shards specified, and requires
+     * those shards target only the host in the map.
      */
     AsyncRequestsSender(OperationContext* opCtx,
                         std::shared_ptr<executor::TaskExecutor> executor,
@@ -137,7 +152,8 @@ public:
                         const std::vector<AsyncRequestsSender::Request>& requests,
                         const ReadPreferenceSetting& readPreference,
                         Shard::RetryPolicy retryPolicy,
-                        std::unique_ptr<ResourceYielder> resourceYielder);
+                        std::unique_ptr<ResourceYielder> resourceYielder,
+                        const ShardHostMap& designatedHostsMap);
 
     /**
      * Returns true if responses for all requests have been returned via next().
@@ -176,7 +192,10 @@ private:
         /**
          * Creates a new uninitialized remote state with a command to send.
          */
-        RemoteData(AsyncRequestsSender* ars, ShardId shardId, BSONObj cmdObj);
+        RemoteData(AsyncRequestsSender* ars,
+                   ShardId shardId,
+                   BSONObj cmdObj,
+                   HostAndPort designatedHost);
 
         /**
          * Returns a SemiFuture containing a shard object associated with this remote.
@@ -251,6 +270,9 @@ private:
 
         // The command object to send to the remote host.
         BSONObj _cmdObj;
+
+        // The designated host and port to send the command to, if provided.  Otherwise is empty().
+        HostAndPort _designatedHostAndPort;
 
         // The exact host on which the remote command was run. Is unset until a request has been
         // sent.

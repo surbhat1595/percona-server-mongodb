@@ -348,6 +348,8 @@ class WiredTigerTestCase(unittest.TestCase):
         if seedw != 0 and seedz != 0:
             WiredTigerTestCase._randomseed = True
             WiredTigerTestCase._seeds = [seedw, seedz]
+        # We don't have a lot of output, but we want to see it right away.
+        sys.stdout.reconfigure(line_buffering=True)
         WiredTigerTestCase._globalSetup = True
 
     @staticmethod
@@ -676,6 +678,8 @@ class WiredTigerTestCase(unittest.TestCase):
         os.chdir(self.testdir)
         with open('testname.txt', 'w+') as namefile:
             namefile.write(str(self) + '\n')
+        if WiredTigerTestCase._verbose >= 2:
+            print("[pid:{}]: {}: starting".format(os.getpid(), str(self)))
         self.fdSetUp()
         self._threadLocal.currentTestCase = self
         self.ignoreTearDownLogs = False
@@ -729,11 +733,19 @@ class WiredTigerTestCase(unittest.TestCase):
         teardown_msg = None
         if not dueToRetry:
             for action in self.teardown_actions:
-                tmp = action()
+                try:
+                    tmp = action()
+                except:
+                    e = sys.exc_info()
+                    self.prexception(e)
+                    tmp = (-1, str(e[1]))
                 if tmp[0] != 0:
                     self.pr('ERROR: teardown action failed, message=' + tmp[1])
                     teardown_failed = True
-                    teardown_msg = tmp[1]
+                    if teardown_msg is None:
+                        teardown_msg = str(tmp[1])
+                    else:
+                        teardown_msg += "; " + str(tmp[1])
 
         # This approach works for all our support Python versions and
         # is suggested by one of the answers in:
@@ -755,14 +767,22 @@ class WiredTigerTestCase(unittest.TestCase):
         self._failed = error or failure or exc_failure
         passed = not (self._failed or teardown_failed)
 
-        self.platform_api.tearDown()
+        try:
+            self.platform_api.tearDown()
+        except:
+            self.pr('ERROR: failed to tear down the platform API')
+            self.prexception(sys.exc_info())
 
         # Download the files from the bucket for tiered tests if the test fails or preserve is
         # turned on.
-        if hasattr(self, 'ss_name') and not self.skipped and \
-            (not passed or WiredTigerTestCase._preserveFiles):
-                self.pr('downloading object files')
-                self.download_objects(self.bucket, self.bucket_prefix)
+        try:
+            if hasattr(self, 'ss_name') and not self.skipped and \
+                (not passed or WiredTigerTestCase._preserveFiles):
+                    self.pr('downloading object files')
+                    self.download_objects(self.bucket, self.bucket_prefix)
+        except:
+            self.pr('ERROR: failed to download objects')
+            self.prexception(sys.exc_info())
 
         self.pr('finishing')
 
@@ -793,7 +813,11 @@ class WiredTigerTestCase(unittest.TestCase):
         # Clean up unless there's a failure
         self.readyDirectoryForRemoval(self.testdir)
         if (passed and (not WiredTigerTestCase._preserveFiles)) or self.skipped:
-            shutil.rmtree(self.testdir, ignore_errors=True)
+            try:
+                shutil.rmtree(self.testdir, ignore_errors=True)
+            except:
+                self.pr('ERROR: failed to delete the test directory: ' + self.testdir)
+                self.prexception(sys.exc_info())
         else:
             self.pr('preserving directory ' + self.testdir)
 
@@ -803,8 +827,8 @@ class WiredTigerTestCase(unittest.TestCase):
         if elapsed > 0.001 and WiredTigerTestCase._verbose >= 2:
             print("[pid:{}]: {}: {:.2f} seconds".format(os.getpid(), str(self), elapsed))
         if teardown_failed:
-            self.fail(f'Teardown failed with message: {teardown_msg}')
-        if (not passed) and (not self.skipped):
+            self.fail(f'Teardown of {self} failed with message: {teardown_msg}')
+        if (not passed or teardown_failed) and (not self.skipped):
             print("[pid:{}]: ERROR in {}".format(os.getpid(), str(self)))
             self.pr('FAIL')
             self.pr('preserving directory ' + self.testdir)
@@ -829,6 +853,9 @@ class WiredTigerTestCase(unittest.TestCase):
             shutil.copy(bkp_cursor.get_key(), backup_dir)
         self.assertEqual(ret, wiredtiger.WT_NOTFOUND)
         bkp_cursor.close()
+
+    def runningHook(self, name):
+        return name in WiredTigerTestCase.hook_names
 
     # Set a Python breakpoint.  When this function is called,
     # the python debugger will be called as described here:
@@ -980,7 +1007,25 @@ class WiredTigerTestCase(unittest.TestCase):
     def timestamp_str(self, t):
         return '%x' % t
 
+    # Some tests do table drops as a means to perform some test repeatedly in a loop.
+    # These tests require that a name be completely removed before the next iteration
+    # can begin.  However, tiered storage does not always provide a way to remove or
+    # rename objects that have been stored to the cloud, as doing that is not the normal
+    # part of a workflow (at this writing, GC is not yet implemented). Most storage sources
+    # return ENOTSUP when asked to remove a cloud object, so we really don't have a way to
+    # clear out the name space, and so we skip these tests under tiered storage.
+    #
+    # Note: as part of PM-3389, we may end up with unique names for every cloud object.
+    # If so, we could remove this restriction.
+    def requireDropRemovesNameConflict(self):
+        if self.runningHook('tiered'):
+            self.skipTest('Test requires removal from cloud storage, which is not yet permitted')
+
     def dropUntilSuccess(self, session, uri, config=None):
+        # Most test cases consider a drop, and especially a 'drop until success',
+        # to completely remove a file's artifacts, so that the name can be reused.
+        # Require this behavior.
+        self.requireDropRemovesNameConflict()
         while True:
             try:
                 session.drop(uri, config)

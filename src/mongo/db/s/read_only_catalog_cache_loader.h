@@ -29,7 +29,14 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/s/catalog/type_database_gen.h"
+#include "mongo/s/catalog_cache_loader.h"
+#include "mongo/s/chunk_version.h"
 #include "mongo/s/config_server_catalog_cache_loader.h"
+#include "mongo/util/future.h"
 
 namespace mongo {
 
@@ -46,8 +53,10 @@ public:
     void initializeReplicaSetRole(bool isPrimary) override {}
     void onStepDown() override {}
     void onStepUp() override {}
+    void onReplicationRollback() override {}
     void shutDown() override;
-    void notifyOfCollectionPlacementVersionUpdate(const NamespaceString& nss) override {}
+    void notifyOfCollectionRefreshEndMarkerSeen(const NamespaceString& nss,
+                                                const Timestamp& commitTime) override {}
     void waitForCollectionFlush(OperationContext* opCtx, const NamespaceString& nss) override;
     void waitForDatabaseFlush(OperationContext* opCtx, StringData dbName) override;
 

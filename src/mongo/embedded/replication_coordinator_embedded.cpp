@@ -28,13 +28,17 @@
  */
 
 
-#include "mongo/platform/basic.h"
+#include <boost/move/utility_core.hpp>
 
-#include "mongo/embedded/replication_coordinator_embedded.h"
+#include <boost/optional/optional.hpp>
 
+#include "mongo/base/error_codes.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/embedded/not_implemented.h"
+#include "mongo/embedded/replication_coordinator_embedded.h"
+#include "mongo/util/assert_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -334,6 +338,10 @@ Milliseconds ReplicationCoordinatorEmbedded::getConfigElectionTimeoutPeriod() co
 }
 
 std::vector<MemberConfig> ReplicationCoordinatorEmbedded::getConfigVotingMembers() const {
+    UASSERT_NOT_IMPLEMENTED;
+}
+
+size_t ReplicationCoordinatorEmbedded::getNumConfigVotingMembers() const {
     UASSERT_NOT_IMPLEMENTED;
 }
 
@@ -654,6 +662,10 @@ repl::SplitPrepareSessionManager* ReplicationCoordinatorEmbedded::getSplitPrepar
 
 bool ReplicationCoordinatorEmbedded::isRetryableWrite(OperationContext* opCtx) const {
     return false;
+}
+
+boost::optional<UUID> ReplicationCoordinatorEmbedded::getInitialSyncId(OperationContext* opCtx) {
+    UASSERT_NOT_IMPLEMENTED;
 }
 
 }  // namespace embedded

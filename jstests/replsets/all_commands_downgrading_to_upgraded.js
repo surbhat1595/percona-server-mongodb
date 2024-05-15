@@ -10,13 +10,10 @@
  * ]
  */
 
-(function() {
-"use strict";
-
 // This will verify the completeness of our map and run all tests.
 load("jstests/libs/all_commands_test.js");
-load("jstests/libs/fixture_helpers.js");    // For isSharded and isReplSet
-load("jstests/libs/feature_flag_util.js");  // For isPresentAndEnabled
+load("jstests/libs/fixture_helpers.js");  // For isSharded and isReplSet
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 load('jstests/replsets/rslib.js');
 
 const name = jsTestName();
@@ -66,7 +63,6 @@ const allCommands = {
     _configsvrRemoveShardFromZone: {skip: isAnInternalCommand},
     _configsvrRemoveTags: {skip: isAnInternalCommand},
     _configsvrRepairShardedCollectionChunksHistory: {skip: isAnInternalCommand},
-    _configsvrRenameCollectionMetadata: {skip: isAnInternalCommand},
     _configsvrResetPlacementHistory: {skip: isAnInternalCommand},
     _configsvrReshardCollection: {skip: isAnInternalCommand},
     _configsvrRunRestore: {skip: isAnInternalCommand},
@@ -76,6 +72,7 @@ const allCommands = {
     _configsvrTransitionFromDedicatedConfigServer: {skip: isAnInternalCommand},
     _configsvrTransitionToDedicatedConfigServer: {skip: isAnInternalCommand},
     _configsvrUpdateZoneKeyRange: {skip: isAnInternalCommand},
+    _dropConnectionsToMongot: {skip: isAnInternalCommand},
     _flushDatabaseCacheUpdates: {skip: isAnInternalCommand},
     _flushDatabaseCacheUpdatesWithWriteConcern: {skip: isAnInternalCommand},
     _flushReshardingStateChange: {skip: isAnInternalCommand},
@@ -89,6 +86,7 @@ const allCommands = {
     _killOperations: {skip: isAnInternalCommand},
     _mergeAuthzCollections: {skip: isAnInternalCommand},
     _migrateClone: {skip: isAnInternalCommand},
+    _mongotConnPoolStats: {skip: isAnInternalCommand},
     _movePrimaryRecipientAbortMigration: {skip: isAnInternalCommand},
     _movePrimaryRecipientForgetMigration: {skip: isAnInternalCommand},
     _movePrimaryRecipientSyncData: {skip: isAnInternalCommand},
@@ -109,8 +107,6 @@ const allCommands = {
     _shardsvrDropCollection: {skip: isAnInternalCommand},
     _shardsvrCreateCollection: {skip: isAnInternalCommand},
     _shardsvrCreateGlobalIndex: {skip: isAnInternalCommand},
-    // TODO SERVER-74324: deprecate _shardsvrDropCollectionIfUUIDNotMatching after 7.0 is lastLTS.
-    _shardsvrDropCollectionIfUUIDNotMatching: {skip: isAnInternalCommand},
     _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: isAnInternalCommand},
     _shardsvrDropCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrDropGlobalIndex: {skip: isAnInternalCommand},
@@ -154,6 +150,7 @@ const allCommands = {
     streams_getMoreStreamSample: {skip: isAnInternalCommand},
     streams_getStats: {skip: isAnInternalCommand},
     streams_testOnlyInsert: {skip: isAnInternalCommand},
+    streams_getMetrics: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
     abortReshardCollection: {
@@ -228,11 +225,7 @@ const allCommands = {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
         },
         command: {analyze: collName},
-        expectFailure: true,
-        expectedErrorCode: [
-            6660400,
-            6765500
-        ],  // Analyze command requires common query framework feature flag to be enabled.
+        checkFeatureFlag: "CommonQueryFramework",
         teardown: function(conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         },
@@ -420,6 +413,7 @@ const allCommands = {
     },
     clusterAbortTransaction: {skip: "already tested by 'abortTransaction' tests on mongos"},
     clusterAggregate: {skip: "already tested by 'aggregate' tests on mongos"},
+    clusterBulkWrite: {skip: "already tested by 'bulkWrite' tests on mongos"},
     clusterCommitTransaction: {skip: "already tested by 'commitTransaction' tests on mongos"},
     clusterCount: {skip: "already tested by 'count' tests on mongos"},
     clusterDelete: {skip: "already tested by 'delete' tests on mongos"},
@@ -511,7 +505,7 @@ const allCommands = {
                 assert.commandWorked(conn.getCollection(fullNs).insert({a: i}));
             }
         },
-        command: {configureQueryAnalyzer: fullNs, mode: "full", sampleRate: 1},
+        command: {configureQueryAnalyzer: fullNs, mode: "full", samplesPerSecond: 1},
         teardown: function(conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         },
@@ -1474,6 +1468,27 @@ const allCommands = {
         doesNotRunOnStandalone: true,
         command: {setClusterParameter: {testIntClusterParameter: {intData: 2022}}}
     },
+    setQuerySettings: {
+        skip: commandIsDisabledOnLastLTS,
+        // TODO: SERVER-71537 Remove Feature Flag for PM-412.
+        checkFeatureFlag: "QuerySettings",
+        isAdminCommand: true,
+        doesNotRunOnStandalone: true,
+        command: {
+            setQuerySettings: {find: collName, $db: dbName, filter: {a: 1}},
+            settings: {indexHints: {allowedIndexes: ["a_1"]}}
+        }
+    },
+    removeQuerySettings: {
+        skip: commandIsDisabledOnLastLTS,
+        // TODO: SERVER-71537 Remove Feature Flag for PM-412.
+        checkFeatureFlag: "QuerySettings",
+        isAdminCommand: true,
+        doesNotRunOnStandalone: true,
+        command: {
+            removeQuerySettings: {find: collName, $db: dbName, filter: {a: 1}},
+        }
+    },
     setUserWriteBlockMode: {
         command: {setUserWriteBlockMode: 1, global: true},
         teardown: function(conn) {
@@ -1549,8 +1564,6 @@ const allCommands = {
     transitionFromDedicatedConfigServer: {
         // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
         skip: commandIsDisabledOnLastLTS,
-        // TODO SERVER-66060: Remove check when this feature flag is removed.
-        checkFeatureFlag: "CatalogShard",
         command: {transitionFromDedicatedConfigServer: 1},
         isShardedOnly: true,
         isAdminCommand: true,
@@ -1558,8 +1571,6 @@ const allCommands = {
     transitionToDedicatedConfigServer: {
         // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
         skip: commandIsDisabledOnLastLTS,
-        // TODO SERVER-66060: Remove check when this feature flag is removed.
-        checkFeatureFlag: "CatalogShard",
         command: {transitionToDedicatedConfigServer: 1},
         isShardedOnly: true,
         isAdminCommand: true,
@@ -1867,4 +1878,3 @@ let runShardedClusterTest = function() {
 runStandaloneTest();
 runReplicaSetTest();
 runShardedClusterTest();
-})();

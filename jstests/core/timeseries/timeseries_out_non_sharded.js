@@ -3,18 +3,16 @@
  * There is a test for sharded source collections in jstests/sharding/timeseries_out_sharded.js.
  *
  * @tags: [
+ *   references_foreign_collection,
  *   # TimeseriesAggTests doesn't handle stepdowns.
  *   does_not_support_stepdowns,
  *   # We need a timeseries collection.
  *   requires_timeseries,
  *   requires_fcv_71,
- *  featureFlagAggOutTimeseries
+ *   featureFlagAggOutTimeseries,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/core/timeseries/libs/timeseries_agg_helpers.js");
+import {TimeseriesAggTests} from "jstests/core/timeseries/libs/timeseries_agg_helpers.js";
 
 const numHosts = 10;
 const numIterations = 20;
@@ -167,4 +165,3 @@ if (!FixtureHelpers.isMongos(testDB)) {  // can not shard a view.
     assert.throwsWithCode(() => inColl.aggregate(pipeline), 7268703);
     assert.throwsWithCode(() => observerInColl.aggregate(pipeline), 7268703);
 }
-})();

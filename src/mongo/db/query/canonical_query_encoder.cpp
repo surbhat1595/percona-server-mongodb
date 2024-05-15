@@ -30,24 +30,70 @@
 
 #include "mongo/db/query/canonical_query_encoder.h"
 
+#include <algorithm>
 #include <boost/iterator/transform_iterator.hpp>
+#include <cstddef>
+#include <iterator>
+#include <memory>
+#include <set>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+#include <boost/iterator/iterator_facade.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <s2cellid.h>
 
 #include "mongo/base/simple_string_data_comparator.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/bson/util/builder_fwd.h"
+#include "mongo/db/api_parameters.h"
+#include "mongo/db/basic_types.h"
+#include "mongo/db/basic_types_gen.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/geo/geometry_container.h"
+#include "mongo/db/geo/shapes.h"
 #include "mongo/db/matcher/expression_array.h"
 #include "mongo/db/matcher/expression_expr.h"
 #include "mongo/db/matcher/expression_geo.h"
+#include "mongo/db/matcher/expression_leaf.h"
+#include "mongo/db/matcher/expression_path.h"
 #include "mongo/db/matcher/expression_text.h"
 #include "mongo/db/matcher/expression_text_noop.h"
+#include "mongo/db/matcher/expression_tree.h"
+#include "mongo/db/matcher/expression_type.h"
+#include "mongo/db/matcher/expression_visitor.h"
 #include "mongo/db/matcher/expression_where.h"
 #include "mongo/db/matcher/expression_where_noop.h"
+#include "mongo/db/matcher/schema/expression_internal_schema_allowed_properties.h"
+#include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_group.h"
+#include "mongo/db/pipeline/document_source_internal_projection.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/inner_pipeline_stage_interface.h"
 #include "mongo/db/query/analyze_regex.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/find_command.h"
 #include "mongo/db/query/projection.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/tree_walker.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/read_concern_level.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/base64.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -422,6 +468,14 @@ void encodePipeline(const std::vector<std::unique_ptr<InnerPipelineStageInterfac
             auto serializedGroup = groupStage->serialize();
             const auto bson = serializedGroup.getDocument().toBson();
             bufBuilder->appendBuf(bson.objdata(), bson.objsize());
+        } else if (auto projectionStage =
+                       dynamic_cast<DocumentSourceInternalProjection*>(stage->documentSource())) {
+            projectionStage->serializeToArray(serializedArray, {});
+            tassert(7824600,
+                    "stage isn't serialized to a single bson object",
+                    serializedArray.size() == 1 && serializedArray[0].getType() == Object);
+            const auto bson = serializedArray[0].getDocument().toBson();
+            bufBuilder->appendBuf(bson.objdata(), bson.objsize());
         } else {
             tasserted(6443200,
                       str::stream() << "Pipeline stage cannot be encoded in plan cache key: "
@@ -587,7 +641,7 @@ void encodeKeyForProj(const projection_ast::Projection* proj, StringBuilder* key
         return;
     }
 
-    auto requiredFields = proj->getRequiredFields();
+    const auto& requiredFields = proj->getRequiredFields();
 
     // If the only requirement is that $sortKey be included with some value, we just act as if the
     // entire document is needed.

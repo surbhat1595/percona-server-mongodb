@@ -26,17 +26,49 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#include "mongo/platform/basic.h"
+// IWYU pragma: no_include "cxxabi.h"
+#include <algorithm>
+#include <boost/move/utility_core.hpp>
+#include <boost/smart_ptr.hpp>
+#include <cstddef>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/client/connection_string.h"
+#include "mongo/client/mongo_uri.h"
+#include "mongo/client/read_preference.h"
+#include "mongo/client/replica_set_change_notifier.h"
+#include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/replica_set_monitor_manager.h"
-#include "mongo/client/streamable_replica_set_monitor.h"
 #include "mongo/db/wire_version.h"
+#include "mongo/executor/network_interface.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/network_interface_thread_pool.h"
+#include "mongo/executor/remote_command_request.h"
+#include "mongo/executor/remote_command_response.h"
+#include "mongo/executor/task_executor.h"
 #include "mongo/executor/thread_pool_task_executor.h"
+#include "mongo/platform/mutex.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
 #include "mongo/unittest/integration_test.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/cancellation.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/future.h"
+#include "mongo/util/hierarchical_acquisition.h"
 
 namespace mongo {
 namespace executor {
@@ -157,7 +189,6 @@ protected:
 TEST_F(ReplicaSetMonitorFixture, StreamableRSMWireVersion) {
     auto rsm = ReplicaSetMonitorManager::get()->getOrCreateMonitor(replSetUri, nullptr);
 
-    // Schedule isMaster requests and wait for the responses.
     auto primaryFuture =
         rsm->getHostOrRefresh(ReadPreferenceSetting(mongo::ReadPreference::PrimaryOnly),
                               CancellationToken::uncancelable());
@@ -224,6 +255,26 @@ TEST_F(ReplicaSetMonitorFixture, LockOrderingAndGC) {
     ASSERT_EQ(previousGCCount + 1,
               ReplicaSetMonitorManager::get()->getGarbageCollectedMonitorsCount());
     ASSERT_EQ(0, ReplicaSetMonitorManager::get()->getAllSetNames().size());
+}
+
+// Tests 1) that boost::none gets returned if you try to get pingTime for some random host and port
+// that isn't part of the RSM and 2) that the pingTime can be collected for an RSM.
+TEST_F(ReplicaSetMonitorFixture, PingTime) {
+    ReplicaSetMonitor::cleanup();
+    auto rsm = ReplicaSetMonitor::createIfNeeded(replSetUri);
+
+    rsm->getHostOrRefresh(ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                          CancellationToken::uncancelable())
+        .get();
+
+    bool foundPing = false;
+    for (const auto& server : replSetUri.getServers()) {
+        if (rsm->pingTime(server) != boost::none) {
+            foundPing = true;
+        }
+    }
+    ASSERT_TRUE(foundPing);
+    ASSERT_EQ(rsm->pingTime(HostAndPort{"not-member-host", 1234}), boost::none);
 }
 
 }  // namespace

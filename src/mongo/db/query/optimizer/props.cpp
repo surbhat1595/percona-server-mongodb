@@ -28,6 +28,13 @@
  */
 
 #include "mongo/db/query/optimizer/props.h"
+
+#include <functional>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+
+#include "mongo/db/query/optimizer/utils/strong_alias.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
 #include "mongo/util/assert_util.h"
 
@@ -242,6 +249,20 @@ bool LimitEstimate::hasLimit() const {
 
 CEType LimitEstimate::getEstimate() const {
     return _estimate;
+}
+
+RemoveOrphansRequirement::RemoveOrphansRequirement(bool mustRemove) : _mustRemove(mustRemove) {}
+
+bool RemoveOrphansRequirement::operator==(const RemoveOrphansRequirement& other) const {
+    return _mustRemove == other._mustRemove;
+}
+
+ProjectionNameSet RemoveOrphansRequirement::getAffectedProjectionNames() const {
+    return {};
+}
+
+bool RemoveOrphansRequirement::mustRemove() const {
+    return _mustRemove;
 }
 
 ProjectionAvailability::ProjectionAvailability(ProjectionNameSet projections)

@@ -12,6 +12,7 @@ from buildscripts.resmokelib.testing.fixtures import replicaset
 from buildscripts.resmokelib.testing.hooks import dbhash
 from buildscripts.resmokelib.testing.hooks import interface
 from buildscripts.resmokelib.testing.hooks import oplog
+from buildscripts.resmokelib.testing.hooks import preimages_consistency
 from buildscripts.resmokelib.testing.hooks import validate
 
 
@@ -141,6 +142,10 @@ class PeriodicKillSecondariesTestCase(interface.DynamicTestCase):
         # the secondaries.
         self._check_repl_oplog(self._test_report)
 
+        # The CheckReplPreImagesConsistency hook checks that config.system.preimages is compatible
+        # across nodes and that there are no holes in the collection.
+        self._check_pre_images_consistency(self._test_report)
+
         # The CheckReplDBHash hook waits until all operations have replicated to and have been
         # applied on the secondaries, so we run the ValidateCollections hook after it to ensure
         # we're validating the entire contents of the collection.
@@ -159,7 +164,7 @@ class PeriodicKillSecondariesTestCase(interface.DynamicTestCase):
         for secondary in self.fixture.get_secondaries():
             # Disable the "rsSyncApplyStop" failpoint on the secondary to have it resume applying
             # oplog entries.
-            self._hook._disable_rssyncapplystop(secondary)  # pylint: disable=protected-access
+            self._hook._disable_rssyncapplystop(secondary)
 
             # Wait a little bit for the secondary to start apply oplog entries so that we are more
             # likely to kill the mongod process while it is partway into applying a batch.
@@ -190,6 +195,15 @@ class PeriodicKillSecondariesTestCase(interface.DynamicTestCase):
 
         for secondary in self.fixture.get_secondaries():
             self._check_invariants_as_standalone(secondary)
+            # We disable the remover for pre-images. Otherwise the remover might run and fix any
+            # potential consistency issues before we validate the config.system.preimages
+            # collection.
+            if "set_parameters" in secondary.mongod_options:
+                secondary.mongod_options["set_parameters"]["disableExpiredPreImagesRemover"] = True
+            else:
+                secondary.mongod_options["set_parameters"] = {
+                    "disableExpiredPreImagesRemover": True
+                }
 
             self.logger.info(
                 "Restarting the secondary on port %d as a replica set node with"
@@ -242,6 +256,14 @@ class PeriodicKillSecondariesTestCase(interface.DynamicTestCase):
         oplog_test_case.after_test(self, test_report)
         oplog_test_case.after_suite(test_report)
 
+    def _check_pre_images_consistency(self, test_report):
+        preimages_test_case = preimages_consistency.CheckReplPreImagesConsistency(
+            self._hook.logger, self.fixture)
+        preimages_test_case.before_suite(test_report)
+        preimages_test_case.before_test(self, test_report)
+        preimages_test_case.after_test(self, test_report)
+        preimages_test_case.after_suite(test_report)
+
     def _restart_and_clear_fixture(self):
         # We restart the fixture after setting 'preserve_dbpath' back to its original value in order
         # to clear the contents of the data directory if desired. The CleanEveryN hook cannot be
@@ -255,6 +277,11 @@ class PeriodicKillSecondariesTestCase(interface.DynamicTestCase):
         except errors.ServerFailure:
             raise errors.ServerFailure(
                 "{} did not exit cleanly after verifying data consistency".format(self.fixture))
+
+        for secondary in self.fixture.get_secondaries():
+            # We re-enable the remover for pre-images. It was disabled before re-joining the replSet
+            # as a secondary during the consistency checks.
+            secondary.mongod_options["set_parameters"].pop("disableExpiredPreImagesRemover")
 
         self.logger.info("Starting the fixture back up again with no data...")
         self.fixture.setup()
@@ -350,8 +377,8 @@ class PeriodicKillSecondariesTestCase(interface.DynamicTestCase):
                     ]))
                 break
             except pymongo.errors.OperationFailure as err:
-                if (err.code != self.INTERRUPTED_DUE_TO_REPL_STATE_CHANGE
-                        and err.code != self.INTERRUPTED_DUE_TO_STORAGE_CHANGE):
+                if err.code not in (self.INTERRUPTED_DUE_TO_REPL_STATE_CHANGE,
+                                    self.INTERRUPTED_DUE_TO_STORAGE_CHANGE):
                     self.logger.exception(
                         "mongod on port %d failed to reach state SECONDARY after %d seconds",
                         secondary.port, fixture.ReplFixture.AWAIT_REPL_TIMEOUT_FOREVER_MINS * 60)

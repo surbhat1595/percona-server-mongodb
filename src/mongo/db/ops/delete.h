@@ -29,7 +29,12 @@
 
 #pragma once
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/ops/delete_request_gen.h"
 #include "mongo/db/query/plan_executor.h"
 
@@ -37,7 +42,7 @@ namespace mongo {
 
 class Database;
 class OperationContext;
-class ScopedCollectionAcquisition;
+class CollectionAcquisition;
 
 /**
  * Deletes objects from 'collection' that match the query predicate given by 'pattern'. If 'justOne'
@@ -45,7 +50,7 @@ class ScopedCollectionAcquisition;
  * not yield. If 'god' is true, deletes are allowed on system namespaces.
  */
 long long deleteObjects(OperationContext* opCtx,
-                        const ScopedCollectionAcquisition& collection,
+                        const CollectionAcquisition& collection,
                         BSONObj pattern,
                         bool justOne,
                         bool god = false,
@@ -57,7 +62,7 @@ struct DeleteResult {
 };
 
 DeleteResult deleteObject(OperationContext* opCtx,
-                          const ScopedCollectionAcquisition& collection,
+                          const CollectionAcquisition& collection,
                           const DeleteRequest& request);
 
 }  // namespace mongo

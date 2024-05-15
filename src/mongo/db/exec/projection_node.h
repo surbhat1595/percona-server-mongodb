@@ -29,11 +29,31 @@
 
 #pragma once
 
+#include <absl/container/flat_hash_map.h>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <cstddef>
 #include <list>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
 
+#include "mongo/base/string_data.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/projection_executor.h"
-
+#include "mongo/db/pipeline/dependencies.h"
+#include "mongo/db/pipeline/expression.h"
+#include "mongo/db/pipeline/expression_dependencies.h"
+#include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/projection_policies.h"
+#include "mongo/db/query/serialization_options.h"
+#include "mongo/util/string_map.h"
 
 namespace mongo::projection_executor {
 /**
@@ -119,10 +139,14 @@ public:
      *
      * Computed paths that are identified as the result of a simple rename are instead filled out in
      * 'renamedPaths'. Each entry in 'renamedPaths' maps from the path's new name to its old name
-     * prior to application of this projection.
+     * prior to application of this projection. 'complexRenamedPaths' is an optional parameter that
+     * acts exactly as the 'renamedPaths' map and includes renames whose old name includes dotted
+     * paths (Note: the dotted path renames are constrained to length 3). The paths that are
+     * included in 'complexRenamedPaths' are also included in 'computedPaths'.
      */
     void reportComputedPaths(OrderedPathSet* computedPaths,
-                             StringMap<std::string>* renamedPaths) const;
+                             StringMap<std::string>* renamedPaths,
+                             StringMap<std::string>* complexRenamedPaths = nullptr) const;
 
     const std::string& getPath() const {
         return _pathToNode;

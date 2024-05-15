@@ -194,7 +194,7 @@ __page_read(WT_SESSION_IMPL *session, WT_REF *ref, uint32_t flags)
     page_flags = WT_DATA_IN_ITEM(&tmp) ? WT_PAGE_DISK_ALLOC : WT_PAGE_DISK_MAPPED;
     if (LF_ISSET(WT_READ_IGNORE_CACHE_SIZE))
         FLD_SET(page_flags, WT_PAGE_EVICT_NO_PROGRESS);
-    WT_ERR(__wt_page_inmem(session, ref, tmp.data, page_flags, &notused, &prepare));
+    WT_ERR(__wt_page_inmem(session, ref, tmp.data, tmp.size, page_flags, &notused, &prepare));
     tmp.mem = NULL;
     if (prepare)
         WT_ERR(__wt_page_inmem_prepare(session, ref));
@@ -281,6 +281,13 @@ __wt_page_in_func(WT_SESSION_IMPL *session, WT_REF *ref, uint32_t flags
      */
     if (!LF_ISSET(WT_READ_CACHE))
         WT_STAT_CONN_DATA_INCR(session, cache_pages_requested);
+
+    /*
+     * If configured, free stashed memory more aggressively to encourage finding bugs in generation
+     * tracking code.
+     */
+    if (FLD_ISSET(S2C(session)->timing_stress_flags, WT_TIMING_STRESS_AGGRESSIVE_STASH_FREE))
+        __wt_stash_discard(session);
 
     for (evict_skip = stalled = wont_need = false, force_attempts = 0, sleep_usecs = yield_cnt = 0;
          ;) {

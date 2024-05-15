@@ -29,11 +29,25 @@
 
 #pragma once
 
+#include <boost/optional/optional.hpp>
+#include <cstddef>
+#include <list>
+#include <ratio>
+#include <stack>
+#include <utility>
+
+#include "mongo/base/string_data.h"
+#include "mongo/crypto/sha256_block.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/platform/mutex.h"
 #include "mongo/stdx/unordered_map.h"
-
-#include <stack>
+#include "mongo/util/concurrency/with_lock.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 
@@ -111,7 +125,7 @@ private:
     LogicalSessionIdMap<Session> _childSessions;
 
     // Map partitioning the session pool by logged in user.
-    stdx::unordered_map<SHA256Block, std::list<Session>, SHA256Block::Hash> _perUserSessionPool;
+    stdx::unordered_map<SHA256Block, std::list<Session>> _perUserSessionPool;
 
     // Protects the internal data structures.
     mutable Mutex _mutex = MONGO_MAKE_LATCH("InternalSessionPool::_mutex");

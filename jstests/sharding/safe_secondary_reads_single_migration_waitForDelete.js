@@ -71,6 +71,7 @@ let testCases = {
     _configsvrTransitionFromDedicatedConfigServer: {skip: "primary only"},
     _configsvrTransitionToDedicatedConfigServer: {skip: "primary only"},
     _configsvrUpdateZoneKeyRange: {skip: "primary only"},
+    _dropConnectionsToMongot: {skip: "does not return user data"},
     _flushReshardingStateChange: {skip: "does not return user data"},
     _flushRoutingTableCacheUpdates: {skip: "does not return user data"},
     _flushRoutingTableCacheUpdatesWithWriteConcern: {skip: "does not return user data"},
@@ -81,6 +82,7 @@ let testCases = {
     _killOperations: {skip: "does not return user data"},
     _mergeAuthzCollections: {skip: "primary only"},
     _migrateClone: {skip: "primary only"},
+    _mongotConnPoolStats: {skip: "internal command"},
     _shardsvrCheckMetadataConsistency: {skip: "internal command"},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: "internal command"},
     _shardsvrCleanupStructuredEncryptionData: {skip: "primary only"},
@@ -126,7 +128,7 @@ let testCases = {
         checkResults: function(res) {
             // The command should work and return correct results.
             assert.commandWorked(res);
-            assert.eq(res.numDocs, 1000, res);
+            assert.eq(res.keyCharacteristics.numDocsTotal, 1000, res);
         },
         behavior: "versioned"
     },
@@ -139,7 +141,7 @@ let testCases = {
     balancerStatus: {skip: "primary only"},
     balancerStop: {skip: "primary only"},
     buildInfo: {skip: "does not return user data"},
-    bulkWrite: {skip: "not yet implemented"},
+    bulkWrite: {skip: "primary only"},
     captrunc: {skip: "primary only"},
     checkMetadataConsistency: {skip: "primary only"},
     checkShardingIndex: {skip: "primary only"},
@@ -152,6 +154,7 @@ let testCases = {
     cloneCollectionAsCapped: {skip: "primary only"},
     clusterAbortTransaction: {skip: "already tested by 'abortTransaction' tests on mongos"},
     clusterAggregate: {skip: "already tested by 'aggregate' tests on mongos"},
+    clusterBulkWrite: {skip: "already tested by 'bulkWrite' tests on mongos"},
     clusterCommitTransaction: {skip: "already tested by 'commitTransaction' tests on mongos"},
     clusterCount: {skip: "already tested by 'count' tests on mongos"},
     clusterDelete: {skip: "already tested by 'delete' tests on mongos"},
@@ -368,6 +371,8 @@ let testCases = {
     setShardVersion: {skip: "does not return user data"},
     setChangeStreamState: {skip: "does not return user data"},
     setClusterParameter: {skip: "does not return user data"},
+    setQuerySettings: {skip: "does not return user data"},
+    removeQuerySettings: {skip: "does not return user data"},
     setUserWriteBlockMode: {skip: "primary only"},
     shardCollection: {skip: "primary only"},
     shardingState: {skip: "does not return user data"},

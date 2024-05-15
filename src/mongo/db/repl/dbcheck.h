@@ -29,13 +29,32 @@
 
 #pragma once
 
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <cstdint>
+#include <limits>
 #include <memory>
+#include <string>
 
+#include "mongo/base/status.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/health_log_gen.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/repl/dbcheck_gen.h"
+#include "mongo/db/repl/dbcheck_idl.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/db/storage/recovery_unit.h"
+#include "mongo/util/md5.h"
 #include "mongo/util/md5.hpp"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 
@@ -50,8 +69,13 @@ class OpTime;
 
 /**
  * Logs an entry into 'local.system.healthLog'.
+ *
+ * The parameters nss and collectionUUID are boost::optional because they are not present in
+ * DbCheckOplogStartStop health log entries. DbCheckOplogStartStop entries will use boost::none
+ * for both nss and collectionUUID.
  */
 std::unique_ptr<HealthLogEntry> dbCheckHealthLogEntry(const boost::optional<NamespaceString>& nss,
+                                                      const boost::optional<UUID>& collectionUUID,
                                                       SeverityEnum severity,
                                                       const std::string& msg,
                                                       OplogEntriesEnum operation,
@@ -62,20 +86,24 @@ std::unique_ptr<HealthLogEntry> dbCheckHealthLogEntry(const boost::optional<Name
  */
 std::unique_ptr<HealthLogEntry> dbCheckErrorHealthLogEntry(
     const boost::optional<NamespaceString>& nss,
+    const boost::optional<UUID>& collectionUUID,
     const std::string& msg,
     OplogEntriesEnum operation,
     const Status& err,
     const BSONObj& context = BSONObj());
 
-std::unique_ptr<HealthLogEntry> dbCheckWarningHealthLogEntry(const NamespaceString& nss,
-                                                             const std::string& msg,
-                                                             OplogEntriesEnum operation,
-                                                             const Status& err);
+std::unique_ptr<HealthLogEntry> dbCheckWarningHealthLogEntry(
+    const NamespaceString& nss,
+    const boost::optional<UUID>& collectionUUID,
+    const std::string& msg,
+    OplogEntriesEnum operation,
+    const Status& err);
 /**
  * Get a HealthLogEntry for a dbCheck batch.
  */
 std::unique_ptr<HealthLogEntry> dbCheckBatchEntry(
     const NamespaceString& nss,
+    const boost::optional<UUID>& collectionUUID,
     int64_t count,
     int64_t bytes,
     const std::string& expectedHash,

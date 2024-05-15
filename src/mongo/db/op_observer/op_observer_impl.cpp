@@ -28,57 +28,85 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/db/op_observer/op_observer_impl.h"
-
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
+#include <cstddef>
+#include <iterator>
 #include <limits>
+#include <mutex>
+#include <utility>
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/import_collection_oplog_entry_gen.h"
 #include "mongo/db/catalog_raii.h"
-#include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/change_stream_serverless_helpers.h"
+#include "mongo/db/client.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
-#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/create_indexes_gen.h"
+#include "mongo/db/curop.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/logical_time_validator.h"
-#include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/batched_write_context.h"
+#include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/change_stream_preimage_gen.h"
+#include "mongo/db/ops/update_result.h"
 #include "mongo/db/read_write_concern_defaults.h"
+#include "mongo/db/record_id.h"
 #include "mongo/db/repl/image_collection_entry_gen.h"
+#include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
-#include "mongo/db/repl/repl_server_parameters_gen.h"
+#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/tenant_migration_decoration.h"
-#include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/scoped_collection_metadata.h"
 #include "mongo/db/s/sharding_write_router.h"
-#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/db/shard_id.h"
+#include "mongo/db/shard_role.h"
+#include "mongo/db/storage/record_data.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/tenant_id.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction/transaction_participant_gen.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
-#include "mongo/scripting/engine.h"
-#include "mongo/stdx/mutex.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/s/catalog/type_index_catalog.h"
+#include "mongo/s/database_version.h"
+#include "mongo/s/shard_version.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/clock_source.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/namespace_string_util.h"
+#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -88,8 +116,8 @@ using repl::DurableOplogEntry;
 using repl::MutableOplogEntry;
 using ChangeStreamPreImageRecordingMode = repl::ReplOperation::ChangeStreamPreImageRecordingMode;
 
-const OperationContext::Decoration<boost::optional<ShardId>> destinedRecipientDecoration =
-    OperationContext::declareDecoration<boost::optional<ShardId>>();
+const auto destinedRecipientDecoration =
+    OplogDeleteEntryArgs::declareDecoration<boost::optional<ShardId>>();
 
 namespace {
 
@@ -116,19 +144,6 @@ repl::OpTime logOperation(OperationContext* opCtx,
     auto opTime = oplogWriter->logOp(opCtx, oplogEntry);
     times.push_back(opTime);
     return opTime;
-}
-
-void writeChangeStreamPreImageEntry(
-    OperationContext* opCtx,
-    // Skip the pre-image insert if we are in the middle of a tenant migration. Pre-image inserts
-    // for writes during the oplog catchup phase are handled in the oplog application code.
-    boost::optional<TenantId> tenantId,
-    const ChangeStreamPreImage& preImage) {
-    if (repl::tenantMigrationInfo(opCtx)) {
-        return;
-    }
-
-    ChangeStreamPreImagesCollectionManager::get(opCtx).insertPreImage(opCtx, tenantId, preImage);
 }
 
 /**
@@ -252,18 +267,20 @@ OpTimeBundle replLogDelete(OperationContext* opCtx,
                            const boost::optional<UUID>& uuid,
                            StmtId stmtId,
                            bool fromMigrate,
+                           const DocumentKey& documentKey,
+                           const boost::optional<ShardId>& destinedRecipient,
                            OplogWriter* oplogWriter) {
     oplogEntry->setTid(nss.tenantId());
     oplogEntry->setNss(nss);
     oplogEntry->setUuid(uuid);
-    oplogEntry->setDestinedRecipient(destinedRecipientDecoration(opCtx));
+    oplogEntry->setDestinedRecipient(destinedRecipient);
 
     repl::OplogLink oplogLink;
     oplogWriter->appendOplogEntryChainInfo(opCtx, oplogEntry, &oplogLink, {stmtId});
 
     OpTimeBundle opTimes;
     oplogEntry->setOpType(repl::OpTypeEnum::kDelete);
-    oplogEntry->setObject(repl::documentKeyDecoration(opCtx).value().getShardKeyAndId());
+    oplogEntry->setObject(documentKey.getShardKeyAndId());
     oplogEntry->setFromMigrateIfTrue(fromMigrate);
     opTimes.writeOpTime =
         logOperation(opCtx, oplogEntry, true /*assignWallClockTime*/, oplogWriter);
@@ -271,6 +288,14 @@ OpTimeBundle replLogDelete(OperationContext* opCtx,
     return opTimes;
 }
 
+/**
+ * Writes temporary documents for retryable findAndModify commands to the
+ * side collection (config.image_collection).
+ *
+ * In server version 7.0 and earlier, this behavior used to be configurable
+ * through the server parameter storeFindAndModifyImagesInSideCollection.
+ * See SERVER-59443.
+ */
 void writeToImageCollection(OperationContext* opCtx,
                             const LogicalSessionId& sessionId,
                             const repl::ReplOperation::ImageBundle& imageToWrite) {
@@ -425,7 +450,7 @@ void OpObserverImpl::onCreateIndex(OperationContext* opCtx,
 
     auto opTime = logMutableOplogEntry(opCtx, &oplogEntry, _oplogWriter.get());
 
-    if (opCtx->writesAreReplicated()) {
+    if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
         if (opTime.isNull()) {
             LOGV2(7360100,
                   "Added oplog entry for createIndexes to transaction",
@@ -482,7 +507,8 @@ void OpObserverImpl::onStartIndexBuildSinglePhase(OperationContext* opCtx,
         opCtx,
         {},
         boost::none,
-        BSON("msg" << std::string(str::stream() << "Creating indexes. Coll: " << nss)),
+        BSON("msg" << std::string(str::stream() << "Creating indexes. Coll: "
+                                                << NamespaceStringUtil::serialize(nss))),
         boost::none,
         boost::none,
         boost::none,
@@ -500,7 +526,8 @@ void OpObserverImpl::onAbortIndexBuildSinglePhase(OperationContext* opCtx,
         opCtx,
         {},
         boost::none,
-        BSON("msg" << std::string(str::stream() << "Aborting indexes. Coll: " << nss)),
+        BSON("msg" << std::string(str::stream() << "Aborting indexes. Coll: "
+                                                << NamespaceStringUtil::serialize(nss))),
         boost::none,
         boost::none,
         boost::none,
@@ -635,14 +662,13 @@ std::vector<repl::OpTime> _logInsertOps(OperationContext* opCtx,
         if (insertStatementOplogSlot.isNull()) {
             insertStatementOplogSlot = oplogWriter->getNextOpTimes(opCtx, 1U)[0];
         }
-        const auto docKey =
-            repl::getDocumentKey(opCtx, collectionPtr, begin[i].doc).getShardKeyAndId();
+        const auto docKey = getDocumentKey(collectionPtr, begin[i].doc).getShardKeyAndId();
         oplogEntry.setObject(begin[i].doc);
         oplogEntry.setObject2(docKey);
         oplogEntry.setOpTime(insertStatementOplogSlot);
         oplogEntry.setDestinedRecipient(
             shardingWriteRouter.getReshardingDestinedRecipient(begin[i].doc));
-        repl::addDestinedRecipient.execute([&](const BSONObj& data) {
+        addDestinedRecipient.execute([&](const BSONObj& data) {
             auto recipient = data["destinedRecipient"].String();
             oplogEntry.setDestinedRecipient(boost::make_optional<ShardId>({recipient}));
         });
@@ -664,7 +690,7 @@ std::vector<repl::OpTime> _logInsertOps(OperationContext* opCtx,
             RecordId(), RecordData(bsonOplogEntries[i].objdata(), bsonOplogEntries[i].objsize())};
     }
 
-    repl::sleepBetweenInsertOpTimeGenerationAndLogOp.execute([&](const BSONObj& data) {
+    sleepBetweenInsertOpTimeGenerationAndLogOp.execute([&](const BSONObj& data) {
         auto numMillis = data["waitForMillis"].numberInt();
         LOGV2(7456300,
               "Sleeping for {sleepMillis}ms after receiving {numOpTimesReceived} optimes from "
@@ -702,7 +728,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
                                std::vector<InsertStatement>::const_iterator last,
                                std::vector<bool> fromMigrate,
                                bool defaultFromMigrate,
-                               InsertsOpStateAccumulator* opAccumulator) {
+                               OpStateAccumulator* opAccumulator) {
     auto txnParticipant = TransactionParticipant::get(opCtx);
     const bool inMultiDocumentTransaction =
         txnParticipant && opCtx->writesAreReplicated() && txnParticipant.transactionIsOpen();
@@ -713,7 +739,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
     std::vector<repl::OpTime> opTimeList;
     repl::OpTime lastOpTime;
 
-    ShardingWriteRouter shardingWriteRouter(opCtx, nss);
+    auto shardingWriteRouter = std::make_unique<ShardingWriteRouter>(opCtx, nss);
 
     auto& batchedWriteContext = BatchedWriteContext::get(opCtx);
     const bool inBatchedWrite = batchedWriteContext.writesAreBatched();
@@ -722,10 +748,10 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
         invariant(!defaultFromMigrate);
 
         for (auto iter = first; iter != last; iter++) {
-            const auto docKey = repl::getDocumentKey(opCtx, coll, iter->doc).getShardKeyAndId();
+            const auto docKey = getDocumentKey(coll, iter->doc).getShardKeyAndId();
             auto operation = MutableOplogEntry::makeInsertOperation(nss, uuid, iter->doc, docKey);
             operation.setDestinedRecipient(
-                shardingWriteRouter.getReshardingDestinedRecipient(iter->doc));
+                shardingWriteRouter->getReshardingDestinedRecipient(iter->doc));
 
             operation.setFromMigrateIfTrue(fromMigrate[std::distance(first, iter)]);
 
@@ -746,13 +772,13 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
             isInternalSessionForRetryableWrite(*opCtx->getLogicalSessionId());
 
         for (auto iter = first; iter != last; iter++) {
-            const auto docKey = repl::getDocumentKey(opCtx, coll, iter->doc).getShardKeyAndId();
+            const auto docKey = getDocumentKey(coll, iter->doc).getShardKeyAndId();
             auto operation = MutableOplogEntry::makeInsertOperation(nss, uuid, iter->doc, docKey);
             if (inRetryableInternalTransaction) {
                 operation.setInitializedStatementIds(iter->stmtIds);
             }
             operation.setDestinedRecipient(
-                shardingWriteRouter.getReshardingDestinedRecipient(iter->doc));
+                shardingWriteRouter->getReshardingDestinedRecipient(iter->doc));
 
             operation.setFromMigrateIfTrue(fromMigrate[std::distance(first, iter)]);
 
@@ -776,7 +802,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
                                    first,
                                    last,
                                    std::move(fromMigrate),
-                                   shardingWriteRouter,
+                                   *shardingWriteRouter,
                                    coll,
                                    _oplogWriter.get());
         if (!opTimeList.empty())
@@ -799,17 +825,10 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
     }
 
     if (opAccumulator) {
-        opAccumulator->opTimes = opTimeList;
+        opAccumulator->insertOpTimes = std::move(opTimeList);
+        shardingWriteRouterOpStateAccumulatorDecoration(opAccumulator) =
+            std::move(shardingWriteRouter);
     }
-
-    shardObserveInsertsOp(opCtx,
-                          nss,
-                          first,
-                          last,
-                          opTimeList,
-                          shardingWriteRouter,
-                          defaultFromMigrate,
-                          inMultiDocumentTransaction);
 }
 
 void OpObserverImpl::onInsertGlobalIndexKey(OperationContext* opCtx,
@@ -865,8 +884,8 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
         },
         [&](const BSONObj& data) {
             // If the failpoint specifies no collection or matches the existing one, fail.
-            auto collElem = data["collectionNS"];
-            return !collElem || args.coll->ns().ns() == collElem.String();
+            const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "collectionNS");
+            return fpNss.isEmpty() || args.coll->ns() == fpNss;
         });
 
     // Do not log a no-op operation; see SERVER-21738
@@ -878,7 +897,7 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
     const bool inMultiDocumentTransaction =
         txnParticipant && opCtx->writesAreReplicated() && txnParticipant.transactionIsOpen();
 
-    ShardingWriteRouter shardingWriteRouter(opCtx, args.coll->ns());
+    auto shardingWriteRouter = std::make_unique<ShardingWriteRouter>(opCtx, args.coll->ns());
 
     OpTimeBundle opTime;
     auto& batchedWriteContext = BatchedWriteContext::get(opCtx);
@@ -888,7 +907,7 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
         auto operation = MutableOplogEntry::makeUpdateOperation(
             args.coll->ns(), args.coll->uuid(), args.updateArgs->update, args.updateArgs->criteria);
         operation.setDestinedRecipient(
-            shardingWriteRouter.getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
+            shardingWriteRouter->getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
         operation.setFromMigrateIfTrue(args.updateArgs->source == OperationSource::kFromMigrate);
         batchedWriteContext.addBatchedOperation(opCtx, operation);
     } else if (inMultiDocumentTransaction) {
@@ -939,7 +958,7 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
                 ChangeStreamPreImageRecordingMode::kPreImagesCollection);
         }
 
-        const auto& scopedCollectionDescription = shardingWriteRouter.getCollDesc();
+        const auto& scopedCollectionDescription = shardingWriteRouter->getCollDesc();
         // ShardingWriteRouter only has boost::none scopedCollectionDescription when not in a
         // sharded cluster.
         if (scopedCollectionDescription && scopedCollectionDescription->isSharded()) {
@@ -949,13 +968,13 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
         }
 
         operation.setDestinedRecipient(
-            shardingWriteRouter.getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
+            shardingWriteRouter->getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
         operation.setFromMigrateIfTrue(args.updateArgs->source == OperationSource::kFromMigrate);
         txnParticipant.addTransactionOperation(opCtx, operation);
     } else {
         MutableOplogEntry oplogEntry;
         oplogEntry.setDestinedRecipient(
-            shardingWriteRouter.getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
+            shardingWriteRouter->getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
 
         if (args.retryableFindAndModifyLocation ==
             RetryableFindAndModifyLocation::kSideCollection) {
@@ -991,63 +1010,29 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
             writeToImageCollection(opCtx, *opCtx->getLogicalSessionId(), imageToWrite);
         }
 
-        // Write a pre-image to the change streams pre-images collection when following conditions
-        // are met:
-        // 1. The collection has 'changeStreamPreAndPostImages' enabled.
-        // 2. The node wrote the oplog entry for the corresponding operation.
-        // 3. The request to write the pre-image does not come from chunk-migrate event, i.e. source
-        //    of the request is not 'fromMigrate'. The 'fromMigrate' events are filtered out by
-        //    change streams and storing them in pre-image collection is redundant.
-        // 4. a request to update is not on a temporary resharding collection. This update request
-        //    does not result in change streams events. Recording pre-images from temporary
-        //    resharing collection could result in incorrect pre-image getting recorded due to the
-        //    temporary resharding collection not being consistent until writes are blocked (initial
-        //    sync mode application).
-        if (args.updateArgs->changeStreamPreAndPostImagesEnabledForCollection &&
-            !opTime.writeOpTime.isNull() &&
-            args.updateArgs->source != OperationSource::kFromMigrate &&
-            !args.coll->ns().isTemporaryReshardingCollection()) {
-            const auto& preImageDoc = args.updateArgs->preImageDoc;
-            invariant(!preImageDoc.isEmpty(), str::stream() << "PreImage must be set");
-
-            ChangeStreamPreImageId id(args.coll->uuid(), opTime.writeOpTime.getTimestamp(), 0);
-            ChangeStreamPreImage preImage(id, opTime.wallClockTime, preImageDoc);
-
-            writeChangeStreamPreImageEntry(opCtx, args.coll->ns().tenantId(), preImage);
-        }
-
         SessionTxnRecord sessionTxnRecord;
         sessionTxnRecord.setLastWriteOpTime(opTime.writeOpTime);
         sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
         onWriteOpCompleted(opCtx, args.updateArgs->stmtIds, sessionTxnRecord);
     }
 
-    if (args.coll->ns() != NamespaceString::kSessionTransactionsTableNamespace) {
-        if (args.updateArgs->source != OperationSource::kFromMigrate) {
-            shardObserveUpdateOp(opCtx,
-                                 args.coll->ns(),
-                                 args.updateArgs->preImageDoc,
-                                 args.updateArgs->updatedDoc,
-                                 opTime.writeOpTime,
-                                 shardingWriteRouter,
-                                 inMultiDocumentTransaction);
-        }
+    if (opAccumulator) {
+        shardingWriteRouterOpStateAccumulatorDecoration(opAccumulator) =
+            std::move(shardingWriteRouter);
     }
 }
 
 void OpObserverImpl::aboutToDelete(OperationContext* opCtx,
                                    const CollectionPtr& coll,
                                    BSONObj const& doc,
+                                   OplogDeleteEntryArgs* args,
                                    OpStateAccumulator* opAccumulator) {
-    repl::documentKeyDecoration(opCtx).emplace(repl::getDocumentKey(opCtx, coll, doc));
+    documentKeyDecoration(args).emplace(getDocumentKey(coll, doc));
 
-    ShardingWriteRouter shardingWriteRouter(opCtx, coll->ns());
-
-    repl::DurableReplOperation op;
-    op.setDestinedRecipient(shardingWriteRouter.getReshardingDestinedRecipient(doc));
-    destinedRecipientDecoration(opCtx) = op.getDestinedRecipient();
-
-    shardObserveAboutToDelete(opCtx, coll->ns(), doc);
+    {
+        ShardingWriteRouter shardingWriteRouter(opCtx, coll->ns());
+        destinedRecipientDecoration(args) = shardingWriteRouter.getReshardingDestinedRecipient(doc);
+    }
 }
 
 void OpObserverImpl::onDelete(OperationContext* opCtx,
@@ -1057,7 +1042,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
                               OpStateAccumulator* opAccumulator) {
     const auto& nss = coll->ns();
     const auto uuid = coll->uuid();
-    auto optDocKey = repl::documentKeyDecoration(opCtx);
+    auto optDocKey = documentKeyDecoration(args);
     invariant(optDocKey, nss.toStringForErrorMsg());
     auto& documentKey = optDocKey.value();
 
@@ -1072,7 +1057,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
     if (inBatchedWrite) {
         auto operation =
             MutableOplogEntry::makeDeleteOperation(nss, uuid, documentKey.getShardKeyAndId());
-        operation.setDestinedRecipient(destinedRecipientDecoration(opCtx));
+        operation.setDestinedRecipient(destinedRecipientDecoration(args));
         operation.setFromMigrateIfTrue(args.fromMigrate);
         batchedWriteContext.addBatchedOperation(opCtx, operation);
     } else if (inMultiDocumentTransaction) {
@@ -1109,7 +1094,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
                 ChangeStreamPreImageRecordingMode::kPreImagesCollection);
         }
 
-        operation.setDestinedRecipient(destinedRecipientDecoration(opCtx));
+        operation.setDestinedRecipient(destinedRecipientDecoration(args));
         operation.setFromMigrateIfTrue(args.fromMigrate);
         txnParticipant.addTransactionOperation(opCtx, operation);
     } else {
@@ -1127,8 +1112,15 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
             }
         }
 
-        opTime = replLogDelete(
-            opCtx, nss, &oplogEntry, uuid, stmtId, args.fromMigrate, _oplogWriter.get());
+        opTime = replLogDelete(opCtx,
+                               nss,
+                               &oplogEntry,
+                               uuid,
+                               stmtId,
+                               args.fromMigrate,
+                               documentKey,
+                               destinedRecipientDecoration(args),
+                               _oplogWriter.get());
         if (opAccumulator) {
             opAccumulator->opTime.writeOpTime = opTime.writeOpTime;
             opAccumulator->opTime.wallClockTime = opTime.wallClockTime;
@@ -1141,44 +1133,10 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
             writeToImageCollection(opCtx, *opCtx->getLogicalSessionId(), imageToWrite);
         }
 
-        // Write a pre-image to the change streams pre-images collection when following conditions
-        // are met:
-        // 1. The collection has 'changeStreamPreAndPostImages' enabled.
-        // 2. The node wrote the oplog entry for the corresponding operation.
-        // 3. The request to write the pre-image does not come from chunk-migrate event, i.e. source
-        //    of the request is not 'fromMigrate'. The 'fromMigrate' events are filtered out by
-        //    change streams and storing them in pre-image collection is redundant.
-        // 4. a request to delete is not on a temporary resharding collection. This delete request
-        //    does not result in change streams events. Recording pre-images from temporary
-        //    resharing collection could result in incorrect pre-image getting recorded due to the
-        //    temporary resharding collection not being consistent until writes are blocked (initial
-        //    sync mode application).
-        if (args.changeStreamPreAndPostImagesEnabledForCollection && !opTime.writeOpTime.isNull() &&
-            !args.fromMigrate && !nss.isTemporaryReshardingCollection()) {
-            invariant(!args.deletedDoc->isEmpty(), str::stream() << "Deleted document must be set");
-
-            ChangeStreamPreImageId id(uuid, opTime.writeOpTime.getTimestamp(), 0);
-            ChangeStreamPreImage preImage(id, opTime.wallClockTime, *args.deletedDoc);
-
-            writeChangeStreamPreImageEntry(opCtx, nss.tenantId(), preImage);
-        }
-
         SessionTxnRecord sessionTxnRecord;
         sessionTxnRecord.setLastWriteOpTime(opTime.writeOpTime);
         sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
         onWriteOpCompleted(opCtx, std::vector<StmtId>{stmtId}, sessionTxnRecord);
-    }
-
-    if (nss != NamespaceString::kSessionTransactionsTableNamespace) {
-        if (!args.fromMigrate) {
-            ShardingWriteRouter shardingWriteRouter(opCtx, nss);
-            shardObserveDeleteOp(opCtx,
-                                 nss,
-                                 documentKey.getShardKeyAndId(),
-                                 opTime.writeOpTime,
-                                 shardingWriteRouter,
-                                 inMultiDocumentTransaction);
-        }
     }
 }
 
@@ -1233,7 +1191,7 @@ void OpObserverImpl::onCreateCollection(OperationContext* opCtx,
         oplogEntry.setOpTime(createOpTime);
     }
     auto opTime = logMutableOplogEntry(opCtx, &oplogEntry, _oplogWriter.get());
-    if (opCtx->writesAreReplicated()) {
+    if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, collectionName)) {
         if (opTime.isNull()) {
             LOGV2(7360102,
                   "Added oplog entry for create to transaction",
@@ -1288,7 +1246,7 @@ void OpObserverImpl::onCollMod(OperationContext* opCtx,
         oplogEntry.setTid(nss.tenantId());
         oplogEntry.setNss(nss.getCommandNS());
         oplogEntry.setUuid(uuid);
-        oplogEntry.setObject(repl::makeCollModCmdObj(collModCmd, oldCollOptions, indexInfo));
+        oplogEntry.setObject(makeCollModCmdObj(collModCmd, oldCollOptions, indexInfo));
         oplogEntry.setObject2(o2Builder.done());
         auto opTime =
             logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _oplogWriter.get());
@@ -1333,9 +1291,7 @@ void OpObserverImpl::onDropDatabase(OperationContext* opCtx, const DatabaseName&
               "object"_attr = oplogEntry.getObject());
     }
 
-    uassert(50714,
-            "dropping the admin database is not allowed.",
-            dbName.db() != DatabaseName::kAdmin.db());
+    uassert(50714, "dropping the admin database is not allowed.", !dbName.isAdminDB());
 }
 
 repl::OpTime OpObserverImpl::onDropCollection(OperationContext* opCtx,
@@ -1518,68 +1474,6 @@ void OpObserverImpl::onEmptyCapped(OperationContext* opCtx,
 
 namespace {
 
-/**
- * Writes pre-images for update/replace/delete operations packed into a single "applyOps" entry to
- * the change stream pre-images collection if required. The operations are defined by sequence
- * ['stmtBegin', 'stmtEnd'). 'applyOpsTimestamp' and 'operationTime' are the timestamp and the wall
- * clock time, respectively, of the "applyOps" entry. A pre-image is recorded for an operation only
- * if pre-images are enabled for the collection the operation is issued on.
- */
-void writeChangeStreamPreImagesForApplyOpsEntries(
-    OperationContext* opCtx,
-    std::vector<repl::ReplOperation>::const_iterator stmtBegin,
-    std::vector<repl::ReplOperation>::const_iterator stmtEnd,
-    Timestamp applyOpsTimestamp,
-    Date_t operationTime) {
-    int64_t applyOpsIndex{0};
-    for (auto stmtIterator = stmtBegin; stmtIterator != stmtEnd; ++stmtIterator) {
-        auto& operation = *stmtIterator;
-        if (operation.isChangeStreamPreImageRecordedInPreImagesCollection() &&
-            !operation.getNss().isTemporaryReshardingCollection()) {
-            invariant(operation.getUuid());
-            invariant(!operation.getPreImage().isEmpty());
-
-            writeChangeStreamPreImageEntry(
-                opCtx,
-                operation.getTid(),
-                ChangeStreamPreImage{
-                    ChangeStreamPreImageId{*operation.getUuid(), applyOpsTimestamp, applyOpsIndex},
-                    operationTime,
-                    operation.getPreImage()});
-        }
-        ++applyOpsIndex;
-    }
-}
-
-/**
- * Returns maximum number of operations to pack into a single oplog entry,
- * when multi-oplog format for transactions is in use.
- *
- * Stop packing when either number of transaction operations is reached, or when the
- * next one would make the total size of operations larger than the maximum BSON Object
- * User Size. We rely on the headroom between BSONObjMaxUserSize and
- * BSONObjMaxInternalSize to cover the BSON overhead and the other "applyOps" entry
- * fields. But if a single operation in the set exceeds BSONObjMaxUserSize, we still fit
- * it, as a single max-length operation should be able to be packed into an "applyOps"
- * entry.
- */
-std::size_t getMaxNumberOfTransactionOperationsInSingleOplogEntry() {
-    tassert(6278503,
-            "gMaxNumberOfTransactionOperationsInSingleOplogEntry should be positive number",
-            gMaxNumberOfTransactionOperationsInSingleOplogEntry > 0);
-    return static_cast<std::size_t>(gMaxNumberOfTransactionOperationsInSingleOplogEntry);
-}
-
-/**
- * Returns maximum size (bytes) of operations to pack into a single oplog entry,
- * when multi-oplog format for transactions is in use.
- *
- * Refer to getMaxNumberOfTransactionOperationsInSingleOplogEntry() comments for a
- * description on packing transaction operations into "applyOps" entries.
- */
-std::size_t getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes() {
-    return static_cast<std::size_t>(BSONObjMaxUserSize);
-}
 
 /**
  * Returns maximum number of operations to pack into a single oplog entry,
@@ -1597,36 +1491,6 @@ std::size_t getMaxNumberOfBatchedOperationsInSingleOplogEntry() {
 std::size_t getMaxSizeOfBatchedOperationsInSingleOplogEntryBytes() {
     // IDL validation defined for this startup parameter ensures that we have a positive number.
     return static_cast<std::size_t>(gMaxSizeOfBatchedOperationsInSingleOplogEntryBytes);
-}
-
-/**
- * Writes change stream pre-images for transaction 'operations'. The 'applyOpsOperationAssignment'
- * contains a representation of "applyOps" entries to be written for the transaction. The
- * 'operationTime' is wall clock time of the operations used for the pre-image documents.
- */
-void writeChangeStreamPreImagesForTransaction(
-    OperationContext* opCtx,
-    const std::vector<repl::ReplOperation>& operations,
-    const OpObserver::ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
-    Date_t operationTime) {
-    // This function must be called from an outer WriteUnitOfWork in order to be rolled back upon
-    // reaching the exception.
-    invariant(opCtx->lockState()->inAWriteUnitOfWork());
-
-    auto applyOpsEntriesIt = applyOpsOperationAssignment.applyOpsEntries.begin();
-    for (auto operationIter = operations.begin(); operationIter != operations.end();) {
-        tassert(6278507,
-                "Unexpected end of applyOps entries vector",
-                applyOpsEntriesIt != applyOpsOperationAssignment.applyOpsEntries.end());
-        const auto& applyOpsEntry = *applyOpsEntriesIt++;
-        const auto operationSequenceEnd = operationIter + applyOpsEntry.operations.size();
-        writeChangeStreamPreImagesForApplyOpsEntries(opCtx,
-                                                     operationIter,
-                                                     operationSequenceEnd,
-                                                     applyOpsEntry.oplogSlot.getTimestamp(),
-                                                     operationTime);
-        operationIter = operationSequenceEnd;
-    }
 }
 
 // Logs one applyOps entry on a prepared transaction, or an unprepared transaction's commit, or on
@@ -1743,10 +1607,11 @@ void OpObserverImpl::onTransactionStart(OperationContext* opCtx) {}
 
 void OpObserverImpl::onUnpreparedTransactionCommit(
     OperationContext* opCtx,
+    const std::vector<OplogSlot>& reservedSlots,
     const TransactionOperations& transactionOperations,
+    const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
     OpStateAccumulator* opAccumulator) {
     const auto& statements = transactionOperations.getOperationsForOpObserver();
-    auto numberOfPrePostImagesToWrite = transactionOperations.getNumberOfPrePostImagesToWrite();
 
     invariant(opCtx->getTxnNumber());
 
@@ -1759,10 +1624,8 @@ void OpObserverImpl::onUnpreparedTransactionCommit(
     if (statements.empty())
         return;
 
-    // Reserve all the optimes in advance, so we only need to get the optime mutex once.  We
-    // reserve enough entries for all statements in the transaction.
-    auto oplogSlots =
-        _oplogWriter->getNextOpTimes(opCtx, statements.size() + numberOfPrePostImagesToWrite);
+    const auto& oplogSlots = reservedSlots;
+    const auto& applyOpsOplogSlotAndOperationAssignment = applyOpsOperationAssignment;
 
     // Throw TenantMigrationConflict error if the database for the transaction statements is being
     // migrated. We only need check the namespace of the first statement since a transaction's
@@ -1775,13 +1638,6 @@ void OpObserverImpl::onUnpreparedTransactionCommit(
         uasserted(51268, "hangAndFailUnpreparedCommitAfterReservingOplogSlot fail point enabled");
     }
 
-    // Serialize transaction statements to BSON and determine their assignment to "applyOps"
-    // entries.
-    const auto applyOpsOplogSlotAndOperationAssignment = transactionOperations.getApplyOpsInfo(
-        oplogSlots,
-        getMaxNumberOfTransactionOperationsInSingleOplogEntry(),
-        getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes(),
-        /*prepare=*/false);
     invariant(!applyOpsOplogSlotAndOperationAssignment.prepare);
     const auto wallClockTime = getWallClockTimeForOpLog(opCtx);
 
@@ -1832,21 +1688,15 @@ void OpObserverImpl::onUnpreparedTransactionCommit(
                                               &imageToWrite);
     invariant(numOplogEntries > 0);
 
-    // Write change stream pre-images. At this point the pre-images will be written at the
-    // transaction commit timestamp as driven (implicitly) by the last written "applyOps" oplog
-    // entry.
-    writeChangeStreamPreImagesForTransaction(
-        opCtx, statements, applyOpsOplogSlotAndOperationAssignment, wallClockTime);
-
-    if (imageToWrite) {
-        writeToImageCollection(opCtx, *opCtx->getLogicalSessionId(), *imageToWrite);
-    }
-
     repl::OpTime commitOpTime = oplogSlots[numOplogEntries - 1];
     invariant(!commitOpTime.isNull());
     if (opAccumulator) {
         opAccumulator->opTime.writeOpTime = commitOpTime;
         opAccumulator->opTime.wallClockTime = wallClockTime;
+    }
+
+    if (imageToWrite) {
+        writeToImageCollection(opCtx, *opCtx->getLogicalSessionId(), *imageToWrite);
     }
 }
 
@@ -1993,23 +1843,6 @@ void OpObserverImpl::onPreparedTransactionCommit(
 
     logCommitOrAbortForPreparedTransaction(
         opCtx, &oplogEntry, DurableTxnStateEnum::kCommitted, _oplogWriter.get());
-}
-
-std::unique_ptr<OpObserver::ApplyOpsOplogSlotAndOperationAssignment>
-OpObserverImpl::preTransactionPrepare(OperationContext* opCtx,
-                                      const std::vector<OplogSlot>& reservedSlots,
-                                      const TransactionOperations& transactionOperations,
-                                      Date_t wallClockTime) {
-    auto applyOpsOplogSlotAndOperationAssignment = transactionOperations.getApplyOpsInfo(
-        reservedSlots,
-        getMaxNumberOfTransactionOperationsInSingleOplogEntry(),
-        getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes(),
-        /*prepare=*/true);
-    const auto& statements = transactionOperations.getOperationsForOpObserver();
-    writeChangeStreamPreImagesForTransaction(
-        opCtx, statements, applyOpsOplogSlotAndOperationAssignment, wallClockTime);
-    return std::make_unique<OpObserver::ApplyOpsOplogSlotAndOperationAssignment>(
-        std::move(applyOpsOplogSlotAndOperationAssignment));
 }
 
 void OpObserverImpl::onTransactionPrepare(
@@ -2175,7 +2008,8 @@ void OpObserverImpl::onModifyCollectionShardingIndexCatalog(OperationContext* op
                                                             const UUID& uuid,
                                                             BSONObj opDoc) {
     repl::MutableOplogEntry oplogEntry;
-    auto obj = BSON(kShardingIndexCatalogOplogEntryName << nss.toString()).addFields(opDoc);
+    auto obj = BSON(kShardingIndexCatalogOplogEntryName << NamespaceStringUtil::serialize(nss))
+                   .addFields(opDoc);
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
     oplogEntry.setNss(nss);
     oplogEntry.setUuid(uuid);

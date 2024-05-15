@@ -2,12 +2,30 @@
  * This test confirms that telemetry store key fields are properly nested and none are missing.
  * @tags: [featureFlagQueryStats]
  */
-load("jstests/libs/telemetry_utils.js");
+load("jstests/libs/query_stats_utils.js");
 (function() {
 "use strict";
 
-function confirmAllFieldsPresent(queryStatsEntries) {
+function confirmAllMetaFieldsPresent(clientSubObj) {
     const kApplicationName = "MongoDB Shell";
+    assert.eq(clientSubObj.application.name, kApplicationName);
+
+    {
+        assert(clientSubObj.hasOwnProperty('driver'), clientSubObj);
+        assert(clientSubObj.driver.hasOwnProperty("name"), clientSubObj);
+        assert(clientSubObj.driver.hasOwnProperty("version"), clientSubObj);
+    }
+
+    {
+        assert(clientSubObj.hasOwnProperty('os'), clientSubObj);
+        assert(clientSubObj.os.hasOwnProperty("type"), clientSubObj);
+        assert(clientSubObj.os.hasOwnProperty("name"), clientSubObj);
+        assert(clientSubObj.os.hasOwnProperty("architecture"), clientSubObj);
+        assert(clientSubObj.os.hasOwnProperty("version"), clientSubObj);
+    }
+}
+
+function confirmAllFieldsPresent(queryStatsEntries) {
     const queryShapeFindFields = [
         "cmdNs",
         "command",
@@ -39,16 +57,17 @@ function confirmAllFieldsPresent(queryStatsEntries) {
         "noCursorTimeout",
         "readConcern",
         "allowPartialResults",
-        "applicationName",
         "apiDeprecationErrors",
         "apiVersion",
-        "apiStrict"
+        "apiStrict",
+        "collectionType",
+        "client"
     ];
 
     for (const entry of queryStatsEntries) {
         let fieldCounter = 0;
         assert.eq(entry.key.queryShape.command, "find");
-        assert.eq(entry.key.applicationName, kApplicationName);
+        confirmAllMetaFieldsPresent(entry.key.client);
 
         for (const field in entry.key.queryShape) {
             assert(queryShapeFindFields.includes(field));
@@ -67,7 +86,7 @@ function confirmAllFieldsPresent(queryStatsEntries) {
 
 // Turn on the collecting of telemetry metrics.
 let options = {
-    setParameter: {internalQueryStatsSamplingRate: -1},
+    setParameter: {internalQueryStatsRateLimit: -1},
 };
 
 const conn = MongoRunner.runMongod(options);
@@ -109,9 +128,14 @@ let commandObj = {
 };
 
 assert.commandWorked(testDB.runCommand(commandObj));
-let telemetry = getTelemetry(conn);
+let telemetry = getQueryStats(conn);
 assert.eq(1, telemetry.length);
 confirmAllFieldsPresent(telemetry);
+
+// $hint can only be string(index name) or object (index spec).
+assert.throwsWithCode(() => {
+    coll.find({v: {$eq: 2}}).hint({'v': 60, $hint: -128}).itcount();
+}, ErrorCodes.FailedToParse);
 
 MongoRunner.stopMongod(conn);
 }());

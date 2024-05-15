@@ -29,12 +29,32 @@
 
 #pragma once
 
+#include <boost/optional/optional.hpp>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
 
+#include "mongo/base/status.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
-#include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/op_observer/oplog_writer.h"
-#include "mongo/db/s/collection_sharding_state.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/transaction/transaction_operations.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 namespace repl {
@@ -52,6 +72,10 @@ class OpObserverImpl : public OpObserver {
 public:
     OpObserverImpl(std::unique_ptr<OplogWriter> oplogWriter);
     virtual ~OpObserverImpl() = default;
+
+    NamespaceFilters getNamespaceFilters() const final {
+        return {NamespaceFilter::kAll, NamespaceFilter::kAll};
+    }
 
     void onModifyCollectionShardingIndexCatalog(OperationContext* opCtx,
                                                 const NamespaceString& nss,
@@ -103,7 +127,7 @@ public:
                    std::vector<InsertStatement>::const_iterator last,
                    std::vector<bool> fromMigrate,
                    bool defaultFromMigrate,
-                   InsertsOpStateAccumulator* opAccumulator = nullptr) final;
+                   OpStateAccumulator* opAccumulator = nullptr) final;
 
     void onInsertGlobalIndexKey(OperationContext* opCtx,
                                 const NamespaceString& globalIndexNss,
@@ -123,6 +147,7 @@ public:
     void aboutToDelete(OperationContext* opCtx,
                        const CollectionPtr& coll,
                        const BSONObj& doc,
+                       OplogDeleteEntryArgs* args,
                        OpStateAccumulator* opAccumulator = nullptr) final;
     void onDelete(OperationContext* opCtx,
                   const CollectionPtr& coll,
@@ -200,9 +225,12 @@ public:
                        const NamespaceString& collectionName,
                        const UUID& uuid) final;
     void onTransactionStart(OperationContext* opCtx) final;
-    void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       const TransactionOperations& transactionOperations,
-                                       OpStateAccumulator* opAccumulator = nullptr) final;
+    void onUnpreparedTransactionCommit(
+        OperationContext* opCtx,
+        const std::vector<OplogSlot>& reservedSlots,
+        const TransactionOperations& transactionOperations,
+        const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
+        OpStateAccumulator* opAccumulator = nullptr) final;
     void onBatchedWriteStart(OperationContext* opCtx) final;
     void onBatchedWriteCommit(OperationContext* opCtx) final;
     void onBatchedWriteAbort(OperationContext* opCtx) final;
@@ -212,11 +240,11 @@ public:
         Timestamp commitTimestamp,
         const std::vector<repl::ReplOperation>& statements) noexcept final;
 
-    std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment> preTransactionPrepare(
+    void preTransactionPrepare(
         OperationContext* opCtx,
-        const std::vector<OplogSlot>& reservedSlots,
         const TransactionOperations& transactionOperations,
-        Date_t wallClockTime) final;
+        const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
+        Date_t wallClockTime) final {}
 
     void onTransactionPrepare(
         OperationContext* opCtx,
@@ -238,31 +266,6 @@ public:
                                      const repl::OpTime& newCommitPoint) final {}
 
 private:
-    virtual void shardObserveAboutToDelete(OperationContext* opCtx,
-                                           NamespaceString const& nss,
-                                           BSONObj const& doc) {}
-    virtual void shardObserveInsertsOp(OperationContext* opCtx,
-                                       const NamespaceString& nss,
-                                       std::vector<InsertStatement>::const_iterator first,
-                                       std::vector<InsertStatement>::const_iterator last,
-                                       const std::vector<repl::OpTime>& opTimeList,
-                                       const ShardingWriteRouter& shardingWriteRouter,
-                                       bool fromMigrate,
-                                       bool inMultiDocumentTransaction){};
-    virtual void shardObserveUpdateOp(OperationContext* opCtx,
-                                      const NamespaceString& nss,
-                                      boost::optional<BSONObj> preImageDoc,
-                                      const BSONObj& postImageDoc,
-                                      const repl::OpTime& opTime,
-                                      const ShardingWriteRouter& shardingWriteRouter,
-                                      const bool inMultiDocumentTransaction) {}
-    virtual void shardObserveDeleteOp(OperationContext* opCtx,
-                                      const NamespaceString& nss,
-                                      const BSONObj& documentKey,
-                                      const repl::OpTime& opTime,
-                                      const ShardingWriteRouter& shardingWriteRouter,
-                                      const bool inMultiDocumentTransaction) {}
-
     std::unique_ptr<OplogWriter> _oplogWriter;
 };
 

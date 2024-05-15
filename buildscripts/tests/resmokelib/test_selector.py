@@ -7,11 +7,9 @@ import unittest
 import collections
 
 import buildscripts.resmokelib.config
-import buildscripts.resmokelib.parser as parser
-import buildscripts.resmokelib.selector as selector
-import buildscripts.resmokelib.utils.globstar as globstar
-
-# pylint: disable=protected-access
+from buildscripts.resmokelib import parser
+from buildscripts.resmokelib import selector
+from buildscripts.resmokelib.utils import globstar
 
 FIXTURE_PREFIX = "buildscripts/tests/selftest_fixtures"
 
@@ -460,7 +458,7 @@ class TestMultiJSSelector(unittest.TestCase):
 
     @unittest.skip("Known broken. SERVER-48969 tracks re-enabling.")
     def test_multi_js_test_selector_one_group(self):
-        """Test we return only one group if the group size equals number of files"""
+        """Test we return only one group if the group size equals number of files."""
         num_files = MockTestFileExplorer.NUM_JS_FILES
         config = selector._MultiJSTestSelectorConfig(roots=["dir/**/*.js"], group_size=num_files,
                                                      group_count_multiplier=9999999)

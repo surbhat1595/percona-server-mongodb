@@ -27,20 +27,47 @@
  *    it in the license file.
  */
 
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/json.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/hasher.h"
-#include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/keypattern.h"
+#include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/db/ops/write_ops_parsers.h"
+#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_options.h"
-#include "mongo/logv2/log.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/catalog_cache_test_fixture.h"
+#include "mongo/s/chunk.h"
 #include "mongo/s/collection_routing_info_targeter.h"
-#include "mongo/s/session_catalog_router.h"
-#include "mongo/s/transaction_router.h"
+#include "mongo/s/database_version.h"
+#include "mongo/s/resharding/type_collection_fields_gen.h"
+#include "mongo/s/sharding_index_catalog_cache.h"
+#include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/s/write_ops/batched_command_request.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/bson_test_util.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -94,6 +121,10 @@ protected:
     void testTargetDeleteWithRangePrefixHashedShardKey();
     void testTargetDeleteWithHashedPrefixHashedShardKey();
     void testTargetDeleteWithExactId();
+
+    // The tests using this fixture expects that a write without shard key is not allowed.
+    RAIIServerParameterControllerForTest _featureFlagController{
+        "featureFlagUpdateOneWithoutShardKey", false};
 };
 
 class CollectionRoutingInfoTargeterWithChunkRangesTest : public CollectionRoutingInfoTargeterTest {
@@ -740,26 +771,41 @@ void CollectionRoutingInfoTargeterTest::testTargetDeleteWithRangePrefixHashedSha
                                           << "hashed"),
                                splitPoints);
 
-    // Cannot delete without full shardkey in the query.
-    auto requestPartialKey = buildDelete(kNss, fromjson("{'a.b': {$gt : 2}}"));
-    ASSERT_THROWS_CODE(criTargeter.targetDelete(operationContext(),
-                                                BatchItemRef(&requestPartialKey, 0),
-                                                checkChunkRanges ? &chunkRanges : nullptr),
-                       DBException,
-                       ErrorCodes::ShardKeyNotFound);
+    // Can delete wih partial shard key in the query if the query only targets one shard.
+    auto requestPartialKey = buildDelete(kNss, fromjson("{'a.b': {$gt : 101}}"));
+    auto res = criTargeter.targetDelete(operationContext(),
+                                        BatchItemRef(&requestPartialKey, 0),
+                                        checkChunkRanges ? &chunkRanges : nullptr);
+    ASSERT_EQUALS(res.size(), 1);
+    ASSERT_EQUALS(res[0].shardName, "4");
+    if (checkChunkRanges) {
+        ASSERT_EQUALS(chunkRanges.size(), 1);
+        ASSERT_BSONOBJ_EQ(chunkRanges.cbegin()->getMin(), BSON("a.b" << 100 << "c.d" << MINKEY));
+        ASSERT_BSONOBJ_EQ(chunkRanges.cbegin()->getMax(), BSON("a.b" << MAXKEY << "c.d" << MAXKEY));
+        chunkRanges.clear();
+    }
 
-    auto requestPartialKey2 = buildDelete(kNss, fromjson("{'a.b': -101}"));
+    // Cannot delete with partial shard key in the query if the query targets multiple shards.
+    auto requestPartialKey2 = buildDelete(kNss, fromjson("{'a.b': {$gt: 0}}"));
     ASSERT_THROWS_CODE(criTargeter.targetDelete(operationContext(),
                                                 BatchItemRef(&requestPartialKey2, 0),
                                                 checkChunkRanges ? &chunkRanges : nullptr),
                        DBException,
                        ErrorCodes::ShardKeyNotFound);
 
+    // Cannot delete without at least a partial shard key.
+    auto requestNoShardKey = buildDelete(kNss, fromjson("{'k': 0}"));
+    ASSERT_THROWS_CODE(criTargeter.targetDelete(operationContext(),
+                                                BatchItemRef(&requestNoShardKey, 0),
+                                                checkChunkRanges ? &chunkRanges : nullptr),
+                       DBException,
+                       ErrorCodes::ShardKeyNotFound);
+
     // Delete targeted correctly with full shard key in query.
     auto requestFullKey = buildDelete(kNss, fromjson("{'a.b': -101, 'c.d': 5}"));
-    auto res = criTargeter.targetDelete(operationContext(),
-                                        BatchItemRef(&requestFullKey, 0),
-                                        checkChunkRanges ? &chunkRanges : nullptr);
+    res = criTargeter.targetDelete(operationContext(),
+                                   BatchItemRef(&requestFullKey, 0),
+                                   checkChunkRanges ? &chunkRanges : nullptr);
     ASSERT_EQUALS(res.size(), 1);
     ASSERT_EQUALS(res[0].shardName, "1");
     if (checkChunkRanges) {

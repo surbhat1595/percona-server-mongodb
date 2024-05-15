@@ -29,10 +29,29 @@
 
 #include "mongo/db/pipeline/document_source_change_stream_oplog_match.h"
 
-#include "mongo/bson/bsonmisc.h"
+#include <algorithm>
+#include <boost/preprocessor/control/iif.hpp>
+#include <iterator>
+#include <list>
+#include <memory>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/basic_types.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/matcher/expression_tree.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/change_stream_filter_helpers.h"
 #include "mongo/db/pipeline/change_stream_helpers.h"
-#include "mongo/db/pipeline/document_source_change_stream_unwind_transaction.h"
+#include "mongo/db/pipeline/document_source_change_stream.h"
+#include "mongo/db/pipeline/resume_token.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
+#include "mongo/idl/idl_parser.h"
 
 namespace mongo {
 
@@ -148,10 +167,6 @@ Pipeline::SourceContainer::iterator DocumentSourceChangeStreamOplogMatch::doOpti
     tassert(5687203, "Iterator mismatch during optimization", *itr == this);
 
     auto nextChangeStreamStageItr = std::next(itr);
-    // (Ignore FCV check): This feature flag doesn't have upgrade/downgrade concern.
-    if (!feature_flags::gFeatureFlagChangeStreamsRewrite.isEnabledAndIgnoreFCVUnsafe()) {
-        return nextChangeStreamStageItr;
-    }
 
     // It is not safe to combine any parts of a user $match with this stage when the $user match has
     // a non-simple collation, because this stage's MatchExpression always executes wtih the simple
@@ -215,11 +230,12 @@ Value DocumentSourceChangeStreamOplogMatch::serialize(SerializationOptions opts)
         sub.done();
     } else {
         BSONObjBuilder sub(builder.subobjStart(kStageName));
-        if (opts.replacementForLiteralArgs || opts.applyHmacToIdentifiers) {
+        if (opts.literalPolicy != LiteralSerializationPolicy::kUnchanged ||
+            opts.transformIdentifiers) {
             sub.append(DocumentSourceChangeStreamOplogMatchSpec::kFilterFieldName,
                        getMatchExpression()->serialize(opts));
         } else {
-            DocumentSourceChangeStreamOplogMatchSpec(_predicate).serialize(&sub);
+            DocumentSourceChangeStreamOplogMatchSpec(getPredicate()).serialize(&sub);
         }
         sub.done();
     }

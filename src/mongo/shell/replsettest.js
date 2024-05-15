@@ -1447,10 +1447,12 @@ var ReplSetTest = function(opts) {
         // set. If this is a config server, the FCV will be set as part of ShardingTest.
         // versions are supported with the useRandomBinVersionsWithinReplicaSet option.
         let setLastLTSFCV = (lastLTSBinVersionWasSpecifiedForSomeNode ||
-                             jsTest.options().useRandomBinVersionsWithinReplicaSet) &&
+                             jsTest.options().useRandomBinVersionsWithinReplicaSet == 'last-lts') &&
             !self.isConfigServer;
         let setLastContinuousFCV = !setLastLTSFCV &&
-            lastContinuousBinVersionWasSpecifiedForSomeNode && !self.isConfigServer;
+            (lastContinuousBinVersionWasSpecifiedForSomeNode ||
+             jsTest.options().useRandomBinVersionsWithinReplicaSet == 'last-continuous') &&
+            !self.isConfigServer;
 
         if ((setLastLTSFCV || setLastContinuousFCV) &&
             jsTest.options().replSetFeatureCompatibilityVersion) {
@@ -1465,15 +1467,23 @@ var ReplSetTest = function(opts) {
             // Authenticate before running the command.
             asCluster(self.nodes, function setFCV() {
                 let fcv = setLastLTSFCV ? lastLTSFCV : lastContinuousFCV;
+
                 print("Setting feature compatibility version for replica set to '" + fcv + "'");
-                const res = self.getPrimary().adminCommand({setFeatureCompatibilityVersion: fcv});
+                // When latest is not equal to last-continuous, the transition to last-continuous is
+                // not allowed. Setting fromConfigServer allows us to bypass this restriction and
+                // test last-continuous.
+                const res = self.getPrimary().adminCommand(
+                    {setFeatureCompatibilityVersion: fcv, fromConfigServer: true});
                 // TODO (SERVER-74398): Remove the retry with 'confirm: true' once 7.0 is last LTS.
                 if (!res.ok && res.code === 7369100) {
                     // We failed due to requiring 'confirm: true' on the command. This will only
                     // occur on 7.0+ nodes that have 'enableTestCommands' set to false. Retry the
                     // setFCV command with 'confirm: true'.
-                    assert.commandWorked(self.getPrimary().adminCommand(
-                        {setFeatureCompatibilityVersion: fcv, confirm: true}));
+                    assert.commandWorked(self.getPrimary().adminCommand({
+                        setFeatureCompatibilityVersion: fcv,
+                        confirm: true,
+                        fromConfigServer: true
+                    }));
                 } else {
                     assert.commandWorked(res);
                 }
@@ -1710,6 +1720,20 @@ var ReplSetTest = function(opts) {
               (new Date() - awaitTsStart) + "ms for " + this.nodes.length + " nodes in set '" +
               this.name + "'");
 
+        // Waits for the services which write on step-up to finish rebuilding to avoid background
+        // writes after initiation is done. PrimaryOnlyServices wait for the stepup optime to be
+        // majority committed before rebuilding services, so we skip waiting for PrimaryOnlyServices
+        // if we do not wait for replication.
+        if (!doNotWaitForReplication && !doNotWaitForPrimaryOnlyServices) {
+            primary = self.getPrimary();
+            // TODO(SERVER-57924): cleanup asCluster() to avoid checking here.
+            if (self._notX509Auth(primary) || primary.isTLS()) {
+                asCluster(primary, function() {
+                    self.waitForStepUpWrites(primary);
+                });
+            }
+        }
+
         // Make sure all nodes are up to date. Bypass this if the heartbeat interval wasn't turned
         // down or the test specifies that we should not wait for replication. This is only an
         // optimization so it's OK if we bypass it in some suites.
@@ -1717,20 +1741,6 @@ var ReplSetTest = function(opts) {
             asCluster(self.nodes, function() {
                 self.awaitNodesAgreeOnAppliedOpTime();
             });
-        }
-
-        // Waits for the primary only services to finish rebuilding to avoid background writes
-        // after initiation is done. PrimaryOnlyServices wait for the stepup optime to be majority
-        // committed before rebuilding services, so we skip waiting for PrimaryOnlyServices if
-        // we do not wait for replication.
-        if (!doNotWaitForReplication && !doNotWaitForPrimaryOnlyServices) {
-            primary = self.getPrimary();
-            // TODO(SERVER-57924): cleanup asCluster() to avoid checking here.
-            if (self._notX509Auth(primary) || primary.isTLS()) {
-                asCluster(self.nodes, function() {
-                    self.waitForPrimaryOnlyServices(primary);
-                });
-            }
         }
 
         // Turn off the failpoints now that initial sync and initial setup is complete.
@@ -1757,15 +1767,28 @@ var ReplSetTest = function(opts) {
         let startTime = new Date();  // Measure the execution time of this function.
         this.initiateWithAnyNodeAsPrimary(cfg, initCmd, {doNotWaitForPrimaryOnlyServices: true});
 
-        // stepUp() calls awaitReplication() which requires all nodes to be authorized to run
-        // replSetGetStatus.
-        asCluster(this.nodes, function() {
-            const newPrimary = self.nodes[0];
-            self.stepUp(newPrimary);
-            if (!doNotWaitForPrimaryOnlyServices) {
-                self.waitForPrimaryOnlyServices(newPrimary);
-            }
-        });
+        // Most of the time node 0 will already be primary so we can skip the step-up.
+        let primary = self.getPrimary();
+        if (self.getNodeId(self.nodes[0]) == self.getNodeId(primary)) {
+            print("ReplSetTest initiateWithNodeZeroAsPrimary skipping step-up because node 0 is " +
+                  "already primary");
+            asCluster(primary, function() {
+                if (!doNotWaitForPrimaryOnlyServices) {
+                    self.waitForStepUpWrites(primary);
+                }
+            });
+        } else {
+            // stepUp() calls awaitReplication() which requires all nodes to be authorized to run
+            // replSetGetStatus.
+            asCluster(this.nodes, function() {
+                const newPrimary = self.nodes[0];
+                self.stepUp(newPrimary,
+                            {doNotWaitForPrimaryOnlyServices: doNotWaitForPrimaryOnlyServices});
+                if (!doNotWaitForPrimaryOnlyServices) {
+                    self.waitForStepUpWrites(newPrimary);
+                }
+            });
+        }
 
         print("ReplSetTest initiateWithNodeZeroAsPrimary took " + (new Date() - startTime) +
               "ms for " + this.nodes.length + " nodes.");
@@ -1803,11 +1826,15 @@ var ReplSetTest = function(opts) {
      */
     this.stepUp = function(node, {
         awaitReplicationBeforeStepUp: awaitReplicationBeforeStepUp = true,
-        awaitWritablePrimary: awaitWritablePrimary = true
+        awaitWritablePrimary: awaitWritablePrimary = true,
+        doNotWaitForPrimaryOnlyServices = false,
     } = {}) {
         jsTest.log("ReplSetTest stepUp: Stepping up " + node.host);
 
         if (awaitReplicationBeforeStepUp) {
+            if (!doNotWaitForPrimaryOnlyServices) {
+                this.waitForStepUpWrites();
+            }
             this.awaitReplication();
         }
 
@@ -1848,6 +1875,17 @@ var ReplSetTest = function(opts) {
     };
 
     /**
+     * Wait for writes which may happen when nodes are stepped up.  This currently includes
+     * primary-only service writes and writes from the query analysis writer, the latter being
+     * a replica-set-aware service for which there is no generic way to wait.
+     */
+    this.waitForStepUpWrites = function(primary) {
+        primary = primary || self.getPrimary();
+        this.waitForPrimaryOnlyServices(primary);
+        this.waitForQueryAnalysisWriterSetup(primary);
+    };
+
+    /**
      * Waits for primary only services to finish the rebuilding stage after a primary is elected.
      * This is useful for tests that are expecting particular write timestamps since some primary
      * only services can do background writes (e.g. build indexes) during rebuilding stage that
@@ -1866,6 +1904,41 @@ var ReplSetTest = function(opts) {
                 return services[s].state === undefined || services[s].state === "running";
             });
         }, "Timed out waiting for primary only services to finish rebuilding");
+    };
+
+    /**
+     * If query sampling is supported, waits for the query analysis writer to finish setting up
+     * after a primary is elected. This is useful for tests that expect particular write timestamps
+     * since the query analysis writer setup involves building indexes for the config.sampledQueries
+     * and config.sampledQueriesDiff collections.
+     */
+    this.waitForQueryAnalysisWriterSetup = function(primary) {
+        primary = primary || self.getPrimary();
+
+        const serverStatusRes = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
+        if (!serverStatusRes.hasOwnProperty("queryAnalyzers")) {
+            // Query sampling is not supported on this replica set. That is, either it uses binaries
+            // released before query sampling was introduced or it uses binaries where query
+            // sampling is guarded by a feature flag and the feature flag is not enabled.
+            return;
+        }
+
+        const getParamsRes = primary.adminCommand({getParameter: 1, multitenancySupport: 1});
+        if (!getParamsRes.ok || getParamsRes["multitenancySupport"]) {
+            // Query sampling is not supported on a multi-tenant replica set.
+            return;
+        }
+
+        jsTest.log("Waiting for query analysis writer to finish setting up");
+
+        assert.soonNoExcept(function() {
+            const sampledQueriesIndexes =
+                primary.getCollection("config.sampledQueries").getIndexes();
+            const sampledQueriesDiffIndexes =
+                primary.getCollection("config.sampledQueriesDiff").getIndexes();
+            // There should be two indexes: _id index and TTL index.
+            return sampledQueriesIndexes.length == 2 && sampledQueriesDiffIndexes.length == 2;
+        }, "Timed out waiting for query analysis writer to finish setting up");
     };
 
     /**
@@ -2594,11 +2667,8 @@ var ReplSetTest = function(opts) {
             // to time out since it may take a while to process each batch and a test may have
             // changed "cursorTimeoutMillis" to a short time period.
             this._cursorExhausted = false;
-            this.cursor = coll.find(query)
-                              .sort({$natural: -1})
-                              .noCursorTimeout()
-                              .readConcern("local")
-                              .limit(-1);
+            this.cursor =
+                coll.find(query).sort({$natural: -1}).noCursorTimeout().readConcern("local");
         };
 
         this.getFirstDoc = function() {
@@ -2742,6 +2812,39 @@ var ReplSetTest = function(opts) {
         return readers;
     }
 
+    function dumpPreImagesCollection(msgPrefix, node, nsUUID, timestamp, limit) {
+        const beforeCursor =
+            node.getDB("config")["system.preimages"]
+                .find({"_id.nsUUID": nsUUID, "_id.ts": {"$lt": timestamp}})
+                .sort({$natural: -1})
+                .noCursorTimeout()
+                .readConcern("local")
+                .limit(limit / 2);  // We print up to half of the limit in the before part so that
+                                    // the timestamp is centered.
+        const beforeEntries = beforeCursor.toArray().reverse();
+
+        let log = `${msgPrefix} -- Dumping a window of ${
+            limit} entries for preimages of collection ${nsUUID} from host ${
+            node.host} centered around timestamp ${timestamp.toStringIncomparable()}`;
+
+        beforeEntries.forEach(entry => {
+            log += '\n' + tojsononeline(entry);
+        });
+
+        const remainingWindow = limit - beforeEntries.length;
+        const cursor = node.getDB("config")["system.preimages"]
+                           .find({"_id.nsUUID": nsUUID, "_id.ts": {"$gte": timestamp}})
+                           .sort({$natural: 1})
+                           .noCursorTimeout()
+                           .readConcern("local")
+                           .limit(remainingWindow);
+        cursor.forEach(entry => {
+            log += '\n' + tojsononeline(entry);
+        });
+
+        jsTestLog(log);
+    }
+
     /**
      * Check preimages on all nodes, by reading reading from the last time. Since the preimage may
      * or may not be maintained independently, each node may not contain the same number of entries
@@ -2749,6 +2852,8 @@ var ReplSetTest = function(opts) {
      */
     function checkPreImageCollection(rst, secondaries, msgPrefix = 'checkPreImageCollection') {
         secondaries = secondaries || rst._secondaries;
+
+        const originalPreferences = [];
 
         print(`${msgPrefix} -- starting preimage checks.`);
         print(`${msgPrefix} -- waiting for secondaries to be ready.`);
@@ -2772,7 +2877,13 @@ var ReplSetTest = function(opts) {
                 }
 
                 const preImageColl = node.getDB("config")["system.preimages"];
-                // Reset connection preferences in case the test has modified them.
+                // Reset connection preferences in case the test has modified them. We'll restore
+                // them back to what they were originally in the end.
+                originalPreferences[i] = {
+                    secondaryOk: preImageColl.getMongo().getSecondaryOk(),
+                    readPref: preImageColl.getMongo().getReadPref()
+                };
+
                 preImageColl.getMongo().setSecondaryOk(true);
                 preImageColl.getMongo().setReadPref(rst._primary === node ? "primary"
                                                                           : "secondary");
@@ -2789,14 +2900,39 @@ var ReplSetTest = function(opts) {
 
                 while (true) {
                     let preImageEntryToCompare = undefined;
+                    let originNode = undefined;
                     for (const reader of readers) {
                         if (reader.hasNext()) {
                             const preImageEntry = reader.next();
                             if (preImageEntryToCompare === undefined) {
                                 preImageEntryToCompare = preImageEntry;
+                                originNode = reader.mongo;
                             } else {
-                                assert(bsonBinaryEqual(preImageEntryToCompare, preImageEntry),
-                                       `Detected preimage entries that have different content`);
+                                if (!bsonBinaryEqual(preImageEntryToCompare, preImageEntry)) {
+                                    // TODO SERVER-55756: Investigate if we can remove this since
+                                    // we'll have the data files present in case this fails with
+                                    // PeriodicKillSecondaries.
+                                    print(
+                                        `${msgPrefix} -- preimage inconsistency detected.` +
+                                        "\n" +
+                                        `${originNode.host} -> ${
+                                            tojsononeline(preImageEntryToCompare)}` +
+                                        "\n" +
+                                        `${reader.mongo.host} -> ${tojsononeline(preImageEntry)}`);
+                                    print("Printing previous entries:");
+                                    dumpPreImagesCollection(msgPrefix,
+                                                            originNode,
+                                                            nsUUID,
+                                                            preImageEntryToCompare._id.ts,
+                                                            100);
+                                    dumpPreImagesCollection(
+                                        msgPrefix, reader.mongo, nsUUID, preImageEntry._id.ts, 100);
+                                    const log = `${msgPrefix} -- non-matching preimage entries:\n` +
+                                        `${originNode.host} -> ${
+                                                    tojsononeline(preImageEntryToCompare)}\n` +
+                                        `${reader.mongo.host} -> ${tojsononeline(preImageEntry)}`;
+                                    assert(false, log);
+                                }
                             }
                         }
                     }
@@ -2807,6 +2943,14 @@ var ReplSetTest = function(opts) {
             }
         }
         print(`${msgPrefix} -- preimages check complete.`);
+
+        // Restore original read preferences used by the connection.
+        for (const idx in originalPreferences) {
+            const node = rst.nodes[idx];
+            const conn = node.getDB("config").getMongo();
+            conn.setSecondaryOk(originalPreferences[idx].secondaryOk);
+            conn.setReadPref(originalPreferences[idx].readPref);
+        }
     }
 
     this.checkPreImageCollection = function(msgPrefix) {
@@ -3069,6 +3213,12 @@ var ReplSetTest = function(opts) {
     /**
      * Restarts a db without clearing the data directory by default, and using the node(s)'s
      * original startup options by default.
+     *
+     * When using this method with mongobridge, be aware that mongobridge may not do a good
+     * job of detecting that a node was restarted. For example, when mongobridge is being used
+     * between some Node A and Node B, on restarting Node B mongobridge will not aggressively
+     * close its connection with Node A, leading Node A to think the connection with Node B is
+     * still healthy.
      *
      * Option { startClean : true } forces clearing the data directory.
      * Option { auth : Object } object that contains the auth details for admin credentials.

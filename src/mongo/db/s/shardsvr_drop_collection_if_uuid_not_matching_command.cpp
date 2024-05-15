@@ -27,75 +27,32 @@
  *    it in the license file.
  */
 
+#include <memory>
+#include <string>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/sharding_state.h"
-#include "mongo/logv2/log.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/write_concern.h"
+#include "mongo/rpc/op_msg.h"
 #include "mongo/s/request_types/drop_collection_if_uuid_not_matching_gen.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/decorable.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 
 namespace mongo {
 namespace {
-
-// TODO SERVER-74324: deprecate _shardsvrDropCollectionIfUUIDNotMatching after 7.0 is lastLTS.
-class ShardsvrDropCollectionIfUUIDNotMatchingCommand final
-    : public TypedCommand<ShardsvrDropCollectionIfUUIDNotMatchingCommand> {
-public:
-    bool skipApiVersionCheck() const override {
-        /* Internal command (server to server) */
-        return true;
-    }
-
-    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
-        return Command::AllowedOnSecondary::kNever;
-    }
-
-    std::string help() const override {
-        return "Internal command aimed to remove stale entries from the local collection catalog.";
-    }
-
-    using Request = ShardsvrDropCollectionIfUUIDNotMatchingRequest;
-
-    class Invocation final : public InvocationBase {
-    public:
-        using InvocationBase::InvocationBase;
-
-        void typedRun(OperationContext* opCtx) {
-            uassertStatusOK(ShardingState::get(opCtx)->canAcceptShardedCommands());
-
-            opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
-
-            uassertStatusOK(dropCollectionIfUUIDNotMatching(
-                opCtx, ns(), request().getExpectedCollectionUUID()));
-
-            WriteConcernResult ignoreResult;
-            auto latestOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
-            uassertStatusOK(waitForWriteConcern(
-                opCtx, latestOpTime, CommandHelpers::kMajorityWriteConcern, &ignoreResult));
-        }
-
-    private:
-        NamespaceString ns() const override {
-            return request().getNamespace();
-        }
-
-        bool supportsWriteConcern() const override {
-            return false;
-        }
-
-        void doCheckAuthorization(OperationContext* opCtx) const override {
-            uassert(ErrorCodes::Unauthorized,
-                    "Unauthorized",
-                    AuthorizationSession::get(opCtx->getClient())
-                        ->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
-                                                           ActionType::dropCollection));
-        }
-    };
-} shardSvrDropCollectionIfUUIDNotMatching;
 
 class ShardsvrDropCollectionIfUUIDNotMatchingWithWriteConcernCommand final
     : public TypedCommand<ShardsvrDropCollectionIfUUIDNotMatchingWithWriteConcernCommand> {
@@ -144,8 +101,9 @@ public:
             uassert(ErrorCodes::Unauthorized,
                     "Unauthorized",
                     AuthorizationSession::get(opCtx->getClient())
-                        ->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
-                                                           ActionType::dropCollection));
+                        ->isAuthorizedForActionsOnResource(
+                            ResourcePattern::forClusterResource(request().getDbName().tenantId()),
+                            ActionType::dropCollection));
         }
     };
 } shardSvrDropCollectionIfUUIDNotMatchingWithWriteConcern;

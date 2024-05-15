@@ -76,6 +76,8 @@ env.Library(
         '$BUILD_DIR/mongo/db/timeseries/timeseries_stats',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_write_util',
         '$BUILD_DIR/mongo/db/transaction/transaction',
+        '$BUILD_DIR/mongo/db/transaction/transaction_api',
+        '$BUILD_DIR/mongo/executor/inline_executor',
         '$BUILD_DIR/mongo/s/query_analysis_sampler',
         '$BUILD_DIR/mongo/util/fail_point',
         '$BUILD_DIR/mongo/util/log_and_backoff',
@@ -165,7 +167,9 @@ env.CppUnitTest(
 
 env.CppIntegrationTest(
     target='db_ops_integration_test',
-    source='write_ops_document_stream_integration_test.cpp',
+    source=[
+        'write_ops_document_stream_integration_test.cpp',
+    ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/client/clientdriver_network',
         '$BUILD_DIR/mongo/transport/transport_layer_egress_init',

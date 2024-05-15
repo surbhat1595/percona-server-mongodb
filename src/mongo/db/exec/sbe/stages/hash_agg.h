@@ -29,11 +29,33 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <absl/container/flat_hash_map.h>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/bson/util/builder.h"
+#include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
+#include "mongo/db/exec/sbe/stages/plan_stats.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
+#include "mongo/db/exec/sbe/util/debug_print.h"
+#include "mongo/db/exec/sbe/values/row.h"
+#include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
+#include "mongo/db/exec/trial_run_tracker.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/stage_types.h"
+#include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/temporary_record_store.h"
+#include "mongo/platform/atomic_proxy.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/unordered_map.h"
 
 namespace mongo {
@@ -83,12 +105,6 @@ namespace sbe {
  */
 class HashAggStage final : public PlanStage {
 public:
-    struct AggExprPair {
-        std::unique_ptr<EExpression> init;
-        std::unique_ptr<EExpression> acc;
-    };
-    using AggExprVector = std::vector<std::pair<value::SlotId, AggExprPair>>;
-
     HashAggStage(std::unique_ptr<PlanStage> input,
                  value::SlotVector gbs,
                  AggExprVector aggs,
@@ -175,7 +191,7 @@ private:
 
     /**
      * Inserts a key and value pair to the '_recordStore'. They key is serialized to a
-     * 'KeyString::Value' which becomes the 'RecordId'. This makes the keys memcmp-able and ensures
+     * 'key_string::Value' which becomes the 'RecordId'. This makes the keys memcmp-able and ensures
      * that the record store ends up sorted by the group-by keys.
      *
      * Note that the 'typeBits' are needed to reconstruct the spilled 'key' to a 'MaterializedRow',
@@ -310,40 +326,5 @@ private:
     // run is complete, this pointer is reset to nullptr.
     TrialRunTracker* _tracker{nullptr};
 };
-
-namespace detail {
-// base case
-template <typename R>
-inline void makeAggExprVectorHelper(R& result,
-                                    value::SlotId slot,
-                                    std::unique_ptr<EExpression> initExpr,
-                                    std::unique_ptr<EExpression> accExpr) {
-    result.push_back(
-        std::make_pair(slot, HashAggStage::AggExprPair{std::move(initExpr), std::move(accExpr)}));
-}
-
-// recursive case
-template <typename R, typename... Ts>
-inline void makeAggExprVectorHelper(R& result,
-                                    value::SlotId slot,
-                                    std::unique_ptr<EExpression> initExpr,
-                                    std::unique_ptr<EExpression> accExpr,
-                                    Ts&&... rest) {
-    result.push_back(
-        std::make_pair(slot, HashAggStage::AggExprPair{std::move(initExpr), std::move(accExpr)}));
-    makeAggExprVectorHelper(result, std::forward<Ts>(rest)...);
-}
-}  // namespace detail
-
-template <typename... Ts>
-auto makeAggExprVector(Ts&&... pack) {
-    HashAggStage::AggExprVector v;
-    if constexpr (sizeof...(pack) > 0) {
-        v.reserve(sizeof...(Ts) / 3);
-        detail::makeAggExprVectorHelper(v, std::forward<Ts>(pack)...);
-    }
-    return v;
-}
-
 }  // namespace sbe
 }  // namespace mongo

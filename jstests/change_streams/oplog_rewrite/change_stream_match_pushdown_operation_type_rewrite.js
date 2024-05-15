@@ -2,7 +2,6 @@
 // 'operationType' and apply it to oplog-format documents in order to filter out results as early as
 // possible.
 // @tags: [
-//   featureFlagChangeStreamsRewrite,
 //   requires_fcv_51,
 //   requires_pipeline_optimization,
 //   requires_sharding,
@@ -11,10 +10,10 @@
 //   assumes_unsharded_collection,
 //   assumes_read_preference_unchanged
 // ]
-(function() {
-"use strict";
-
-load("jstests/libs/change_stream_rewrite_util.js");  // For rewrite helpers.
+import {
+    createShardedCollection,
+    verifyChangeStreamOnWholeCluster
+} from "jstests/libs/change_stream_rewrite_util.js";
 
 const dbName = "change_stream_match_pushdown_and_rewrite";
 const collName = "coll1";
@@ -306,4 +305,3 @@ verifyOnWholeCluster({
                      [6, 5] /* expectedOplogRetDocsForEachShard */);
 
 st.stop();
-})();

@@ -1,16 +1,16 @@
-'use strict';
-
 /**
  * Performs range deletions while chunks are being moved.
  *
  * @tags: [requires_sharding, assumes_balancer_on, antithesis_incompatible]
  */
 
-load('jstests/concurrency/fsm_libs/extend_workload.js');
-load('jstests/concurrency/fsm_workloads/sharded_base_partitioned.js');
+import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
+import {
+    $config as $baseConfig
+} from "jstests/concurrency/fsm_workloads/sharded_base_partitioned.js";
 load('jstests/concurrency/fsm_workload_helpers/balancer.js');
 
-var $config = extendWorkload($config, function($config, $super) {
+export const $config = extendWorkload($baseConfig, function($config, $super) {
     $config.threadCount = 5;
     $config.iterations = 50;
 
@@ -31,15 +31,14 @@ var $config = extendWorkload($config, function($config, $super) {
         const shardNames = Object.keys(connCache.shards);
         const randomIndex = Math.floor(Math.random() * shardNames.length);
 
-        const shard = connCache.shards[shardNames[randomIndex]];
-        const shardPrimary = ChunkHelper.getPrimary(shard);
+        const shardConn = connCache.rsConns.shards[shardNames[randomIndex]];
 
         // Disable balancing so that waiting for orphan cleanup can converge quickly.
         BalancerHelper.disableBalancerForCollection(db, ns);
 
         // Ensure the cleanup of all chunk orphans of the primary shard
         assert.soonNoExcept(() => {
-            assert.commandWorked(shardPrimary.adminCommand({cleanupOrphaned: ns}));
+            assert.commandWorked(shardConn.adminCommand({cleanupOrphaned: ns}));
             return true;
         }, undefined, 10 * 1000, 100);
 

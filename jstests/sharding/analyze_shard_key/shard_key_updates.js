@@ -3,12 +3,9 @@
  *
  * @tags: [requires_fcv_70]
  */
-(function() {
-"use strict";
-
 load("jstests/sharding/analyze_shard_key/libs/analyze_shard_key_util.js");
 load("jstests/sharding/analyze_shard_key/libs/query_sampling_util.js");
-load("jstests/libs/feature_flag_util.js");
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 load("jstests/libs/uuid_util.js");  // for 'extractUUIDFromObject'
 
 // This command involves running commands outside a session.
@@ -22,7 +19,7 @@ const assertApprox = AnalyzeShardKeyUtil.assertApprox;
 const queryAnalysisSamplerConfigurationRefreshSecs = 1;
 const queryAnalysisWriterIntervalSecs = 1;
 
-const sampleRate = 10000;
+const samplesPerSecond = 10000;
 const analyzeShardKeyNumRanges = 10;
 
 const st = new ShardingTest({
@@ -112,7 +109,8 @@ function runTest({isShardedColl, execCtxType}) {
     assert.commandWorked(mongosDB.getCollection(collName).insert(docs));
     const collectionUuid = QuerySamplingUtil.getCollectionUuid(mongosDB, collName);
 
-    assert.commandWorked(st.s.adminCommand({configureQueryAnalyzer: ns, mode: "full", sampleRate}));
+    assert.commandWorked(
+        st.s.adminCommand({configureQueryAnalyzer: ns, mode: "full", samplesPerSecond}));
     QuerySamplingUtil.waitForActiveSamplingShardedCluster(st, ns, collectionUuid);
 
     // Test with a mix of modifier, replacement and pipeline updates and findAndModify updates.
@@ -238,7 +236,8 @@ function runTest({isShardedColl, execCtxType}) {
     assert.eq(res0.writeDistribution.sampleSize.total, numTotal, res0);
     assert.eq(res0.writeDistribution.percentageOfShardKeyUpdates, 100, res0);
 
-    assert.commandWorked(st.s.adminCommand({configureQueryAnalyzer: ns, mode: "full", sampleRate}));
+    assert.commandWorked(
+        st.s.adminCommand({configureQueryAnalyzer: ns, mode: "full", samplesPerSecond}));
     QuerySamplingUtil.waitForActiveSamplingShardedCluster(st, ns, collectionUuid);
 
     // Below are not shard key updates.
@@ -326,4 +325,3 @@ runTest({isShardedColl: true, execCtxType: execCtxTypes.kClientSessionTransactio
 runTest({isShardedColl: false, execCtxType: execCtxTypes.kNoClientSession});
 
 st.stop();
-})();

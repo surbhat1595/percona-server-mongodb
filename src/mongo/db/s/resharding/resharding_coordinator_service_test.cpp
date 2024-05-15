@@ -27,36 +27,67 @@
  *    it in the license file.
  */
 
+#include <absl/container/node_hash_map.h>
 #include <boost/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
 #include <functional>
+#include <mutex>
+#include <string>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bson_field.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/client/dbclient_cursor.h"
+#include "mongo/db/client.h"
+#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/op_observer/op_observer_impl.h"
-#include "mongo/db/op_observer/op_observer_noop.h"
+#include "mongo/db/keypattern.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
-#include "mongo/db/repl/primary_only_service_op_observer.h"
-#include "mongo/db/repl/primary_only_service_test_fixture.h"
+#include "mongo/db/query/find_command.h"
+#include "mongo/db/repl/member_state.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/config/config_server_test_fixture.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
 #include "mongo/db/s/resharding/resharding_op_observer.h"
-#include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_service_test_helpers.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_cache_noop.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/executor/mock_async_rpc.h"
+#include "mongo/idl/idl_parser.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
 #include "mongo/s/catalog/type_collection.h"
+#include "mongo/s/catalog/type_collection_gen.h"
+#include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog/type_shard.h"
+#include "mongo/s/database_version.h"
 #include "mongo/s/resharding/resharding_coordinator_service_conflicting_op_in_progress_info.h"
+#include "mongo/s/resharding/type_collection_fields_gen.h"
+#include "mongo/s/shard_key_pattern.h"
 #include "mongo/stdx/unordered_map.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/util/clock_source_mock.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/clock_source.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -211,13 +242,8 @@ public:
 
     std::shared_ptr<ReshardingCoordinator> getCoordinatorIfExists(
         OperationContext* opCtx, repl::PrimaryOnlyService::InstanceID instanceId) {
-        auto coordinatorOpt = ReshardingCoordinator::lookup(opCtx, _service, instanceId);
-        if (!coordinatorOpt) {
-            return nullptr;
-        }
-
-        auto coordinator = *coordinatorOpt;
-        return coordinator ? coordinator : nullptr;
+        auto [coordinatorOpt, _] = ReshardingCoordinator::lookup(opCtx, _service, instanceId);
+        return coordinatorOpt ? *coordinatorOpt : nullptr;
     }
 
     ReshardingCoordinatorDocument getCoordinatorDoc(OperationContext* opCtx) {
@@ -401,7 +427,7 @@ public:
             opCtx->getServiceContext()->getPreciseClockSource()->now());
         client.insert(CollectionType::ConfigNS, originalNssCatalogEntry.toBSON());
 
-        DatabaseType dbDoc(coordinatorDoc.getSourceNss().db().toString(),
+        DatabaseType dbDoc(coordinatorDoc.getSourceNss().db_forTest().toString(),
                            coordinatorDoc.getDonorShards().front().getId(),
                            DatabaseVersion{UUID::gen(), Timestamp(1, 1)});
         client.insert(NamespaceString::kConfigDatabasesNamespace, dbDoc.toBSON());
@@ -702,9 +728,9 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpDuringInitializing) {
                                                       CoordinatorStateEnum::kPreparingToDonate};
 
     auto opCtx = operationContext();
-    auto pauseBeforeInsertCoordinatorDoc =
-        globalFailPointRegistry().find("pauseBeforeInsertCoordinatorDoc");
-    auto timesEnteredFailPoint = pauseBeforeInsertCoordinatorDoc->setMode(FailPoint::alwaysOn, 0);
+    auto pauseAfterInsertCoordinatorDoc =
+        globalFailPointRegistry().find("pauseAfterInsertCoordinatorDoc");
+    auto timesEnteredFailPoint = pauseAfterInsertCoordinatorDoc->setMode(FailPoint::alwaysOn, 0);
 
     auto doc = insertStateAndCatalogEntries(CoordinatorStateEnum::kUnused, _originalEpoch);
     doc.setRecipientShards({});
@@ -733,11 +759,11 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpDuringInitializing) {
     auto instanceId =
         BSON(ReshardingCoordinatorDocument::kReshardingUUIDFieldName << doc.getReshardingUUID());
 
-    pauseBeforeInsertCoordinatorDoc->waitForTimesEntered(timesEnteredFailPoint + 1);
+    pauseAfterInsertCoordinatorDoc->waitForTimesEntered(timesEnteredFailPoint + 1);
 
     auto coordinator = getCoordinator(opCtx, instanceId);
     stepDown(opCtx);
-    pauseBeforeInsertCoordinatorDoc->setMode(FailPoint::off, 0);
+    pauseAfterInsertCoordinatorDoc->setMode(FailPoint::off, 0);
     ASSERT_EQ(coordinator->getCompletionFuture().getNoThrow(), ErrorCodes::CallbackCanceled);
 
     coordinator.reset();
@@ -879,7 +905,7 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
         std::vector<ChunkType> foundCollections;
         auto collection =
             client.findOne(CollectionType::ConfigNS,
-                           BSON(CollectionType::kNssFieldName << doc.getSourceNss().ns()));
+                           BSON(CollectionType::kNssFieldName << doc.getSourceNss().ns_forTest()));
 
         ASSERT_EQUALS(collection.isEmpty(), false);
         ASSERT_EQUALS(
@@ -913,7 +939,7 @@ TEST_F(ReshardingCoordinatorServiceTest, ReshardingCoordinatorFailsIfMigrationNo
     {
         DBDirectClient client(opCtx);
         client.update(CollectionType::ConfigNS,
-                      BSON(CollectionType::kNssFieldName << _originalNss.ns()),
+                      BSON(CollectionType::kNssFieldName << _originalNss.ns_forTest()),
                       BSON("$set" << BSON(CollectionType::kAllowMigrationsFieldName << false)));
     }
 
@@ -923,8 +949,9 @@ TEST_F(ReshardingCoordinatorServiceTest, ReshardingCoordinatorFailsIfMigrationNo
     // Check that reshardCollection keeps allowMigrations setting intact.
     {
         DBDirectClient client(opCtx);
-        CollectionType collDoc(client.findOne(
-            CollectionType::ConfigNS, BSON(CollectionType::kNssFieldName << _originalNss.ns())));
+        CollectionType collDoc(
+            client.findOne(CollectionType::ConfigNS,
+                           BSON(CollectionType::kNssFieldName << _originalNss.ns_forTest())));
         ASSERT_FALSE(collDoc.getAllowMigrations());
     }
 }

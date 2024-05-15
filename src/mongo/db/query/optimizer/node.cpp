@@ -27,12 +27,24 @@
  *    it in the license file.
  */
 
-#include <functional>
-#include <stack>
+#include <boost/optional.hpp>
+#include <set>
+#include <type_traits>
 
-#include "mongo/db/query/optimizer/node.h"
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/query/optimizer/algebra/polyvalue.h"
+#include "mongo/db/query/optimizer/containers.h"
+#include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
+#include "mongo/db/query/optimizer/syntax/expr.h"
 #include "mongo/db/query/optimizer/utils/path_utils.h"
+#include "mongo/db/query/optimizer/utils/strong_alias.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
+#include "mongo/util/str.h"
 
 namespace mongo::optimizer {
 
@@ -339,9 +351,38 @@ const ProjectionName& RIDIntersectNode::getScanProjectionName() const {
     return _scanProjectionName;
 }
 
-RIDUnionNode::RIDUnionNode(ProjectionName scanProjectionName, ABT leftChild, ABT rightChild)
-    : Base(std::move(leftChild), std::move(rightChild)),
+/**
+ * A helper that builds References object of UnionNode or SortedMergeNode for reference tracking
+ * purposes.
+ *
+ * Example: union outputs 3 projections: A,B,C and it has 4 children. Then the References object is
+ * a vector of variables A,B,C,A,B,C,A,B,C,A,B,C. One group of variables per child.
+ */
+static ABT buildUnionTypeReferences(const ProjectionNameVector& names, const size_t numOfChildren) {
+    ABTVector variables;
+    for (size_t outerIdx = 0; outerIdx < numOfChildren; ++outerIdx) {
+        for (size_t idx = 0; idx < names.size(); ++idx) {
+            variables.emplace_back(make<Variable>(names[idx]));
+        }
+    }
+
+    return make<References>(std::move(variables));
+}
+
+RIDUnionNode::RIDUnionNode(ProjectionName scanProjectionName,
+                           ProjectionNameVector unionProjectionNames,
+                           ABT leftChild,
+                           ABT rightChild)
+    : Base(std::move(leftChild),
+           std::move(rightChild),
+           buildSimpleBinder(unionProjectionNames),
+           buildUnionTypeReferences(unionProjectionNames, 2)),
       _scanProjectionName(std::move(scanProjectionName)) {
+    tassert(7858803,
+            "Scan projection must exist in the RIDUnionNode projection list",
+            std::find(unionProjectionNames.cbegin(),
+                      unionProjectionNames.cend(),
+                      _scanProjectionName) != unionProjectionNames.cend());
     assertNodeSort(getLeftChild());
     assertNodeSort(getRightChild());
 }
@@ -362,6 +403,12 @@ ABT& RIDUnionNode::getRightChild() {
     return get<1>();
 }
 
+const ExpressionBinder& RIDUnionNode::binder() const {
+    const ABT& result = get<2>();
+    tassert(7858801, "Invalid binder type", result.is<ExpressionBinder>());
+    return *result.cast<ExpressionBinder>();
+}
+
 bool RIDUnionNode::operator==(const RIDUnionNode& other) const {
     return _scanProjectionName == other._scanProjectionName &&
         getLeftChild() == other.getLeftChild() && getRightChild() == other.getRightChild();
@@ -373,19 +420,21 @@ const ProjectionName& RIDUnionNode::getScanProjectionName() const {
 
 static ProjectionNameVector createSargableBindings(const PartialSchemaRequirements& reqMap) {
     ProjectionNameVector result;
-    PSRExpr::visitDNF(reqMap.getRoot(), [&](const PartialSchemaEntry& e) {
-        if (auto binding = e.second.getBoundProjectionName()) {
-            result.push_back(*binding);
-        }
-    });
+    PSRExpr::visitDNF(reqMap.getRoot(),
+                      [&](const PartialSchemaEntry& e, const PSRExpr::VisitorContext&) {
+                          if (auto binding = e.second.getBoundProjectionName()) {
+                              result.push_back(*binding);
+                          }
+                      });
     return result;
 }
 
 static ProjectionNameVector createSargableReferences(const PartialSchemaRequirements& reqMap) {
     ProjectionNameOrderPreservingSet result;
-    PSRExpr::visitDNF(reqMap.getRoot(), [&](const PartialSchemaEntry& e) {
-        result.emplace_back(*e.first._projectionName);
-    });
+    PSRExpr::visitDNF(reqMap.getRoot(),
+                      [&](const PartialSchemaEntry& e, const PSRExpr::VisitorContext&) {
+                          result.emplace_back(*e.first._projectionName);
+                      });
     return result.getVector();
 }
 
@@ -423,44 +472,49 @@ SargableNode::SargableNode(PartialSchemaRequirements reqMap,
     // projections, or non-trivial multikey requirements which also bind. Further assert that under
     // a conjunction 1) non-multikey paths have at most one req and 2) there are no duplicate bound
     // projection names.
-    PSRExpr::visitDisjuncts(_reqMap.getRoot(), [&](const PSRExpr::Node& disjunct, const size_t) {
-        PartialSchemaKeySet seenKeys;
-        ProjectionNameSet seenProjNames;
-        PSRExpr::visitConjuncts(disjunct, [&](const PSRExpr::Node& conjunct, const size_t) {
-            PSRExpr::visitAtom(conjunct, [&](const PartialSchemaEntry& e) {
-                const auto& [key, req] = e;
-                if (auto projName = req.getBoundProjectionName()) {
-                    tassert(
-                        6624094,
-                        "SargableNode has a multikey requirement with a non-trivial interval which "
-                        "also binds",
-                        isIntervalReqFullyOpenDNF(req.getIntervals()) ||
-                            !checkPathContainsTraverse(key._path));
-                    tassert(6624095,
-                            "SargableNode has a perf only binding requirement",
-                            !req.getIsPerfOnly());
+    PSRExpr::visitDisjuncts(
+        _reqMap.getRoot(), [&](const PSRExpr::Node& disjunct, const PSRExpr::VisitorContext&) {
+            PartialSchemaKeySet seenKeys;
+            ProjectionNameSet seenProjNames;
+            PSRExpr::visitConjuncts(
+                disjunct, [&](const PSRExpr::Node& conjunct, const PSRExpr::VisitorContext&) {
+                    PSRExpr::visitAtom(
+                        conjunct, [&](const PartialSchemaEntry& e, const PSRExpr::VisitorContext&) {
+                            const auto& [key, req] = e;
+                            if (auto projName = req.getBoundProjectionName()) {
+                                tassert(6624094,
+                                        "SargableNode has a multikey requirement with a "
+                                        "non-trivial interval which "
+                                        "also binds",
+                                        isIntervalReqFullyOpenDNF(req.getIntervals()) ||
+                                            !checkPathContainsTraverse(key._path));
+                                tassert(6624095,
+                                        "SargableNode has a perf only binding requirement",
+                                        !req.getIsPerfOnly());
 
-                    auto insertedBoundProj = seenProjNames.insert(*projName).second;
-                    tassert(6624087,
-                            "PartialSchemaRequirements has duplicate bound projection names in "
-                            "a conjunction",
-                            insertedBoundProj);
-                }
+                                auto insertedBoundProj = seenProjNames.insert(*projName).second;
+                                tassert(6624087,
+                                        "PartialSchemaRequirements has duplicate bound projection "
+                                        "names in "
+                                        "a conjunction",
+                                        insertedBoundProj);
+                            }
 
-                tassert(6624088,
-                        "SargableNode cannot reference an internally bound projection",
-                        boundsProjectionNameSet.count(*key._projectionName) == 0);
+                            tassert(6624088,
+                                    "SargableNode cannot reference an internally bound projection",
+                                    boundsProjectionNameSet.count(*key._projectionName) == 0);
 
-                if (!checkPathContainsTraverse(key._path)) {
-                    auto insertedKey = seenKeys.insert(key).second;
-                    tassert(7155020,
-                            "PartialSchemaRequirements has two predicates on the same non-multikey "
-                            "path in a conjunction",
-                            insertedKey);
-                }
-            });
+                            if (!checkPathContainsTraverse(key._path)) {
+                                auto insertedKey = seenKeys.insert(key).second;
+                                tassert(7155020,
+                                        "PartialSchemaRequirements has two predicates on the same "
+                                        "non-multikey "
+                                        "path in a conjunction",
+                                        insertedKey);
+                            }
+                        });
+                });
         });
-    });
 }
 
 bool SargableNode::operator==(const SargableNode& other) const {
@@ -701,24 +755,6 @@ ABT& NestedLoopJoinNode::getRightChild() {
 
 const ABT& NestedLoopJoinNode::getFilter() const {
     return get<2>();
-}
-
-/**
- * A helper that builds References object of UnionNode or SortedMergeNode for reference tracking
- * purposes.
- *
- * Example: union outputs 3 projections: A,B,C and it has 4 children. Then the References object is
- * a vector of variables A,B,C,A,B,C,A,B,C,A,B,C. One group of variables per child.
- */
-static ABT buildUnionTypeReferences(const ProjectionNameVector& names, const size_t numOfChildren) {
-    ABTVector variables;
-    for (size_t outerIdx = 0; outerIdx < numOfChildren; ++outerIdx) {
-        for (size_t idx = 0; idx < names.size(); ++idx) {
-            variables.emplace_back(make<Variable>(names[idx]));
-        }
-    }
-
-    return make<References>(std::move(variables));
 }
 
 // Helper function to get the projection names from a CollationRequirement as a vector instead of a

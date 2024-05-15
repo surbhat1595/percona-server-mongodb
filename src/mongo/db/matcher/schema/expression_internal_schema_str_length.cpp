@@ -27,11 +27,15 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <boost/move/utility_core.hpp>
+#include <utility>
 
+#include <boost/optional/optional.hpp>
+
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/matcher/schema/expression_internal_schema_str_length.h"
-
-#include "mongo/bson/bsontypes.h"
 
 namespace mongo {
 
@@ -50,9 +54,9 @@ void InternalSchemaStrLengthMatchExpression::debugString(StringBuilder& debug,
     _debugStringAttachTagInfo(&debug);
 }
 
-BSONObj InternalSchemaStrLengthMatchExpression::getSerializedRightHandSide(
-    SerializationOptions opts) const {
-    return BSON(_name << opts.serializeLiteral(_strLen));
+void InternalSchemaStrLengthMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, SerializationOptions opts) const {
+    opts.appendLiteral(bob, _name, _strLen);
 }
 
 bool InternalSchemaStrLengthMatchExpression::equivalent(const MatchExpression* other) const {

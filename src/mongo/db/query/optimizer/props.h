@@ -29,13 +29,21 @@
 
 #pragma once
 
+#include <absl/container/node_hash_map.h>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <map>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "mongo/db/query/optimizer/algebra/operator.h"
 #include "mongo/db/query/optimizer/algebra/polyvalue.h"
+#include "mongo/db/query/optimizer/containers.h"
 #include "mongo/db/query/optimizer/defs.h"
+#include "mongo/db/query/optimizer/index_bounds.h"
 #include "mongo/db/query/optimizer/metadata.h"
 #include "mongo/util/assert_util.h"
 
@@ -71,6 +79,7 @@ class DistributionRequirement;
 class IndexingRequirement;
 class RepetitionEstimate;
 class LimitEstimate;
+class RemoveOrphansRequirement;
 
 using LogicalProperty = algebra::PolyValue<CardinalityEstimate,
                                            ProjectionAvailability,
@@ -84,7 +93,8 @@ using PhysProperty = algebra::PolyValue<CollationRequirement,
                                         DistributionRequirement,
                                         IndexingRequirement,
                                         RepetitionEstimate,
-                                        LimitEstimate>;
+                                        LimitEstimate,
+                                        RemoveOrphansRequirement>;
 
 using LogicalProps = opt::unordered_map<LogicalProperty::key_type, LogicalProperty>;
 using PhysProps = opt::unordered_map<PhysProperty::key_type, PhysProperty>;
@@ -350,6 +360,29 @@ public:
 
 private:
     CEType _estimate;
+};
+
+/**
+ * A physical property that specifies that we must filter out data corresponding to orphaned
+ * documents from a particular collection. This property is only meaningful for groups which have
+ * IndexingAvailability. For every group with IndexingAvailability, we add a
+ * RemoveOrphansRequirement. This allows us to distinguish between RemoveOrphansRequirement{false},
+ * which means do not perform shard filtering, and the lack of a RemoveOrphansRequirement, which
+ * implies that we are in a group without IndexingAvailability and thus don't have access to the
+ * scan projection (e.g. above a GroupByNode).
+ */
+class RemoveOrphansRequirement final : public PhysPropertyTag {
+public:
+    RemoveOrphansRequirement(bool mustRemove);
+
+    bool operator==(const RemoveOrphansRequirement& other) const;
+
+    ProjectionNameSet getAffectedProjectionNames() const;
+
+    bool mustRemove() const;
+
+private:
+    bool _mustRemove;
 };
 
 /**

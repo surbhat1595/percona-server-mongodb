@@ -29,7 +29,8 @@
 
 #pragma once
 
-#include "mongo/db/query/optimizer/utils/printable_enum.h"
+#include "mongo/db/query/util/named_enum.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo::optimizer {
 
@@ -61,8 +62,7 @@ namespace mongo::optimizer {
     F(Or)                       \
     F(Not)
 
-MAKE_PRINTABLE_ENUM(Operations, PATHSYNTAX_OPNAMES);
-MAKE_PRINTABLE_ENUM_STRING_ARRAY(OperationsEnum, Operations, PATHSYNTAX_OPNAMES);
+QUERY_UTIL_NAMED_ENUM_DEFINE(Operations, PATHSYNTAX_OPNAMES);
 #undef PATHSYNTAX_OPNAMES
 
 inline constexpr bool isUnaryOp(Operations op) {

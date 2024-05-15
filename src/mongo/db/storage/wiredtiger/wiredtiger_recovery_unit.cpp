@@ -28,27 +28,47 @@
  */
 
 
-#include "mongo/platform/basic.h"
+#include <algorithm>
+#include <boost/cstdint.hpp>
+#include <fmt/format.h>
+#include <memory>
+#include <string>
+#include <utility>
+#include <wiredtiger.h>
 
-#include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/parse_number.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/storage/snapshot.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_begin_transaction_block.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_prepare_conflict.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_stats.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/log_severity.h"
+#include "mongo/logv2/log_truncation.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/stacktrace.h"
+#include "mongo/util/str.h"
 #include "mongo/util/testing_proctor.h"
-
-#include <fmt/compile.h>
-#include <fmt/format.h>
-#include <memory>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -221,12 +241,12 @@ void WiredTigerRecoveryUnit::setTxnModified() {
 }
 
 boost::optional<int64_t> WiredTigerRecoveryUnit::getOplogVisibilityTs() {
-    if (!_isOplogReader) {
-        return boost::none;
-    }
-
     getSession();
     return _oplogVisibleTs;
+}
+
+void WiredTigerRecoveryUnit::setOplogVisibilityTs(boost::optional<int64_t> oplogVisibleTs) {
+    _oplogVisibleTs = oplogVisibleTs;
 }
 
 WiredTigerSession* WiredTigerRecoveryUnit::getSession() {
@@ -255,12 +275,6 @@ void WiredTigerRecoveryUnit::doAbandonSnapshot() {
 void WiredTigerRecoveryUnit::preallocateSnapshot() {
     // Begin a new transaction, if one is not already started.
     getSession();
-}
-
-void WiredTigerRecoveryUnit::preallocateSnapshotForOplogRead() {
-    // Indicate that we are an oplog reader before opening the snapshot
-    setIsOplogReader();
-    preallocateSnapshot();
 }
 
 void WiredTigerRecoveryUnit::_txnClose(bool commit) {
@@ -390,7 +404,6 @@ void WiredTigerRecoveryUnit::_txnClose(bool commit) {
     _prepareTimestamp = Timestamp();
     _durableTimestamp = Timestamp();
     _roundUpPreparedTimestamps = RoundUpPreparedTimestamps::kNoRound;
-    _isOplogReader = false;
     _oplogVisibleTs = boost::none;
     _orderedCommit = true;  // Default value is true; we assume all writes are ordered.
     if (_untimestampedWriteAssertionLevel !=
@@ -447,7 +460,7 @@ boost::optional<Timestamp> WiredTigerRecoveryUnit::getPointInTimeReadTimestamp(
     }
 
     // Ensure a transaction is opened. Storage engine operations require the global lock.
-    invariant(opCtx->lockState()->isNoop() || opCtx->lockState()->isLocked());
+    invariant(opCtx->lockState()->isLocked());
     getSession();
 
     switch (_timestampReadSource) {
@@ -489,9 +502,7 @@ void WiredTigerRecoveryUnit::_txnOpen() {
 
     switch (_timestampReadSource) {
         case ReadSource::kNoTimestamp: {
-            if (_isOplogReader) {
-                _oplogVisibleTs = static_cast<std::int64_t>(_oplogManager->getOplogReadTimestamp());
-            }
+            _oplogVisibleTs = static_cast<std::int64_t>(_oplogManager->getOplogReadTimestamp());
             WiredTigerBeginTxnBlock(session,
                                     _prepareConflictBehavior,
                                     _roundUpPreparedTimestamps,

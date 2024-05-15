@@ -29,12 +29,27 @@
 
 #pragma once
 
+#include <algorithm>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/preprocessor/facilities/overload.hpp>
 #include <cstdlib>
+#include <exception>
+#include <fmt/format.h>
+#include <iterator>
+#include <memory>
 #include <string>
+#include <type_traits>
 #include <typeinfo>
+#include <utility>
+#include <vector>
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/error_extra_info.h"
+#include "mongo/base/static_assert.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/platform/source_location.h"
 #include "mongo/util/assert_util_core.h"  // IWYU pragma: export
@@ -157,11 +172,20 @@ public:
 };
 
 /**
+ * Encompasses a class of exceptions due to lack of resources or conflicting resources. Can be used
+ * to conveniently catch all derived exceptions instead of enumerating each of them individually.
+ */
+class StorageUnavailableException : public DBException {
+public:
+    using DBException::DBException;
+};
+
+/**
  * Use `throwWriteConflictException()` instead of throwing `WriteConflictException` directly.
  */
-class WriteConflictException final : public DBException {
+class WriteConflictException final : public StorageUnavailableException {
 public:
-    WriteConflictException(const Status& status) : DBException(status) {}
+    WriteConflictException(const Status& status) : StorageUnavailableException(status) {}
 
 private:
     void defineOnlyInFinalSubclassToPreventSlicing() final {}
@@ -171,9 +195,9 @@ private:
  * Use `throwTemporarilyUnavailableException()` instead of throwing
  * `TemporarilyUnavailableException` directly.
  */
-class TemporarilyUnavailableException final : public DBException {
+class TemporarilyUnavailableException final : public StorageUnavailableException {
 public:
-    TemporarilyUnavailableException(const Status& status) : DBException(status) {}
+    TemporarilyUnavailableException(const Status& status) : StorageUnavailableException(status) {}
 
 private:
     void defineOnlyInFinalSubclassToPreventSlicing() final {}
@@ -183,9 +207,10 @@ private:
  * Use `throwTransactionTooLargeForCache()` instead of throwing
  * `TransactionTooLargeForCache` directly.
  */
-class TransactionTooLargeForCacheException final : public DBException {
+class TransactionTooLargeForCacheException final : public StorageUnavailableException {
 public:
-    TransactionTooLargeForCacheException(const Status& status) : DBException(status) {}
+    TransactionTooLargeForCacheException(const Status& status)
+        : StorageUnavailableException(status) {}
 
 private:
     void defineOnlyInFinalSubclassToPreventSlicing() final {}

@@ -27,31 +27,59 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr.hpp>
+#include <cstdint>
+#include <functional>
+#include <set>
+#include <tuple>
+#include <utility>
 
-#include "mongo/db/s/query_analysis_writer.h"
+#include <boost/optional/optional.hpp>
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/client/connpool.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/ops/write_ops.h"
+#include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
-#include "mongo/db/server_options.h"
+#include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/update/document_diff_calculator.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/redaction.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/analyze_shard_key_documents_gen.h"
+#include "mongo/s/analyze_shard_key_role.h"
 #include "mongo/s/analyze_shard_key_server_parameters_gen.h"
 #include "mongo/s/analyze_shard_key_util.h"
 #include "mongo/s/query_analysis_client.h"
 #include "mongo/s/query_analysis_sample_tracker.h"
 #include "mongo/s/write_ops/batched_command_response.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/cancellation.h"
+#include "mongo/util/clock_source.h"
 #include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/future_impl.h"
 #include "mongo/util/future_util.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
@@ -60,6 +88,9 @@ namespace mongo {
 namespace analyze_shard_key {
 
 namespace {
+
+using WriterIntervalSecs =
+    decltype(QueryAnalysisWriter::observeQueryAnalysisWriterIntervalSecs)::Argument;
 
 const auto getQueryAnalysisWriter = ServiceContext::declareDecoration<QueryAnalysisWriter>();
 
@@ -94,11 +125,6 @@ BSONObj createIndex(OperationContext* opCtx, const NamespaceString& nss, const B
     return resObj;
 }
 
-bool isInternalClient(const OperationContext* opCtx) {
-    return !opCtx->getClient()->session() ||
-        (opCtx->getClient()->session()->getTags() & transport::Session::kInternalClient);
-}
-
 struct SampledCommandRequest {
     UUID sampleId;
     NamespaceString nss;
@@ -124,7 +150,7 @@ SampledCommandRequest makeSampledReadCommand(const UUID& sampleId,
  * Returns a sampled update command for the update at 'opIndex' in the given update command.
  */
 SampledCommandRequest makeSampledUpdateCommandRequest(
-    const OperationContext* opCtx,
+    OperationContext* opCtx,
     const UUID& sampleId,
     const write_ops::UpdateCommandRequest& originalCmd,
     int opIndex) {
@@ -154,16 +180,17 @@ SampledCommandRequest makeSampledUpdateCommandRequest(
     write_ops::UpdateCommandRequest sampledCmd(originalCmd.getNamespace(), {std::move(op)});
     sampledCmd.setLet(originalCmd.getLet());
 
-    return {sampleId,
-            sampledCmd.getNamespace(),
-            sampledCmd.toBSON(BSON("$db" << sampledCmd.getNamespace().db().toString()))};
+    return {
+        sampleId,
+        sampledCmd.getNamespace(),
+        sampledCmd.toBSON(BSON("$db" << sampledCmd.getNamespace().db_forSharding().toString()))};
 }
 
 /*
  * Returns a sampled delete command for the delete at 'opIndex' in the given delete command.
  */
 SampledCommandRequest makeSampledDeleteCommandRequest(
-    const OperationContext* opCtx,
+    OperationContext* opCtx,
     const UUID& sampleId,
     const write_ops::DeleteCommandRequest& originalCmd,
     int opIndex) {
@@ -193,9 +220,10 @@ SampledCommandRequest makeSampledDeleteCommandRequest(
     write_ops::DeleteCommandRequest sampledCmd(originalCmd.getNamespace(), {std::move(op)});
     sampledCmd.setLet(originalCmd.getLet());
 
-    return {sampleId,
-            sampledCmd.getNamespace(),
-            sampledCmd.toBSON(BSON("$db" << sampledCmd.getNamespace().db().toString()))};
+    return {
+        sampleId,
+        sampledCmd.getNamespace(),
+        sampledCmd.toBSON(BSON("$db" << sampledCmd.getNamespace().db_forSharding().toString()))};
 }
 
 /*
@@ -235,9 +263,10 @@ SampledCommandRequest makeSampledFindAndModifyCommandRequest(
     sampledCmd.setArrayFilters(originalCmd.getArrayFilters());
     sampledCmd.setLet(originalCmd.getLet());
 
-    return {sampleId,
-            sampledCmd.getNamespace(),
-            sampledCmd.toBSON(BSON("$db" << sampledCmd.getNamespace().db().toString()))};
+    return {
+        sampleId,
+        sampledCmd.getNamespace(),
+        sampledCmd.toBSON(BSON("$db" << sampledCmd.getNamespace().db_forSharding().toString()))};
 }
 
 /*
@@ -313,11 +342,12 @@ void QueryAnalysisWriter::onStartup(OperationContext* opCtx) {
             auto opCtx = client->makeOperationContext();
             _flushQueries(opCtx.get());
         },
-        Seconds(gQueryAnalysisWriterIntervalSecs),
+        Seconds(gQueryAnalysisWriterIntervalSecs.load()),
         // TODO(SERVER-74662): Please revisit if this periodic job could be made killable.
         false /*isKillableByStepdown*/);
-    _periodicQueryWriter = periodicRunner->makeJob(std::move(queryWriterJob));
-    _periodicQueryWriter.start();
+    _periodicQueryWriter =
+        std::make_shared<PeriodicJobAnchor>(periodicRunner->makeJob(std::move(queryWriterJob)));
+    _periodicQueryWriter->start();
 
     PeriodicRunner::PeriodicJob diffWriterJob(
         "QueryAnalysisDiffWriter",
@@ -328,11 +358,26 @@ void QueryAnalysisWriter::onStartup(OperationContext* opCtx) {
             auto opCtx = client->makeOperationContext();
             _flushDiffs(opCtx.get());
         },
-        Seconds(gQueryAnalysisWriterIntervalSecs),
+        Seconds(gQueryAnalysisWriterIntervalSecs.load()),
         // TODO(SERVER-74662): Please revisit if this periodic job could be made killable.
         false /*isKillableByStepdown*/);
-    _periodicDiffWriter = periodicRunner->makeJob(std::move(diffWriterJob));
-    _periodicDiffWriter.start();
+    _periodicDiffWriter =
+        std::make_shared<PeriodicJobAnchor>(periodicRunner->makeJob(std::move(diffWriterJob)));
+    _periodicDiffWriter->start();
+
+    QueryAnalysisWriter::observeQueryAnalysisWriterIntervalSecs.addObserver(
+        [queryWriter = _periodicQueryWriter,
+         diffWriter = _periodicDiffWriter](const WriterIntervalSecs& secs) {
+            try {
+                queryWriter->setPeriod(Seconds(secs));
+                diffWriter->setPeriod(Seconds(secs));
+            } catch (const DBException& ex) {
+                LOGV2(7891302,
+                      "Failed to update the periods of the threads for writing sampled queries and "
+                      "diffs to disk",
+                      "error"_attr = ex.toStatus());
+            }
+        });
 
     ThreadPool::Options threadPoolOptions;
     threadPoolOptions.maxThreads = gQueryAnalysisWriterMaxThreadPoolSize;
@@ -357,11 +402,11 @@ void QueryAnalysisWriter::onShutdown() {
         _executor->shutdown();
         _executor->join();
     }
-    if (_periodicQueryWriter.isValid()) {
-        _periodicQueryWriter.stop();
+    if (_periodicQueryWriter && _periodicQueryWriter->isValid()) {
+        _periodicQueryWriter->stop();
     }
-    if (_periodicDiffWriter.isValid()) {
-        _periodicDiffWriter.stop();
+    if (_periodicDiffWriter && _periodicDiffWriter->isValid()) {
+        _periodicDiffWriter->stop();
     }
 }
 

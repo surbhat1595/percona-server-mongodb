@@ -4,14 +4,11 @@
  * @tags: [
  *   requires_replication,
  *   # TODO SERVER-67607: Test plan cache with CQF enabled.
- *   cqf_incompatible,
+ *   cqf_experimental_incompatible,
  * ]
  */
-(function() {
-"use strict";
-
-load('jstests/libs/analyze_plan.js');  // For getCachedPlan().
-load("jstests/libs/sbe_util.js");      // For checkSBEEnabled.
+import {getCachedPlan} from "jstests/libs/analyze_plan.js";
+import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
 const dbName = "test";
 const collName = "coll";
@@ -63,10 +60,7 @@ function runTest({rst, readDB, writeDB}) {
     // single plan exists.
     assert.commandWorked(writeDB.runCommand({
         createIndexes: collName,
-        indexes: [
-            {key: {y: 1}, name: "less_selective", background: false},
-            {key: {z: 1}, name: "least_selective", background: false}
-        ],
+        indexes: [{key: {y: 1}, name: "less_selective"}, {key: {z: 1}, name: "least_selective"}],
         writeConcern: {w: "majority"}
     }));
 
@@ -102,7 +96,7 @@ function runTest({rst, readDB, writeDB}) {
         const testDB = db.getSiblingDB(TestData.dbName);
         assert.commandWorked(testDB.runCommand({
             createIndexes: TestData.collName,
-            indexes: [{key: {x: 1}, name: "most_selective", background: true}],
+            indexes: [{key: {x: 1}, name: "most_selective"}],
             writeConcern: {w: "majority"}
         }));
     }, writeDB.getMongo().port);
@@ -155,7 +149,7 @@ function runTest({rst, readDB, writeDB}) {
     // Build a "most selective" index in the foreground.
     assert.commandWorked(writeDB.runCommand({
         createIndexes: collName,
-        indexes: [{key: {x: 1}, name: "most_selective", background: false}],
+        indexes: [{key: {x: 1}, name: "most_selective"}],
         writeConcern: {w: "majority"}
     }));
 
@@ -183,11 +177,10 @@ const secondaryDB = rst.getSecondary().getDB(dbName);
 if (checkSBEEnabled(primaryDB)) {
     jsTest.log("Skipping test because SBE is enabled");
     rst.stopSet();
-    return;
+    quit();
 }
 
 runTest({rst: rst, readDB: primaryDB, writeDB: primaryDB});
 runTest({rst: rst, readDB: secondaryDB, writeDB: primaryDB});
 
 rst.stopSet();
-})();

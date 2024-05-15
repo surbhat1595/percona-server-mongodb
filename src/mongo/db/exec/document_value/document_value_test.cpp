@@ -27,17 +27,48 @@
  *    it in the license file.
  */
 
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <variant>
+#include <vector>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_depth.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/bsontypes_util.h"
+#include "mongo/bson/json.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/bson/util/builder.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_comparator.h"
+#include "mongo/db/exec/document_value/document_internal.h"
+#include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/db/json.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/logv2/log.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/platform/decimal128.h"
+#include "mongo/stdx/variant.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/bson_test_util.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/bufreader.h"
+#include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -891,7 +922,7 @@ TEST(MetaFields, CopyMetadataFromCopiesAllMetadata) {
                  << "h" << 1 << "$indexKey" << BSON("y" << 1) << "$searchScoreDetails"
                  << BSON("scoreDetails"
                          << "foo")
-                 << "$searchSortValues" << BSON("a" << 1)));
+                 << "$searchSortValues" << BSON("a" << 1) << "$vectorSearchDistance" << 6.7));
 
     MutableDocument destination{};
     destination.copyMetaDataFrom(source);
@@ -909,6 +940,7 @@ TEST(MetaFields, CopyMetadataFromCopiesAllMetadata) {
                       BSON("scoreDetails"
                            << "foo"));
     ASSERT_BSONOBJ_EQ(result.metadata().getSearchSortValues(), BSON("a" << 1));
+    ASSERT_EQ(result.metadata().getVectorSearchDistance(), 6.7);
 }
 
 class SerializationTest : public unittest::Test {
@@ -929,6 +961,8 @@ protected:
         ASSERT_EQ(output.metadata().hasSearchScore(), input.metadata().hasSearchScore());
         ASSERT_EQ(output.metadata().hasSearchHighlights(), input.metadata().hasSearchHighlights());
         ASSERT_EQ(output.metadata().hasIndexKey(), input.metadata().hasIndexKey());
+        ASSERT_EQ(output.metadata().hasVectorSearchDistance(),
+                  input.metadata().hasVectorSearchDistance());
         if (input.metadata().hasTextScore()) {
             ASSERT_EQ(output.metadata().getTextScore(), input.metadata().getTextScore());
         }
@@ -949,6 +983,10 @@ protected:
             ASSERT_BSONOBJ_EQ(output.metadata().getSearchScoreDetails(),
                               input.metadata().getSearchScoreDetails());
         }
+        if (input.metadata().hasVectorSearchDistance()) {
+            ASSERT_EQ(output.metadata().getVectorSearchDistance(),
+                      input.metadata().getVectorSearchDistance());
+        }
 
         ASSERT(output.toBson().binaryEqual(input.toBson()));
     }
@@ -963,6 +1001,7 @@ TEST_F(SerializationTest, MetaSerializationNoVals) {
                                                         << "def"_sd));
     docBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails"
                                                      << "foo"));
+    docBuilder.metadata().setVectorSearchDistance(40.0);
     assertRoundTrips(docBuilder.freeze());
 }
 
@@ -977,6 +1016,7 @@ TEST_F(SerializationTest, MetaSerializationWithVals) {
     docBuilder.metadata().setIndexKey(BSON("key" << 42));
     docBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails"
                                                      << "foo"));
+    docBuilder.metadata().setVectorSearchDistance(40.0);
     assertRoundTrips(docBuilder.freeze());
 }
 
@@ -1000,6 +1040,7 @@ TEST(MetaFields, ToAndFromBson) {
     docBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails"
                                                      << "foo"));
     docBuilder.metadata().setSearchSortValues(BSON("a" << 42));
+    docBuilder.metadata().setVectorSearchDistance(40.0);
     Document doc = docBuilder.freeze();
     BSONObj obj = doc.toBsonWithMetaData();
     ASSERT_EQ(10.0, obj[Document::metaFieldTextScore].Double());
@@ -1012,6 +1053,7 @@ TEST(MetaFields, ToAndFromBson) {
                       BSON("scoreDetails"
                            << "foo"));
     ASSERT_BSONOBJ_EQ(BSON("a" << 42), obj[Document::metaFieldSearchSortValues].Obj());
+    ASSERT_EQ(40.0, obj[Document::metaFieldVectorSearchDistance].Double());
     Document fromBson = Document::fromBsonWithMetaData(obj);
     ASSERT_TRUE(fromBson.metadata().hasTextScore());
     ASSERT_TRUE(fromBson.metadata().hasRandVal());
@@ -1021,6 +1063,7 @@ TEST(MetaFields, ToAndFromBson) {
                            << "foo"),
                       fromBson.metadata().getSearchScoreDetails());
     ASSERT_BSONOBJ_EQ(BSON("a" << 42), fromBson.metadata().getSearchSortValues());
+    ASSERT_EQ(40.0, fromBson.metadata().getVectorSearchDistance());
 }
 
 TEST(MetaFields, ToAndFromBsonTrivialConvertibility) {

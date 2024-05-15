@@ -27,17 +27,51 @@
  *    it in the license file.
  */
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <cstddef>
+#include <fmt/format.h>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/collection_write_path.h"
+#include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/drop_collection.h"
+#include "mongo/db/catalog/index_catalog.h"
+#include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/catalog/rename_collection.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
+#include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/record_id.h"
-#include "mongo/dbtests/dbtests.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/key_string.h"
+#include "mongo/db/storage/record_data.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 namespace RollbackTests {
@@ -58,8 +92,8 @@ void dropDatabase(OperationContext* opCtx, const NamespaceString& nss) {
 }
 
 bool collectionExists(OperationContext* opCtx, OldClientContext* ctx, StringData ns) {
-    return (bool)CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx,
-                                                                            NamespaceString(ns));
+    return (bool)CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
+        opCtx, NamespaceString::createNamespaceString_forTest(ns));
 }
 
 void createCollection(OperationContext* opCtx, const NamespaceString& nss) {
@@ -137,9 +171,9 @@ size_t getNumIndexEntries(OperationContext* opCtx,
     if (desc) {
         auto iam = catalog->getEntry(desc)->accessMethod()->asSortedData();
         auto cursor = iam->newCursor(opCtx);
-        KeyString::Builder keyString(iam->getSortedDataInterface()->getKeyStringVersion(),
-                                     BSONObj(),
-                                     iam->getSortedDataInterface()->getOrdering());
+        key_string::Builder keyString(iam->getSortedDataInterface()->getKeyStringVersion(),
+                                      BSONObj(),
+                                      iam->getSortedDataInterface()->getOrdering());
         for (auto kv = cursor->seek(keyString.getValueCopy()); kv; kv = cursor->next()) {
             numEntries++;
         }
@@ -172,7 +206,7 @@ public:
         std::string ns = "unittests.rollback_create_collection";
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
-        NamespaceString nss(ns);
+        NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
         dropDatabase(&opCtx, nss);
 
         Lock::DBLock dbXLock(&opCtx, nss.dbName(), MODE_X);
@@ -209,7 +243,7 @@ public:
         std::string ns = "unittests.rollback_drop_collection";
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
-        NamespaceString nss(ns);
+        NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
         dropDatabase(&opCtx, nss);
 
         Lock::DBLock dbXLock(&opCtx, nss.dbName(), MODE_X);
@@ -230,7 +264,8 @@ public:
         {
             WriteUnitOfWork uow(&opCtx);
             ASSERT(collectionExists(&opCtx, &ctx, ns));
-            ASSERT_OK(ctx.db()->dropCollection(&opCtx, NamespaceString(ns)));
+            ASSERT_OK(ctx.db()->dropCollection(&opCtx,
+                                               NamespaceString::createNamespaceString_forTest(ns)));
             ASSERT(!collectionExists(&opCtx, &ctx, ns));
             if (!rollback) {
                 uow.commit();
@@ -253,8 +288,10 @@ public:
             return;
         }
 
-        NamespaceString source("unittests.rollback_rename_collection_src");
-        NamespaceString target("unittests.rollback_rename_collection_dest");
+        NamespaceString source = NamespaceString::createNamespaceString_forTest(
+            "unittests.rollback_rename_collection_src");
+        NamespaceString target = NamespaceString::createNamespaceString_forTest(
+            "unittests.rollback_rename_collection_dest");
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
 
@@ -307,8 +344,10 @@ public:
             return;
         }
 
-        NamespaceString source("unittests.rollback_rename_droptarget_collection_src");
-        NamespaceString target("unittests.rollback_rename_droptarget_collection_dest");
+        NamespaceString source = NamespaceString::createNamespaceString_forTest(
+            "unittests.rollback_rename_droptarget_collection_src");
+        NamespaceString target = NamespaceString::createNamespaceString_forTest(
+            "unittests.rollback_rename_droptarget_collection_dest");
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
 
@@ -378,7 +417,8 @@ template <bool rollback, bool defaultIndexes>
 class ReplaceCollection {
 public:
     void run() {
-        NamespaceString nss("unittests.rollback_replace_collection");
+        NamespaceString nss =
+            NamespaceString::createNamespaceString_forTest("unittests.rollback_replace_collection");
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
         dropDatabase(&opCtx, nss);
@@ -436,7 +476,8 @@ template <bool rollback, bool defaultIndexes>
 class TruncateCollection {
 public:
     void run() {
-        NamespaceString nss("unittests.rollback_truncate_collection");
+        NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+            "unittests.rollback_truncate_collection");
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
         dropDatabase(&opCtx, nss);
@@ -490,7 +531,7 @@ public:
         std::string ns = "unittests.rollback_create_index";
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
-        NamespaceString nss(ns);
+        NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
         dropDatabase(&opCtx, nss);
         createCollection(&opCtx, nss);
 
@@ -532,7 +573,7 @@ public:
         std::string ns = "unittests.rollback_drop_index";
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
-        NamespaceString nss(ns);
+        NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
         dropDatabase(&opCtx, nss);
         createCollection(&opCtx, nss);
 
@@ -586,7 +627,7 @@ public:
         std::string ns = "unittests.rollback_create_drop_index";
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
-        NamespaceString nss(ns);
+        NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
         dropDatabase(&opCtx, nss);
         createCollection(&opCtx, nss);
 
@@ -630,7 +671,7 @@ public:
         std::string ns = "unittests.rollback_create_collection_and_indexes";
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
-        NamespaceString nss(ns);
+        NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
         dropDatabase(&opCtx, nss);
 
         Lock::DBLock dbXLock(&opCtx, nss.dbName(), MODE_X);

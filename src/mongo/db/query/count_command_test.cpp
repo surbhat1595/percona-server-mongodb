@@ -27,21 +27,40 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <vector>
 
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
+#include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/db/basic_types_gen.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/query/count_command_as_aggregation_command.h"
 #include "mongo/db/query/count_command_gen.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/util/str.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/rpc/op_msg.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/bson_test_util.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace {
 
-static const NamespaceString testns("TestDB.TestColl");
+static const NamespaceString testns =
+    NamespaceString::createNamespaceString_forTest("TestDB.TestColl");
 
 const IDLParserContext ctxt("count");
 
@@ -175,7 +194,7 @@ TEST(CountCommandTest, ConvertToAggregationWithHint) {
                            << "hint" << BSON("x" << 1));
     auto countCmd = CountCommandRequest::parse(ctxt, commandObj);
     auto agg = uassertStatusOK(countCommandAsAggregationCommand(countCmd, testns));
-    auto cmdObj = OpMsgRequest::fromDBAndBody(testns.db(), agg).body;
+    auto cmdObj = OpMsgRequest::fromDBAndBody(testns.db_forTest(), agg).body;
 
     auto ar = uassertStatusOK(aggregation_request_helper::parseFromBSONForTests(testns, cmdObj));
     ASSERT_BSONOBJ_EQ(ar.getHint().value_or(BSONObj()), BSON("x" << 1));
@@ -197,7 +216,7 @@ TEST(CountCommandTest, ConvertToAggregationWithQueryAndFilterAndLimit) {
                            << "limit" << 200 << "skip" << 300 << "query" << BSON("x" << 7));
     auto countCmd = CountCommandRequest::parse(ctxt, commandObj);
     auto agg = uassertStatusOK(countCommandAsAggregationCommand(countCmd, testns));
-    auto cmdObj = OpMsgRequest::fromDBAndBody(testns.db(), agg).body;
+    auto cmdObj = OpMsgRequest::fromDBAndBody(testns.db_forTest(), agg).body;
 
     auto ar = uassertStatusOK(aggregation_request_helper::parseFromBSONForTests(testns, cmdObj));
     ASSERT_EQ(ar.getCursor().getBatchSize().value_or(aggregation_request_helper::kDefaultBatchSize),
@@ -223,7 +242,7 @@ TEST(CountCommandTest, ConvertToAggregationWithMaxTimeMS) {
                                                     << "maxTimeMS" << 100 << "$db"
                                                     << "TestDB"));
     auto agg = uassertStatusOK(countCommandAsAggregationCommand(countCmd, testns));
-    auto cmdObj = OpMsgRequest::fromDBAndBody(testns.db(), agg).body;
+    auto cmdObj = OpMsgRequest::fromDBAndBody(testns.db_forTest(), agg).body;
 
     auto ar = uassertStatusOK(aggregation_request_helper::parseFromBSONForTests(testns, cmdObj));
     ASSERT_EQ(ar.getMaxTimeMS().value_or(0), 100u);
@@ -246,7 +265,7 @@ TEST(CountCommandTest, ConvertToAggregationWithQueryOptions) {
     countCmd.setQueryOptions(BSON("readPreference"
                                   << "secondary"));
     auto agg = uassertStatusOK(countCommandAsAggregationCommand(countCmd, testns));
-    auto cmdObj = OpMsgRequest::fromDBAndBody(testns.db(), agg).body;
+    auto cmdObj = OpMsgRequest::fromDBAndBody(testns.db_forTest(), agg).body;
 
     auto ar = uassertStatusOK(aggregation_request_helper::parseFromBSONForTests(testns, cmdObj));
     ASSERT_BSONOBJ_EQ(ar.getUnwrappedReadPref().value_or(BSONObj()),
@@ -271,7 +290,7 @@ TEST(CountCommandTest, ConvertToAggregationWithReadConcern) {
     countCmd.setReadConcern(BSON("level"
                                  << "linearizable"));
     auto agg = uassertStatusOK(countCommandAsAggregationCommand(countCmd, testns));
-    auto cmdObj = OpMsgRequest::fromDBAndBody(testns.db(), agg).body;
+    auto cmdObj = OpMsgRequest::fromDBAndBody(testns.db_forTest(), agg).body;
 
     auto ar = uassertStatusOK(aggregation_request_helper::parseFromBSONForTests(testns, cmdObj));
     ASSERT_BSONOBJ_EQ(ar.getReadConcern().value_or(BSONObj()),

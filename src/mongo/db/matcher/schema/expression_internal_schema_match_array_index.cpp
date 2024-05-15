@@ -27,8 +27,15 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <utility>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/matcher/schema/expression_internal_schema_match_array_index.h"
 
 namespace mongo {
@@ -66,13 +73,13 @@ bool InternalSchemaMatchArrayIndexMatchExpression::equivalent(const MatchExpress
         _expression->equivalent(other->_expression.get());
 }
 
-BSONObj InternalSchemaMatchArrayIndexMatchExpression::getSerializedRightHandSide(
-    SerializationOptions opts) const {
-    return BSON(
-        kName << BSON(
-            "index" << opts.serializeLiteral(_index) << "namePlaceholder"
-                    << opts.serializeFieldPathFromString(_expression->getPlaceholder().value_or(""))
-                    << "expression" << _expression->getFilter()->serialize(opts)));
+void InternalSchemaMatchArrayIndexMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, SerializationOptions opts) const {
+    bob->append(kName,
+                BSON("index" << opts.serializeLiteral(_index) << "namePlaceholder"
+                             << opts.serializeFieldPathFromString(
+                                    _expression->getPlaceholder().value_or(""))
+                             << "expression" << _expression->getFilter()->serialize(opts)));
 }
 
 std::unique_ptr<MatchExpression> InternalSchemaMatchArrayIndexMatchExpression::clone() const {

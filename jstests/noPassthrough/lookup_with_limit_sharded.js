@@ -12,9 +12,13 @@
  *   requires_sharding,
  * ]
  */
-(function() {
-load("jstests/libs/analyze_plan.js");  // For getAggPlanStages().
-load("jstests/libs/sbe_util.js");      // For checkSBEEnabled.
+import {
+    flattenQueryPlanTree,
+    getAggPlanStages,
+    getPlanStage,
+    getWinningPlan
+} from "jstests/libs/analyze_plan.js";
+import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
 const st = new ShardingTest({shards: 2, config: 1});
 const db = st.s.getDB("test");
@@ -22,7 +26,7 @@ const db = st.s.getDB("test");
 if (!checkSBEEnabled(db)) {
     jsTestLog("Skipping test because SBE $lookup is not enabled.");
     st.stop();
-    return;
+    quit();
 }
 
 const coll = db.lookup_with_limit;
@@ -82,8 +86,16 @@ const multiLookupPipeline = [
     {$lookup: {from: other.getName(), localField: "x", foreignField: "x", as: "additional"}},
     {$limit: 5}
 ];
-checkUnshardedResults(
-    multiLookupPipeline, ["COLLSCAN", "LIMIT", "EQ_LOOKUP"], ["$addFields", "$lookup"]);
+
+// TODO SERVER-72549: Remove use of featureFlagSbeFull by SBE Pushdown feature.
+if (checkSBEEnabled(db, ["featureFlagSbeFull"])) {
+    checkUnshardedResults(multiLookupPipeline,
+                          ["COLLSCAN", "LIMIT", "EQ_LOOKUP", "PROJECTION_DEFAULT", "EQ_LOOKUP"],
+                          []);
+} else {
+    checkUnshardedResults(
+        multiLookupPipeline, ["COLLSCAN", "LIMIT", "EQ_LOOKUP"], ["$addFields", "$lookup"]);
+}
 
 // Check that lookup->unwind->limit is reordered to lookup->limit, with the unwind stage being
 // absorbed into the lookup stage and preventing the limit from swapping before it.
@@ -127,4 +139,3 @@ checkShardedResults(sortPipeline, 0);
 checkShardedResults(topKSortPipeline, 2);
 
 st.stop();
-}());

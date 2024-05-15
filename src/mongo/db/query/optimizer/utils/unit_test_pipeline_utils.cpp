@@ -29,12 +29,38 @@
 
 #include "mongo/db/query/optimizer/utils/unit_test_pipeline_utils.h"
 
+#include <map>
+#include <ostream>
+#include <set>
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/container/node_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/base/init.h"  // IWYU pragma: keep
+#include "mongo/base/initializer.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/json.h"
+#include "mongo/db/client.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/abt/document_source_visitor.h"
+#include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/query/cost_model/cost_model_gen.h"
 #include "mongo/db/query/optimizer/explain.h"
-#include "mongo/db/query/optimizer/rewrites/const_eval.h"
+#include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
+#include "mongo/db/query/optimizer/utils/strong_alias.h"
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
+#include "mongo/unittest/assert.h"
 #include "mongo/unittest/temp_dir.h"
+#include "mongo/util/intrusive_counter.h"
 
 
 namespace mongo::optimizer {
@@ -84,7 +110,10 @@ ABT translatePipeline(const Metadata& metadata,
                       const std::vector<ExpressionContext::ResolvedNamespace>& involvedNss) {
     auto opCtx = cc().makeOperationContext();
     auto pipeline =
-        parsePipeline(NamespaceString("a." + scanDefName), pipelineStr, *opCtx, involvedNss);
+        parsePipeline(NamespaceString::createNamespaceString_forTest("a." + scanDefName),
+                      pipelineStr,
+                      *opCtx,
+                      involvedNss);
     return translatePipelineToABT(metadata,
                                   *pipeline.get(),
                                   scanProjName,
@@ -94,9 +123,9 @@ ABT translatePipeline(const Metadata& metadata,
 
 void serializeOptPhases(std::ostream& stream, opt::unordered_set<OptPhase> phaseSet) {
     // The order of phases in the golden file must be the same every time the test is run.
-    std::set<std::string> orderedPhases;
+    std::set<StringData> orderedPhases;
     for (const auto& phase : phaseSet) {
-        orderedPhases.insert(OptPhaseEnum::toString[static_cast<int>(phase)]);
+        orderedPhases.insert(toStringData(phase));
     }
 
     stream << "optimization phases: " << std::endl;
@@ -122,8 +151,7 @@ void serializeDistributionAndPaths(std::ostream& stream,
                                    DistributionAndPaths distributionAndPaths,
                                    std::string baseTabs) {
     stream << baseTabs << "distribution and paths: " << std::endl;
-    stream << baseTabs << "\tdistribution type: "
-           << DistributionTypeEnum::toString[static_cast<int>(distributionAndPaths._type)]
+    stream << baseTabs << "\tdistribution type: " << toStringData(distributionAndPaths._type)
            << std::endl;
     stream << baseTabs << "\tdistribution paths: " << std::endl;
     for (const ABT& abt : distributionAndPaths._paths) {
@@ -169,8 +197,7 @@ void serializeMetadata(std::ostream& stream, Metadata metadata) {
                                            "\t\t\t\t\t\t\t",
                                            ExplainGenerator::explainV2(indexCollationEntry._path));
 
-                stream << "\t\t\t\t\t\tcollation op: "
-                       << CollationOpEnum::toString[static_cast<int>(indexCollationEntry._op)]
+                stream << "\t\t\t\t\t\tcollation op: " << toStringData(indexCollationEntry._op)
                        << std::endl;
             }
 

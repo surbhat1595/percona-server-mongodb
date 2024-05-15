@@ -27,16 +27,31 @@
  *    it in the license file.
  */
 
-#include "mongo/bson/json.h"
+#include <boost/none.hpp>
+#include <initializer_list>
+#include <memory>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/commands/bulk_write_crud_op.h"
 #include "mongo/db/commands/bulk_write_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/ops/write_ops_parsers_test_helpers.h"
+#include "mongo/s/chunk_version.h"
+#include "mongo/s/index_version.h"
 #include "mongo/s/shard_version_factory.h"
 #include "mongo/s/write_ops/bulk_write_command_modifier.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/unittest/framework.h"
 
 namespace mongo {
 namespace {
@@ -59,7 +74,7 @@ TEST(BulkWriteCommandModifier, AddInsert) {
 
         auto nsInfo = request.getNsInfo();
         ASSERT_EQ(1, nsInfo.size());
-        ASSERT_EQ("TestDB", nsInfo[0].getNs().db());
+        ASSERT_EQ("TestDB", nsInfo[0].getNs().db_forTest());
         ASSERT_EQ("test", nsInfo[0].getNs().coll());
         ASSERT_EQ(2, request.getOps().size());
         ASSERT_EQ(boost::none, nsInfo[0].getShardVersion());
@@ -67,7 +82,7 @@ TEST(BulkWriteCommandModifier, AddInsert) {
 }
 
 TEST(BulkWriteCommandModifier, AddOpInsert) {
-    auto nss = NamespaceString("TestDB", "test");
+    auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     auto req = write_ops::InsertCommandRequest(nss);
     auto docs = std::vector<BSONObj>();
     docs.emplace_back(BSON("a" << 1));
@@ -81,14 +96,14 @@ TEST(BulkWriteCommandModifier, AddOpInsert) {
 
     auto nsInfo = request.getNsInfo();
     ASSERT_EQ(1, nsInfo.size());
-    ASSERT_EQ("TestDB", nsInfo[0].getNs().db());
+    ASSERT_EQ("TestDB", nsInfo[0].getNs().db_forTest());
     ASSERT_EQ("test", nsInfo[0].getNs().coll());
     ASSERT_EQ(2, request.getOps().size());
     ASSERT_EQ(boost::none, nsInfo[0].getShardVersion());
 }
 
 TEST(BulkWriteCommandModifier, AddInsertOps) {
-    auto nss = NamespaceString("TestDB", "test");
+    auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     auto docs = std::vector<BSONObj>();
     docs.emplace_back(BSON("a" << 1));
     docs.emplace_back(BSON("b" << 1));
@@ -100,7 +115,7 @@ TEST(BulkWriteCommandModifier, AddInsertOps) {
 
     auto nsInfo = request.getNsInfo();
     ASSERT_EQ(1, nsInfo.size());
-    ASSERT_EQ("TestDB", nsInfo[0].getNs().db());
+    ASSERT_EQ("TestDB", nsInfo[0].getNs().db_forTest());
     ASSERT_EQ("test", nsInfo[0].getNs().coll());
     ASSERT_EQ(2, request.getOps().size());
     ASSERT_EQ(boost::none, nsInfo[0].getShardVersion());
@@ -130,7 +145,7 @@ TEST(BulkWriteCommandModifier, InsertWithShardVersion) {
 
         auto nsInfo = request.getNsInfo();
         ASSERT_EQ(1, nsInfo.size());
-        ASSERT_EQ("TestDB", nsInfo[0].getNs().db());
+        ASSERT_EQ("TestDB", nsInfo[0].getNs().db_forTest());
         ASSERT_EQ("test", nsInfo[0].getNs().coll());
         ASSERT_NE(boost::none, nsInfo[0].getShardVersion());
         ASSERT_EQ(ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 2}),
@@ -141,7 +156,7 @@ TEST(BulkWriteCommandModifier, InsertWithShardVersion) {
 }
 
 TEST(BulkWriteCommandModifier, AddUpdate) {
-    auto nss = NamespaceString("TestDB", "test");
+    auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     const BSONObj query = BSON("x" << 1);
     const BSONObj update = BSON("$inc" << BSON("x" << 1));
     const BSONObj collation = BSON("locale"
@@ -154,7 +169,7 @@ TEST(BulkWriteCommandModifier, AddUpdate) {
                          << "multi" << multi << "upsert" << upsert << "collation" << collation);
             auto cmd = BSON("update" << nss.coll() << "updates" << BSON_ARRAY(rawUpdate));
             for (bool seq : {false, true}) {
-                auto opMsgRequest = toOpMsg(nss.db(), cmd, seq);
+                auto opMsgRequest = toOpMsg(nss.db_forTest(), cmd, seq);
 
                 BulkWriteCommandRequest request;
                 BulkWriteCommandModifier builder(&request);
@@ -163,7 +178,7 @@ TEST(BulkWriteCommandModifier, AddUpdate) {
 
                 auto nsInfo = request.getNsInfo();
                 ASSERT_EQ(1, nsInfo.size());
-                ASSERT_EQ("TestDB", nsInfo[0].getNs().db());
+                ASSERT_EQ("TestDB", nsInfo[0].getNs().db_forTest());
                 ASSERT_EQ("test", nsInfo[0].getNs().coll());
                 ASSERT_EQ(boost::none, nsInfo[0].getShardVersion());
 
@@ -183,7 +198,7 @@ TEST(BulkWriteCommandModifier, AddUpdate) {
 }
 
 TEST(BulkWriteCommandModifier, AddOpUpdate) {
-    auto nss = NamespaceString("TestDB", "test");
+    auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     const BSONObj query = BSON("x" << 1);
     const BSONObj update = BSON("$inc" << BSON("x" << 1));
     const BSONObj collation = BSON("locale"
@@ -210,7 +225,7 @@ TEST(BulkWriteCommandModifier, AddOpUpdate) {
 
             auto nsInfo = request.getNsInfo();
             ASSERT_EQ(1, nsInfo.size());
-            ASSERT_EQ("TestDB", nsInfo[0].getNs().db());
+            ASSERT_EQ("TestDB", nsInfo[0].getNs().db_forTest());
             ASSERT_EQ("test", nsInfo[0].getNs().coll());
             ASSERT_EQ(boost::none, nsInfo[0].getShardVersion());
 
@@ -229,7 +244,7 @@ TEST(BulkWriteCommandModifier, AddOpUpdate) {
 }
 
 TEST(BulkWriteCommandModifier, AddUpdateOps) {
-    auto nss = NamespaceString("TestDB", "test");
+    auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     const BSONObj query = BSON("x" << 1);
     const BSONObj update = BSON("$inc" << BSON("x" << 1));
     const BSONObj collation = BSON("locale"
@@ -256,7 +271,7 @@ TEST(BulkWriteCommandModifier, AddUpdateOps) {
 
                 auto nsInfo = request.getNsInfo();
                 ASSERT_EQ(1, nsInfo.size());
-                ASSERT_EQ("TestDB", nsInfo[0].getNs().db());
+                ASSERT_EQ("TestDB", nsInfo[0].getNs().db_forTest());
                 ASSERT_EQ("test", nsInfo[0].getNs().coll());
                 ASSERT_EQ(boost::none, nsInfo[0].getShardVersion());
 
@@ -277,7 +292,7 @@ TEST(BulkWriteCommandModifier, AddUpdateOps) {
 }
 
 TEST(CommandWriteOpsParsers, BulkWriteUpdateWithPipeline) {
-    auto nss = NamespaceString("TestDB", "test");
+    auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     const BSONObj query = BSON("q" << BSON("x" << 1));
     std::vector<BSONObj> pipeline{BSON("$addFields" << BSON("x" << 1))};
     const BSONObj update = BSON("u" << pipeline);
@@ -291,7 +306,7 @@ TEST(CommandWriteOpsParsers, BulkWriteUpdateWithPipeline) {
 
             auto nsInfo = request.getNsInfo();
             ASSERT_EQ(1, nsInfo.size());
-            ASSERT_EQ("TestDB", nsInfo[0].getNs().db());
+            ASSERT_EQ("TestDB", nsInfo[0].getNs().db_forTest());
             ASSERT_EQ("test", nsInfo[0].getNs().coll());
             ASSERT_EQ(boost::none, nsInfo[0].getShardVersion());
 
@@ -306,7 +321,7 @@ TEST(CommandWriteOpsParsers, BulkWriteUpdateWithPipeline) {
 }
 
 TEST(BulkWriteCommandModifier, AddDelete) {
-    auto nss = NamespaceString("TestDB", "test");
+    auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     const BSONObj query = BSON("x" << 1);
     const BSONObj collation = BSON("locale"
                                    << "en_US");
@@ -315,7 +330,7 @@ TEST(BulkWriteCommandModifier, AddDelete) {
             BSON("q" << query << "limit" << (multi ? 0 : 1) << "collation" << collation);
         auto cmd = BSON("delete" << nss.coll() << "deletes" << BSON_ARRAY(rawDelete));
         for (bool seq : {false, true}) {
-            auto opMsgRequest = toOpMsg(nss.db(), cmd, seq);
+            auto opMsgRequest = toOpMsg(nss.db_forTest(), cmd, seq);
 
 
             BulkWriteCommandRequest request;
@@ -325,7 +340,7 @@ TEST(BulkWriteCommandModifier, AddDelete) {
 
             auto nsInfo = request.getNsInfo();
             ASSERT_EQ(1, nsInfo.size());
-            ASSERT_EQ("TestDB", nsInfo[0].getNs().db());
+            ASSERT_EQ("TestDB", nsInfo[0].getNs().db_forTest());
             ASSERT_EQ("test", nsInfo[0].getNs().coll());
             ASSERT_EQ(boost::none, nsInfo[0].getShardVersion());
 
@@ -339,7 +354,7 @@ TEST(BulkWriteCommandModifier, AddDelete) {
 }
 
 TEST(BulkWriteCommandModifier, AddOpDelete) {
-    auto nss = NamespaceString("TestDB", "test");
+    auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     const BSONObj query = BSON("x" << 1);
     const BSONObj collation = BSON("locale"
                                    << "en_US");
@@ -359,7 +374,7 @@ TEST(BulkWriteCommandModifier, AddOpDelete) {
 
         auto nsInfo = request.getNsInfo();
         ASSERT_EQ(1, nsInfo.size());
-        ASSERT_EQ("TestDB", nsInfo[0].getNs().db());
+        ASSERT_EQ("TestDB", nsInfo[0].getNs().db_forTest());
         ASSERT_EQ("test", nsInfo[0].getNs().coll());
         ASSERT_EQ(boost::none, nsInfo[0].getShardVersion());
 
@@ -373,7 +388,7 @@ TEST(BulkWriteCommandModifier, AddOpDelete) {
 
 // Add delete ops
 TEST(BulkWriteCommandModifier, AddDeleteOps) {
-    auto nss = NamespaceString("TestDB", "test");
+    auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     const BSONObj query = BSON("x" << 1);
     const BSONObj collation = BSON("locale"
                                    << "en_US");
@@ -387,7 +402,7 @@ TEST(BulkWriteCommandModifier, AddDeleteOps) {
 
             auto nsInfo = request.getNsInfo();
             ASSERT_EQ(1, nsInfo.size());
-            ASSERT_EQ("TestDB", nsInfo[0].getNs().db());
+            ASSERT_EQ("TestDB", nsInfo[0].getNs().db_forTest());
             ASSERT_EQ("test", nsInfo[0].getNs().coll());
             ASSERT_EQ(boost::none, nsInfo[0].getShardVersion());
 
@@ -402,7 +417,7 @@ TEST(BulkWriteCommandModifier, AddDeleteOps) {
 }
 
 TEST(BulkWriteCommandModifier, TestMultiOpsSameNs) {
-    auto nss = NamespaceString("TestDB", "test");
+    auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     auto docs = std::vector<BSONObj>();
     docs.emplace_back(BSON("a" << 1));
     docs.emplace_back(BSON("b" << 1));
@@ -419,7 +434,7 @@ TEST(BulkWriteCommandModifier, TestMultiOpsSameNs) {
 
     auto nsInfo = request.getNsInfo();
     ASSERT_EQ(1, nsInfo.size());
-    ASSERT_EQ("TestDB", nsInfo[0].getNs().db());
+    ASSERT_EQ("TestDB", nsInfo[0].getNs().db_forTest());
     ASSERT_EQ("test", nsInfo[0].getNs().coll());
     ASSERT_EQ(boost::none, nsInfo[0].getShardVersion());
 
@@ -444,8 +459,8 @@ TEST(BulkWriteCommandModifier, TestMultiOpsSameNs) {
 
 // Multiple ops (different types) different namespaces
 TEST(BulkWriteCommandModifier, TestMultiOpsDifferentNs) {
-    auto nss = NamespaceString("TestDB", "test");
-    auto nss2 = NamespaceString("TestDB", "test1");
+    auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
+    auto nss2 = NamespaceString::createNamespaceString_forTest("TestDB", "test1");
     auto docs = std::vector<BSONObj>();
     docs.emplace_back(BSON("a" << 1));
     docs.emplace_back(BSON("b" << 1));
@@ -462,9 +477,9 @@ TEST(BulkWriteCommandModifier, TestMultiOpsDifferentNs) {
 
     auto nsInfo = request.getNsInfo();
     ASSERT_EQ(2, nsInfo.size());
-    ASSERT_EQ("TestDB", nsInfo[0].getNs().db());
+    ASSERT_EQ("TestDB", nsInfo[0].getNs().db_forTest());
     ASSERT_EQ("test", nsInfo[0].getNs().coll());
-    ASSERT_EQ("TestDB", nsInfo[1].getNs().db());
+    ASSERT_EQ("TestDB", nsInfo[1].getNs().db_forTest());
     ASSERT_EQ("test1", nsInfo[1].getNs().coll());
     ASSERT_EQ(boost::none, nsInfo[0].getShardVersion());
 

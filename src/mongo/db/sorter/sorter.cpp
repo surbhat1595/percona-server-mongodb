@@ -48,23 +48,52 @@
 
 #include "mongo/db/sorter/sorter.h"
 
+#include <algorithm>
 #include <boost/filesystem/operations.hpp>
+#include <cerrno>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <exception>
+#include <functional>
+#include <istream>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <queue>
 #include <snappy.h>
+#include <string>
+#include <system_error>
+#include <utility>
 #include <vector>
 
-#include "mongo/base/string_data.h"
-#include "mongo/config.h"
-#include "mongo/db/jsobj.h"
+// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
+#include <boost/filesystem/path.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/base/data_range.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/bson/util/builder_fwd.h"
+#include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/service_context.h"
+#include "mongo/db/sorter/sorter_gen.h"
+#include "mongo/db/sorter/sorter_stats.h"
 #include "mongo/db/storage/encryption_hooks.h"
-#include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/platform/overflow_arithmetic.h"
-#include "mongo/s/is_mongos.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/bufreader.h"
 #include "mongo/util/destructor_guard.h"
+#include "mongo/util/murmur3.h"
+#include "mongo/util/shared_buffer_fragment.h"
 #include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
@@ -77,17 +106,16 @@ namespace {
  * Calculates and returns a new murmur hash value based on the prior murmur hash and a new piece
  * of data.
  */
-uint32_t addDataToChecksum(const void* startOfData, size_t sizeOfData, uint32_t checksum) {
-    unsigned newChecksum;
-    MurmurHash3_x86_32(startOfData, sizeOfData, checksum, &newChecksum);
-    return newChecksum;
+uint32_t addDataToChecksum(const char* startOfData, size_t sizeOfData, uint32_t checksum) {
+    return murmur3<sizeof(uint32_t)>(ConstDataRange{startOfData, sizeOfData}, checksum);
 }
 
 void checkNoExternalSortOnMongos(const SortOptions& opts) {
     // This should be checked by consumers, but if it isn't try to fail early.
     uassert(16947,
             "Attempting to use external sort from mongos. This is not allowed.",
-            !(isMongos() && opts.extSortAllowed));
+            !(serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer) &&
+              opts.extSortAllowed));
 }
 
 /**
@@ -1391,8 +1419,9 @@ SortedFileWriter<Key, Value>::SortedFileWriter(
       _fileStartOffset(_file->currentOffset()),
       _opts(opts) {
     // This should be checked by consumers, but if we get here don't allow writes.
-    uassert(
-        16946, "Attempting to use external sort from mongos. This is not allowed.", !isMongos());
+    uassert(16946,
+            "Attempting to use external sort from mongos. This is not allowed.",
+            !serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer));
 
     uassert(17148,
             "Attempting to use external sort without setting SortOptions::tempDir",

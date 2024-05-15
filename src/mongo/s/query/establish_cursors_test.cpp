@@ -27,20 +27,43 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
+#include <boost/move/utility_core.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <fmt/format.h>
+// IWYU pragma: no_include "cxxabi.h"
+// IWYU pragma: no_include "ext/alloc_traits.h"
+#include <algorithm>
+#include <cstddef>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <system_error>
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/json.h"
+#include "mongo/client/connection_string.h"
 #include "mongo/client/remote_command_targeter_factory_mock.h"
 #include "mongo/client/remote_command_targeter_mock.h"
-#include "mongo/db/json.h"
+#include "mongo/db/client.h"
+#include "mongo/db/cursor_id.h"
 #include "mongo/db/query/cursor_response.h"
+#include "mongo/executor/network_test_env.h"
+#include "mongo/executor/remote_command_request.h"
 #include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/query/establish_cursors.h"
 #include "mongo/s/sharding_router_test_fixture.h"
+#include "mongo/unittest/assert.h"
 #include "mongo/unittest/barrier.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/net/hostandport.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 
@@ -69,7 +92,8 @@ std::vector<UUID> extractOperationKeys(BSONObj obj) {
 
 class EstablishCursorsTest : public ShardingTestFixture {
 public:
-    EstablishCursorsTest() : _nss("testdb.testcoll") {}
+    EstablishCursorsTest()
+        : _nss(NamespaceString::createNamespaceString_forTest("testdb.testcoll")) {}
 
     void setUp() override {
         ShardingTestFixture::setUp();
@@ -87,6 +111,8 @@ public:
 
             std::unique_ptr<RemoteCommandTargeterMock> targeter(
                 std::make_unique<RemoteCommandTargeterMock>());
+            _targeters.push_back(targeter.get());
+
             targeter->setConnectionStringReturnValue(ConnectionString(kTestShardHosts[i]));
             targeter->setFindHostReturnValue(kTestShardHosts[i]);
 
@@ -124,6 +150,7 @@ public:
 
 protected:
     const NamespaceString _nss;
+    std::vector<RemoteCommandTargeterMock*> _targeters;  // Targeters are owned by the factory.
 };
 
 TEST_F(EstablishCursorsTest, NoRemotes) {
@@ -151,6 +178,41 @@ TEST_F(EstablishCursorsTest, SingleRemoteRespondsWithSuccess) {
                                         remotes,
                                         false);  // allowPartialResults
         ASSERT_EQUALS(remotes.size(), cursors.size());
+    });
+
+    // Remote responds.
+    onCommand([this](const RemoteCommandRequest& request) {
+        ASSERT_EQ(_nss.coll(), request.cmdObj.firstElement().valueStringData());
+
+        std::vector<BSONObj> batch = {fromjson("{_id: 1}"), fromjson("{_id: 2}")};
+        CursorResponse cursorResponse(_nss, CursorId(123), batch);
+        return cursorResponse.toBSON(CursorResponse::ResponseType::InitialResponse);
+    });
+
+    future.default_timed_get();
+}
+
+TEST_F(EstablishCursorsTest, SingleRemoteRespondsWithDesignatedHost) {
+    BSONObj cmdObj = fromjson("{find: 'testcoll'}");
+    std::vector<std::pair<ShardId, BSONObj>> remotes{{kTestShardIds[0], cmdObj}};
+
+    AsyncRequestsSender::ShardHostMap designatedHosts;
+    auto shard0Secondary = HostAndPort("SecondaryHostShard0", 12345);
+    _targeters[0]->setConnectionStringReturnValue(
+        ConnectionString::forReplicaSet("shard0_rs"_sd, {kTestShardHosts[0], shard0Secondary}));
+    designatedHosts[kTestShardIds[0]] = shard0Secondary;
+    auto future = launchAsync([&] {
+        auto cursors = establishCursors(operationContext(),
+                                        executor(),
+                                        _nss,
+                                        ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                        remotes,
+                                        false,  // allowPartialResults
+                                        Shard::RetryPolicy::kIdempotent,
+                                        {},  // providedOpKeys
+                                        designatedHosts);
+        ASSERT_EQUALS(remotes.size(), cursors.size());
+        ASSERT_EQUALS(cursors[0].getHostAndPort(), shard0Secondary);
     });
 
     // Remote responds.

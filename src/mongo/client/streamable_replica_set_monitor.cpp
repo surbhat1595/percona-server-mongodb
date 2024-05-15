@@ -27,33 +27,41 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/client/streamable_replica_set_monitor.h"
-
 #include <algorithm>
+#include <boost/none.hpp>
 #include <limits>
+#include <map>
+#include <mutex>
+#include <ostream>
 #include <set>
+#include <tuple>
+#include <type_traits>
 
-#include "mongo/bson/simple_bsonelement_comparator.h"
-#include "mongo/client/connpool.h"
-#include "mongo/client/global_conn_pool.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/client/read_preference.h"
+#include "mongo/client/replica_set_change_notifier.h"
+#include "mongo/client/replica_set_monitor_interface.h"
+#include "mongo/client/replica_set_monitor_manager.h"
 #include "mongo/client/replica_set_monitor_server_parameters_gen.h"
+#include "mongo/client/sdam/election_id_set_version_pair.h"
+#include "mongo/client/sdam/server_description.h"
+#include "mongo/client/sdam/topology_description.h"
+#include "mongo/client/sdam/topology_manager.h"
+#include "mongo/client/streamable_replica_set_monitor.h"
 #include "mongo/client/streamable_replica_set_monitor_discovery_time_processor.h"
 #include "mongo/client/streamable_replica_set_monitor_query_processor.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/repl/bson_extract_optime.h"
-#include "mongo/db/server_options.h"
-#include "mongo/executor/thread_pool_task_executor.h"
+#include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/mutex.h"
-#include "mongo/rpc/metadata/egress_metadata_hook_list.h"
-#include "mongo/stdx/condition_variable.h"
-#include "mongo/stdx/unordered_set.h"
-#include "mongo/util/string_map.h"
-#include "mongo/util/timer.h"
+#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -414,12 +422,12 @@ SemiFuture<std::vector<HostAndPort>> StreamableReplicaSetMonitor::_enqueueOutsta
     query->start = _executor->now();
 
     // Add the query to the list of outstanding queries.
-    auto queryIter = _outstandingQueries.insert(_outstandingQueries.end(), query);
+    _outstandingQueries.insert(_outstandingQueries.end(), query);
 
     // After a deadline or when the input cancellation token is canceled, cancel this query. If the
     // query completes first, the deadlineCancelSource will be used to cancel this task.
     _executor->sleepUntil(deadline, query->deadlineCancelSource.token())
-        .getAsync([this, query, queryIter, self = shared_from_this(), cancelToken](Status status) {
+        .getAsync([this, query, self = shared_from_this(), cancelToken](Status status) {
             // If the deadline was reached or cancellation occurred on the input cancellation token,
             // mark the query as canceled. Otherwise, the deadlineCancelSource must have been
             // canceled due to the query completing successfully.
@@ -439,7 +447,7 @@ SemiFuture<std::vector<HostAndPort>> StreamableReplicaSetMonitor::_enqueueOutsta
                     // been cleared) before erasing.
                     if (!_isDropped.load()) {
                         invariant(_outstandingQueries.size() > 0);
-                        _eraseQueryFromOutstandingQueries(lk, queryIter);
+                        _eraseQueryFromOutstandingQueries(lk, query);
                     }
                 }
             }
@@ -797,9 +805,14 @@ void StreamableReplicaSetMonitor::_failOutstandingWithStatus(WithLock, Status st
 }
 
 std::list<StreamableReplicaSetMonitor::HostQueryPtr>::iterator
-StreamableReplicaSetMonitor::_eraseQueryFromOutstandingQueries(
+StreamableReplicaSetMonitor::_eraseQueryIterFromOutstandingQueries(
     WithLock, std::list<HostQueryPtr>::iterator iter) {
     return _outstandingQueries.erase(iter);
+}
+
+void StreamableReplicaSetMonitor::_eraseQueryFromOutstandingQueries(WithLock,
+                                                                    const HostQueryPtr& query) {
+    std::erase_if(_outstandingQueries, [&query](const HostQueryPtr& _q) { return _q == query; });
 }
 
 void StreamableReplicaSetMonitor::_processOutstanding(
@@ -835,7 +848,7 @@ void StreamableReplicaSetMonitor::_processOutstanding(
                                 "readPref"_attr = readPrefToStringFull(query->criteria),
                                 "duration"_attr = Milliseconds(latency));
 
-                    it = _eraseQueryFromOutstandingQueries(lock, it);
+                    it = _eraseQueryIterFromOutstandingQueries(lock, it);
                 } else {
                     // The query was canceled, so skip to the next entry without erasing it.
                     ++it;
@@ -860,4 +873,12 @@ void StreamableReplicaSetMonitor::_processOutstanding(
 void StreamableReplicaSetMonitor::runScanForMockReplicaSet() {
     MONGO_UNREACHABLE;
 }
+
+boost::optional<Microseconds> StreamableReplicaSetMonitor::pingTime(const HostAndPort& host) const {
+    if (const auto& serverDescription = _currentTopology()->findServerByAddress(host)) {
+        return (*serverDescription)->getRtt();
+    }
+    return boost::none;
+}
+
 }  // namespace mongo

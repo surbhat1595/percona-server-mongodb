@@ -84,17 +84,6 @@ NSS_CONSTANT(kMigrationCoordinatorsNamespace, DatabaseName::kConfig, "migrationC
 // Namespace for storing the persisted state of migration recipients.
 NSS_CONSTANT(kMigrationRecipientsNamespace, DatabaseName::kConfig, "migrationRecipients"_sd)
 
-// Namespace for storing the persisted state of movePrimary operation recipients.
-NSS_CONSTANT(kMovePrimaryRecipientNamespace, DatabaseName::kConfig, "movePrimaryRecipients"_sd)
-
-// Namespace for storing the oplog applier progress of movePrimary operations at recipient.
-NSS_CONSTANT(kMovePrimaryApplierProgressNamespace,
-             DatabaseName::kConfig,
-             "movePrimaryRecipients.applierProgress"_sd)
-
-// Namespace for storing the persisted state of movePrimary operation donors.
-NSS_CONSTANT(kMovePrimaryDonorNamespace, DatabaseName::kConfig, "movePrimaryDonors"_sd)
-
 // Namespace for storing the persisted state of tenant migration donors.
 NSS_CONSTANT(kTenantMigrationDonorsNamespace, DatabaseName::kConfig, "tenantMigrationDonors"_sd)
 
@@ -285,3 +274,26 @@ NSS_CONSTANT(kConfigVersionNamespace, DatabaseName::kConfig, "version"_sd)
 
 // Namespace used for storing mongos info on the CSRS.
 NSS_CONSTANT(kConfigMongosNamespace, DatabaseName::kConfig, "mongos"_sd)
+
+// Namespace used for oplog truncate after point.
+NSS_CONSTANT(kDefaultOplogTruncateAfterPointNamespace,
+             DatabaseName::kLocal,
+             "replset.oplogTruncateAfterPoint"_sd)
+
+// Namespace used for local system rollback id.
+NSS_CONSTANT(kDefaultRollbackIdNamespace, DatabaseName::kLocal, "system.rollback.id"_sd)
+
+// Namespace used for the local oplog dollar main namespace.
+NSS_CONSTANT(kLocalOplogDollarMain, DatabaseName::kLocal, "oplog.$main"_sd)
+
+// Namespace used for local replset initial sync id.
+NSS_CONSTANT(kDefaultInitialSyncIdNamespace, DatabaseName::kLocal, "replset.initialSyncId"_sd)
+
+// Namespace used for local temporary oplog buffer.
+NSS_CONSTANT(kDefaultOplogCollectionNamespace, DatabaseName::kLocal, "temp_oplog_buffer"_sd)
+
+// Namespace used for local minimum valid namespace.
+NSS_CONSTANT(kDefaultMinValidNamespace, DatabaseName::kLocal, "replset.minvalid"_sd)
+
+// Namespace used by the test command to pin the oldest timestamp.
+NSS_CONSTANT(kDurableHistoryTestNamespace, DatabaseName::kMdbTesting, "pinned_timestamp"_sd)

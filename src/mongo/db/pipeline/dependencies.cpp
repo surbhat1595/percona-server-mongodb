@@ -27,12 +27,17 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <algorithm>
+#include <bitset>
 
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/field_path.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
 namespace mongo {
@@ -111,7 +116,7 @@ void DepsTracker::setNeedsMetadata(DocumentMetadataFields::MetaType type, bool r
 }
 
 // Returns true if the lhs value should sort before the rhs, false otherwise.
-bool PathComparator::operator()(const std::string& lhs, const std::string& rhs) const {
+bool PathComparator::operator()(StringData lhs, StringData rhs) const {
     constexpr char dot = '.';
 
     for (size_t pos = 0, len = std::min(lhs.size(), rhs.size()); pos < len; ++pos) {

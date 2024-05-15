@@ -5,13 +5,10 @@
  * @tags: [
  *   requires_sharding,
  *   # TODO SERVER-71169: Implement shard filtering for CQF.
- *   cqf_incompatible,
+ *   cqf_experimental_incompatible,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/analyze_plan.js");
+import {isIndexOnly, isIxscan, planHasStage} from "jstests/libs/analyze_plan.js";
 
 // Deliberately inserts orphans outside of migration.
 TestData.skipCheckOrphans = true;
@@ -150,4 +147,3 @@ assert.sameMembers(
     [{a: 0, b: 0}]);
 
 st.stop();
-})();

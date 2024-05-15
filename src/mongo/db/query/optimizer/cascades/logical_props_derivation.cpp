@@ -28,7 +28,28 @@
  */
 
 #include "mongo/db/query/optimizer/cascades/logical_props_derivation.h"
+
+#include <absl/container/node_hash_map.h>
+#include <absl/container/node_hash_set.h>
+#include <absl/meta/type_traits.h>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <cstddef>
+#include <set>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include "mongo/db/query/optimizer/algebra/operator.h"
+#include "mongo/db/query/optimizer/algebra/polyvalue.h"
+#include "mongo/db/query/optimizer/bool_expression.h"
+#include "mongo/db/query/optimizer/containers.h"
+#include "mongo/db/query/optimizer/index_bounds.h"
+#include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
+#include "mongo/db/query/optimizer/partial_schema_requirements.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo::optimizer::cascades {
 
@@ -37,6 +58,12 @@ using namespace properties;
 static void populateInitialDistributions(const DistributionAndPaths& distributionAndPaths,
                                          const bool isMultiPartition,
                                          DistributionSet& distributions) {
+
+    if (!isMultiPartition) {
+        distributions.insert({DistributionType::Centralized});
+        return;
+    }
+
     switch (distributionAndPaths._type) {
         case DistributionType::Centralized:
             distributions.insert({DistributionType::Centralized});
@@ -103,41 +130,51 @@ static void populateDistributionPaths(const PartialSchemaRequirements& req,
  */
 static bool computeEqPredsOnly(const PartialSchemaRequirements& reqMap) {
     bool eqPredsOnly = true;
-    PSRExpr::visitDisjuncts(reqMap.getRoot(), [&](const PSRExpr::Node& child, const size_t) {
-        PartialSchemaKeySet equalityKeys;
-        PartialSchemaKeySet fullyOpenKeys;
+    PSRExpr::visitDisjuncts(
+        reqMap.getRoot(), [&](const PSRExpr::Node& child, const PSRExpr::VisitorContext& disjCtx) {
+            PartialSchemaKeySet equalityKeys;
+            PartialSchemaKeySet fullyOpenKeys;
 
-        PSRExpr::visitConjuncts(child, [&](const PSRExpr::Node& atom, const size_t) {
-            PSRExpr::visitAtom(atom, [&](const PartialSchemaEntry& e) {
-                if (!eqPredsOnly) {
+            PSRExpr::visitConjuncts(
+                child, [&](const PSRExpr::Node& atom, const PSRExpr::VisitorContext& conjCtx) {
+                    PSRExpr::visitAtom(
+                        atom, [&](const PartialSchemaEntry& e, const PSRExpr::VisitorContext&) {
+                            const auto& [key, req] = e;
+                            const auto& intervals = req.getIntervals();
+                            if (auto singularInterval =
+                                    IntervalReqExpr::getSingularDNF(intervals)) {
+                                if (singularInterval->isFullyOpen()) {
+                                    fullyOpenKeys.insert(key);
+                                } else if (singularInterval->isEquality()) {
+                                    equalityKeys.insert(key);
+                                } else {
+                                    // Encountered a non-equality and not-fully-open interval.
+                                    eqPredsOnly = false;
+                                }
+                            } else {
+                                // Encountered a non-trivial interval.
+                                eqPredsOnly = false;
+                            }
+
+                            if (!eqPredsOnly) {
+                                conjCtx.returnEarly();
+                            }
+                        });
+
+                    if (!eqPredsOnly) {
+                        disjCtx.returnEarly();
+                    }
+                });
+
+            for (const auto& key : fullyOpenKeys) {
+                if (equalityKeys.count(key) == 0) {
+                    // No possible match for fully open requirement.
+                    eqPredsOnly = false;
+                    disjCtx.returnEarly();
                     return;
                 }
-
-                const auto& [key, req] = e;
-                const auto& intervals = req.getIntervals();
-                if (auto singularInterval = IntervalReqExpr::getSingularDNF(intervals)) {
-                    if (singularInterval->isFullyOpen()) {
-                        fullyOpenKeys.insert(key);
-                    } else if (singularInterval->isEquality()) {
-                        equalityKeys.insert(key);
-                    } else {
-                        // Encountered a non-equality and not-fully-open interval.
-                        eqPredsOnly = false;
-                    }
-                } else {
-                    // Encountered a non-trivial interval.
-                    eqPredsOnly = false;
-                }
-            });
-        });
-
-        for (const auto& key : fullyOpenKeys) {
-            if (equalityKeys.count(key) == 0) {
-                // No possible match for fully open requirement.
-                eqPredsOnly = false;
             }
-        }
-    });
+        });
 
     return eqPredsOnly;
 }
@@ -264,7 +301,9 @@ public:
 
     LogicalProps transport(const RIDUnionNode& node,
                            LogicalProps /*leftChildResult*/,
-                           LogicalProps /*rightChildResult*/) {
+                           LogicalProps /*rightChildResult*/,
+                           LogicalProps /*bindResult*/,
+                           LogicalProps /*refsResult*/) {
         // Properties for the group should already be derived via the underlying Filter or
         // Evaluation logical nodes.
         uasserted(7016302, "Should not be necessary to derive properties for RIDUnionNode");

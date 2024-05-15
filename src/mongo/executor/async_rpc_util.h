@@ -31,6 +31,7 @@
 
 #include <memory>
 
+#include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/executor/async_rpc_error_info.h"
@@ -56,8 +57,10 @@ namespace mongo::async_rpc {
  * Mirrors command helper methods found in commands.h or cluster_command_helpers.h.
  */
 struct AsyncRPCCommandHelpers {
+    // TODO SERVER-78237 Remove ignoreMinimumAcceptableWTimeout, clarify logic.
     static void appendMajorityWriteConcern(GenericArgs& args,
-                                           WriteConcernOptions defaultWC = WriteConcernOptions()) {
+                                           WriteConcernOptions defaultWC = WriteConcernOptions(),
+                                           bool ignoreMinimumAcceptableWTimeout = true) {
         WriteConcernOptions newWC = CommandHelpers::kMajorityWriteConcern;
         if (auto wc = args.stable.getWriteConcern()) {
             // The command has a writeConcern field and it's majority, so we can return it as-is.
@@ -72,11 +75,12 @@ struct AsyncRPCCommandHelpers {
             newWC = defaultWC;
             newWC.w = "majority";
 
-            if (defaultWC.wTimeout < minimumAcceptableWTimeout) {
+            // Some code may choose to serialize write concern with timeout = 0 (no timeout).
+            if (!ignoreMinimumAcceptableWTimeout &&
+                defaultWC.wTimeout < minimumAcceptableWTimeout) {
                 newWC.wTimeout = minimumAcceptableWTimeout;
             }
         }
-
         args.stable.setWriteConcern(newWC);
     }
 
@@ -185,7 +189,6 @@ Future<std::vector<SingleResult>> getAllResponsesOrFirstErrorWithCancellation(
         }
 
         auto reply = sw.getValue();
-
         auto response = processResponse(reply, index);
 
         stdx::unique_lock<Latch> lk(sharedUtil->mutex);

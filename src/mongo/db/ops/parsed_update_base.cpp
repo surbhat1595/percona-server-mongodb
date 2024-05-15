@@ -27,17 +27,53 @@
  *    it in the license file.
  */
 
-#include "mongo/db/ops/parsed_update.h"
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/exec/disk_use_options_gen.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/matcher/expression_parser.h"
+#include "mongo/db/matcher/expression_with_placeholder.h"
+#include "mongo/db/matcher/extensions_callback.h"
+#include "mongo/db/matcher/extensions_callback_noop.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/ops/parsed_update.h"
 #include "mongo/db/ops/parsed_update_array_filters.h"
+#include "mongo/db/ops/parsed_writes_common.h"
 #include "mongo/db/ops/update_request.h"
-#include "mongo/db/ops/write_ops_exec.h"
 #include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/db/ops/write_ops_parsers.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/canonical_query.h"
-#include "mongo/db/query/collation/collator_factory_interface.h"
-#include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/storage/storage_options.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
+#include "mongo/db/update/update_driver.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/str.h"
 
 namespace mongo::impl {
 
@@ -108,6 +144,16 @@ Status ParsedUpdateBase::maybeTranslateTimeseriesUpdate() {
     // expression. We do not need to track the internal match expression counters and so we stop the
     // counters because we do not want to count the internal match expression.
     _expCtx->stopExpressionCounters();
+
+    // We also need a copy of the original match expression to use for upserts and positional
+    // updates.
+    MatchExpressionParser::AllowedFeatureSet allowedFeatures =
+        MatchExpressionParser::kAllowAllSpecialFeatures;
+    if (_request->isUpsert()) {
+        allowedFeatures &= ~MatchExpressionParser::AllowedFeatures::kExpr;
+    }
+    _originalExpr = uassertStatusOK(MatchExpressionParser::parse(
+        _request->getQuery(), _expCtx, ExtensionsCallbackNoop(), allowedFeatures));
 
     if (_request->isMulti() && !_timeseriesUpdateQueryExprs->_residualExpr) {
         // If we don't have a residual predicate and this is not a single update, we might be able

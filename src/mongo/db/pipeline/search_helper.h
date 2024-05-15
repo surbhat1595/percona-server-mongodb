@@ -29,7 +29,19 @@
 
 #pragma once
 
+#include <memory>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/client/dbclient_cursor.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/service_context.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 
@@ -68,6 +80,22 @@ public:
         Pipeline* origPipeline,
         boost::optional<UUID> uuid) {
         return nullptr;
+    }
+
+    /**
+     * Check if this is a $search pipeline, specifically that the front of the pipeline is
+     * a $search stage.
+     */
+    virtual bool isSearchPipeline(const Pipeline* pipeline) {
+        return false;
+    }
+
+    /**
+     * Check if this is a $searchMeta pipeline, specifically that the front of the pipeline is
+     * a $searchMeta stage.
+     */
+    virtual bool isSearchMetaPipeline(const Pipeline* pipeline) {
+        return false;
     }
 };
 

@@ -30,17 +30,30 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/inlined_vector.h>
+#include <algorithm>
+#include <cstddef>
 #include <memory>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
+// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/bson/util/builder.h"
+#include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/stages/hash_agg.h"
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
+#include "mongo/db/exec/sbe/stages/window.h"
+#include "mongo/db/exec/sbe/values/row.h"
 #include "mongo/db/exec/sbe/values/slot.h"
+#include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/index_bounds.h"
+#include "mongo/db/query/interval.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/util/indexed_string_vector.h"
 
@@ -90,12 +103,30 @@ inline size_t estimate(const StringData& str) {
     return 0;
 }
 
-inline size_t estimate(const HashAggStage::AggExprPair& expr) {
+inline size_t estimate(const AggExprPair& expr) {
     size_t size = 0;
     if (expr.init) {
         size += expr.init->estimateSize();
     }
     size += expr.acc->estimateSize();
+    return size;
+}
+
+inline size_t estimate(const WindowStage::Window& window) {
+    size_t size = sizeof(window);
+    if (window.lowBoundExpr) {
+        size += size_estimator::estimate(window.lowBoundExpr);
+    }
+    if (window.highBoundExpr) {
+        size += size_estimator::estimate(window.highBoundExpr);
+    }
+    if (window.initExpr) {
+        size += size_estimator::estimate(window.initExpr);
+    }
+    size += size_estimator::estimate(window.addExpr);
+    if (window.removeExpr) {
+        size += size_estimator::estimate(window.removeExpr);
+    }
     return size;
 }
 
@@ -193,5 +224,4 @@ inline size_t estimate(const IndexedStringVector& vec) {
     size += size_estimator::estimate(vec.getUnderlyingMap());
     return size;
 }
-
 }  // namespace mongo::sbe::size_estimator

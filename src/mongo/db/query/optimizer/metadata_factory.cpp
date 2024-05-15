@@ -29,8 +29,21 @@
 
 #include "mongo/db/query/optimizer/metadata_factory.h"
 
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/db/query/optimizer/partial_schema_requirements.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
+#include "mongo/db/query/optimizer/syntax/syntax.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
+#include "mongo/util/assert_util.h"
 
 
 namespace mongo::optimizer {
@@ -89,7 +102,8 @@ ScanDefinition createScanDef(ScanDefOptions options,
                              const ConstFoldFn& constFold,
                              DistributionAndPaths distributionAndPaths,
                              const bool exists,
-                             boost::optional<CEType> ce) {
+                             boost::optional<CEType> ce,
+                             ShardingMetadata shardingMetadata) {
 
     // Simplify partial filter requirements using the non-multikey paths.
     for (auto& [indexDefName, indexDef] : indexDefs) {
@@ -112,7 +126,8 @@ ScanDefinition createScanDef(ScanDefOptions options,
             std::move(multikeynessTrie),
             std::move(distributionAndPaths),
             exists,
-            std::move(ce)};
+            std::move(ce),
+            std::move(shardingMetadata)};
 }
 
 }  // namespace mongo::optimizer

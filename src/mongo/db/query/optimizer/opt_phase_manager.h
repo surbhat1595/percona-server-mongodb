@@ -29,13 +29,29 @@
 
 #pragma once
 
+#include <absl/container/node_hash_map.h>
+#include <boost/optional/optional.hpp>
+#include <memory>
+#include <tuple>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
+#include "mongo/db/query/optimizer/algebra/operator.h"
 #include "mongo/db/query/optimizer/cascades/interfaces.h"
 #include "mongo/db/query/optimizer/cascades/logical_rewriter.h"
+#include "mongo/db/query/optimizer/cascades/memo.h"
 #include "mongo/db/query/optimizer/cascades/physical_rewriter.h"
+#include "mongo/db/query/optimizer/containers.h"
+#include "mongo/db/query/optimizer/defs.h"
+#include "mongo/db/query/optimizer/metadata.h"
+#include "mongo/db/query/optimizer/node_defs.h"
 #include "mongo/db/query/optimizer/reference_tracker.h"
+#include "mongo/db/query/optimizer/syntax/syntax.h"
+#include "mongo/db/query/optimizer/utils/const_fold_interface.h"
 #include "mongo/db/query/optimizer/utils/memo_utils.h"
+#include "mongo/db/query/optimizer/utils/utils.h"
+#include "mongo/db/query/util/named_enum.h"
 
 
 namespace mongo::optimizer {
@@ -70,8 +86,7 @@ using namespace cascades;
     /* Final round of constant folding, identical to the first ConstEval stage. */                 \
     F(ConstEvalPost)
 
-MAKE_PRINTABLE_ENUM(OptPhase, OPT_PHASE);
-MAKE_PRINTABLE_ENUM_STRING_ARRAY(OptPhaseEnum, OptPhase, OPT_PHASE);
+QUERY_UTIL_NAMED_ENUM_DEFINE(OptPhase, OPT_PHASE);
 #undef OPT_PHASE
 
 /**

@@ -15,6 +15,9 @@ selector:
   - uses_parallel_shell
   # columnstore indexes are under development and cannot be used without enabling the feature flag
   - featureFlagColumnstoreIndexes
+  # getClusterParameter() command is not allowed with security token.
+  # TODO: SERVER-77789 Implement $querySettings agg stage (no showDebugQueryShape case).
+  - featureFlagQuerySettings
   # Server side javascript not allowed in Serverless.
   - requires_scripting
   exclude_files:
@@ -66,6 +69,9 @@ selector:
   - jstests/core/**/list_catalog.js
   # This test uses '_hashBSONElement' command that cannot be run with security token.
   - jstests/core/**/index_key_expression.js
+  # Queryable encryption test performs implicit encryption which issues commands that don't
+  # include the security token.
+  - jstests/core/queryable_encryption/**/*.js
 
 executor:
   archive:
@@ -77,7 +83,7 @@ executor:
   config:
     shell_options:
       eval: |
-        testingReplication = true;
+        globalThis.testingReplication = true;
         load('jstests/libs/override_methods/inject_security_token.js');
   hooks:
   # The CheckReplDBHash hook waits until all operations have replicated to and have been applied
@@ -96,7 +102,7 @@ executor:
         enableTestCommands: 1
         multitenancySupport: true
         featureFlagSecurityToken: true
-        # TODO SERVER-74284: remove featureFlagRequireTenantID from the parameters and have the
+        # TODO SERVER-78300: remove featureFlagRequireTenantID from the parameters and have the
         # inject_security_token override to be able to test both tenant-prefixed request and non-tenant-prefixed request.
         # Currently, we only test non-tenant-prefixed request and enable the featureFlagRequireTenantID
         # to have mongod return non-tenant-prefixed response too.

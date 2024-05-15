@@ -30,10 +30,27 @@
 #include "mongo/s/query/establish_cursors.h"
 
 #include <set>
+#include <string>
+#include <tuple>
 
+#include <absl/container/flat_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/client/connection_string.h"
 #include "mongo/client/remote_command_retry_scheduler.h"
-#include "mongo/client/remote_command_targeter.h"
 #include "mongo/db/catalog/collection_uuid_mismatch_info.h"
+#include "mongo/db/client.h"
 #include "mongo/db/cursor_id.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/kill_cursors_gen.h"
@@ -42,10 +59,20 @@
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
+#include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/log_severity.h"
+#include "mongo/s/async_requests_sender.h"
+#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/multi_statement_transaction_requests_sender.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/net/hostandport.h"
+#include "mongo/util/string_map.h"
+#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -65,13 +92,15 @@ public:
                       std::shared_ptr<executor::TaskExecutor> executor,
                       const NamespaceString& nss,
                       bool allowPartialResults,
-                      std::vector<OperationKey> providedOpKeys)
+                      std::vector<OperationKey> providedOpKeys,
+                      AsyncRequestsSender::ShardHostMap designatedHostsMap)
         : _opCtx(opCtx),
           _executor{std::move(executor)},
           _nss(nss),
           _allowPartialResults(allowPartialResults),
           _defaultOpKey{UUID::gen()},
-          _providedOpKeys(std::move(providedOpKeys)) {}
+          _providedOpKeys(std::move(providedOpKeys)),
+          _designatedHostsMap(std::move(designatedHostsMap)) {}
 
     /**
      * Make a RequestSender and thus send requests.
@@ -137,6 +166,7 @@ private:
     boost::optional<Status> _maybeFailure;
     std::vector<RemoteCursor> _remoteCursors;
     std::vector<HostAndPort> _remotesToClean;
+    AsyncRequestsSender::ShardHostMap _designatedHostsMap;
 };
 
 void CursorEstablisher::sendRequests(const ReadPreferenceSetting& readPref,
@@ -173,7 +203,13 @@ void CursorEstablisher::sendRequests(const ReadPreferenceSetting& readPref,
     }
 
     // Send the requests
-    _ars.emplace(_opCtx, _executor, _nss.dbName(), std::move(requests), readPref, retryPolicy);
+    _ars.emplace(_opCtx,
+                 _executor,
+                 _nss.dbName(),
+                 std::move(requests),
+                 readPref,
+                 retryPolicy,
+                 _designatedHostsMap);
 }
 
 void CursorEstablisher::waitForResponse() noexcept {
@@ -393,9 +429,14 @@ std::vector<RemoteCursor> establishCursors(OperationContext* opCtx,
                                            const std::vector<std::pair<ShardId, BSONObj>>& remotes,
                                            bool allowPartialResults,
                                            Shard::RetryPolicy retryPolicy,
-                                           std::vector<OperationKey> providedOpKeys) {
-    auto establisher =
-        CursorEstablisher(opCtx, executor, nss, allowPartialResults, std::move(providedOpKeys));
+                                           std::vector<OperationKey> providedOpKeys,
+                                           AsyncRequestsSender::ShardHostMap designatedHostsMap) {
+    auto establisher = CursorEstablisher(opCtx,
+                                         executor,
+                                         nss,
+                                         allowPartialResults,
+                                         std::move(providedOpKeys),
+                                         std::move(designatedHostsMap));
     establisher.sendRequests(readPref, remotes, retryPolicy);
     establisher.waitForResponses();
     establisher.checkForFailedRequests();
@@ -409,7 +450,7 @@ void killRemoteCursor(OperationContext* opCtx,
     BSONObj cmdObj = KillCursorsCommandRequest(nss, {cursor.getCursorResponse().getCursorId()})
                          .toBSON(BSONObj{});
     executor::RemoteCommandRequest request(
-        cursor.getHostAndPort(), nss.db().toString(), cmdObj, opCtx);
+        cursor.getHostAndPort(), nss.db_forSharding().toString(), cmdObj, opCtx);
 
     // We do not process the response to the killCursors request (we make a good-faith
     // attempt at cleaning up the cursors, but ignore any returned errors).
@@ -457,7 +498,7 @@ std::vector<RemoteCursor> establishCursorsOnAllHosts(
     options.maxConcurrency = internalQueryAggMulticastMaxConcurrency;
     auto results = executor::AsyncMulticaster(executor, options)
                        .multicast(servers,
-                                  nss.db().toString(),
+                                  nss.db_forSharding().toString(),
                                   cmd,
                                   opCtx,
                                   Milliseconds(internalQueryAggMulticastTimeoutMS));

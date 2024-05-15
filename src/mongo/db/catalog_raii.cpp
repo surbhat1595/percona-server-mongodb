@@ -29,6 +29,18 @@
 
 #include "mongo/db/catalog_raii.h"
 
+#include <boost/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <fmt/format.h>
+#include <functional>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/catalog/catalog_helper.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
@@ -39,11 +51,14 @@
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/scoped_collection_metadata.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/shard_role.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
-#include "mongo/logv2/log.h"
-#include "mongo/util/fail_point.h"
+#include "mongo/s/shard_version.h"
+#include "mongo/s/stale_exception.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -60,12 +75,12 @@ void verifyDbAndCollection(OperationContext* opCtx,
                            const Collection* coll,
                            Database* db,
                            bool verifyWriteEligible) {
-    invariant(!nsOrUUID.uuid() || coll,
+    invariant(!nsOrUUID.isUUID() || coll,
               str::stream() << "Collection for " << resolvedNss.toStringForErrorMsg()
                             << " disappeared after successfully resolving "
                             << nsOrUUID.toStringForErrorMsg());
 
-    invariant(!nsOrUUID.uuid() || db,
+    invariant(!nsOrUUID.isUUID() || db,
               str::stream() << "Database for " << resolvedNss.toStringForErrorMsg()
                             << " disappeared after successfully resolving "
                             << nsOrUUID.toStringForErrorMsg());
@@ -86,7 +101,7 @@ void verifyDbAndCollection(OperationContext* opCtx,
     // Verify that we are using the latest instance if we intend to perform writes.
     if (verifyWriteEligible) {
         auto latest = CollectionCatalog::latest(opCtx);
-        if (!latest->containsCollection(opCtx, coll)) {
+        if (!latest->isLatestCollection(opCtx, coll)) {
             throwWriteConflictException(str::stream() << "Unable to write to collection '"
                                                       << coll->ns().toStringForErrorMsg()
                                                       << "' due to catalog changes; please "
@@ -136,20 +151,15 @@ AutoGetDb::AutoGetDb(OperationContext* opCtx,
 }
 
 bool AutoGetDb::canSkipRSTLLock(const NamespaceStringOrUUID& nsOrUUID) {
-    const auto& maybeNss = nsOrUUID.nss();
-
-    if (maybeNss) {
-        const auto& nss = *maybeNss;
-        return repl::canCollectionSkipRSTLLockAcquisition(nss);
+    if (nsOrUUID.isNamespaceString()) {
+        return repl::canCollectionSkipRSTLLockAcquisition(nsOrUUID.nss());
     }
     return false;
 }
 
 bool AutoGetDb::canSkipFlowControlTicket(const NamespaceStringOrUUID& nsOrUUID) {
-    const auto& maybeNss = nsOrUUID.nss();
-
-    if (maybeNss) {
-        const auto& nss = *maybeNss;
+    if (nsOrUUID.isNamespaceString()) {
+        const auto& nss = nsOrUUID.nss();
         bool notReplicated = !nss.isReplicated();
         // TODO: Improve comment
         //
@@ -219,8 +229,8 @@ CollectionNamespaceOrUUIDLock::CollectionNamespaceOrUUIDLock(OperationContext* o
                                                              LockMode mode,
                                                              Date_t deadline)
     : _lock([opCtx, &nsOrUUID, mode, deadline] {
-          if (auto ns = nsOrUUID.nss()) {
-              return Lock::CollectionLock{opCtx, *ns, mode, deadline};
+          if (nsOrUUID.isNamespaceString()) {
+              return Lock::CollectionLock{opCtx, nsOrUUID.nss(), mode, deadline};
           }
 
           auto resolveNs = [opCtx, &nsOrUUID] {
@@ -243,31 +253,31 @@ CollectionNamespaceOrUUIDLock::CollectionNamespaceOrUUIDLock(OperationContext* o
 AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
                                      const NamespaceStringOrUUID& nsOrUUID,
                                      LockMode modeColl,
-                                     Options options)
+                                     const Options& options)
     : AutoGetCollection(opCtx,
                         nsOrUUID,
                         modeColl,
-                        std::move(options),
+                        options,
                         /*verifyWriteEligible=*/modeColl != MODE_IS) {}
 
 AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
                                      const NamespaceStringOrUUID& nsOrUUID,
                                      LockMode modeColl,
-                                     Options options,
+                                     const Options& options,
                                      ForReadTag reader)
-    : AutoGetCollection(
-          opCtx, nsOrUUID, modeColl, std::move(options), /*verifyWriteEligible=*/false) {}
+    : AutoGetCollection(opCtx, nsOrUUID, modeColl, options, /*verifyWriteEligible=*/false) {}
 
 AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
                                      const NamespaceStringOrUUID& nsOrUUID,
                                      LockMode modeColl,
-                                     Options options,
+                                     const Options& options,
                                      bool verifyWriteEligible)
     : _autoDb(AutoGetDb::createForAutoGetCollection(opCtx, nsOrUUID, modeColl, options)) {
 
     auto& viewMode = options._viewMode;
     auto& deadline = options._deadline;
-    auto& secondaryNssOrUUIDs = options._secondaryNssOrUUIDs;
+    auto& secondaryNssOrUUIDsBegin = options._secondaryNssOrUUIDsBegin;
+    auto& secondaryNssOrUUIDsEnd = options._secondaryNssOrUUIDsEnd;
 
     // Out of an abundance of caution, force operations to acquire new snapshots after
     // acquiring exclusive collection locks. Operations that hold MODE_X locks make an
@@ -276,18 +286,28 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
     // exclusive lock.
     if (modeColl == MODE_X) {
         invariant(!opCtx->recoveryUnit()->isActive(),
-                  str::stream() << "Snapshot opened before acquiring X lock for " << nsOrUUID);
+                  str::stream() << "Snapshot opened before acquiring X lock for "
+                                << toStringForLogging(nsOrUUID));
     }
 
     // Acquire the collection locks. If there's only one lock, then it can simply be taken. If
     // there are many, however, the locks must be taken in _ascending_ ResourceId order to avoid
     // deadlocks across threads.
-    if (secondaryNssOrUUIDs.empty()) {
-        uassertStatusOK(nsOrUUID.isNssValid());
+    if (secondaryNssOrUUIDsBegin == secondaryNssOrUUIDsEnd) {
+        uassert(ErrorCodes::InvalidNamespace,
+                fmt::format("Namespace {} is not a valid collection name",
+                            nsOrUUID.toStringForErrorMsg()),
+                nsOrUUID.isUUID() || (nsOrUUID.isNamespaceString() && nsOrUUID.nss().isValid()));
+
         _collLocks.emplace_back(opCtx, nsOrUUID, modeColl, deadline);
     } else {
-        catalog_helper::acquireCollectionLocksInResourceIdOrder(
-            opCtx, nsOrUUID, modeColl, deadline, secondaryNssOrUUIDs, &_collLocks);
+        catalog_helper::acquireCollectionLocksInResourceIdOrder(opCtx,
+                                                                nsOrUUID,
+                                                                modeColl,
+                                                                deadline,
+                                                                secondaryNssOrUUIDsBegin,
+                                                                secondaryNssOrUUIDsEnd,
+                                                                &_collLocks);
     }
 
     // Wait for a configured amount of time after acquiring locks if the failpoint is enabled
@@ -311,10 +331,10 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
         _autoDb.refreshDbReferenceIfNull(opCtx);
     }
 
-    checkCollectionUUIDMismatch(opCtx, _resolvedNss, _coll, options._expectedUUID);
     verifyDbAndCollection(
         opCtx, modeColl, nsOrUUID, _resolvedNss, _coll.get(), _autoDb.getDb(), verifyWriteEligible);
-    for (auto& secondaryNssOrUUID : secondaryNssOrUUIDs) {
+    for (auto iter = secondaryNssOrUUIDsBegin; iter != secondaryNssOrUUIDsEnd; ++iter) {
+        const auto& secondaryNssOrUUID = *iter;
         auto secondaryResolvedNss =
             catalog->resolveNamespaceStringOrUUID(opCtx, secondaryNssOrUUID);
         auto secondaryColl = catalog->lookupCollectionByNamespace(opCtx, secondaryResolvedNss);
@@ -342,6 +362,8 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
         if (collDesc.isSharded()) {
             _coll.setShardKeyPattern(collDesc.getKeyPattern());
         }
+
+        checkCollectionUUIDMismatch(opCtx, *catalog, _resolvedNss, _coll, options._expectedUUID);
 
         return;
     }
@@ -372,7 +394,6 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
                                   << " is a view therefore the shard "
                                   << "version attached to the request must be unset or UNSHARDED",
                     !receivedShardVersion || *receivedShardVersion == ShardVersion::UNSHARDED());
-
             return;
         }
     }
@@ -398,6 +419,8 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
                           << "version attached to the request must be unset, UNSHARDED or IGNORED",
             !receivedShardVersion || *receivedShardVersion == ShardVersion::UNSHARDED() ||
                 ShardVersion::isPlacementVersionIgnored(*receivedShardVersion));
+
+    checkCollectionUUIDMismatch(opCtx, *catalog, _resolvedNss, _coll, options._expectedUUID);
 }
 
 Collection* AutoGetCollection::getWritableCollection(OperationContext* opCtx) {
@@ -435,8 +458,7 @@ struct CollectionWriter::SharedImpl {
     std::function<Collection*()> _writableCollectionInitializer;
 };
 
-CollectionWriter::CollectionWriter(OperationContext* opCtx,
-                                   ScopedCollectionAcquisition* acquisition)
+CollectionWriter::CollectionWriter(OperationContext* opCtx, CollectionAcquisition* acquisition)
     : _acquisition(acquisition),
       _collection(&_storedCollection),
       _managed(true),
@@ -447,8 +469,9 @@ CollectionWriter::CollectionWriter(OperationContext* opCtx,
     _storedCollection.makeYieldable(opCtx, LockedCollectionYieldRestore(opCtx, _storedCollection));
 
     _sharedImpl->_writableCollectionInitializer = [this, opCtx]() mutable {
-        invariant(!_fence);
-        _fence = std::make_unique<ScopedLocalCatalogWriteFence>(opCtx, _acquisition);
+        if (!_fence) {
+            _fence = std::make_unique<ScopedLocalCatalogWriteFence>(opCtx, _acquisition);
+        }
 
         return CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForMetadataWrite(
             opCtx, _acquisition->nss());
@@ -527,7 +550,6 @@ Collection* CollectionWriter::getWritableCollection(OperationContext* opCtx) {
                 [shared = _sharedImpl](OperationContext* opCtx, boost::optional<Timestamp>) {
                     if (shared->_parent) {
                         shared->_parent->_writableCollection = nullptr;
-                        shared->_parent->_fence.reset();
 
                         // Make the stored collection yieldable again as we now operate with the
                         // same instance as is in the catalog.
@@ -539,7 +561,6 @@ Collection* CollectionWriter::getWritableCollection(OperationContext* opCtx) {
                     OperationContext* opCtx) mutable {
                     if (shared->_parent) {
                         shared->_parent->_writableCollection = nullptr;
-                        shared->_parent->_fence.reset();
 
                         // Restore stored collection to its previous state. The rollback
                         // instance is already yieldable.

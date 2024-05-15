@@ -28,22 +28,33 @@
  */
 
 
-#include "mongo/platform/basic.h"
+#include <algorithm>
+#include <boost/cstdint.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <cstdint>
+#include <mutex>
+#include <string>
 
-#include "mongo/s/query/async_results_merger.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/client/remote_command_targeter.h"
 #include "mongo/db/pipeline/change_stream_constants.h"
 #include "mongo/db/pipeline/change_stream_invalidation_info.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/query/kill_cursors_gen.h"
-#include "mongo/db/query/query_feature_flags_gen.h"
+#include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/executor/remote_command_response.h"
-#include "mongo/s/catalog/type_shard.h"
+#include "mongo/rpc/metadata.h"
+#include "mongo/s/query/async_results_merger.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -458,12 +469,14 @@ Status AsyncResultsMerger::_askForNextBatch(WithLock, size_t remoteIndex) {
     if (_params.getSessionId()) {
         BSONObjBuilder newCmdBob(std::move(cmdObj));
 
-        BSONObjBuilder lsidBob(newCmdBob.subobjStart(OperationSessionInfo::kSessionIdFieldName));
+        BSONObjBuilder lsidBob(
+            newCmdBob.subobjStart(OperationSessionInfoFromClient::kSessionIdFieldName));
         _params.getSessionId()->serialize(&lsidBob);
         lsidBob.doneFast();
 
         if (_params.getTxnNumber()) {
-            newCmdBob.append(OperationSessionInfo::kTxnNumberFieldName, *_params.getTxnNumber());
+            newCmdBob.append(OperationSessionInfoFromClient::kTxnNumberFieldName,
+                             *_params.getTxnNumber());
         }
 
         if (_params.getAutocommit()) {
@@ -475,7 +488,7 @@ Status AsyncResultsMerger::_askForNextBatch(WithLock, size_t remoteIndex) {
     }
 
     executor::RemoteCommandRequest request(
-        remote.getTargetHost(), remote.cursorNss.db().toString(), cmdObj, _opCtx);
+        remote.getTargetHost(), remote.cursorNss.db_forSharding().toString(), cmdObj, _opCtx);
 
     auto callbackStatus =
         _executor->scheduleRemoteCommand(request, [this, remoteIndex](auto const& cbData) {
@@ -502,7 +515,7 @@ Status AsyncResultsMerger::_scheduleGetMores(WithLock lk) {
 
     // Reveal opCtx errors (such as MaxTimeMSExpired) and reflect them in the remote status.
     invariant(_opCtx, "Cannot schedule a getMore without an OperationContext");
-    const auto interruptStatus = _opCtx->checkForInterruptNoAssert();
+    auto interruptStatus = _opCtx->checkForInterruptNoAssert();
     if (!interruptStatus.isOK()) {
         for (size_t i = 0; i < _remotes.size(); ++i) {
             if (!_remotes[i].exhausted()) {
@@ -868,7 +881,7 @@ void AsyncResultsMerger::_scheduleKillCursors(WithLock lk, OperationContext* opC
             executor::RemoteCommandRequest::Options options;
             options.fireAndForget = true;
             executor::RemoteCommandRequest request(remote.getTargetHost(),
-                                                   _params.getNss().db().toString(),
+                                                   _params.getNss().db_forSharding().toString(),
                                                    cmdObj,
                                                    rpc::makeEmptyMetadata(),
                                                    opCtx,

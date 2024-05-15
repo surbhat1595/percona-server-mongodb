@@ -31,7 +31,6 @@
 
 #include <boost/optional.hpp>
 #include <functional>
-#include <memory>
 #include <vector>
 
 #include "mongo/bson/bsonobj.h"
@@ -45,14 +44,12 @@
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/tailable_mode.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/session/logical_session_id.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/s/query/async_results_merger_params_gen.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
-
-class OperationContext;
-class RouterExecStage;
 
 /**
  * The resulting ClusterClientCursor will take ownership of the existing remote cursor, generating
@@ -65,48 +62,15 @@ class RouterExecStage;
 struct ClusterClientCursorParams {
     ClusterClientCursorParams(NamespaceString nss,
                               APIParameters apiParameters,
-                              boost::optional<ReadPreferenceSetting> readPref = boost::none,
-                              boost::optional<repl::ReadConcernArgs> readConcernArgs = boost::none)
-        : nsString(std::move(nss)), apiParameters(std::move(apiParameters)) {
-        if (readPref) {
-            readPreference = std::move(readPref.get());
-        }
-        if (readConcernArgs) {
-            readConcern = std::move(readConcernArgs.get());
-        }
-    }
+                              boost::optional<ReadPreferenceSetting> readPreference,
+                              boost::optional<repl::ReadConcernArgs> readConcern,
+                              OperationSessionInfoFromClient osi);
 
     /**
      * Extracts the subset of fields here needed by the AsyncResultsMerger. The returned
      * AsyncResultsMergerParams will assume ownership of 'remotes'.
      */
-    AsyncResultsMergerParams extractARMParams() {
-        AsyncResultsMergerParams armParams;
-        if (!sortToApplyOnRouter.isEmpty()) {
-            armParams.setSort(sortToApplyOnRouter);
-        }
-        armParams.setCompareWholeSortKey(compareWholeSortKeyOnRouter);
-        armParams.setRemotes(std::move(remotes));
-        armParams.setTailableMode(tailableMode);
-        armParams.setBatchSize(batchSize);
-        armParams.setNss(nsString);
-        armParams.setAllowPartialResults(isAllowPartialResults);
-
-        OperationSessionInfoFromClient sessionInfo;
-        boost::optional<LogicalSessionFromClient> lsidFromClient;
-
-        if (lsid) {
-            lsidFromClient.emplace(lsid->getId());
-            lsidFromClient->setUid(lsid->getUid());
-        }
-
-        sessionInfo.setSessionId(lsidFromClient);
-        sessionInfo.setTxnNumber(txnNumber);
-        sessionInfo.setAutocommit(isAutoCommit);
-        armParams.setOperationSessionInfo(sessionInfo);
-
-        return armParams;
-    }
+    AsyncResultsMergerParams extractARMParams();
 
     // Namespace against which the cursors exist.
     NamespaceString nsString;
@@ -153,18 +117,13 @@ struct ClusterClientCursorParams {
     // Set if a readConcern must be respected throughout the lifetime of the cursor.
     boost::optional<repl::ReadConcernArgs> readConcern;
 
+    // Session/transaction information to attach with this request (if run under a session or
+    // transaction)
+    OperationSessionInfoFromClient osi;
+
     // Whether the client indicated that it is willing to receive partial results in the case of an
     // unreachable host.
     bool isAllowPartialResults = false;
-
-    // The logical session id of the command that created the cursor.
-    boost::optional<LogicalSessionId> lsid;
-
-    // The transaction number of the command that created the cursor.
-    boost::optional<TxnNumber> txnNumber;
-
-    // Set to false for multi statement transactions.
-    boost::optional<bool> isAutoCommit;
 };
 
 }  // namespace mongo

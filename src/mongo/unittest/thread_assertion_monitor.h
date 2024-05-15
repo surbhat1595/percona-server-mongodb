@@ -29,11 +29,16 @@
 
 #pragma once
 
+// IWYU pragma: no_include "cxxabi.h"
 #include <exception>
+#include <functional>
+#include <mutex>
+#include <utility>
 
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/unittest/assert.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/scopeguard.h"
 
@@ -106,8 +111,10 @@ public:
         stdx::unique_lock lk(_mu);
         do {
             _cv.wait(lk, [&] { return _done || _ex; });
-            if (_ex)
+            if (_ex) {
+                _done = true;
                 std::rethrow_exception(std::exchange(_ex, nullptr));
+            }
         } while (!_done);
     }
 

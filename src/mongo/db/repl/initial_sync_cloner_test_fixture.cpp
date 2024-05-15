@@ -27,11 +27,20 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <memory>
+#include <mutex>
+
+#include <boost/move/utility_core.hpp>
 
 #include "mongo/base/checked_cast.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/initial_sync_cloner_test_fixture.h"
+#include "mongo/db/repl/repl_sync_shared_data.h"
 #include "mongo/db/repl/replication_consistency_markers_impl.h"
+#include "mongo/dbtests/mock/mock_remote_db_server.h"
+#include "mongo/util/duration.h"
 
 namespace mongo {
 namespace repl {
@@ -42,8 +51,7 @@ void InitialSyncClonerTestFixture::setUp() {
     _sharedData = std::make_unique<InitialSyncSharedData>(kInitialRollbackId, Days(1), &_clock);
 
     // Set the initial sync ID on the mock server.
-    _mockServer->insert(NamespaceString::createNamespaceString_forTest(
-                            ReplicationConsistencyMarkersImpl::kDefaultInitialSyncIdNamespace),
+    _mockServer->insert(NamespaceString::kDefaultInitialSyncIdNamespace,
                         BSON("_id" << _initialSyncId));
 }
 

@@ -27,17 +27,38 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/db/query/query_request_helper.h"
-
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <cstdint>
 #include <memory>
+#include <string>
 
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/db/basic_types.h"
 #include "mongo/db/commands/test_commands_enabled.h"
-#include "mongo/db/dbmessage.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
+#include "mongo/db/query/cursor_response_gen.h"
+#include "mongo/db/query/find_command_gen.h"
+#include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/tailable_mode.h"
+#include "mongo/db/server_options.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/s/resharding/resharding_feature_flag_gen.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
 
@@ -79,6 +100,47 @@ Status validateGetMoreCollectionName(StringData collectionName) {
     if (collectionName.find('\0') != std::string::npos) {
         return Status(ErrorCodes::InvalidNamespace,
                       "Collection names cannot have embedded null characters");
+    }
+
+    return Status::OK();
+}
+
+Status validateResumeAfter(const mongo::BSONObj& resumeAfter, bool isClusteredCollection) {
+    if (resumeAfter.isEmpty()) {
+        return Status::OK();
+    }
+
+    BSONType recordIdType = resumeAfter["$recordId"].type();
+    if (mongo::resharding::gFeatureFlagReshardingImprovements.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        if (resumeAfter.nFields() > 2 ||
+            (recordIdType != BSONType::NumberLong && recordIdType != BSONType::BinData &&
+             recordIdType != BSONType::jstNULL) ||
+            (resumeAfter.nFields() == 2 &&
+             (resumeAfter["$initialSyncId"].type() != BSONType::BinData ||
+              resumeAfter["$initialSyncId"].binDataType() != BinDataType::newUUID))) {
+            return Status(ErrorCodes::BadValue,
+                          "Malformed resume token: the '_resumeAfter' object must contain"
+                          " '$recordId', of type NumberLong, BinData or jstNULL and"
+                          " optional '$initialSyncId of type BinData.");
+        }
+    } else if (resumeAfter.nFields() != 1 ||
+               (recordIdType != BSONType::NumberLong && recordIdType != BSONType::BinData &&
+                recordIdType != BSONType::jstNULL)) {
+        return Status(ErrorCodes::BadValue,
+                      "Malformed resume token: the '_resumeAfter' object must contain"
+                      " exactly one field named '$recordId', of type NumberLong, BinData "
+                      "or jstNULL.");
+    }
+
+    // Clustered collections can only accept '$_resumeAfter' parameter of type BinData. Non
+    // clustered collections should only accept '$_resumeAfter' of type Long.
+    if ((isClusteredCollection && recordIdType == BSONType::NumberLong) ||
+        (!isClusteredCollection && recordIdType == BSONType::BinData)) {
+        return Status(ErrorCodes::Error(7738600),
+                      "The '$_resumeAfter parameter must match collection type. Clustered "
+                      "collections only have BinData recordIds, and all other collections"
+                      "have Long recordId.");
     }
 
     return Status::OK();
@@ -130,17 +192,8 @@ Status validateFindCommandRequest(const FindCommandRequest& findCommand) {
             return Status(ErrorCodes::BadValue,
                           "sort must be unset or {$natural:1} if 'requestResumeToken' is enabled");
         }
-        if (!findCommand.getResumeAfter().isEmpty()) {
-            if (findCommand.getResumeAfter().nFields() != 1 ||
-                (findCommand.getResumeAfter()["$recordId"].type() != BSONType::NumberLong &&
-                 findCommand.getResumeAfter()["$recordId"].type() != BSONType::BinData &&
-                 findCommand.getResumeAfter()["$recordId"].type() != BSONType::jstNULL)) {
-                return Status(ErrorCodes::BadValue,
-                              "Malformed resume token: the '_resumeAfter' object must contain"
-                              " exactly one field named '$recordId', of type NumberLong, BinData "
-                              "or jstNULL.");
-            }
-        }
+        // The $_resumeAfter parameter is checked in 'validateResumeAfter()'.
+
     } else if (!findCommand.getResumeAfter().isEmpty()) {
         return Status(ErrorCodes::BadValue,
                       "'requestResumeToken' must be true if 'resumeAfter' is"
@@ -228,156 +281,6 @@ void validateCursorResponse(const BSONObj& outputAsBson,
                              SerializationContext::stateCommandReply(serializationContext)),
             outputAsBson);
     }
-}
-
-StatusWith<BSONObj> asAggregationCommand(const FindCommandRequest& findCommand) {
-    BSONObjBuilder aggregationBuilder;
-
-    // First, check if this query has options that are not supported in aggregation.
-    if (!findCommand.getMin().isEmpty()) {
-        return {ErrorCodes::InvalidPipelineOperator,
-                str::stream() << "Option " << FindCommandRequest::kMinFieldName
-                              << " not supported in aggregation."};
-    }
-    if (!findCommand.getMax().isEmpty()) {
-        return {ErrorCodes::InvalidPipelineOperator,
-                str::stream() << "Option " << FindCommandRequest::kMaxFieldName
-                              << " not supported in aggregation."};
-    }
-    if (findCommand.getReturnKey()) {
-        return {ErrorCodes::InvalidPipelineOperator,
-                str::stream() << "Option " << FindCommandRequest::kReturnKeyFieldName
-                              << " not supported in aggregation."};
-    }
-    if (findCommand.getShowRecordId()) {
-        return {ErrorCodes::InvalidPipelineOperator,
-                str::stream() << "Option " << FindCommandRequest::kShowRecordIdFieldName
-                              << " not supported in aggregation."};
-    }
-    if (findCommand.getTailable()) {
-        return {ErrorCodes::InvalidPipelineOperator,
-                "Tailable cursors are not supported in aggregation."};
-    }
-    if (findCommand.getNoCursorTimeout()) {
-        return {ErrorCodes::InvalidPipelineOperator,
-                str::stream() << "Option " << FindCommandRequest::kNoCursorTimeoutFieldName
-                              << " not supported in aggregation."};
-    }
-    if (findCommand.getAllowPartialResults()) {
-        return {ErrorCodes::InvalidPipelineOperator,
-                str::stream() << "Option " << FindCommandRequest::kAllowPartialResultsFieldName
-                              << " not supported in aggregation."};
-    }
-    if (findCommand.getSort()[query_request_helper::kNaturalSortField]) {
-        return {ErrorCodes::InvalidPipelineOperator,
-                str::stream() << "Sort option " << query_request_helper::kNaturalSortField
-                              << " not supported in aggregation."};
-    }
-    // The aggregation command normally does not support the 'singleBatch' option, but we make a
-    // special exception if 'limit' is set to 1.
-    if (findCommand.getSingleBatch() && findCommand.getLimit().value_or(0) != 1LL) {
-        return {ErrorCodes::InvalidPipelineOperator,
-                str::stream() << "Option " << FindCommandRequest::kSingleBatchFieldName
-                              << " not supported in aggregation."};
-    }
-    if (findCommand.getReadOnce()) {
-        return {ErrorCodes::InvalidPipelineOperator,
-                str::stream() << "Option " << FindCommandRequest::kReadOnceFieldName
-                              << " not supported in aggregation."};
-    }
-
-    if (findCommand.getAllowSpeculativeMajorityRead()) {
-        return {ErrorCodes::InvalidPipelineOperator,
-                str::stream() << "Option "
-                              << FindCommandRequest::kAllowSpeculativeMajorityReadFieldName
-                              << " not supported in aggregation."};
-    }
-
-    if (findCommand.getRequestResumeToken()) {
-        return {ErrorCodes::InvalidPipelineOperator,
-                str::stream() << "Option " << FindCommandRequest::kRequestResumeTokenFieldName
-                              << " not supported in aggregation."};
-    }
-
-    if (!findCommand.getResumeAfter().isEmpty()) {
-        return {ErrorCodes::InvalidPipelineOperator,
-                str::stream() << "Option " << FindCommandRequest::kResumeAfterFieldName
-                              << " not supported in aggregation."};
-    }
-
-    // Now that we've successfully validated this QR, begin building the aggregation command.
-    aggregationBuilder.append("aggregate",
-                              findCommand.getNamespaceOrUUID().nss()
-                                  ? findCommand.getNamespaceOrUUID().nss()->coll()
-                                  : "");
-
-    // Construct an aggregation pipeline that finds the equivalent documents to this query request.
-    BSONArrayBuilder pipelineBuilder(aggregationBuilder.subarrayStart("pipeline"));
-    if (!findCommand.getFilter().isEmpty()) {
-        BSONObjBuilder matchBuilder(pipelineBuilder.subobjStart());
-        matchBuilder.append("$match", findCommand.getFilter());
-        matchBuilder.doneFast();
-    }
-    if (!findCommand.getSort().isEmpty()) {
-        BSONObjBuilder sortBuilder(pipelineBuilder.subobjStart());
-        sortBuilder.append("$sort", findCommand.getSort());
-        sortBuilder.doneFast();
-    }
-    if (findCommand.getSkip()) {
-        BSONObjBuilder skipBuilder(pipelineBuilder.subobjStart());
-        skipBuilder.append("$skip", *findCommand.getSkip());
-        skipBuilder.doneFast();
-    }
-    if (findCommand.getLimit()) {
-        BSONObjBuilder limitBuilder(pipelineBuilder.subobjStart());
-        limitBuilder.append("$limit", *findCommand.getLimit());
-        limitBuilder.doneFast();
-    }
-    if (!findCommand.getProjection().isEmpty()) {
-        BSONObjBuilder projectBuilder(pipelineBuilder.subobjStart());
-        projectBuilder.append("$project", findCommand.getProjection());
-        projectBuilder.doneFast();
-    }
-    pipelineBuilder.doneFast();
-
-    // The aggregation 'cursor' option is always set, regardless of the presence of batchSize.
-    BSONObjBuilder batchSizeBuilder(aggregationBuilder.subobjStart("cursor"));
-    if (findCommand.getBatchSize()) {
-        batchSizeBuilder.append(FindCommandRequest::kBatchSizeFieldName,
-                                *findCommand.getBatchSize());
-    }
-    batchSizeBuilder.doneFast();
-
-    // Other options.
-    aggregationBuilder.append("collation", findCommand.getCollation());
-    int maxTimeMS = findCommand.getMaxTimeMS() ? static_cast<int>(*findCommand.getMaxTimeMS()) : 0;
-    if (maxTimeMS > 0) {
-        aggregationBuilder.append(cmdOptionMaxTimeMS, maxTimeMS);
-    }
-    if (!findCommand.getHint().isEmpty()) {
-        aggregationBuilder.append(FindCommandRequest::kHintFieldName, findCommand.getHint());
-    }
-    if (findCommand.getReadConcern()) {
-        aggregationBuilder.append("readConcern", *findCommand.getReadConcern());
-    }
-    if (!findCommand.getUnwrappedReadPref().isEmpty()) {
-        aggregationBuilder.append(FindCommandRequest::kUnwrappedReadPrefFieldName,
-                                  findCommand.getUnwrappedReadPref());
-    }
-    if (findCommand.getAllowDiskUse().has_value()) {
-        aggregationBuilder.append(FindCommandRequest::kAllowDiskUseFieldName,
-                                  static_cast<bool>(findCommand.getAllowDiskUse()));
-    }
-    if (findCommand.getLegacyRuntimeConstants()) {
-        BSONObjBuilder rtcBuilder(
-            aggregationBuilder.subobjStart(FindCommandRequest::kLegacyRuntimeConstantsFieldName));
-        findCommand.getLegacyRuntimeConstants()->serialize(&rtcBuilder);
-        rtcBuilder.doneFast();
-    }
-    if (findCommand.getLet()) {
-        aggregationBuilder.append(FindCommandRequest::kLetFieldName, *findCommand.getLet());
-    }
-    return StatusWith<BSONObj>(aggregationBuilder.obj());
 }
 
 bool hasInvalidNaturalParam(const BSONObj& obj) {

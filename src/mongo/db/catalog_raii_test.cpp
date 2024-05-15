@@ -27,15 +27,32 @@
  *    it in the license file.
  */
 
+#include <functional>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/oid.h"
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/database_holder_mock.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/locker_impl.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/storage/recovery_unit_noop.h"
+#include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/logv2/log.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
@@ -235,7 +252,8 @@ TEST_F(CatalogRAIITestFixture, AutoGetCollectionSecondaryNamespacesSingleDb) {
     autoGetColl.emplace(opCtx1,
                         nss,
                         MODE_IS,
-                        AutoGetCollection::Options{}.secondaryNssOrUUIDs(secondaryNamespaces));
+                        AutoGetCollection::Options{}.secondaryNssOrUUIDs(
+                            secondaryNamespaces.cbegin(), secondaryNamespaces.cend()));
 
     ASSERT(opCtx1->lockState()->isRSTLLocked());
     ASSERT(opCtx1->lockState()->isReadLocked());  // Global lock check
@@ -271,7 +289,8 @@ TEST_F(CatalogRAIITestFixture, AutoGetCollectionMultiNamespacesMODEIX) {
     autoGetColl.emplace(opCtx1,
                         nss,
                         MODE_IX,
-                        AutoGetCollection::Options{}.secondaryNssOrUUIDs(secondaryNamespaces));
+                        AutoGetCollection::Options{}.secondaryNssOrUUIDs(
+                            secondaryNamespaces.cbegin(), secondaryNamespaces.cend()));
 
     ASSERT(opCtx1->lockState()->isRSTLLocked());
     ASSERT(opCtx1->lockState()->isWriteLocked());  // Global lock check
@@ -336,7 +355,8 @@ TEST_F(CatalogRAIITestFixture, AutoGetCollectionMultiNssCollLockDeadline) {
                                    MODE_IS,
                                    AutoGetCollection::Options{}
                                        .deadline(Date_t::now() + timeoutMs)
-                                       .secondaryNssOrUUIDs(secondaryNamespacesConflict));
+                                       .secondaryNssOrUUIDs(secondaryNamespacesConflict.cbegin(),
+                                                            secondaryNamespacesConflict.cend()));
         },
         timeoutMs);
 
@@ -344,12 +364,14 @@ TEST_F(CatalogRAIITestFixture, AutoGetCollectionMultiNssCollLockDeadline) {
         // Sanity check that there's no conflict without kSecondaryNss1 that's MODE_X locked.
         const std::vector<NamespaceStringOrUUID> secondaryNamespacesNoConflict{
             NamespaceStringOrUUID(kSecondaryNss2), NamespaceStringOrUUID(kSecondaryNss2)};
-        AutoGetCollection collNoConflict(client2.second.get(),
-                                         nss,
-                                         MODE_IS,
-                                         AutoGetCollection::Options{}
-                                             .deadline(Date_t::now() + timeoutMs)
-                                             .secondaryNssOrUUIDs(secondaryNamespacesNoConflict));
+        AutoGetCollection collNoConflict(
+            client2.second.get(),
+            nss,
+            MODE_IS,
+            AutoGetCollection::Options{}
+                .deadline(Date_t::now() + timeoutMs)
+                .secondaryNssOrUUIDs(secondaryNamespacesNoConflict.cbegin(),
+                                     secondaryNamespacesNoConflict.cend()));
     }
 
     // Now without the MODE_X lock on kSecondaryNss1, should work fine.
@@ -358,7 +380,8 @@ TEST_F(CatalogRAIITestFixture, AutoGetCollectionMultiNssCollLockDeadline) {
         client2.second.get(),
         nss,
         MODE_IS,
-        AutoGetCollection::Options{}.secondaryNssOrUUIDs(secondaryNamespacesConflict));
+        AutoGetCollection::Options{}.secondaryNssOrUUIDs(secondaryNamespacesConflict.cbegin(),
+                                                         secondaryNamespacesConflict.cend()));
 }
 
 using ReadSource = RecoveryUnit::ReadSource;

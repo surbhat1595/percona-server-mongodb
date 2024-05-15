@@ -23,8 +23,6 @@ from pkg_resources import parse_version
 
 import SCons
 import SCons.Script
-from mongo_tooling_metrics.client import get_mongo_metrics_client
-from mongo_tooling_metrics.errors import ExternalHostException
 from mongo_tooling_metrics.lib.top_level_metrics import SConsToolingMetrics
 from site_scons.mongo import build_profiles
 
@@ -453,6 +451,12 @@ add_option(
 add_option(
     'lldb-server',
     help='build in lldb server support',
+    nargs=0,
+)
+
+add_option(
+    'wait-for-debugger',
+    help='Wait for debugger attach on process startup',
     nargs=0,
 )
 
@@ -1677,7 +1681,7 @@ envDict = dict(
     # changes to MCI.
     UNITTEST_LIST='$BUILD_ROOT/unittests.txt',
     PRETTY_PRINTER_TEST_ALIAS='install-pretty-printer-tests',
-    PRETTY_PRINTER_TEST_LIST='$BUILD_DIR/pretty_printer_tests.txt',
+    PRETTY_PRINTER_TEST_LIST='$BUILD_ROOT/pretty_printer_tests.txt',
     LIBFUZZER_TEST_ALIAS='install-fuzzertests',
     LIBFUZZER_TEST_LIST='$BUILD_ROOT/libfuzzer_tests.txt',
     INTEGRATION_TEST_ALIAS='install-integration-tests',
@@ -1703,22 +1707,13 @@ env.AddMethod(lambda env, name, **kwargs: add_option(name, **kwargs), 'AddOption
 
 # The placement of this is intentional. Here we setup an atexit method to store tooling metrics.
 # We should only register this function after env, env_vars and the parser have been properly initialized.
-try:
-    metrics_client = get_mongo_metrics_client()
-    metrics_client.register_metrics(
-        SConsToolingMetrics,
-        utc_starttime=datetime.utcnow(),
-        artifact_dir=env.Dir('$BUILD_DIR').get_abspath(),
-        env_vars=env_vars,
-        env=env,
-        parser=_parser,
-    )
-except ExternalHostException as _:
-    pass
-except Exception as _:
-    print(
-        "This MongoDB Virtual Workstation could not connect to the internal cluster\nThis is a non-issue, but if this message persists feel free to reach out in #server-dev-platform"
-    )
+SConsToolingMetrics.register_metrics(
+    utc_starttime=datetime.utcnow(),
+    artifact_dir=env.Dir('$BUILD_DIR').get_abspath(),
+    env_vars=env_vars,
+    env=env,
+    parser=_parser,
+)
 
 if get_option('build-metrics'):
     env['BUILD_METRICS_ARTIFACTS_DIR'] = '$BUILD_ROOT/$VARIANT_DIR'
@@ -2067,6 +2062,7 @@ if env.get('ENABLE_OOM_RETRY'):
                 ': fatal error: Killed signal terminated program cc1',
                 # TODO: SERVER-77322 remove this non memory related ICE.
                 r'during IPA pass: cp.+g\+\+: internal compiler error',
+                'ld terminated with signal 9',
             ]
         elif env.ToolchainIs('msvc'):
             env['OOM_RETRY_MESSAGES'] = [
@@ -3313,12 +3309,6 @@ if not env.TargetOSIs('windows', 'macOS') and (env.ToolchainIs('GCC', 'clang')):
                     for flag_value in env[search_variable]):
                 env.Append(CCFLAGS=[f'{targeting_flag}{targeting_flag_value}'])
 
-# Needed for auth tests since key files are stored in git with mode 644.
-if not env.TargetOSIs('windows'):
-    for keysuffix in ["1", "2", "ForRollover"]:
-        keyfile = "jstests/libs/key%s" % keysuffix
-        os.chmod(keyfile, stat.S_IWUSR | stat.S_IRUSR)
-
 # boostSuffixList is used when using system boost to select a search sequence
 # for boost libraries.
 boostSuffixList = ["-mt", ""]
@@ -4427,6 +4417,11 @@ def doConfigure(myenv):
                 env.FatalError(
                     "Cannot use libunwind with TSAN, please add --use-libunwind=off to your compile flags"
                 )
+
+            # We add supressions based on the library file in etc/tsan.suppressions
+            # so the link-model needs to be dynamic.
+            if not link_model.startswith('dynamic'):
+                env.FatalError("TSAN is only supported with dynamic link models")
 
             # If anything is changed, added, or removed in
             # tsan_options, be sure to make the corresponding changes
@@ -6089,8 +6084,10 @@ env['RPATH_ESCAPED_DOLLAR_ORIGIN'] = '\\$$$$ORIGIN'
 
 def isSupportedStreamsPlatform(thisEnv):
     # TODO https://jira.mongodb.org/browse/SERVER-74961: Support other platforms.
-    return thisEnv.TargetOSIs(
-        'linux') and thisEnv['TARGET_ARCH'] == 'x86_64' and ssl_provider == 'openssl'
+    # linux x86 and ARM64 are supported.
+    return thisEnv.TargetOSIs('linux') and \
+        thisEnv['TARGET_ARCH'] in ('x86_64', 'aarch64') \
+        and ssl_provider == 'openssl'
 
 
 def shouldBuildStreams(thisEnv):
@@ -6258,7 +6255,7 @@ sconslinters = env.Command(
 
 lint_py = env.Command(
     target="#lint-lint.py",
-    source=["buildscripts/quickcpplint.py"],
+    source=["buildscripts/quickmongolint.py"],
     action="$PYTHON ${SOURCES[0]} lint",
 )
 
@@ -6429,7 +6426,7 @@ if get_option('ninja') == 'disabled':
     compileCommands = env.CompilationDatabase('compile_commands.json')
     # Initialize generated-sources Alias as a placeholder so that it can be used as a
     # dependency for compileCommands. This Alias will be properly updated in other SConscripts.
-    env.Requires(compileCommands, env.Alias("generated-sources"))
+    env.Depends(compileCommands, env.Alias("generated-sources"))
     compileDb = env.Alias("compiledb", compileCommands)
 
 msvc_version = ""

@@ -5,12 +5,9 @@
  *   requires_replication,
  * ]
  */
-(function() {
-'use strict';
-
 load('jstests/noPassthrough/libs/index_build.js');  // For IndexBuildTest
 load("jstests/libs/fail_point_util.js");
-load("jstests/libs/ttl_util.js");
+import {TTLUtil} from "jstests/libs/ttl_util.js";
 
 var rst = new ReplSetTest({
     nodes: 2,
@@ -91,9 +88,11 @@ assertMetrics(primary, (metrics) => {
     assert.gte(metrics[dbName2].totalUnitsWritten, 2);
 });
 
-// Clear metrics and wait for a TTL pass to delete the documents.
+// Clear metrics and wait for two TTL passes to make sure we both observe the inserts and delete the
+// documents.
 clearMetrics(primary);
 pauseTtl.off();
+TTLUtil.waitForPass(primaryDB1);
 TTLUtil.waitForPass(primaryDB1);
 
 // Ensure that the TTL monitor deleted 2 documents on the primary and recorded read and write
@@ -145,4 +144,3 @@ assert.eq(secondaryDB1[collName].count({}), 0);
 assert.eq(secondaryDB2[collName].count({}), 2);
 
 rst.stopSet();
-}());

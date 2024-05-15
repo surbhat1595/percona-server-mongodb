@@ -30,27 +30,56 @@
 
 #include "mongo/db/s/collmod_coordinator.h"
 
+#include <absl/container/node_hash_map.h>
+#include <algorithm>
+#include <boost/smart_ptr.hpp>
+#include <set>
+#include <string>
+#include <tuple>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/client/connection_string.h"
+#include "mongo/client/read_preference.h"
 #include "mongo/db/catalog/coll_mod.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_uuid_mismatch.h"
-#include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog_raii.h"
+#include "mongo/db/client.h"
 #include "mongo/db/coll_mod_gen.h"
-#include "mongo/db/db_raii.h"
-#include "mongo/db/ops/insert.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/s/forwardable_operation_metadata.h"
 #include "mongo/db/s/participant_block_gen.h"
 #include "mongo/db/s/sharded_collmod_gen.h"
+#include "mongo/db/s/sharding_ddl_coordinator_gen.h"
 #include "mongo/db/s/sharding_ddl_util.h"
-#include "mongo/db/s/sharding_state.h"
+#include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/timeseries/catalog_helper.h"
 #include "mongo/db/timeseries/timeseries_collmod.h"
 #include "mongo/db/timeseries/timeseries_options.h"
+#include "mongo/db/write_concern_options.h"
+#include "mongo/executor/async_rpc.h"
 #include "mongo/executor/async_rpc_util.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/logv2/log.h"
 #include "mongo/s/async_requests_sender.h"
+#include "mongo/s/catalog/sharding_catalog_client.h"
+#include "mongo/s/catalog/type_collection.h"
+#include "mongo/s/catalog/type_database_gen.h"
+#include "mongo/s/catalog_cache.h"
+#include "mongo/s/chunk_manager.h"
+#include "mongo/s/client/shard.h"
+#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/future_impl.h"
+#include "mongo/util/read_through_cache.h"
+#include "mongo/util/str.h"
+#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -79,6 +108,18 @@ bool hasTimeSeriesBucketingUpdate(const CollModRequest& request) {
     return ts->getGranularity() || ts->getBucketMaxSpanSeconds() || ts->getBucketRoundingSeconds();
 }
 
+template <typename CommandType>
+std::vector<AsyncRequestsSender::Response> sendAuthenticatedCommandWithOsiToShards(
+    OperationContext* opCtx,
+    std::shared_ptr<async_rpc::AsyncRPCOptions<CommandType>> opts,
+    const std::vector<ShardId>& shardIds,
+    const OperationSessionInfo& osi,
+    WriteConcernOptions wc = WriteConcernOptions()) {
+    async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(opts->genericArgs, wc);
+    async_rpc::AsyncRPCCommandHelpers::appendOSI(opts->genericArgs, osi);
+    return sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, shardIds);
+}
+
 }  // namespace
 
 CollModCoordinator::CollModCoordinator(ShardingDDLCoordinatorService* service,
@@ -102,11 +143,6 @@ void CollModCoordinator::checkIfOptionsConflict(const BSONObj& doc) const {
 void CollModCoordinator::appendCommandInfo(BSONObjBuilder* cmdInfoBuilder) const {
     cmdInfoBuilder->appendElements(_request.toBSON());
 };
-
-// TODO SERVER-68008 Remove once 7.0 becomes last LTS
-bool CollModCoordinator::_isPre61Compatible() const {
-    return operationType() == DDLCoordinatorTypeEnum::kCollModPre61Compatible;
-}
 
 void CollModCoordinator::_performNoopRetryableWriteOnParticipants(
     OperationContext* opCtx, const std::shared_ptr<executor::TaskExecutor>& executor) {
@@ -188,9 +224,6 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
             }
         })
         .then([this, executor = executor, anchor = shared_from_this()] {
-            if (_isPre61Compatible()) {
-                return;
-            }
             _buildPhaseHandler(
                 Phase::kFreezeMigrations, [this, executor = executor, anchor = shared_from_this()] {
                     auto opCtxHolder = cc().makeOperationContext();
@@ -216,41 +249,20 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                 getForwardableOpMetadata().setOn(opCtx);
 
                 _saveCollectionInfoOnCoordinatorIfNecessary(opCtx);
-
-                if (_isPre61Compatible() && _collInfo->isSharded) {
-                    const auto migrationsAlreadyBlockedForBucketNss =
-                        hasTimeSeriesBucketingUpdate(_request) &&
-                        _doc.getMigrationsAlreadyBlockedForBucketNss();
-
-                    if (!migrationsAlreadyBlockedForBucketNss) {
-                        const auto& collUUID = sharding_ddl_util::getCollectionUUID(
-                            opCtx, _collInfo->nsForTargeting, true /* allowViews */);
-                        _doc.setCollUUID(collUUID);
-                        sharding_ddl_util::stopMigrations(
-                            opCtx, _collInfo->nsForTargeting, collUUID, getNewSession(opCtx));
-                    }
-                }
-
                 _saveShardingInfoOnCoordinatorIfNecessary(opCtx);
 
                 if (_collInfo->isSharded && hasTimeSeriesBucketingUpdate(_request)) {
-                    if (_isPre61Compatible()) {
-                        auto newDoc = _doc;
-                        newDoc.setMigrationsAlreadyBlockedForBucketNss(true);
-                        _updateStateDocument(opCtx, std::move(newDoc));
-                    }
-
                     ShardsvrParticipantBlock blockCRUDOperationsRequest(_collInfo->nsForTargeting);
                     blockCRUDOperationsRequest.setBlockType(
                         CriticalSectionBlockTypeEnum::kReadsAndWrites);
-                    async_rpc::GenericArgs args;
-                    async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
-                    async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
                     auto opts =
                         std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-                            blockCRUDOperationsRequest, **executor, token, args);
-                    sharding_ddl_util::sendAuthenticatedCommandToShards(
-                        opCtx, opts, _shardingInfo->shardsOwningChunks);
+                            blockCRUDOperationsRequest,
+                            **executor,
+                            token,
+                            async_rpc::GenericArgs());
+                    sendAuthenticatedCommandWithOsiToShards(
+                        opCtx, opts, _shardingInfo->shardsOwningChunks, getNewSession(opCtx));
                 }
             }))
         .then(_buildPhaseHandler(
@@ -269,14 +281,13 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                     hasTimeSeriesBucketingUpdate(_request)) {
                     ConfigsvrCollMod request(_collInfo->nsForTargeting, _request);
                     const auto cmdObj =
-                        CommandHelpers::appendMajorityWriteConcern(request.toBSON({}))
-                            .addFields(getNewSession(opCtx).toBSON());
+                        CommandHelpers::appendMajorityWriteConcern(request.toBSON({}));
 
                     const auto& configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
                     uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(
                         configShard->runCommand(opCtx,
                                                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                                nss().db().toString(),
+                                                nss().db_forSharding().toString(),
                                                 cmdObj,
                                                 Shard::RetryPolicy::kIdempotent)));
                 }
@@ -300,19 +311,14 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                                 return;
                             } else if (allowMigrations) {
                                 // Previous run on a different node completed, but we lost the
-                                // result in the stepdown. Restart from stage in which we disallow
-                                // migrations.
-                                auto newPhase = _isPre61Compatible() ? Phase::kBlockShards
-                                                                     : Phase::kFreezeMigrations;
-                                _enterPhase(newPhase);
+                                // result in the stepdown. Restart from kFreezeMigrations.
+                                _enterPhase(Phase::kFreezeMigrations);
                                 uasserted(ErrorCodes::Interrupted,
                                           "Retriable error to move to previous stage");
                             }
                         }
 
                         ShardsvrCollModParticipant request(originalNss(), _request);
-                        async_rpc::GenericArgs args;
-                        async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
                         bool needsUnblock =
                             _collInfo->timeSeriesOptions && hasTimeSeriesBucketingUpdate(_request);
                         request.setNeedsUnblock(needsUnblock);
@@ -335,6 +341,8 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                             // strip out other incompatible options.
                             auto dryRunRequest = ShardsvrCollModParticipant{
                                 originalNss(), makeCollModDryRunRequest(_request)};
+                            async_rpc::GenericArgs args;
+                            async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
                             auto optsDryRun = std::make_shared<
                                 async_rpc::AsyncRPCOptions<ShardsvrCollModParticipant>>(
                                 dryRunRequest, **executor, token, args);
@@ -348,13 +356,9 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                             request.setPerformViewChange(true);
                             auto opts = std::make_shared<
                                 async_rpc::AsyncRPCOptions<ShardsvrCollModParticipant>>(
-                                request, **executor, token, args);
-                            async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
-                            async_rpc::AsyncRPCCommandHelpers::appendOSI(args,
-                                                                         getNewSession(opCtx));
-                            const auto& primaryResponse =
-                                sharding_ddl_util::sendAuthenticatedCommandToShards(
-                                    opCtx, opts, {_shardingInfo->primaryShard});
+                                request, **executor, token, async_rpc::GenericArgs());
+                            const auto& primaryResponse = sendAuthenticatedCommandWithOsiToShards(
+                                opCtx, opts, {_shardingInfo->primaryShard}, getNewSession(opCtx));
 
                             responses.insert(
                                 responses.end(), primaryResponse.begin(), primaryResponse.end());
@@ -362,14 +366,11 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                         }
 
                         request.setPerformViewChange(false);
-                        async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
-                        async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
                         auto opts = std::make_shared<
                             async_rpc::AsyncRPCOptions<ShardsvrCollModParticipant>>(
-                            request, **executor, token, args);
-                        const auto& secondaryResponses =
-                            sharding_ddl_util::sendAuthenticatedCommandToShards(
-                                opCtx, opts, shardsOwningChunks);
+                            request, **executor, token, async_rpc::GenericArgs());
+                        const auto& secondaryResponses = sendAuthenticatedCommandWithOsiToShards(
+                            opCtx, opts, shardsOwningChunks, getNewSession(opCtx));
 
                         responses.insert(
                             responses.end(), secondaryResponses.begin(), secondaryResponses.end());
@@ -402,8 +403,9 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                         opCtx, originalNss(), cmd, true, &collModResBuilder));
                     auto collModRes = collModResBuilder.obj();
 
-                    const auto dbInfo = uassertStatusOK(
-                        Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nss().db()));
+                    const auto dbInfo =
+                        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(
+                            opCtx, nss().db_forSharding()));
                     const auto shard = uassertStatusOK(
                         Grid::get(opCtx)->shardRegistry()->getShard(opCtx, dbInfo->getPrimary()));
                     BSONObjBuilder builder;

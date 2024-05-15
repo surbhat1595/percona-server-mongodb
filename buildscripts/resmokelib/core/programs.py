@@ -279,7 +279,7 @@ def mongo_shell_program(logger, executable=None, connection_string=None, filenam
         eval_sb.append(str(kwargs.pop("eval")))
 
     # Load a callback to check that the cluster-wide metadata is consistent.
-    eval_sb.append("load('jstests/libs/override_methods/check_metadata_consistency.js');")
+    eval_sb.append("await import('jstests/libs/override_methods/check_metadata_consistency.js');")
 
     # Load this file to allow a callback to validate collections before shutting down mongod.
     eval_sb.append("load('jstests/libs/override_methods/validate_collections_on_shutdown.js');")
@@ -297,7 +297,8 @@ def mongo_shell_program(logger, executable=None, connection_string=None, filenam
 
     # Load a callback to check that the info stored in config.collections and config.chunks is
     # semantically correct before shutting down a ShardingTest.
-    eval_sb.append("load('jstests/libs/override_methods/check_routing_table_consistency.js');")
+    eval_sb.append(
+        "await import('jstests/libs/override_methods/check_routing_table_consistency.js');")
 
     # Load a callback to check that all shards have correct filtering information before shutting
     # down a ShardingTest.
@@ -454,6 +455,11 @@ def _set_keyfile_permissions(opts):
     We can't permanently set the keyfile permissions because git is not
     aware of them.
     """
+    for keysuffix in ["1", "2", "ForRollover"]:
+        keyfile = "jstests/libs/key%s" % keysuffix
+        if os.path.exists(keyfile):
+            os.chmod(keyfile, stat.S_IRUSR | stat.S_IWUSR)
+
     if "keyFile" in opts:
         os.chmod(opts["keyFile"], stat.S_IRUSR | stat.S_IWUSR)
     if "encryptionKeyFile" in opts:

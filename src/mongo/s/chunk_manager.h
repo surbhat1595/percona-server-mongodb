@@ -29,13 +29,30 @@
 
 #pragma once
 
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/keypattern.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/shard_id.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/chunk.h"
+#include "mongo/s/chunk_version.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
 #include "mongo/s/shard_key_pattern.h"
@@ -43,19 +60,36 @@
 #include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/read_through_cache.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 
 class ChunkManager;
 
 struct PlacementVersionTargetingInfo {
+
+    PlacementVersionTargetingInfo(const PlacementVersionTargetingInfo& other)
+        : placementVersion(other.placementVersion),
+          validAfter(other.validAfter),
+          isStale(other.isStale.load()) {}
+    /**
+     * Constructs a placement information for a collection with the specified generation, starting
+     * at placementVersion {0, 0} and maxValidAfter of Timestamp{0, 0}. The expectation is that the
+     * incremental refresh algorithm will increment these values as it processes the incoming
+     * chunks.
+     */
+    explicit PlacementVersionTargetingInfo(const CollectionGeneration& generation);
+    PlacementVersionTargetingInfo(ChunkVersion placementVersion, Timestamp validAfter)
+        : placementVersion(std::move(placementVersion)), validAfter(std::move(validAfter)) {}
+
+    // Max chunk version for the shard, effectively this is the shard placement version.
+    ChunkVersion placementVersion;
+    // Max validAfter for the shard, effectively this is the timestamp of the latest placement
+    // change that occurred on a particular shard.
+    Timestamp validAfter;
+
     // Indicates whether the shard is stale and thus needs a catalog cache refresh
     AtomicWord<bool> isStale{false};
-
-    // Max chunk version for the shard
-    ChunkVersion placementVersion;
-
-    PlacementVersionTargetingInfo(const OID& epoch, const Timestamp& timestamp);
 };
 
 // Map from a shard to a struct indicating both the max chunk version on that shard and whether the
@@ -69,64 +103,172 @@ using ShardPlacementVersionMap =
  * underlying implementation.
  */
 class ChunkMap {
+public:
     // Vector of chunks ordered by max key.
     using ChunkVector = std::vector<std::shared_ptr<ChunkInfo>>;
+    using ChunkVectorMap = std::map<std::string, std::shared_ptr<ChunkVector>>;
 
-public:
-    ChunkMap(OID epoch, const Timestamp& timestamp, size_t initialCapacity = 0);
+    explicit ChunkMap(OID epoch, const Timestamp& timestamp, size_t chunkVectorSize)
+        : _collectionPlacementVersion({epoch, timestamp}, {0, 0}),
+          _maxChunkVectorSize(chunkVectorSize) {}
 
-    size_t size() const {
-        return _chunkMap.size();
-    }
+    size_t size() const;
 
+    // Max version across all chunks
     ChunkVersion getVersion() const {
         return _collectionPlacementVersion;
     }
 
+    size_t getMaxChunkVectorSize() const {
+        return _maxChunkVectorSize;
+    }
+
+    const ShardPlacementVersionMap& getShardPlacementVersionMap() const {
+        return _placementVersions;
+    }
+
+    const ChunkVectorMap& getChunkVectorMap() const {
+        return _chunkVectorMap;
+    }
+
+
+    /*
+     * Invoke the given handler for each std::shared_ptr<ChunkInfo> contained in this chunk map
+     * until either all matching chunks have been processed or @handler returns false.
+     *
+     * Chunks are yielded in ascending order of shardkey (e.g. minKey to maxKey);
+     *
+     * When shardKey is provided only the chunks with minKey greater or equal to shardKey will be
+     * yielded.
+     */
     template <typename Callable>
     void forEach(Callable&& handler, const BSONObj& shardKey = BSONObj()) const {
-        auto it = shardKey.isEmpty() ? _chunkMap.begin() : _findIntersectingChunk(shardKey);
+        if (shardKey.isEmpty()) {
+            for (const auto& mapIt : _chunkVectorMap) {
+                for (const auto& chunkInfoPtr : *(mapIt.second)) {
+                    if (!handler(chunkInfoPtr))
+                        return;
+                }
+            }
 
-        for (; it != _chunkMap.end(); ++it) {
-            if (!handler(*it))
-                break;
+            return;
+        }
+
+        auto shardKeyString = ShardKeyPattern::toKeyString(shardKey);
+
+        const auto mapItBegin = _chunkVectorMap.lower_bound(shardKeyString);
+        for (auto mapIt = mapItBegin; mapIt != _chunkVectorMap.end(); mapIt++) {
+            const auto& chunkVector = *(mapIt->second);
+            auto it = mapIt == mapItBegin ? _findIntersectingChunkIterator(shardKeyString,
+                                                                           chunkVector.begin(),
+                                                                           chunkVector.end(),
+                                                                           true /*isMaxInclusive*/)
+                                          : chunkVector.begin();
+            for (; it != chunkVector.end(); ++it) {
+                if (!handler(*it))
+                    return;
+            }
         }
     }
 
+
+    /*
+     * Invoke the given @handler for each std::shared_ptr<ChunkInfo> that overlaps with range [@min,
+     * @max] until either all matching chunks have been processed or @handler returns false.
+     *
+     * Chunks are yielded in ascending order of shardkey (e.g. minKey to maxKey);
+     *
+     * When @isMaxInclusive is true also the chunk whose minKey is equal to @max will be yielded.
+     */
     template <typename Callable>
     void forEachOverlappingChunk(const BSONObj& min,
                                  const BSONObj& max,
                                  bool isMaxInclusive,
                                  Callable&& handler) const {
-        const auto bounds = _overlappingBounds(min, max, isMaxInclusive);
+        const auto minShardKeyStr = ShardKeyPattern::toKeyString(min);
+        const auto maxShardKeyStr = ShardKeyPattern::toKeyString(max);
+        const auto bounds =
+            _overlappingVectorSlotBounds(minShardKeyStr, maxShardKeyStr, isMaxInclusive);
+        for (auto mapIt = bounds.first; mapIt != bounds.second; ++mapIt) {
 
-        for (auto it = bounds.first; it != bounds.second; ++it) {
-            if (!handler(*it))
-                break;
+            const auto& chunkVector = *(mapIt->second);
+
+            const auto chunkItBegin = [&] {
+                if (mapIt == bounds.first) {
+                    // On first vector we need to start from chunk that contain the given minKey
+                    return _findIntersectingChunkIterator(minShardKeyStr,
+                                                          chunkVector.begin(),
+                                                          chunkVector.end(),
+                                                          true /* isMaxInclusive */);
+                }
+                return chunkVector.begin();
+            }();
+
+            const auto chunkItEnd = [&] {
+                if (mapIt == std::prev(bounds.second)) {
+                    // On last vector we need to skip all chunks that are greater than the give
+                    // maxKey
+                    auto it = _findIntersectingChunkIterator(
+                        maxShardKeyStr, chunkItBegin, chunkVector.end(), isMaxInclusive);
+                    return it == chunkVector.end() ? it : ++it;
+                }
+                return chunkVector.end();
+            }();
+
+            for (auto chunkIt = chunkItBegin; chunkIt != chunkItEnd; ++chunkIt) {
+                if (!handler(*chunkIt))
+                    return;
+            }
         }
     }
 
-    ShardPlacementVersionMap constructShardPlacementVersionMap() const;
     std::shared_ptr<ChunkInfo> findIntersectingChunk(const BSONObj& shardKey) const;
 
-    void appendChunk(const std::shared_ptr<ChunkInfo>& chunk);
-
-    ChunkMap createMerged(const std::vector<std::shared_ptr<ChunkInfo>>& changedChunks) const;
+    ChunkMap createMerged(ChunkVector changedChunks) const;
 
     BSONObj toBSON() const;
+
+    std::string toString() const;
 
     static bool allElementsAreOfType(BSONType type, const BSONObj& obj);
 
 private:
-    ChunkVector::const_iterator _findIntersectingChunk(const BSONObj& shardKey,
-                                                       bool isMaxInclusive = true) const;
-    std::pair<ChunkVector::const_iterator, ChunkVector::const_iterator> _overlappingBounds(
-        const BSONObj& min, const BSONObj& max, bool isMaxInclusive) const;
+    ChunkVector::const_iterator _findIntersectingChunkIterator(const std::string& shardKeyString,
+                                                               ChunkVector::const_iterator first,
+                                                               ChunkVector::const_iterator last,
+                                                               bool isMaxInclusive) const;
 
-    ChunkVector _chunkMap;
+    std::pair<ChunkVectorMap::const_iterator, ChunkVectorMap::const_iterator>
+    _overlappingVectorSlotBounds(const std::string& minShardKeyStr,
+                                 const std::string& maxShardKeyStr,
+                                 bool isMaxInclusive) const;
+    ChunkMap _makeUpdated(ChunkVector&& changedChunks) const;
+
+    void _updateShardVersionFromDiscardedChunk(const ChunkInfo& chunk);
+    void _updateShardVersionFromUpdateChunk(const ChunkInfo& chunk,
+                                            const ShardPlacementVersionMap& oldPlacmentVersions);
+    void _commitUpdatedChunkVector(std::shared_ptr<ChunkVector>&& chunkVectorPtr,
+                                   bool checkMaxKeyConsistency);
+    void _mergeAndCommitUpdatedChunkVector(ChunkVectorMap::const_iterator pos,
+                                           std::shared_ptr<ChunkVector>&& chunkVectorPtr);
+    void _splitAndCommitUpdatedChunkVector(ChunkVectorMap::const_iterator pos,
+                                           std::shared_ptr<ChunkVector>&& chunkVectorPtr);
+
+    ChunkVectorMap _chunkVectorMap;
 
     // Max version across all chunks
     ChunkVersion _collectionPlacementVersion;
+
+    // The representation of shard versions and staleness indicators for this namespace. If a
+    // shard does not exist, it will not have an entry in the map.
+    // Note: this declaration must not be moved before _chunkMap since it is initialized by using
+    // the _chunkVectorMap instance.
+    ShardPlacementVersionMap _placementVersions;
+
+    // Maximum size of chunk vectors stored in the chunk vector map.
+    // Bigger vectors will imply slower incremental refreshes (more chunks to copy) but
+    // faster map copy (less chunk vector pointers to copy).
+    size_t _maxChunkVectorSize;
 };
 
 /**
@@ -215,6 +357,10 @@ public:
      */
     void setAllShardsRefreshed();
 
+    /**
+     * Returns the maximum version across all shards (also known as the "collection placement
+     * version").
+     */
     ChunkVersion getVersion() const {
         return _chunkMap.getVersion();
     }
@@ -223,14 +369,26 @@ public:
      * Retrieves the placement version for the given shard. Will throw a
      * ShardInvalidatedForTargeting exception if the shard is marked as stale.
      */
-    ChunkVersion getVersion(const ShardId& shardId) const;
+    ChunkVersion getVersion(const ShardId& shardId) const {
+        return _getVersion(shardId, true).placementVersion;
+    }
 
     /**
      * Retrieves the placement version for the given shard. Will not throw if the shard is marked as
      * stale. Only use when logging the given chunk version -- if the caller must execute logic
      * based on the returned version, use getVersion() instead.
      */
-    ChunkVersion getVersionForLogging(const ShardId& shardId) const;
+    ChunkVersion getVersionForLogging(const ShardId& shardId) const {
+        return _getVersion(shardId, false).placementVersion;
+    }
+
+    /**
+     * Retrieves the maximum validAfter timestamp for the given shard. Will throw a
+     * ShardInvalidatedForTargeting exception if the shard is marked as stale.
+     */
+    Timestamp getMaxValidAfter(const ShardId& shardId) const {
+        return _getVersion(shardId, true).validAfter;
+    }
 
     size_t numChunks() const {
         return _chunkMap.size();
@@ -271,11 +429,6 @@ public:
         return _placementVersions.size();
     }
 
-    /**
-     * Returns true if, for this shard, the chunks are identical in both chunk managers
-     */
-    bool compatibleWith(const RoutingTableHistory& other, const ShardId& shard) const;
-
     std::string toString() const;
 
     bool uuidMatches(const UUID& uuid) const {
@@ -311,7 +464,7 @@ private:
                         bool allowMigrations,
                         ChunkMap chunkMap);
 
-    ChunkVersion _getVersion(const ShardId& shardName, bool throwOnStaleShard) const;
+    PlacementVersionTargetingInfo _getVersion(const ShardId& shardId, bool throwOnStaleShard) const;
 
     // Namespace to which this routing information corresponds
     NamespaceString _nss;
@@ -530,31 +683,56 @@ public:
     // Methods only supported on sharded collections (caller must check isSharded())
 
     const ShardKeyPattern& getShardKeyPattern() const {
+        tassert(7626400, "Expected routing table to be initialized", _rt->optRt);
         return _rt->optRt->getShardKeyPattern();
     }
 
     const CollatorInterface* getDefaultCollator() const {
+        tassert(7626401, "Expected routing table to be initialized", _rt->optRt);
         return _rt->optRt->getDefaultCollator();
     }
 
     bool isUnique() const {
+        tassert(7626402, "Expected routing table to be initialized", _rt->optRt);
         return _rt->optRt->isUnique();
     }
 
     ChunkVersion getVersion() const {
+        tassert(7626403, "Expected routing table to be initialized", _rt->optRt);
         return _rt->optRt->getVersion();
     }
 
+    /**
+     * Retrieves the placement version for the given shard. Will throw a
+     * ShardInvalidatedForTargeting exception if the shard is marked as stale.
+     */
     ChunkVersion getVersion(const ShardId& shardId) const {
+        tassert(7626404, "Expected routing table to be initialized", _rt->optRt);
         return _rt->optRt->getVersion(shardId);
     }
 
+    /**
+     * Retrieves the maximum validAfter timestamp for the given shard. Will throw a
+     * ShardInvalidatedForTargeting exception if the shard is marked as stale.
+     */
+    Timestamp getMaxValidAfter(const ShardId& shardId) const {
+        tassert(7626405, "Expected routing table to be initialized", _rt->optRt);
+        return _rt->optRt->getMaxValidAfter(shardId);
+    }
+
+    /**
+     * Retrieves the placement version for the given shard. Will not throw if the shard is marked as
+     * stale. Only use when logging the given chunk version -- if the caller must execute logic
+     * based on the returned version, use getVersion() instead.
+     */
     ChunkVersion getVersionForLogging(const ShardId& shardId) const {
+        tassert(7626406, "Expected routing table to be initialized", _rt->optRt);
         return _rt->optRt->getVersionForLogging(shardId);
     }
 
     template <typename Callable>
     void forEachChunk(Callable&& handler, const BSONObj& shardKey = BSONObj()) const {
+        tassert(7626407, "Expected routing table to be initialized", _rt->optRt);
         _rt->optRt->forEachChunk(
             [this, handler = std::forward<Callable>(handler)](const auto& chunkInfo) mutable {
                 if (!handler(Chunk{*chunkInfo, _clusterTime}))
@@ -604,6 +782,7 @@ public:
      * Same as findIntersectingChunk, but assumes the simple collation.
      */
     Chunk findIntersectingChunkWithSimpleCollation(const BSONObj& shardKey) const {
+        tassert(7626408, "Expected routing table to be initialized", _rt->optRt);
         return findIntersectingChunk(shardKey, CollationSpec::kSimpleSpec);
     }
 
@@ -628,6 +807,7 @@ public:
      * Returns the ids of all shards on which the collection has any chunks.
      */
     void getAllShardIds(std::set<ShardId>* all) const {
+        tassert(7626409, "Expected routing table to be initialized", _rt->optRt);
         _rt->optRt->getAllShardIds(all);
     }
 
@@ -635,6 +815,7 @@ public:
      * Returns the chunk ranges of all shards on which the collection has any chunks.
      */
     void getAllChunkRanges(std::set<ChunkRange>* all) const {
+        tassert(7626410, "Expected routing table to be initialized", _rt->optRt);
         _rt->optRt->getAllChunkRanges(all);
     }
 
@@ -642,6 +823,7 @@ public:
      * Returns the number of shards on which the collection has any chunks
      */
     size_t getNShardsOwningChunks() const {
+        tassert(7626411, "Expected routing table to be initialized", _rt->optRt);
         return _rt->optRt->getNShardsOwningChunks();
     }
 
@@ -651,34 +833,33 @@ public:
      */
     static ChunkManager makeAtTime(const ChunkManager& cm, Timestamp clusterTime);
 
-    /**
-     * Returns true if, for this shard, the chunks are identical in both chunk managers
-     */
-    bool compatibleWith(const ChunkManager& other, const ShardId& shard) const {
-        return _rt->optRt->compatibleWith(*other._rt->optRt, shard);
-    }
-
     bool uuidMatches(const UUID& uuid) const {
+        tassert(7626412, "Expected routing table to be initialized", _rt->optRt);
         return _rt->optRt->uuidMatches(uuid);
     }
 
     const UUID& getUUID() const {
+        tassert(7626413, "Expected routing table to be initialized", _rt->optRt);
         return _rt->optRt->getUUID();
     }
 
     const NamespaceString& getNss() const {
+        tassert(7626414, "Expected routing table to be initialized", _rt->optRt);
         return _rt->optRt->nss();
     }
 
     const boost::optional<TypeCollectionTimeseriesFields>& getTimeseriesFields() const {
+        tassert(7626415, "Expected routing table to be initialized", _rt->optRt);
         return _rt->optRt->getTimeseriesFields();
     }
 
     const boost::optional<TypeCollectionReshardingFields>& getReshardingFields() const {
+        tassert(7626416, "Expected routing table to be initialized", _rt->optRt);
         return _rt->optRt->getReshardingFields();
     }
 
     const RoutingTableHistory& getRoutingTableHistory_ForTest() const {
+        tassert(7626417, "Expected routing table to be initialized", _rt->optRt);
         return *_rt->optRt;
     }
 

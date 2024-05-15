@@ -29,11 +29,29 @@
 
 #pragma once
 
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
+// IWYU pragma: no_include "ext/alloc_traits.h"
+#include <string>
+#include <utility>
+#include <vector>
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/projection_executor_utils.h"
 #include "mongo/db/matcher/copyable_match_expression.h"
 #include "mongo/db/pipeline/expression.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_visitor.h"
+#include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/serialization_options.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/intrusive_counter.h"
 
 namespace mongo {
 /**
@@ -90,8 +108,8 @@ public:
     }
 
     boost::intrusive_ptr<Expression> optimize() final {
-        for (const auto& child : _children) {
-            child->optimize();
+        for (auto& child : _children) {
+            child = child->optimize();
         }
         // SERVER-43740: ideally we'd want to optimize '_matchExpr' here as well. However, given
         // that the match expression is stored as a shared copyable expression in this class, and
@@ -162,7 +180,7 @@ public:
     boost::intrusive_ptr<Expression> optimize() final {
         invariant(_children.size() == 1ul);
 
-        _children[0]->optimize();
+        _children[0] = _children[0]->optimize();
         return this;
     }
 
@@ -208,7 +226,7 @@ public:
     boost::intrusive_ptr<Expression> optimize() final {
         invariant(_children.size() == 1ul);
 
-        _children[0]->optimize();
+        _children[0] = _children[0]->optimize();
         // SERVER-43740: ideally we'd want to optimize '_matchExpr' here as well. However, given
         // that the match expression is stored as a shared copyable expression in this class, and
         // 'MatchExpression::optimize()' takes and returns a unique pointer on a match expression,

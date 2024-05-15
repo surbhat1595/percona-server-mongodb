@@ -12,9 +12,7 @@
  * @tags: [requires_collstats, requires_capped]
  */
 
-var $config = (function() {
-    load("jstests/libs/feature_flag_util.js");
-
+export const $config = (function() {
     // TODO: This workload may fail if an iteration multiplier is specified.
     var data = {prefix: 'convert_to_capped_collection'};
 

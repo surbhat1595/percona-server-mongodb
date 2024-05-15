@@ -28,18 +28,34 @@
  */
 
 
-#include "mongo/platform/basic.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+// IWYU pragma: no_include "cxxabi.h"
+#include <mutex>
+#include <utility>
 
-#include "mongo/db/storage/control/journal_flusher.h"
-
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
 #include "mongo/db/client.h"
+#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
-#include "mongo/stdx/future.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/scopeguard.h"
+#include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -79,12 +95,6 @@ void JournalFlusher::set(ServiceContext* serviceCtx, std::unique_ptr<JournalFlus
 void JournalFlusher::run() {
     ThreadClient tc(name(), getGlobalServiceContext());
     LOGV2_DEBUG(4584701, 1, "starting {name} thread", "name"_attr = name());
-
-    // TODO(SERVER-74657): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(*tc.get());
-        tc.get()->setSystemOperationUnkillableByStepdown(lk);
-    }
 
     // The thread must not run and access the service context to create an opCtx while unit test
     // infrastructure is still being set up and expects sole access to the service context (there is
@@ -130,16 +140,15 @@ void JournalFlusher::run() {
             // Signal the waiters that a round completed.
             _currentSharedPromise->emplaceValue();
         } catch (const AssertionException& e) {
-            // Can be caused by killOp.
+            // Can be caused by killOp or stepdown.
             if (e.code() == ErrorCodes::Interrupted) {
-                // This thread should not be affected by killOp. Therefore, the thread will
-                // immediately restart the journal flush without sending errors to waiting callers.
-                // The opCtx error should already be cleared of the interrupt by the ON_BLOCK_EXIT
-                // handling above.
-                LOGV2(5574501,
-                      "The JournalFlusher received and is ignoring a killOp error: the user should "
-                      "not kill mongod internal threads",
-                      "JournalFlusherError"_attr = e.toString());
+                // When this thread is interrupted it will immediately restart the journal flush
+                // without sending errors to waiting callers. The opCtx error should already be
+                // cleared of the interrupt by the ON_BLOCK_EXIT handling above.
+                LOGV2_DEBUG(5574501,
+                            1,
+                            "The JournalFlusher got interrupted, retrying",
+                            "error"_attr = e.toString());
                 continue;
             }
 

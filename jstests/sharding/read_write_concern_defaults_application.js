@@ -113,7 +113,6 @@ let testCases = {
     _configsvrRemoveShardFromZone: {skip: "internal command"},
     _configsvrRemoveTags: {skip: "internal command"},
     _configsvrRenameCollection: {skip: "internal command"},
-    _configsvrRenameCollectionMetadata: {skip: "internal command"},
     _configsvrRepairShardedCollectionChunksHistory: {skip: "internal command"},
     _configsvrResetPlacementHistory: {skip: "internal command"},
     _configsvrReshardCollection: {skip: "internal command"},
@@ -124,6 +123,7 @@ let testCases = {
     _configsvrTransitionFromDedicatedConfigServer: {skip: "internal command"},
     _configsvrTransitionToDedicatedConfigServer: {skip: "internal command"},
     _configsvrUpdateZoneKeyRange: {skip: "internal command"},
+    _dropConnectionsToMongot: {skip: "internal command"},
     _flushDatabaseCacheUpdates: {skip: "internal command"},
     _flushDatabaseCacheUpdatesWithWriteConcern: {skip: "internal command"},
     _flushReshardingStateChange: {skip: "internal command"},
@@ -137,6 +137,7 @@ let testCases = {
     _killOperations: {skip: "internal command"},
     _mergeAuthzCollections: {skip: "internal command"},
     _migrateClone: {skip: "internal command"},
+    _mongotConnPoolStats: {skip: "internal command"},
     _movePrimaryRecipientSyncData: {skip: "internal command"},
     _movePrimaryRecipientAbortMigration: {skip: "internal command"},
     _movePrimaryRecipientForgetMigration: {skip: "internal command"},
@@ -161,8 +162,6 @@ let testCases = {
     _shardsvrCreateGlobalIndex: {skip: "internal command"},
     _shardsvrDropGlobalIndex: {skip: "internal command"},
     _shardsvrDropCollection: {skip: "internal command"},
-    // TODO SERVER-74324: deprecate _shardsvrDropCollectionIfUUIDNotMatching after 7.0 is lastLTS.
-    _shardsvrDropCollectionIfUUIDNotMatching: {skip: "internal command"},
     _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: "internal command"},
     _shardsvrDropCollectionParticipant: {skip: "internal command"},
     _shardsvrUnregisterIndex: {skip: "internal command"},
@@ -205,6 +204,7 @@ let testCases = {
     streams_getMoreStreamSample: {skip: "internal command"},
     streams_getStats: {skip: "internal command"},
     streams_testOnlyInsert: {skip: "internal command"},
+    streams_getMetrics: {skip: "internal command"},
     _transferMods: {skip: "internal command"},
     _vectorClockPersist: {skip: "internal command"},
     abortReshardCollection: {skip: "does not accept read or write concern"},
@@ -263,7 +263,25 @@ let testCases = {
     balancerStatus: {skip: "does not accept read or write concern"},
     balancerStop: {skip: "does not accept read or write concern"},
     buildInfo: {skip: "does not accept read or write concern"},
-    bulkWrite: {skip: "not yet implemented"},
+    bulkWrite: {
+        // TODO SERVER-52419: Run this test and remove the skip.
+        // setUp: function(conn) {
+        //     assert.commandWorked(conn.getDB(db).runCommand({create: coll, writeConcern: {w:
+        //     1}}));
+        // },
+        // db: "admin",
+        // command: {
+        //     bulkWrite: 1,
+        //     ops: [{insert: 0, document: {_id: ObjectId()}}],
+        //     nsInfo: [{ns: db + "." + coll}]
+        // },
+        // checkReadConcern: false,
+        // checkWriteConcern: true,
+        // // TODO SERVER-78258: Depending on what profiling behavior we implement we may be able to
+        // // use profiler output here instead rather than logs.
+        // useLogs: true,
+        skip: "requires feature flag"
+    },
     captrunc: {skip: "test command"},
     checkMetadataConsistency: {skip: "does not accept read or write concern"},
     checkShardingIndex: {skip: "does not accept read or write concern"},
@@ -283,6 +301,7 @@ let testCases = {
     },
     clusterAbortTransaction: {skip: "already tested by 'abortTransaction' tests on mongos"},
     clusterAggregate: {skip: "already tested by 'aggregate' tests on mongos"},
+    clusterBulkWrite: {skip: "already tested by 'bulkWrite' tests on mongos"},
     clusterCommitTransaction: {skip: "already tested by 'commitTransaction' tests on mongos"},
     clusterCount: {skip: "already tested by 'count' tests on mongos"},
     clusterDelete: {skip: "already tested by 'delete' tests on mongos"},
@@ -737,6 +756,8 @@ let testCases = {
     setShardVersion: {skip: "internal command"},
     setChangeStreamState: {skip: "does not accept read or write concern"},
     setClusterParameter: {skip: "does not accept read or write concern"},
+    setQuerySettings: {skip: "does not accept read or write concern"},
+    removeQuerySettings: {skip: "does not accept read or write concern"},
     setUserWriteBlockMode: {skip: "does not accept read or write concern"},
     shardCollection: {skip: "does not accept read or write concern"},
     shardingState: {skip: "does not accept read or write concern"},

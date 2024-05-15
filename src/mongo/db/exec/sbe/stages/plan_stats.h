@@ -30,7 +30,19 @@
 #pragma once
 
 #include "mongo/db/exec/plan_stats.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <list>
+#include <memory>
+
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/string_data.h"
 #include "mongo/db/exec/plan_stats_visitor.h"
+#include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/query/stage_types.h"
+#include "mongo/db/query/tree_walker.h"
 #include "mongo/db/storage/column_store.h"
 
 namespace mongo::sbe {
@@ -358,6 +370,24 @@ struct HashLookupStats : public SpecificStats {
     long long spilledHtBytesOverAllRecords{0};
     long long spilledBuffRecords{0};
     long long spilledBuffBytesOverAllRecords{0};
+};
+
+struct WindowStats : public SpecificStats {
+    std::unique_ptr<SpecificStats> clone() const final {
+        return std::make_unique<WindowStats>(*this);
+    }
+
+    uint64_t estimateObjectSizeInBytes() const final {
+        return sizeof(*this);
+    }
+
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
+    }
 };
 
 /**

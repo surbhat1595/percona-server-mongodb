@@ -30,40 +30,88 @@
 
 #include "mongo/db/s/balancer/balancer.h"
 
+#include <absl/container/node_hash_set.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/none_t.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr.hpp>
+// IWYU pragma: no_include "cxxabi.h"
 #include <algorithm>
+#include <cmath>
+#include <iterator>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <ratio>
 #include <string>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <variant>
+#include <vector>
 
+#include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/client.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/s/balancer/actions_stream_policy.h"
 #include "mongo/db/s/balancer/auto_merger_policy.h"
-#include "mongo/db/s/balancer/balancer_chunk_selection_policy_impl.h"
+#include "mongo/db/s/balancer/balancer_commands_scheduler.h"
 #include "mongo/db/s/balancer/balancer_commands_scheduler_impl.h"
-#include "mongo/db/s/balancer/balancer_defragmentation_policy_impl.h"
+#include "mongo/db/s/balancer/balancer_defragmentation_policy.h"
 #include "mongo/db/s/balancer/cluster_statistics_impl.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/sharding_config_server_parameters_gen.h"
 #include "mongo/db/s/sharding_logging.h"
+#include "mongo/db/shard_id.h"
+#include "mongo/db/write_concern_options.h"
 #include "mongo/executor/scoped_task_executor.h"
+#include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/redaction.h"
+#include "mongo/platform/random.h"
 #include "mongo/s/balancer_configuration.h"
+#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_chunk.h"
+#include "mongo/s/catalog/type_collection.h"
+#include "mongo/s/catalog/type_shard.h"
+#include "mongo/s/catalog_cache.h"
+#include "mongo/s/chunk.h"
+#include "mongo/s/chunk_manager.h"
+#include "mongo/s/chunk_version.h"
+#include "mongo/s/client/shard.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/balancer_collection_status_gen.h"
-#include "mongo/s/request_types/configure_collection_balancing_gen.h"
+#include "mongo/s/request_types/migration_secondary_throttle_options.h"
 #include "mongo/s/shard_util.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
+#include "mongo/stdx/variant.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
-#include "mongo/util/exit.h"
+#include "mongo/util/debug_util.h"
+#include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/future.h"
+#include "mongo/util/future_impl.h"
 #include "mongo/util/pcre.h"
+#include "mongo/util/scopeguard.h"
+#include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
 #include "mongo/util/version.h"
 
@@ -294,34 +342,38 @@ Balancer* Balancer::get(OperationContext* operationContext) {
 Balancer::Balancer()
     : _balancedLastTime(0),
       _clusterStats(std::make_unique<ClusterStatisticsImpl>()),
-      _chunkSelectionPolicy(
-          std::make_unique<BalancerChunkSelectionPolicyImpl>(_clusterStats.get())),
+      _chunkSelectionPolicy(std::make_unique<BalancerChunkSelectionPolicy>(_clusterStats.get())),
       _commandScheduler(std::make_unique<BalancerCommandsSchedulerImpl>()),
-      _defragmentationPolicy(std::make_unique<BalancerDefragmentationPolicyImpl>(
+      _defragmentationPolicy(std::make_unique<BalancerDefragmentationPolicy>(
           _clusterStats.get(), [this]() { _onActionsStreamPolicyStateUpdate(); })),
       _autoMergerPolicy(
           std::make_unique<AutoMergerPolicy>([this]() { _onActionsStreamPolicyStateUpdate(); })),
       _imbalancedCollectionsCache(std::make_unique<stdx::unordered_set<NamespaceString>>()) {}
 
 Balancer::~Balancer() {
-    // Terminate the balancer thread so it doesn't leak memory.
-    interruptBalancer();
-    waitForBalancerToStop();
+    onShutdown();
 }
 
 void Balancer::onStepUpBegin(OperationContext* opCtx, long long term) {
-    // Before starting step-up, ensure the balancer is ready to start. Specifically, that the
-    // balancer is actually stopped, because it may still be in the process of stopping if this
-    // node was previously primary.
-    waitForBalancerToStop();
+    // Before starting step-up, ensure the balancer is ready to start. Specifically, that there is
+    // not an outstanding termination sequence requested during a previous step down of this node.
+    joinTermination();
 }
 
 void Balancer::onStepUpComplete(OperationContext* opCtx, long long term) {
-    initiateBalancer(opCtx);
+    initiate(opCtx);
 }
 
 void Balancer::onStepDown() {
-    interruptBalancer();
+    // Asynchronously request to terminate all the worker threads and allow the stepdown sequence to
+    // continue.
+    requestTermination();
+}
+
+void Balancer::onShutdown() {
+    // Terminate the balancer thread so it doesn't leak memory.
+    requestTermination();
+    joinTermination();
 }
 
 void Balancer::onBecomeArbiter() {
@@ -330,11 +382,11 @@ void Balancer::onBecomeArbiter() {
     MONGO_UNREACHABLE;
 }
 
-void Balancer::initiateBalancer(OperationContext* opCtx) {
+void Balancer::initiate(OperationContext* opCtx) {
     stdx::lock_guard<Latch> scopedLock(_mutex);
     _imbalancedCollectionsCache->clear();
-    invariant(_state == kStopped);
-    _state = kRunning;
+    invariant(_threadSetState == ThreadSetState::Terminated);
+    _threadSetState = ThreadSetState::Running;
 
     invariant(!_thread.joinable());
     invariant(!_actionStreamConsumerThread.joinable());
@@ -342,13 +394,13 @@ void Balancer::initiateBalancer(OperationContext* opCtx) {
     _thread = stdx::thread([this] { _mainThread(); });
 }
 
-void Balancer::interruptBalancer() {
+void Balancer::requestTermination() {
     stdx::lock_guard<Latch> scopedLock(_mutex);
-    if (_state != kRunning) {
+    if (_threadSetState != ThreadSetState::Running) {
         return;
     }
 
-    _state = kStopping;
+    _threadSetState = ThreadSetState::Terminating;
 
     // Interrupt the balancer thread if it has been started. We are guaranteed that the operation
     // context of that thread is still alive, because we hold the balancer mutex.
@@ -361,9 +413,9 @@ void Balancer::interruptBalancer() {
     _actionStreamCondVar.notify_all();
 }
 
-void Balancer::waitForBalancerToStop() {
+void Balancer::joinTermination() {
     stdx::unique_lock<Latch> scopedLock(_mutex);
-    _joinCond.wait(scopedLock, [this] { return _state == kStopped; });
+    _joinCond.wait(scopedLock, [this] { return _threadSetState == ThreadSetState::Terminated; });
     if (_thread.joinable()) {
         _thread.join();
     }
@@ -434,11 +486,6 @@ void Balancer::report(OperationContext* opCtx, BSONObjBuilder* builder) {
 }
 
 void Balancer::_consumeActionStreamLoop() {
-    ScopeGuard onExitCleanup([this] {
-        _defragmentationPolicy->interruptAllDefragmentations();
-        _autoMergerPolicy->disable();
-    });
-
     Client::initThread("BalancerSecondary");
 
     // TODO(SERVER-74658): Please revisit if this thread could be made killable.
@@ -450,6 +497,20 @@ void Balancer::_consumeActionStreamLoop() {
     auto opCtx = cc().makeOperationContext();
     executor::ScopedTaskExecutor executor(
         Grid::get(opCtx.get())->getExecutorPool()->getFixedExecutor());
+
+    ScopeGuard onExitCleanup([this, &executor] {
+        _defragmentationPolicy->interruptAllDefragmentations();
+        _autoMergerPolicy->disable();
+        // Explicitly cancel and drain any outstanding streaming action already dispatched to the
+        // task executor.
+        executor->shutdown();
+        executor->join();
+        // When shutting down, the task executor may or may not invoke the
+        // applyActionResponseTo()callback for canceled streaming actions: to ensure a consistent
+        // state of the balancer after a step down, _outstandingStreamingOps needs then to be reset
+        // to 0 once all the tasks have been drained.
+        _outstandingStreamingOps.store(0);
+    });
 
     // Lambda function for applying action response
     auto applyActionResponseTo = [this](const BalancerStreamAction& action,
@@ -496,7 +557,7 @@ void Balancer::_consumeActionStreamLoop() {
             //  - There were  actions to schedule on the previous iteration or there is an update on
             //  the streams state
             auto stopWaitingCondition = [&] {
-                return _state != kRunning ||
+                return _threadSetState != ThreadSetState::Running ||
                     (_outstandingStreamingOps.load() <= kMaxOutstandingStreamingOperations &&
                      _actionStreamsStateUpdated.load());
             };
@@ -509,7 +570,7 @@ void Balancer::_consumeActionStreamLoop() {
                     ul, backOff.nextSleep().toSystemDuration(), stopWaitingCondition);
             }
 
-            if (_state != kRunning) {
+            if (_threadSetState != ThreadSetState::Running) {
                 break;
             }
         }
@@ -633,8 +694,8 @@ void Balancer::_mainThread() {
     ON_BLOCK_EXIT([this] {
         {
             stdx::lock_guard<Latch> scopedLock(_mutex);
-            _state = kStopped;
-            LOGV2_DEBUG(21855, 1, "Balancer thread terminated");
+            _threadSetState = ThreadSetState::Terminated;
+            LOGV2_DEBUG(21855, 1, "Balancer thread set terminated");
         }
         _joinCond.notify_all();
     });
@@ -660,7 +721,7 @@ void Balancer::_mainThread() {
     const Seconds kInitBackoffInterval(10);
 
     auto balancerConfig = shardingContext->getBalancerConfiguration();
-    while (!_stopRequested()) {
+    while (!_terminationRequested()) {
         Status refreshStatus = balancerConfig->refreshAndCheck(opCtx.get());
         if (!refreshStatus.isOK()) {
             LOGV2_WARNING(
@@ -689,7 +750,7 @@ void Balancer::_mainThread() {
     // Main balancer loop
     auto lastMigrationTime = Date_t::fromMillisSinceEpoch(0);
     auto lastDrainingShardsCheckTime{Date_t::fromMillisSinceEpoch(0)};
-    while (!_stopRequested()) {
+    while (!_terminationRequested()) {
         BalanceRoundDetails roundDetails;
 
         _beginRound(opCtx.get());
@@ -709,7 +770,7 @@ void Balancer::_mainThread() {
                 continue;
             }
 
-            if (!balancerConfig->shouldBalance() || _stopRequested()) {
+            if (!balancerConfig->shouldBalance() || _terminationRequested()) {
 
                 if (balancerConfig->getBalancerMode() == BalancerSettingsType::BalancerMode::kOff &&
                     Date_t::now() - lastDrainingShardsCheckTime >= kDrainingShardsCheckInterval) {
@@ -867,7 +928,7 @@ void Balancer::_mainThread() {
 
     {
         stdx::lock_guard<Latch> scopedLock(_mutex);
-        invariant(_state == kStopping);
+        invariant(_threadSetState == ThreadSetState::Terminating);
     }
 
     _commandScheduler->stop();
@@ -883,9 +944,9 @@ void Balancer::_mainThread() {
     LOGV2(21867, "CSRS balancer is now stopped");
 }
 
-bool Balancer::_stopRequested() {
+bool Balancer::_terminationRequested() {
     stdx::lock_guard<Latch> scopedLock(_mutex);
-    return (_state != kRunning);
+    return (_threadSetState != ThreadSetState::Running);
 }
 
 void Balancer::_beginRound(OperationContext* opCtx) {
@@ -908,7 +969,9 @@ void Balancer::_endRound(OperationContext* opCtx, Milliseconds waitTimeout) {
 
 void Balancer::_sleepFor(OperationContext* opCtx, Milliseconds waitTimeout) {
     stdx::unique_lock<Latch> lock(_mutex);
-    _condVar.wait_for(lock, waitTimeout.toSystemDuration(), [&] { return _state != kRunning; });
+    _condVar.wait_for(lock, waitTimeout.toSystemDuration(), [&] {
+        return _threadSetState != ThreadSetState::Running;
+    });
 }
 
 bool Balancer::_checkOIDs(OperationContext* opCtx) {
@@ -920,7 +983,7 @@ bool Balancer::_checkOIDs(OperationContext* opCtx) {
     map<int, ShardId> oids;
 
     for (const ShardId& shardId : all) {
-        if (_stopRequested()) {
+        if (_terminationRequested()) {
             return false;
         }
 
@@ -1032,8 +1095,13 @@ int Balancer::_moveChunks(OperationContext* opCtx,
     auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
 
     // If the balancer was disabled since we started this round, don't start new chunk moves
-    if (_stopRequested() || !balancerConfig->shouldBalance()) {
-        LOGV2_DEBUG(21870, 1, "Skipping balancing round because balancer was stopped");
+    if (const bool terminating = _terminationRequested(), enabled = balancerConfig->shouldBalance();
+        terminating || !enabled) {
+        LOGV2_DEBUG(21870,
+                    1,
+                    "Skipping balancing round",
+                    "terminating"_attr = terminating,
+                    "balancerEnabled"_attr = enabled);
         return 0;
     }
 

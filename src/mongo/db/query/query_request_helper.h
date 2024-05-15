@@ -29,14 +29,26 @@
 
 #pragma once
 
+#include <boost/none.hpp>
 #include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <memory>
 #include <string>
 
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/tailable_mode.h"
+#include "mongo/db/query/tailable_mode_gen.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/util/serialization_context.h"
 
 namespace mongo {
 
@@ -61,6 +73,12 @@ static constexpr auto kNaturalSortField = "$natural";
 Status validateGetMoreCollectionName(StringData collectionName);
 
 /**
+ * Returns a non-OK status if '$_resumeAfter' is set to an unexpected value, or the wrong type
+ * determined by the collection type.
+ */
+Status validateResumeAfter(const mongo::BSONObj& resumeAfter, bool isClusteredCollection);
+
+/**
  * Returns a non-OK status if any property of the QR has a bad value (e.g. a negative skip
  * value) or if there is a bad combination of options (e.g. awaitData is illegal without
  * tailable).
@@ -83,13 +101,6 @@ std::unique_ptr<FindCommandRequest> makeFromFindCommandForTests(
     const BSONObj& cmdObj,
     boost::optional<NamespaceString> nss = boost::none,
     bool apiStrict = false);
-
-/**
- * Converts this FindCommandRequest into an aggregation using $match. If this FindCommandRequest has
- * options that cannot be satisfied by aggregation, a non-OK status is returned and 'cmdBuilder' is
- * not modified.
- */
-StatusWith<BSONObj> asAggregationCommand(const FindCommandRequest& findCommand);
 
 /**
  * Helper function to identify text search sort key

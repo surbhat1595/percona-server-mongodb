@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/base/error_codes.h"
+#include "mongo/executor/async_rpc_error_info.h"
 #include "mongo/executor/async_rpc_retry_policy.h"
 #include "mongo/s/client/shard.h"
 
@@ -50,7 +51,17 @@ public:
         if (_retryCount >= kOnErrorNumRetries) {
             return false;
         }
-        return Shard::remoteIsRetriableError(s.code(), _shardInternalRetryPolicy);
+
+        if (s.isOK() || s.code() != ErrorCodes::RemoteCommandExecutionError) {
+            return false;
+        }
+
+        auto extraInfo = s.extraInfo<AsyncRPCErrorInfo>();
+        if (extraInfo->isLocal()) {
+            return false;
+        }
+        return Shard::remoteIsRetriableError(extraInfo->asRemote().getRemoteCommandResult().code(),
+                                             _shardInternalRetryPolicy);
     }
 
     bool recordAndEvaluateRetry(Status s) override {

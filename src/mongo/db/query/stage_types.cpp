@@ -27,7 +27,9 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
 
 #include "mongo/db/query/stage_types.h"
 #include "mongo/stdx/unordered_map.h"
@@ -65,6 +67,7 @@ StringData stageTypeToString(StageType stageType) {
         {STAGE_RECORD_STORE_FAST_COUNT, "RECORD_STORE_FAST_COUNT"_sd},
         {STAGE_RETURN_KEY, "RETURN_KEY"_sd},
         {STAGE_SAMPLE_FROM_TIMESERIES_BUCKET, "SAMPLE_FROM_TIMESERIES_BUCKET"_sd},
+        {STAGE_SEARCH, "SEARCH"_sd},
         {STAGE_SHARDING_FILTER, "SHARDING_FILTER"_sd},
         {STAGE_SKIP, "SKIP"_sd},
         {STAGE_SORT_DEFAULT, "SORT"_sd},

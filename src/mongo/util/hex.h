@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <fmt/format.h>
 #include <string>
 #include <type_traits>
@@ -98,9 +99,11 @@ std::string decode(StringData s);
 
 }  // namespace hexblob
 
+static const size_t kHexDumpMaxSize = 1000000;
+
 /**
  * Returns a dump of the buffer as lower case hex digit pairs separated by spaces.
- * Requires `len < 1000000`.
+ * Requires `len < kHexDumpMaxSize`.
  */
 std::string hexdump(StringData data);
 

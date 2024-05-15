@@ -4,15 +4,11 @@
  * @tags: [requires_fcv_62]
  */
 
-(function() {
-"use strict";
-
 // For assertDropAndRecreateCollection.
 load("jstests/libs/collection_drop_recreate.js");
 // For ChangeStreamMultitenantReplicaSetTest.
 load("jstests/serverless/libs/change_collection_util.js");
-// For FeatureFlagUtil.
-load("jstests/libs/feature_flag_util.js");
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const getTenantConnection = ChangeStreamMultitenantReplicaSetTest.getTenantConnection;
 
@@ -88,12 +84,13 @@ const stocks = [
 
 // Create the 'stocks' collection on all three tenants.
 // Enable pre-images collection for 'tenant1' and 'tenant2' but not for 'notUsedTenant'.
+const dbName = "mt_pre_image_expired_doc_remover";
 const stocksCollTenant1 = assertDropAndRecreateCollection(
-    connTenant1.getDB(jsTestName()), "stocks", {changeStreamPreAndPostImages: {enabled: true}});
+    connTenant1.getDB(dbName), "stocks", {changeStreamPreAndPostImages: {enabled: true}});
 const stocksCollTenant2 = assertDropAndRecreateCollection(
-    connTenant2.getDB(jsTestName()), "stocks", {changeStreamPreAndPostImages: {enabled: true}});
+    connTenant2.getDB(dbName), "stocks", {changeStreamPreAndPostImages: {enabled: true}});
 const stocksCollNotUsedTenant =
-    assertDropAndRecreateCollection(connNotUsedTenant.getDB(jsTestName()), "stocks");
+    assertDropAndRecreateCollection(connNotUsedTenant.getDB(dbName), "stocks");
 
 // Insert some documents. They should not create pre-images documents.
 assert.commandWorked(stocksCollTenant1.insertMany(stocks));
@@ -165,4 +162,3 @@ if (FeatureFlagUtil.isPresentAndEnabled(connTenant2Secondary.getDB(jsTestName())
 }
 
 rst.stopSet();
-}());

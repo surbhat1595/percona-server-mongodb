@@ -29,23 +29,54 @@
 
 #include "mongo/db/s/rename_collection_participant_service.h"
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <string>
+#include <tuple>
+
 #include "mongo/base/checked_cast.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/rename_collection.h"
+#include "mongo/db/catalog_raii.h"
+#include "mongo/db/client.h"
+#include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/persistent_task_store.h"
+#include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
-#include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/drop_collection_coordinator.h"
-#include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/forwardable_operation_metadata.h"
 #include "mongo/db/s/range_deletion_util.h"
+#include "mongo/db/s/shard_filtering_metadata_refresh.h"
+#include "mongo/db/s/sharding_ddl_coordinator.h"
 #include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/db/s/sharding_recovery_service.h"
 #include "mongo/db/s/sharding_state.h"
+#include "mongo/db/shard_id.h"
+#include "mongo/db/vector_clock_mutable.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/redaction.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
+#include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/grid.h"
+#include "mongo/util/database_name_util.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/future_util.h"
-
+#include "mongo/util/namespace_string_util.h"
+#include "mongo/util/str.h"
+#include "mongo/util/time_support.h"
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
@@ -115,6 +146,15 @@ void renameOrDropTarget(OperationContext* opCtx,
         dropCollectionLocally(opCtx, toNss, options.markFromMigrate);
         deleteRangeDeletionTasksForRename(opCtx, fromNss, toNss);
     }
+}
+
+void clearFilteringMetadataOnNss(OperationContext* opCtx, const NamespaceString& nss) {
+    // Set the placement version to UNKNOWN to force a future operation to refresh the metadata
+    // TODO (SERVER-71444): Fix to be interruptible or document exception.
+    UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
+    AutoGetCollection autoColl(opCtx, nss, MODE_IX);
+    CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss)
+        ->clearFilteringMetadata(opCtx);
 }
 
 }  // namespace
@@ -199,7 +239,7 @@ void RenameParticipantInstance::_enterPhase(Phase newPhase) {
         }
     } else {
         store.update(opCtx.get(),
-                     BSON(StateDoc::kFromNssFieldName << fromNss().ns()),
+                     BSON(StateDoc::kFromNssFieldName << NamespaceStringUtil::serialize(fromNss())),
                      newDoc.toBSON(),
                      WriteConcerns::kMajorityWriteConcernNoTimeout);
     }
@@ -216,7 +256,7 @@ void RenameParticipantInstance::_removeStateDocument(OperationContext* opCtx) {
 
     PersistentTaskStore<StateDoc> store(NamespaceString::kShardingRenameParticipantsNamespace);
     store.remove(opCtx,
-                 BSON(StateDoc::kFromNssFieldName << fromNss().ns()),
+                 BSON(StateDoc::kFromNssFieldName << NamespaceStringUtil::serialize(fromNss())),
                  WriteConcerns::kMajorityWriteConcernNoTimeout);
 
     _doc = {};
@@ -338,7 +378,7 @@ SemiFuture<void> RenameParticipantInstance::_runImpl(
                     Grid::get(opCtx)
                         ->catalogClient()
                         ->getDatabase(opCtx,
-                                      fromNss().dbName().db(),
+                                      DatabaseNameUtil::serialize(fromNss().dbName()),
                                       repl::ReadConcernLevel::kMajorityReadConcern)
                         .getPrimary();
                 const auto thisShardId = ShardingState::get(opCtx)->shardId();
@@ -379,6 +419,11 @@ SemiFuture<void> RenameParticipantInstance::_runImpl(
                 return _canUnblockCRUDPromise.getFuture();
             }
 
+            // Checkpoint the vector clock to ensure causality in the event of a crash or shutdown.
+            auto opCtxHolder = cc().makeOperationContext();
+            auto* opCtx = opCtxHolder.get();
+            VectorClockMutable::get(opCtx)->waitForDurableConfigTime().get(opCtx);
+
             return SemiFuture<void>::makeReady().share();
         })
         .then(_buildPhaseHandler(
@@ -386,6 +431,9 @@ SemiFuture<void> RenameParticipantInstance::_runImpl(
             [this, anchor = shared_from_this()] {
                 auto opCtxHolder = cc().makeOperationContext();
                 auto* opCtx = opCtxHolder.get();
+
+                clearFilteringMetadataOnNss(opCtx, fromNss());
+                clearFilteringMetadataOnNss(opCtx, toNss());
 
                 // Release source/target critical sections
                 // Note: Use 'throwIfReasonDiffers=false' on the destination collection because as

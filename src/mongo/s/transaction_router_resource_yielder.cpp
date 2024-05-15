@@ -29,11 +29,19 @@
 
 #include "mongo/s/transaction_router_resource_yielder.h"
 
+#include <string>
+
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/db/session/session.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/logv2/log.h"
-#include "mongo/s/is_mongos.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
 #include "mongo/s/session_catalog_router.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/exit.h"
+#include "mongo/util/fail_point.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTransaction
 
@@ -50,7 +58,7 @@ TransactionRouterResourceYielder::makeForLocalHandoff() {
 
 std::unique_ptr<TransactionRouterResourceYielder>
 TransactionRouterResourceYielder::makeForRemoteCommand() {
-    if (isMongos()) {
+    if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer)) {
         // Mongos cannot target itself so it does not need to yield for remote commands.
         return nullptr;
     }

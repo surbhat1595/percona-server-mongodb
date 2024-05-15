@@ -7,10 +7,9 @@
  *   requires_getmore,
  * ]
  */
-(function() {
-"use strict";
+import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 
-load("jstests/core/timeseries/libs/timeseries.js");
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const kIdleBucketExpiryMemoryUsageThreshold = 1024 * 1024 * 10;
 const conn = MongoRunner.runMongod({
@@ -22,6 +21,8 @@ const conn = MongoRunner.runMongod({
 
 const dbName = jsTestName();
 const testDB = conn.getDB(dbName);
+const alwaysUseCompressedBuckets =
+    FeatureFlagUtil.isEnabled(testDB, "TimeseriesAlwaysUseCompressedBuckets");
 const isTimeseriesScalabilityImprovementsEnabled =
     TimeseriesTest.timeseriesScalabilityImprovementsEnabled(testDB);
 
@@ -182,7 +183,7 @@ if (isTimeseriesScalabilityImprovementsEnabled) {
     expectedStats.numBucketsClosedDueToTimeBackward++;
 }
 expectedStats.numMeasurementsCommitted++;
-if (!isTimeseriesScalabilityImprovementsEnabled) {
+if (!isTimeseriesScalabilityImprovementsEnabled && !alwaysUseCompressedBuckets) {
     expectedStats.numCompressedBuckets++;
 }
 if (isTimeseriesScalabilityImprovementsEnabled) {
@@ -203,7 +204,9 @@ expectedStats.numCommits += 2;
 expectedStats.numMeasurementsCommitted += numDocs;
 expectedStats.avgNumMeasurementsPerCommit =
     Math.floor(expectedStats.numMeasurementsCommitted / expectedStats.numCommits);
-expectedStats.numCompressedBuckets++;
+if (!alwaysUseCompressedBuckets) {
+    expectedStats.numCompressedBuckets++;
+}
 if (isTimeseriesScalabilityImprovementsEnabled) {
     expectedStats.numBucketQueriesFailed++;
 }
@@ -226,8 +229,10 @@ expectedStats.numCommits += 2;
 expectedStats.numMeasurementsCommitted += 1001;
 expectedStats.avgNumMeasurementsPerCommit =
     Math.floor(expectedStats.numMeasurementsCommitted / expectedStats.numCommits);
-expectedStats.numCompressedBuckets++;
-expectedStats.numSubObjCompressionRestart += 2;
+if (!alwaysUseCompressedBuckets) {
+    expectedStats.numCompressedBuckets++;
+    expectedStats.numSubObjCompressionRestart += 2;
+}
 if (isTimeseriesScalabilityImprovementsEnabled) {
     expectedStats.numBucketQueriesFailed++;
 }
@@ -327,5 +332,13 @@ testIdleBucketExpiry(i => {
     return {[timeFieldName]: ISODate(), [metaFieldName]: i, a: largeValue};
 });
 
+// Ensure that creating a non-time-series collection on a system.buckets namespace doesn't confuse
+// the stats collector.
+const nonTimeseries = testDB.getCollection('nonTimeseries');
+const nonTimeseriesBuckets = testDB.getCollection('system.buckets.nonTimeseries');
+assert.commandWorked(testDB.createCollection(nonTimeseries.getName()));
+assert.commandWorked(testDB.createCollection(nonTimeseriesBuckets.getName()));
+assert.eq(null, nonTimeseries.stats().timeseries);
+assert.eq(null, nonTimeseriesBuckets.stats().timeseries);
+
 MongoRunner.stopMongod(conn);
-})();

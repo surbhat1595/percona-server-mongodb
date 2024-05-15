@@ -27,41 +27,81 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/shell/encrypted_dbclient_base.h"
-
+#include <absl/container/node_hash_map.h>
+#include <algorithm>
+#include <boost/none.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <cstdint>
+#include <cstring>
+#include <iterator>
+#include <js/Class.h>
 #include <js/Object.h>
 #include <js/ValueArray.h>
+#include <jsapi.h>
+#include <limits>
+#include <list>
+#include <new>
+#include <stack>
 
-#include "mongo/base/data_cursor.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <js/CallArgs.h>
+#include <js/RootingAPI.h>
+#include <js/TracingAPI.h>
+#include <js/TypeDecls.h>
+#include <js/Value.h>
+
+#include "mongo/base/data_range_cursor.h"
 #include "mongo/base/data_type_validated.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/init.h"  // IWYU pragma: keep
+#include "mongo/base/initializer.h"
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
 #include "mongo/bson/bson_depth.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/util/builder.h"
 #include "mongo/client/dbclient_base.h"
-#include "mongo/config.h"
+#include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/crypto/aead_encryption.h"
 #include "mongo/crypto/fle_crypto.h"
 #include "mongo/crypto/fle_data_frames.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/crypto/symmetric_crypto.h"
-#include "mongo/db/client.h"
-#include "mongo/db/commands.h"
 #include "mongo/db/matcher/schema/encrypt_schema_gen.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/rpc/object_check.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/rpc/object_check.h"  // IWYU pragma: keep
 #include "mongo/rpc/op_msg_rpc_impls.h"
+#include "mongo/rpc/reply_interface.h"
 #include "mongo/scripting/mozjs/bindata.h"
+#include "mongo/scripting/mozjs/code.h"
+#include "mongo/scripting/mozjs/db.h"
+#include "mongo/scripting/mozjs/dbcollection.h"
+#include "mongo/scripting/mozjs/dbref.h"
 #include "mongo/scripting/mozjs/implscope.h"
+#include "mongo/scripting/mozjs/internedstring.h"
 #include "mongo/scripting/mozjs/maxkey.h"
 #include "mongo/scripting/mozjs/minkey.h"
 #include "mongo/scripting/mozjs/mongo.h"
+#include "mongo/scripting/mozjs/numberdecimal.h"
 #include "mongo/scripting/mozjs/objectwrapper.h"
 #include "mongo/scripting/mozjs/valuereader.h"
 #include "mongo/scripting/mozjs/valuewriter.h"
+#include "mongo/scripting/mozjs/wraptype.h"
+#include "mongo/shell/encrypted_dbclient_base.h"
 #include "mongo/shell/kms.h"
 #include "mongo/shell/kms_gen.h"
-#include "mongo/shell/shell_options.h"
+#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/base64.h"
+#include "mongo/util/database_name_util.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/str.h"
 
 namespace mongo {
 
@@ -91,7 +131,7 @@ static void validateCollection(JSContext* cx, JS::HandleValue value) {
             mozjs::getScope(cx)->getProto<mozjs::DBCollectionInfo>().instanceOf(coll));
 }
 
-EncryptedDBClientBase::EncryptedDBClientBase(std::unique_ptr<DBClientBase> conn,
+EncryptedDBClientBase::EncryptedDBClientBase(std::shared_ptr<DBClientBase> conn,
                                              ClientSideFLEOptions encryptionOptions,
                                              JS::HandleValue collection,
                                              JSContext* cx)
@@ -574,7 +614,7 @@ NamespaceString validateStructuredEncryptionParams(JSContext* cx,
                   str::stream() << "1st param to " << cmdName << " has to be a string");
     }
     std::string fullName = mozjs::ValueWriter(cx, args.get(0)).toString();
-    NamespaceString nss(fullName);
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(fullName);
 
     uassert(
         ErrorCodes::BadValue, str::stream() << "Invalid namespace: " << fullName, nss.isValid());
@@ -618,8 +658,26 @@ void EncryptedDBClientBase::trace(JSTracer* trc) {
     JS::TraceEdge(trc, &_collection, "collection object");
 }
 
+void EncryptedDBClientBase::getEncryptionOptions(JSContext* cx, JS::CallArgs args) {
+    mozjs::ValueReader(cx, args.rval()).fromBSON(_encryptionOptions.toBSON(), nullptr, false);
+}
+
+const ClientSideFLEOptions& EncryptedDBClientBase::getEncryptionOptions() const {
+    return _encryptionOptions;
+}
+
 JS::Value EncryptedDBClientBase::getCollection() const {
     return _collection.get();
+}
+
+JS::Value EncryptedDBClientBase::getKeyVaultMongo() const {
+    JS::RootedValue mongoRooted(_cx);
+    JS::RootedObject collectionRooted(_cx, &_collection.get().toObject());
+    JS_GetProperty(_cx, collectionRooted, "_mongo", &mongoRooted);
+    if (!mongoRooted.isObject()) {
+        uasserted(ErrorCodes::BadValue, "Collection object is incomplete.");
+    }
+    return mongoRooted.get();
 }
 
 std::unique_ptr<DBClientCursor> EncryptedDBClientBase::find(FindCommandRequest findRequest,
@@ -680,7 +738,7 @@ NamespaceString EncryptedDBClientBase::getCollectionNS() {
         uasserted(ErrorCodes::BadValue, "Collection object is incomplete.");
     }
     std::string fullName = mozjs::ValueWriter(_cx, fullNameRooted).toString();
-    NamespaceString fullNameNS = NamespaceString(fullName);
+    NamespaceString fullNameNS = NamespaceString::createNamespaceString_forTest(fullName);
     uassert(ErrorCodes::BadValue,
             str::stream() << "Invalid namespace: " << fullName,
             fullNameNS.isValid());
@@ -733,6 +791,7 @@ BSONObj EncryptedDBClientBase::getEncryptedKey(const UUID& uuid) {
     findCmd.setFilter(BSON("_id" << uuid));
     findCmd.setReadConcern(
         repl::ReadConcernArgs(repl::ReadConcernLevel::kMajorityReadConcern).toBSONInner());
+
     BSONObj dataKeyObj = _conn->findOne(std::move(findCmd));
     if (dataKeyObj.isEmpty()) {
         uasserted(ErrorCodes::BadValue, "Invalid keyID.");
@@ -820,7 +879,7 @@ void createCollectionObject(JSContext* cx,
                             JS::MutableHandleValue collection) {
     invariant(!client.isNull() && !client.isUndefined());
 
-    auto ns = NamespaceString(nsString);
+    auto ns = NamespaceString::createNamespaceString_forTest(nsString);
     uassert(ErrorCodes::BadValue,
             "Invalid keystore namespace.",
             ns.isValid() && NamespaceString::validCollectionName(ns.coll()));
@@ -842,14 +901,14 @@ void createCollectionObject(JSContext* cx,
     collectionArgs[0].setObject(client.toObject());
     collectionArgs[1].setObject(*databaseObj);
     mozjs::ValueReader(cx, collectionArgs[2]).fromStringData(ns.coll());
-    mozjs::ValueReader(cx, collectionArgs[3]).fromStringData(ns.ns());
+    mozjs::ValueReader(cx, collectionArgs[3]).fromStringData(ns.toString_forTest());
 
     scope->getProto<mozjs::DBCollectionInfo>().newInstance(collectionArgs, collection);
 }
 
 // The parameters required to start FLE on the shell. The current connection is passed in as a
 // parameter to create the keyvault collection object if one is not provided.
-std::unique_ptr<DBClientBase> createEncryptedDBClientBase(std::unique_ptr<DBClientBase> conn,
+std::shared_ptr<DBClientBase> createEncryptedDBClientBase(std::shared_ptr<DBClientBase> conn,
                                                           JS::HandleValue arg,
                                                           JS::HandleObject mongoConnection,
                                                           JSContext* cx) {
@@ -860,7 +919,7 @@ std::unique_ptr<DBClientBase> createEncryptedDBClientBase(std::unique_ptr<DBClie
     static constexpr auto keyVaultClientFieldId = "keyVaultClient";
 
     if (!arg.isObject()) {
-        return conn;
+        return nullptr;
     }
 
     ClientSideFLEOptions encryptionOptions;
@@ -898,9 +957,22 @@ std::unique_ptr<DBClientBase> createEncryptedDBClientBase(std::unique_ptr<DBClie
             std::move(conn), encryptionOptions, collection, cx);
     }
 
-    std::unique_ptr<EncryptedDBClientBase> base =
-        std::make_unique<EncryptedDBClientBase>(std::move(conn), encryptionOptions, collection, cx);
-    return std::move(base);
+    return std::make_shared<EncryptedDBClientBase>(
+        std::move(conn), encryptionOptions, collection, cx);
+}
+
+std::shared_ptr<DBClientBase> createEncryptedDBClientBaseFromExisting(
+    std::shared_ptr<DBClientBase> encConn, std::shared_ptr<DBClientBase> rawConn, JSContext* cx) {
+    auto encConnPtr = dynamic_cast<EncryptedDBClientBase*>(encConn.get());
+    uassert(ErrorCodes::BadValue, "Connection is not a valid encrypted connection", encConnPtr);
+
+    JS::RootedValue encOptsRV(cx);
+    JS::RootedObject kvMongoRO(cx);
+    mozjs::ValueReader(cx, &encOptsRV)
+        .fromBSON(encConnPtr->getEncryptionOptions().toBSON(), nullptr, false);
+    kvMongoRO.set(encConnPtr->getKeyVaultMongo().toObjectOrNull());
+
+    return createEncryptedDBClientBase(rawConn, encOptsRV, kvMongoRO, cx);
 }
 
 DBClientBase* getNestedConnection(DBClientBase* conn) {
@@ -912,7 +984,8 @@ DBClientBase* getNestedConnection(DBClientBase* conn) {
 }
 
 MONGO_INITIALIZER(setCallbacksForEncryptedDBClientBase)(InitializerContext*) {
-    mongo::mozjs::setEncryptedDBClientCallbacks(createEncryptedDBClientBase, getNestedConnection);
+    mongo::mozjs::setEncryptedDBClientCallbacks(
+        createEncryptedDBClientBase, createEncryptedDBClientBaseFromExisting, getNestedConnection);
 }
 
 }  // namespace

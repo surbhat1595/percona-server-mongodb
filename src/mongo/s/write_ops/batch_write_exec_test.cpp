@@ -27,16 +27,53 @@
  *    it in the license file.
  */
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+// IWYU pragma: no_include "cxxabi.h"
+#include <cstddef>
+#include <iterator>
+#include <memory>
+#include <string>
+#include <system_error>
+#include <vector>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/client/remote_command_targeter_factory_mock.h"
 #include "mongo/client/remote_command_targeter_mock.h"
+#include "mongo/db/baton.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/txn_cmds_gen.h"
+#include "mongo/db/logical_time.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/db/ops/write_ops_parsers.h"
+#include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/vector_clock.h"
+#include "mongo/executor/network_test_env.h"
+#include "mongo/executor/remote_command_request.h"
+#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/rpc/op_msg.h"
+#include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/client/shard_registry.h"
+#include "mongo/s/chunk_manager.h"
+#include "mongo/s/chunk_version.h"
+#include "mongo/s/database_version.h"
+#include "mongo/s/index_version.h"
 #include "mongo/s/mock_ns_targeter.h"
 #include "mongo/s/session_catalog_router.h"
+#include "mongo/s/shard_version.h"
 #include "mongo/s/shard_version_factory.h"
 #include "mongo/s/sharding_router_test_fixture.h"
 #include "mongo/s/stale_exception.h"
@@ -44,8 +81,13 @@
 #include "mongo/s/write_ops/batch_write_exec.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/bson_test_util.h"
+#include "mongo/unittest/framework.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 namespace {
@@ -64,11 +106,11 @@ const int kMaxRoundsWithoutProgress = 5;
 BSONObj expectInsertsReturnStaleVersionErrorsBase(const NamespaceString& nss,
                                                   const std::vector<BSONObj>& expected,
                                                   const executor::RemoteCommandRequest& request) {
-    ASSERT_EQUALS(nss.db(), request.dbname);
+    ASSERT_EQUALS(nss.db_forTest(), request.dbname);
 
     const auto opMsgRequest(OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
     const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));
-    ASSERT_EQUALS(nss.toString_forTest(), actualBatchedInsert.getNS().ns());
+    ASSERT_EQUALS(nss.toString_forTest(), actualBatchedInsert.getNS().ns_forTest());
 
     const auto& inserted = actualBatchedInsert.getInsertRequest().getDocuments();
     ASSERT_EQUALS(expected.size(), inserted.size());
@@ -109,11 +151,11 @@ BSONObj expectInsertsReturnStaleVersionErrorsBase(const NamespaceString& nss,
 BSONObj expectInsertsReturnStaleDbVersionErrorsBase(const NamespaceString& nss,
                                                     const std::vector<BSONObj>& expected,
                                                     const executor::RemoteCommandRequest& request) {
-    ASSERT_EQUALS(nss.db(), request.dbname);
+    ASSERT_EQUALS(nss.db_forTest(), request.dbname);
 
     const auto opMsgRequest(OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
     const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));
-    ASSERT_EQUALS(nss.toString_forTest(), actualBatchedInsert.getNS().ns());
+    ASSERT_EQUALS(nss.toString_forTest(), actualBatchedInsert.getNS().ns_forTest());
 
     const auto& inserted = actualBatchedInsert.getInsertRequest().getDocuments();
     ASSERT_EQUALS(expected.size(), inserted.size());
@@ -138,7 +180,7 @@ BSONObj expectInsertsReturnStaleDbVersionErrorsBase(const NamespaceString& nss,
         errorBuilder.append("code", int(ErrorCodes::StaleDbVersion));
 
         auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp(1, 1));
-        errorBuilder.append("db", nss.db());
+        errorBuilder.append("db", nss.db_forTest());
         errorBuilder.append("vReceived", dbVersion.toBSON());
         errorBuilder.append("vWanted", dbVersion.makeUpdated().toBSON());
 
@@ -161,11 +203,11 @@ BSONObj expectInsertsReturnTenantMigrationAbortedErrorsBase(
     const std::vector<BSONObj>& expected,
     const executor::RemoteCommandRequest& request,
     int numberOfFailedOps) {
-    ASSERT_EQUALS(nss.db(), request.dbname);
+    ASSERT_EQUALS(nss.db_forTest(), request.dbname);
 
     const auto opMsgRequest(OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
     const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));
-    ASSERT_EQUALS(nss.toString_forTest(), actualBatchedInsert.getNS().ns());
+    ASSERT_EQUALS(nss.toString_forTest(), actualBatchedInsert.getNS().ns_forTest());
 
     const auto& inserted = actualBatchedInsert.getInsertRequest().getDocuments();
     ASSERT_EQUALS(expected.size(), inserted.size());
@@ -257,11 +299,11 @@ public:
     void expectInsertsReturnSuccess(std::vector<BSONObj>::const_iterator expectedFrom,
                                     std::vector<BSONObj>::const_iterator expectedTo) {
         onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
-            ASSERT_EQUALS(nss.db(), request.dbname);
+            ASSERT_EQUALS(nss.db_forTest(), request.dbname);
 
             const auto opMsgRequest(OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
             const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));
-            ASSERT_EQUALS(nss.toString_forTest(), actualBatchedInsert.getNS().ns());
+            ASSERT_EQUALS(nss.toString_forTest(), actualBatchedInsert.getNS().ns_forTest());
 
             const auto& inserted = actualBatchedInsert.getInsertRequest().getDocuments();
             const size_t expectedSize = std::distance(expectedFrom, expectedTo);
@@ -306,12 +348,12 @@ public:
                                   const BatchedCommandResponse& errResponse) {
         onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
             try {
-                ASSERT_EQUALS(nss.db(), request.dbname);
+                ASSERT_EQUALS(nss.db_forTest(), request.dbname);
 
                 const auto opMsgRequest(
                     OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
                 const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));
-                ASSERT_EQUALS(nss.toString_forTest(), actualBatchedInsert.getNS().ns());
+                ASSERT_EQUALS(nss.toString_forTest(), actualBatchedInsert.getNS().ns_forTest());
 
                 const auto& inserted = actualBatchedInsert.getInsertRequest().getDocuments();
                 ASSERT_EQUALS(expected.size(), inserted.size());
@@ -344,6 +386,11 @@ public:
                        boost::none),
                    BSON("x" << MINKEY),
                    BSON("x" << MAXKEY))}};
+
+private:
+    // The tests using this fixture expects that a write without shard key is not allowed.
+    RAIIServerParameterControllerForTest _featureFlagController{
+        "featureFlagUpdateOneWithoutShardKey", false};
 };
 
 //
@@ -1982,6 +2029,11 @@ public:
     }
 
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
+
+private:
+    // The tests using this fixture expects that a write without shard key is not allowed.
+    RAIIServerParameterControllerForTest _featureFlagController{
+        "featureFlagUpdateOneWithoutShardKey", false};
 };
 
 TEST_F(BatchWriteExecTargeterErrorTest, TargetedFailedAndErrorResponse) {
@@ -2452,11 +2504,11 @@ public:
 
     void expectInsertsReturnTransientTxnErrors(const std::vector<BSONObj>& expected) {
         onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
-            ASSERT_EQUALS(nss.db(), request.dbname);
+            ASSERT_EQUALS(nss.db_forTest(), request.dbname);
 
             const auto opMsgRequest(OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
             const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));
-            ASSERT_EQUALS(nss.toString_forTest(), actualBatchedInsert.getNS().ns());
+            ASSERT_EQUALS(nss.toString_forTest(), actualBatchedInsert.getNS().ns_forTest());
 
             const auto& inserted = actualBatchedInsert.getInsertRequest().getDocuments();
             ASSERT_EQUALS(expected.size(), inserted.size());

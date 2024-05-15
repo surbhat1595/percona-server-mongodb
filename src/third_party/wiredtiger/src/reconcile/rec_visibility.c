@@ -552,21 +552,14 @@ __rec_upd_select(WT_SESSION_IMPL *session, WT_RECONCILE *r, WT_UPDATE *first_upd
          * check is not required for history store updates as they are implicitly committed. As
          * prepared transaction IDs are globally visible, need to check the update state as well.
          *
-         * If an earlier reconciliation chose this update (it is marked as being destined for the
-         * data store), we should select it regardless of visibility if we haven't already selected
-         * one. This is important as it is never ok to shift the on-disk value backwards in the
-         * update chain.
+         * There are several cases we should select the update irrespective of visibility. See the
+         * detailed scenarios in the definition of WT_UPDATE_SELECT_FOR_DS.
          *
-         * Also, if an earlier reconciliation performed an update-restore eviction and this update
-         * was restored from disk, or, we rolled back a prepared transaction and restored an update
-         * from the history store, we can select this update irrespective of visibility. This
-         * scenario can happen if the current reconciliation has a limited visibility of updates
-         * compared to one of the previous reconciliations.
+         * These scenarios can happen if the current reconciliation has a limited visibility of
+         * updates compared to one of the previous reconciliations. This is important as it is never
+         * ok to undo the work of the previous reconciliations.
          */
-        if (!F_ISSET(upd,
-              WT_UPDATE_DS | WT_UPDATE_PREPARE_RESTORED_FROM_DS | WT_UPDATE_RESTORED_FROM_DS |
-                WT_UPDATE_RESTORED_FROM_HS) &&
-          !is_hs_page &&
+        if (!F_ISSET(upd, WT_UPDATE_SELECT_FOR_DS) && !is_hs_page &&
           (F_ISSET(r, WT_REC_VISIBLE_ALL) ? WT_TXNID_LE(r->last_running, txnid) :
                                             !__txn_visible_id(session, txnid))) {
             /*
@@ -718,8 +711,19 @@ __rec_fill_tw_from_upd_select(
     else if (select_tw->stop_ts != WT_TS_NONE || select_tw->stop_txn != WT_TXN_NONE) {
         WT_ASSERT_ALWAYS(
           session, tombstone != NULL, "The only contents of the update list is a single tombstone");
-        WT_ASSERT_ALWAYS(session, vpack != NULL && vpack->type != WT_CELL_DEL && !vpack->tw.prepare,
-          "No ondisk values found that are not prepared updates");
+
+        /*
+         * The fixed-length column-store implicitly fills the gap with empty records of single
+         * tombstones. We are done with update selection if there is no on-disk entry.
+         */
+        if (vpack == NULL && S2BT(session)->type == BTREE_COL_FIX) {
+            upd_select->upd = tombstone;
+            return (0);
+        }
+
+        WT_ASSERT_ALWAYS(
+          session, vpack != NULL && vpack->type != WT_CELL_DEL, "No on-disk value is found");
+        WT_ASSERT_ALWAYS(session, !vpack->tw.prepare, "On-disk value is a prepared update");
 
         /* Move the pointer to the last update on the update chain. */
         for (last_upd = tombstone; last_upd->next != NULL; last_upd = last_upd->next)

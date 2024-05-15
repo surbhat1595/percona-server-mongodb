@@ -29,6 +29,10 @@
 
 #pragma once
 
+#include <memory>
+
+#include "mongo/base/status.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/update_result.h"
 #include "mongo/db/record_id.h"
@@ -40,7 +44,7 @@ class CollectionPtr;
 class Database;
 class OperationContext;
 class FindCommandRequest;
-class ScopedCollectionAcquisition;
+class CollectionAcquisition;
 
 /**
  * db helpers are helper functions and classes that let us easily manipulate the local
@@ -122,9 +126,7 @@ struct Helpers {
      * Performs an upsert of "obj" into the collection "ns", with an empty update predicate.
      * Callers must have "ns" locked.
      */
-    static void putSingleton(OperationContext* opCtx,
-                             ScopedCollectionAcquisition& coll,
-                             BSONObj obj);
+    static void putSingleton(OperationContext* opCtx, CollectionAcquisition& coll, BSONObj obj);
 
     /**
      * Callers are expected to hold the collection lock.
@@ -132,7 +134,7 @@ struct Helpers {
      * o has to have an _id field or will assert
      */
     static UpdateResult upsert(OperationContext* opCtx,
-                               ScopedCollectionAcquisition& coll,
+                               CollectionAcquisition& coll,
                                const BSONObj& o,
                                bool fromMigrate = false);
 
@@ -143,7 +145,7 @@ struct Helpers {
      * on the same storage snapshot.
      */
     static UpdateResult upsert(OperationContext* opCtx,
-                               ScopedCollectionAcquisition& coll,
+                               CollectionAcquisition& coll,
                                const BSONObj& filter,
                                const BSONObj& updateMod,
                                bool fromMigrate = false);
@@ -155,10 +157,17 @@ struct Helpers {
      * on the same storage snapshot.
      */
     static void update(OperationContext* opCtx,
-                       ScopedCollectionAcquisition& coll,
+                       CollectionAcquisition& coll,
                        const BSONObj& filter,
                        const BSONObj& updateMod,
                        bool fromMigrate = false);
+
+    /**
+     * Inserts document 'doc' into collection 'coll'.
+     */
+    static Status insert(OperationContext* opCtx,
+                         const CollectionAcquisition& coll,
+                         const BSONObj& doc);
 
     // TODO: this should be somewhere else probably
     /* Takes object o, and returns a new object with the
@@ -179,7 +188,7 @@ struct Helpers {
      * You do not need to set the database before calling.
      * Does not oplog the operation.
      */
-    static void emptyCollection(OperationContext* opCtx, const ScopedCollectionAcquisition& coll);
+    static void emptyCollection(OperationContext* opCtx, const CollectionAcquisition& coll);
 
     /*
      * Finds the doc and then runs a no-op update by running an update using the doc just read. Used

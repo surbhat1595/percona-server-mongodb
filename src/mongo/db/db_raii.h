@@ -29,12 +29,31 @@
 
 #pragma once
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <memory>
+#include <set>
 #include <string>
+#include <utility>
+#include <vector>
 
+#include "mongo/base/string_data.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog_raii.h"
+#include "mongo/db/collection_type.h"
+#include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/locker.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/stats/top.h"
+#include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/views/view.h"
 #include "mongo/stdx/variant.h"
-#include "mongo/util/overloaded_visitor.h"
+#include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
+#include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
 
 namespace mongo {
@@ -72,7 +91,10 @@ public:
                      LogMode logMode,
                      int dbProfilingLevel,
                      Date_t deadline = Date_t::max(),
-                     const std::vector<NamespaceStringOrUUID>& secondaryNssVector = {});
+                     boost::optional<std::vector<NamespaceStringOrUUID>::const_iterator>
+                         secondaryNssVectorBegin = boost::none,
+                     boost::optional<std::vector<NamespaceStringOrUUID>::const_iterator>
+                         secondaryNssVectorEnd = boost::none);
 
     /**
      * Records stats about the current operation via Top, if 'logMode' is 'kUpdateTop' or
@@ -103,7 +125,7 @@ class AutoGetCollectionForRead {
 public:
     AutoGetCollectionForRead(OperationContext* opCtx,
                              const NamespaceStringOrUUID& nsOrUUID,
-                             AutoGetCollection::Options = {});
+                             const AutoGetCollection::Options& = {});
 
     explicit operator bool() const {
         return static_cast<bool>(getCollection());
@@ -182,14 +204,7 @@ public:
     }
 
 private:
-    /**
-     * Creates the std::function object used by CollectionPtrs to restore state for this
-     * AutoGetCollectionForReadLockFree object after having yielded.
-     */
-    CollectionPtr::RestoreFn _makeRestoreFromYieldFn(
-        const AutoGetCollection::Options& options,
-        bool callerExpectedToConflictWithSecondaryBatchApplication,
-        const DatabaseName& dbName);
+    const Collection* _restoreFromYield(OperationContext* opCtx, UUID uuid);
 
     // Used so that we can reset the read source back to the original read source when this instance
     // of AutoGetCollectionForReadLockFree is destroyed.
@@ -237,11 +252,17 @@ private:
     // May change after construction, when restoring from yield.
     NamespaceString _resolvedNss;
 
+    // Holds a copy of '_resolvedNss.dbName()'. Unlike '_resolvedNss', this field does _not_ change
+    // after construction.
+    DatabaseName _resolvedDbName;
+
     // Only set if _collectionPtr does not contain a nullptr and if the requested namespace is a
     // view.
     //
     // May change after construction, when restoring from yield.
     std::shared_ptr<const ViewDefinition> _view;
+
+    AutoGetCollection::Options _options;
 };
 
 /**
@@ -290,7 +311,7 @@ public:
     AutoGetCollectionForReadCommandBase(
         OperationContext* opCtx,
         const NamespaceStringOrUUID& nsOrUUID,
-        AutoGetCollection::Options options = {},
+        const AutoGetCollection::Options& options = {},
         AutoStatsTracker::LogMode logMode = AutoStatsTracker::LogMode::kUpdateTopAndCurOp);
 
     explicit operator bool() const {
@@ -411,6 +432,7 @@ public:
         return getCollection();
     }
     const CollectionPtr& getCollection() const;
+    query_shape::CollectionType getCollectionType() const;
     const ViewDefinition* getView() const;
     const NamespaceString& getNss() const;
     bool isAnySecondaryNamespaceAViewOrSharded() const;
@@ -510,7 +532,7 @@ private:
  * lock otherwise. MODE_IX acquisition will allow a read to participate in two-phase locking.
  * Throws an exception if 'system.views' is being queried within a transaction.
  */
-LockMode getLockModeForQuery(OperationContext* opCtx, const boost::optional<NamespaceString>& nss);
+LockMode getLockModeForQuery(OperationContext* opCtx, const NamespaceStringOrUUID& nssOrUUID);
 
 /**
  * When in scope, enforces prepare conflicts in the storage engine. Reads and writes in this scope
@@ -547,21 +569,6 @@ public:
 private:
     OperationContext* _opCtx;
     PrepareConflictBehavior _originalValue;
-};
-
-/**
- * TODO (SERVER-69813): Get rid of this when ShardServerCatalogCacheLoader will be removed.
- * RAII type for letting secondary reads to block behind the PBW lock.
- * Note: Do not add additional usage. This is only temporary for ease of backport.
- */
-struct BlockSecondaryReadsDuringBatchApplication_DONT_USE {
-public:
-    BlockSecondaryReadsDuringBatchApplication_DONT_USE(OperationContext* opCtx);
-    ~BlockSecondaryReadsDuringBatchApplication_DONT_USE();
-
-private:
-    OperationContext* _opCtx{nullptr};
-    boost::optional<bool> _originalSettings;
 };
 
 }  // namespace mongo

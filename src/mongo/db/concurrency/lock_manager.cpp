@@ -29,22 +29,37 @@
 
 #include "mongo/db/concurrency/lock_manager.h"
 
+#include <cstdint>
+#include <cstring>
 #include <fmt/format.h>
 #include <fmt/ostream.h>
+#include <iosfwd>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 
-#include "mongo/base/data_type_endian.h"
-#include "mongo/base/data_view.h"
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/preprocessor/control/iif.hpp>
+
 #include "mongo/base/static_assert.h"
+#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/config.h"
-#include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/client.h"
+#include "mongo/db/concurrency/lock_request_list.h"
 #include "mongo/db/concurrency/locker.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/log_truncation.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
-#include "mongo/util/str.h"
-#include "mongo/util/timer.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -878,6 +893,23 @@ void LockManager::getLockInfoBSON(const std::map<LockerId, BSONObj>& lockToClien
                                   BSONObjBuilder* result) {
     auto lockInfoArr = BSONArrayBuilder(result->subarrayStart("lockInfo"));
     _buildLocksArray(lockToClientMap, false, this, &lockInfoArr);
+}
+
+std::vector<LogDegugInfo> LockManager::getLockInfoFromResourceHolders(ResourceId resId) {
+    std::vector<LogDegugInfo> locksInfo;
+    for (size_t i = 0; i < _numLockBuckets; ++i) {
+        LockBucket& bucket = _lockBuckets[i];
+        stdx::lock_guard<SimpleMutex> scopedLock{bucket.mutex};
+        const auto it = bucket.data.find(resId);
+        if (it == bucket.data.end()) {
+            continue;
+        }
+        LockHead* lock = it->second;
+        for (auto iter = lock->grantedList._front; iter != nullptr; iter = iter->next) {
+            locksInfo.emplace_back(iter->mode, iter->locker->getDebugInfo());
+        }
+    }
+    return locksInfo;
 }
 
 void LockManager::_buildLocksArray(const std::map<LockerId, BSONObj>& lockToClientMap,

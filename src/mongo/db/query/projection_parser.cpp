@@ -29,8 +29,32 @@
 
 #include "mongo/db/query/projection_parser.h"
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <cstddef>
+#include <utility>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/base/error_codes.h"
 #include "mongo/base/exact_cast.h"
-#include "mongo/db/exec/document_value/document.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/matcher/copyable_match_expression.h"
+#include "mongo/db/matcher/expression_parser.h"
+#include "mongo/db/matcher/extensions_callback.h"
+#include "mongo/db/matcher/extensions_callback_noop.h"
+#include "mongo/db/pipeline/expression.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/str.h"
 
 namespace mongo {
 namespace projection_ast {
@@ -279,9 +303,9 @@ bool attemptToParseGenericExpression(ParseContext* parseCtx,
     const bool isMeta = subObj.firstElementFieldNameStringData() == "$meta";
     uassert(31252,
             "Cannot use expression other than $meta in exclusion projection",
-            !parseCtx->type || *parseCtx->type == ProjectType::kInclusion || isMeta);
+            !parseCtx->type || *parseCtx->type != ProjectType::kExclusion || isMeta);
 
-    if (!isMeta) {
+    if (!isMeta && !parseCtx->type) {
         parseCtx->type = ProjectType::kInclusion;
     }
 
@@ -476,10 +500,14 @@ void parseLiteral(ParseContext* ctx, BSONElement elem, ProjectionPathASTNode* pa
     FieldPath pathFromParent(elem.fieldNameStringData());
     addNodeAtPath(parent, pathFromParent, std::make_unique<ExpressionASTNode>(expr));
 
-    uassert(31310,
-            str::stream() << "Cannot use an expression " << elem << " in an exclusion projection",
-            !ctx->type || *ctx->type == ProjectType::kInclusion);
-    ctx->type = ProjectType::kInclusion;
+    if (ctx->policies.computedFieldsPolicy !=
+        ProjectionPolicies::ComputedFieldsPolicy::kOnlyComputedFields) {
+        uassert(31310,
+                str::stream() << "Cannot use an expression " << elem
+                              << " in an exclusion projection",
+                !ctx->type || *ctx->type == ProjectType::kInclusion);
+        ctx->type = ProjectType::kInclusion;
+    }
 }
 
 // Mutually recursive with parseSubObject().
@@ -499,9 +527,7 @@ void parseSubObject(ParseContext* ctx,
                     const BSONObj& obj,
                     ProjectionPathASTNode* parent) {
     uassert(
-        51270,
-        str::stream() << "An empty sub-projection is not a valid value. Found empty object at path",
-        !obj.isEmpty());
+        51270, str::stream() << "Invalid empty sub-projection: " << objFieldName, !obj.isEmpty());
 
     FieldPath path(objFieldName);
 
@@ -563,15 +589,25 @@ void parseElement(ParseContext* ctx,
 
     if (elem.type() == BSONType::Object) {
         BSONObj subObj = elem.embeddedObject();
+        // Uninitialized 'ctx->type' is default treated as ProjectType::kInclusion.
+        if (!ctx->type || *ctx->type != ProjectType::kAddition || !subObj.isEmpty()) {
+            // Make sure this isn't a positional operator. It's illegal to combine positional with
+            // any expression.
+            uassert(31271,
+                    "positional projection cannot be used with an expression or sub object",
+                    !hasPositional);
 
-        // Make sure this isn't a positional operator. It's illegal to combine positional with
-        // any expression.
-        uassert(31271,
-                "positional projection cannot be used with an expression or sub object",
-                !hasPositional);
-
-        parseSubObject(ctx, elem.fieldNameStringData(), fullPathToParent, subObj, parent);
-    } else if (isInclusionOrExclusionType(elem.type())) {
+            parseSubObject(ctx, elem.fieldNameStringData(), fullPathToParent, subObj, parent);
+        } else {
+            // subObj.isEmpty() in the ProjectType::kAddition case. This occurs when a pipeline
+            // stage like {$addFields: {myField: {}}} is pushed down to SBE and the current object
+            // is the one holding "myField". In this case we want to treat {myField: {}} as a
+            // projection literal, i.e. add "myField" with literal value {}.
+            parseLiteral(ctx, elem, parent);
+        }
+    } else if (ctx->policies.computedFieldsPolicy !=
+                   ProjectionPolicies::ComputedFieldsPolicy::kOnlyComputedFields &&
+               isInclusionOrExclusionType(elem.type())) {
         if (elem.trueValue()) {
             parseInclusion(ctx, elem, parent, fullPathToParent);
         } else {
@@ -600,6 +636,12 @@ Projection parseAndAnalyze(boost::intrusive_ptr<ExpressionContext> expCtx,
     ProjectionPathASTNode root;
 
     ParseContext ctx{expCtx, query, queryObj, obj, policies};
+
+    // $addFields is treated as a projection that has only computed fields.
+    if (policies.computedFieldsPolicy ==
+        ProjectionPolicies::ComputedFieldsPolicy::kOnlyComputedFields) {
+        ctx.type = ProjectType::kAddition;
+    }
 
     for (auto&& elem : obj) {
         ctx.idSpecified |=

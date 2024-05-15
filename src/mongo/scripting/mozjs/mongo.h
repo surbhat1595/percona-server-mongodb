@@ -29,19 +29,35 @@
 
 #pragma once
 
+#include <memory>
+
+#include <js/CallArgs.h>
+#include <js/Class.h>
+#include <js/PropertySpec.h>
+#include <js/RootingAPI.h>
+#include <js/TracingAPI.h>
+#include <js/TypeDecls.h>
+
 #include "mongo/client/dbclient_base.h"
+#include "mongo/scripting/mozjs/base.h"
+#include "mongo/scripting/mozjs/objectwrapper.h"
 #include "mongo/scripting/mozjs/wraptype.h"
 
 namespace mongo {
 namespace mozjs {
 
-using EncryptedDBClientCallback = std::unique_ptr<DBClientBase>(std::unique_ptr<DBClientBase>,
+using EncryptedDBClientCallback = std::shared_ptr<DBClientBase>(std::shared_ptr<DBClientBase>,
                                                                 JS::HandleValue,
                                                                 JS::HandleObject,
                                                                 JSContext*);
 
+using EncryptedDBClientFromExistingCallback = std::shared_ptr<DBClientBase>(
+    std::shared_ptr<DBClientBase>, std::shared_ptr<DBClientBase>, JSContext*);
+
 using GetNestedConnectionCallback = DBClientBase*(DBClientBase*);
+
 void setEncryptedDBClientCallbacks(EncryptedDBClientCallback* encCallback,
+                                   EncryptedDBClientFromExistingCallback* encFromExistingCallback,
                                    GetNestedConnectionCallback* getCallback);
 
 /**
@@ -60,6 +76,13 @@ struct MongoBase : public BaseInfo {
         MONGO_DECLARE_JS_FUNCTION(close);
         MONGO_DECLARE_JS_FUNCTION(cleanup);
         MONGO_DECLARE_JS_FUNCTION(compact);
+
+        MONGO_DECLARE_JS_FUNCTION(setAutoEncryption);
+        MONGO_DECLARE_JS_FUNCTION(getAutoEncryptionOptions);
+        MONGO_DECLARE_JS_FUNCTION(unsetAutoEncryption);
+        MONGO_DECLARE_JS_FUNCTION(toggleAutoEncryption);
+        MONGO_DECLARE_JS_FUNCTION(isAutoEncryptionEnabled);
+
         MONGO_DECLARE_JS_FUNCTION(cursorHandleFromId);
         MONGO_DECLARE_JS_FUNCTION(find);
         MONGO_DECLARE_JS_FUNCTION(generateDataKey);
@@ -84,7 +107,7 @@ struct MongoBase : public BaseInfo {
         MONGO_DECLARE_JS_FUNCTION(_refreshAccessToken);
     };
 
-    static const JSFunctionSpec methods[24];
+    static const JSFunctionSpec methods[29];
 
     static const char* const className;
     static const unsigned classFlags = JSCLASS_HAS_PRIVATE;
@@ -114,6 +137,7 @@ public:
     virtual void cleanup(JSContext* cx, JS::CallArgs args) = 0;
     virtual void compact(JSContext* cx, JS::CallArgs args) = 0;
     virtual void trace(JSTracer* trc) = 0;
+    virtual void getEncryptionOptions(JSContext* cx, JS::CallArgs args) = 0;
 };
 
 void setEncryptionCallbacks(DBClientBase* conn, EncryptionCallbacks* callbacks);

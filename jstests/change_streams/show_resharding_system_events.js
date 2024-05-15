@@ -4,8 +4,6 @@
  * operate in a sharded cluster.
  *
  * @tags: [
- *  requires_fcv_61,
- *  featureFlagChangeStreamsFurtherEnrichedEvents,
  *  requires_sharding,
  *  uses_change_streams,
  *  change_stream_does_not_expect_txns,
@@ -13,9 +11,7 @@
  *  assumes_read_preference_unchanged,
  * ]
  */
-(function() {
-"use strict";
-
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 load('jstests/libs/change_stream_util.js');  // For 'assertChangeStreamEventEq'.
 
 // Create a single-shard cluster for this test.
@@ -74,7 +70,7 @@ const origNs = {
     db: testDB.getName(),
     coll: testColl.getName()
 };
-const expectedReshardingEvents = [
+let expectedReshardingEvents = [
     {ns: reshardingNs, collectionUUID: newUUID, operationType: "create"},
     {
         ns: reshardingNs,
@@ -118,6 +114,52 @@ const expectedReshardingEvents = [
     },
 ];
 
+if (FeatureFlagUtil.isEnabled(st.s, "ReshardingImprovements")) {
+    expectedReshardingEvents = [
+        {ns: reshardingNs, collectionUUID: newUUID, operationType: "create"},
+        {
+            ns: reshardingNs,
+            collectionUUID: newUUID,
+            operationType: "shardCollection",
+            operationDescription: {shardKey: {a: 1}}
+        },
+        {
+            ns: reshardingNs,
+            collectionUUID: newUUID,
+            operationType: "insert",
+            fullDocument: {_id: 0, a: 0},
+            documentKey: {a: 0, _id: 0}
+        },
+        {
+            ns: reshardingNs,
+            collectionUUID: newUUID,
+            operationType: "insert",
+            fullDocument: {_id: 1, a: 1},
+            documentKey: {a: 1, _id: 1}
+        },
+        {
+            ns: reshardingNs,
+            collectionUUID: newUUID,
+            operationType: "createIndexes",
+            operationDescription: {indexes: [{v: 2, key: {a: 1}, name: "a_1"}]}
+        },
+        {
+            ns: origNs,
+            collectionUUID: oldUUID,
+            operationType: "reshardCollection",
+            operationDescription:
+                {reshardUUID: newUUID, shardKey: {a: 1}, oldShardKey: {_id: 1}, unique: false}
+        },
+        {
+            ns: origNs,
+            collectionUUID: newUUID,
+            operationType: "insert",
+            fullDocument: {_id: 2, a: 2},
+            documentKey: {a: 2, _id: 2}
+        },
+    ];
+}
+
 // Helper to confirm the sequence of events observed in the change stream.
 function assertChangeStreamEventSequence(csConfig, expectedEvents) {
     // Open a change stream on the test DB using the given configuration.
@@ -141,4 +183,3 @@ const nonSystemEvents =
 assertChangeStreamEventSequence({showSystemEvents: false}, nonSystemEvents);
 
 st.stop();
-}());

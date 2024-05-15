@@ -29,8 +29,26 @@
 
 #include "mongo/s/analyze_shard_key_util.h"
 
+#include <cmath>
+#include <memory>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
-#include "mongo/logv2/log.h"
+#include "mongo/db/read_write_concern_provenance_base_gen.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/transport/session.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -54,19 +72,29 @@ Status validateNamespace(const NamespaceString& nss) {
 }
 
 StatusWith<UUID> validateCollectionOptions(OperationContext* opCtx, const NamespaceString& nss) {
-    if (CollectionCatalog::get(opCtx)->lookupView(opCtx, nss)) {
-        return Status{ErrorCodes::CommandNotSupportedOnView, "The namespace corresponds to a view"};
-    }
+    AutoGetCollectionForReadMaybeLockFree collection(
+        opCtx,
+        nss,
+        AutoGetCollection::Options{}.viewMode(auto_get_collection::ViewMode::kViewsPermitted));
 
-    AutoGetCollectionForReadCommandMaybeLockFree collection(opCtx, nss);
+    if (auto view = collection.getView()) {
+        if (view->timeseries()) {
+            return Status{ErrorCodes::IllegalOperation,
+                          "Operation not supported for a timeseries collection"};
+        }
+        return Status{ErrorCodes::CommandNotSupportedOnView, "Operation not supported for a view"};
+    }
     if (!collection) {
         return Status{ErrorCodes::NamespaceNotFound,
                       str::stream() << "The namespace does not exist"};
     }
     if (collection->getCollectionOptions().encryptedFieldConfig.has_value()) {
-        return Status{ErrorCodes::IllegalOperation,
-                      str::stream() << "The collection has queryable encryption enabled"};
+        return Status{
+            ErrorCodes::IllegalOperation,
+            str::stream()
+                << "Operation not supported for a collection with queryable encryption enabled"};
     }
+
     return collection->uuid();
 }
 
@@ -98,6 +126,11 @@ double calculatePercentage(double part, double whole) {
     invariant(whole > 0);
     invariant(part <= whole);
     return round(part / whole * 100, kMaxNumDecimalPlaces);
+}
+
+bool isInternalClient(OperationContext* opCtx) {
+    return !opCtx->getClient()->session() ||
+        (opCtx->getClient()->session()->getTags() & transport::Session::kInternalClient);
 }
 
 }  // namespace analyze_shard_key

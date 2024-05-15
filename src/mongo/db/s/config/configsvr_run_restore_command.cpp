@@ -28,17 +28,58 @@
  */
 
 
+#include <cstddef>
+#include <cstdint>
+#include <list>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/none_t.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/client/dbclient_cursor.h"
+#include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/create_collection.h"
-#include "mongo/db/catalog_raii.h"
+#include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/query/find_command.h"
+#include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/storage_interface_impl.h"
+#include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/s/config/known_collections.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/storage_options.h"
+#include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/database_name_util.h"
+#include "mongo/util/namespace_string_util.h"
+#include "mongo/util/str.h"
+#include "mongo/util/string_map.h"
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/uuid.h"
 
@@ -65,9 +106,10 @@ ShouldRestoreDocument shouldRestoreDocument(OperationContext* opCtx,
 
     auto findRequest = FindCommandRequest(NamespaceString::kConfigsvrRestoreNamespace);
     if (nss && uuid) {
-        findRequest.setFilter(BSON("ns" << nss->toString() << "uuid" << *uuid));
+        findRequest.setFilter(
+            BSON("ns" << NamespaceStringUtil::serialize(*nss) << "uuid" << *uuid));
     } else if (nss) {
-        findRequest.setFilter(BSON("ns" << nss->toString()));
+        findRequest.setFilter(BSON("ns" << NamespaceStringUtil::serialize(*nss)));
     } else if (uuid) {
         findRequest.setFilter(BSON("uuid" << *uuid));
     }
@@ -88,9 +130,10 @@ ShouldRestoreDocument shouldRestoreDocument(OperationContext* opCtx,
                 (void)UUID::parse(doc);
             } catch (const AssertionException&) {
                 uasserted(ErrorCodes::BadValue,
-                          str::stream() << "The uuid field of '" << doc.toString() << "' in '"
-                                        << NamespaceString::kConfigsvrRestoreNamespace.toString()
-                                        << "' needs to be of type UUID");
+                          str::stream()
+                              << "The uuid field of '" << doc.toString() << "' in '"
+                              << NamespaceString::kConfigsvrRestoreNamespace.toStringForErrorMsg()
+                              << "' needs to be of type UUID");
             }
         }
     }
@@ -110,8 +153,9 @@ std::set<std::string> getDatabasesToRestore(OperationContext* opCtx) {
             continue;
         }
 
-        NamespaceString nss(doc.getStringField("ns"));
-        databasesToRestore.emplace(nss.db());
+        NamespaceString nss =
+            NamespaceStringUtil::deserialize(boost::none, doc.getStringField("ns"));
+        databasesToRestore.emplace(nss.db_forSharding());
     }
 
     return databasesToRestore;
@@ -156,11 +200,12 @@ public:
     }
 
     Status checkAuthForOperation(OperationContext* opCtx,
-                                 const DatabaseName&,
+                                 const DatabaseName& dbName,
                                  const BSONObj&) const override {
         if (!AuthorizationSession::get(opCtx->getClient())
-                 ->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
-                                                    ActionType::internal)) {
+                 ->isAuthorizedForActionsOnResource(
+                     ResourcePattern::forClusterResource(dbName.tenantId()),
+                     ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
         return Status::OK();
@@ -239,10 +284,11 @@ public:
                         // Handles the "_id.namespace" case for collection
                         // "config.system.sharding_ddl_coordinators".
                         const auto obj = doc.getField(nssFieldName->substr(0, dotPosition)).Obj();
-                        docNss = NamespaceString(
-                            obj.getStringField(nssFieldName->substr(dotPosition + 1)));
+                        docNss = NamespaceStringUtil::deserialize(
+                            boost::none, obj.getStringField(nssFieldName->substr(dotPosition + 1)));
                     } else {
-                        docNss = NamespaceString(doc.getStringField(*nssFieldName));
+                        docNss = NamespaceStringUtil::deserialize(
+                            boost::none, doc.getStringField(*nssFieldName));
                     }
                 }
 
@@ -280,7 +326,8 @@ public:
                             logAttrs(coll->ns().dbName()),
                             "uuid"_attr = coll->uuid(),
                             "_id"_attr = doc.getField("_id"));
-                NamespaceStringOrUUID nssOrUUID(coll->ns().db().toString(), coll->uuid());
+                NamespaceStringOrUUID nssOrUUID(coll->ns().db_forSharding().toString(),
+                                                coll->uuid());
                 uassertStatusOK(repl::StorageInterface::get(opCtx)->deleteById(
                     opCtx, nssOrUUID, doc.getField("_id")));
             }
@@ -312,14 +359,16 @@ public:
                 while (cursor->more()) {
                     auto doc = cursor->next();
 
-                    const NamespaceString dbNss = NamespaceString(doc.getStringField("_id"));
+                    const NamespaceString dbNss =
+                        NamespaceStringUtil::deserialize(boost::none, doc.getStringField("_id"));
                     if (!dbNss.coll().empty()) {
                         // We want to handle database only namespaces.
                         continue;
                     }
 
                     bool shouldRestore =
-                        databasesRestored.find(dbNss.db().toString()) != databasesRestored.end();
+                        databasesRestored.find(dbNss.db_forSharding().toString()) !=
+                        databasesRestored.end();
 
                     LOGV2_DEBUG(6261305,
                                 1,
@@ -341,7 +390,8 @@ public:
                                 logAttrs(coll->ns().dbName()),
                                 "uuid"_attr = coll->uuid(),
                                 "_id"_attr = doc.getField("_id"));
-                    NamespaceStringOrUUID nssOrUUID(coll->ns().db().toString(), coll->uuid());
+                    NamespaceStringOrUUID nssOrUUID(coll->ns().db_forSharding().toString(),
+                                                    coll->uuid());
                     uassertStatusOK(repl::StorageInterface::get(opCtx)->deleteById(
                         opCtx, nssOrUUID, doc.getField("_id")));
                 }

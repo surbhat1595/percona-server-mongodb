@@ -29,14 +29,25 @@
 
 #pragma once
 
+#include <boost/optional/optional.hpp>
+#include <memory>
+#include <vector>
+
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/db/commands/bulk_write_gen.h"
 #include "mongo/db/commands/bulk_write_parser.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/write_concern_options.h"
 #include "mongo/s/ns_targeter.h"
 #include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/write_op.h"
+#include "mongo/stdx/unordered_map.h"
 
 namespace mongo {
 namespace bulk_write_exec {
@@ -99,12 +110,12 @@ public:
      * targeting errors, but if not we should refresh once first.)
      *
      * Returned TargetedWriteBatches are owned by the caller.
-     * If a write without a shard key is detected, return an OK StatusWith that has 'true' as the
-     * value.
+     * If a write without a shard key or a time-series retryable update is detected, return an OK
+     * StatusWith that has the corresponding WriteType as the value.
      */
-    StatusWith<bool> target(const std::vector<std::unique_ptr<NSTargeter>>& targeters,
-                            bool recordTargetErrors,
-                            TargetedBatchMap& targetedBatches);
+    StatusWith<WriteType> target(const std::vector<std::unique_ptr<NSTargeter>>& targeters,
+                                 bool recordTargetErrors,
+                                 TargetedBatchMap& targetedBatches);
 
     /**
      * Fills a BulkWriteCommandRequest from a TargetedWriteBatch for this BulkWriteOp.
@@ -142,6 +153,12 @@ public:
      * this bulkWrite operation.
      */
     std::vector<BulkWriteReplyItem> generateReplyItems() const;
+
+    /**
+     * Calculates an estimate of the size, in bytes, required to store the common fields that will
+     * go into each sub-batch command sent to a shard, i.e. all fields besides the actual write ops.
+     */
+    int getBaseBatchCommandSizeEstimate() const;
 
 private:
     // The OperationContext the client bulkWrite request is run on.

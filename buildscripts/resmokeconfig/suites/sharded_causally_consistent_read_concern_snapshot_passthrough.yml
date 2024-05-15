@@ -85,6 +85,7 @@ executor:
   archive:
     hooks:
       - CheckReplDBHash
+      - CheckMetadataConsistencyInBackground
       - ValidateCollections
   config:
     shell_options:
@@ -93,12 +94,13 @@ executor:
           defaultReadConcernLevel: snapshot
           disallowSnapshotDistinct: true
       eval: >-
-        var testingReplication = true;
+        globalThis.testingReplication = true;
         load('jstests/libs/override_methods/set_read_and_write_concerns.js');
         load("jstests/libs/override_methods/enable_causal_consistency.js");
         load("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
   hooks:
   - class: CheckReplDBHash
+  - class: CheckMetadataConsistencyInBackground
   - class: ValidateCollections
   - class: CheckOrphansDeleted
   - class: CleanEveryN

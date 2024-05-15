@@ -27,15 +27,18 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <functional>
+#include <string>
 
-#include "mongo/bson/bsonobj.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
+#include "mongo/unittest/assert.h"
 #include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/unittest/framework.h"
 
 namespace mongo {
 
@@ -52,6 +55,7 @@ TEST(DocumentMetadataFieldsTest, AllMetadataRoundtripsThroughSerialization) {
     metadata.setSearchScoreDetails(BSON("scoreDetails"
                                         << "foo"));
     metadata.setSearchSortValues(BSON("a" << 1));
+    metadata.setVectorSearchDistance(7.6);
 
     BufBuilder builder;
     metadata.serializeForSorter(builder);
@@ -72,6 +76,7 @@ TEST(DocumentMetadataFieldsTest, AllMetadataRoundtripsThroughSerialization) {
                       BSON("scoreDetails"
                            << "foo"));
     ASSERT_BSONOBJ_EQ(deserialized.getSearchSortValues(), BSON("a" << 1));
+    ASSERT_EQ(deserialized.getVectorSearchDistance(), 7.6);
 }
 
 TEST(DocumentMetadataFieldsTest, HasMethodsReturnFalseForEmptyMetadata) {
@@ -87,6 +92,7 @@ TEST(DocumentMetadataFieldsTest, HasMethodsReturnFalseForEmptyMetadata) {
     ASSERT_FALSE(metadata.hasIndexKey());
     ASSERT_FALSE(metadata.hasSearchScoreDetails());
     ASSERT_FALSE(metadata.hasSearchSortValues());
+    ASSERT_FALSE(metadata.hasVectorSearchDistance());
 }
 
 TEST(DocumentMetadataFieldsTest, HasMethodsReturnTrueForInitializedMetadata) {
@@ -133,6 +139,10 @@ TEST(DocumentMetadataFieldsTest, HasMethodsReturnTrueForInitializedMetadata) {
     ASSERT_FALSE(metadata.hasSearchSortValues());
     metadata.setSearchSortValues(BSON("a" << 1));
     ASSERT_TRUE(metadata.hasSearchSortValues());
+
+    ASSERT_FALSE(metadata.hasVectorSearchDistance());
+    metadata.setVectorSearchDistance(7.6);
+    ASSERT_TRUE(metadata.hasVectorSearchDistance());
 }
 
 TEST(DocumentMetadataFieldsTest, MoveConstructor) {
@@ -148,6 +158,7 @@ TEST(DocumentMetadataFieldsTest, MoveConstructor) {
     metadata.setSearchScoreDetails(BSON("scoreDetails"
                                         << "foo"));
     metadata.setSearchSortValues(BSON("a" << 1));
+    metadata.setVectorSearchDistance(7.6);
 
     DocumentMetadataFields moveConstructed(std::move(metadata));
     ASSERT_TRUE(moveConstructed);
@@ -164,6 +175,7 @@ TEST(DocumentMetadataFieldsTest, MoveConstructor) {
                       BSON("scoreDetails"
                            << "foo"));
     ASSERT_BSONOBJ_EQ(moveConstructed.getSearchSortValues(), BSON("a" << 1));
+    ASSERT_EQ(moveConstructed.getVectorSearchDistance(), 7.6);
 
     ASSERT_FALSE(metadata);  // NOLINT(bugprone-use-after-move)
 }
@@ -181,6 +193,7 @@ TEST(DocumentMetadataFieldsTest, MoveAssignmentOperator) {
     metadata.setSearchScoreDetails(BSON("scoreDetails"
                                         << "foo"));
     metadata.setSearchSortValues(BSON("a" << 1));
+    metadata.setVectorSearchDistance(7.6);
 
     DocumentMetadataFields moveAssigned;
     moveAssigned.setTextScore(12.3);
@@ -200,6 +213,7 @@ TEST(DocumentMetadataFieldsTest, MoveAssignmentOperator) {
                       BSON("scoreDetails"
                            << "foo"));
     ASSERT_BSONOBJ_EQ(moveAssigned.getSearchSortValues(), BSON("a" << 1));
+    ASSERT_EQ(moveAssigned.getVectorSearchDistance(), 7.6);
 
     ASSERT_FALSE(metadata);  // NOLINT(bugprone-use-after-move)
 }
@@ -254,6 +268,7 @@ TEST(DocumentMetadataFieldsTest, MergeWithOnlyCopiesMetadataThatDestinationDoesN
     ASSERT_FALSE(destination.hasIndexKey());
     ASSERT_FALSE(destination.hasSearchScoreDetails());
     ASSERT_FALSE(destination.hasSearchSortValues());
+    ASSERT_FALSE(destination.hasVectorSearchDistance());
 }
 
 TEST(DocumentMetadataFieldsTest, CopyFromCopiesAllMetadataThatSourceHas) {
@@ -280,6 +295,7 @@ TEST(DocumentMetadataFieldsTest, CopyFromCopiesAllMetadataThatSourceHas) {
     ASSERT_FALSE(destination.hasIndexKey());
     ASSERT_FALSE(destination.hasSearchScoreDetails());
     ASSERT_FALSE(destination.hasSearchSortValues());
+    ASSERT_FALSE(destination.hasVectorSearchDistance());
 }
 
 TEST(DocumentMetadataFieldsTest, GetTimeseriesBucketMinTimeExists) {
@@ -323,6 +339,7 @@ TEST(DocumentMetadataFieldsTest, MetadataIsMarkedModifiedOnSetMetadataField) {
     testFieldSetter([](DocumentMetadataFields& md) { md.setTimeseriesBucketMinTime(Date_t()); });
     testFieldSetter([](DocumentMetadataFields& md) { md.setTimeseriesBucketMaxTime(Date_t()); });
     testFieldSetter([](DocumentMetadataFields& md) { md.setSearchSortValues(BSON("a" << 1)); });
+    testFieldSetter([](DocumentMetadataFields& md) { md.setVectorSearchDistance(60.0); });
 }
 
 TEST(DocumentMetadataFieldsTest, MetadataIsConstructedUnmodified) {

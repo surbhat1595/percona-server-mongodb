@@ -27,30 +27,36 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <cstddef>
+#include <list>
+#include <memory>
+#include <stack>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <utility>
+#include <vector>
 
-#include "mongo/db/query/sbe_stage_builder_projection.h"
+#include <absl/container/inlined_vector.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
-#include "mongo/base/exact_cast.h"
+#include "mongo/base/string_data.h"
+#include "mongo/db/exec/sbe/expressions/expression.h"
+#include "mongo/db/exec/sbe/makeobj_enums.h"
 #include "mongo/db/exec/sbe/makeobj_spec.h"
-#include "mongo/db/exec/sbe/stages/branch.h"
-#include "mongo/db/exec/sbe/stages/co_scan.h"
-#include "mongo/db/exec/sbe/stages/filter.h"
-#include "mongo/db/exec/sbe/stages/limit_skip.h"
-#include "mongo/db/exec/sbe/stages/loop_join.h"
-#include "mongo/db/exec/sbe/stages/makeobj.h"
-#include "mongo/db/exec/sbe/stages/project.h"
-#include "mongo/db/exec/sbe/stages/traverse.h"
-#include "mongo/db/exec/sbe/stages/union.h"
-#include "mongo/db/exec/sbe/values/bson.h"
-#include "mongo/db/matcher/expression_array.h"
+#include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/query/projection_ast.h"
+#include "mongo/db/query/projection_ast_visitor.h"
 #include "mongo/db/query/sbe_stage_builder.h"
 #include "mongo/db/query/sbe_stage_builder_expression.h"
-#include "mongo/db/query/sbe_stage_builder_filter.h"
+#include "mongo/db/query/sbe_stage_builder_projection.h"
 #include "mongo/db/query/tree_walker.h"
-#include "mongo/db/query/util/make_data_structure.h"
-#include "mongo/util/overloaded_visitor.h"
-#include "mongo/util/str.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 
 namespace mongo::stage_builder {
 namespace {
@@ -87,7 +93,7 @@ struct ProjectionTraversalVisitorContext {
             return inputExpr.clone();
         }
         std::unique_ptr<sbe::EExpression> getInputExpr() const {
-            return inputExpr.getExpr(state.slotVarMap, *state.data->env);
+            return inputExpr.getExpr(state.slotVarMap, *state.env);
         }
 
         EvalExpr extractInputEvalExpr() {
@@ -123,7 +129,7 @@ struct ProjectionTraversalVisitorContext {
         levels.push({state, std::move(rootExpr), {}, boost::none});
     }
 
-    const auto& topFrontField() const {
+    const std::string& topFrontField() const {
         invariant(!levels.empty());
         invariant(!levels.top().fields.empty());
         return levels.top().fields.front();
@@ -131,8 +137,10 @@ struct ProjectionTraversalVisitorContext {
 
     void popFrontField() {
         invariant(!levels.empty());
-        invariant(!levels.top().fields.empty());
-        levels.top().fields.pop_front();
+        // An empty field name occurs for {$addFields: {}}, which is treated as a no-op.
+        if (MONGO_likely(!levels.top().fields.empty())) {
+            levels.top().fields.pop_front();
+        }
     }
 
     size_t numLevels() const {
@@ -221,7 +229,10 @@ public:
         _context->pushLevel(
             {node->fieldNames().begin(), node->fieldNames().end()}, std::move(expr), lambdaFrame);
 
-        _context->currentFieldPath.push_back(_context->topFrontField());
+        if (node->children().size() > 0) {
+            // There is no need to update the field path when it has no child nodes to evaluate.
+            _context->currentFieldPath.push_back(_context->topFrontField());
+        }
     }
 
     void visit(const projection_ast::ProjectionPositionalASTNode* node) final {}
@@ -359,9 +370,11 @@ public:
     void visit(const projection_ast::ProjectionPathASTNode* node) final {
         using namespace std::literals;
 
-        // Remove the last field name from context and ensure that there are no more left.
-        _context->popFrontField();
-        _context->currentFieldPath.pop_back();
+        if (node->children().size() > 0) {
+            // Remove the last field name from context and ensure that there are no more left.
+            _context->popFrontField();
+            _context->currentFieldPath.pop_back();
+        }
         invariant(_context->topLevel().fields.empty());
 
         auto [keepFields, dropFields, projectFields, projectExprs] =
@@ -369,6 +382,8 @@ public:
 
         // Generate a document for the current nested level.
         const bool isInclusion = _context->projectType == projection_ast::ProjectType::kInclusion;
+        const bool isInclusionOrAddFields =
+            _context->projectType != projection_ast::ProjectType::kExclusion;
 
         auto [fieldBehavior, fieldVector] = isInclusion
             ? std::make_pair(sbe::MakeObjSpec::FieldBehavior::keep, std::move(keepFields))
@@ -402,7 +417,7 @@ public:
 
         auto innerExpr = sbe::makeE<sbe::EFunction>("makeBsonObj", std::move(args));
 
-        if (!isInclusion || !containsComputedField) {
+        if (!isInclusionOrAddFields || !containsComputedField) {
             // If this is an inclusion projection and with no computed fields, then anything that's
             // not an object should get filtered out. Example:
             // projection: {a: {b: 1}}
@@ -420,7 +435,7 @@ public:
             // preserved as-is.
             innerExpr = sbe::makeE<sbe::EIf>(makeFunction("isObject", childInputExpr->clone()),
                                              std::move(innerExpr),
-                                             isInclusion && !containsComputedField
+                                             isInclusionOrAddFields && !containsComputedField
                                                  ? makeConstant(sbe::value::TypeTags::Nothing, 0)
                                                  : childInputExpr->clone());
         }

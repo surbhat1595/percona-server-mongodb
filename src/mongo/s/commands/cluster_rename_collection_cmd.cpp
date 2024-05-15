@@ -28,16 +28,43 @@
  */
 
 
-#include "mongo/platform/basic.h"
+#include <memory>
+#include <string>
+#include <variant>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/client/read_preference.h"
+#include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/catalog/collection_uuid_mismatch_info.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/rename_collection_common.h"
 #include "mongo/db/commands/rename_collection_gen.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/rpc/op_msg.h"
+#include "mongo/s/catalog/type_database_gen.h"
+#include "mongo/s/catalog_cache.h"
+#include "mongo/s/client/shard.h"
+#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
+#include "mongo/s/shard_version.h"
+#include "mongo/stdx/variant.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/read_through_cache.h"
+#include "mongo/util/str.h"
+#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -77,6 +104,22 @@ public:
                     "Can't rename a collection to itself",
                     fromNss != toNss);
 
+            if (fromNss.isTimeseriesBucketsCollection()) {
+                uassert(ErrorCodes::IllegalOperation,
+                        "Renaming system.buckets collections is not allowed",
+                        AuthorizationSession::get(opCtx->getClient())
+                            ->isAuthorizedForActionsOnResource(
+                                ResourcePattern::forClusterResource(fromNss.tenantId()),
+                                ActionType::setUserWriteBlockMode));
+
+                uassert(ErrorCodes::IllegalOperation,
+                        str::stream() << "Cannot rename time-series buckets collection {"
+                                      << fromNss.toStringForErrorMsg()
+                                      << "} to a non-time-series buckets namespace {"
+                                      << toNss.toStringForErrorMsg() << "}",
+                        toNss.isTimeseriesBucketsCollection());
+            }
+
             RenameCollectionRequest renameCollReq(request().getTo());
             renameCollReq.setStayTemp(request().getStayTemp());
             renameCollReq.setExpectedSourceUUID(request().getCollectionUUID());
@@ -95,11 +138,13 @@ public:
             renameCollRequest.setRenameCollectionRequest(renameCollReq);
             renameCollRequest.setAllowEncryptedCollectionRename(
                 AuthorizationSession::get(opCtx->getClient())
-                    ->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
-                                                       ActionType::setUserWriteBlockMode));
+                    ->isAuthorizedForActionsOnResource(
+                        ResourcePattern::forClusterResource(fromNss.tenantId()),
+                        ActionType::setUserWriteBlockMode));
 
             auto catalogCache = Grid::get(opCtx)->catalogCache();
-            auto swDbInfo = Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, fromNss.db());
+            auto swDbInfo =
+                Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, fromNss.db_forSharding());
             if (swDbInfo == ErrorCodes::NamespaceNotFound) {
                 uassert(CollectionUUIDMismatchInfo(fromNss.dbName(),
                                                    *request().getCollectionUUID(),
@@ -116,7 +161,7 @@ public:
             auto cmdResponse = uassertStatusOK(shard->runCommandWithFixedRetryAttempts(
                 opCtx,
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                fromNss.db().toString(),
+                fromNss.db_forSharding().toString(),
                 CommandHelpers::appendMajorityWriteConcern(
                     appendDbVersionIfPresent(renameCollRequest.toBSON({}), dbInfo->getVersion())),
                 Shard::RetryPolicy::kNoRetry));
@@ -139,7 +184,7 @@ public:
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
             uassertStatusOK(rename_collection::checkAuthForRenameCollectionCommand(
-                opCtx->getClient(), ns().db().toString(), request().toBSON(BSONObj())));
+                opCtx->getClient(), request()));
         }
 
         bool supportsWriteConcern() const override {

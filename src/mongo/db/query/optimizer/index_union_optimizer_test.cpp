@@ -27,17 +27,35 @@
  *    it in the license file.
  */
 
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/string_data.h"
 #include "mongo/db/pipeline/abt/utils.h"
-#include "mongo/db/query/optimizer/cascades/logical_props_derivation.h"
-#include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
-#include "mongo/db/query/optimizer/explain.h"
+#include "mongo/db/query/cost_model/cost_model_gen.h"
+#include "mongo/db/query/optimizer/bool_expression.h"
+#include "mongo/db/query/optimizer/defs.h"
+#include "mongo/db/query/optimizer/index_bounds.h"
+#include "mongo/db/query/optimizer/metadata.h"
 #include "mongo/db/query/optimizer/metadata_factory.h"
-#include "mongo/db/query/optimizer/node.h"
+#include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
-#include "mongo/db/query/optimizer/rewrites/const_eval.h"
+#include "mongo/db/query/optimizer/partial_schema_requirements.h"
+#include "mongo/db/query/optimizer/props.h"
+#include "mongo/db/query/optimizer/syntax/path.h"
+#include "mongo/db/query/optimizer/syntax/syntax.h"
+#include "mongo/db/query/optimizer/utils/abt_hash.h"
+#include "mongo/db/query/optimizer/utils/physical_plan_builder.h"
 #include "mongo/db/query/optimizer/utils/unit_test_abt_literals.h"
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/db/query/optimizer/utils/utils.h"
+#include "mongo/unittest/framework.h"
 
 using namespace mongo::optimizer::unit_test_abt_literals;
 
@@ -290,11 +308,6 @@ TEST(LogicalRewriter, DisjunctionProjectionConversion) {
         "|   Variable [fieldProj_0]\n"
         "Sargable [Complete]\n"
         "|   |   requirements: \n"
-        "|   |       {{{scan_0, 'PathGet [x] PathIdentity []', fieldProj_0, {{{<fully open>}}}}}}\n"
-        "|   scanParams: \n"
-        "|       {'x': fieldProj_0}\n"
-        "Sargable [Complete]\n"
-        "|   |   requirements: \n"
         "|   |       {\n"
         "|   |           {{scan_0, 'PathGet [a] PathIdentity []', {{{=Const [0]}}}}}\n"
         "|   |        U \n"
@@ -308,6 +321,11 @@ TEST(LogicalRewriter, DisjunctionProjectionConversion) {
         "|                U \n"
         "|                   {{evalTemp_1, 'PathIdentity []', {{{=Const [1]}}}, entryIndex: 1}}\n"
         "|               }\n"
+        "Sargable [Complete]\n"
+        "|   |   requirements: \n"
+        "|   |       {{{scan_0, 'PathGet [x] PathIdentity []', fieldProj_0, {{{<fully open>}}}}}}\n"
+        "|   scanParams: \n"
+        "|       {'x': fieldProj_0}\n"
         "Scan [coll, {scan_0}]\n",
         optimized);
 }
@@ -452,18 +470,13 @@ TEST(PhysRewriter, OptimizeSargableNodeWithTopLevelDisjunction) {
         .pop();
     auto reqs2 = PartialSchemaRequirements(builder.finish().get());
 
-    builder.pushDisj().pushConj().atom({makeKey("g"), req}).pop();
-    auto reqs3 = PartialSchemaRequirements(builder.finish().get());
-
     ABT scanNode = make<ScanNode>("ptest", "test");
     ABT sargableNode1 = make<SargableNode>(
         reqs1, CandidateIndexes(), boost::none, IndexReqTarget::Complete, std::move(scanNode));
     ABT sargableNode2 = make<SargableNode>(
         reqs2, CandidateIndexes(), boost::none, IndexReqTarget::Complete, std::move(sargableNode1));
-    ABT sargableNode3 = make<SargableNode>(
-        reqs3, CandidateIndexes(), boost::none, IndexReqTarget::Complete, std::move(sargableNode2));
     ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"ptest"}},
-                                  std::move(sargableNode3));
+                                  std::move(sargableNode2));
 
     auto prefixId = PrefixId::createForTests();
     auto phaseManager = makePhaseManager(
@@ -503,10 +516,6 @@ TEST(PhysRewriter, OptimizeSargableNodeWithTopLevelDisjunction) {
     // We should get an index union between 'ab' and 'cd'.
     ASSERT_EXPLAIN_V2Compact_AUTO(
         "Root [{ptest}]\n"
-        "Filter []\n"
-        "|   EvalFilter []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathGet [g] PathCompare [Eq] Const [1]\n"
         "Filter []\n"
         "|   BinaryOp [Or]\n"
         "|   |   EvalFilter []\n"

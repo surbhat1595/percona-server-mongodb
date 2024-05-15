@@ -27,8 +27,14 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <boost/move/utility_core.hpp>
+#include <utility>
 
+#include <boost/optional/optional.hpp>
+
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/matcher/schema/expression_internal_schema_num_array_items.h"
 
 namespace mongo {
@@ -50,9 +56,9 @@ void InternalSchemaNumArrayItemsMatchExpression::debugString(StringBuilder& debu
     _debugStringAttachTagInfo(&debug);
 }
 
-BSONObj InternalSchemaNumArrayItemsMatchExpression::getSerializedRightHandSide(
-    SerializationOptions opts) const {
-    return BSON(_name << opts.serializeLiteral(_numItems));
+void InternalSchemaNumArrayItemsMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, SerializationOptions opts) const {
+    opts.appendLiteral(bob, _name, _numItems);
 }
 
 bool InternalSchemaNumArrayItemsMatchExpression::equivalent(const MatchExpression* other) const {

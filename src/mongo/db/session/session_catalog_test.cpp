@@ -28,21 +28,28 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
+#include <absl/container/node_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "cxxabi.h"
+#include <algorithm>
+#include <future>
 #include <memory>
+#include <string>
+#include <system_error>
 
-#include "mongo/db/cancelable_operation_context.h"
+#include "mongo/base/string_data.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/session/kill_sessions.h"
 #include "mongo/db/session/session_catalog.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/logv2/log.h"
 #include "mongo/stdx/future.h"
+#include "mongo/unittest/assert.h"
 #include "mongo/unittest/barrier.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/util/concurrency/thread_pool.h"
-#include "mongo/util/scopeguard.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/fail_point.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -1149,7 +1156,7 @@ TEST_F(SessionCatalogTest, KillSessionWhenChildSessionIsNotCheckedOut) {
     runTest(parentLsid, makeLogicalSessionIdWithTxnUUIDForTest(parentLsid));
 }
 
-TEST_F(SessionCatalogTest, KillingChildSessionDoesNotInterruptParentSession) {
+TEST_F(SessionCatalogTest, KillingChildSessionInterruptsParentSession) {
     auto runTest = [&](const LogicalSessionId& parentLsid, const LogicalSessionId& childLsid) {
         auto killToken = [this, &parentLsid, &childLsid] {
             assertCanCheckoutSession(childLsid);
@@ -1160,8 +1167,9 @@ TEST_F(SessionCatalogTest, KillingChildSessionDoesNotInterruptParentSession) {
 
             auto killToken = catalog()->killSession(childLsid);
 
-            // Make sure the owning operation context is not interrupted.
-            opCtx->checkForInterrupt();
+            // Make sure the owning operation context is interrupted.
+            ASSERT_THROWS_CODE(
+                opCtx->checkForInterrupt(), AssertionException, ErrorCodes::Interrupted);
 
             // Make sure that the checkOutForKill call will wait for the owning operation context to
             // check the session back in

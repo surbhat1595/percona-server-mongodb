@@ -1,15 +1,12 @@
-'use strict';
-
 // Test that the 'cloneCatalogData' command works correctly.
 // Eventually, _shardsvrMovePrimary will use this command.
+import {ConfigShardUtil} from "jstests/libs/config_shard_util.js";
 
 // Do not check metadata consistency as unsharded collections are cloned to non-primary shards for
 // testing purposes.
 TestData.skipCheckMetadataConsistency = true;
 
 (() => {
-    load("jstests/libs/config_shard_util.js");
-
     function sortByName(a, b) {
         if (a.name < b.name)
             return -1;
@@ -118,10 +115,12 @@ TestData.skipCheckMetadataConsistency = true;
         var indexes = res.cursor.firstBatch;
         indexes.sort(sortByName);
 
-        // TODO SERVER-74252: once 7.0 becomes LastLTS we can assume that the movePrimary will never
-        // copy indexes of sharded collections.
+        // For each unsharded collection, there should be a total of 3 indexes - one for the _id
+        // field and the other two that we have created. However, in the case of sharded
+        // collections, only the _id index is present. When cloning sharded collections, indexes are
+        // not copied.
         if (shardedColl)
-            assert(indexes.length === 1 || indexes.length === 3);
+            assert(indexes.length === 1);
         else
             assert(indexes.length === 3);
 
@@ -166,8 +165,6 @@ TestData.skipCheckMetadataConsistency = true;
     }),
                                  ErrorCodes.InvalidOptions);
 
-    const isConfigShardEnabled = ConfigShardUtil.isEnabledIgnoringFCV(st);
-
     if (TestData.configShard) {
         // The config server is a shard and already has collections for the database.
         assert.commandFailedWithCode(st.configRS.getPrimary().adminCommand({
@@ -176,22 +173,14 @@ TestData.skipCheckMetadataConsistency = true;
             writeConcern: {w: "majority"}
         }),
                                      ErrorCodes.NamespaceExists);
-    } else if (isConfigShardEnabled) {
-        // The config server is dedicated but supports config shard mode, so it can accept shaded
+    } else {
+        // The config server is dedicated but supports config shard mode, so it can accept sharded
         // commands.
         assert.commandWorked(st.configRS.getPrimary().adminCommand({
             _shardsvrCloneCatalogData: 'test',
             from: fromShard.host,
             writeConcern: {w: "majority"}
         }));
-    } else {
-        // A dedicated non-config shard supporting config server cannot run the command.
-        assert.commandFailedWithCode(st.configRS.getPrimary().adminCommand({
-            _shardsvrCloneCatalogData: 'test',
-            from: fromShard.host,
-            writeConcern: {w: "majority"}
-        }),
-                                     ErrorCodes.NoShardingEnabled);
     }
 
     // Check that the command fails when failing to specify a source.

@@ -27,9 +27,14 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "replication_coordinator_noop.h"
+
+#include <boost/move/utility_core.hpp>
+
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace repl {
@@ -306,6 +311,10 @@ Milliseconds ReplicationCoordinatorNoOp::getConfigElectionTimeoutPeriod() const 
 }
 
 std::vector<MemberConfig> ReplicationCoordinatorNoOp::getConfigVotingMembers() const {
+    MONGO_UNREACHABLE;
+}
+
+size_t ReplicationCoordinatorNoOp::getNumConfigVotingMembers() const {
     MONGO_UNREACHABLE;
 }
 
@@ -622,6 +631,10 @@ SplitPrepareSessionManager* ReplicationCoordinatorNoOp::getSplitPrepareSessionMa
 }
 
 bool ReplicationCoordinatorNoOp::isRetryableWrite(OperationContext* opCtx) const {
+    MONGO_UNREACHABLE;
+}
+
+boost::optional<UUID> ReplicationCoordinatorNoOp::getInitialSyncId(OperationContext* opCtx) {
     MONGO_UNREACHABLE;
 }
 

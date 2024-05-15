@@ -27,45 +27,86 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include <boost/optional.hpp>
+#include <absl/container/node_hash_map.h>
+#include <absl/container/node_hash_set.h>
+#include <algorithm>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <cstdint>
+#include <fmt/format.h>
+#include <functional>
+#include <list>
+#include <memory>
+#include <ostream>
+#include <utility>
 #include <vector>
 
-#include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/bsontypes_util.h"
+#include "mongo/bson/oid.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_mock.h"
-#include "mongo/db/catalog/drop_collection.h"
+#include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/client.h"
+#include "mongo/db/cluster_role.h"
+#include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/record_id.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
+#include "mongo/db/repl/member_state.h"
+#include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/oplog_interface_local.h"
 #include "mongo/db/repl/oplog_interface_mock.h"
+#include "mongo/db/repl/replication_consistency_markers.h"
+#include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/rollback_impl.h"
 #include "mongo/db/repl/rollback_test_fixture.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/type_shard_identity.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/shard_id.h"
+#include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/tenant_id.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
 #include "mongo/s/catalog/type_config_version.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/transport_layer_mock.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/framework.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/namespace_string_util.h"
 #include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplicationRollback
-
 
 namespace mongo {
 namespace repl {
 namespace {
 
-NamespaceString kOplogNSS("local.oplog.rs");
-NamespaceString nss("test.coll");
+NamespaceString kOplogNSS = NamespaceString::createNamespaceString_forTest("local.oplog.rs");
+NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.coll");
 std::string kGenericUUIDStr = "b4c66a44-c1ca-4d86-8d25-12e82fa2de5b";
 
 BSONObj makeInsertOplogEntry(long long time, BSONObj obj, StringData ns, UUID uuid) {
@@ -781,7 +822,7 @@ TEST_F(RollbackImplTest, RollbackReturnsBadStatusIfIncrementRollbackIDFails) {
     ASSERT_OK(_insertOplogEntry(makeOp(2)));
 
     // Delete the rollback id collection.
-    auto rollbackIdNss = NamespaceString(_storageInterface->kDefaultRollbackIdNamespace);
+    auto rollbackIdNss = NamespaceString::kDefaultRollbackIdNamespace;
     ASSERT_OK(_storageInterface->dropCollection(_opCtx.get(), rollbackIdNss));
 
     _assertDocsInOplog(_opCtx.get(), {1, 2});
@@ -895,10 +936,10 @@ TEST_F(RollbackImplTest,
     // Insert another document so the collection count is 2.
     const Timestamp time = Timestamp(2, 2);
     ASSERT_OK(_storageInterface->insertDocument(
-        _opCtx.get(), {nss.db().toString(), uuid}, {BSON("_id" << 2), time}, time.asULL()));
+        _opCtx.get(), {nss.db_forTest().toString(), uuid}, {BSON("_id" << 2), time}, time.asULL()));
     ASSERT_EQ(2ULL,
               unittest::assertGet(_storageInterface->getCollectionCount(
-                  _opCtx.get(), {nss.db().toString(), uuid})));
+                  _opCtx.get(), {nss.db_forTest().toString(), uuid})));
 
     _assertDocsInOplog(_opCtx.get(), {1, 2});
     auto truncateAfterPoint =
@@ -1016,7 +1057,7 @@ TEST_F(RollbackImplTest, RollbackDoesNotWriteRollbackFilesIfNoInsertsOrUpdatesAf
     _storageInterface->setStableTimestamp(nullptr, Timestamp(1, 1));
 
     const auto uuid = UUID::gen();
-    const auto nss = NamespaceString("db.coll");
+    const auto nss = NamespaceString::createNamespaceString_forTest("db.coll");
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
     const auto oplogEntry = BSON("ts" << Timestamp(3, 3) << "t" << 3LL << "op"
                                       << "c"
@@ -1034,7 +1075,7 @@ TEST_F(RollbackImplTest, RollbackSavesInsertedDocumentToFile) {
     ASSERT_OK(_insertOplogEntry(commonOp.first));
     _storageInterface->setStableTimestamp(nullptr, Timestamp(1, 1));
 
-    const auto nss = NamespaceString("db.people");
+    const auto nss = NamespaceString::createNamespaceString_forTest("db.people");
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
 
@@ -1055,7 +1096,7 @@ TEST_F(RollbackImplTest, RollbackSavesLatestVersionOfDocumentWhenThereAreMultipl
     ASSERT_OK(_insertOplogEntry(commonOp.first));
     _storageInterface->setStableTimestamp(nullptr, Timestamp(1, 1));
 
-    const auto nss = NamespaceString("db.people");
+    const auto nss = NamespaceString::createNamespaceString_forTest("db.people");
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
 
@@ -1080,7 +1121,7 @@ TEST_F(RollbackImplTest, RollbackSavesUpdatedDocumentToFile) {
     ASSERT_OK(_insertOplogEntry(commonOp.first));
     _storageInterface->setStableTimestamp(nullptr, Timestamp(1, 1));
 
-    const auto nss = NamespaceString("db.people");
+    const auto nss = NamespaceString::createNamespaceString_forTest("db.people");
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
 
@@ -1102,7 +1143,7 @@ TEST_F(RollbackImplTest, RollbackSavesLatestVersionOfDocumentWhenThereAreMultipl
     ASSERT_OK(_insertOplogEntry(commonOp.first));
     _storageInterface->setStableTimestamp(nullptr, Timestamp(1, 1));
 
-    const auto nss = NamespaceString("db.people");
+    const auto nss = NamespaceString::createNamespaceString_forTest("db.people");
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
 
@@ -1128,7 +1169,7 @@ TEST_F(RollbackImplTest, RollbackDoesNotWriteDocumentToFileIfInsertIsRevertedByD
     ASSERT_OK(_insertOplogEntry(commonOp.first));
     _storageInterface->setStableTimestamp(nullptr, Timestamp(1, 1));
 
-    const auto nss = NamespaceString("db.numbers");
+    const auto nss = NamespaceString::createNamespaceString_forTest("db.numbers");
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
 
@@ -1151,7 +1192,7 @@ TEST_F(RollbackImplTest, RollbackDoesNotWriteDocumentToFileIfUpdateIsFollowedByD
     ASSERT_OK(_insertOplogEntry(commonOp.first));
     _storageInterface->setStableTimestamp(nullptr, Timestamp(1, 1));
 
-    const auto nss = NamespaceString("db.numbers");
+    const auto nss = NamespaceString::createNamespaceString_forTest("db.numbers");
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
 
@@ -1174,7 +1215,7 @@ TEST_F(RollbackImplTest, RollbackProperlySavesFilesWhenCollectionIsRenamed) {
     ASSERT_OK(_insertOplogEntry(commonOp.first));
     _storageInterface->setStableTimestamp(nullptr, Timestamp(1, 1));
 
-    const auto nssBeforeRename = NamespaceString("db.firstColl");
+    const auto nssBeforeRename = NamespaceString::createNamespaceString_forTest("db.firstColl");
     const auto uuidBeforeRename = UUID::gen();
     const auto collBeforeRename =
         _initializeCollection(_opCtx.get(), uuidBeforeRename, nssBeforeRename);
@@ -1185,7 +1226,7 @@ TEST_F(RollbackImplTest, RollbackProperlySavesFilesWhenCollectionIsRenamed) {
     _insertDocAndGenerateOplogEntry(objInRenamedCollection, uuidBeforeRename, nssBeforeRename, 2);
 
     // Rename the original collection.
-    const auto nssAfterRename = NamespaceString("db.secondColl");
+    const auto nssAfterRename = NamespaceString::createNamespaceString_forTest("db.secondColl");
     auto renameCmdObj = BSON("renameCollection" << nssBeforeRename.ns_forTest() << "to"
                                                 << nssAfterRename.ns_forTest());
     auto renameCmdOp = makeCommandOp(
@@ -1224,7 +1265,8 @@ TEST_F(RollbackImplTest, RollbackProperlySavesFilesWhenInsertsAndDropOfCollectio
 
     // Create the collection, but as a drop-pending collection.
     const auto dropOpTime = OpTime(Timestamp(200, 200), 200L);
-    const auto nss = NamespaceString("db.people").makeDropPendingNamespace(dropOpTime);
+    const auto nss = NamespaceString::createNamespaceString_forTest("db.people")
+                         .makeDropPendingNamespace(dropOpTime);
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
     DropPendingCollectionReaper::get(_opCtx.get())
@@ -1266,7 +1308,7 @@ TEST_F(RollbackImplTest, RollbackProperlySavesFilesWhenCreateCollAndInsertsAreRo
     _storageInterface->setStableTimestamp(nullptr, Timestamp(1, 1));
 
     // Create the collection and make an oplog entry for the creation event.
-    const auto nss = NamespaceString("db.people");
+    const auto nss = NamespaceString::createNamespaceString_forTest("db.people");
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
     const auto oplogEntry = BSON("ts" << Timestamp(3, 3) << "t" << 3LL << "op"
@@ -1305,7 +1347,7 @@ DEATH_TEST_F(RollbackImplTest,
     ASSERT_OK(_insertOplogEntry(commonOp.first));
     _storageInterface->setStableTimestamp(nullptr, Timestamp(1, 1));
 
-    const auto nss = NamespaceString("db.people");
+    const auto nss = NamespaceString::createNamespaceString_forTest("db.people");
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
 
@@ -1348,37 +1390,41 @@ TEST_F(RollbackImplTest, RollbackSetsMultipleCollectionCounts) {
     ASSERT_OK(_insertOplogEntry(commonOp.first));
 
     auto uuid1 = UUID::gen();
-    auto nss1 = NamespaceString("test.coll1");
+    auto nss1 = NamespaceString::createNamespaceString_forTest("test.coll1");
     const auto obj1 = BSON("_id" << 1);
     const auto coll1 = _initializeCollection(_opCtx.get(), uuid1, nss1);
     _insertDocAndGenerateOplogEntry(obj1, uuid1, nss1, 2);
 
     const Timestamp time1 = Timestamp(2, 2);
-    ASSERT_OK(_storageInterface->insertDocument(
-        _opCtx.get(), {nss1.db().toString(), uuid1}, {BSON("_id" << 2), time1}, time1.asULL()));
+    ASSERT_OK(_storageInterface->insertDocument(_opCtx.get(),
+                                                {nss1.db_forTest().toString(), uuid1},
+                                                {BSON("_id" << 2), time1},
+                                                time1.asULL()));
     ASSERT_EQ(2ULL,
               unittest::assertGet(_storageInterface->getCollectionCount(
-                  _opCtx.get(), {nss1.db().toString(), uuid1})));
-    ASSERT_OK(
-        _storageInterface->setCollectionCount(_opCtx.get(), {nss1.db().toString(), uuid1}, 2));
+                  _opCtx.get(), {nss1.db_forTest().toString(), uuid1})));
+    ASSERT_OK(_storageInterface->setCollectionCount(
+        _opCtx.get(), {nss1.db_forTest().toString(), uuid1}, 2));
 
     auto uuid2 = UUID::gen();
-    auto nss2 = NamespaceString("test.coll2");
+    auto nss2 = NamespaceString::createNamespaceString_forTest("test.coll2");
     const auto obj2 = BSON("_id" << 1);
     const auto coll2 = _initializeCollection(_opCtx.get(), uuid2, nss2);
     const Timestamp time2 = Timestamp(3, 3);
     ASSERT_OK(_storageInterface->insertDocument(
-        _opCtx.get(), {nss2.db().toString(), uuid2}, {obj2, time2}, time2.asULL()));
+        _opCtx.get(), {nss2.db_forTest().toString(), uuid2}, {obj2, time2}, time2.asULL()));
     _deleteDocAndGenerateOplogEntry(obj2["_id"], uuid2, nss2, 3);
 
     const Timestamp time3 = Timestamp(4, 4);
-    ASSERT_OK(_storageInterface->insertDocument(
-        _opCtx.get(), {nss2.db().toString(), uuid2}, {BSON("_id" << 2), time3}, time3.asULL()));
+    ASSERT_OK(_storageInterface->insertDocument(_opCtx.get(),
+                                                {nss2.db_forTest().toString(), uuid2},
+                                                {BSON("_id" << 2), time3},
+                                                time3.asULL()));
     ASSERT_EQ(1ULL,
               unittest::assertGet(_storageInterface->getCollectionCount(
-                  _opCtx.get(), {nss2.db().toString(), uuid2})));
-    ASSERT_OK(
-        _storageInterface->setCollectionCount(_opCtx.get(), {nss2.db().toString(), uuid2}, 1));
+                  _opCtx.get(), {nss2.db_forTest().toString(), uuid2})));
+    ASSERT_OK(_storageInterface->setCollectionCount(
+        _opCtx.get(), {nss2.db_forTest().toString(), uuid2}, 1));
 
     _assertDocsInOplog(_opCtx.get(), {1, 2, 3});
 
@@ -1399,7 +1445,7 @@ TEST_F(RollbackImplTest, CountChangesCancelOut) {
     const auto obj = BSON("_id" << 2);
     const Timestamp time = Timestamp(2, 2);
     ASSERT_OK(_storageInterface->insertDocument(
-        _opCtx.get(), {nss.db().toString(), uuid}, {obj, time}, time.asULL()));
+        _opCtx.get(), {nss.db_forTest().toString(), uuid}, {obj, time}, time.asULL()));
 
     _insertDocAndGenerateOplogEntry(BSON("_id" << 1), uuid, nss, 2);
     _deleteDocAndGenerateOplogEntry(obj["_id"], uuid, nss, 3);
@@ -1408,7 +1454,7 @@ TEST_F(RollbackImplTest, CountChangesCancelOut) {
     // Test that we read the collection count from drop entries.
     ASSERT_OK(_insertOplogEntry(makeCommandOp(Timestamp(5, 5),
                                               uuid,
-                                              nss.getCommandNS().toString(),
+                                              nss.getCommandNS().toString_forTest(),
                                               BSON("drop" << nss.coll()),
                                               5,
                                               BSON("numRecords" << 1))
@@ -1416,7 +1462,7 @@ TEST_F(RollbackImplTest, CountChangesCancelOut) {
 
     ASSERT_EQ(2ULL,
               unittest::assertGet(_storageInterface->getCollectionCount(
-                  _opCtx.get(), {nss.db().toString(), uuid})));
+                  _opCtx.get(), {nss.db_forTest().toString(), uuid})));
     ASSERT_OK(_storageInterface->setCollectionCount(nullptr, {"", uuid}, 2));
 
     _assertDocsInOplog(_opCtx.get(), {1, 2, 3, 4, 5});
@@ -1433,31 +1479,35 @@ TEST_F(RollbackImplTest, RollbackIgnoresSetCollectionCountError) {
     ASSERT_OK(_insertOplogEntry(commonOp.first));
 
     auto uuid1 = UUID::gen();
-    auto nss1 = NamespaceString("test.coll1");
+    auto nss1 = NamespaceString::createNamespaceString_forTest("test.coll1");
     const auto obj1 = BSON("_id" << 1);
     const auto coll1 = _initializeCollection(_opCtx.get(), uuid1, nss1);
     _insertDocAndGenerateOplogEntry(obj1, uuid1, nss1, 2);
 
     const Timestamp time1 = Timestamp(2, 2);
-    ASSERT_OK(_storageInterface->insertDocument(
-        _opCtx.get(), {nss1.db().toString(), uuid1}, {BSON("_id" << 2), time1}, time1.asULL()));
+    ASSERT_OK(_storageInterface->insertDocument(_opCtx.get(),
+                                                {nss1.db_forTest().toString(), uuid1},
+                                                {BSON("_id" << 2), time1},
+                                                time1.asULL()));
     ASSERT_EQ(2ULL,
               unittest::assertGet(_storageInterface->getCollectionCount(
-                  _opCtx.get(), {nss1.db().toString(), uuid1})));
+                  _opCtx.get(), {nss1.db_forTest().toString(), uuid1})));
     ASSERT_OK(_storageInterface->setCollectionCount(nullptr, {"", uuid1}, 2));
 
     auto uuid2 = UUID::gen();
-    auto nss2 = NamespaceString("test.coll2");
+    auto nss2 = NamespaceString::createNamespaceString_forTest("test.coll2");
     const auto obj2 = BSON("_id" << 1);
     const auto coll2 = _initializeCollection(_opCtx.get(), uuid2, nss2);
     _insertDocAndGenerateOplogEntry(obj2, uuid2, nss2, 3);
 
     const Timestamp time2 = Timestamp(3, 3);
-    ASSERT_OK(_storageInterface->insertDocument(
-        _opCtx.get(), {nss2.db().toString(), uuid2}, {BSON("_id" << 2), time2}, time2.asULL()));
+    ASSERT_OK(_storageInterface->insertDocument(_opCtx.get(),
+                                                {nss2.db_forTest().toString(), uuid2},
+                                                {BSON("_id" << 2), time2},
+                                                time2.asULL()));
     ASSERT_EQ(2ULL,
               unittest::assertGet(_storageInterface->getCollectionCount(
-                  _opCtx.get(), {nss2.db().toString(), uuid2})));
+                  _opCtx.get(), {nss2.db_forTest().toString(), uuid2})));
     ASSERT_OK(_storageInterface->setCollectionCount(nullptr, {"", uuid2}, 2));
 
     _assertDocsInOplog(_opCtx.get(), {1, 2, 3});
@@ -1492,14 +1542,15 @@ RollbackImplTest::_setUpUnpreparedTransactionForCountTest(UUID collId) {
     // Initialize the collection with one document inserted outside a transaction.
     // The final collection count after rolling back the transaction, which has one entry before the
     // stable timestamp, should be 1.
-    auto nss = NamespaceString("test.coll1");
+    auto nss = NamespaceString::createNamespaceString_forTest("test.coll1");
     _initializeCollection(_opCtx.get(), collId, nss);
     auto insertOp1 = _insertDocAndReturnOplogEntry(BSON("_id" << 1), collId, nss, 1);
     ops.push_back(insertOp1);
     ASSERT_OK(_insertOplogEntry(insertOp1.first));
 
     // Common field values for applyOps oplog entries.
-    auto adminCmdNss = NamespaceString(DatabaseName::kAdmin).getCommandNS();
+    auto adminCmdNss =
+        NamespaceString::createNamespaceString_forTest(DatabaseName::kAdmin).getCommandNS();
     OperationSessionInfo sessionInfo;
     sessionInfo.setSessionId(makeLogicalSessionId(_opCtx.get()));
     sessionInfo.setTxnNumber(1);
@@ -1570,7 +1621,8 @@ RollbackImplTest::_setUpUnpreparedTransactionForCountTest(UUID collId) {
     ASSERT_OK(_insertOplogEntry(commitApplyOpsOplogEntry.toBSON()));
     ops.push_back(std::make_pair(commitApplyOpsOplogEntry.toBSON(), insertOp3.second));
 
-    ASSERT_OK(_storageInterface->setCollectionCount(nullptr, {nss.db().toString(), collId}, 3));
+    ASSERT_OK(
+        _storageInterface->setCollectionCount(nullptr, {nss.db_forTest().toString(), collId}, 3));
     _assertDocsInOplog(_opCtx.get(), {1, 2, 3});
 
     return ops;
@@ -1914,7 +1966,7 @@ public:
         auto doc = BSON("_id" << 1);
         const Timestamp time = Timestamp(2, 1);
         ASSERT_OK(_storageInterface->insertDocument(
-            _opCtx.get(), {nss.db().toString(), collId}, {doc, time}, time.asULL()));
+            _opCtx.get(), {nss.db_forTest().toString(), collId}, {doc, time}, time.asULL()));
 
         BSONObjBuilder bob;
         bob.append("ts", time);
@@ -1948,7 +2000,7 @@ protected:
 };
 
 TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsExtractsNamespaceOfInsertOplogEntry) {
-    auto insertNss = NamespaceString("test", "coll");
+    auto insertNss = NamespaceString::createNamespaceString_forTest("test", "coll");
     auto ts = Timestamp(2, 2);
     auto insertOp = makeCRUDOp(OpTypeEnum::kInsert,
                                ts,
@@ -1965,7 +2017,7 @@ TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsExtractsNamespaceOfInsertOp
 }
 
 TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsExtractsNamespaceOfUpdateOplogEntry) {
-    auto updateNss = NamespaceString("test", "coll");
+    auto updateNss = NamespaceString::createNamespaceString_forTest("test", "coll");
     auto ts = Timestamp(2, 2);
     auto o = BSON("$set" << BSON("x" << 2));
     auto updateOp = makeCRUDOp(
@@ -1978,7 +2030,7 @@ TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsExtractsNamespaceOfUpdateOp
 }
 
 TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsExtractsNamespaceOfDeleteOplogEntry) {
-    auto deleteNss = NamespaceString("test", "coll");
+    auto deleteNss = NamespaceString::createNamespaceString_forTest("test", "coll");
     auto ts = Timestamp(2, 2);
     auto deleteOp = makeCRUDOp(OpTypeEnum::kDelete,
                                ts,
@@ -1995,7 +2047,7 @@ TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsExtractsNamespaceOfDeleteOp
 }
 
 TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsIgnoresNamespaceOfNoopOplogEntry) {
-    auto noopNss = NamespaceString("test", "coll");
+    auto noopNss = NamespaceString::createNamespaceString_forTest("test", "coll");
     auto ts = Timestamp(2, 2);
     auto noop = makeCRUDOp(
         OpTypeEnum::kNoop, ts, UUID::gen(), noopNss.ns_forTest(), BSONObj(), boost::none, 2);
@@ -2008,10 +2060,10 @@ TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsIgnoresNamespaceOfNoopOplog
 
 TEST_F(RollbackImplObserverInfoTest,
        NamespacesForOpsExtractsNamespaceOfCreateCollectionOplogEntry) {
-    auto nss = NamespaceString("test", "coll");
+    auto nss = NamespaceString::createNamespaceString_forTest("test", "coll");
     auto cmdOp = makeCommandOp(Timestamp(2, 2),
                                UUID::gen(),
-                               nss.getCommandNS().toString(),
+                               nss.getCommandNS().toString_forTest(),
                                BSON("create" << nss.coll()),
                                2);
     std::set<NamespaceString> expectedNamespaces = {nss};
@@ -2021,9 +2073,12 @@ TEST_F(RollbackImplObserverInfoTest,
 }
 
 TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsExtractsNamespaceOfDropCollectionOplogEntry) {
-    auto nss = NamespaceString("test", "coll");
-    auto cmdOp = makeCommandOp(
-        Timestamp(2, 2), UUID::gen(), nss.getCommandNS().toString(), BSON("drop" << nss.coll()), 2);
+    auto nss = NamespaceString::createNamespaceString_forTest("test", "coll");
+    auto cmdOp = makeCommandOp(Timestamp(2, 2),
+                               UUID::gen(),
+                               nss.getCommandNS().toString_forTest(),
+                               BSON("drop" << nss.coll()),
+                               2);
 
     std::set<NamespaceString> expectedNamespaces = {nss};
     auto namespaces =
@@ -2032,15 +2087,15 @@ TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsExtractsNamespaceOfDropColl
 }
 
 TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsExtractsNamespaceOfCreateIndexOplogEntry) {
-    auto nss = NamespaceString("test", "coll");
+    auto nss = NamespaceString::createNamespaceString_forTest("test", "coll");
     auto indexObj =
         BSON("createIndexes" << nss.coll() << "v"
                              << static_cast<int>(IndexDescriptor::IndexVersion::kV2) << "key"
                              << "x"
                              << "name"
                              << "x_1");
-    auto cmdOp =
-        makeCommandOp(Timestamp(2, 2), UUID::gen(), nss.getCommandNS().toString(), indexObj, 2);
+    auto cmdOp = makeCommandOp(
+        Timestamp(2, 2), UUID::gen(), nss.getCommandNS().toString_forTest(), indexObj, 2);
 
     std::set<NamespaceString> expectedNamespaces = {nss};
     auto namespaces =
@@ -2049,10 +2104,10 @@ TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsExtractsNamespaceOfCreateIn
 }
 
 TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsExtractsNamespaceOfDropIndexOplogEntry) {
-    auto nss = NamespaceString("test", "coll");
+    auto nss = NamespaceString::createNamespaceString_forTest("test", "coll");
     auto cmdOp = makeCommandOp(Timestamp(2, 2),
                                UUID::gen(),
-                               nss.getCommandNS().toString(),
+                               nss.getCommandNS().toString_forTest(),
                                BSON("dropIndexes" << nss.coll() << "index"
                                                   << "x_1"),
                                2);
@@ -2064,8 +2119,8 @@ TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsExtractsNamespaceOfDropInde
 
 TEST_F(RollbackImplObserverInfoTest,
        NamespacesForOpsExtractsNamespacesOfRenameCollectionOplogEntry) {
-    auto fromNss = NamespaceString("test", "source");
-    auto toNss = NamespaceString("test", "dest");
+    auto fromNss = NamespaceString::createNamespaceString_forTest("test", "source");
+    auto toNss = NamespaceString::createNamespaceString_forTest("test", "dest");
 
     auto cmdObj = BSON("renameCollection" << fromNss.ns_forTest() << "to" << toNss.ns_forTest());
     auto cmdOp =
@@ -2123,7 +2178,7 @@ TEST_F(RollbackImplObserverInfoTest,
 }
 
 TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsIgnoresNamespaceOfDropDatabaseOplogEntry) {
-    auto nss = NamespaceString("test", "coll");
+    auto nss = NamespaceString::createNamespaceString_forTest("test", "coll");
     auto cmdObj = BSON("dropDatabase" << 1);
     auto cmdOp =
         makeCommandOp(Timestamp(2, 2), boost::none, nss.getCommandNS().ns_forTest(), cmdObj, 2);
@@ -2135,7 +2190,7 @@ TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsIgnoresNamespaceOfDropDatab
 }
 
 TEST_F(RollbackImplObserverInfoTest, NamespacesForOpsExtractsNamespacesOfCollModOplogEntry) {
-    auto nss = NamespaceString("test", "coll");
+    auto nss = NamespaceString::createNamespaceString_forTest("test", "coll");
     auto cmdObj = BSON("collMod" << nss.coll() << "validationLevel"
                                  << "off");
     auto cmdOp =
@@ -2160,10 +2215,10 @@ DEATH_TEST_F(RollbackImplObserverInfoTest,
              NamespacesForOpsInvariantsOnApplyOpsOplogEntry,
              "_namespacesForOp does not handle 'applyOps' oplog entries.") {
     // Add one sub-op.
-    auto createNss = NamespaceString("test", "createColl");
+    auto createNss = NamespaceString::createNamespaceString_forTest("test", "createColl");
     auto createOp = makeCommandOp(Timestamp(2, 2),
                                   UUID::gen(),
-                                  createNss.getCommandNS().toString(),
+                                  createNss.getCommandNS().toString_forTest(),
                                   BSON("create" << createNss.coll()),
                                   2);
 
@@ -2183,17 +2238,19 @@ DEATH_TEST_F(RollbackImplObserverInfoTest,
 TEST_F(RollbackImplObserverInfoTest, RollbackRecordsNamespacesOfApplyOpsOplogEntry) {
 
     // Add a few different sub-ops from different namespaces to make sure they all get recorded.
-    auto createNss = NamespaceString("test", "createColl");
-    auto createOp = makeCommandOpForApplyOps(
-        UUID::gen(), createNss.getCommandNS().toString(), BSON("create" << createNss.coll()), 2);
+    auto createNss = NamespaceString::createNamespaceString_forTest("test", "createColl");
+    auto createOp = makeCommandOpForApplyOps(UUID::gen(),
+                                             createNss.getCommandNS().toString_forTest(),
+                                             BSON("create" << createNss.coll()),
+                                             2);
 
-    auto dropNss = NamespaceString("test", "dropColl");
+    auto dropNss = NamespaceString::createNamespaceString_forTest("test", "dropColl");
     auto dropUuid = UUID::gen();
     auto dropOp = makeCommandOpForApplyOps(
-        dropUuid, dropNss.getCommandNS().toString(), BSON("drop" << dropNss.coll()), 2);
+        dropUuid, dropNss.getCommandNS().toString_forTest(), BSON("drop" << dropNss.coll()), 2);
     _initializeCollection(_opCtx.get(), dropUuid, dropNss);
 
-    auto collModNss = NamespaceString("test", "collModColl");
+    auto collModNss = NamespaceString::createNamespaceString_forTest("test", "collModColl");
     auto collModOp =
         makeCommandOpForApplyOps(UUID::gen(),
                                  collModNss.getCommandNS().ns_forTest(),
@@ -2229,7 +2286,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackFailsOnMalformedApplyOpsOplogEntry)
 }
 
 TEST_F(RollbackImplObserverInfoTest, RollbackRecordsNamespaceOfSingleOplogEntry) {
-    const auto nss = NamespaceString("test", "coll");
+    const auto nss = NamespaceString::createNamespaceString_forTest("test", "coll");
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
     const auto insertOp = _insertDocAndReturnOplogEntry(BSON("_id" << 1), uuid, nss, 2);
@@ -2244,9 +2301,9 @@ TEST_F(RollbackImplObserverInfoTest, RollbackRecordsMultipleNamespacesOfOplogEnt
         return _insertDocAndReturnOplogEntry(BSON("_id" << 1), uuid, nss, recordId);
     };
 
-    const auto nss1 = NamespaceString("test", "coll1");
-    const auto nss2 = NamespaceString("test", "coll2");
-    const auto nss3 = NamespaceString("test", "coll3");
+    const auto nss1 = NamespaceString::createNamespaceString_forTest("test", "coll1");
+    const auto nss2 = NamespaceString::createNamespaceString_forTest("test", "coll2");
+    const auto nss3 = NamespaceString::createNamespaceString_forTest("test", "coll3");
 
     const auto uuid1 = UUID::gen();
     const auto uuid2 = UUID::gen();
@@ -2296,7 +2353,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackRecordsSessionIdFromOplogEntry) {
 
 TEST_F(RollbackImplObserverInfoTest,
        RollbackDoesntRecordSessionIdFromOplogEntryWithoutSessionInfo) {
-    const auto nss = NamespaceString("test", "coll");
+    const auto nss = NamespaceString::createNamespaceString_forTest("test", "coll");
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
 
@@ -2335,7 +2392,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordShardIdentityRollbackFo
 }
 
 TEST_F(RollbackImplObserverInfoTest, RollbackRecordsConfigVersionRollback) {
-    serverGlobalParams.clusterRole = ClusterRole::ConfigServer;
+    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
     const auto uuid = UUID::gen();
     const auto nss = VersionType::ConfigNS;
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
@@ -2370,7 +2427,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordConfigVersionRollbackFo
 }
 
 TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordConfigVersionRollbackForNonInsert) {
-    serverGlobalParams.clusterRole = ClusterRole::ConfigServer;
+    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
     const auto uuid = UUID::gen();
     const auto nss = VersionType::ConfigNS;
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
@@ -2387,14 +2444,14 @@ TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordConfigVersionRollbackFo
 }
 
 TEST_F(RollbackImplObserverInfoTest, RollbackRecordsInsertOpsInUUIDToIdMap) {
-    const auto nss1 = NamespaceString("db.people");
+    const auto nss1 = NamespaceString::createNamespaceString_forTest("db.people");
     const auto uuid1 = UUID::gen();
     const auto coll1 = _initializeCollection(_opCtx.get(), uuid1, nss1);
     const auto obj1 = BSON("_id"
                            << "kyle");
     const auto insertOp1 = _insertDocAndReturnOplogEntry(obj1, uuid1, nss1, 2);
 
-    const auto nss2 = NamespaceString("db.persons");
+    const auto nss2 = NamespaceString::createNamespaceString_forTest("db.persons");
     const auto uuid2 = UUID::gen();
     const auto coll2 = _initializeCollection(_opCtx.get(), uuid2, nss2);
     const auto obj2 = BSON("_id"
@@ -2409,7 +2466,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackRecordsInsertOpsInUUIDToIdMap) {
 }
 
 TEST_F(RollbackImplObserverInfoTest, RollbackRecordsUpdateOpsInUUIDToIdMap) {
-    const auto nss1 = NamespaceString("db.coll1");
+    const auto nss1 = NamespaceString::createNamespaceString_forTest("db.coll1");
     const auto uuid1 = UUID::gen();
     const auto coll1 = _initializeCollection(_opCtx.get(), uuid1, nss1);
     const auto id1 = BSON("_id" << 1);
@@ -2421,7 +2478,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackRecordsUpdateOpsInUUIDToIdMap) {
                                       id1,
                                       2);
 
-    const auto nss2 = NamespaceString("db.coll2");
+    const auto nss2 = NamespaceString::createNamespaceString_forTest("db.coll2");
     const auto uuid2 = UUID::gen();
     const auto coll2 = _initializeCollection(_opCtx.get(), uuid2, nss2);
     const auto id2 = BSON("_id" << 2);
@@ -2441,7 +2498,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackRecordsUpdateOpsInUUIDToIdMap) {
 }
 
 TEST_F(RollbackImplObserverInfoTest, RollbackRecordsMultipleInsertOpsForSameNamespace) {
-    const auto nss = NamespaceString("db.coll");
+    const auto nss = NamespaceString::createNamespaceString_forTest("db.coll");
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
 
@@ -2459,7 +2516,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackRecordsMultipleInsertOpsForSameName
 }
 
 TEST_F(RollbackImplObserverInfoTest, RollbackRecordsMultipleUpdateOpsForSameNamespace) {
-    const auto nss = NamespaceString("db.coll");
+    const auto nss = NamespaceString::createNamespaceString_forTest("db.coll");
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
     const auto obj1 = BSON("_id" << 1);

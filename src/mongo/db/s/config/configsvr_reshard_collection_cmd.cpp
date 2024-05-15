@@ -28,27 +28,62 @@
  */
 
 
-#include "mongo/platform/basic.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
+#include "mongo/base/checked_cast.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
+#include "mongo/db/commands/test_commands_enabled.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/repl/primary_only_service.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
-#include "mongo/db/s/metrics/sharding_data_transform_metrics.h"
 #include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
-#include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
-#include "mongo/db/vector_clock.h"
-#include "mongo/logv2/log.h"
-#include "mongo/s/catalog/type_tags.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/service_context.h"
+#include "mongo/rpc/op_msg.h"
+#include "mongo/s/catalog/sharding_catalog_client.h"
+#include "mongo/s/catalog/type_collection.h"
+#include "mongo/s/catalog_cache.h"
+#include "mongo/s/chunk_manager.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/reshard_collection_gen.h"
+#include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/resharding_coordinator_service_conflicting_op_in_progress_info.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
+#include "mongo/s/shard_key_pattern.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/clock_source.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/future.h"
+#include "mongo/util/str.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -73,10 +108,19 @@ public:
                     serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
             CommandHelpers::uassertCommandRunWithMajority(Request::kCommandName,
                                                           opCtx->getWriteConcern());
+            const NamespaceString& nss = ns();
+
+            {
+                repl::ReplicationStateTransitionLockGuard rstl(opCtx, MODE_IX);
+                auto const replCoord = repl::ReplicationCoordinator::get(opCtx);
+                uassert(ErrorCodes::InterruptedDueToReplStateChange,
+                        "node is not primary",
+                        replCoord->canAcceptWritesForDatabase(opCtx, nss.dbName()));
+                opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
+            }
+
             repl::ReadConcernArgs::get(opCtx) =
                 repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern);
-
-            const NamespaceString& nss = ns();
 
             const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
             try {
@@ -107,7 +151,7 @@ public:
 
             const auto& authoritativeTags =
                 uassertStatusOK(catalogClient->getTagsForCollection(opCtx, nss));
-            if (!authoritativeTags.empty()) {
+            if (!authoritativeTags.empty() && !request().getForceRedistribution()) {
                 uassert(ErrorCodes::BadValue,
                         "Must specify value for zones field",
                         request().getZones());
@@ -137,6 +181,9 @@ public:
                     ErrorCodes::InvalidOptions,
                     "Resharding improvements is not enabled, reject forceRedistribution parameter",
                     !request().getForceRedistribution().has_value());
+                uassert(ErrorCodes::InvalidOptions,
+                        "Resharding improvements is not enabled, reject reshardingUUID parameter",
+                        !request().getReshardingUUID().has_value());
             }
 
             if (const auto& shardDistribution = request().getShardDistribution()) {
@@ -148,11 +195,6 @@ public:
             auto instance =
                 ([&]() -> boost::optional<std::shared_ptr<const ReshardingCoordinator>> {
                     FixedFCVRegion fixedFcv(opCtx);
-
-                    uassert(ErrorCodes::CommandNotSupported,
-                            "reshardCollection command not enabled",
-                            resharding::gFeatureFlagResharding.isEnabled(
-                                serverGlobalParams.featureCompatibility));
 
                     // (Generic FCV reference): To run this command and ensure the consistency of
                     // the metadata we need to make sure we are on a stable state.
@@ -167,8 +209,8 @@ public:
                             ->catalogCache()
                             ->getShardedCollectionRoutingInfoWithPlacementRefresh(opCtx, nss));
 
-                    auto tempReshardingNss =
-                        resharding::constructTemporaryReshardingNss(nss.db(), cm.getUUID());
+                    auto tempReshardingNss = resharding::constructTemporaryReshardingNss(
+                        nss.db_forSharding(), cm.getUUID());
 
 
                     if (auto zones = request().getZones()) {
@@ -177,8 +219,8 @@ public:
 
                     auto coordinatorDoc =
                         ReshardingCoordinatorDocument(std::move(CoordinatorStateEnum::kUnused),
-                                                      {},   // donorShards
-                                                      {});  // recipientShards
+                                                      {} /* donorShards */,
+                                                      {} /* recipientShards */);
 
                     // Generate the resharding metadata for the ReshardingCoordinatorDocument.
                     auto reshardingUUID = UUID::gen();
@@ -190,15 +232,20 @@ public:
                                                                    request().getKey());
                     commonMetadata.setStartTime(
                         opCtx->getServiceContext()->getFastClockSource()->now());
+                    if (request().getReshardingUUID()) {
+                        commonMetadata.setUserReshardingUUID(*request().getReshardingUUID());
+                    }
 
+                    coordinatorDoc.setSourceKey(cm.getShardKeyPattern().getKeyPattern().toBSON());
                     coordinatorDoc.setCommonReshardingMetadata(std::move(commonMetadata));
                     coordinatorDoc.setZones(request().getZones());
                     coordinatorDoc.setPresetReshardedChunks(request().get_presetReshardedChunks());
                     coordinatorDoc.setNumInitialChunks(request().getNumInitialChunks());
                     coordinatorDoc.setShardDistribution(request().getShardDistribution());
                     coordinatorDoc.setForceRedistribution(request().getForceRedistribution());
+                    coordinatorDoc.setUnique(request().getUnique());
+                    coordinatorDoc.setCollation(request().getCollation());
 
-                    opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
                     auto instance = getOrCreateReshardingCoordinator(opCtx, coordinatorDoc);
                     instance->getCoordinatorDocWrittenFuture().get(opCtx);
                     return instance;
@@ -233,8 +280,9 @@ public:
             uassert(ErrorCodes::Unauthorized,
                     "Unauthorized",
                     AuthorizationSession::get(opCtx->getClient())
-                        ->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
-                                                           ActionType::internal));
+                        ->isAuthorizedForActionsOnResource(
+                            ResourcePattern::forClusterResource(request().getDbName().tenantId()),
+                            ActionType::internal));
         }
     };
 

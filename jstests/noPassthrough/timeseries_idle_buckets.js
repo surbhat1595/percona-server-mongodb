@@ -5,10 +5,8 @@
  *  requires_replication,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/core/timeseries/libs/timeseries.js");  // For 'TimeseriesTest'.
+import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const rst = new ReplSetTest({nodes: 1});
 rst.startSet({setParameter: {timeseriesIdleBucketExpiryMemoryUsageThreshold: 10485760}});
@@ -16,6 +14,8 @@ rst.initiate();
 
 const db = rst.getPrimary().getDB(jsTestName());
 
+const alwaysUseCompressedBuckets =
+    FeatureFlagUtil.isEnabled(db, "TimeseriesAlwaysUseCompressedBuckets");
 const isBucketReopeningEnabled = TimeseriesTest.timeseriesScalabilityImprovementsEnabled(db);
 
 assert.commandWorked(db.dropDatabase());
@@ -70,7 +70,9 @@ for (let i = 0; i < numDocs; i++) {
 
     // Check buckets.
     if (isBucketReopeningEnabled) {
-        let bucketDocs = bucketsColl.find({"control.version": 2}).limit(1).toArray();
+        let bucketDocs = bucketsColl.find({"control.version": alwaysUseCompressedBuckets ? 1 : 2})
+                             .limit(1)
+                             .toArray();
         if (bucketDocs.length > 0) {
             foundExpiredBucket = true;
         }
@@ -80,7 +82,7 @@ for (let i = 0; i < numDocs; i++) {
                              .toArray();
         if (bucketDocs.length > 1) {
             // If bucket compression is enabled the expired bucket should have been compressed
-            assert.eq(2,
+            assert.eq(alwaysUseCompressedBuckets ? 1 : 2,
                       bucketDocs[0].control.version,
                       'unexpected control.version in first bucket: ' + tojson(bucketDocs));
             assert.eq(1,
@@ -105,4 +107,3 @@ for (let i = 0; i < numDocs; i++) {
 assert(foundExpiredBucket, "Did not find an expired bucket");
 
 rst.stopSet();
-})();

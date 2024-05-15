@@ -1,6 +1,6 @@
-load("jstests/libs/ttl_util.js");
+import {TTLUtil} from "jstests/libs/ttl_util.js";
 
-var ClusteredCappedUtils = class {
+export var ClusteredCappedUtils = class {
     // Validate TTL-based deletion on a clustered, capped collection.
     static testClusteredCappedCollectionWithTTL(db, collName, clusterKeyField) {
         jsTest.log("Validating TTL operation on capped clustered collection");
@@ -308,12 +308,7 @@ var ClusteredCappedUtils = class {
             {getParameter: 1, "ttlMonitorBatchDeletes": 1}))["ttlMonitorBatchDeletes"];
         const ns = db.getName() + "." + collName;
 
-        const featureFlagBatchMultiDeletes = assert.commandWorked(db.adminCommand({
-            getParameter: 1,
-            "featureFlagBatchMultiDeletes": 1
-        }))["featureFlagBatchMultiDeletes"]["value"];
-
-        if (featureFlagBatchMultiDeletes && isBatched) {
+        if (isBatched) {
             const ops =
                 db.getSiblingDB("local")
                     .oplog.rs

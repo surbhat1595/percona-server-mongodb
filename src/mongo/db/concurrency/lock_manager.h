@@ -35,7 +35,9 @@
 #include <vector>
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/config.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/auth/cluster_auth_mode.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/lock_request_list.h"
 #include "mongo/platform/atomic_word.h"
@@ -170,6 +172,11 @@ public:
      */
     void getLockInfoBSON(const std::map<LockerId, BSONObj>& lockToClientMap,
                          BSONObjBuilder* result);
+
+    /**
+     * Returns a vector of those locks granted for the given resource.
+     */
+    std::vector<LogDegugInfo> getLockInfoFromResourceHolders(ResourceId resId);
 
 private:
     // The lockheads need access to the partitions

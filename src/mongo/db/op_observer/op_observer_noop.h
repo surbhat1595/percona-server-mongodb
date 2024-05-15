@@ -41,6 +41,10 @@ namespace mongo {
  */
 class OpObserverNoop : public OpObserver {
 public:
+    NamespaceFilters getNamespaceFilters() const override {
+        return {NamespaceFilter::kAll, NamespaceFilter::kAll};
+    }
+
     void onModifyCollectionShardingIndexCatalog(OperationContext* opCtx,
                                                 const NamespaceString& nss,
                                                 const UUID& uuid,
@@ -95,7 +99,7 @@ public:
                    std::vector<InsertStatement>::const_iterator end,
                    std::vector<bool> fromMigrate,
                    bool defaultFromMigrate,
-                   InsertsOpStateAccumulator* opAccumulator = nullptr) override {}
+                   OpStateAccumulator* opAccumulator = nullptr) override {}
 
     void onInsertGlobalIndexKey(OperationContext* opCtx,
                                 const NamespaceString& globalIndexNss,
@@ -116,6 +120,7 @@ public:
     void aboutToDelete(OperationContext* opCtx,
                        const CollectionPtr& coll,
                        const BSONObj& doc,
+                       OplogDeleteEntryArgs* args,
                        OpStateAccumulator* opAccumulator = nullptr) override {}
 
     void onDelete(OperationContext* opCtx,
@@ -212,9 +217,12 @@ public:
 
     void onTransactionStart(OperationContext* opCtx) override {}
 
-    void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       const TransactionOperations& transactionOperations,
-                                       OpStateAccumulator* opAccumulator = nullptr) override {}
+    void onUnpreparedTransactionCommit(
+        OperationContext* opCtx,
+        const std::vector<OplogSlot>& reservedSlots,
+        const TransactionOperations& transactionOperations,
+        const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
+        OpStateAccumulator* opAccumulator = nullptr) override {}
 
     void onBatchedWriteStart(OperationContext* opCtx) override {}
 
@@ -228,13 +236,11 @@ public:
         Timestamp commitTimestamp,
         const std::vector<repl::ReplOperation>& statements) noexcept override {}
 
-    std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment> preTransactionPrepare(
+    void preTransactionPrepare(
         OperationContext* opCtx,
-        const std::vector<OplogSlot>& reservedSlots,
         const TransactionOperations& transactionOperations,
-        Date_t wallClockTime) override {
-        return nullptr;
-    }
+        const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
+        Date_t wallClockTime) override {}
 
     void onTransactionPrepare(
         OperationContext* opCtx,

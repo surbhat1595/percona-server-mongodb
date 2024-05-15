@@ -10,18 +10,15 @@
  *   6. Verify the data consistency after the downgrade procedure
  */
 
-(function() {
-'use strict';
-
 load('jstests/multiVersion/libs/multi_cluster.js');  // For upgradeCluster
-load("jstests/libs/feature_flag_util.js");
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const dbName = jsTestName();
 
 function setupClusterAndDatabase(binVersion) {
     const st = new ShardingTest({
         mongos: 1,
-        config: 1,
+        config: 2,
         shards: 2,
         other: {
             mongosOptions: {binVersion: binVersion},
@@ -94,9 +91,42 @@ function checkConfigAndShardsFCV(expectedFCV) {
     }
 }
 
+// TODO(SERVER-77873): Remove checkReshardingActiveIndex; once the feature flag is removed the
+// check will be incorrect.
+function checkReshardingActiveIndex() {
+    const getActiveIndex = (node) => {
+        const indexes = st.configRS.getPrimary().getDB("config").reshardingOperations.getIndexes();
+        return indexes.find((index) => (index.name == "ReshardingCoordinatorActiveIndex"));
+    };
+    let activeIndex = getActiveIndex(st.configRS.getPrimary());
+    if (FeatureFlagUtil.isPresentAndEnabled(st.s, "ReshardingImprovements")) {
+        assert(
+            !activeIndex,
+            "With ReshardingImprovements enabled, the config.reshardingOperations ReshardingCoordinatorActiveIndex is present but should not be.");
+    }
+    // Since downgrading does not restore the index, we don't check for the index's presence
+    // until we force a step-up (re-initializing the coordinator)
+
+    assert.commandWorked(st.configRS.getSecondary().adminCommand({replSetStepUp: 1}));
+    st.configRS.waitForPrimaryOnlyServices(st.configRS.getPrimary());
+    activeIndex = getActiveIndex(st.configRS.getPrimary());
+    if (FeatureFlagUtil.isPresentAndEnabled(st.s, "ReshardingImprovements")) {
+        assert(
+            !activeIndex,
+            "With ReshardingImprovements enabled, the config.reshardingOperations ReshardingCoordinatorActiveIndex is present but should not be, after step-up.");
+    } else {
+        assert(
+            activeIndex,
+            "With ReshardingImprovements disabled, the config.reshardingOperations ReshardingCoordinatorActiveIndex is not present but should be, after step-up.");
+        assert(activeIndex.unique,
+               "The config.reshardingOperations ReshardingCoordinatorActiveIndex is not unique");
+    }
+}
+
 function checkClusterBeforeUpgrade(fcv) {
     checkConfigAndShardsFCV(fcv);
     checkConfigVersionDoc();
+    checkReshardingActiveIndex();
 }
 
 function checkClusterAfterBinaryUpgrade() {
@@ -106,10 +136,12 @@ function checkClusterAfterBinaryUpgrade() {
 function checkClusterAfterFCVUpgrade(fcv) {
     checkConfigAndShardsFCV(fcv);
     checkConfigVersionDoc();
+    checkReshardingActiveIndex();
 }
 
 function checkClusterAfterFCVDowngrade() {
     checkConfigVersionDoc();
+    checkReshardingActiveIndex();
 }
 
 function checkClusterAfterBinaryDowngrade(fcv) {
@@ -154,4 +186,3 @@ for (const oldVersion of [lastLTSFCV, lastContinuousFCV]) {
 
     st.stop();
 }
-})();

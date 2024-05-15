@@ -29,27 +29,72 @@
 
 #include "mongo/db/s/shard_server_catalog_cache_loader.h"
 
+#include <boost/smart_ptr.hpp>
 #include <fmt/format.h>
+#include <iterator>
+#include <mutex>
+#include <tuple>
 
-#include "mongo/db/catalog/rename_collection.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/bson/bson_field.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/client/read_preference.h"
 #include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/client.h"
+#include "mongo/db/cluster_role.h"
+#include "mongo/db/concurrency/locker.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/keypattern.h"
+#include "mongo/db/logical_time.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/operation_context_group.h"
-#include "mongo/db/read_concern.h"
-#include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/shard_metadata_util.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/type_shard_collection.h"
+#include "mongo/db/s/type_shard_collection_gen.h"
 #include "mongo/db/s/type_shard_database.h"
+#include "mongo/db/s/type_shard_database_gen.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/shard_id.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/redaction.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/s/catalog/type_chunk.h"
+#include "mongo/s/client/shard.h"
 #include "mongo/s/client/shard_registry.h"
+#include "mongo/s/database_version.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/index_version.h"
+#include "mongo/s/resharding/type_collection_fields_gen.h"
+#include "mongo/s/shard_version.h"
 #include "mongo/s/shard_version_factory.h"
 #include "mongo/s/stale_exception.h"
+#include "mongo/s/type_collection_common_types_gen.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/admission_context.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/future_impl.h"
+#include "mongo/util/namespace_string_util.h"
+#include "mongo/util/str.h"
+#include "mongo/util/timer.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -110,11 +155,11 @@ Status persistCollectionAndChangedChunks(OperationContext* opCtx,
     update.setAllowMigrations(collAndChunks.allowMigrations);
     update.setRefreshing(true);  // Mark as refreshing so secondaries are aware of it.
 
-    Status status =
-        updateShardCollectionsEntry(opCtx,
-                                    BSON(ShardCollectionType::kNssFieldName << nss.ns()),
-                                    update.toBSON(),
-                                    true /*upsert*/);
+    Status status = updateShardCollectionsEntry(
+        opCtx,
+        BSON(ShardCollectionType::kNssFieldName << NamespaceStringUtil::serialize(nss)),
+        update.toBSON(),
+        true /*upsert*/);
     if (!status.isOK()) {
         return status;
     }
@@ -308,29 +353,6 @@ ShardId getSelfShardId(OperationContext* opCtx) {
 }
 
 /**
- * Sends _flushRoutingTableCacheUpdates to the primary to force it to refresh its routing table for
- * collection 'nss' and then waits for the refresh to replicate to this node.
- */
-void forcePrimaryCollectionRefreshAndWaitForReplication(OperationContext* opCtx,
-                                                        const NamespaceString& nss) {
-    auto selfShard =
-        uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, getSelfShardId(opCtx)));
-
-    auto cmdResponse = uassertStatusOK(selfShard->runCommandWithFixedRetryAttempts(
-        opCtx,
-        ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        "admin",
-        BSON("_flushRoutingTableCacheUpdates" << nss.ns()),
-        Seconds{30},
-        Shard::RetryPolicy::kIdempotent));
-
-    uassertStatusOK(cmdResponse.commandStatus);
-
-    uassertStatusOK(repl::ReplicationCoordinator::get(opCtx)->waitUntilOpTimeForRead(
-        opCtx, {LogicalTime::fromOperationTime(cmdResponse.response), boost::none}));
-}
-
-/**
  * Sends _flushDatabaseCacheUpdates to the primary to force it to refresh its routing table for
  * database 'dbName' and then waits for the refresh to replicate to this node.
  */
@@ -352,13 +374,6 @@ void forcePrimaryDatabaseRefreshAndWaitForReplication(OperationContext* opCtx, S
         opCtx, {LogicalTime::fromOperationTime(cmdResponse.response), boost::none}));
 }
 
-// TODO: SERVER-74105 remove
-bool shouldSkipStoringLocally() {
-    // Note: cannot use isExclusivelyConfigSvrRole as it ignores fcv.
-    return serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-        !gFeatureFlagCatalogShard.isEnabled(serverGlobalParams.featureCompatibility);
-}
-
 }  // namespace
 
 ShardServerCatalogCacheLoader::ShardServerCatalogCacheLoader(
@@ -378,9 +393,9 @@ ShardServerCatalogCacheLoader::~ShardServerCatalogCacheLoader() {
     shutDown();
 }
 
-void ShardServerCatalogCacheLoader::notifyOfCollectionPlacementVersionUpdate(
-    const NamespaceString& nss) {
-    _namespaceNotifications.notifyChange(nss);
+void ShardServerCatalogCacheLoader::notifyOfCollectionRefreshEndMarkerSeen(
+    const NamespaceString& nss, const Timestamp& commitTime) {
+    _namespaceNotifications.notifyChange(nss, commitTime);
 }
 
 void ShardServerCatalogCacheLoader::initializeReplicaSetRole(bool isPrimary) {
@@ -408,6 +423,13 @@ void ShardServerCatalogCacheLoader::onStepUp() {
     _contexts.interrupt(ErrorCodes::InterruptedDueToReplStateChange);
     ++_term;
     _role = ReplicaSetRole::Primary;
+}
+
+void ShardServerCatalogCacheLoader::onReplicationRollback() {
+    // No need to increment the term since this interruption is only to prevent the secondary
+    // refresh thread from getting stuck or waiting on an incorrect opTime.
+    stdx::lock_guard<Latch> lg(_mutex);
+    _contexts.interrupt(ErrorCodes::Interrupted);
 }
 
 void ShardServerCatalogCacheLoader::shutDown() {
@@ -545,13 +567,6 @@ void ShardServerCatalogCacheLoader::waitForCollectionFlush(OperationContext* opC
                               << " because the node's replication role changed.",
                 _role == ReplicaSetRole::Primary && _term == initialTerm);
 
-        uassert(StaleConfigInfo(nss,
-                                ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                                boost::none,
-                                getSelfShardId(opCtx)),
-                "config server is not storing cached metadata",
-                !shouldSkipStoringLocally());
-
         auto it = _collAndChunkTaskLists.find(nss);
 
         // If there are no tasks for the specified namespace, everything must have been completed
@@ -598,7 +613,7 @@ void ShardServerCatalogCacheLoader::waitForCollectionFlush(OperationContext* opC
             opCtx->waitForConditionOrInterrupt(*condVar, lg, [&]() {
                 const auto it = _collAndChunkTaskLists.find(nss);
                 return it == _collAndChunkTaskLists.end() || it->second.empty() ||
-                    it->second.front().taskNum != activeTaskNum || shouldSkipStoringLocally();
+                    it->second.front().taskNum != activeTaskNum;
             });
         }
     }
@@ -618,10 +633,6 @@ void ShardServerCatalogCacheLoader::waitForDatabaseFlush(OperationContext* opCtx
                               << dbName.toString()
                               << " because the node's replication role changed.",
                 _role == ReplicaSetRole::Primary && _term == initialTerm);
-
-        uassert(StaleDbRoutingVersion(dbName.toString(), DatabaseVersion::makeFixed(), boost::none),
-                "config server is not storing cached metadata",
-                !shouldSkipStoringLocally());
 
         auto it = _dbTaskLists.find(dbName.toString());
 
@@ -670,7 +681,7 @@ void ShardServerCatalogCacheLoader::waitForDatabaseFlush(OperationContext* opCtx
             opCtx->waitForConditionOrInterrupt(*condVar, lg, [&]() {
                 const auto it = _dbTaskLists.find(dbName.toString());
                 return it == _dbTaskLists.end() || it->second.empty() ||
-                    it->second.front().taskNum != activeTaskNum || shouldSkipStoringLocally();
+                    it->second.front().taskNum != activeTaskNum;
             });
         }
     }
@@ -680,13 +691,8 @@ StatusWith<CollectionAndChangedChunks> ShardServerCatalogCacheLoader::_runSecond
     OperationContext* opCtx,
     const NamespaceString& nss,
     const ChunkVersion& catalogCacheSinceVersion) {
-
-    if (shouldSkipStoringLocally()) {
-        return _configServerLoader->getChunksSince(nss, catalogCacheSinceVersion).getNoThrow();
-    }
-
     Timer t;
-    forcePrimaryCollectionRefreshAndWaitForReplication(opCtx, nss);
+    auto nssNotif = _forcePrimaryCollectionRefreshAndWaitForReplication(opCtx, nss);
     LOGV2_FOR_CATALOG_REFRESH(5965800,
                               2,
                               "Cache loader on secondary successfully waited for primary refresh "
@@ -695,9 +701,8 @@ StatusWith<CollectionAndChangedChunks> ShardServerCatalogCacheLoader::_runSecond
                               "duration"_attr = Milliseconds(t.millis()));
 
     // Read the local metadata.
-
     return _getCompletePersistedMetadataForSecondarySinceVersion(
-        opCtx, nss, catalogCacheSinceVersion);
+        opCtx, std::move(nssNotif), nss, catalogCacheSinceVersion);
 }
 
 StatusWith<CollectionAndChangedChunks>
@@ -706,16 +711,8 @@ ShardServerCatalogCacheLoader::_schedulePrimaryGetChunksSince(
     const NamespaceString& nss,
     const ChunkVersion& catalogCacheSinceVersion,
     long long termScheduled) {
-    const auto decidedToSkipStoringLocally = shouldSkipStoringLocally();
-
     // Get the max version the loader has.
     const auto maxLoaderVersion = [&] {
-        // If we are not storing locally, use the requested version to prevent fetching the entire
-        // routing table everytime.
-        if (decidedToSkipStoringLocally) {
-            return catalogCacheSinceVersion;
-        }
-
         {
             stdx::lock_guard<Latch> lock(_mutex);
             auto taskListIt = _collAndChunkTaskLists.find(nss);
@@ -736,8 +733,7 @@ ShardServerCatalogCacheLoader::_schedulePrimaryGetChunksSince(
     auto swCollectionAndChangedChunks =
         _configServerLoader->getChunksSince(nss, maxLoaderVersion).getNoThrow();
 
-    if (swCollectionAndChangedChunks == ErrorCodes::NamespaceNotFound &&
-        !decidedToSkipStoringLocally) {
+    if (swCollectionAndChangedChunks == ErrorCodes::NamespaceNotFound) {
         _ensureMajorityPrimaryAndScheduleCollAndChunksTask(
             opCtx,
             nss,
@@ -771,9 +767,8 @@ ShardServerCatalogCacheLoader::_schedulePrimaryGetChunksSince(
                           << "'."};
     }
 
-    if (!decidedToSkipStoringLocally &&
-        (collAndChunks.changedChunks.back().getVersion().isNotComparableWith(maxLoaderVersion) ||
-         maxLoaderVersion.isOlderThan(collAndChunks.changedChunks.back().getVersion()))) {
+    if (collAndChunks.changedChunks.back().getVersion().isNotComparableWith(maxLoaderVersion) ||
+        maxLoaderVersion.isOlderThan(collAndChunks.changedChunks.back().getVersion())) {
         _ensureMajorityPrimaryAndScheduleCollAndChunksTask(
             opCtx,
             nss,
@@ -791,10 +786,6 @@ ShardServerCatalogCacheLoader::_schedulePrimaryGetChunksSince(
         "oldCollectionPlacementVersion"_attr = maxLoaderVersion,
         "refreshedCollectionPlacementVersion"_attr =
             collAndChunks.changedChunks.back().getVersion());
-
-    if (decidedToSkipStoringLocally) {
-        return swCollectionAndChangedChunks;
-    }
 
     // Metadata was found remotely
     // -- otherwise we would have received NamespaceNotFound rather than Status::OK().
@@ -833,10 +824,6 @@ ShardServerCatalogCacheLoader::_schedulePrimaryGetChunksSince(
 
 StatusWith<DatabaseType> ShardServerCatalogCacheLoader::_runSecondaryGetDatabase(
     OperationContext* opCtx, StringData dbName) {
-    if (shouldSkipStoringLocally()) {
-        return _configServerLoader->getDatabase(dbName).getNoThrow();
-    }
-
     Timer t;
     forcePrimaryDatabaseRefreshAndWaitForReplication(opCtx, dbName);
     LOGV2_FOR_CATALOG_REFRESH(5965801,
@@ -1047,10 +1034,6 @@ void ShardServerCatalogCacheLoader::_ensureMajorityPrimaryAndScheduleCollAndChun
 void ShardServerCatalogCacheLoader::_ensureMajorityPrimaryAndScheduleDbTask(OperationContext* opCtx,
                                                                             StringData dbName,
                                                                             DBTask task) {
-    if (shouldSkipStoringLocally()) {
-        return;
-    }
-
     {
         stdx::lock_guard<Latch> lock(_mutex);
 
@@ -1325,34 +1308,52 @@ void ShardServerCatalogCacheLoader::_updatePersistedDbMetadata(OperationContext*
                               "db"_attr = dbName.toString());
 }
 
+NamespaceMetadataChangeNotifications::ScopedNotification
+ShardServerCatalogCacheLoader::_forcePrimaryCollectionRefreshAndWaitForReplication(
+    OperationContext* opCtx, const NamespaceString& nss) {
+    auto selfShard =
+        uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, getSelfShardId(opCtx)));
+
+    auto notif = _namespaceNotifications.createNotification(nss);
+
+    auto cmdResponse = uassertStatusOK(selfShard->runCommandWithFixedRetryAttempts(
+        opCtx,
+        ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+        "admin",
+        BSON("_flushRoutingTableCacheUpdates" << NamespaceStringUtil::serialize(nss)),
+        Seconds{30},
+        Shard::RetryPolicy::kIdempotent));
+
+    uassertStatusOK(cmdResponse.commandStatus);
+
+    uassertStatusOK(repl::ReplicationCoordinator::get(opCtx)->waitUntilOpTimeForRead(
+        opCtx, {LogicalTime::fromOperationTime(cmdResponse.response), boost::none}));
+    return notif;
+}
+
 CollectionAndChangedChunks
 ShardServerCatalogCacheLoader::_getCompletePersistedMetadataForSecondarySinceVersion(
-    OperationContext* opCtx, const NamespaceString& nss, const ChunkVersion& version) {
+    OperationContext* opCtx,
+    NamespaceMetadataChangeNotifications::ScopedNotification&& notif,
+    const NamespaceString& nss,
+    const ChunkVersion& version) {
     // Keep trying to load the metadata until we get a complete view without updates being
     // concurrently applied.
     while (true) {
-        // Disallow reading on an older snapshot because this relies on being able to read the
-        // side effects of writes during secondary replication after being signalled from the
-        // CollectionPlacementVersionLogOpHandler.
-        BlockSecondaryReadsDuringBatchApplication_DONT_USE secondaryReadsBlockBehindReplication(
-            opCtx);
-
-        // Taking the PBWM and blocking on admission control can lead to deadlock with prepared
-        // transactions, so have internal refresh operations skip admission control
-        ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
-                                                            AdmissionContext::Priority::kImmediate);
-
         const auto beginRefreshState = [&]() {
             while (true) {
-                auto notif = _namespaceNotifications.createNotification(nss);
-
                 auto refreshState = uassertStatusOK(getPersistedRefreshFlags(opCtx, nss));
 
                 if (!refreshState.refreshing) {
                     return refreshState;
                 }
 
-                notif.get(opCtx);
+                // Blocking call to wait for the notification, get the most recent value, and
+                // recreate the notification under lock so that we don't miss any notifications.
+                auto notificationTime = _namespaceNotifications.get(opCtx, notif);
+                // Wait until the local lastApplied timestamp is the one from the notification.
+                uassertStatusOK(repl::ReplicationCoordinator::get(opCtx)->waitUntilOpTimeForRead(
+                    opCtx, {LogicalTime(notificationTime), boost::none}));
             }
         }();
 

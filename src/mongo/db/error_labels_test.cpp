@@ -27,16 +27,31 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <cstdint>
+#include <mutex>
 
+#include <boost/optional/optional.hpp>
+
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/client.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/error_labels.h"
-#include "mongo/db/pipeline/aggregate_command_gen.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
-#include "mongo/db/session/logical_session_id.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/rpc/message.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/bson_test_util.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point.h"
 
 namespace mongo {
 namespace {
@@ -150,7 +165,7 @@ private:
 };
 
 TEST_F(ErrorLabelBuilderTest, NonErrorCodesHaveNoLabel) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     std::string commandName = "insert";
     ErrorLabelBuilder builder(opCtx(),
                               sessionInfo,
@@ -168,7 +183,7 @@ TEST_F(ErrorLabelBuilderTest, NonErrorCodesHaveNoLabel) {
 }
 
 TEST_F(ErrorLabelBuilderTest, NonTransactionsHaveNoTransientTransactionErrorLabel) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     std::string commandName = "insert";
     ErrorLabelBuilder builder(opCtx(),
                               sessionInfo,
@@ -183,7 +198,7 @@ TEST_F(ErrorLabelBuilderTest, NonTransactionsHaveNoTransientTransactionErrorLabe
 }
 
 TEST_F(ErrorLabelBuilderTest, RetryableWritesHaveNoTransientTransactionErrorLabel) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     std::string commandName = "insert";
     ErrorLabelBuilder builder(opCtx(),
@@ -199,7 +214,7 @@ TEST_F(ErrorLabelBuilderTest, RetryableWritesHaveNoTransientTransactionErrorLabe
 }
 
 TEST_F(ErrorLabelBuilderTest, NonTransientTransactionErrorsHaveNoTransientTransactionErrorLabel) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     sessionInfo.setAutocommit(false);
     std::string commandName = "commitTransaction";
@@ -216,7 +231,7 @@ TEST_F(ErrorLabelBuilderTest, NonTransientTransactionErrorsHaveNoTransientTransa
 }
 
 TEST_F(ErrorLabelBuilderTest, TransientTransactionErrorsHaveTransientTransactionErrorLabel) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     sessionInfo.setAutocommit(false);
     std::string commandName = "commitTransaction";
@@ -235,7 +250,7 @@ TEST_F(ErrorLabelBuilderTest, TransientTransactionErrorsHaveTransientTransaction
 TEST_F(
     ErrorLabelBuilderTest,
     TransientTransactionErrorWithRetryableWriteConcernErrorHasTransientTransactionErrorLabelOnly) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     sessionInfo.setAutocommit(false);
     std::string commandName = "commitTransaction";
@@ -260,7 +275,7 @@ TEST_F(
 }
 
 TEST_F(ErrorLabelBuilderTest, NonRetryableWritesHaveNoRetryableWriteErrorLabel) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     std::string commandName = "insert";
     ErrorLabelBuilder builder(opCtx(),
                               sessionInfo,
@@ -282,7 +297,7 @@ TEST_F(ErrorLabelBuilderTest, NonRetryableWritesHaveNoRetryableWriteErrorLabel) 
 }
 
 TEST_F(ErrorLabelBuilderTest, NonRetryableWriteErrorsHaveNoRetryableWriteErrorLabel) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     std::string commandName = "update";
     ErrorLabelBuilder builder(opCtx(),
@@ -298,7 +313,7 @@ TEST_F(ErrorLabelBuilderTest, NonRetryableWriteErrorsHaveNoRetryableWriteErrorLa
 }
 
 TEST_F(ErrorLabelBuilderTest, RetryableWriteErrorsHaveRetryableWriteErrorLabel) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     std::string commandName = "update";
     ErrorLabelBuilder builder(opCtx(),
@@ -314,7 +329,7 @@ TEST_F(ErrorLabelBuilderTest, RetryableWriteErrorsHaveRetryableWriteErrorLabel) 
 }
 
 TEST_F(ErrorLabelBuilderTest, NonLocalShutDownErrorsOnMongosDoNotHaveRetryableWriteErrorLabel) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     std::string commandName = "update";
     ErrorLabelBuilder builder(opCtx(),
@@ -331,7 +346,7 @@ TEST_F(ErrorLabelBuilderTest, NonLocalShutDownErrorsOnMongosDoNotHaveRetryableWr
 
 TEST_F(ErrorLabelBuilderTest,
        LocalShutDownErrorsOnMongosHaveRetryableWriteErrorLabelInterruptedAtShutdown) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     std::string commandName = "update";
     FailPointEnableBlock failPoint("errorLabelBuilderMockShutdown");
@@ -349,7 +364,7 @@ TEST_F(ErrorLabelBuilderTest,
 
 TEST_F(ErrorLabelBuilderTest,
        LocalShutDownErrorsOnMongosHaveRetryableWriteErrorLabelCallbackCanceled) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     std::string commandName = "update";
     FailPointEnableBlock failPoint("errorLabelBuilderMockShutdown");
@@ -367,7 +382,7 @@ TEST_F(ErrorLabelBuilderTest,
 
 TEST_F(ErrorLabelBuilderTest,
        RetryableWriteErrorsHaveNoRetryableWriteErrorLabelForInternalClients) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     std::string commandName = "update";
     ErrorLabelBuilder builder(opCtx(),
@@ -384,7 +399,7 @@ TEST_F(ErrorLabelBuilderTest,
 
 TEST_F(ErrorLabelBuilderTest,
        NonRetryableWriteErrorsInWriteConcernErrorsHaveNoRetryableWriteErrorLabel) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     std::string commandName = "update";
     ErrorLabelBuilder builder(opCtx(),
@@ -401,7 +416,7 @@ TEST_F(ErrorLabelBuilderTest,
 
 TEST_F(ErrorLabelBuilderTest,
        RetryableWriteErrorsInWriteConcernErrorsHaveRetryableWriteErrorLabel) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     std::string commandName = "update";
     ErrorLabelBuilder builder(opCtx(),
@@ -417,7 +432,7 @@ TEST_F(ErrorLabelBuilderTest,
 }
 
 TEST_F(ErrorLabelBuilderTest, RetryableWriteErrorsOnCommitAbortHaveRetryableWriteErrorLabel) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     sessionInfo.setAutocommit(false);
     std::string commandName;
@@ -489,7 +504,7 @@ TEST_F(ErrorLabelBuilderTest, RetryableWriteErrorsOnCommitAbortHaveRetryableWrit
 }
 
 TEST_F(ErrorLabelBuilderTest, NonResumableChangeStreamError) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     std::string commandName;
     ErrorLabelBuilder builder(opCtx(),
                               sessionInfo,
@@ -504,12 +519,12 @@ TEST_F(ErrorLabelBuilderTest, NonResumableChangeStreamError) {
 }
 
 TEST_F(ErrorLabelBuilderTest, ResumableChangeStreamErrorAppliesToChangeStreamAggregations) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     // Build the aggregation command and confirm that it parses correctly, so we know that the error
     // is the only factor that determines the success or failure of isResumableChangeStreamError().
     auto cmdObj = BSON("aggregate" << nss().coll() << "pipeline"
                                    << BSON_ARRAY(BSON("$changeStream" << BSONObj())) << "cursor"
-                                   << BSONObj() << "$db" << nss().db());
+                                   << BSONObj() << "$db" << nss().db_forTest());
     auto aggRequest =
         uassertStatusOK(aggregation_request_helper::parseFromBSONForTests(nss(), cmdObj));
     ASSERT_TRUE(LiteParsedPipeline(aggRequest).hasChangeStream());
@@ -543,12 +558,12 @@ TEST_F(ErrorLabelBuilderTest, ResumableChangeStreamErrorAppliesToChangeStreamAgg
 }
 
 TEST_F(ErrorLabelBuilderTest, ResumableChangeStreamErrorDoesNotApplyToNonResumableErrors) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     // Build the aggregation command and confirm that it parses correctly, so we know that the error
     // is the only factor that determines the success or failure of isResumableChangeStreamError().
     auto cmdObj = BSON("aggregate" << nss().coll() << "pipeline"
                                    << BSON_ARRAY(BSON("$changeStream" << BSONObj())) << "cursor"
-                                   << BSONObj() << "$db" << nss().db());
+                                   << BSONObj() << "$db" << nss().db_forTest());
     auto aggRequest =
         uassertStatusOK(aggregation_request_helper::parseFromBSONForTests(nss(), cmdObj));
     ASSERT_TRUE(LiteParsedPipeline(aggRequest).hasChangeStream());
@@ -582,12 +597,12 @@ TEST_F(ErrorLabelBuilderTest, ResumableChangeStreamErrorDoesNotApplyToNonResumab
 }
 
 TEST_F(ErrorLabelBuilderTest, ResumableChangeStreamErrorDoesNotApplyToNonChangeStreamAggregations) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     // Build the aggregation command and confirm that it parses correctly, so we know that the error
     // is the only factor that determines the success or failure of isResumableChangeStreamError().
     auto cmdObj =
         BSON("aggregate" << nss().coll() << "pipeline" << BSON_ARRAY(BSON("$match" << BSONObj()))
-                         << "cursor" << BSONObj() << "$db" << nss().db());
+                         << "cursor" << BSONObj() << "$db" << nss().db_forTest());
     auto aggRequest =
         uassertStatusOK(aggregation_request_helper::parseFromBSONForTests(nss(), cmdObj));
     ASSERT_FALSE(LiteParsedPipeline(aggRequest).hasChangeStream());
@@ -621,7 +636,7 @@ TEST_F(ErrorLabelBuilderTest, ResumableChangeStreamErrorDoesNotApplyToNonChangeS
 }
 
 TEST_F(ErrorLabelBuilderTest, ResumableChangeStreamErrorDoesNotApplyToNonAggregations) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     auto cmdObj = BSON("find" << nss().coll() << "filter" << BSONObj());
     // The label does not apply to a "find" command.
     std::string commandName = "find";
@@ -652,7 +667,7 @@ TEST_F(ErrorLabelBuilderTest, ResumableChangeStreamErrorDoesNotApplyToNonAggrega
 }
 
 TEST_F(ErrorLabelBuilderTest, NoWritesPerformedLabelApplied) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     std::string commandName = "find";
     ErrorLabelBuilder builder(opCtx(),
                               sessionInfo,
@@ -667,7 +682,7 @@ TEST_F(ErrorLabelBuilderTest, NoWritesPerformedLabelApplied) {
 }
 
 TEST_F(ErrorLabelBuilderTest, NoWritesPerformedLabelNotAppliedAfterWrite) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     std::string commandName = "update";
     ErrorLabelBuilder builder(opCtx(),
                               sessionInfo,
@@ -682,7 +697,7 @@ TEST_F(ErrorLabelBuilderTest, NoWritesPerformedLabelNotAppliedAfterWrite) {
 }
 
 TEST_F(ErrorLabelBuilderTest, NoWritesPerformedLabelNotAppliedIfUnknown) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     std::string commandName = "update";
     ErrorLabelBuilder builder(opCtx(),
                               sessionInfo,
@@ -697,7 +712,7 @@ TEST_F(ErrorLabelBuilderTest, NoWritesPerformedLabelNotAppliedIfUnknown) {
 }
 
 TEST_F(ErrorLabelBuilderTest, NoWritesPerformedAndRetryableWriteAppliesBothLabels) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     std::string commandName = "update";
     auto actualErrorLabels = getErrorLabels(opCtx(),
@@ -716,7 +731,7 @@ TEST_F(ErrorLabelBuilderTest, NoWritesPerformedAndRetryableWriteAppliesBothLabel
 }
 
 TEST_F(ErrorLabelBuilderTest, NoWritesPerformedNotAppliedDuringOrdinaryUpdate) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     std::string commandName = "update";
     auto actualErrorLabels = getErrorLabels(opCtx(),
                                             sessionInfo,
@@ -731,7 +746,7 @@ TEST_F(ErrorLabelBuilderTest, NoWritesPerformedNotAppliedDuringOrdinaryUpdate) {
 }
 
 TEST_F(ErrorLabelBuilderTest, NoWritesPerformedNotAppliedDuringTransientTransactionError) {
-    OperationSessionInfoFromClient sessionInfo;
+    OperationSessionInfoFromClient sessionInfo{LogicalSessionFromClient(UUID::gen())};
     sessionInfo.setTxnNumber(1);
     sessionInfo.setAutocommit(false);
     std::string commandName = "commitTransaction";

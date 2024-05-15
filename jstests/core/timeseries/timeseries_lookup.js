@@ -7,12 +7,10 @@
  *   does_not_support_stepdowns,
  *   # We need a timeseries collection.
  *   requires_timeseries,
+ *   references_foreign_collection,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/core/timeseries/libs/timeseries.js");
+import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 
 TimeseriesTest.run((insert) => {
     const testDB = db.getSiblingDB(jsTestName());
@@ -246,4 +244,3 @@ TimeseriesTest.run((insert) => {
         });
     });
 });
-})();

@@ -27,15 +27,22 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include <boost/intrusive_ptr.hpp>
+#include <boost/move/utility_core.hpp>
 #include <deque>
+#include <memory>
+#include <utility>
 #include <vector>
 
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -43,9 +50,14 @@
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/document_source_change_stream_add_post_image.h"
 #include "mongo/db/pipeline/document_source_mock.h"
-#include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/process_interface/stub_lookup_single_document_process_interface.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/db/pipeline/resume_token.h"
+#include "mongo/db/query/explain_options.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 namespace {
@@ -137,7 +149,7 @@ TEST_F(DocumentSourceChangeStreamAddPostImageTest, ShouldErrorIfMissingDocumentK
         Document{{"_id", makeResumeToken(0)},
                  {"operationType", "update"_sd},
                  {"fullDocument", Document{{"_id", 0}}},
-                 {"ns", Document{{"db", expCtx->ns.db()}, {"coll", expCtx->ns.coll()}}}},
+                 {"ns", Document{{"db", expCtx->ns.db_forTest()}, {"coll", expCtx->ns.coll()}}}},
         expCtx);
 
     lookupChangeStage->setSource(mockLocalSource.get());
@@ -160,7 +172,7 @@ TEST_F(DocumentSourceChangeStreamAddPostImageTest, ShouldErrorIfMissingOperation
         Document{{"_id", makeResumeToken(0)},
                  {"documentKey", Document{{"_id", 0}}},
                  {"fullDocument", Document{{"_id", 0}}},
-                 {"ns", Document{{"db", expCtx->ns.db()}, {"coll", expCtx->ns.coll()}}}},
+                 {"ns", Document{{"db", expCtx->ns.db_forTest()}, {"coll", expCtx->ns.coll()}}}},
         expCtx);
 
     lookupChangeStage->setSource(mockLocalSource.get());
@@ -286,7 +298,7 @@ TEST_F(DocumentSourceChangeStreamAddPostImageTest, ShouldPassIfDatabaseMatchesOn
         Document{{"_id", makeResumeToken(0)},
                  {"documentKey", Document{{"_id", 0}}},
                  {"operationType", "update"_sd},
-                 {"ns", Document{{"db", expCtx->ns.db()}, {"coll", "irrelevant"_sd}}}},
+                 {"ns", Document{{"db", expCtx->ns.db_forTest()}, {"coll", "irrelevant"_sd}}}},
         expCtx);
 
     lookupChangeStage->setSource(mockLocalSource.get());
@@ -298,7 +310,7 @@ TEST_F(DocumentSourceChangeStreamAddPostImageTest, ShouldPassIfDatabaseMatchesOn
         (Document{{"_id", makeResumeToken(0)},
                   {"documentKey", Document{{"_id", 0}}},
                   {"operationType", "update"_sd},
-                  {"ns", Document{{"db", expCtx->ns.db()}, {"coll", "irrelevant"_sd}}},
+                  {"ns", Document{{"db", expCtx->ns.db_forTest()}, {"coll", "irrelevant"_sd}}},
                   {"fullDocument", Document{{"_id", 0}}}}));
 }
 
@@ -313,7 +325,7 @@ TEST_F(DocumentSourceChangeStreamAddPostImageTest, ShouldErrorIfDocumentKeyIsNot
         Document{{"_id", makeResumeToken(0)},
                  {"documentKey", Document{{"_id", 0}}},
                  {"operationType", "update"_sd},
-                 {"ns", Document{{"db", expCtx->ns.db()}, {"coll", expCtx->ns.coll()}}}},
+                 {"ns", Document{{"db", expCtx->ns.db_forTest()}, {"coll", expCtx->ns.coll()}}}},
         expCtx);
 
     lookupChangeStage->setSource(mockLocalSource.get());
@@ -339,13 +351,13 @@ TEST_F(DocumentSourceChangeStreamAddPostImageTest, ShouldPropagatePauses) {
         {Document{{"_id", makeResumeToken(0)},
                   {"documentKey", Document{{"_id", 0}}},
                   {"operationType", "insert"_sd},
-                  {"ns", Document{{"db", expCtx->ns.db()}, {"coll", expCtx->ns.coll()}}},
+                  {"ns", Document{{"db", expCtx->ns.db_forTest()}, {"coll", expCtx->ns.coll()}}},
                   {"fullDocument", Document{{"_id", 0}}}},
          DocumentSource::GetNextResult::makePauseExecution(),
          Document{{"_id", makeResumeToken(1)},
                   {"documentKey", Document{{"_id", 1}}},
                   {"operationType", "update"_sd},
-                  {"ns", Document{{"db", expCtx->ns.db()}, {"coll", expCtx->ns.coll()}}}},
+                  {"ns", Document{{"db", expCtx->ns.db_forTest()}, {"coll", expCtx->ns.coll()}}}},
          DocumentSource::GetNextResult::makePauseExecution()},
         expCtx);
 
@@ -364,7 +376,7 @@ TEST_F(DocumentSourceChangeStreamAddPostImageTest, ShouldPropagatePauses) {
         (Document{{"_id", makeResumeToken(0)},
                   {"documentKey", Document{{"_id", 0}}},
                   {"operationType", "insert"_sd},
-                  {"ns", Document{{"db", expCtx->ns.db()}, {"coll", expCtx->ns.coll()}}},
+                  {"ns", Document{{"db", expCtx->ns.db_forTest()}, {"coll", expCtx->ns.coll()}}},
                   {"fullDocument", Document{{"_id", 0}}}}));
 
     ASSERT_TRUE(lookupChangeStage->getNext().isPaused());
@@ -376,7 +388,7 @@ TEST_F(DocumentSourceChangeStreamAddPostImageTest, ShouldPropagatePauses) {
         (Document{{"_id", makeResumeToken(1)},
                   {"documentKey", Document{{"_id", 1}}},
                   {"operationType", "update"_sd},
-                  {"ns", Document{{"db", expCtx->ns.db()}, {"coll", expCtx->ns.coll()}}},
+                  {"ns", Document{{"db", expCtx->ns.db_forTest()}, {"coll", expCtx->ns.coll()}}},
                   {"fullDocument", Document{{"_id", 1}}}}));
 
     ASSERT_TRUE(lookupChangeStage->getNext().isPaused());

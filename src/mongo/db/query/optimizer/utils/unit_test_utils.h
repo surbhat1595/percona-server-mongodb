@@ -29,13 +29,22 @@
 
 #pragma once
 
+#include <boost/optional/optional.hpp>
+#include <memory>
+#include <string>
+#include <vector>
+
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/query/ce/hinted_estimator.h"
 #include "mongo/db/query/cost_model/cost_model_gen.h"
+#include "mongo/db/query/optimizer/cascades/interfaces.h"
 #include "mongo/db/query/optimizer/defs.h"
 #include "mongo/db/query/optimizer/explain.h"
+#include "mongo/db/query/optimizer/metadata.h"
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
+#include "mongo/db/query/optimizer/syntax/syntax.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
+#include "mongo/unittest/assert.h"
 #include "mongo/unittest/inline_auto_update.h"
 
 
@@ -164,7 +173,8 @@ std::unique_ptr<CardinalityEstimator> makeHeuristicCE();
 /**
  * A factory function to create a hint-based cardinality estimator.
  */
-std::unique_ptr<CardinalityEstimator> makeHintedCE(ce::PartialSchemaSelHints hints);
+std::unique_ptr<CardinalityEstimator> makeHintedCE(
+    ce::PartialSchemaSelHints hints, ce::PartialSchemaIntervalSelHints intervalHints = {});
 
 /**
  * Return default CostModel used in unit tests.
@@ -215,4 +225,8 @@ OptPhaseManager makePhaseManagerRequireRID(OptPhaseManager::PhaseSet phaseSet,
                                            DebugInfo debugInfo,
                                            QueryHints queryHints = {});
 
+/**
+ * Compares plans to allow sorting plans in a deterministic way.
+ */
+bool planComparator(const PlanAndProps& e1, const PlanAndProps& e2);
 }  // namespace mongo::optimizer

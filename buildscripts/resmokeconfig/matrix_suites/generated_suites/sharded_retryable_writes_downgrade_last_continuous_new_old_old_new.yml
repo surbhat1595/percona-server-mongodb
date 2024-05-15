@@ -11,12 +11,13 @@ executor:
     hooks:
     - CheckReplDBHash
     - CheckReplOplogs
+    - CheckMetadataConsistencyInBackground
     - ValidateCollections
     tests: true
   config:
     shell_options:
-      eval: testingReplication = true; load('jstests/libs/override_methods/network_error_and_txn_override.js');
-        db = connect(TestData.connectionString); load("jstests/libs/override_methods/enable_sessions.js");
+      eval: globalThis.testingReplication = true; load('jstests/libs/override_methods/network_error_and_txn_override.js');
+        globalThis.db = connect(TestData.connectionString); load("jstests/libs/override_methods/enable_sessions.js");
         load("jstests/libs/override_methods/set_read_and_write_concerns.js"); load("jstests/libs/override_methods/fail_unclean_shutdown_incompatible_commands.js");
         load("jstests/libs/override_methods/fail_unclean_shutdown_start_parallel_shell.js");
       global_vars:
@@ -72,6 +73,7 @@ executor:
     should_downgrade: true
   - class: CheckReplOplogs
   - class: CheckReplDBHash
+  - class: CheckMetadataConsistencyInBackground
   - class: ValidateCollections
   - class: CheckOrphansDeleted
   - class: CleanEveryN

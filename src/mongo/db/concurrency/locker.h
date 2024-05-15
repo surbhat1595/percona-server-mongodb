@@ -29,15 +29,28 @@
 
 #pragma once
 
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
 #include <climits>  // For UINT_MAX
+#include <functional>
+#include <limits>
+#include <string>
+#include <thread>
 #include <vector>
 
+#include "mongo/base/error_codes.h"
 #include "mongo/db/concurrency/flow_control_ticketholder.h"
 #include "mongo/db/concurrency/lock_manager.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/lock_stats.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 
@@ -46,7 +59,9 @@ namespace mongo {
  * request (transaction).
  *
  * Lock/unlock methods must always be called from a single thread.
+ *
  */
+// TODO (SERVER-26879): Get rid of LockerImpl, devirtualise Locker and make it final
 class Locker {
     Locker(const Locker&) = delete;
     Locker& operator=(const Locker&) = delete;
@@ -57,19 +72,7 @@ class Locker {
 public:
     using LockTimeoutCallback = std::function<void()>;
 
-    virtual ~Locker();
-
-    /**
-     * Returns true if this is an instance of LockerNoop. Because LockerNoop doesn't implement many
-     * methods, some users may need to check this first to find out what is safe to call. LockerNoop
-     * is only used in unittests and for a brief period at startup, so you can assume you hold the
-     * equivalent of a MODE_X lock when using it.
-     *
-     * TODO get rid of this once we kill LockerNoop.
-     */
-    virtual bool isNoop() const {
-        return false;
-    }
+    virtual ~Locker() = default;
 
     /**
      * State for reporting the number of active and queued reader and writer clients.
@@ -163,7 +166,7 @@ public:
     /**
      * Decrements the reference count on the global lock.  If the reference count on the
      * global lock hits zero, the transaction is over, and unlockGlobal unlocks all other locks
-     * except for RESOURCE_MUTEX locks.
+     * except for RESOURCE_MUTEX and RESOURCE_DDL_* locks.
      *
      * @return true if this is the last endTransaction call (i.e., the global lock was
      *          released); false if there are still references on the global lock. This value
@@ -349,8 +352,7 @@ public:
                                boost::optional<SingleThreadedLockStats> lockStatsBase) const = 0;
 
     /**
-     * Returns boost::none if this is an instance of LockerNoop, or a populated LockerInfo
-     * otherwise.
+     * Returns diagnostics information for the locker.
      */
     virtual boost::optional<LockerInfo> getLockerInfo(
         boost::optional<SingleThreadedLockStats> lockStatsBase) const = 0;
@@ -389,8 +391,8 @@ public:
     virtual bool canSaveLockState() = 0;
 
     /**
-     * Retrieves all locks held by this transaction, other than RESOURCE_MUTEX locks, and what mode
-     * they're held in.
+     * Retrieves all locks held by this transaction, other than RESOURCE_MUTEX and RESOURCE_DDL_*
+     * locks, and what mode they're held in.
      *
      * Unlocks all locks held by this transaction, and stores them in 'stateOut'. This functionality
      * is used for yielding, which is voluntary/cooperative lock release and reacquisition in order
@@ -488,6 +490,11 @@ public:
      * lock).
      */
     virtual bool hasLockPending() const = 0;
+
+    /**
+     * Returns a vector with the lock information from the given resource lock holders.
+     */
+    virtual std::vector<LogDegugInfo> getLockInfoFromResourceHolders(ResourceId resId) = 0;
 
     /**
      * If set to false, this opts out of conflicting with replication's use of the

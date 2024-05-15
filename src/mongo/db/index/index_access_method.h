@@ -30,19 +30,40 @@
 #pragma once
 
 #include <atomic>
+#include <boost/optional/optional.hpp>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <set>
+#include <utility>
+#include <vector>
 
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/db/catalog/index_catalog.h"
+#include "mongo/db/catalog/index_catalog_entry.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/multikey_metadata_access_stats.h"
+#include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/resumable_index_builds_gen.h"
 #include "mongo/db/sorter/sorter.h"
+#include "mongo/db/sorter/sorter_stats.h"
+#include "mongo/db/storage/duplicate_key_error_info.h"
+#include "mongo/db/storage/ident.h"
+#include "mongo/db/storage/key_string.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/yieldable.h"
+#include "mongo/util/shared_buffer_fragment.h"
 
 namespace mongo {
 
@@ -75,7 +96,7 @@ public:
                                                    Status status,
                                                    const BSONObj& obj,
                                                    const boost::optional<RecordId>& loc)>;
-    using KeyHandlerFn = std::function<Status(const KeyString::Value&)>;
+    using KeyHandlerFn = std::function<Status(const key_string::Value&)>;
     using RecordIdHandlerFn = std::function<Status(const RecordId&)>;
 
     IndexAccessMethod() = default;
@@ -284,7 +305,7 @@ public:
         const IndexCatalogEntry* entry,
         size_t maxMemoryUsageBytes,
         const boost::optional<IndexStateInfo>& stateInfo,
-        StringData dbName) = 0;
+        const DatabaseName& dbName) = 0;
 };
 
 /**
@@ -451,7 +472,7 @@ public:
                       const IndexCatalogEntry* entry,
                       const KeyStringSet& keys,
                       const InsertDeleteOptions& options,
-                      int64_t* numDeleted);
+                      int64_t* numDeleted) const;
 
     /**
      * Gets the keys of the documents 'from' and 'to' and prepares them for the update.
@@ -586,7 +607,7 @@ public:
     std::unique_ptr<BulkBuilder> initiateBulk(const IndexCatalogEntry* entry,
                                               size_t maxMemoryUsageBytes,
                                               const boost::optional<IndexStateInfo>& stateInfo,
-                                              StringData dbName) final;
+                                              const DatabaseName& dbName) final;
 
 protected:
     /**
@@ -632,8 +653,8 @@ private:
      */
     void removeOneKey(OperationContext* opCtx,
                       const IndexCatalogEntry* entry,
-                      const KeyString::Value& keyString,
-                      bool dupsAllowed);
+                      const key_string::Value& keyString,
+                      bool dupsAllowed) const;
 
     /**
      * While inserting keys into index (from external sorter), if a duplicate key is detected
@@ -642,7 +663,7 @@ private:
      */
     Status _handleDuplicateKey(OperationContext* opCtx,
                                const IndexCatalogEntry* entry,
-                               const KeyString::Value& dataKey,
+                               const key_string::Value& dataKey,
                                const RecordIdHandlerFn& onDuplicateRecord);
 
     Status _indexKeysOrWriteToSideTable(OperationContext* opCtx,

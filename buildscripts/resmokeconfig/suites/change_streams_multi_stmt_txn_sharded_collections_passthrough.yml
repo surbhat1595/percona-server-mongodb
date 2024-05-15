@@ -24,6 +24,7 @@ executor:
     hooks:
       - CheckReplDBHash
       - CheckReplOplogs
+      - CheckMetadataConsistencyInBackground
       - ValidateCollections
   config:
     shell_options:
@@ -33,16 +34,18 @@ executor:
             wrapCRUDinTransactions: true
       # Enable the transactions passthrough.
       eval: >-
-        var testingReplication = true;
+        globalThis.testingReplication = true;
         load('jstests/libs/override_methods/enable_sessions.js');
         load('jstests/libs/override_methods/txn_passthrough_cmd_massage.js');
         load('jstests/libs/override_methods/network_error_and_txn_override.js');
+        load('jstests/libs/override_methods/implicit_filter_eot_changestreams.js');
   hooks:
   # The CheckReplDBHash hook waits until all operations have replicated to and have been applied
   # on the secondaries, so we run the ValidateCollections hook after it to ensure we're
   # validating the entire contents of the collection.
   - class: CheckReplOplogs
   - class: CheckReplDBHash
+  - class: CheckMetadataConsistencyInBackground
   - class: ValidateCollections
   - class: CheckOrphansDeleted
   - class: CleanEveryN

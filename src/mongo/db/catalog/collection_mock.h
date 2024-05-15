@@ -31,6 +31,8 @@
 
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/index_catalog.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 
@@ -101,7 +103,7 @@ public:
         MONGO_UNREACHABLE;
     }
     std::shared_ptr<Ident> getSharedIdent() const {
-        return std::make_shared<Ident>(_nss.toString());
+        return std::make_shared<Ident>(_nss.toString_forTest());
     }
     void setIdent(std::shared_ptr<Ident> newIdent) {
         MONGO_UNREACHABLE;
@@ -196,6 +198,15 @@ public:
 
     void setTimeseriesBucketsMayHaveMixedSchemaData(OperationContext* opCtx,
                                                     boost::optional<bool> setting) {
+        MONGO_UNREACHABLE;
+    }
+
+    bool timeseriesBucketingParametersMayHaveChanged() const {
+        MONGO_UNREACHABLE;
+    }
+
+    void setTimeseriesBucketingParametersChanged(OperationContext* opCtx,
+                                                 boost::optional<bool> value) {
         MONGO_UNREACHABLE;
     }
 
@@ -339,14 +350,6 @@ public:
 
     UUID uuid() const {
         return _uuid;
-    }
-
-    bool isCommitted() const final {
-        return _committed;
-    }
-
-    void setCommitted(bool val) final {
-        _committed = val;
     }
 
     void indexBuildSuccess(OperationContext* opCtx, IndexCatalogEntry* index) {

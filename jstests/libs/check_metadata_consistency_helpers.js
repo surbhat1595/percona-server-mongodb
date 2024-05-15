@@ -1,8 +1,6 @@
-'use strict';
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
-load('jstests/libs/feature_flag_util.js');  // For FeatureFlagUtil.
-
-var MetadataConsistencyChecker = (function() {
+export var MetadataConsistencyChecker = (function() {
     const run = (mongos) => {
         const adminDB = mongos.getDB('admin');
 
@@ -16,6 +14,31 @@ var MetadataConsistencyChecker = (function() {
             jsTest.log(`Skipped metadata consistency check: ${err}`);
             return;
         }
+
+        // The isTransientError() function is responsible for setting an error as transient and
+        // abort the metadata consistency check to be retried in the future.
+        const isTransientError = function(e) {
+            if (ErrorCodes.isRetriableError(e.code) || ErrorCodes.isInterruption(e.code)) {
+                return true;
+            }
+
+            // TODO SERVER-78117: Remove once checkMetadataConsistency command is robust to
+            // ShardNotFound
+            if (e.code === ErrorCodes.ShardNotFound) {
+                // Metadata consistency check can fail with ShardNotFound if the router's
+                // ShardRegistry reloads after choosing which shards to target and a chosen
+                // shard is no longer in the cluster.
+                return true;
+            }
+
+            if (e.code === ErrorCodes.FailedToSatisfyReadPreference) {
+                // Metadata consistency check can fail with FailedToSatisfyReadPreference error
+                // response when the primary of the shard is permanently down.
+                return true;
+            }
+
+            return false;
+        };
 
         const checkMetadataConsistency = function() {
             jsTest.log('Started metadata consistency check');
@@ -40,7 +63,7 @@ var MetadataConsistencyChecker = (function() {
         try {
             checkMetadataConsistency();
         } catch (e) {
-            if (ErrorCodes.isRetriableError(e.code) || ErrorCodes.isInterruption(e.code)) {
+            if (isTransientError(e)) {
                 jsTest.log(`Aborted metadata consistency check due to retriable error: ${e}`);
             } else {
                 throw e;

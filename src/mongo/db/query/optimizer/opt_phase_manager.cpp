@@ -29,11 +29,26 @@
 
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
 
+#include <absl/container/node_hash_set.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <string>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/optional/optional.hpp>
+
 #include "mongo/db/query/optimizer/cascades/logical_props_derivation.h"
+#include "mongo/db/query/optimizer/cascades/physical_rewriter.h"
+#include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
+#include "mongo/db/query/optimizer/props.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
 #include "mongo/db/query/optimizer/rewrites/path.h"
 #include "mongo/db/query/optimizer/rewrites/path_lower.h"
 #include "mongo/db/query/optimizer/utils/memo_utils.h"
+#include "mongo/db/query/optimizer/utils/strong_alias.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
 
 namespace mongo::optimizer {
 
@@ -106,7 +121,7 @@ void OptPhaseManager::runStructuralPhase(C instance, VariableEnvironment& env, A
     for (int iterationCount = 0; instance.optimize(input); iterationCount++) {
         tassert(6808708,
                 str::stream() << "Iteration limit exceeded while running the following phase: "
-                              << OptPhaseEnum::toString[static_cast<int>(phase)] << ".",
+                              << toStringData(phase) << ".",
                 !_debugInfo.exceedsIterationLimit(iterationCount));
     }
 
@@ -131,8 +146,7 @@ void OptPhaseManager::runStructuralPhases(C1 instance1,
         // Iteration limit exceeded.
         tassert(6808700,
                 str::stream() << "Iteration limit exceeded while running the following phases: "
-                              << OptPhaseEnum::toString[static_cast<int>(phase1)] << ", "
-                              << OptPhaseEnum::toString[static_cast<int>(phase2)] << ".",
+                              << toStringData(phase1) << ", " << toStringData(phase2) << ".",
                 !_debugInfo.exceedsIterationLimit(iterationCount));
 
 

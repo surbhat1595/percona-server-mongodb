@@ -11,11 +11,12 @@ executor:
     hooks:
     - CheckReplDBHash
     - CheckReplOplogs
+    - CheckMetadataConsistencyInBackground
     - ValidateCollections
   config:
     shell_options:
-      eval: var testingReplication = true; load('jstests/libs/override_methods/network_error_and_txn_override.js');
-        db = connect(TestData.connectionString); load("jstests/libs/override_methods/enable_sessions.js");
+      eval: globalThis.testingReplication = true; load('jstests/libs/override_methods/network_error_and_txn_override.js');
+        globalThis.db = connect(TestData.connectionString); load("jstests/libs/override_methods/enable_sessions.js");
         load("jstests/libs/override_methods/fail_unclean_shutdown_start_parallel_shell.js");
         load('jstests/libs/override_methods/txn_passthrough_cmd_massage.js'); load('jstests/libs/override_methods/implicitly_shard_accessed_collections.js');
       global_vars:
@@ -62,6 +63,7 @@ executor:
   - class: RunChangeStreamsInBackground
   - class: CheckReplOplogs
   - class: CheckReplDBHash
+  - class: CheckMetadataConsistencyInBackground
   - class: ValidateCollections
     shell_options:
       global_vars:

@@ -28,15 +28,26 @@
  */
 
 
-#include "mongo/platform/basic.h"
+#include <utility>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/s/resharding/document_source_resharding_ownership_match.h"
-
 #include "mongo/db/s/resharding/resharding_util.h"
-#include "mongo/db/transaction/transaction_history_iterator.h"
+#include "mongo/idl/idl_parser.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/resharding/common_types_gen.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -116,8 +127,8 @@ DocumentSource::GetModPathsReturn DocumentSourceReshardingOwnershipMatch::getMod
 DocumentSource::GetNextResult DocumentSourceReshardingOwnershipMatch::doGetNext() {
     if (!_tempReshardingChunkMgr) {
         // TODO: Actually propagate the temporary resharding namespace from the recipient.
-        auto tempReshardingNss =
-            resharding::constructTemporaryReshardingNss(pExpCtx->ns.db(), *pExpCtx->uuid);
+        auto tempReshardingNss = resharding::constructTemporaryReshardingNss(
+            pExpCtx->ns.db_forSharding(), *pExpCtx->uuid);
 
         auto* catalogCache = Grid::get(pExpCtx->opCtx)->catalogCache();
         _tempReshardingChunkMgr =

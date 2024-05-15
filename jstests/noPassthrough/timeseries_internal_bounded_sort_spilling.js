@@ -7,19 +7,11 @@
  *   does_not_support_stepdowns,
  * ]
  */
-(function() {
-"use strict";
-
-load('jstests/libs/analyze_plan.js');
-load("jstests/core/timeseries/libs/timeseries.js");
+import {getAggPlanStage} from "jstests/libs/analyze_plan.js";
 
 const kSmallMemoryLimit = 1024;
-const conn = MongoRunner.runMongod({
-    setParameter: {
-        internalQueryMaxBlockingSortMemoryUsageBytes: kSmallMemoryLimit,
-        featureFlagBucketUnpackWithSort: true
-    }
-});
+const conn = MongoRunner.runMongod(
+    {setParameter: {internalQueryMaxBlockingSortMemoryUsageBytes: kSmallMemoryLimit}});
 
 const dbName = jsTestName();
 const testDB = conn.getDB(dbName);
@@ -173,4 +165,3 @@ function assertSorted(result) {
 }
 
 MongoRunner.stopMongod(conn);
-})();

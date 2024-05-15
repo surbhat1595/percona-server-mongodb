@@ -27,18 +27,50 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <algorithm>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <cmath>
+#include <limits>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
-#include "mongo/s/query_analysis_sampler.h"
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
 
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/client/read_preference.h"
+#include "mongo/db/client.h"
+#include "mongo/db/cluster_role.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/s/analyze_shard_key_util.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/redaction.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/s/analyze_shard_key_role.h"
+#include "mongo/s/client/shard.h"
+#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/is_mongos.h"
 #include "mongo/s/query_analysis_client.h"
 #include "mongo/s/query_analysis_sample_tracker.h"
+#include "mongo/s/query_analysis_sampler.h"
 #include "mongo/s/refresh_query_analyzer_configuration_cmd_gen.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/net/socket_utils.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
@@ -49,6 +81,8 @@ namespace analyze_shard_key {
 namespace {
 
 using QuerySamplingOptions = OperationContext::QuerySamplingOptions;
+using ConfigurationRefreshSecs =
+    decltype(QueryAnalysisSampler::observeQueryAnalysisSamplerConfigurationRefreshSecs)::Argument;
 
 MONGO_FAIL_POINT_DEFINE(disableQueryAnalysisSampler);
 MONGO_FAIL_POINT_DEFINE(overwriteQueryAnalysisSamplerAvgLastCountToZero);
@@ -74,7 +108,8 @@ StatusWith<std::vector<CollectionQueryAnalyzerConfiguration>> executeRefreshComm
     cmd.setNumQueriesExecutedPerSecond(lastAvgCount);
 
     BSONObj resObj;
-    if (isMongos() || serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
+    if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer) ||
+        serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
         auto swResponse = configShard->runCommandWithFixedRetryAttempts(
             opCtx,
@@ -117,7 +152,7 @@ void QueryAnalysisSampler::onStartup() {
     auto periodicRunner = serviceContext->getPeriodicRunner();
     invariant(periodicRunner);
 
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<Latch> lk(_sampleRateLimitersMutex);
 
     PeriodicRunner::PeriodicJob queryStatsRefresherJob(
         "QueryAnalysisQueryStatsRefresher",
@@ -141,20 +176,32 @@ void QueryAnalysisSampler::onStartup() {
                       "error"_attr = redact(ex));
             }
         },
-        Seconds(gQueryAnalysisSamplerConfigurationRefreshSecs),
+        Seconds(gQueryAnalysisSamplerConfigurationRefreshSecs.load()),
         // TODO(SERVER-74662): Please revisit if this periodic job could be made killable.
         false /*isKillableByStepdown*/);
-    _periodicConfigurationsRefresher =
-        periodicRunner->makeJob(std::move(configurationsRefresherJob));
-    _periodicConfigurationsRefresher.start();
+    _periodicConfigurationsRefresher = std::make_shared<PeriodicJobAnchor>(
+        periodicRunner->makeJob(std::move(configurationsRefresherJob)));
+    _periodicConfigurationsRefresher->start();
+
+    QueryAnalysisSampler::observeQueryAnalysisSamplerConfigurationRefreshSecs.addObserver(
+        [refresher = _periodicConfigurationsRefresher](const ConfigurationRefreshSecs& secs) {
+            try {
+                refresher->setPeriod(Seconds(secs));
+            } catch (const DBException& ex) {
+                LOGV2(7891301,
+                      "Failed to update the period of the thread for refreshing query sampling "
+                      "configurations",
+                      "error"_attr = ex.toStatus());
+            }
+        });
 }
 
 void QueryAnalysisSampler::onShutdown() {
     if (_periodicQueryStatsRefresher.isValid()) {
         _periodicQueryStatsRefresher.stop();
     }
-    if (_periodicConfigurationsRefresher.isValid()) {
-        _periodicConfigurationsRefresher.stop();
+    if (_periodicConfigurationsRefresher && _periodicConfigurationsRefresher->isValid()) {
+        _periodicConfigurationsRefresher->stop();
     }
 }
 
@@ -172,12 +219,14 @@ void QueryAnalysisSampler::QueryStats::gotCommand(const StringData& cmdName) {
 
 double QueryAnalysisSampler::QueryStats::_calculateExponentialMovingAverage(
     double prevAvg, long long newVal) const {
-    return (1 - _smoothingFactor) * prevAvg + _smoothingFactor * newVal;
+    auto smoothingFactor = gQueryAnalysisQueryStatsSmoothingFactor.load();
+    return (1 - smoothingFactor) * prevAvg + smoothingFactor * newVal;
 }
 
 void QueryAnalysisSampler::QueryStats::refreshTotalCount() {
     long long newTotalCount = [&] {
-        if (isMongos() || serverGlobalParams.clusterRole.has(ClusterRole::None)) {
+        if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer) ||
+            serverGlobalParams.clusterRole.has(ClusterRole::None)) {
             return globalOpCounters.getUpdate()->load() + globalOpCounters.getDelete()->load() +
                 _lastFindAndModifyQueriesCount + globalOpCounters.getQuery()->load() +
                 _lastAggregateQueriesCount + _lastCountQueriesCount + _lastDistinctQueriesCount;
@@ -200,7 +249,7 @@ void QueryAnalysisSampler::_refreshQueryStats() {
         return;
     }
 
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<Latch> lk(_queryStatsMutex);
     _queryStats.refreshTotalCount();
 }
 
@@ -270,7 +319,7 @@ bool QueryAnalysisSampler::SampleRateLimiter::tryConsume() {
     return false;
 }
 
-void QueryAnalysisSampler::SampleRateLimiter::refreshRate(double numTokensPerSecond) {
+void QueryAnalysisSampler::SampleRateLimiter::refreshSamplesPerSecond(double numTokensPerSecond) {
     // Fill the bucket with tokens created by the previous rate before setting a new rate.
     _refill(_numTokensPerSecond, _getBurstCapacity(numTokensPerSecond));
     _numTokensPerSecond = numTokensPerSecond;
@@ -283,7 +332,7 @@ void QueryAnalysisSampler::_refreshConfigurations(OperationContext* opCtx) {
 
     boost::optional<double> lastAvgCount;
     {
-        stdx::lock_guard<Latch> lk(_mutex);
+        stdx::lock_guard<Latch> lk(_queryStatsMutex);
         lastAvgCount = (MONGO_unlikely(overwriteQueryAnalysisSamplerAvgLastCountToZero.shouldFail())
                             ? 0
                             : _queryStats.getLastAvgCount());
@@ -310,6 +359,9 @@ void QueryAnalysisSampler::_refreshConfigurations(OperationContext* opCtx) {
                 "Refreshed query analyzer configurations",
                 "numQueriesExecutedPerSecond"_attr = lastAvgCount,
                 "configurations"_attr = configurations);
+
+    stdx::lock_guard<Latch> lk(_sampleRateLimitersMutex);
+
     if (configurations.size() != _sampleRateLimiters.size()) {
         LOGV2(7362407,
               "Refreshed query analyzer configurations. The number of collections with active "
@@ -319,27 +371,46 @@ void QueryAnalysisSampler::_refreshConfigurations(OperationContext* opCtx) {
               "configurations"_attr = configurations);
     }
 
-    stdx::lock_guard<Latch> lk(_mutex);
-
     std::map<NamespaceString, SampleRateLimiter> sampleRateLimiters;
+    std::array<uint64_t, srlBloomFilterNumBlocks> srlBloomFilter{};
     for (const auto& configuration : configurations) {
-        auto it = _sampleRateLimiters.find(configuration.getNs());
-        if (it == _sampleRateLimiters.end() ||
-            it->second.getCollectionUuid() != configuration.getCollectionUuid()) {
-            // There is no existing SampleRateLimiter for the collection with this specific
-            // collection uuid so create one for it.
-            sampleRateLimiters.emplace(configuration.getNs(),
-                                       SampleRateLimiter{opCtx->getServiceContext(),
-                                                         configuration.getNs(),
-                                                         configuration.getCollectionUuid(),
-                                                         configuration.getSampleRate()});
-        } else {
-            auto rateLimiter = it->second;
-            rateLimiter.refreshRate(configuration.getSampleRate());
-            sampleRateLimiters.emplace(configuration.getNs(), std::move(rateLimiter));
-        }
+        auto nss = configuration.getNs();
+
+        // Set the bit corresponding to nss's hash to 1 in 'srlBloomFilter'.
+        size_t nssHash = absl::Hash<NamespaceString>{}(nss);
+        size_t blockIdx = (nssHash / srlBloomFilterNumBitsPerBlock) % srlBloomFilterNumBlocks;
+        size_t bit = nssHash % srlBloomFilterNumBitsPerBlock;
+        srlBloomFilter[blockIdx] |= (1ull << bit);
+
+        // Create a SampleRateLimiter or copy an existing one ('rateLimiter') for 'nss'.
+        auto rateLimiter = [&] {
+            auto it = _sampleRateLimiters.find(nss);
+            if (it == _sampleRateLimiters.end() ||
+                it->second.getCollectionUuid() != configuration.getCollectionUuid()) {
+                // There is no existing SampleRateLimiter for the collection with this specific
+                // collection uuid so create one for it.
+                return SampleRateLimiter{opCtx->getServiceContext(),
+                                         configuration.getNs(),
+                                         configuration.getCollectionUuid(),
+                                         configuration.getSamplesPerSecond()};
+            } else {
+                auto rateLimiter = it->second;
+                rateLimiter.refreshSamplesPerSecond(configuration.getSamplesPerSecond());
+                return rateLimiter;
+            }
+        }();
+
+        // Add 'std::pair(nss, rateLimiter)' to the 'sampleRateLimiters' map.
+        sampleRateLimiters.emplace(std::move(nss), std::move(rateLimiter));
     }
+
+    // Update '_sampleRateLimiters'.
     _sampleRateLimiters = std::move(sampleRateLimiters);
+
+    // Update '__srlBloomFilter'.
+    for (size_t i = 0; i < srlBloomFilterNumBlocks; ++i) {
+        _srlBloomFilter[i].store(srlBloomFilter[i]);
+    }
 
     QueryAnalysisSampleTracker::get(opCtx).refreshConfigurations(configurations);
 }
@@ -392,7 +463,17 @@ boost::optional<UUID> QueryAnalysisSampler::tryGenerateSampleId(OperationContext
         return boost::none;
     }
 
-    stdx::lock_guard<Latch> lk(_mutex);
+    // Before checking '_sampleRateLimiters', check '_srlBloomFilter' first. If the bit
+    // corresponding to nss's hash is 0, then we don't need to bother with acquiring
+    // '_sampleRateLimitersMutex' and we can return 'boost::none'.
+    size_t nssHash = absl::Hash<NamespaceString>{}(nss);
+    size_t blockIdx = (nssHash / srlBloomFilterNumBitsPerBlock) % srlBloomFilterNumBlocks;
+    size_t bit = nssHash % srlBloomFilterNumBitsPerBlock;
+    if (((_srlBloomFilter[blockIdx].load() >> bit) & 1u) == 0u) {
+        return boost::none;
+    }
+
+    stdx::lock_guard<Latch> lk(_sampleRateLimitersMutex);
     auto it = _sampleRateLimiters.find(nss);
 
     if (it == _sampleRateLimiters.end()) {
@@ -401,7 +482,8 @@ boost::optional<UUID> QueryAnalysisSampler::tryGenerateSampleId(OperationContext
 
     auto& rateLimiter = it->second;
     if (rateLimiter.tryConsume()) {
-        if (isMongos() || serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
+        if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer) ||
+            serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
             // On a standalone replica set, sample selection is done by the mongod persisting the
             // sample itself. To avoid double counting a sample, the counters will be incremented
             // by the QueryAnalysisWriter when the sample gets added to the buffer.

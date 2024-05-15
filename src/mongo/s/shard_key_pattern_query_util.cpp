@@ -29,14 +29,56 @@
 
 #include "mongo/s/shard_key_pattern_query_util.h"
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/db/basic_types_gen.h"
+#include "mongo/db/field_ref.h"
+#include "mongo/db/field_ref_set.h"
+#include "mongo/db/hasher.h"
+#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/index/multikey_paths.h"
+#include "mongo/db/index_names.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/matcher/path_internal.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/find_command.h"
 #include "mongo/db/query/index_bounds_builder.h"
+#include "mongo/db/query/index_entry.h"
+#include "mongo/db/query/interval.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_common.h"
+#include "mongo/db/query/query_planner_params.h"
+#include "mongo/db/query/query_solution.h"
+#include "mongo/db/query/stage_types.h"
 #include "mongo/db/update/path_support.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/redaction.h"
+#include "mongo/s/chunk.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
+#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -51,7 +93,7 @@ constexpr size_t kMaxFlattenedInCombinations = 4000000;
 
 IndexBounds collapseQuerySolution(const QuerySolutionNode* node) {
     if (node->children.empty()) {
-        invariant(node->getType() == STAGE_IXSCAN);
+        tassert(7670304, "Invalid node type", node->getType() == STAGE_IXSCAN);
 
         const IndexScanNode* ixNode = static_cast<const IndexScanNode*>(node);
         return ixNode->bounds;
@@ -79,7 +121,6 @@ IndexBounds collapseQuerySolution(const QuerySolutionNode* node) {
     for (auto it = node->children.begin(); it != node->children.end(); it++) {
         // The first branch under OR
         if (it == node->children.begin()) {
-            invariant(bounds.size() == 0);
             bounds = collapseQuerySolution(it->get());
             if (bounds.size() == 0) {  // Got unexpected node in query solution tree
                 return IndexBounds();
@@ -93,7 +134,9 @@ IndexBounds collapseQuerySolution(const QuerySolutionNode* node) {
             return IndexBounds();
         }
 
-        invariant(childBounds.size() == bounds.size());
+        tassert(7670303,
+                "Node's index bounds size must match children index bounds sizes",
+                childBounds.size() == bounds.size());
 
         for (size_t i = 0; i < bounds.size(); i++) {
             bounds.fields[i].intervals.insert(bounds.fields[i].intervals.end(),
@@ -227,7 +270,9 @@ BSONObj extractShardKeyFromQuery(const ShardKeyPattern& shardKeyPattern,
 }
 
 BoundList flattenBounds(const ShardKeyPattern& shardKeyPattern, const IndexBounds& indexBounds) {
-    invariant(indexBounds.fields.size() == (size_t)shardKeyPattern.toBSON().nFields());
+    tassert(7670302,
+            "'IndexBounds' and 'ShardKeyPattern' must have the same number of fields",
+            indexBounds.fields.size() == (size_t)shardKeyPattern.toBSON().nFields());
 
     // If any field is unsatisfied, return empty bound list.
     for (const auto& field : indexBounds.fields) {
@@ -405,9 +450,10 @@ void getShardIdsForQuery(boost::intrusive_ptr<ExpressionContext> expCtx,
                          const BSONObj& collation,
                          const ChunkManager& cm,
                          std::set<ShardId>* shardIds,
-                         QueryTargetingInfo* info) {
+                         QueryTargetingInfo* info,
+                         bool bypassIsFieldHashedCheck) {
     if (info) {
-        invariant(info->chunkRanges.empty());
+        tassert(7670301, "Invalid QueryTargetingInfo", info->chunkRanges.empty());
     }
 
     auto findCommand = std::make_unique<FindCommandRequest>(cm.getNss());
@@ -431,11 +477,25 @@ void getShardIdsForQuery(boost::intrusive_ptr<ExpressionContext> expCtx,
                                      ExtensionsCallbackNoop(),
                                      MatchExpressionParser::kAllowAllSpecialFeatures));
 
+    getShardIdsForCanonicalQuery(*cq, collation, cm, shardIds, info, bypassIsFieldHashedCheck);
+}
+
+void getShardIdsForCanonicalQuery(const CanonicalQuery& query,
+                                  const BSONObj& collation,
+                                  const ChunkManager& cm,
+                                  std::set<ShardId>* shardIds,
+                                  QueryTargetingInfo* info,
+                                  bool bypassIsFieldHashedCheck) {
+    if (info) {
+        tassert(7670300, "Invalid non-empty 'info->chungRanges'", info->chunkRanges.empty());
+    }
+
     // Fast path for targeting equalities on the shard key.
-    auto shardKeyToFind = extractShardKeyFromQuery(cm.getShardKeyPattern(), *cq);
+    auto shardKeyToFind = extractShardKeyFromQuery(cm.getShardKeyPattern(), query);
     if (!shardKeyToFind.isEmpty()) {
         try {
-            auto chunk = cm.findIntersectingChunk(shardKeyToFind, collation);
+            auto chunk =
+                cm.findIntersectingChunk(shardKeyToFind, collation, bypassIsFieldHashedCheck);
             shardIds->insert(chunk.getShardId());
             if (info) {
                 info->desc = QueryTargetingInfo::Description::kSingleKey;
@@ -453,7 +513,7 @@ void getShardIdsForQuery(boost::intrusive_ptr<ExpressionContext> expCtx,
     //   Query { a : { $gte : 1, $lt : 2 },
     //            b : { $gte : 3, $lt : 4 } }
     //   => Bounds { a : [1, 2), b : [3, 4) }
-    IndexBounds bounds = getIndexBoundsForQuery(cm.getShardKeyPattern().toBSON(), *cq);
+    IndexBounds bounds = getIndexBoundsForQuery(cm.getShardKeyPattern().toBSON(), query);
 
     // Transforms bounds for each shard key field into full shard key ranges
     // for example :

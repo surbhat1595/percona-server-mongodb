@@ -36,6 +36,7 @@ namespace mongo::transport::grpc {
 class WireVersionProvider {
 public:
     WireVersionProvider() = default;
+    virtual ~WireVersionProvider() = default;
     WireVersionProvider(const WireVersionProvider&) = delete;
     WireVersionProvider& operator=(const WireVersionProvider&) = delete;
 
@@ -53,7 +54,7 @@ public:
      * is the only server version that supports gRPC. In the future, the provider will be augmented
      * to account for the other servers in the cluster.
      */
-    int getClusterMaxWireVersion() const;
+    virtual int getClusterMaxWireVersion() const;
 };
 
 }  // namespace mongo::transport::grpc

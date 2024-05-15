@@ -29,9 +29,20 @@
 
 #pragma once
 
+#include <memory>
+#include <string>
+
+#include "mongo/base/status.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/shard_role.h"
 #include "mongo/db/ttl_collection_cache.h"
+#include "mongo/platform/mutex.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/background.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 
@@ -85,7 +96,7 @@ private:
     /**
      * Deletes all expired documents. May consist of several sub-passes.
      */
-    void _doTTLPass();
+    void _doTTLPass(OperationContext* opCtx);
 
     /**
      * A sub-pass iterates over a list of TTL indexes until there are no more expired documents to
@@ -138,7 +149,7 @@ private:
      */
     bool _deleteExpiredWithIndex(OperationContext* opCtx,
                                  TTLCollectionCache* ttlCollectionCache,
-                                 const ScopedCollectionAcquisition& collection,
+                                 const CollectionAcquisition& collection,
                                  std::string indexName);
 
     /*
@@ -154,7 +165,7 @@ private:
      */
     bool _deleteExpiredWithCollscan(OperationContext* opCtx,
                                     TTLCollectionCache* ttlCollectionCache,
-                                    const ScopedCollectionAcquisition& collection);
+                                    const CollectionAcquisition& collection);
 
     // Protects the state below.
     mutable Mutex _stateMutex = MONGO_MAKE_LATCH("TTLMonitorStateMutex");

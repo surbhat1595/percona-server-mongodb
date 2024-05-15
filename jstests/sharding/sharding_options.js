@@ -5,39 +5,30 @@ var baseName = "jstests_sharding_sharding_options";
 
 load('jstests/libs/command_line/test_parsed_options.js');
 
-// Move Paranoia
-jsTest.log("Testing \"moveParanoia\" command line option");
-var expectedResult = {"parsed": {"sharding": {"archiveMovedChunks": true}}};
-testGetCmdLineOptsMongod({moveParanoia: ""}, expectedResult);
+//////////////////////////////
+// Sharding role
 
-jsTest.log("Testing \"noMoveParanoia\" command line option");
-expectedResult = {
-    "parsed": {"sharding": {"archiveMovedChunks": false}}
-};
-testGetCmdLineOptsMongod({noMoveParanoia: ""}, expectedResult);
+// Command line options
 
-jsTest.log("Testing \"sharding.archiveMovedChunks\" config file option");
-expectedResult = {
-    "parsed": {
-        "config": "jstests/libs/config_files/enable_paranoia.json",
-        "sharding": {"archiveMovedChunks": true}
-    }
-};
-testGetCmdLineOptsMongod({config: "jstests/libs/config_files/enable_paranoia.json"},
-                         expectedResult);
-
-// Sharding Role
-jsTest.log("Testing \"configsvr\" command line option");
+jsTest.log("Testing \"--configsvr\" command line option");
 var expectedResult = {
     "parsed": {"sharding": {"clusterRole": "configsvr"}, "replication": {"replSet": "dummy"}}
 };
 testGetCmdLineOptsMongod({configsvr: "", replSet: "dummy"}, expectedResult);
 
-jsTest.log("Testing \"shardsvr\" command line option");
+jsTest.log("Testing \"--shardsvr\" command line option");
 expectedResult = {
     "parsed": {"sharding": {"clusterRole": "shardsvr"}, "replication": {"replSet": "dummy"}}
 };
 testGetCmdLineOptsMongod({shardsvr: "", replSet: "dummy"}, expectedResult);
+
+jsTest.log("Ensure starting a standalone with \"--shardsvr\" fails");
+testGetCmdLineOptsMongodFailed({shardsvr: ""});
+
+jsTest.log("Ensure starting a standalone with \"--configsvr\" fails");
+testGetCmdLineOptsMongodFailed({configsvr: ""});
+
+// Configuration file options
 
 jsTest.log("Testing \"sharding.clusterRole = shardsvr\" config file option");
 expectedResult = {
@@ -61,31 +52,65 @@ expectedResult = {
 testGetCmdLineOptsMongod({config: "jstests/libs/config_files/set_shardingrole_configsvr.json"},
                          expectedResult);
 
-// Test that we preserve switches explicitly set to false in config files.  See SERVER-13439.
-jsTest.log("Testing explicitly disabled \"moveParanoia\" config file option");
-expectedResult = {
+//////////////////////////////
+// Built-in router
+
+// Command line options
+
+jsTest.log("Testing \"--configsvr\" and \"--router\" command line options");
+var expectedResult = {
     "parsed": {
-        "config": "jstests/libs/config_files/disable_moveparanoia.ini",
-        "sharding": {"archiveMovedChunks": false}
+        "sharding": {"clusterRole": "configsvr", "routerEnabled": true},
+        "replication": {"replSet": "dummy"}
     }
 };
-testGetCmdLineOptsMongod({config: "jstests/libs/config_files/disable_moveparanoia.ini"},
-                         expectedResult);
+testGetCmdLineOptsMongod({configsvr: "", router: "", replSet: "dummy"}, expectedResult);
 
-jsTest.log("Testing explicitly disabled \"noMoveParanoia\" config file option");
-expectedResult = {
+jsTest.log("Testing \"--shardsvr\" and \"--router\" command line options");
+var expectedResult = {
     "parsed": {
-        "config": "jstests/libs/config_files/disable_nomoveparanoia.ini",
-        "sharding": {"archiveMovedChunks": true}
+        "sharding": {"clusterRole": "shardsvr", "routerEnabled": true},
+        "replication": {"replSet": "dummy"}
     }
 };
-testGetCmdLineOptsMongod({config: "jstests/libs/config_files/disable_nomoveparanoia.ini"},
+testGetCmdLineOptsMongod({shardsvr: "", router: "", replSet: "dummy"}, expectedResult);
+
+jsTest.log("Ensure starting a replica set with \"--router\" fails");
+testGetCmdLineOptsMongodFailed({router: "", replSet: "dummy"});
+
+jsTest.log("Ensure starting a standalone with \"--router\" fails");
+testGetCmdLineOptsMongodFailed({router: ""});
+
+// Configuration file options
+
+jsTest.log(
+    "Testing \"sharding.clusterRole = configsvr\" and \"sharding.routerEnabled = true\" config file options");
+expectedResult = {
+    "parsed": {
+        "config": "jstests/libs/config_files/enable_router_with_config_role.json",
+        "sharding": {"clusterRole": "configsvr", "routerEnabled": true},
+        "replication": {"replSetName": "dummy"}
+    }
+};
+testGetCmdLineOptsMongod({config: "jstests/libs/config_files/enable_router_with_config_role.json"},
                          expectedResult);
 
-jsTest.log("Ensure starting a standalone with --shardsvr fails");
-testGetCmdLineOptsMongodFailed({shardsvr: ""});
+jsTest.log(
+    "Testing \"sharding.clusterRole = shardsvr\" and \"sharding.routerEnabled = true\" config file options");
+expectedResult = {
+    "parsed": {
+        "config": "jstests/libs/config_files/enable_router_with_shard_role.json",
+        "sharding": {"clusterRole": "shardsvr", "routerEnabled": true},
+        "replication": {"replSetName": "dummy"}
+    }
+};
+testGetCmdLineOptsMongod({config: "jstests/libs/config_files/enable_router_with_shard_role.json"},
+                         expectedResult);
 
-jsTest.log("Ensure starting a standalone with --configsvr fails");
-testGetCmdLineOptsMongodFailed({configsvr: ""});
+jsTest.log("Ensure starting a replica set with \"sharding.routerEnabled = true\" fails");
+testGetCmdLineOptsMongodFailed(
+    {config: "jstests/libs/config_files/enable_router_with_replicaset.json"});
 
-print(baseName + " succeeded.");
+jsTest.log("Ensure starting a standalone with \"sharding.routerEnabled = true\" fails");
+testGetCmdLineOptsMongodFailed(
+    {config: "jstests/libs/config_files/enable_router_with_standalone.json"});

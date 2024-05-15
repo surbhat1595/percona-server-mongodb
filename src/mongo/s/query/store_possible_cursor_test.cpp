@@ -27,12 +27,23 @@
  *    it in the license file.
  */
 
+#include <string>
+#include <vector>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/concurrency/locker_impl_client_observer.h"
+#include "mongo/db/cursor_id.h"
 #include "mongo/db/query/cursor_response.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
 #include "mongo/s/query/store_possible_cursor.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/bson_test_util.h"
+#include "mongo/unittest/framework.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/net/hostandport.h"
 
@@ -45,11 +56,7 @@ const ShardId shardId("testshard");
 
 class StorePossibleCursorTest : public ServiceContextTest {
 protected:
-    StorePossibleCursorTest() : _manager(&_clockSourceMock) {
-        auto service = getServiceContext();
-        service->registerClientObserver(std::make_unique<LockerImplClientObserver>());
-        _opCtx = makeOperationContext();
-    }
+    StorePossibleCursorTest() : _opCtx(makeOperationContext()), _manager(&_clockSourceMock) {}
 
     OperationContext* opCtx() const {
         return _opCtx.get();

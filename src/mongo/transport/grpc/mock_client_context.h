@@ -44,12 +44,15 @@ public:
         _metadata.insert({key, value});
     };
 
-    boost::optional<const MetadataContainer&> getServerInitialMetadata() const override {
+    MetadataView getServerInitialMetadata() const override {
         invariant(_stream);
-        if (!_stream->_serverInitialMetadata.isReady()) {
-            return boost::none;
+        invariant(_stream->_serverInitialMetadata.isReady());
+
+        MetadataView mv;
+        for (auto& kvp : _stream->_serverInitialMetadata.get()) {
+            mv.insert({kvp.first, kvp.second});
         }
-        return _stream->_serverInitialMetadata.get();
+        return mv;
     }
 
     Date_t getDeadline() const override {

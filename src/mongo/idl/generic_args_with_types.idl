@@ -217,6 +217,36 @@ structs:
                 cpp_name: "dollarTenant"
                 forward_to_shards: true
                 optional: true
+            placementConflictTime:
+                type: logicalTime
+                forward_to_shards: false
+                optional: true
+
+    ClusterTimeSignature:
+        description: "Structure used in '$clusterTime'."
+        strict: false
+        fields:
+            hash:
+                type: bindata_generic
+                forward_from_shards: false
+                optional: false
+            keyId:
+                type: safeInt64
+                forward_from_shards: false
+                optional: false
+
+    ClusterTime:
+        description: "Field under '$clusterTime' that appears in GenericReplyFields. Matches VectorClock::SignedComponentFormat"
+        strict: false
+        fields:
+            clusterTime:
+                type: logicalTime
+                forward_from_shards: false
+                optional: true
+            signature:
+                type: ClusterTimeSignature
+                forward_from_shards: false
+                optional: true
 
     
     GenericReplyFieldsWithTypesV1:
@@ -226,7 +256,7 @@ structs:
         is_generic_cmd_list: "reply"
         fields:
             $clusterTime:
-                type: logicalTime
+                type: ClusterTime
                 cpp_name: "dollarClusterTime"
                 forward_from_shards: false
                 optional: true

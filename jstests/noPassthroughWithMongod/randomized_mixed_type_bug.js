@@ -2,12 +2,17 @@
  * Tests that randomly generated documents can be queried from timeseries collections in the same
  * manner as a tradional collection.
  */
-(function() {
-"use strict";
+import {checkCascadesOptimizerEnabled} from "jstests/libs/optimizer_utils.js";
 
 load('jstests/third_party/fast_check/fc-3.1.0.js');  // For fast-check (fc).
 
-const scalars = [fc.string(), fc.double(), fc.boolean(), fc.date(), fc.constant(null)];
+// TODO SERVER-67506: Re-enable this test when a decision is made about how Bonsai will handle
+// comparison to null. Other semantic difference tickets are also relevant here.
+let scalars = [fc.string(), fc.double(), fc.boolean(), fc.date()];
+if (!checkCascadesOptimizerEnabled(db)) {
+    scalars.push(fc.constant(null));
+}
+
 const pathComponents = fc.constant("a", "b");
 // Define our grammar for documents.
 let documentModel = fc.letrec(
@@ -61,7 +66,7 @@ let testMixedTypeQuerying = () => {
             // Query on pathArray w/ {[compare]: val} on test and control.
             // Compare the results.
             try {
-                assert.docEq(
+                assert.sameMembers(
                     // Isn't timeseries.
                     db.control.find({[path]: {[compare]: val}}, {_id: 0}).toArray(),
                     // Is timeseries.
@@ -76,4 +81,3 @@ let testMixedTypeQuerying = () => {
 };  // testMixedTypeQuerying
 
 testMixedTypeQuerying();
-})();

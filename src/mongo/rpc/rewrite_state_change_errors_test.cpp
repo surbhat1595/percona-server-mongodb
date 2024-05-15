@@ -27,17 +27,20 @@
  *    it in the license file.
  */
 
-#include "mongo/rpc/rewrite_state_change_errors.h"
+#include <boost/optional/optional.hpp>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/concurrency/locker_noop_client_observer.h"
 #include "mongo/db/service_context.h"
-#include "mongo/rpc/message.h"
-#include "mongo/rpc/op_msg.h"
-#include "mongo/s/is_mongos.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/rpc/rewrite_state_change_errors.h"
+#include "mongo/unittest/bson_test_util.h"
+#include "mongo/unittest/framework.h"
 
 namespace mongo::rpc {
 namespace {
@@ -46,19 +49,18 @@ class RewriteStateChangeErrorsTest : public unittest::Test {
 public:
     RewriteStateChangeErrorsTest() {
         sc = ServiceContext::make();
-        sc->registerClientObserver(std::make_unique<LockerNoopClientObserver>());
         cc = sc->makeClient("test", nullptr);
         opCtx = sc->makeOperationContext(cc.get());
     }
 
     void setUp() override {
-        _savedIsMongos = isMongos();
-        setMongos(true);  // whole feature only happens on mongos
+        // Whole feature only happens on mongos.
+        serverGlobalParams.clusterRole = ClusterRole::RouterServer;
         RewriteStateChangeErrors::setEnabled(&*sc, true);
     }
 
     void tearDown() override {
-        setMongos(_savedIsMongos);
+        serverGlobalParams.clusterRole = ClusterRole::None;
     }
 
     /** Run rewrite on `obj` and return what it was remapped to if anything. */
@@ -100,9 +102,6 @@ public:
     ServiceContext::UniqueServiceContext sc;
     ServiceContext::UniqueClient cc;
     ServiceContext::UniqueOperationContext opCtx;
-
-private:
-    bool _savedIsMongos;
 };
 
 // Rewrite Shutdown errors received from proxied commands.

@@ -5,11 +5,6 @@
  *     requires_replication,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/core/timeseries/libs/timeseries.js");
-
 const rst = new ReplSetTest({nodes: 1});
 rst.startSet();
 rst.initiate();
@@ -34,9 +29,11 @@ assert.commandFailedWithCode(session.commitTransaction_forTesting(), ErrorCodes.
 
 session.startTransaction();
 // Time-series update in a multi-document transaction should fail.
-assert.commandFailedWithCode(sessionColl.update({[metaFieldName]: "a"}, {"$set": {"b": "a"}}),
+assert.commandFailedWithCode(session.getDatabase(jsTestName()).runCommand({
+    update: collectionName,
+    updates: [{q: {[metaFieldName]: "a"}, u: {"$set": {"b": "a"}}, multi: true}],
+}),
                              ErrorCodes.OperationNotSupportedInTransaction);
 assert.commandFailedWithCode(session.commitTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
 session.endSession();
 rst.stopSet();
-})();

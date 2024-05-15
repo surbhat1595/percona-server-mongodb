@@ -29,12 +29,33 @@
 
 #pragma once
 
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
 #include <boost/shared_array.hpp>
+#include <boost/smart_ptr/shared_array.hpp>
+#include <cstddef>
+#include <cstdint>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <vector>
 
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/mutable/damage_vector.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/storage/key_format.h"
+#include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/platform/mutex.h"
+#include "mongo/util/assert_util_core.h"
 #include "mongo/util/concurrency/with_lock.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 
@@ -45,7 +66,7 @@ namespace mongo {
  */
 class EphemeralForTestRecordStore : public RecordStore {
 public:
-    explicit EphemeralForTestRecordStore(StringData ns,
+    explicit EphemeralForTestRecordStore(const NamespaceString& ns,
                                          boost::optional<UUID> uuid,
                                          StringData identName,
                                          std::shared_ptr<void>* dataInOut,
@@ -127,7 +148,7 @@ public:
                                   std::vector<RecordId>* out,
                                   size_t nRecords) final{};
 
-    std::string ns(OperationContext* opCtx) const final {
+    NamespaceString ns(OperationContext* opCtx) const final {
         return _data->ns;
     }
 
@@ -176,14 +197,14 @@ private:
 
     // This is the "persistent" data.
     struct Data {
-        Data(StringData nss, bool isOplog)
+        Data(const NamespaceString& nss, bool isOplog)
             : dataSize(0), recordsMutex(), nextId(1), ns(nss), isOplog(isOplog) {}
 
         int64_t dataSize;
         stdx::recursive_mutex recordsMutex;
         Records records;
         int64_t nextId;
-        std::string ns;
+        NamespaceString ns;
         const bool isOplog;
     };
 

@@ -27,20 +27,43 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/db/index/index_access_method.h"
-
+#include <boost/container/container_fwd.hpp>
+#include <fmt/format.h>
+// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
+#include <boost/container/flat_set.hpp>
+#include <boost/container/small_vector.hpp>
+#include <boost/container/vector.hpp>
+#include <boost/cstdint.hpp>
+#include <boost/move/algo/move.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
+// IWYU pragma: no_include "boost/move/algo/detail/set_difference.hpp"
+#include <algorithm>
+#include <deque>
+#include <exception>
+#include <iterator>
+#include <new>
+#include <string>
+#include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
 
+#include <boost/optional/optional.hpp>
+
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_consistency.h"
-#include "mongo/db/client.h"
+#include "mongo/db/catalog/validate_results.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/index/2d_access_method.h"
 #include "mongo/db/index/btree_access_method.h"
@@ -48,23 +71,39 @@
 #include "mongo/db/index/columns_access_method.h"
 #include "mongo/db/index/fts_access_method.h"
 #include "mongo/db/index/hash_access_method.h"
+#include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_build_interceptor.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/s2_access_method.h"
 #include "mongo/db/index/s2_bucket_access_method.h"
 #include "mongo/db/index/wildcard_access_method.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/db/keypattern.h"
+#include "mongo/db/index_names.h"
+#include "mongo/db/matcher/expression.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repl/timestamp_block.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/sorter/sorter.h"
+#include "mongo/db/sorter/sorter_gen.h"
 #include "mongo/db/storage/execution_context.h"
+#include "mongo/db/storage/index_entry_comparison.h"
+#include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/kv/kv_engine.h"
+#include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/util/progress_meter.h"
-#include "mongo/util/scopeguard.h"
+#include "mongo/platform/random.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/bufreader.h"
+#include "mongo/util/database_name_util.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/namespace_string_util.h"
 #include "mongo/util/stacktrace.h"
+#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -188,7 +227,9 @@ bool isMultikeyFromPaths(const MultikeyPaths& multikeyPaths) {
                        [](const MultikeyComponents& components) { return !components.empty(); });
 }
 
-SortOptions makeSortOptions(size_t maxMemoryUsageBytes, StringData dbName, SorterFileStats* stats) {
+SortOptions makeSortOptions(size_t maxMemoryUsageBytes,
+                            const DatabaseName& dbName,
+                            SorterFileStats* stats) {
     return SortOptions()
         .TempDir(storageGlobalParams.dbpath + "/_tmp")
         .ExtSortAllowed()
@@ -196,7 +237,7 @@ SortOptions makeSortOptions(size_t maxMemoryUsageBytes, StringData dbName, Sorte
         .UseMemoryPool(true)
         .FileStats(stats)
         .Tracker(&indexBulkBuilderSSS.sorterTracker)
-        .DBName(dbName.toString());
+        .DBName(DatabaseNameUtil::serializeForCatalog(dbName));
 }
 
 MultikeyPaths createMultikeyPaths(const std::vector<MultikeyPath>& multikeyPathsVec) {
@@ -213,7 +254,7 @@ MultikeyPaths createMultikeyPaths(const std::vector<MultikeyPath>& multikeyPaths
 }  // namespace
 
 struct BtreeExternalSortComparison {
-    int operator()(const KeyString::Value& l, const KeyString::Value& r) const {
+    int operator()(const key_string::Value& l, const key_string::Value& r) const {
         return l.compare(r);
     }
 };
@@ -440,12 +481,19 @@ Status SortedDataIndexAccessMethod::insertKeys(OperationContext* opCtx,
 
 void SortedDataIndexAccessMethod::removeOneKey(OperationContext* opCtx,
                                                const IndexCatalogEntry* entry,
-                                               const KeyString::Value& keyString,
-                                               bool dupsAllowed) {
+                                               const key_string::Value& keyString,
+                                               bool dupsAllowed) const {
 
     try {
         _newInterface->unindex(opCtx, keyString, dupsAllowed);
     } catch (AssertionException& e) {
+        if (e.code() == ErrorCodes::DataCorruptionDetected) {
+            // DataCorruptionDetected errors are expected to have logged an error and added an entry
+            // to the health log with the stack trace at the location where the error was initially
+            // thrown. No need to do so again.
+            throw;
+        }
+
         NamespaceString ns = entry->getNSSFromCatalog(opCtx);
         LOGV2(20683,
               "Assertion failure: _unindex failed on: {namespace} for index: {indexName}. "
@@ -468,7 +516,7 @@ Status SortedDataIndexAccessMethod::removeKeys(OperationContext* opCtx,
                                                const IndexCatalogEntry* entry,
                                                const KeyStringSet& keys,
                                                const InsertDeleteOptions& options,
-                                               int64_t* numDeleted) {
+                                               int64_t* numDeleted) const {
 
     for (const auto& key : keys) {
         removeOneKey(opCtx, entry, key, options.dupsAllowed);
@@ -487,11 +535,11 @@ RecordId SortedDataIndexAccessMethod::findSingle(OperationContext* opCtx,
                                                  const IndexCatalogEntry* entry,
                                                  const BSONObj& requestedKey) const {
     // Generate the key for this index.
-    KeyString::Value actualKey = [&]() {
+    key_string::Value actualKey = [&]() {
         if (entry->getCollator()) {
             // For performance, call get keys only if there is a non-simple collation.
             SharedBufferFragmentBuilder pooledBuilder(
-                KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
+                key_string::HeapBuilder::kHeapAllocatorDefaultBytes);
             auto& executionCtx = StorageExecutionContext::get(opCtx);
             auto keys = executionCtx.keys();
             KeyStringSet* multikeyMetadataKeys = nullptr;
@@ -511,7 +559,7 @@ RecordId SortedDataIndexAccessMethod::findSingle(OperationContext* opCtx,
             invariant(keys->size() == 1);
             return *keys->begin();
         } else {
-            KeyString::HeapBuilder requestedKeyString(
+            key_string::HeapBuilder requestedKeyString(
                 getSortedDataInterface()->getKeyStringVersion(),
                 BSONObj::stripFieldNames(requestedKey),
                 getSortedDataInterface()->getOrdering());
@@ -597,7 +645,7 @@ void SortedDataIndexAccessMethod::prepareUpdate(OperationContext* opCtx,
                                                 const RecordId& record,
                                                 const InsertDeleteOptions& options,
                                                 UpdateTicket* ticket) const {
-    SharedBufferFragmentBuilder pooledBuilder(KeyString::HeapBuilder::kHeapAllocatorDefaultBytes);
+    SharedBufferFragmentBuilder pooledBuilder(key_string::HeapBuilder::kHeapAllocatorDefaultBytes);
     const MatchExpression* indexFilter = entry->getFilterExpression();
     if (!indexFilter || indexFilter->matchesBSON(from)) {
         // Override key constraints when generating keys for removal. This only applies to keys
@@ -722,12 +770,12 @@ Status SortedDataIndexAccessMethod::applyIndexBuildSideWrite(OperationContext* o
         }
     }();
 
-    // Deserialize the encoded KeyString::Value.
+    // Deserialize the encoded key_string::Value.
     int keyLen;
     const char* binKey = operation["key"].binData(keyLen);
     BufReader reader(binKey, keyLen);
-    const KeyString::Value keyString =
-        KeyString::Value::deserialize(reader, getSortedDataInterface()->getKeyStringVersion());
+    const key_string::Value keyString =
+        key_string::Value::deserialize(reader, getSortedDataInterface()->getKeyStringVersion());
 
     const KeyStringSet keySet{keyString};
     if (opType == IndexBuildInterceptor::Op::kInsert) {
@@ -803,7 +851,9 @@ const IndexCatalogEntry* IndexAccessMethod::BulkBuilder::yield(OperationContext*
                 LOGV2(5180600, "Hanging index build during bulk load yield");
                 fp->pauseWhileSet();
             },
-            [opCtx, &ns](auto&& config) { return config.getStringField("namespace") == ns.ns(); });
+            [opCtx, &ns](auto&& config) {
+                return NamespaceStringUtil::parseFailPointData(config, "namespace") == ns;
+            });
     };
     failPointHang(&hangDuringIndexBuildBulkLoadYield);
     failPointHang(&hangDuringIndexBuildBulkLoadYieldSecond);
@@ -826,18 +876,18 @@ const IndexCatalogEntry* IndexAccessMethod::BulkBuilder::yield(OperationContext*
 class SortedDataIndexAccessMethod::BulkBuilderImpl final
     : public BulkBuilderCommon<SortedDataIndexAccessMethod::BulkBuilderImpl> {
 public:
-    using Sorter = mongo::Sorter<KeyString::Value, mongo::NullValue>;
+    using Sorter = mongo::Sorter<key_string::Value, mongo::NullValue>;
 
     BulkBuilderImpl(const IndexCatalogEntry* entry,
                     SortedDataIndexAccessMethod* iam,
                     size_t maxMemoryUsageBytes,
-                    StringData dbName);
+                    const DatabaseName& dbName);
 
     BulkBuilderImpl(const IndexCatalogEntry* entry,
                     SortedDataIndexAccessMethod* iam,
                     size_t maxMemoryUsageBytes,
                     const IndexStateInfo& stateInfo,
-                    StringData dbName);
+                    const DatabaseName& dbName);
 
     Status insert(OperationContext* opCtx,
                   const CollectionPtr& collection,
@@ -879,7 +929,7 @@ private:
 
     Sorter* _makeSorter(
         size_t maxMemoryUsageBytes,
-        StringData dbName,
+        const DatabaseName& dbName,
         boost::optional<StringData> fileName = boost::none,
         const boost::optional<std::vector<SorterRange>>& ranges = boost::none) const;
 
@@ -888,7 +938,7 @@ private:
     SortedDataIndexAccessMethod* _iam;
     std::unique_ptr<Sorter> _sorter;
 
-    KeyString::Value _previousKey;
+    key_string::Value _previousKey;
 
     // Set to true if any document added to the BulkBuilder causes the index to become multikey.
     bool _isMultiKey = false;
@@ -907,7 +957,7 @@ std::unique_ptr<IndexAccessMethod::BulkBuilder> SortedDataIndexAccessMethod::ini
     const IndexCatalogEntry* entry,
     size_t maxMemoryUsageBytes,
     const boost::optional<IndexStateInfo>& stateInfo,
-    StringData dbName) {
+    const DatabaseName& dbName) {
     return stateInfo
         ? std::make_unique<BulkBuilderImpl>(entry, this, maxMemoryUsageBytes, *stateInfo, dbName)
         : std::make_unique<BulkBuilderImpl>(entry, this, maxMemoryUsageBytes, dbName);
@@ -916,7 +966,7 @@ std::unique_ptr<IndexAccessMethod::BulkBuilder> SortedDataIndexAccessMethod::ini
 SortedDataIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(const IndexCatalogEntry* entry,
                                                               SortedDataIndexAccessMethod* iam,
                                                               size_t maxMemoryUsageBytes,
-                                                              StringData dbName)
+                                                              const DatabaseName& dbName)
     : BulkBuilderCommon(0,
                         "Index Build: inserting keys from external sorter into index",
                         entry->descriptor()->indexName()),
@@ -929,7 +979,7 @@ SortedDataIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(const IndexCatalog
                                                               SortedDataIndexAccessMethod* iam,
                                                               size_t maxMemoryUsageBytes,
                                                               const IndexStateInfo& stateInfo,
-                                                              StringData dbName)
+                                                              const DatabaseName& dbName)
     : BulkBuilderCommon(stateInfo.getNumKeys().value_or(0),
                         "Index Build: inserting keys from external sorter into index",
                         entry->descriptor()->indexName()),
@@ -1030,7 +1080,7 @@ void SortedDataIndexAccessMethod::BulkBuilderImpl::_insertMultikeyMetadataKeysIn
 
 SortedDataIndexAccessMethod::BulkBuilderImpl::Sorter::Settings
 SortedDataIndexAccessMethod::BulkBuilderImpl::_makeSorterSettings() const {
-    return std::pair<KeyString::Value::SorterDeserializeSettings,
+    return std::pair<key_string::Value::SorterDeserializeSettings,
                      mongo::NullValue::SorterDeserializeSettings>(
         {_iam->getSortedDataInterface()->getKeyStringVersion()}, {});
 }
@@ -1038,7 +1088,7 @@ SortedDataIndexAccessMethod::BulkBuilderImpl::_makeSorterSettings() const {
 SortedDataIndexAccessMethod::BulkBuilderImpl::Sorter*
 SortedDataIndexAccessMethod::BulkBuilderImpl::_makeSorter(
     size_t maxMemoryUsageBytes,
-    StringData dbName,
+    const DatabaseName& dbName,
     boost::optional<StringData> fileName,
     const boost::optional<std::vector<SorterRange>>& ranges) const {
     return fileName
@@ -1053,7 +1103,7 @@ SortedDataIndexAccessMethod::BulkBuilderImpl::_makeSorter(
                        _makeSorterSettings());
 }
 
-std::unique_ptr<mongo::Sorter<KeyString::Value, mongo::NullValue>::Iterator>
+std::unique_ptr<mongo::Sorter<key_string::Value, mongo::NullValue>::Iterator>
 SortedDataIndexAccessMethod::BulkBuilderImpl::finalizeSort() {
     _insertMultikeyMetadataKeysIntoSorter();
     return std::unique_ptr<Sorter::Iterator>(_sorter->done());
@@ -1226,16 +1276,16 @@ std::string nextFileName() {
 Status SortedDataIndexAccessMethod::_handleDuplicateKey(
     OperationContext* opCtx,
     const IndexCatalogEntry* entry,
-    const KeyString::Value& dataKey,
+    const key_string::Value& dataKey,
     const RecordIdHandlerFn& onDuplicateRecord) {
     RecordId recordId = (KeyFormat::Long == _newInterface->rsKeyFormat())
-        ? KeyString::decodeRecordIdLongAtEnd(dataKey.getBuffer(), dataKey.getSize())
-        : KeyString::decodeRecordIdStrAtEnd(dataKey.getBuffer(), dataKey.getSize());
+        ? key_string::decodeRecordIdLongAtEnd(dataKey.getBuffer(), dataKey.getSize())
+        : key_string::decodeRecordIdStrAtEnd(dataKey.getBuffer(), dataKey.getSize());
     if (onDuplicateRecord) {
         return onDuplicateRecord(recordId);
     }
 
-    BSONObj dupKey = KeyString::toBson(dataKey, getSortedDataInterface()->getOrdering());
+    BSONObj dupKey = key_string::toBson(dataKey, getSortedDataInterface()->getOrdering());
     return buildDupKeyErrorStatus(dupKey.getOwned(),
                                   entry->getNSSFromCatalog(opCtx),
                                   entry->descriptor()->indexName(),
@@ -1354,5 +1404,6 @@ void SortedDataIndexAccessMethod::_unindexKeysOrWriteToSideTable(
 
 #undef MONGO_LOGV2_DEFAULT_COMPONENT
 #include "mongo/db/sorter/sorter.cpp"
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
-MONGO_CREATE_SORTER(mongo::KeyString::Value, mongo::NullValue, mongo::BtreeExternalSortComparison);
+MONGO_CREATE_SORTER(mongo::key_string::Value, mongo::NullValue, mongo::BtreeExternalSortComparison);

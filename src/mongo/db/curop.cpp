@@ -31,30 +31,67 @@
 
 #include "mongo/db/curop.h"
 
+#include <absl/container/flat_hash_set.h>
+#include <boost/optional.hpp>
+#include <fmt/format.h>
+#include <mutex>
+#include <ostream>
+#include <tuple>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/mutable/document.h"
-#include "mongo/config.h"
-#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/bson/util/builder_fwd.h"
+#include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/auth/user_name.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/json.h"
+#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/prepare_conflict_tracker.h"
 #include "mongo/db/profile_filter.h"
-#include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/stats/timer_stats.h"
+#include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine_feature_flags_gen.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/redaction.h"
+#include "mongo/platform/compiler.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/metadata/impersonated_user_metadata.h"
+#include "mongo/rpc/metadata/impersonated_user_metadata_gen.h"
 #include "mongo/transport/service_executor.h"
+#include "mongo/transport/session.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/clock_source.h"
+#include "mongo/util/concurrency/admission_context.h"
+#include "mongo/util/database_name_util.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/diagnostic_info.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log_with_sampling.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/str.h"
-#include "mongo/util/system_tick_source.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -64,15 +101,17 @@ namespace {
 auto& oplogGetMoreStats = makeServerStatusMetric<TimerStats>("repl.network.oplogGetMoresProcessed");
 
 BSONObj serializeDollarDbInOpDescription(boost::optional<TenantId> tenantId,
-                                         const BSONObj& cmdObj) {
+                                         const BSONObj& cmdObj,
+                                         const SerializationContext& sc) {
     auto db = cmdObj["$db"];
     if (!db) {
         return cmdObj;
     }
 
-    auto dbName = DatabaseNameUtil::deserialize(tenantId, db.String());
-    auto newCmdObj =
-        cmdObj.addField(BSON("$db" << DatabaseNameUtil::serialize(dbName)).firstElement());
+    auto dbName = DatabaseNameUtil::deserialize(tenantId, db.String(), sc);
+    auto newCmdObj = cmdObj.addField(BSON("$db" << DatabaseNameUtil::serialize(
+                                              dbName, SerializationContext::stateCommandReply(sc)))
+                                         .firstElement());
     return newCmdObj;
 }
 
@@ -264,9 +303,12 @@ void CurOp::reportCurrentOpForClient(const boost::intrusive_ptr<ExpressionContex
 
         tassert(7663403,
                 str::stream() << "SerializationContext on the expCtx should not be empty, with ns: "
-                              << expCtx->ns.ns(),
+                              << expCtx->ns.toStringForErrorMsg(),
                 expCtx->serializationCtxt != SerializationContext::stateDefault());
-        CurOp::get(clientOpCtx)->reportState(infoBuilder, expCtx->serializationCtxt, truncateOps);
+
+        // reportState is used to generate a command reply
+        auto sc = SerializationContext::stateCommandReply(expCtx->serializationCtxt);
+        CurOp::get(clientOpCtx)->reportState(infoBuilder, sc, truncateOps);
     }
 
 #ifndef MONGO_CONFIG_USE_RAW_LATCHES
@@ -306,11 +348,7 @@ OperationContext* CurOp::opCtx() {
 }
 
 void CurOp::setOpDescription_inlock(const BSONObj& opDescription) {
-    if (_nss.tenantId()) {
-        _opDescription = serializeDollarDbInOpDescription(_nss.tenantId(), opDescription);
-    } else {
-        _opDescription = opDescription;
-    }
+    _opDescription = opDescription;
 }
 
 void CurOp::setGenericCursor_inlock(GenericCursor gc) {
@@ -337,18 +375,21 @@ void CurOp::setGenericOpRequestDetails(NamespaceString nss,
     _isCommand = _debug.iscommand = isCommand;
     _logicalOp = _debug.logicalOp = logicalOp;
     _networkOp = _debug.networkOp = op;
-    _opDescription = serializeDollarDbInOpDescription(nss.tenantId(), cmdObj);
+    _opDescription = cmdObj;
     _command = command;
     _nss = std::move(nss);
 }
 
 void CurOp::setEndOfOpMetrics(long long nreturned) {
     _debug.additiveMetrics.nreturned = nreturned;
-    // executionTime is set with the final executionTime in completeAndLogOperation, but for
-    // query stats collection we want it set before incrementing cursor metrics using OpDebug's
-    // AdditiveMetrics. The value set here will be overwritten later in
-    // completeAndLogOperation.
-    _debug.additiveMetrics.executionTime = elapsedTimeExcludingPauses();
+    // A non-null queryStats store key indicates the current query is being tracked for queryStats
+    // and therefore the executionTime needs to be recorded as part of that effort. executionTime is
+    // set with the final executionTime in completeAndLogOperation, but for query stats collection
+    // we want it set before incrementing cursor metrics using OpDebug's AdditiveMetrics. The value
+    // set here will be overwritten later in completeAndLogOperation.
+    if (_debug.queryStatsStoreKeyHash) {
+        _debug.additiveMetrics.executionTime = elapsedTimeExcludingPauses();
+    }
 }
 
 void CurOp::setMessage_inlock(StringData message) {
@@ -526,10 +567,16 @@ bool CurOp::completeAndLogOperation(logv2::LogComponent component,
                 // Retrieving storage stats should not be blocked by oplog application.
                 ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
                     opCtx->lockState());
+                // Slow query logs are critical for observability and should not wait for ticket
+                // acquisition. Slow queries can happen for various reasons; however, if queries are
+                // slower due to ticket exhaustion, queueing in order to log can compound the issue.
+                ScopedAdmissionPriorityForLock skipAdmissionControl(
+                    opCtx->lockState(), AdmissionContext::Priority::kImmediate);
                 Lock::GlobalLock lk(opCtx,
                                     MODE_IS,
                                     Date_t::now() + Milliseconds(500),
-                                    Lock::InterruptBehavior::kThrow);
+                                    Lock::InterruptBehavior::kThrow,
+                                    Lock::GlobalLockSkipOptions{.skipRSTLLock = true});
                 _debug.storageStats =
                     opCtx->recoveryUnit()->computeOperationStatisticsSinceLastCall();
             } catch (const DBException& ex) {
@@ -735,7 +782,9 @@ void CurOp::reportState(BSONObjBuilder* builder,
     // is true, limit the size of each op to 1000 bytes. Otherwise, do not truncate.
     const boost::optional<size_t> maxQuerySize{truncateOps, 1000};
 
-    auto obj = appendCommentField(opCtx, _opDescription);
+    auto opDescription =
+        serializeDollarDbInOpDescription(_nss.tenantId(), _opDescription, serializationContext);
+    auto obj = appendCommentField(opCtx, opDescription);
 
     // If flag is true, add command field to builder without sensitive information.
     if (omitAndRedactInformation) {
@@ -1191,8 +1240,7 @@ void OpDebug::append(OperationContext* opCtx,
 
     b.append("op", logicalOpToString(logicalOp));
 
-    NamespaceString nss = NamespaceString(curop.getNS());
-    b.append("ns", nss.ns());
+    b.append("ns", curop.getNS());
 
     appendAsObjOrString(
         "command", appendCommentField(opCtx, curop.opDescription()), appendMaxElementSize, &b);
@@ -1303,6 +1351,11 @@ void OpDebug::append(OperationContext* opCtx,
 
     if (writeConcern && !writeConcern->usedDefaultConstructedWC) {
         b.append("writeConcern", writeConcern->toBSON());
+    }
+
+    if (waitForWriteConcernDurationMillis > Milliseconds::zero()) {
+        b.append("waitForWriteConcernDuration",
+                 durationCount<Milliseconds>(waitForWriteConcernDurationMillis));
     }
 
     if (storageStats) {
@@ -1433,9 +1486,7 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
     addIfNeeded("op", [](auto field, auto args, auto& b) {
         b.append(field, logicalOpToString(args.op.logicalOp));
     });
-    addIfNeeded("ns", [](auto field, auto args, auto& b) {
-        b.append(field, NamespaceString(args.curop.getNS()).ns());
-    });
+    addIfNeeded("ns", [](auto field, auto args, auto& b) { b.append(field, args.curop.getNS()); });
 
     addIfNeeded("command", [](auto field, auto args, auto& b) {
         appendAsObjOrString(field,
@@ -1796,7 +1847,7 @@ static void appendResolvedViewsInfoImpl(
         const std::vector<BSONObj>& pipeline = kv.second.second;
 
         BSONObjBuilder aView;
-        aView.append("viewNamespace", viewNss.ns());
+        aView.append("viewNamespace", NamespaceStringUtil::serialize(viewNss));
 
         BSONArrayBuilder dependenciesArr(aView.subarrayStart("dependencyChain"));
         for (const auto& nss : dependencies) {

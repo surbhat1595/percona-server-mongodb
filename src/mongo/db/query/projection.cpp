@@ -29,12 +29,25 @@
 
 #include "mongo/db/query/projection.h"
 
+#include <cstddef>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
 #include "mongo/base/exact_cast.h"
+#include "mongo/db/matcher/copyable_match_expression.h"
 #include "mongo/db/matcher/match_expression_dependencies.h"
 #include "mongo/db/pipeline/expression_dependencies.h"
+#include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/query/projection_ast_path_tracking_visitor.h"
+#include "mongo/db/query/projection_ast_visitor.h"
 #include "mongo/db/query/tree_walker.h"
-#include "mongo/db/query/util/make_data_structure.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace projection_ast {
@@ -212,7 +225,7 @@ auto analyzeProjection(const ProjectionPathASTNode* root, ProjectType type) {
     const auto& userData = context.data();
     const auto& tracker = userData.fieldDependencyTracker;
 
-    if (type == ProjectType::kInclusion) {
+    if (type == ProjectType::kInclusion || type == ProjectType::kAddition) {
         deps.paths = userData.requiredFields();
     } else {
         invariant(type == ProjectType::kExclusion);

@@ -27,11 +27,15 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <ostream>
+#include <vector>
 
-#include "mongo/db/exec/document_value/document_metadata_fields.h"
+#include <boost/preprocessor/control/iif.hpp>
 
+#include "mongo/base/data_type_endian.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/exec/document_value/document_metadata_fields.h"
 
 namespace mongo {
 
@@ -98,6 +102,9 @@ void DocumentMetadataFields::mergeWith(const DocumentMetadataFields& other) {
     if (!hasSearchSortValues() && other.hasSearchSortValues()) {
         setSearchSortValues(other.getSearchSortValues());
     }
+    if (!hasVectorSearchDistance() && other.hasVectorSearchDistance()) {
+        setVectorSearchDistance(other.getVectorSearchDistance());
+    }
 }
 
 void DocumentMetadataFields::copyFrom(const DocumentMetadataFields& other) {
@@ -136,6 +143,9 @@ void DocumentMetadataFields::copyFrom(const DocumentMetadataFields& other) {
     }
     if (other.hasSearchSortValues()) {
         setSearchSortValues(other.getSearchSortValues());
+    }
+    if (other.hasVectorSearchDistance()) {
+        setVectorSearchDistance(other.getVectorSearchDistance());
     }
 }
 
@@ -218,6 +228,10 @@ void DocumentMetadataFields::serializeForSorter(BufBuilder& buf) const {
         buf.appendNum(static_cast<char>(MetaType::kSearchSortValues + 1));
         getSearchSortValues().appendSelfToBufBuilder(buf);
     }
+    if (hasVectorSearchDistance()) {
+        buf.appendNum(static_cast<char>(MetaType::kVectorSearchDistance + 1));
+        buf.appendNum(getVectorSearchDistance());
+    }
     buf.appendNum(static_cast<char>(0));
 }
 
@@ -258,6 +272,8 @@ void DocumentMetadataFields::deserializeForSorter(BufReader& buf, DocumentMetada
         } else if (marker == static_cast<char>(MetaType::kSearchSortValues) + 1) {
             out->setSearchSortValues(
                 BSONObj::deserializeForSorter(buf, BSONObj::SorterDeserializeSettings()));
+        } else if (marker == static_cast<char>(MetaType::kVectorSearchDistance) + 1) {
+            out->setVectorSearchDistance(buf.read<LittleEndian<double>>());
         } else {
             uasserted(28744, "Unrecognized marker, unable to deserialize buffer");
         }
@@ -319,6 +335,8 @@ const char* DocumentMetadataFields::typeNameToDebugString(DocumentMetadataFields
             return "timeseries bucket max time";
         case DocumentMetadataFields::kSearchSortValues:
             return "$search sort values";
+        case DocumentMetadataFields::kVectorSearchDistance:
+            return "$vectorSearch distance";
         default:
             MONGO_UNREACHABLE;
     }

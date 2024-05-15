@@ -15,17 +15,8 @@
  * ]
  */
 
-(function() {
-"use strict";
-
 load("jstests/aggregation/extras/utils.js");  // For getExplainedPipelineFromAggregation.
-load("jstests/core/timeseries/libs/timeseries.js");
-load('jstests/libs/analyze_plan.js');
-
-if (!TimeseriesTest.bucketUnpackWithSortEnabled(db.getMongo())) {
-    jsTestLog("Skipping test because 'BucketUnpackWithSort' is disabled.");
-    return;
-}
+import {getAggPlanStages} from "jstests/libs/analyze_plan.js";
 
 const timeFieldName = "t";
 
@@ -262,4 +253,3 @@ function runTest(ascending) {
 
 runTest(false);  // descending
 runTest(true);   // ascending
-})();

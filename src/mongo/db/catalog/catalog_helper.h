@@ -29,8 +29,15 @@
 
 #pragma once
 
+#include <functional>
+#include <vector>
+
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/catalog_raii.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo::catalog_helper {
 
@@ -49,7 +56,8 @@ void acquireCollectionLocksInResourceIdOrder(
     const NamespaceStringOrUUID& nsOrUUID,
     LockMode modeColl,
     Date_t deadline,
-    const std::vector<NamespaceStringOrUUID>& secondaryNssOrUUIDs,
+    std::vector<NamespaceStringOrUUID>::const_iterator secondaryNssOrUUIDsBegin,
+    std::vector<NamespaceStringOrUUID>::const_iterator secondaryNssOrUUIDsEnd,
     std::vector<CollectionNamespaceOrUUIDLock>* collLocks);
 
 /**

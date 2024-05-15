@@ -27,29 +27,64 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <memory>
+#include <ratio>
+#include <utility>
+#include <vector>
 
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/database.h"
 #include "mongo/db/client.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/batched_delete_stage.h"
 #include "mongo/db/exec/collection_scan.h"
+#include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/exec/delete_stage.h"
-#include "mongo/db/exec/queued_data_stage.h"
+#include "mongo/db/exec/plan_stage.h"
+#include "mongo/db/exec/plan_stats.h"
+#include "mongo/db/exec/working_set.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/find_command.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role.h"
 #include "mongo/db/storage/checkpointer.h"
-#include "mongo/dbtests/dbtests.h"
+#include "mongo/db/storage/snapshot.h"
+#include "mongo/db/transaction_resources.h"
+#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/tick_source.h"
 #include "mongo/util/tick_source_mock.h"
+#include "mongo/util/timer.h"
 
 namespace mongo {
 namespace QueryStageBatchedDelete {
 
-static const NamespaceString nss("unittests.QueryStageBatchedDelete");
+static const NamespaceString nss =
+    NamespaceString::createNamespaceString_forTest("unittests.QueryStageBatchedDelete");
 
 // For the following tests, fix the targetBatchDocs to 10 documents.
 static const int targetBatchDocs = 10;
@@ -67,6 +102,7 @@ public:
     void aboutToDelete(OperationContext* opCtx,
                        const CollectionPtr& coll,
                        const BSONObj& doc,
+                       OplogDeleteEntryArgs* args,
                        OpStateAccumulator* opAccumulator = nullptr) override {
 
         if (docDurationMap.find(doc) != docDurationMap.end()) {
@@ -174,7 +210,7 @@ public:
         params.tailable = false;
 
         std::unique_ptr<CollectionScan> scan(
-            new CollectionScan(_expCtx.get(), collection, params, &ws, nullptr));
+            new CollectionScan(_expCtx.get(), &collection, params, &ws, nullptr));
         while (!scan->isEOF()) {
             WorkingSetID id = WorkingSet::INVALID_ID;
             PlanStage::StageState state = scan->work(&id);
@@ -196,16 +232,14 @@ public:
 
     // Uses the default _expCtx tied to the test suite.
     std::unique_ptr<BatchedDeleteStage> makeBatchedDeleteStage(
-        WorkingSet* ws,
-        const ScopedCollectionAcquisition& coll,
-        CanonicalQuery* deleteParamsFilter = nullptr) {
+        WorkingSet* ws, CollectionAcquisition coll, CanonicalQuery* deleteParamsFilter = nullptr) {
         return makeBatchedDeleteStage(ws, coll, _expCtx.get(), deleteParamsFilter);
     }
 
     // Defaults batch params to be test defaults for targetBatchTimeMS and targetBatchDocs.
     std::unique_ptr<BatchedDeleteStage> makeBatchedDeleteStage(
         WorkingSet* ws,
-        const ScopedCollectionAcquisition& coll,
+        CollectionAcquisition coll,
         ExpressionContext* expCtx,
         CanonicalQuery* deleteParamsFilter = nullptr) {
 
@@ -218,7 +252,7 @@ public:
 
     std::unique_ptr<BatchedDeleteStage> makeBatchedDeleteStage(
         WorkingSet* ws,
-        const ScopedCollectionAcquisition& coll,
+        CollectionAcquisition coll,
         ExpressionContext* expCtx,
         std::unique_ptr<BatchedDeleteStageParams> batchedDeleteParams,
         CanonicalQuery* deleteParamsFilter = nullptr) {
@@ -235,7 +269,7 @@ public:
             std::move(batchedDeleteParams),
             ws,
             coll,
-            new CollectionScan(expCtx, coll.getCollectionPtr(), collScanParams, ws, nullptr));
+            new CollectionScan(expCtx, coll, collScanParams, ws, nullptr));
     }
 
 protected:

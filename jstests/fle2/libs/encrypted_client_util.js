@@ -1,13 +1,13 @@
 load("jstests/concurrency/fsm_workload_helpers/server_types.js");  // For isMongos.
-load("jstests/libs/feature_flag_util.js");
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 /**
  * Create a FLE client that has an unencrypted and encrypted client to the same database
  */
 
-var kSafeContentField = "__safeContent__";
+export var kSafeContentField = "__safeContent__";
 
-var EncryptedClient = class {
+export var EncryptedClient = class {
     /**
      * Create a new encrypted FLE connection to the target server with a local KMS
      *
@@ -20,6 +20,14 @@ var EncryptedClient = class {
         // Detect if jstests/libs/override_methods/implicitly_shard_accessed_collections.js is in
         // use
         this.useImplicitSharding = !(typeof (ImplicitlyShardAccessCollSettings) === "undefined");
+
+        if (conn.isAutoEncryptionEnabled()) {
+            this._keyVault = conn.getKeyVault();
+            this._edb = conn.getDB(dbName);
+            this._db = undefined;
+            this._admindb = conn.getDB("admin");
+            return;
+        }
 
         const localKMS = {
             key: BinData(
@@ -67,6 +75,13 @@ var EncryptedClient = class {
      */
     getDB() {
         return this._edb;
+    }
+
+    /**
+     * Creates a session on the encryptedClient.
+     */
+    startSession() {
+        return this._edb.getMongo().startSession();
     }
 
     /**
@@ -158,21 +173,21 @@ var EncryptedClient = class {
 
         // All our tests use "last" as the key to query on so shard on "last" instead of "_id"
         if (this.useImplicitSharding) {
-            let resShard = this._db.adminCommand({enableSharding: this._db.getName()});
+            let resShard = this._edb.adminCommand({enableSharding: this._edb.getName()});
 
             // enableSharding may only be called once for a database.
             if (resShard.code !== ErrorCodes.AlreadyInitialized) {
                 assert.commandWorked(
-                    resShard, "enabling sharding on the '" + this._db.getName() + "' db failed");
+                    resShard, "enabling sharding on the '" + this._edb.getName() + "' db failed");
             }
 
             let shardCollCmd = {
-                shardCollection: this._db.getName() + "." + name,
+                shardCollection: this._edb.getName() + "." + name,
                 key: {last: "hashed"},
                 collation: {locale: "simple"}
             };
 
-            resShard = this._db.adminCommand(shardCollCmd);
+            resShard = this._edb.adminCommand(shardCollCmd);
 
             jsTestLog("Sharding: " + tojson(shardCollCmd));
         }
@@ -207,7 +222,7 @@ var EncryptedClient = class {
         if (tenantId) {
             Object.extend(listCollCmdObj, {"$tenant": tenantId});
         }
-        const cis = assert.commandWorked(this._db.runCommand(listCollCmdObj));
+        const cis = assert.commandWorked(this._edb.runCommand(listCollCmdObj));
         assert.eq(
             cis.cursor.firstBatch.length, 1, `Expected to find one collection named '${name}'`);
 
@@ -258,7 +273,7 @@ var EncryptedClient = class {
      */
     assertEncryptedCollectionCounts(name, expectedEdc, expectedEsc, expectedEcoc, tenantId) {
         this.assertEncryptedCollectionCountsByObject(
-            this._db, name, expectedEdc, expectedEsc, expectedEcoc, tenantId);
+            this._edb, name, expectedEdc, expectedEsc, expectedEcoc, tenantId);
     }
 
     /**
@@ -415,7 +430,7 @@ var EncryptedClient = class {
     }
 };
 
-function runEncryptedTest(db, dbName, collNames, encryptedFields, runTestsCallback) {
+export function runEncryptedTest(db, dbName, collNames, encryptedFields, runTestsCallback) {
     const dbTest = db.getSiblingDB(dbName);
     dbTest.dropDatabase();
 
@@ -433,7 +448,7 @@ function runEncryptedTest(db, dbName, collNames, encryptedFields, runTestsCallba
         collNames = [collNames];
     }
 
-    for (collName of collNames) {
+    for (let collName of collNames) {
         assert.commandWorked(
             client.createEncryptionCollection(collName, {encryptedFields: encryptedFields}));
     }
@@ -445,21 +460,21 @@ function runEncryptedTest(db, dbName, collNames, encryptedFields, runTestsCallba
 /**
  * @returns Returns true if talking to a replica set
  */
-function isFLE2ReplicationEnabled() {
+export function isFLE2ReplicationEnabled() {
     return typeof (testingReplication) == "undefined" || testingReplication === true;
 }
 
 /**
  * @returns Returns true if featureFlagFLE2CleanupCommand is enabled
  */
-function isFLE2CleanupEnabled(db) {
+export function isFLE2CleanupEnabled(db) {
     return FeatureFlagUtil.isEnabled(db, "FLE2CleanupCommand");
 }
 
 /**
  * @returns Returns true if internalQueryFLEAlwaysUseEncryptedCollScanMode is enabled
  */
-function isFLE2AlwaysUseCollScanModeEnabled(db) {
+export function isFLE2AlwaysUseCollScanModeEnabled(db) {
     const doc = assert.commandWorked(
         db.adminCommand({getParameter: 1, internalQueryFLEAlwaysUseEncryptedCollScanMode: 1}));
     return (doc.internalQueryFLEAlwaysUseEncryptedCollScanMode === true);
@@ -471,7 +486,7 @@ function isFLE2AlwaysUseCollScanModeEnabled(db) {
  *
  * @param {BinData} value bindata value
  */
-function assertIsIndexedEncryptedField(value) {
+export function assertIsIndexedEncryptedField(value) {
     assert(value instanceof BinData, "Expected BinData, found: " + value);
     assert.eq(value.subtype(), 6, "Expected Encrypted bindata: " + value);
     assert(value.hex().startsWith("0e") || value.hex().startsWith("0f"),
@@ -483,7 +498,7 @@ function assertIsIndexedEncryptedField(value) {
  *
  * @param {BinData} value bindata value
  */
-function assertIsEqualityIndexedEncryptedField(value) {
+export function assertIsEqualityIndexedEncryptedField(value) {
     assert(value instanceof BinData, "Expected BinData, found: " + value);
     assert.eq(value.subtype(), 6, "Expected Encrypted bindata: " + value);
     assert(value.hex().startsWith("0e"),
@@ -495,7 +510,7 @@ function assertIsEqualityIndexedEncryptedField(value) {
  *
  * @param {BinData} value bindata value
  */
-function assertIsRangeIndexedEncryptedField(value) {
+export function assertIsRangeIndexedEncryptedField(value) {
     assert(value instanceof BinData, "Expected BinData, found: " + value);
     assert.eq(value.subtype(), 6, "Expected Encrypted bindata: " + value);
     assert(value.hex().startsWith("0f"),
@@ -507,7 +522,7 @@ function assertIsRangeIndexedEncryptedField(value) {
  *
  * @param {BinData} value bindata value
  */
-function assertIsUnindexedEncryptedField(value) {
+export function assertIsUnindexedEncryptedField(value) {
     assert(value instanceof BinData, "Expected BinData, found: " + value);
     assert.eq(value.subtype(), 6, "Expected Encrypted bindata: " + value);
     assert(value.hex().startsWith("10"),

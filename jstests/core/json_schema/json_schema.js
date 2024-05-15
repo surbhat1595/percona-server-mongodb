@@ -1,17 +1,14 @@
 // listCollections tests expect that a collection is not implicitly created after a drop.
 // @tags: [
 //   assumes_no_implicit_collection_creation_after_drop,
-//   requires_non_retryable_commands,
+//   requires_non_retryable_commands
 // ]
 
 /**
  * Tests for JSON Schema document validation.
  */
-(function() {
-"use strict";
-
 load("jstests/libs/assert_schema_match.js");
-load("jstests/libs/sbe_util.js");  // For checkSBEEnabled.
+import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
 const isSBEEnabled = checkSBEEnabled(db);
 
@@ -344,4 +341,3 @@ if (!isSBEEnabled) {
 }
 assert.eq(1, coll.find({$alwaysTrue: 1, b: 2}).itcount());
 assert.eq(0, coll.find({$alwaysFalse: 1, b: 2}).itcount());
-}());

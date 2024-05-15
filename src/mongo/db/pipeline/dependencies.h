@@ -30,10 +30,13 @@
 #pragma once
 
 #include <boost/optional.hpp>
+#include <cstddef>
 #include <set>
 #include <string>
 
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/pipeline/variables.h"
 
 namespace mongo {
@@ -43,8 +46,10 @@ namespace mongo {
  * This ensures that a parent field is ordered directly before its children.
  */
 struct PathComparator {
+    using is_transparent = void;
+
     /* Returns true if the lhs value should sort before the rhs, false otherwise. */
-    bool operator()(const std::string& lhs, const std::string& rhs) const;
+    bool operator()(StringData lhs, StringData rhs) const;
 };
 
 /**

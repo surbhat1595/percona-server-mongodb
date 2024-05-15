@@ -29,10 +29,26 @@
 
 #include "mongo/db/query/ce/hinted_estimator.h"
 
+#include <type_traits>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+
 #include "mongo/db/query/ce/heuristic_estimator.h"
 #include "mongo/db/query/ce/sel_tree_utils.h"
+#include "mongo/db/query/optimizer/algebra/operator.h"
+#include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
+#include "mongo/db/query/optimizer/partial_schema_requirements.h"
 
 namespace mongo::optimizer::ce {
+
+bool PartialSchemaIntervalComparator::operator()(const PartialSchemaInterval& k1,
+                                                 const PartialSchemaInterval& k2) const {
+    int result = PartialSchemaKeyComparator::Cmp3W{}(k1.first, k2.first);
+    result = result == 0 ? compareIntervalExpr(k1.second, k2.second) : result;
+    return result < 0;
+}
+
 class HintedTransport {
 public:
     CEType transport(const ABT& n,
@@ -43,9 +59,11 @@ public:
         EstimatePartialSchemaEntrySelFn entrySelFn = [&](SelectivityTreeBuilder& selTreeBuilder,
                                                          const PartialSchemaEntry& e) {
             const auto& [key, req] = e;
-            if (!isIntervalReqFullyOpenDNF(req.getIntervals())) {
-                auto it = _hints.find(key);
-                if (it != _hints.cend()) {
+            const auto& interval = req.getIntervals();
+            if (!isIntervalReqFullyOpenDNF(interval)) {
+                if (auto it = _intervalHints.find({key, interval}); it != _intervalHints.cend()) {
+                    selTreeBuilder.atom(it->second);
+                } else if (auto it = _pathHints.find(key); it != _pathHints.cend()) {
                     selTreeBuilder.atom(it->second);
                 }
             }
@@ -65,10 +83,11 @@ public:
 
     static CEType derive(const Metadata& metadata,
                          const cascades::Memo& memo,
-                         const PartialSchemaSelHints& hints,
+                         const PartialSchemaSelHints& pathHints,
+                         const PartialSchemaIntervalSelHints& intervalHints,
                          const properties::LogicalProps& logicalProps,
                          const ABT::reference_type logicalNodeRef) {
-        HintedTransport instance(metadata, memo, logicalProps, hints);
+        HintedTransport instance(metadata, memo, logicalProps, pathHints, intervalHints);
         return algebra::transport<true>(logicalNodeRef, instance);
     }
 
@@ -76,12 +95,14 @@ private:
     HintedTransport(const Metadata& metadata,
                     const cascades::Memo& memo,
                     const properties::LogicalProps& logicalProps,
-                    const PartialSchemaSelHints& hints)
+                    const PartialSchemaSelHints& pathHints,
+                    const PartialSchemaIntervalSelHints& intervalHints)
         : _heuristicCE(),
           _metadata(metadata),
           _memo(memo),
           _logicalProps(logicalProps),
-          _hints(hints) {}
+          _pathHints(pathHints),
+          _intervalHints(intervalHints) {}
 
     HeuristicEstimator _heuristicCE;
 
@@ -89,14 +110,19 @@ private:
     const Metadata& _metadata;
     const cascades::Memo& _memo;
     const properties::LogicalProps& _logicalProps;
-    const PartialSchemaSelHints& _hints;
+
+    // Selectivity hints per PartialSchemaKey.
+    const PartialSchemaSelHints& _pathHints;
+    // Selectivity hints per PartialSchemaKey and IntervalReqExpr::Node.
+    const PartialSchemaIntervalSelHints& _intervalHints;
 };
 
 CEType HintedEstimator::deriveCE(const Metadata& metadata,
                                  const cascades::Memo& memo,
                                  const properties::LogicalProps& logicalProps,
                                  const ABT::reference_type logicalNodeRef) const {
-    return HintedTransport::derive(metadata, memo, _hints, logicalProps, logicalNodeRef);
+    return HintedTransport::derive(
+        metadata, memo, _pathHints, _intervalHints, logicalProps, logicalNodeRef);
 }
 
 }  // namespace mongo::optimizer::ce

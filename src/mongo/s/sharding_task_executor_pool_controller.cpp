@@ -28,14 +28,26 @@
  */
 
 
-#include "mongo/platform/basic.h"
+#include <absl/container/node_hash_map.h>
+#include <absl/container/node_hash_set.h>
+#include <absl/meta/type_traits.h>
+#include <algorithm>
+#include <boost/move/utility_core.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <set>
 
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/client/connection_string.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/executor/connection_pool_stats.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
 #include "mongo/s/client/shard_registry.h"
-#include "mongo/s/is_mongos.h"
 #include "mongo/s/sharding_task_executor_pool_controller.h"
+#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kConnectionPool
 
@@ -94,7 +106,7 @@ Status ShardingTaskExecutorPoolController::validatePendingTimeout(
 
 Status ShardingTaskExecutorPoolController::onUpdateMatchingStrategy(const std::string& str) {
     if (str == "automatic") {
-        if (isMongos()) {
+        if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer)) {
             gParameters.matchingStrategy.store(MatchingStrategy::kMatchPrimaryNode);
         } else {
             gParameters.matchingStrategy.store(MatchingStrategy::kDisabled);

@@ -29,14 +29,31 @@
 
 #pragma once
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <memory>
+#include <utility>
+#include <vector>
+
 #include "mongo/base/string_data.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/locker.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/tenant_id.h"
 #include "mongo/db/views/view.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 namespace auto_get_collection {
@@ -67,12 +84,15 @@ struct OptionsBase {
 struct Options : OptionsBase<Options> {};
 struct OptionsWithSecondaryCollections : OptionsBase<OptionsWithSecondaryCollections> {
     OptionsWithSecondaryCollections secondaryNssOrUUIDs(
-        std::vector<NamespaceStringOrUUID> secondaryNssOrUUIDs) {
-        _secondaryNssOrUUIDs = std::move(secondaryNssOrUUIDs);
+        std::vector<NamespaceStringOrUUID>::const_iterator secondaryNssOrUUIDsBegin,
+        std::vector<NamespaceStringOrUUID>::const_iterator secondaryNssOrUUIDsEnd) {
+        _secondaryNssOrUUIDsBegin = secondaryNssOrUUIDsBegin;
+        _secondaryNssOrUUIDsEnd = secondaryNssOrUUIDsEnd;
         return std::move(*this);
     }
 
-    std::vector<NamespaceStringOrUUID> _secondaryNssOrUUIDs;
+    std::vector<NamespaceStringOrUUID>::const_iterator _secondaryNssOrUUIDsBegin;
+    std::vector<NamespaceStringOrUUID>::const_iterator _secondaryNssOrUUIDsEnd;
 };
 }  // namespace auto_get_collection
 
@@ -228,7 +248,7 @@ public:
     AutoGetCollection(OperationContext* opCtx,
                       const NamespaceStringOrUUID& nsOrUUID,
                       LockMode modeColl,
-                      Options options = {});
+                      const Options& options = {});
 
     /**
      * Special constructor when this class is instantiated from AutoGetCollectionForRead. Used to
@@ -239,7 +259,7 @@ public:
     AutoGetCollection(OperationContext* opCtx,
                       const NamespaceStringOrUUID& nsOrUUID,
                       LockMode modeColl,
-                      Options options,
+                      const Options& options,
                       ForReadTag read);
 
     AutoGetCollection(AutoGetCollection&&) = default;
@@ -309,7 +329,7 @@ protected:
     AutoGetCollection(OperationContext* opCtx,
                       const NamespaceStringOrUUID& nsOrUUID,
                       LockMode modeColl,
-                      Options options,
+                      const Options& options,
                       bool verifyWriteEligible);
     // Ordering matters, the _collLocks should destruct before the _autoGetDb releases the
     // rstl/global/database locks.
@@ -327,28 +347,53 @@ protected:
     Collection* _writableColl = nullptr;
 };
 
+class CollectionAcquisition;
+class ScopedLocalCatalogWriteFence;
+
 /**
  * RAII-style class to handle the lifetime of writable Collections.
  * It does not take any locks, concurrency needs to be handled separately using explicit locks or
  * AutoGetCollection. This class can serve as an adaptor to unify different methods of acquiring a
  * writable collection.
  *
- * It is safe to re-use an instance for multiple WriteUnitOfWorks or to destroy it before the active
- * WriteUnitOfWork finishes.
+ * It is safe to re-use an instance for multiple WriteUnitOfWorks. It is not safe to destroy it
+ * before the active WriteUnitOfWork finishes.
  */
-class ScopedCollectionAcquisition;
-class ScopedLocalCatalogWriteFence;
-
 class CollectionWriter final {
 public:
     // This constructor indicates to the shard role subsystem that the subsequent code enters into
     // local DDL land and that the content of the local collection should not be trusted until it
     // goes out of scope.
     //
-    // See the comments on ScopedCollectionAcquisition for more details.
+    // On destruction, if `getWritableCollection` been called during the object lifetime, the
+    // `acquisition` will be advanced to reflect the local catalog changes. It is important that
+    // when this destructor is called, the WUOW under which the catalog changes have been performed
+    // has already been commited or rollbacked. If it hasn't and the WUOW later rollbacks, the
+    // acquisition is left in an invalid state and must not be used.
+    //
+    // Example usage pattern:
+    // writeConflictRetry {
+    //     auto coll = acquireCollection(...);
+    //     CollectionWriter collectionWriter(opCtx, &coll);
+    //     WriteUnitOfWork wuow();
+    //     collectionWriter.getWritableCollection().xxxx();
+    //     wouw.commit();
+    // }
+    //
+    // Example usage pattern when the acquisition is held higher up by the caller:
+    // auto coll = acquireCollection(...);
+    // ...
+    // writeConflictRetry {
+    //     // It is important that ~CollectionWriter will be executed after the ~WriteUnitOfWork
+    //     // commits or rollbacks.
+    //     CollectionWriter collectionWriter(opCtx, &coll);
+    //     WriteUnitOfWork wuow();
+    //     collectionWriter.getWritableCollection().xxxx();
+    //     wouw.commit();
+    // }
     //
     // TODO (SERVER-73766): Only this constructor should remain in use
-    CollectionWriter(OperationContext* opCtx, ScopedCollectionAcquisition* acquisition);
+    CollectionWriter(OperationContext* opCtx, CollectionAcquisition* acquisition);
 
     // Gets the collection from the catalog for the provided uuid
     CollectionWriter(OperationContext* opCtx, const UUID& uuid);
@@ -391,8 +436,8 @@ public:
 
 private:
     // This group of values is only operated on for code paths that go through the
-    // `ScopedCollectionAcquisition` constructor.
-    ScopedCollectionAcquisition* _acquisition = nullptr;
+    // `CollectionAcquisition` constructor.
+    CollectionAcquisition* _acquisition = nullptr;
     std::unique_ptr<ScopedLocalCatalogWriteFence> _fence;
 
     // If this class is instantiated with the constructors that take UUID or nss we need somewhere

@@ -5,10 +5,8 @@
  *
  * @tags: [requires_fcv_70]
  */
-(function() {
-"use strict";
+import {ConfigShardUtil} from "jstests/libs/config_shard_util.js";
 
-load("jstests/libs/config_shard_util.js");
 load("jstests/sharding/analyze_shard_key/libs/query_sampling_util.js");
 
 const testCases = [];
@@ -177,12 +175,10 @@ function testDiffs(rst, testCase, expectSampling) {
     // Force samples to get persisted even though query sampling is not enabled.
     QuerySamplingUtil.skipActiveSamplingCheckWhenPersistingSamples(st);
 
-    const isConfigShardEnabled = ConfigShardUtil.isEnabledIgnoringFCV(st);
     for (const testCase of testCases) {
         testDiffs(st.rs0, testCase, true /* expectSampling */);
-        testDiffs(st.configRS, testCase, isConfigShardEnabled /* expectSampling */);
+        testDiffs(st.configRS, testCase, true /* expectSampling */);
     }
 
     st.stop();
 }
-})();

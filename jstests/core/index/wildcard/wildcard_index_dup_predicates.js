@@ -5,11 +5,8 @@
  *   does_not_support_stepdowns,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/analyze_plan.js");       // For getPlanStages.
-load("jstests/libs/feature_flag_util.js");  // For "FeatureFlagUtil"
+import {getPlanStages, getWinningPlan} from "jstests/libs/analyze_plan.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const coll = db.wildcard_index_dup_predicates;
 coll.drop();
@@ -27,9 +24,9 @@ const allowCompoundWildcardIndexes =
 // Inserts the given document and runs the given query to confirm that:
 // (1) query matches the given document
 // (2) the winning plan does a wildcard index scan
-function assertExpectedDocAnswersWildcardIndexQuery(doc, query, match, excludeCWI = false) {
+function assertExpectedDocAnswersWildcardIndexQuery(doc, query, match) {
     for (const indexSpec of wildcardIndexes) {
-        if ((!allowCompoundWildcardIndexes || excludeCWI) && indexSpec.wildcardProjection) {
+        if (!allowCompoundWildcardIndexes && indexSpec.wildcardProjection) {
             continue;
         }
         coll.drop();
@@ -77,12 +74,11 @@ assertExpectedDocAnswersWildcardIndexQuery(
     {a: {b: "foo"}}, {$and: [{a: {$gt: {}}}, {a: {$gt: {}}}, {"a.b": "foo"}]}, true);
 
 assertExpectedDocAnswersWildcardIndexQuery(
-    {a: {b: "foo"}}, {$and: [{a: {$ne: 3}}, {a: {$ne: 3}}, {"a.b": "foo"}]}, true, true);
+    {a: {b: "foo"}}, {$and: [{a: {$ne: 3}}, {a: {$ne: 3}}, {"a.b": "foo"}]}, true);
 
 assertExpectedDocAnswersWildcardIndexQuery(
     {a: {b: "foo"}},
     {$and: [{a: {$nin: [3, 4, 5]}}, {a: {$nin: [3, 4, 5]}}, {"a.b": "foo"}]},
-    true,
     true);
 
 assertExpectedDocAnswersWildcardIndexQuery(
@@ -92,4 +88,3 @@ assertExpectedDocAnswersWildcardIndexQuery(
     {a: {b: "foo"}},
     {$and: [{a: {$elemMatch: {$gt: {}}}}, {a: {$elemMatch: {$gt: {}}}}, {"a.b": "foo"}]},
     false);
-})();

@@ -4,11 +4,12 @@
 //   # Asserts that some queries use a collection scan.
 //   assumes_no_implicit_index_creation,
 // ]
-(function() {
-"use strict";
-
 load("jstests/libs/fixture_helpers.js");  // For FixtureHelpers.
-load("jstests/libs/analyze_plan.js");     // For planHasStage.
+import {
+    getWinningPlan,
+    planHasStage,
+    assertStagesForExplainOfCommand
+} from "jstests/libs/analyze_plan.js";
 
 const coll = db.distinct_multikey_index;
 
@@ -55,10 +56,12 @@ assertStagesForExplainOfCommand({
 
 assert.commandWorked(coll.dropIndexes());
 assert.commandWorked(coll.createIndex({a: 1, b: 1, text: "text"}));
-assertStagesForExplainOfCommand({
+// TODO SERVER-76084: build a test similar to this to check that the distinct output contains the
+// prefix according to expectPrefix value/presence ie.
+// if (!expectPrefix) assert.eq(result["queryPlanner"]["namespace"], "test.distinct_multikey_index")
+let result = assertStagesForExplainOfCommand({
     coll: coll,
     cmdObj: cmdObj,
     expectedStages: ["COLLSCAN"],
     stagesNotExpected: ["DISTINCT_SCAN"]
 });
-})();

@@ -7,12 +7,10 @@
  *   does_not_support_stepdowns,
  *   # We need a timeseries collection.
  *   requires_timeseries,
+ *   references_foreign_collection,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/core/timeseries/libs/timeseries_agg_helpers.js");
+import {TimeseriesAggTests} from "jstests/core/timeseries/libs/timeseries_agg_helpers.js";
 
 const testDB = TimeseriesAggTests.getTestDb();
 assert.commandWorked(testDB.dropDatabase());
@@ -108,4 +106,3 @@ let runMergeOnTestCase = () => {
 runSimpleMergeTestCase();
 runMergeOnErrorTestCase();
 runMergeOnTestCase();
-})();

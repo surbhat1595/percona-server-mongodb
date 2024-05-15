@@ -8,6 +8,7 @@ env.InjectThirdParty(libraries=['grpc'])
 env.Library(
     target='grpc_transport_layer',
     source=[
+        'client.cpp',
         'client_cache.cpp',
         'grpc_transport_layer.cpp',
         'server.cpp',
@@ -45,8 +46,10 @@ env.CppUnitTest(
     source=[
         'channel_pool_test.cpp',
         'client_cache_test.cpp',
+        'grpc_client_test.cpp',
         'grpc_session_test.cpp',
         'grpc_transport_layer_test.cpp',
+        'mock_client_test.cpp',
         'mock_server_stream_test.cpp',
         'mock_stub_test.cpp',
         'server_test.cpp',
@@ -54,11 +57,12 @@ env.CppUnitTest(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
+        '$BUILD_DIR/mongo/db/service_context_non_d',
         '$BUILD_DIR/mongo/db/service_context_test_fixture',
         '$BUILD_DIR/mongo/db/wire_version',
         '$BUILD_DIR/mongo/rpc/message',
         '$BUILD_DIR/mongo/util/clock_source_mock',
+        '$BUILD_DIR/mongo/util/periodic_runner_factory',
         '$BUILD_DIR/third_party/shim_grpc',
         'grpc_transport_layer',
         'grpc_transport_mock',

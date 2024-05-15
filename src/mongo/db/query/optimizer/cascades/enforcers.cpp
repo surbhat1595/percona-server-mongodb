@@ -29,8 +29,24 @@
 
 #include "mongo/db/query/optimizer/cascades/enforcers.h"
 
+#include <boost/optional.hpp>
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/container/node_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/db/query/optimizer/algebra/polyvalue.h"
 #include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
+#include "mongo/db/query/optimizer/containers.h"
+#include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
+#include "mongo/db/query/optimizer/syntax/syntax.h"
 #include "mongo/db/query/optimizer/utils/memo_utils.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo::optimizer::cascades {
 
@@ -69,13 +85,15 @@ public:
                         const RIDProjectionsMap& ridProjections,
                         PhysRewriteQueue& queue,
                         const PhysProps& physProps,
-                        const LogicalProps& logicalProps)
+                        const LogicalProps& logicalProps,
+                        PrefixId& prefixId)
         : _groupId(groupId),
           _metadata(metadata),
           _ridProjections(ridProjections),
           _queue(queue),
           _physProps(physProps),
-          _logicalProps(logicalProps) {}
+          _logicalProps(logicalProps),
+          _prefixId(prefixId) {}
 
     void operator()(const PhysProperty&, const CollationRequirement& prop) {
         if (hasIncompleteScanIndexingRequirement(_physProps)) {
@@ -254,6 +272,73 @@ public:
         // Noop. We do not currently enforce this property. It only affects costing.
     }
 
+    void operator()(const PhysProperty&, const RemoveOrphansRequirement& prop) {
+        if (!prop.mustRemove()) {
+            // Nothing to do if we don't need to remove any orphans.
+            return;
+        }
+
+        tassert(7829701,
+                "Enforcer for RemoveOrphansRequirement for a group without IndexingAvailability",
+                hasProperty<IndexingAvailability>(_logicalProps));
+
+        const auto& scanDefName =
+            getPropertyConst<IndexingAvailability>(_logicalProps).getScanDefName();
+        const auto& scanDef = _metadata._scanDefs.at(scanDefName);
+
+        // Constuct a plan fragment which enforces the requirement by projecting all fields of the
+        // shard key and invoking the shardFilter FunctionCall in a filter.
+        const auto& shardKey = scanDef.getDistributionAndPaths()._paths;
+        tassert(
+            7829702,
+            "Enforcer for RemoveOrphansRequirement but scan definition doesn't have a shard key.",
+            !shardKey.empty());
+        const auto& scanProj =
+            getPropertyConst<IndexingAvailability>(_logicalProps).getScanProjection();
+        ABTVector shardKeyFieldVars;
+
+        PhysPlanBuilder builder{make<MemoLogicalDelegatorNode>(_groupId)};
+
+        // Use the cardinality estimate of the group for costing purposes of the evaluation and
+        // filter nodes that we are constructing in this plan fragment because in the majority of
+        // cases, we expect there to be very few orphans and thus we don't adjust CE estimates to
+        // account for them.
+        auto ce = getPropertyConst<CardinalityEstimate>(_logicalProps);
+
+        // Save a pointer to the MemoLogicalDelagatorNode so we can use it in the childPropsMap.
+        ABT* childPtr = nullptr;
+
+        for (auto&& field : shardKey) {
+            auto projName = _prefixId.getNextId("shardKey");
+            builder.make<EvaluationNode>(ce.getEstimate(),
+                                         projName,
+                                         make<EvalPath>(field, make<Variable>(scanProj)),
+                                         std::move(builder._node));
+            shardKeyFieldVars.push_back(make<Variable>(projName));
+            if (childPtr == nullptr) {
+                childPtr = &builder._node.cast<EvaluationNode>()->getChild();
+            }
+        }
+        tassert(7829703, "Unable to save pointer to MemoLogicalDelagatorNode child.", childPtr);
+        builder.make<FilterNode>(ce.getEstimate(),
+                                 make<FunctionCall>("shardFilter", std::move(shardKeyFieldVars)),
+                                 std::move(builder._node));
+
+        PhysProps childProps = _physProps;
+        setPropertyOverwrite(childProps, RemoveOrphansRequirement{false});
+        addProjectionsToProperties(childProps, ProjectionNameSet{scanProj});
+
+        ChildPropsType childPropsMap;
+        childPropsMap.emplace_back(childPtr, std::move(childProps));
+
+        optimizeChildrenNoAssert(_queue,
+                                 kDefaultPriority,
+                                 PhysicalRewriteType::EnforceShardFilter,
+                                 std::move(builder._node),
+                                 std::move(childPropsMap),
+                                 std::move(builder._nodeCEMap));
+    }
+
 private:
     const GroupIdType _groupId;
 
@@ -263,6 +348,7 @@ private:
     PhysRewriteQueue& _queue;
     const PhysProps& _physProps;
     const LogicalProps& _logicalProps;
+    PrefixId& _prefixId;
 };
 
 void addEnforcers(const GroupIdType groupId,
@@ -270,8 +356,10 @@ void addEnforcers(const GroupIdType groupId,
                   const RIDProjectionsMap& ridProjections,
                   PhysRewriteQueue& queue,
                   const PhysProps& physProps,
-                  const LogicalProps& logicalProps) {
-    PropEnforcerVisitor visitor(groupId, metadata, ridProjections, queue, physProps, logicalProps);
+                  const LogicalProps& logicalProps,
+                  PrefixId& prefixId) {
+    PropEnforcerVisitor visitor(
+        groupId, metadata, ridProjections, queue, physProps, logicalProps, prefixId);
     for (const auto& entry : physProps) {
         entry.second.visit(visitor);
     }

@@ -29,9 +29,27 @@
 
 #include "mongo/db/query/optimizer/utils/interval_utils.h"
 
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/optimizer/node.h"
+#include <absl/container/node_hash_map.h>
+#include <algorithm>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <iterator>
+#include <memory>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
+
+#include "mongo/db/query/optimizer/algebra/operator.h"
+#include "mongo/db/query/optimizer/algebra/polyvalue.h"
+#include "mongo/db/query/optimizer/bool_expression.h"
+#include "mongo/db/query/optimizer/comparison_op.h"
+#include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
+#include "mongo/db/query/optimizer/syntax/expr.h"
+#include "mongo/db/query/optimizer/syntax/syntax.h"
 #include "mongo/db/query/optimizer/utils/abt_compare.h"
+#include "mongo/util/assert_util.h"
 
 
 namespace mongo::optimizer {
@@ -57,14 +75,8 @@ ABT maxABT(const ABT& v1, const ABT& v2) {
 };
 
 void constFoldInterval(IntervalRequirement& interval, const ConstFoldFn& constFold) {
-    ABT low = interval.getLowBound().getBound();
-    ABT high = interval.getHighBound().getBound();
-    constFold(low);
-    constFold(high);
-    interval = IntervalRequirement{
-        BoundRequirement{interval.getLowBound().isInclusive(), std::move(low)},
-        BoundRequirement{interval.getHighBound().isInclusive(), std::move(high)},
-    };
+    constFold(interval.getLowBound().getBound());
+    constFold(interval.getHighBound().getBound());
 }
 
 // Returns true if the interval can be proven to be empty. If no conclusion can be made, or the
@@ -782,6 +794,91 @@ bool isSimpleRange(const CompoundIntervalReqExpr::Node& interval) {
         return true;
     }
     return false;
+}
+
+bool mayContainNull(const IntervalReqExpr::Atom& node, const ConstFoldFn& constFold) {
+    const auto& interval = node.getExpr();
+
+    const auto foldFn = [&constFold](ABT expr) {
+        constFold(expr);
+        return expr;
+    };
+    if (const auto& lowBound = interval.getLowBound();
+        foldFn(make<BinaryOp>(lowBound.isInclusive() ? Operations::Gt : Operations::Gte,
+                              lowBound.getBound(),
+                              Constant::null())) == Constant::boolean(true)) {
+        // Lower bound is strictly larger than null, or equal to null but not inclusive.
+        return false;
+    }
+    if (const auto& highBound = interval.getHighBound();
+        foldFn(make<BinaryOp>(highBound.isInclusive() ? Operations::Lt : Operations::Lte,
+                              highBound.getBound(),
+                              Constant::null())) == Constant::boolean(true)) {
+        // Upper bound is strictly smaller than null, or equal to null but not inclusive.
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * Transport that replaces the intervals containing nulls in-place in order to preserve the DNF/CNF
+ * structure. If 'excludeNull' is true, the interval is updated to (null, HighBound] (i.e.
+ * intersecting {>Const [null]}). Otherwise, it is updated to [LowBound, null] (i.e. intersecting
+ * {<=Const [null]}).
+ */
+class SplitNullTransport {
+public:
+    void transport(IntervalReqExpr::Node& n,
+                   const IntervalReqExpr::Atom& atom,
+                   const ConstFoldFn& constFold,
+                   const bool excludeNull) {
+        if (mayContainNull(atom, constFold)) {
+            const IntervalRequirement& expr = atom.getExpr();
+            if (excludeNull) {
+                n.cast<IntervalReqExpr::Atom>()->getExpr() = IntervalRequirement{
+                    {false /*inclusive*/, Constant::null()}, expr.getHighBound()};
+            } else {
+                n.cast<IntervalReqExpr::Atom>()->getExpr() =
+                    IntervalRequirement{expr.getLowBound(), {true /*inclusive*/, Constant::null()}};
+            }
+        }
+    }
+    void transport(IntervalReqExpr::Node& n,
+                   const IntervalReqExpr::Conjunction&,
+                   const ConstFoldFn&,
+                   const bool excludeNull,
+                   std::vector<IntervalReqExpr::Node>&) {}
+    void transport(IntervalReqExpr::Node& n,
+                   const IntervalReqExpr::Disjunction&,
+                   const ConstFoldFn&,
+                   const bool excludeNull,
+                   std::vector<IntervalReqExpr::Node>&) {}
+
+
+    void split(IntervalReqExpr::Node& n, const ConstFoldFn& constFold, const bool excludeNull) {
+        algebra::transport<true>(n, *this, constFold, excludeNull);
+    }
+};
+
+boost::optional<std::pair<IntervalReqExpr::Node, IntervalReqExpr::Node>> splitNull(
+    const IntervalReqExpr::Node& interval, const ConstFoldFn& constFold) {
+    // Requires all the intervals to be constant and does not have a high bound with null
+    // inclusively. Having a low bound with null is acceptable because it's beneficial to split
+    // [null, HighBound] into [null, null] and (null, HighBound].
+    if (IntervalReqExpr::any(interval, [](const IntervalRequirement& requirement) {
+            return !requirement.isConstant() ||
+                requirement.getHighBound() == BoundRequirement{true, Constant::null()};
+        })) {
+        return boost::none;
+    }
+    IntervalReqExpr::Node nullExcluded = interval;
+    IntervalReqExpr::Node nullIncluded = interval;
+
+    SplitNullTransport{}.split(nullExcluded, constFold, true /* excludeNull */);
+    SplitNullTransport{}.split(nullIncluded, constFold, false /* excludeNull */);
+
+    return std::make_pair(nullExcluded, nullIncluded);
 }
 
 }  // namespace mongo::optimizer

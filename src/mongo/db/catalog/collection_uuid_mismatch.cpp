@@ -29,9 +29,16 @@
 
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/type_traits/decay.hpp>
+
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/string_data.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_uuid_mismatch_info.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -39,18 +46,18 @@ void checkCollectionUUIDMismatch(OperationContext* opCtx,
                                  const NamespaceString& ns,
                                  const Collection* coll,
                                  const boost::optional<UUID>& uuid) {
-    checkCollectionUUIDMismatch(opCtx, CollectionCatalog::get(opCtx), ns, coll, uuid);
+    checkCollectionUUIDMismatch(opCtx, *CollectionCatalog::get(opCtx), ns, coll, uuid);
 }
 
 void checkCollectionUUIDMismatch(OperationContext* opCtx,
                                  const NamespaceString& ns,
                                  const CollectionPtr& coll,
                                  const boost::optional<UUID>& uuid) {
-    checkCollectionUUIDMismatch(opCtx, CollectionCatalog::get(opCtx), ns, coll.get(), uuid);
+    checkCollectionUUIDMismatch(opCtx, *CollectionCatalog::get(opCtx), ns, coll.get(), uuid);
 }
 
 void checkCollectionUUIDMismatch(OperationContext* opCtx,
-                                 const std::shared_ptr<const CollectionCatalog>& catalog,
+                                 const CollectionCatalog& catalog,
                                  const NamespaceString& ns,
                                  const CollectionPtr& coll,
                                  const boost::optional<UUID>& uuid) {
@@ -58,7 +65,7 @@ void checkCollectionUUIDMismatch(OperationContext* opCtx,
 }
 
 void checkCollectionUUIDMismatch(OperationContext* opCtx,
-                                 const std::shared_ptr<const CollectionCatalog>& catalog,
+                                 const CollectionCatalog& catalog,
                                  const NamespaceString& ns,
                                  const Collection* coll,
                                  const boost::optional<UUID>& uuid) {
@@ -66,7 +73,7 @@ void checkCollectionUUIDMismatch(OperationContext* opCtx,
         return;
     }
 
-    auto actualNamespace = catalog->lookupNSSByUUID(opCtx, *uuid);
+    auto actualNamespace = catalog.lookupNSSByUUID(opCtx, *uuid);
     uassert(
         (CollectionUUIDMismatchInfo{ns.dbName(),
                                     *uuid,

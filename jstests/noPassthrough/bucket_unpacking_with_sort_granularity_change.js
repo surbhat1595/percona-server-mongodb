@@ -3,15 +3,12 @@
 // We check that the results are correct, the documents are sorted, and the documents we expect to
 // appear, appear.
 // Note: events in buckets that exceed bucketMaxSpan are not included.
-(function() {
-"use strict";
-
-load("jstests/core/timeseries/libs/timeseries.js");  // For TimeseriesTest
+import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 
 const dbName = jsTestName();
 
 // Start a single mongoD using MongoRunner.
-const conn = MongoRunner.runMongod({setParameter: "featureFlagBucketUnpackWithSort=true"});
+const conn = MongoRunner.runMongod();
 assert.neq(null, conn, "mongod was unable to start up");
 
 // Create the test DB and collection.
@@ -20,13 +17,6 @@ const adminDB = conn.getDB("admin");
 const collName = dbName;
 const coll = db[collName];
 const minsToMillis = (mins) => mins * 60 * 1000;
-
-if (!TimeseriesTest.bucketUnpackWithSortEnabled(db.getMongo())) {
-    jsTestLog("Skipping test because 'BucketUnpackWithSort' is disabled.");
-    return;
-}
-
-printjson(conn.adminCommand({getParameter: 1, featureFlagBucketUnpackWithSort: 1}));
 
 const on = "alwaysOn";
 const off = "off";
@@ -103,4 +93,3 @@ let resOpt = mergeShellOptimized();
 assert(resOpt == 0);
 
 MongoRunner.stopMongod(conn);
-})();

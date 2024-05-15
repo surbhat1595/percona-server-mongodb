@@ -30,9 +30,18 @@
 #pragma once
 
 #include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <cstddef>
+#include <memory>
+#include <vector>
 
+#include "mongo/base/clonable_ptr.h"
 #include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/util/builder_fwd.h"
+#include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_array.h"
+#include "mongo/db/query/serialization_options.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -52,7 +61,7 @@ public:
 
     void debugString(StringBuilder& debug, int indentationLevel) const final;
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final;
+    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final;
 
     bool equivalent(const MatchExpression* other) const final;
 

@@ -13,10 +13,8 @@
 
 // Test partial index creation and drops.
 
-load("jstests/libs/feature_flag_util.js");
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
-(function() {
-"use strict";
 var coll = db.index_partial_create_drop;
 
 var getNumKeys = function(idxName) {
@@ -77,8 +75,7 @@ assert.commandWorked(coll.dropIndex({x: 1}));
 assert.eq(1, coll.getIndexes().length);
 
 // Create partial index in background.
-assert.commandWorked(
-    coll.createIndex({x: 1}, {background: true, partialFilterExpression: {a: {$lt: 5}}}));
+assert.commandWorked(coll.createIndex({x: 1}, {partialFilterExpression: {a: {$lt: 5}}}));
 assert.eq(5, getNumKeys("x_1"));
 assert.commandWorked(coll.dropIndex({x: 1}));
 assert.eq(1, coll.getIndexes().length);
@@ -120,4 +117,3 @@ numIndexesBefore = coll.getIndexes().length;
 assert.commandFailedWithCode(coll.dropIndex({x: 1}), ErrorCodes.AmbiguousIndexKeyPattern);
 assert.commandWorked(coll.dropIndex("partialIndex2"));
 assert.eq(coll.getIndexes().length, numIndexesBefore - 1);
-})();

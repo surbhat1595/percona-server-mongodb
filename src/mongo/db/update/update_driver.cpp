@@ -29,27 +29,36 @@
 
 #include "mongo/db/update/update_driver.h"
 
+#include <boost/move/utility_core.hpp>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
+#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/mutable/algorithm.h"
+#include "mongo/bson/bsontypes.h"
 #include "mongo/bson/mutable/document.h"
-#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/curop_failpoint_helpers.h"
-#include "mongo/db/field_ref.h"
-#include "mongo/db/matcher/expression_leaf.h"
+#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
-#include "mongo/db/server_options.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/find_command.h"
 #include "mongo/db/update/delta_executor.h"
 #include "mongo/db/update/modifier_table.h"
 #include "mongo/db/update/object_replace_executor.h"
 #include "mongo/db/update/object_transform_executor.h"
 #include "mongo/db/update/path_support.h"
-#include "mongo/db/update/storage_validation.h"
-#include "mongo/db/update/update_oplog_entry_version.h"
-#include "mongo/stdx/variant.h"
-#include "mongo/util/embedded_builder.h"
-#include "mongo/util/overloaded_visitor.h"
+#include "mongo/db/update/pipeline_executor.h"
+#include "mongo/db/update/update_object_node.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 #include "mongo/util/str.h"
 
 namespace mongo {
@@ -187,7 +196,7 @@ Status UpdateDriver::populateDocumentWithQueryFields(OperationContext* opCtx,
     // We canonicalize the query to collapse $and/$or, and the namespace is not needed.  Also,
     // because this is for the upsert case, where we insert a new document if one was not found, the
     // $where/$text clauses do not make sense, hence empty ExtensionsCallback.
-    auto findCommand = std::make_unique<FindCommandRequest>(NamespaceString(""));
+    auto findCommand = std::make_unique<FindCommandRequest>(NamespaceString());
     findCommand->setFilter(query);
     const boost::intrusive_ptr<ExpressionContext> expCtx;
     // $expr is not allowed in the query for an upsert, since it is not clear what the equality

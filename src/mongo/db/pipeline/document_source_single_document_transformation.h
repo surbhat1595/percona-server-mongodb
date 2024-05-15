@@ -29,10 +29,34 @@
 
 #pragma once
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <list>
+#include <memory>
+#include <set>
+#include <string>
 #include <type_traits>
+#include <utility>
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/single_document_transformation_processor.h"
+#include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/transformer_interface.h"
+#include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/serialization_options.h"
+#include "mongo/util/assert_util_core.h"
+#include "mongo/util/intrusive_counter.h"
 
 namespace mongo {
 
@@ -90,14 +114,18 @@ public:
     }
 
     TransformerInterface::TransformerType getType() const {
-        return _parsedTransform->getType();
+        return _transformationProcessor->getTransformer().getType();
     }
 
     const auto& getTransformer() const {
-        return *_parsedTransform;
+        return _transformationProcessor->getTransformer();
     }
     auto& getTransformer() {
-        return *_parsedTransform;
+        return _transformationProcessor->getTransformer();
+    }
+
+    SingleDocumentTransformationProcessor* getTransformationProcessor() {
+        return _transformationProcessor.get_ptr();
     }
 
     /**
@@ -120,7 +148,8 @@ public:
     std::pair<BSONObj, bool> extractComputedProjections(const StringData& oldName,
                                                         const StringData& newName,
                                                         const std::set<StringData>& reservedNames) {
-        return _parsedTransform->extractComputedProjections(oldName, newName, reservedNames);
+        return _transformationProcessor->getTransformer().extractComputedProjections(
+            oldName, newName, reservedNames);
     }
 
     /**
@@ -131,7 +160,8 @@ public:
      */
     std::pair<BSONObj, bool> extractProjectOnFieldAndRename(const StringData& oldName,
                                                             const StringData& newName) {
-        return _parsedTransform->extractProjectOnFieldAndRename(oldName, newName);
+        return _transformationProcessor->getTransformer().extractProjectOnFieldAndRename(oldName,
+                                                                                         newName);
     }
 
 protected:
@@ -142,8 +172,7 @@ protected:
                                                      Pipeline::SourceContainer* container) final;
 
 private:
-    // Stores transformation logic.
-    std::unique_ptr<TransformerInterface> _parsedTransform;
+    boost::optional<SingleDocumentTransformationProcessor> _transformationProcessor;
 
     // Specific name of the transformation.
     std::string _name;

@@ -27,9 +27,21 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#include <absl/meta/type_traits.h>
+#include <boost/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
 
+#include <absl/container/flat_hash_map.h>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/projection_node.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/str.h"
 
 namespace mongo::projection_executor {
 using ArrayRecursionPolicy = ProjectionPolicies::ArrayRecursionPolicy;
@@ -247,7 +259,8 @@ void ProjectionNode::reportProjectedPaths(OrderedPathSet* projectedPaths) const 
 }
 
 void ProjectionNode::reportComputedPaths(OrderedPathSet* computedPaths,
-                                         StringMap<std::string>* renamedPaths) const {
+                                         StringMap<std::string>* renamedPaths,
+                                         StringMap<std::string>* complexRenamedPaths) const {
     for (auto&& computedPair : _expressions) {
         // The expression's path is the concatenation of the path to this node, plus the field name
         // associated with the expression.
@@ -258,9 +271,15 @@ void ProjectionNode::reportComputedPaths(OrderedPathSet* computedPaths,
         for (auto&& rename : exprComputedPaths.renames) {
             (*renamedPaths)[rename.first] = rename.second;
         }
+
+        if (complexRenamedPaths) {
+            for (auto&& complexRename : exprComputedPaths.complexRenames) {
+                (*complexRenamedPaths)[complexRename.first] = complexRename.second;
+            }
+        }
     }
     for (auto&& childPair : _children) {
-        childPair.second->reportComputedPaths(computedPaths, renamedPaths);
+        childPair.second->reportComputedPaths(computedPaths, renamedPaths, complexRenamedPaths);
     }
 }
 

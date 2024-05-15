@@ -10,16 +10,8 @@
  *   requires_timeseries,
  * ]
  */
-(function() {
-"use strict";
-
-load('jstests/libs/analyze_plan.js');
-load("jstests/core/timeseries/libs/timeseries.js");
-
-if (!TimeseriesTest.bucketUnpackWithSortEnabled(db.getMongo())) {
-    jsTestLog("Skipping test because 'BucketUnpackWithSort' is disabled.");
-    return;
-}
+import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
+import {getAggPlanStages} from "jstests/libs/analyze_plan.js";
 
 const coll = db.timeseries_internal_bounded_sort;
 const buckets = db['system.buckets.' + coll.getName()];
@@ -177,4 +169,3 @@ function runTest(ascending) {
 
 runTest(true);   // ascending
 runTest(false);  // descending
-})();

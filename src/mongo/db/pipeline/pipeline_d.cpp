@@ -29,39 +29,70 @@
 
 #include "mongo/db/pipeline/pipeline_d.h"
 
+#include <algorithm>
+#include <bitset>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr.hpp>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <iterator>
+#include <list>
+#include <string>
+#include <tuple>
+#include <type_traits>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/base/error_codes.h"
 #include "mongo/base/exact_cast.h"
+#include "mongo/base/status.h"
+#include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/basic_types.h"
 #include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/curop.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/exec/cached_plan.h"
 #include "mongo/db/exec/collection_scan.h"
-#include "mongo/db/exec/fetch.h"
+#include "mongo/db/exec/collection_scan_common.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/exec/index_scan.h"
 #include "mongo/db/exec/multi_iterator.h"
 #include "mongo/db/exec/multi_plan.h"
-#include "mongo/db/exec/projection.h"
-#include "mongo/db/exec/queued_data_stage.h"
+#include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sample_from_timeseries_bucket.h"
 #include "mongo/db/exec/shard_filter.h"
+#include "mongo/db/exec/shard_filterer.h"
 #include "mongo/db/exec/shard_filterer_impl.h"
-#include "mongo/db/exec/subplan.h"
+#include "mongo/db/exec/timeseries/bucket_spec.h"
 #include "mongo/db/exec/trial_stage.h"
 #include "mongo/db/exec/unpack_timeseries_bucket.h"
 #include "mongo/db/exec/working_set.h"
-#include "mongo/db/index/index_access_method.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/index_names.h"
+#include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_expr.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/ops/write_ops_exec.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
 #include "mongo/db/pipeline/document_source_geo_near.h"
 #include "mongo/db/pipeline/document_source_geo_near_cursor.h"
 #include "mongo/db/pipeline/document_source_group.h"
+#include "mongo/db/pipeline/document_source_group_base.h"
+#include "mongo/db/pipeline/document_source_internal_projection.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/document_source_match.h"
@@ -69,30 +100,54 @@
 #include "mongo/db/pipeline/document_source_sample_from_random_cursor.h"
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/pipeline/document_source_sort.h"
+#include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/inner_pipeline_stage_impl.h"
+#include "mongo/db/pipeline/inner_pipeline_stage_interface.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/search_helper.h"
 #include "mongo/db/pipeline/skip_and_limit.h"
+#include "mongo/db/pipeline/stage_constraints.h"
+#include "mongo/db/pipeline/transformer_interface.h"
+#include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/find_command.h"
 #include "mongo/db/query/get_executor.h"
+#include "mongo/db/query/index_bounds.h"
+#include "mongo/db/query/parsed_distinct.h"
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_executor_impl.h"
-#include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/projection.h"
 #include "mongo/db/query/projection_parser.h"
+#include "mongo/db/query/projection_policies.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
+#include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/record_id_bound.h"
 #include "mongo/db/query/sort_pattern.h"
 #include "mongo/db/query/stage_types.h"
+#include "mongo/db/query/tailable_mode_gen.h"
+#include "mongo/db/query/util/make_data_structure.h"
+#include "mongo/db/record_id.h"
 #include "mongo/db/s/collection_sharding_state.h"
+#include "mongo/db/s/scoped_collection_metadata.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/stats/top.h"
+#include "mongo/db/server_parameter.h"
+#include "mongo/db/server_parameter_with_storage.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/db/storage/test_harness_helper.h"
+#include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/compiler.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/s/query/document_source_merge_cursors.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -107,19 +162,67 @@ using write_ops::InsertCommandRequest;
 
 namespace {
 /**
- * Finds a prefix of 'DocumentSourceGroup' and 'DocumentSourceLookUp' stages from the given
- * pipeline to prepare for pushdown of $group and $lookup into the inner query layer so that it
- * can be executed using SBE.
- * Group stages are extracted from the pipeline when all of the following conditions are met:
- *    - When the 'internalQueryFrameworkControl' is not set to "forceClassicEngine".
- *    - When the 'internalQuerySlotBasedExecutionDisableGroupPushdown' query knob is 'false'.
- *    - When the DocumentSourceGroup has 'doingMerge=false'.
+ * Helper for findSbeCompatibleStagesForPushdown() that checks whether 'stage' is a $project or
+ * $addFields that can be pushed down to SBE as a 'DocumentSourceInternalProjection' stage. If so,
+ * this returns a pointer to a constructed object of the latter type, else it returns nullptr.
+ */
+boost::intrusive_ptr<DocumentSource> sbeCompatibleProjectionFromSingleDocumentTransformation(
+    const DocumentSource& stage) {
+    const DocumentSourceSingleDocumentTransformation* transformStage =
+        dynamic_cast<const DocumentSourceSingleDocumentTransformation*>(&stage);
+    if (!transformStage) {
+        return nullptr;
+    }
+
+    InternalProjectionPolicyEnum policies;
+    switch (transformStage->getType()) {
+        case TransformerInterface::TransformerType::kExclusionProjection:
+        case TransformerInterface::TransformerType::kInclusionProjection:
+            policies = InternalProjectionPolicyEnum::kAggregate;
+            break;
+        case TransformerInterface::TransformerType::kComputedProjection:
+            policies = InternalProjectionPolicyEnum::kAddFields;
+            break;
+        default:
+            return nullptr;
+    }
+
+    const boost::intrusive_ptr<ExpressionContext>& expCtx = transformStage->getContext();
+    ON_BLOCK_EXIT([&,
+                   originalSbeCompatibility{std::exchange(expCtx->sbeCompatibility,
+                                                          SbeCompatibility::fullyCompatible)}]() {
+        expCtx->sbeCompatibility = originalSbeCompatibility;
+    });
+
+    boost::intrusive_ptr<DocumentSource> projectionStage =
+        make_intrusive<DocumentSourceInternalProjection>(
+            expCtx,
+            transformStage->getTransformer().serializeTransformation(boost::none).toBson(),
+            policies);
+
+    return (expCtx->sbeCompatibility != SbeCompatibility::notCompatible) ? projectionStage
+                                                                         : nullptr;
+}
+
+/**
+ * Finds a prefix of stages from the given pipeline to prepare for pushdown into the inner query
+ * layer so that it can be executed using SBE.
  *
- * Lookup stages are extracted from the pipeline when all of the following conditions are met:
- *    - When the 'internalQueryFrameworkControl' is not set to "forceClassicEngine".
- *    - When the 'internalQuerySlotBasedExecutionDisableLookupPushdown' query knob is 'false'.
+ * $group stages ('DocumentSourceGroup') are extracted from the pipeline when all of:
+ *    - 'internalQueryFrameworkControl' is not set to "forceClassicEngine".
+ *    - 'internalQuerySlotBasedExecutionDisableGroupPushdown' query knob is 'false'.
+ *    - DocumentSourceGroup has 'doingMerge=false'.
+ *
+ * $lookup stages ('DocumentSourceLookUp') are extracted when all of:
+ *    - 'internalQueryFrameworkControl' is not set to "forceClassicEngine".
+ *    - 'internalQuerySlotBasedExecutionDisableLookupPushdown' query knob is 'false'.
  *    - The $lookup uses only the 'localField'/'foreignField' syntax (no pipelines).
  *    - The foreign collection is neither sharded nor a view.
+ *
+ * $project and $addFields stages (collectively 'DocumentSourceInternalProjection') are extracted
+ * when all of:
+ *    - 'internalQueryFrameworkControl' is not set to "forceClassicEngine".
+ *    - featureFlagSbeFull is enabled (TODO SERVER-72549 remove this comment line: SBE Pushdown)
  */
 std::vector<std::unique_ptr<InnerPipelineStageInterface>> findSbeCompatibleStagesForPushdown(
     const MultipleCollectionAccessor& collections,
@@ -191,6 +294,18 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> findSbeCompatibleStage
             break;
         }
 
+        // TODO SERVER-72549: Remove use of featureFlagSbeFull by SBE Pushdown feature.
+        // (Ignore FCV check): This is intentional because we always want to use this feature when
+        // the feature flag is enabled.
+        if (feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCVUnsafe()) {
+            if (boost::intrusive_ptr<DocumentSource> projectionStage =
+                    sbeCompatibleProjectionFromSingleDocumentTransformation(**itr)) {
+                stagesForPushdown.push_back(
+                    std::make_unique<InnerPipelineStageImpl>(projectionStage, isLastSource));
+                continue;
+            }
+        }
+
         // Current stage cannot be pushed down.
         break;
     }
@@ -236,6 +351,10 @@ std::unique_ptr<FindCommandRequest> createFindCommand(
     if (aggRequest) {
         findCommand->setAllowDiskUse(aggRequest->getAllowDiskUse());
         findCommand->setHint(aggRequest->getHint().value_or(BSONObj()).getOwned());
+        findCommand->setRequestResumeToken(aggRequest->getRequestResumeToken());
+        if (aggRequest->getResumeAfter()) {
+            findCommand->setResumeAfter(*aggRequest->getResumeAfter());
+        }
     }
 
     // The collation on the ExpressionContext has been resolved to either the user-specified
@@ -560,7 +679,7 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
     // Build a MultiIteratorStage and pass it the random-sampling RecordCursor.
     auto ws = std::make_unique<WorkingSet>();
     std::unique_ptr<PlanStage> root =
-        std::make_unique<MultiIteratorStage>(expCtx.get(), ws.get(), coll);
+        std::make_unique<MultiIteratorStage>(expCtx.get(), ws.get(), &coll);
     static_cast<MultiIteratorStage*>(root.get())->addIterator(std::move(rsRandCursor));
 
     TrialStage* trialStage = nullptr;
@@ -646,7 +765,7 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
             gTimeseriesBucketMaxCount);
 
         std::unique_ptr<PlanStage> collScanPlan = std::make_unique<CollectionScan>(
-            expCtx.get(), coll, CollectionScanParams{}, ws.get(), nullptr);
+            expCtx.get(), &coll, CollectionScanParams{}, ws.get(), nullptr);
 
         if (isSharded) {
             // In the sharded case, we need to add a shard-filterer stage to the backup plan to
@@ -698,7 +817,7 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
             expCtx.get(), *optOwnershipFilter, ws.get(), std::move(root));
         // The backup plan is SHARDING_FILTER-COLLSCAN.
         std::unique_ptr<PlanStage> collScanPlan = std::make_unique<CollectionScan>(
-            expCtx.get(), coll, CollectionScanParams{}, ws.get(), nullptr);
+            expCtx.get(), &coll, CollectionScanParams{}, ws.get(), nullptr);
         collScanPlan = std::make_unique<ShardFilterStage>(
             expCtx.get(), *optOwnershipFilter, ws.get(), std::move(collScanPlan));
         // Place a TRIAL stage at the root of the plan tree, and pass it the trial and backup plans.
@@ -806,7 +925,27 @@ PipelineD::buildInnerQueryExecutor(const MultipleCollectionAccessor& collections
     // We will be modifying the source vector as we go.
     Pipeline::SourceContainer& sources = pipeline->_sources;
 
-    if (!sources.empty() && !sources.front()->constraints().requiresInputDocSource) {
+    // We skip the 'requiresInputDocSource' check in the case of pushing $search down into SBE,
+    // as $search has 'requiresInputDocSource' as false. Specifically, we skip this check if
+    // it is a $search pipeline, 'featureFlagSearchInSbe' is enabled and forceClassicEngine
+    // is false.
+    auto firstStageIsSearch =
+        getSearchHelpers(expCtx->opCtx->getServiceContext())->isSearchPipeline(pipeline) ||
+        getSearchHelpers(expCtx->opCtx->getServiceContext())->isSearchMetaPipeline(pipeline);
+    auto searchInSbeEnabled =
+        feature_flags::gFeatureFlagSearchInSbe.isEnabled(serverGlobalParams.featureCompatibility);
+
+    // TODO SERVER-78998: This check should be modified once we've refactored checking
+    // 'internalQueryFrameworkControl'.
+    auto forceClassicEngine = ServerParameterSet::getNodeParameterSet()
+                                  ->get<QueryFrameworkControl>("internalQueryFrameworkControl")
+                                  ->_data.get() == QueryFrameworkControlEnum::kForceClassicEngine;
+
+    bool skipRequiresInputDocSourceCheck =
+        firstStageIsSearch && searchInSbeEnabled && !forceClassicEngine;
+
+    if (!skipRequiresInputDocSourceCheck && !sources.empty() &&
+        !sources.front()->constraints().requiresInputDocSource) {
         return {};
     }
 
@@ -1313,10 +1452,7 @@ PipelineD::buildInnerQueryExecutorGeneric(const MultipleCollectionAccessor& coll
     // If this is a query on a time-series collection then it may be eligible for a post-planning
     // sort optimization. We check eligibility and perform the rewrite here.
     auto [unpack, sort] = findUnpackThenSort(pipeline->_sources);
-    const bool timeseriesBoundedSortOptimization =
-        feature_flags::gFeatureFlagBucketUnpackWithSort.isEnabled(
-            serverGlobalParams.featureCompatibility) &&
-        unpack && sort;
+    const bool timeseriesBoundedSortOptimization = unpack && sort;
     QueryPlannerParams plannerOpts;
     if (timeseriesBoundedSortOptimization) {
         plannerOpts.traversalPreference = createTimeSeriesTraversalPreference(unpack, sort);

@@ -126,6 +126,16 @@ env.Library(
 )
 
 env.Library(
+    target='connection_pool_controllers',
+    source=[
+        'connection_pool_controllers.cpp',
+    ],
+    LIBDEPS=[
+        'connection_pool_executor',
+    ],
+)
+
+env.Library(
     target='network_test_env',
     source=[
         'network_test_env.cpp',
@@ -404,6 +414,7 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/commands/standalone',
         '$BUILD_DIR/mongo/db/query/command_request_response',
         '$BUILD_DIR/mongo/db/repl/hello_command',
+        '$BUILD_DIR/mongo/db/service_context_non_d',
         '$BUILD_DIR/mongo/db/service_context_test_fixture',
         '$BUILD_DIR/mongo/s/mongos_server_parameters',
         '$BUILD_DIR/mongo/s/sharding_router_test_fixture',
@@ -436,7 +447,6 @@ env.CppIntegrationTest(
     LIBDEPS=[
         '$BUILD_DIR/mongo/client/async_client',
         '$BUILD_DIR/mongo/client/clientdriver_network',
-        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/db/wire_version',
         '$BUILD_DIR/mongo/executor/network_interface_factory',
         '$BUILD_DIR/mongo/executor/network_interface_thread_pool',

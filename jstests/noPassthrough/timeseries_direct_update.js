@@ -2,12 +2,9 @@
  * Tests that direct updates to a timeseries bucket collection close the bucket, preventing further
  * inserts to land in that bucket or deletes and updates to be applied to it.
  */
-(function() {
-'use strict';
-
 load("jstests/libs/fail_point_util.js");
 load("jstests/libs/parallel_shell_helpers.js");
-load("jstests/libs/feature_flag_util.js");
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const conn = MongoRunner.runMongod();
 
@@ -96,15 +93,14 @@ assert(!buckets[2].control.hasOwnProperty("closed"));
 
 // Make sure that closed buckets are skipped by updates and deletes.
 if (FeatureFlagUtil.isPresentAndEnabled(testDB, "TimeseriesUpdatesSupport")) {
-    // TODO SERVER-73454 Enable this test.
     // The first two buckets containing documents 0 and 1 are closed, so we can only update the
     // third document in the last bucket.
-    // const result = assert.commandWorked(coll.updateMany({}, {$set: {newField: 123}}));
-    // assert.eq(result.matchedCount, 1, result);
-    // assert.eq(result.modifiedCount, 1, result);
-    // assert.docEq(docs.slice(2, 3),
-    //              coll.find({newField: 123}, {newField: 0}).toArray(),
-    //              `Expected exactly one document to be updated. ${coll.find().toArray()}`);
+    const result = assert.commandWorked(coll.updateMany({}, {$set: {newField: 123}}));
+    assert.eq(result.matchedCount, 1, result);
+    assert.eq(result.modifiedCount, 1, result);
+    assert.docEq(docs.slice(2, 3),
+                 coll.find({newField: 123}, {newField: 0}).toArray(),
+                 `Expected exactly one document to be updated. ${coll.find().toArray()}`);
 }
 if (FeatureFlagUtil.isPresentAndEnabled(testDB, "TimeseriesDeletesSupport")) {
     // The first two buckets containing documents 0 and 1 are closed, so we can only delete the
@@ -125,4 +121,3 @@ if (FeatureFlagUtil.isPresentAndEnabled(testDB, "TimeseriesDeletesSupport")) {
 }
 
 MongoRunner.stopMongod(conn);
-})();

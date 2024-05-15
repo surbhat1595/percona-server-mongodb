@@ -29,22 +29,33 @@
 
 #pragma once
 
+#include <boost/optional/optional.hpp>
+#include <functional>
 #include <map>
+#include <memory>
 #include <set>
 #include <vector>
 
 #include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_id.h"
 #include "mongo/rpc/write_concern_error_detail.h"
+#include "mongo/s/chunk_manager.h"
 #include "mongo/s/ns_targeter.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
+#include "mongo/s/write_ops/batched_upsert_detail.h"
 #include "mongo/s/write_ops/write_op.h"
 #include "mongo/stdx/unordered_map.h"
 
 namespace mongo {
 
 class OperationContext;
+
 class TrackedErrors;
 
 // Conservative overhead per element contained in the write batch. This value was calculated as 1
@@ -81,6 +92,12 @@ struct ShardWCError {
 };
 
 using TargetedBatchMap = std::map<ShardId, std::unique_ptr<TargetedWriteBatch>>;
+
+enum class WriteType {
+    Ordinary,
+    WithoutShardKeyOrId,
+    TimeseriesRetryableUpdate,
+};
 
 /**
  * The BatchWriteOp class manages the lifecycle of a batched write received by mongos.  Each
@@ -131,12 +148,12 @@ public:
      * targeting errors, but if not we should refresh once first.)
      *
      * Returned TargetedWriteBatches are owned by the caller.
-     * If a write without a shard key is detected, return an OK StatusWith that has 'true' as the
-     * value.
+     * If a write without a shard key or a time-series retryable update is detected, return an OK
+     * StatusWith that has the corresponding WriteType as the value.
      */
-    StatusWith<bool> targetBatch(const NSTargeter& targeter,
-                                 bool recordTargetErrors,
-                                 TargetedBatchMap* targetedBatches);
+    StatusWith<WriteType> targetBatch(const NSTargeter& targeter,
+                                      bool recordTargetErrors,
+                                      TargetedBatchMap* targetedBatches);
 
     /**
      * Fills a BatchCommandRequest from a TargetedWriteBatch for this BatchWriteOp.
@@ -272,12 +289,20 @@ typedef std::function<const NSTargeter&(const WriteOp& writeOp)> GetTargeterFn;
 typedef std::function<int(const WriteOp& writeOp)> GetWriteSizeFn;
 
 // Helper function to target ready writeOps. See BatchWriteOp::targetBatch for details.
-StatusWith<bool> targetWriteOps(OperationContext* opCtx,
-                                std::vector<WriteOp>& writeOps,
-                                bool ordered,
-                                bool recordTargetErrors,
-                                GetTargeterFn getTargeterFn,
-                                GetWriteSizeFn getWriteSizeFn,
-                                TargetedBatchMap& batchMap);
+StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
+                                     std::vector<WriteOp>& writeOps,
+                                     bool ordered,
+                                     bool recordTargetErrors,
+                                     GetTargeterFn getTargeterFn,
+                                     GetWriteSizeFn getWriteSizeFn,
+                                     int baseCommandSizeBytes,
+                                     TargetedBatchMap& batchMap);
+
+/**
+ * Returns a new write concern that has the copy of every field from the original
+ * document but with a w set to 1. This is intended for upgrading { w: 0 } write
+ * concern to { w: 1 }.
+ */
+BSONObj upgradeWriteConcern(const BSONObj& origWriteConcern);
 
 }  // namespace mongo

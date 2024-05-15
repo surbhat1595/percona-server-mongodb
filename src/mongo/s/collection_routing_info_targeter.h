@@ -31,27 +31,34 @@
 
 #include <map>
 #include <set>
+#include <vector>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobj_comparator_interface.h"
+#include "mongo/bson/oid.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/shard_id.h"
+#include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/chunk_manager.h"
+#include "mongo/s/chunk_version.h"
 #include "mongo/s/ns_targeter.h"
+#include "mongo/s/shard_key_pattern.h"
+#include "mongo/s/stale_exception.h"
+#include "mongo/s/write_ops/batched_command_request.h"
 
 namespace mongo {
-
-struct TargeterStats {
-    // Map of chunk shard minKey -> approximate delta. This is used for deciding whether a chunk
-    // might need splitting or not.
-    BSONObjIndexedMap<int> chunkSizeDelta{
-        SimpleBSONObjComparator::kInstance.makeBSONObjIndexedMap<int>()};
-};
-
-using StaleShardPlacementVersionMap = std::map<ShardId, ChunkVersion>;
 
 /**
  * NSTargeter based on a CollectionRoutingInfo implementation. Wraps all exception codepaths and
@@ -147,9 +154,6 @@ public:
      *     { foo : <anything> } => false
      */
     static bool isExactIdQuery(OperationContext* opCtx,
-                               const CanonicalQuery& query,
-                               const ChunkManager& cm);
-    static bool isExactIdQuery(OperationContext* opCtx,
                                const NamespaceString& nss,
                                const BSONObj& query,
                                const BSONObj& collation,
@@ -159,17 +163,32 @@ private:
     CollectionRoutingInfo _init(OperationContext* opCtx, bool refresh);
 
     /**
+     * Returns a CanonicalQuery if parsing succeeds.
+     *
+     * Returns !OK with message if query could not be canonicalized.
+     *
+     * If 'collation' is empty, we use the collection default collation for targeting.
+     */
+    static StatusWith<std::unique_ptr<CanonicalQuery>> _canonicalize(
+        OperationContext* opCtx,
+        boost::intrusive_ptr<mongo::ExpressionContext> expCtx,
+        const NamespaceString& nss,
+        const BSONObj& query,
+        const BSONObj& collation,
+        const ChunkManager& cm);
+
+    static bool _isExactIdQuery(const CanonicalQuery& query, const ChunkManager& cm);
+
+    /**
      * Returns a vector of ShardEndpoints for a potentially multi-shard query.
      *
      * Returns !OK with message if query could not be targeted.
      *
      * If 'collation' is empty, we use the collection default collation for targeting.
      */
-    StatusWith<std::vector<ShardEndpoint>> _targetQuery(
-        boost::intrusive_ptr<ExpressionContext> expCtx,
-        const BSONObj& query,
-        const BSONObj& collation,
-        std::set<ChunkRange>* chunkRanges) const;
+    StatusWith<std::vector<ShardEndpoint>> _targetQuery(const CanonicalQuery& query,
+                                                        const BSONObj& collation,
+                                                        std::set<ChunkRange>* chunkRanges) const;
 
     /**
      * Returns a ShardEndpoint for an exact shard key query.
@@ -186,15 +205,15 @@ private:
     // Full namespace of the collection for this targeter
     NamespaceString _nss;
 
-    // Used to identify the original namespace that the user has requested. Note: this will only be
-    // true if the buckets namespace is sharded.
+    // Used to identify the original namespace that the user has requested. Note: this will only
+    // be true if the buckets namespace is sharded.
     bool _isRequestOnTimeseriesViewNamespace = false;
 
     // Stores last error occurred
     boost::optional<LastErrorType> _lastError;
 
-    // Set to the epoch of the namespace we are targeting. If we ever refresh the catalog cache and
-    // find a new epoch, we immediately throw a StaleEpoch exception.
+    // Set to the epoch of the namespace we are targeting. If we ever refresh the catalog cache
+    // and find a new epoch, we immediately throw a StaleEpoch exception.
     boost::optional<OID> _targetEpoch;
 
     // The latest loaded routing cache entry

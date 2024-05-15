@@ -8,17 +8,18 @@
  *    # the test conflicts with hidden wildcard indexes
  *    assumes_no_implicit_index_creation,
  *    does_not_support_stepdowns,
- *    cqf_incompatible,
  *    multiversion_incompatible,
  *    requires_fcv_70,
  * ]
  */
 
-(function() {
-"use strict";
-
-load("jstests/libs/analyze_plan.js");  // For assertStagesForExplainOfCommand(),
-                                       // assertNoFetchFilter(), assertFetchFilter().
+import {
+    assertFetchFilter,
+    assertNoFetchFilter,
+    assertStagesForExplainOfCommand,
+    getWinningPlan,
+    isCollscan,
+} from "jstests/libs/analyze_plan.js";
 
 function flagVal(n) {
     return (n % 5 > 3) ? true : false;
@@ -222,4 +223,3 @@ const exp =
     coll.find({$and: [{a: {$gte: 90}}, {$or: [{b: {$gte: 80}}, {flag: "true"}]}]}).explain();
 assert(isCollscan(db, exp),
        "Expected collection scan, got " + tojson(getWinningPlan(exp.queryPlanner)));
-})();

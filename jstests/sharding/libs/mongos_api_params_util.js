@@ -3,24 +3,22 @@
  * servers and shards.
  */
 
-let MongosAPIParametersUtil = (function() {
-    'use strict';
+load('jstests/replsets/rslib.js');
+load('jstests/sharding/libs/last_lts_mongos_commands.js');
+load('jstests/sharding/libs/remove_shard_util.js');
+load('jstests/sharding/libs/sharded_transactions_helpers.js');
+load('jstests/libs/auto_retry_transaction_in_sharding.js');
+import {ConfigShardUtil} from "jstests/libs/config_shard_util.js";
 
-    load('jstests/replsets/rslib.js');
-    load('jstests/sharding/libs/last_lts_mongos_commands.js');
-    load('jstests/sharding/libs/remove_shard_util.js');
-    load('jstests/sharding/libs/sharded_transactions_helpers.js');
-    load('jstests/libs/auto_retry_transaction_in_sharding.js');
-    load('jstests/libs/config_shard_util.js');
+// TODO SERVER-50144 Remove this and allow orphan checking.
+// This test calls removeShard which can leave docs in config.rangeDeletions in state "pending",
+// therefore preventing orphans from being cleaned up.
+TestData.skipCheckOrphans = true;
 
-    // TODO SERVER-50144 Remove this and allow orphan checking.
-    // This test calls removeShard which can leave docs in config.rangeDeletions in state "pending",
-    // therefore preventing orphans from being cleaned up.
-    TestData.skipCheckOrphans = true;
+// Cannot run the filtering metadata check on tests that run refineCollectionShardKey.
+TestData.skipCheckShardFilteringMetadata = true;
 
-    // Cannot run the filtering metadata check on tests that run refineCollectionShardKey.
-    TestData.skipCheckShardFilteringMetadata = true;
-
+export let MongosAPIParametersUtil = (function() {
     function validateTestCase(testCase) {
         assert(testCase.skip || testCase.run,
                "must specify exactly one of 'skip' or 'run' for test case " + tojson(testCase));
@@ -1458,8 +1456,7 @@ let MongosAPIParametersUtil = (function() {
         assert.commandWorked(st.rs0.getPrimary().adminCommand({serverStatus: 1}))
             .storageEngine.supportsCommittedReads;
 
-    const isConfigShardEnabled = ConfigShardUtil.isEnabledIgnoringFCV(st) &&
-        ConfigShardUtil.isTransitionEnabledIgnoringFCV(st);
+    const isConfigShardEnabled = ConfigShardUtil.isTransitionEnabledIgnoringFCV(st);
 
     (() => {
         // Validate test cases for all commands. Ensure there is at least one test case for every

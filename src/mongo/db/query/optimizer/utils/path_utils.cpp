@@ -29,6 +29,20 @@
 
 #include "mongo/db/query/optimizer/utils/path_utils.h"
 
+#include <boost/none.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <map>
+#include <string>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/db/query/optimizer/comparison_op.h"
+#include "mongo/db/query/optimizer/defs.h"
+#include "mongo/db/query/optimizer/utils/strong_alias.h"
+#include "mongo/util/assert_util.h"
+
 
 namespace mongo::optimizer {
 
@@ -315,6 +329,34 @@ public:
 bool pathEndsInTraverse(const optimizer::ABT& path) {
     PathEndsInTraverseId t;
     return optimizer::algebra::transport<false>(path, t);
+}
+
+/**
+ * Checks if all the Traverse elements of an index path have single depth.
+ */
+class PathTraverseSingleDepth {
+public:
+    bool transport(const PathTraverse& node, bool childResult) {
+        return childResult && node.getMaxDepth() == PathTraverse::kSingleLevel;
+    }
+    bool transport(const PathGet& /*node*/, bool childResult) {
+        return childResult;
+    }
+    bool transport(const PathIdentity& /*node*/) {
+        return true;
+    }
+    template <typename T, typename... Ts>
+    bool transport(const T& /*node*/, Ts&&...) {
+        uasserted(6935101, "Index paths only consist of Get, Traverse, and Id nodes.");
+        return false;
+    }
+    bool check(const ABT& path) {
+        return algebra::transport<false>(path, *this);
+    }
+};
+
+bool checkPathTraverseSingleDepth(const ABT& path) {
+    return PathTraverseSingleDepth{}.check(path);
 }
 
 }  // namespace mongo::optimizer

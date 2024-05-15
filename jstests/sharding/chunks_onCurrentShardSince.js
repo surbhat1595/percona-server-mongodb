@@ -1,15 +1,7 @@
 /**
  * Tests that `onCurrentShardSince` is always consistent with  `history[0].validAfter` on
  * config.chunks entries
- *
- * TODO (SERVER-72791) remove multiversion_incompatible, featureFlagAutoMerger and
- * does_not_support_stepdowns flags since they are required only for upgradeFCVTest
- * @tags: [multiversion_incompatible, featureFlagAutoMerger, does_not_support_stepdowns]
  */
-(function() {
-'use strict';
-
-load("jstests/libs/feature_flag_util.js");
 load("jstests/sharding/libs/find_chunks_util.js");
 
 Random.setRandomSeed();
@@ -74,25 +66,6 @@ function assertChunksConsistency(chunksColl) {
     assert.eq(numTotalChunks, numConsistenChunks);
 }
 
-/* Upgrade FCV test
- * The upgrade procedure must add the new field `onCurrentShardSince` to all chunks
- * TODO (SERVER-72791) remove this test after v7.0 becomes lastLTS
- */
-function upgradeFCVTest(st, chunksColl, testDB) {
-    // Downgrade to the lastLTSFCV to force an upgrade afterwards
-    assert.commandWorked(st.s.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
-
-    // Create several chunks on different collections and perform some random moves to have
-    // different values on `onCurrentShardSince` fields
-    for (let i = 0; i < 10; i++) {
-        const coll = newShardedColl(st, testDB);
-        performRandomMoveChunks(coll);
-    }
-
-    assert.commandWorked(st.s.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
-    assertChunksConsistency(chunksColl);
-}
-
 function moveAndMergeChunksTest(st, chunksColl, testDB) {
     const coll = newShardedColl(st, testDB);
     const collUuid = st.s.getDB("config").collections.findOne({_id: coll.getFullName()}).uuid;
@@ -155,10 +128,8 @@ const testDB = st.s.getDB(jsTestName());
 
 /* Perform tests */
 if (!TestData.configShard) {
-    upgradeFCVTest(st, chunksColl, testDB);
     moveAndMergeChunksTest(st, chunksColl, testDB);
     splitChunksTest(st, chunksColl, testDB);
 }
 
 st.stop();
-})();

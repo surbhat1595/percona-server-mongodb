@@ -29,25 +29,54 @@
 
 #include "mongo/db/pipeline/change_stream_event_transform.h"
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <cstddef>
+#include <utility>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/basic_types.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/exec/document_value/document_metadata_fields.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/change_stream_document_diff_parser.h"
-#include "mongo/db/pipeline/change_stream_filter_helpers.h"
 #include "mongo/db/pipeline/change_stream_helpers.h"
 #include "mongo/db/pipeline/change_stream_helpers_legacy.h"
 #include "mongo/db/pipeline/change_stream_preimage_gen.h"
-#include "mongo/db/pipeline/document_path_support.h"
-#include "mongo/db/pipeline/document_source_change_stream_add_post_image.h"
+#include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/resume_token.h"
-#include "mongo/db/repl/bson_extract_optime.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
-#include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/tenant_id.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
+#include "mongo/db/update/update_oplog_entry_version.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/namespace_string_util.h"
+#include "mongo/util/str.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 namespace {
 constexpr auto checkValueType = &DocumentSourceChangeStream::checkValueType;
 constexpr auto checkValueTypeOrMissing = &DocumentSourceChangeStream::checkValueTypeOrMissing;
 constexpr auto resolveResumeToken = &change_stream::resolveResumeTokenFromSpec;
+
+const StringDataSet kOpsWithoutUUID = {
+    DocumentSourceChangeStream::kInvalidateOpType,
+    DocumentSourceChangeStream::kDropDatabaseOpType,
+    DocumentSourceChangeStream::kEndOfTransactionOpType,
+};
+
+const StringDataSet kOpsWithoutNs = {
+    DocumentSourceChangeStream::kEndOfTransactionOpType,
+};
 
 Document copyDocExceptFields(const Document& source, const std::set<StringData>& fieldNames) {
     MutableDocument doc(source);
@@ -66,7 +95,7 @@ repl::OpTypeEnum getOplogOpType(const Document& oplog) {
 Value makeChangeStreamNsField(const NamespaceString& nss) {
     // For certain types, such as dropDatabase, the collection name may be empty and should be
     // omitted. We never report the NamespaceString's tenantId in change stream events.
-    return Value(Document{{"db", nss.dbName().db()},
+    return Value(Document{{"db", nss.dbName().serializeWithoutTenantPrefix_UNSAFE()},
                           {"coll", (nss.coll().empty() ? Value() : Value(nss.coll()))}});
 }
 
@@ -83,6 +112,22 @@ void setResumeTokenForEvent(const ResumeTokenData& resumeTokenData, MutableDocum
 NamespaceString createNamespaceStringFromOplogEntry(Value tid, StringData ns) {
     auto tenantId = tid.missing() ? boost::none : boost::optional<TenantId>{tid.getOid()};
     return NamespaceStringUtil::deserialize(tenantId, ns);
+}
+
+void addTransactionIdFieldsIfPresent(const Document& input, MutableDocument& output) {
+    // The lsid and txnNumber may be missing if this is a batched write.
+    auto lsid = input[DocumentSourceChangeStream::kLsidField];
+    checkValueTypeOrMissing(lsid, DocumentSourceChangeStream::kLsidField, BSONType::Object);
+    auto txnNumber = input[DocumentSourceChangeStream::kTxnNumberField];
+    checkValueTypeOrMissing(
+        txnNumber, DocumentSourceChangeStream::kTxnNumberField, BSONType::NumberLong);
+    // We are careful here not to overwrite existing lsid or txnNumber fields with MISSING.
+    if (!txnNumber.missing()) {
+        output.addField(DocumentSourceChangeStream::kTxnNumberField, txnNumber);
+    }
+    if (!lsid.missing()) {
+        output.addField(DocumentSourceChangeStream::kLsidField, lsid);
+    }
 }
 
 }  // namespace
@@ -206,18 +251,17 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
                 if (_changeStreamSpec.getShowRawUpdateDescription()) {
                     updateDescription = input[repl::OplogEntry::kObjectFieldName];
                 } else {
-                    const auto showDisambiguatedPaths = _changeStreamSpec.getShowExpandedEvents() &&
-                        feature_flags::gFeatureFlagChangeStreamsFurtherEnrichedEvents.isEnabled(
-                            serverGlobalParams.featureCompatibility);
                     const auto& deltaDesc = change_stream_document_diff_parser::parseDiff(
                         diffObj.getDocument().toBson());
 
-                    updateDescription = Value(Document{
-                        {"updatedFields", deltaDesc.updatedFields},
-                        {"removedFields", std::move(deltaDesc.removedFields)},
-                        {"truncatedArrays", std::move(deltaDesc.truncatedArrays)},
-                        {"disambiguatedPaths",
-                         showDisambiguatedPaths ? Value(deltaDesc.disambiguatedPaths) : Value()}});
+                    updateDescription =
+                        Value(Document{{"updatedFields", deltaDesc.updatedFields},
+                                       {"removedFields", std::move(deltaDesc.removedFields)},
+                                       {"truncatedArrays", std::move(deltaDesc.truncatedArrays)},
+                                       {"disambiguatedPaths",
+                                        _changeStreamSpec.getShowExpandedEvents()
+                                            ? Value(deltaDesc.disambiguatedPaths)
+                                            : Value()}});
                 }
             } else if (!oplogVersion.missing() || id.missing()) {
                 // This is not a replacement op, and we did not see a valid update version number.
@@ -356,7 +400,7 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
             }
 
             if (!o2Field["migrateChunkToNewShard"].missing()) {
-                operationType = change_stream_legacy::getNewShardDetectedOpName(_expCtx);
+                operationType = DocumentSourceChangeStream::kNewShardDetectedOpType;
                 operationDescription =
                     Value(copyDocExceptFields(o2Field, {"migrateChunkToNewShard"_sd}));
                 break;
@@ -379,6 +423,13 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
                 break;
             }
 
+            if (!o2Field["endOfTransaction"].missing()) {
+                operationType = DocumentSourceChangeStream::kEndOfTransactionOpType;
+                operationDescription = Value{copyDocExceptFields(o2Field, {"endOfTransaction"_sd})};
+                addTransactionIdFieldsIfPresent(o2Field, doc);
+                break;
+            }
+
             // We should never see an unknown noop entry.
             MONGO_UNREACHABLE_TASSERT(5052201);
         }
@@ -387,11 +438,10 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
         }
     }
 
-    // UUID should always be present except for invalidate and dropDatabase entries.
-    if (operationType != DocumentSourceChangeStream::kInvalidateOpType &&
-        operationType != DocumentSourceChangeStream::kDropDatabaseOpType) {
-        invariant(!uuid.missing(), "Saw a CRUD op without a UUID");
-    }
+    // UUID should always be present except for a known set of types.
+    tassert(7826901,
+            "Saw a CRUD op without a UUID",
+            !uuid.missing() || kOpsWithoutUUID.contains(operationType));
 
     // Extract the 'txnOpIndex' and 'applyOpsIndex' fields. These will be missing unless we are
     // unwinding a transaction.
@@ -401,14 +451,7 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
 
     // Add some additional fields only relevant to transactions.
     if (!txnOpIndex.missing()) {
-        // The lsid and txnNumber may be missing if this is a batched write.
-        auto lsid = input[DocumentSourceChangeStream::kLsidField];
-        checkValueTypeOrMissing(lsid, DocumentSourceChangeStream::kLsidField, BSONType::Object);
-        auto txnNumber = input[DocumentSourceChangeStream::kTxnNumberField];
-        checkValueTypeOrMissing(
-            txnNumber, DocumentSourceChangeStream::kTxnNumberField, BSONType::NumberLong);
-        doc.addField(DocumentSourceChangeStream::kTxnNumberField, txnNumber);
-        doc.addField(DocumentSourceChangeStream::kLsidField, lsid);
+        addTransactionIdFieldsIfPresent(input, doc);
     }
 
     // Generate the resume token. Note that only 'ts' is always guaranteed to be present.
@@ -450,8 +493,10 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
         doc.addField(DocumentSourceChangeStream::kPreImageIdField, Value(preImageId.toBSON()));
     }
 
-    // Add the 'ns' field to the change stream document, based on the final value of 'nss'.
-    doc.addField(DocumentSourceChangeStream::kNamespaceField, makeChangeStreamNsField(nss));
+    // If needed, add the 'ns' field to the change stream document, based on the final value of nss.
+    if (!kOpsWithoutNs.contains(operationType)) {
+        doc.addField(DocumentSourceChangeStream::kNamespaceField, makeChangeStreamNsField(nss));
+    }
 
     // The event may have a documentKey OR an operationDescription, but not both. We already
     // validated this while creating the resume token.

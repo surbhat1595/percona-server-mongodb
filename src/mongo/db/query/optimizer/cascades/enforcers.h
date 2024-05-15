@@ -30,6 +30,9 @@
 #pragma once
 
 #include "mongo/db/query/optimizer/cascades/rewrite_queues.h"
+#include "mongo/db/query/optimizer/defs.h"
+#include "mongo/db/query/optimizer/metadata.h"
+#include "mongo/db/query/optimizer/props.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
 
 namespace mongo::optimizer::cascades {
@@ -42,6 +45,7 @@ void addEnforcers(GroupIdType groupId,
                   const RIDProjectionsMap& ridProjections,
                   PhysRewriteQueue& queue,
                   const properties::PhysProps& physProps,
-                  const properties::LogicalProps& logicalProps);
+                  const properties::LogicalProps& logicalProps,
+                  PrefixId& prefixId);
 
 }  // namespace mongo::optimizer::cascades

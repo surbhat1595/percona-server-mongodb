@@ -28,25 +28,34 @@
  */
 
 
-#include "mongo/platform/basic.h"
+#include <absl/meta/type_traits.h>
 
-#include "mongo/db/pipeline/document_source.h"
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
+#include "mongo/base/initializer.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/feature_compatibility_version_documentation.h"
 #include "mongo/db/matcher/expression_algo.h"
-#include "mongo/db/pipeline/document_source_add_fields.h"
+#include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_group.h"
-#include "mongo/db/pipeline/document_source_internal_shard_filter.h"
 #include "mongo/db/pipeline/document_source_match.h"
-#include "mongo/db/pipeline/document_source_project.h"
-#include "mongo/db/pipeline/document_source_replace_root.h"
 #include "mongo/db/pipeline/document_source_sample.h"
-#include "mongo/db/pipeline/document_source_sequential_document_cache.h"
+#include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/pipeline/lite_parsed_document_source.h"
+#include "mongo/db/query/allowed_contexts.h"
+#include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/plan_summary_stats_visitor.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/redaction.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/string_map.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -284,11 +293,11 @@ void DocumentSource::serializeToArray(vector<Value>& array, SerializationOptions
 namespace {
 std::list<boost::intrusive_ptr<DocumentSource>> throwOnParse(
     BSONElement spec, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-    uasserted(6047400, "Search stages are only allowed on MongoDB Atlas");
+    uasserted(6047400, spec.fieldNameStringData() + " stage is only allowed on MongoDB Atlas");
 }
 std::unique_ptr<LiteParsedDocumentSource> throwOnParseLite(NamespaceString nss,
                                                            const BSONElement& spec) {
-    uasserted(6047401, "Search stages are only allowed on MongoDB Atlas");
+    uasserted(6047401, spec.fieldNameStringData() + " stage is only allowed on MongoDB Atlas");
 }
 }  // namespace
 MONGO_INITIALIZER_GROUP(BeginDocumentSourceRegistration,
@@ -298,23 +307,18 @@ MONGO_INITIALIZER_GROUP(BeginDocumentSourceRegistration,
 MONGO_INITIALIZER_WITH_PREREQUISITES(EndDocumentSourceRegistration,
                                      ("BeginDocumentSourceRegistration"))
 (InitializerContext*) {
-    auto stageName = "$search"_sd;
-    auto searchIt = parserMap.find(stageName);
-    // If the $search stage has not been registered at this point, register a parser that errors
-    // with a useful error message on parsing a search stage.
-    if (searchIt == parserMap.end()) {
-        LiteParsedDocumentSource::registerParser("$search",
-                                                 throwOnParseLite,
-                                                 AllowedWithApiStrict::kAlways,
-                                                 AllowedWithClientType::kAny);
-        DocumentSource::registerParser("$search", throwOnParse, boost::none);
-        LiteParsedDocumentSource::registerParser("$searchMeta",
-                                                 throwOnParseLite,
-                                                 AllowedWithApiStrict::kAlways,
-                                                 AllowedWithClientType::kAny);
-        DocumentSource::registerParser("$searchMeta", throwOnParse, boost::none);
+    auto searchStageNames = {"$vectorSearch"_sd, "$search"_sd, "$searchMeta"_sd};
+    for (auto stageName : searchStageNames) {
+        auto searchIt = parserMap.find(stageName);
+        // If the stage has not been registered at this point, register a parser that errors
+        // with a useful error message on parsing a search stage.
+        if (searchIt == parserMap.end()) {
+            LiteParsedDocumentSource::registerParser(stageName.toString(),
+                                                     throwOnParseLite,
+                                                     AllowedWithApiStrict::kAlways,
+                                                     AllowedWithClientType::kAny);
+            DocumentSource::registerParser(stageName.toString(), throwOnParse, boost::none);
+        }
     }
 }
-
-
 }  // namespace mongo

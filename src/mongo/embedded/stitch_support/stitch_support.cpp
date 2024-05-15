@@ -27,28 +27,55 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include "stitch_support/stitch_support.h"
+#include <algorithm>
+#include <cstdlib>
+#include <exception>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "api_common.h"
+#include "stitch_support/stitch_support.h"
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/base/error_codes.h"
 #include "mongo/base/initializer.h"
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/concurrency/locker_noop_client_observer.h"
+#include "mongo/bson/mutable/document.h"
+#include "mongo/db/client.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/projection_executor.h"
 #include "mongo/db/exec/projection_executor_builder.h"
+#include "mongo/db/field_ref.h"
+#include "mongo/db/field_ref_set.h"
+#include "mongo/db/matcher/expression_with_placeholder.h"
+#include "mongo/db/matcher/match_details.h"
 #include "mongo/db/matcher/matcher.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/parsed_update_array_filters.h"
+#include "mongo/db/ops/write_ops_parsers.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/projection.h"
 #include "mongo/db/query/projection_parser.h"
+#include "mongo/db/query/projection_policies.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/update/update_driver.h"
+#include "mongo/stdx/type_traits.h"
 #include "mongo/util/assert_util.h"
-
-#include <algorithm>
-#include <memory>
-#include <string>
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/time_support.h"
 
 #if defined(_WIN32)
 #define MONGO_API_CALL __cdecl
@@ -60,7 +87,7 @@ namespace mongo {
 
 using StitchSupportStatusImpl = StatusForAPI<stitch_support_v1_error>;
 
-const NamespaceString kDummyNamespaceStr = NamespaceString("");
+const NamespaceString kDummyNamespaceStr = NamespaceString();
 
 /**
  * C interfaces that use enterCXX() must provide a translateException() function that converts any
@@ -124,10 +151,7 @@ ServiceContext* initialize() {
     Status status = mongo::runGlobalInitializers(std::vector<std::string>{});
     uassertStatusOKWithContext(status, "Global initialization failed");
     setGlobalServiceContext(ServiceContext::make());
-    auto serviceContext = getGlobalServiceContext();
-    serviceContext->registerClientObserver(std::make_unique<LockerNoopClientObserver>());
-
-    return serviceContext;
+    return getGlobalServiceContext();
 }
 
 struct ServiceContextDestructor {

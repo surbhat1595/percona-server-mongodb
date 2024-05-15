@@ -19,9 +19,11 @@ env.Library(
         'values/bson.cpp',
         'values/value.cpp',
         'values/value_printer.cpp',
+        'values/ts_block.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/bson/util/bson_column',
         '$BUILD_DIR/mongo/db/exec/js_function',
         '$BUILD_DIR/mongo/db/fts/base_fts',
         '$BUILD_DIR/mongo/db/index/index_access_method',
@@ -66,6 +68,7 @@ sbeEnv.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/bson/dotted_path_support',
+        '$BUILD_DIR/mongo/db/query/str_trim_utils',
         '$BUILD_DIR/mongo/db/sorter/sorter_idl',
         '$BUILD_DIR/mongo/db/sorter/sorter_stats',
     ],
@@ -74,8 +77,10 @@ sbeEnv.Library(
 sbeEnv.Library(
     target='query_sbe_stages',
     source=[
+        'stages/agg_project.cpp',
         'stages/branch.cpp',
         'stages/bson_scan.cpp',
+        'stages/block_to_row.cpp',
         'stages/co_scan.cpp',
         'stages/exchange.cpp',
         'stages/hash_agg.cpp',
@@ -86,13 +91,16 @@ sbeEnv.Library(
         'stages/makeobj.cpp',
         'stages/merge_join.cpp',
         'stages/project.cpp',
+        'stages/search_cursor.cpp',
         'stages/sort.cpp',
         'stages/sorted_merge.cpp',
         'stages/spool.cpp',
         'stages/traverse.cpp',
+        'stages/ts_bucket_to_cell_block.cpp',
         'stages/union.cpp',
         'stages/unique.cpp',
         'stages/unwind.cpp',
+        'stages/window.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -165,7 +173,6 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/auth/authmocks',
         '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
-        '$BUILD_DIR/mongo/db/service_context_test_fixture',
     ],
 )
 
@@ -183,6 +190,7 @@ env.CppUnitTest(
         'expressions/sbe_date_to_parts_test.cpp',
         'expressions/sbe_date_to_string_test.cpp',
         'expressions/sbe_date_trunc_test.cpp',
+        'expressions/sbe_exp_moving_avg_test.cpp',
         'expressions/sbe_extract_sub_array_builtin_test.cpp',
         'expressions/sbe_fail_test.cpp',
         'expressions/sbe_get_element_builtin_test.cpp',
@@ -199,6 +207,7 @@ env.CppUnitTest(
         'expressions/sbe_object_array_conversion_test.cpp',
         'expressions/sbe_prim_binary_test.cpp',
         'expressions/sbe_prim_unary_test.cpp',
+        'expressions/sbe_rank_test.cpp',
         'expressions/sbe_regex_test.cpp',
         'expressions/sbe_replace_one_expression_test.cpp',
         'expressions/sbe_reverse_array_builtin_test.cpp',
@@ -211,6 +220,8 @@ env.CppUnitTest(
         'expressions/sbe_trunc_builtin_test.cpp',
         'expressions/sbe_ts_second_ts_increment_test.cpp',
         'expressions/sbe_variable_test.cpp',
+        'sbe_agg_project_test.cpp',
+        'sbe_block_stages_test.cpp',
         'sbe_code_fragment_test.cpp',
         'sbe_column_scan_test.cpp',
         'sbe_filter_test.cpp',
@@ -232,6 +243,7 @@ env.CppUnitTest(
         'sbe_trial_run_tracker_test.cpp',
         'sbe_unique_test.cpp',
         'sbe_unittest.cpp',
+        'sbe_window_test.cpp',
         'util/stage_results_printer_test.cpp',
         'values/column_store_encoder_test.cpp',
         'values/columnar_test.cpp',
@@ -248,7 +260,7 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/index/column_store_index',
         '$BUILD_DIR/mongo/db/query/collation/collator_interface_mock',
         '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
-        '$BUILD_DIR/mongo/db/service_context_test_fixture',
+        "$BUILD_DIR/mongo/db/timeseries/bucket_compression",
         '$BUILD_DIR/mongo/util/pcre_wrapper',
         'sbe_plan_stage_test',
     ],
@@ -260,13 +272,16 @@ env.Library(
         'abt/sbe_abt_test_util.cpp',
     ],
     LIBDEPS=[
-        "$BUILD_DIR/mongo/db/auth/authmocks",
-        "$BUILD_DIR/mongo/db/pipeline/abt_translation",
-        "$BUILD_DIR/mongo/db/query/optimizer/unit_test_utils",
+        '$BUILD_DIR/mongo/db/pipeline/abt_translation',
+        '$BUILD_DIR/mongo/db/query/optimizer/unit_test_utils',
         '$BUILD_DIR/mongo/db/query/query_test_service_context',
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/service_context_test_fixture',
         'query_sbe_abt',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/service_context_non_d',
     ],
 )
 
@@ -277,7 +292,6 @@ env.CppUnitTest(
         'abt/sbe_abt_test.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/unittest/unittest',
         'sbe_abt_test_util',
     ],
 )

@@ -12,7 +12,7 @@ load("jstests/libs/fixture_helpers.js");    // For 'isMongos'
  * If 'checkAllNodes` is true, explicitly checks if feature flags are enabled for all
  * nodes.
  */
-function checkSBEEnabled(theDB, featureFlags = [], checkAllNodes = false) {
+export function checkSBEEnabled(theDB, featureFlags = [], checkAllNodes = false) {
     // By default, we find that SBE is enabled. If, for any node, we find that the classic engine is
     // on, `checkResult` will be set to false. This is done intentionally so that in the event that
     // we check all nodes, the effects from previously visited nodes will carry over into the rest.
@@ -43,25 +43,15 @@ function checkSBEEnabled(theDB, featureFlags = [], checkAllNodes = false) {
 
                 const getParam = conn.adminCommand({
                     getParameter: 1,
-                    internalQueryForceClassicEngine: 1,
                     internalQueryFrameworkControl: 1,
                 });
-
-                // v6.0 does not include the new internalQueryFrameworkControl server parameter.
-                // Here, we are accounting for both the old and new frameworks (where enabling a
-                // certain engine differs semantically).
-                if (getParam.hasOwnProperty("internalQueryForceClassicEngine") &&
-                    getParam.internalQueryForceClassicEngine) {
-                    checkResult = false;
-                }
 
                 if (getParam.hasOwnProperty("internalQueryFrameworkControl") &&
                     getParam.internalQueryFrameworkControl === "forceClassicEngine") {
                     checkResult = false;
                 }
 
-                if (!getParam.hasOwnProperty("internalQueryForceClassicEngine") &&
-                    !getParam.hasOwnProperty("internalQueryFrameworkControl")) {
+                if (!getParam.hasOwnProperty("internalQueryFrameworkControl")) {
                     checkResult = false;
                 }
 

@@ -27,10 +27,25 @@
  *    it in the license file.
  */
 
+#include <memory>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+
+#include "mongo/base/string_data.h"
 #include "mongo/db/catalog/create_collection.h"
+#include "mongo/db/client.h"
+#include "mongo/db/cluster_role.h"
+#include "mongo/db/commands/create_gen.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/s/shard_local.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/shard_id.h"
 #include "mongo/idl/cluster_server_parameter_common.h"
 #include "mongo/idl/cluster_server_parameter_test_util.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace {
@@ -40,7 +55,7 @@ class ClusterServerParameterCommonTest : public ClusterServerParameterTestBase {
 public:
     void setUp() override {
         ClusterServerParameterTestBase::setUp();
-        serverGlobalParams.clusterRole = ClusterRole::ConfigServer;
+        serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
         _shardLocal = std::make_unique<ShardLocal>(ShardId::kConfigServerId);
     }
 

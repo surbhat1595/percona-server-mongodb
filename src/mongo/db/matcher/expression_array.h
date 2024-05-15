@@ -29,13 +29,30 @@
 
 #pragma once
 
+#include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <cstddef>
+// IWYU pragma: no_include "ext/alloc_traits.h"
+#include <memory>
+#include <utility>
 #include <vector>
 
+#include "mongo/base/clonable_ptr.h"
 #include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/util/builder_fwd.h"
+#include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_path.h"
+#include "mongo/db/matcher/expression_visitor.h"
+#include "mongo/db/matcher/match_details.h"
+#include "mongo/db/matcher/path.h"
+#include "mongo/db/query/serialization_options.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -90,7 +107,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final;
+    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final;
 
     std::vector<std::unique_ptr<MatchExpression>>* getChildVector() final {
         return nullptr;
@@ -158,7 +175,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final;
+    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final;
 
     std::vector<std::unique_ptr<MatchExpression>>* getChildVector() final {
         return &_subs;
@@ -233,7 +250,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final;
+    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final;
 
     virtual bool equivalent(const MatchExpression* other) const;
 

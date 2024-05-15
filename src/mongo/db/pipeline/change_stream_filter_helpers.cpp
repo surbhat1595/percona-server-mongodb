@@ -29,13 +29,31 @@
 
 #include "mongo/db/pipeline/change_stream_filter_helpers.h"
 
+#include <boost/optional/optional.hpp>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes_util.h"
+#include "mongo/db/basic_types.h"
 #include "mongo/db/bson/bson_helper.h"
 #include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/matcher/expression_parser.h"
+#include "mongo/db/matcher/expression_tree.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/change_stream_helpers_legacy.h"
 #include "mongo/db/pipeline/change_stream_rewrite_helpers.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
-#include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/document_source_change_stream_gen.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/optime.h"
 
 namespace mongo {
 namespace change_stream_filter {
@@ -211,9 +229,11 @@ std::unique_ptr<MatchExpression> buildInvalidationFilter(
     if (streamType == DocumentSourceChangeStream::ChangeStreamType::kSingleCollection) {
         // A single-collection stream is invalidated by drop and rename events.
         invalidatingCommands.append(BSON("o.drop" << nss.coll()));
-        invalidatingCommands.append(BSON("o.renameCollection" << nss.ns()));
         invalidatingCommands.append(
-            BSON("o.renameCollection" << BSON("$exists" << true) << "o.to" << nss.ns()));
+            BSON("o.renameCollection" << NamespaceStringUtil::serialize(nss)));
+        invalidatingCommands.append(BSON("o.renameCollection"
+                                         << BSON("$exists" << true) << "o.to"
+                                         << NamespaceStringUtil::serialize(nss)));
     } else {
         // For a whole-db streams, only 'dropDatabase' will cause an invalidation event.
         invalidatingCommands.append(BSON("o.dropDatabase" << BSON("$exists" << true)));
@@ -222,8 +242,8 @@ std::unique_ptr<MatchExpression> buildInvalidationFilter(
     // Match only against the target db's command namespace.
     auto invalidatingFilter = BSON("op"
                                    << "c"
-                                   << "ns" << nss.getCommandNS().ns() << "$or"
-                                   << invalidatingCommands.arr());
+                                   << "ns" << NamespaceStringUtil::serialize(nss.getCommandNS())
+                                   << "$or" << invalidatingCommands.arr());
     return MatchExpressionParser::parseAndNormalize(invalidatingFilter, expCtx);
 }  // namespace change_stream_filter
 
@@ -309,11 +329,8 @@ std::unique_ptr<MatchExpression> buildInternalOpFilter(
         internalOpTypes.push_back("migrateLastChunkFromShard"_sd);
     }
 
-    if (feature_flags::gFeatureFlagChangeStreamsFurtherEnrichedEvents.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
-        internalOpTypes.push_back("refineCollectionShardKey"_sd);
-        internalOpTypes.push_back("reshardCollection"_sd);
-    }
+    internalOpTypes.push_back("refineCollectionShardKey"_sd);
+    internalOpTypes.push_back("reshardCollection"_sd);
 
     // Build the oplog filter to match the required internal op types.
     BSONArrayBuilder internalOpTypeOrBuilder;

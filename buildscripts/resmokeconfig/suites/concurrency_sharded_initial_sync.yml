@@ -125,6 +125,7 @@ selector:
   - jstests/concurrency/fsm_workloads/indexed_insert_upsert.js
   - jstests/concurrency/fsm_workloads/indexed_insert_where.js
   - jstests/concurrency/fsm_workloads/list_indexes.js
+  - jstests/concurrency/fsm_workloads/query_stats_concurrent.js
   - jstests/concurrency/fsm_workloads/random_moveChunk_multi_update_delete_change_streams.js
   - jstests/concurrency/fsm_workloads/reindex.js
   - jstests/concurrency/fsm_workloads/reindex_background.js
@@ -219,7 +220,7 @@ executor:
   config:
     shell_options:
       eval: >-
-        testingReplication = true;
+        globalThis.testingReplication = true;
         load("jstests/libs/override_methods/set_read_preference_secondary.js");
         load('jstests/libs/override_methods/enable_causal_consistency_without_read_pref.js');
       global_vars:

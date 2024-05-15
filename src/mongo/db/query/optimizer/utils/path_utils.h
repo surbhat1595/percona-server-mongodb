@@ -29,8 +29,21 @@
 
 #pragma once
 
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <cstddef>
+#include <utility>
+#include <vector>
+
+#include "mongo/db/query/optimizer/algebra/operator.h"
+#include "mongo/db/query/optimizer/algebra/polyvalue.h"
 #include "mongo/db/query/optimizer/defs.h"
-#include "mongo/db/query/optimizer/node.h"
+#include "mongo/db/query/optimizer/metadata.h"
+#include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
+#include "mongo/db/query/optimizer/syntax/expr.h"
+#include "mongo/db/query/optimizer/syntax/path.h"
+#include "mongo/db/query/optimizer/syntax/syntax.h"
 
 
 namespace mongo::optimizer {
@@ -185,5 +198,10 @@ bool checkPathContainsTraverse(const ABT& path);
  * This helper checks to see if we have a PathTraverse + PathId at the end of the path.
  */
 bool pathEndsInTraverse(const optimizer::ABT& path);
+
+/**
+ * This helper checks if a path contains valid Traverse elements.
+ */
+bool checkPathTraverseSingleDepth(const ABT& path);
 
 }  // namespace mongo::optimizer

@@ -5,13 +5,12 @@
  *   requires_fcv_53,
  *   requires_replication,
  *   does_not_support_stepdowns,
+ *   # Tests running with experimental CQF behavior require test commands to be enabled.
+ *   cqf_experimental_incompatible,
  * ]
  */
-(function() {
-"use strict";
-
 load("jstests/libs/clustered_collections/clustered_collection_util.js");
-load("jstests/libs/clustered_collections/clustered_capped_utils.js");
+import {ClusteredCappedUtils} from "jstests/libs/clustered_collections/clustered_capped_utils.js";
 
 {
     const replSet = new ReplSetTest({name: "clustered_capped_collections", nodes: 1});
@@ -58,4 +57,3 @@ load("jstests/libs/clustered_collections/clustered_capped_utils.js");
 
     replSetNoTestCommands.stopSet();
 }
-})();

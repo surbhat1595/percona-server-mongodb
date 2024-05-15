@@ -30,18 +30,14 @@
 
 #include "mongo/db/pipeline/change_stream_helpers_legacy.h"
 
-#include "mongo/db/pipeline/change_stream_filter_helpers.h"
-#include "mongo/db/pipeline/document_source_change_stream_add_post_image.h"
-#include "mongo/db/pipeline/document_source_change_stream_add_pre_image.h"
-#include "mongo/db/pipeline/document_source_change_stream_check_invalidate.h"
-#include "mongo/db/pipeline/document_source_change_stream_check_resumability.h"
-#include "mongo/db/pipeline/document_source_change_stream_check_topology_change.h"
-#include "mongo/db/pipeline/document_source_change_stream_ensure_resume_token_present.h"
-#include "mongo/db/pipeline/document_source_change_stream_handle_topology_change.h"
-#include "mongo/db/pipeline/document_source_change_stream_oplog_match.h"
-#include "mongo/db/pipeline/document_source_change_stream_transform.h"
-#include "mongo/db/pipeline/document_source_change_stream_unwind_transaction.h"
-#include "mongo/db/pipeline/expression.h"
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/pipeline/resume_token.h"
+#include "mongo/util/namespace_string_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -78,18 +74,8 @@ Document convertFromLegacyOplogFormat(const Document& o2Entry, const NamespaceSt
 
     // This field would be the first field in the new format, but the current change stream code
     // does not depend on the field order.
-    doc.addField(type.getString(), Value(nss.toString()));
+    doc.addField(type.getString(), Value(NamespaceStringUtil::serialize(nss)));
     return doc.freeze();
 }
-
-// TODO SERVER-66138: This function can be removed after we branch for 7.0.
-StringData getNewShardDetectedOpName(const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-    // The op name on 6.0 and older versions.
-    const StringData kNewShardDetectedOpTypeLegacyName = "kNewShardDetected"_sd;
-    return (expCtx->changeStreamTokenVersion == ResumeTokenData::kDefaultTokenVersion)
-        ? DocumentSourceChangeStream::kNewShardDetectedOpType
-        : kNewShardDetectedOpTypeLegacyName;
-}
-
 }  // namespace change_stream_legacy
 }  // namespace mongo

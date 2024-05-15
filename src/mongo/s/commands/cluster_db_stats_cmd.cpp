@@ -27,23 +27,42 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
+#include <string>
 #include <vector>
 
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/client/read_preference.h"
+#include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/dbcommands_gen.h"
-#include "mongo/s/client/shard_registry.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
+#include "mongo/executor/remote_command_response.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/s/async_requests_sender.h"
+#include "mongo/s/client/shard.h"
 #include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/grid.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/database_name_util.h"
+#include "mongo/util/decorable.h"
 
 namespace mongo {
 namespace {
 
-void aggregateResults(int scale,
+void aggregateResults(const DBStatsCommand& cmd,
                       const std::vector<AsyncRequestsSender::Response>& responses,
                       BSONObjBuilder& output) {
+    int scale = cmd.getScale();
     long long collections = 0;
     long long views = 0;
     long long objects = 0;
@@ -55,6 +74,9 @@ void aggregateResults(int scale,
     double indexSize = 0;
     double fsUsedSize = 0;
     double fsTotalSize = 0;
+    double freeStorageSize = 0;
+    double totalFreeStorageSize = 0;
+    double indexFreeStorageSize = 0;
 
     for (const auto& response : responses) {
         invariant(response.swResponse.getStatus().isOK());
@@ -72,20 +94,34 @@ void aggregateResults(int scale,
         indexSize += resp.getIndexSize();
         fsUsedSize += resp.getFsUsedSize().get_value_or(0);
         fsTotalSize += resp.getFsTotalSize().get_value_or(0);
+        freeStorageSize += resp.getFreeStorageSize().get_value_or(0);
+        totalFreeStorageSize += resp.getTotalFreeStorageSize().get_value_or(0);
+        indexFreeStorageSize += resp.getIndexFreeStorageSize().get_value_or(0);
     }
 
     output.appendNumber("collections", collections);
     output.appendNumber("views", views);
     output.appendNumber("objects", objects);
 
+    bool freeStorage = cmd.getFreeStorage();
+
     // avgObjSize on mongod is not scaled based on the argument to db.stats(), so we use
     // unscaledDataSize here for consistency.  See SERVER-7347.
     output.appendNumber("avgObjSize", objects == 0 ? 0 : unscaledDataSize / double(objects));
     output.appendNumber("dataSize", dataSize);
     output.appendNumber("storageSize", storageSize);
-    output.appendNumber("totalSize", totalSize);
+    if (freeStorage) {
+        output.appendNumber("freeStorageSize", freeStorageSize);
+    }
     output.appendNumber("indexes", indexes);
     output.appendNumber("indexSize", indexSize);
+    if (freeStorage) {
+        output.appendNumber("indexFreeStorageSize", indexFreeStorageSize);
+    }
+    output.appendNumber("totalSize", totalSize);
+    if (freeStorage) {
+        output.appendNumber("totalFreeStorageSize", totalFreeStorageSize);
+    }
     output.appendNumber("scaleFactor", scale);
     output.appendNumber("fsUsedSize", fsUsedSize);
     output.appendNumber("fsTotalSize", fsTotalSize);
@@ -116,7 +152,7 @@ public:
                                  const DatabaseName& dbname,
                                  const BSONObj&) const final {
         auto as = AuthorizationSession::get(opCtx->getClient());
-        if (!as->isAuthorizedForActionsOnResource(ResourcePattern::forDatabaseName(dbname.db()),
+        if (!as->isAuthorizedForActionsOnResource(ResourcePattern::forDatabaseName(dbname),
                                                   ActionType::dbStats)) {
             return {ErrorCodes::Unauthorized, "unauthorized"};
         }
@@ -133,7 +169,7 @@ public:
 
         auto shardResponses = scatterGatherUnversionedTargetAllShards(
             opCtx,
-            dbName.db(),
+            DatabaseNameUtil::serialize(dbName),
             applyReadWriteConcern(
                 opCtx, this, CommandHelpers::filterCommandRequestForPassthrough(cmdObj)),
             ReadPreferenceSetting::get(opCtx),
@@ -143,8 +179,8 @@ public:
             uasserted(ErrorCodes::OperationFailed, errmsg);
         }
 
-        output.append("db", dbName.db());
-        aggregateResults(cmd.getScale(), shardResponses, output);
+        output.append("db", DatabaseNameUtil::serialize(dbName));
+        aggregateResults(cmd, shardResponses, output);
         return true;
     }
 

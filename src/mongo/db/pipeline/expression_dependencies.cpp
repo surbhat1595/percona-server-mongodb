@@ -29,10 +29,22 @@
 
 #include "mongo/db/pipeline/expression_dependencies.h"
 
+#include <map>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+#include "mongo/base/string_data.h"
+#include "mongo/db/exec/document_value/document_metadata_fields.h"
+#include "mongo/db/matcher/copyable_match_expression.h"
 #include "mongo/db/matcher/match_expression_dependencies.h"
 #include "mongo/db/pipeline/expression_find_internal.h"
 #include "mongo/db/pipeline/expression_visitor.h"
 #include "mongo/db/pipeline/expression_walker.h"
+#include "mongo/db/pipeline/field_path.h"
 
 namespace mongo::expression {
 
@@ -210,10 +222,11 @@ public:
 
         auto metaType = expr->getMetaType();
         if (metaType == MetaType::kSearchScore || metaType == MetaType::kSearchHighlights ||
-            metaType == MetaType::kSearchScoreDetails) {
-            // We do not add the dependencies for searchScore, searchHighlights, or
-            // searchScoreDetails because those values are not stored in the collection (or in
-            // mongod at all).
+            metaType == MetaType::kSearchScoreDetails ||
+            metaType == MetaType::kVectorSearchDistance) {
+            // We do not add the dependencies for searchScore, searchHighlights,
+            // searchScoreDetails, or vectorSearchDistance because those values are not stored in
+            // the collection (or in mongod at all).
             return;
         }
 

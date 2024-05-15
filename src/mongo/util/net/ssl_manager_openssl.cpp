@@ -2270,18 +2270,18 @@ void OCSPFetcher::startPeriodicJob(StatusWith<Milliseconds> swDurationInitial) {
         return;
     }
 
+    // This job is killable. If interrupted, we will warn, and retry after the configured interval.
     _ocspStaplingAnchor =
         getGlobalServiceContext()->getPeriodicRunner()->makeJob(PeriodicRunner::PeriodicJob(
             "OCSP Fetch and Staple",
             [this, sm = _manager->shared_from_this()](Client* client) { doPeriodicJob(); },
             getPeriodForStapleJob(swDurationInitial),
-            // TODO(SERVER-74660): Please revisit if this periodic job could be made killable.
-            false /*isKillableByStepdown*/));
+            true /*isKillableByStepdown*/));
 
     _ocspStaplingAnchor.start();
 }
 
-void OCSPFetcher::doPeriodicJob() {
+void OCSPFetcher::doPeriodicJob() try {
     fetchAndStaple(nullptr).getAsync(
         [this, sm = _manager->shared_from_this()](StatusWith<Milliseconds> swDuration) {
             if (!swDuration.isOK()) {
@@ -2298,6 +2298,10 @@ void OCSPFetcher::doPeriodicJob() {
 
             this->_ocspStaplingAnchor.setPeriod(getPeriodForStapleJob(swDuration));
         });
+} catch (const DBException& ex) {
+    LOGV2_WARNING(7466002,
+                  "An error occurred while running OCSP fetch and staple",
+                  "error"_attr = ex.toStatus());
 }
 
 bool OCSPFetcher::_isShutdownConditionLocked(WithLock lock) {
@@ -2590,7 +2594,7 @@ Status SSLManagerOpenSSL::initSSLContext(SSL_CTX* context,
     if (direction == ConnectionDirection::kIncoming && !params.sslClusterCAFile.empty()) {
         cafile = params.sslClusterCAFile;
     }
-    const auto status = cafile.empty() ? _setupSystemCA(context) : _setupCA(context, cafile);
+    auto status = cafile.empty() ? _setupSystemCA(context) : _setupCA(context, cafile);
     if (!status.isOK()) {
         return status;
     }

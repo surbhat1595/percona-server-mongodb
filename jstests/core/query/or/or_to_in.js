@@ -4,14 +4,11 @@
 // This test is not prepared to handle explain output for sharded collections.
 // @tags: [
 //   assumes_unsharded_collection,
-//   requires_fcv_63,
+//   requires_fcv_70,
 // ]
 
-(function() {
-"use strict";
-
 load("jstests/aggregation/extras/utils.js");  // For assertArrayEq.
-load("jstests/libs/analyze_plan.js");
+import {getWinningPlan} from "jstests/libs/analyze_plan.js";
 
 var coll = db.orToIn;
 coll.drop();
@@ -169,4 +166,3 @@ assert.commandWorked(db.createCollection("orToIn", {collation: {locale: 'de'}}))
 coll = db.orToIn;
 assert.commandWorked(coll.insert(data));
 testOrToIn(positiveTestQueries);
-}());

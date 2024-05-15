@@ -3,14 +3,11 @@
  * cache is cleared.
  * @tags: [
  *   # TODO SERVER-67607: Test plan cache with CQF enabled.
- *   cqf_incompatible,
+ *   cqf_experimental_incompatible,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/analyze_plan.js");
-load("jstests/libs/sbe_util.js");
+import {getPlanCacheKeyFromShape} from "jstests/libs/analyze_plan.js";
+import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
 // Lists the names of the setParameters which should result in the SBE plan cache being cleared when
 // the parameter is modified. Along with each parameter, includes a valid new value of the parameter
@@ -48,6 +45,15 @@ const paramList = [
     {name: "internalQueryColumnScanMinAvgDocSizeBytes", value: 2048},
     {name: "internalQueryColumnScanMinCollectionSizeBytes", value: 2048},
     {name: "internalQueryColumnScanMinNumColumnFilters", value: 5},
+    {name: "internalQueryCardinalityEstimatorMode", value: "sampling"},
+    {name: "internalCascadesOptimizerDisableScan", value: true},
+    {name: "internalCascadesOptimizerDisableIndexes", value: true},
+    {name: "internalCascadesOptimizerDisableMergeJoinRIDIntersect", value: true},
+    {name: "internalCascadesOptimizerDisableHashJoinRIDIntersect", value: true},
+    {name: "internalCascadesOptimizerDisableGroupByAndUnionRIDIntersect", value: true},
+    {name: "internalCascadesOptimizerFastIndexNullHandling", value: true},
+    {name: "internalCascadesOptimizerMinIndexEqPrefixes", value: 2},
+    {name: "internalCascadesOptimizerMaxIndexEqPrefixes", value: 2},
 ];
 
 const conn = MongoRunner.runMongod();
@@ -60,7 +66,7 @@ const db = conn.getDB(dbName);
 if (!checkSBEEnabled(db)) {
     jsTestLog("Skipping test because SBE is not enabled");
     MongoRunner.stopMongod(conn);
-    return;
+    quit();
 }
 
 assert.commandWorked(db.dropDatabase());
@@ -106,4 +112,3 @@ for (let param of paramList) {
 }
 
 MongoRunner.stopMongod(conn);
-}());

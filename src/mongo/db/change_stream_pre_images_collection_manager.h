@@ -30,16 +30,25 @@
 #pragma once
 
 #include <boost/optional/optional.hpp>
+#include <cstddef>
+#include <cstdint>
 
-#include "mongo/db/change_stream_pre_images_truncate_markers.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/change_stream_pre_images_truncate_manager.h"
+#include "mongo/db/change_stream_pre_images_truncate_markers_per_nsUUID.h"
+#include "mongo/db/client.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/change_stream_preimage_gen.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/shard_role.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/util/background.h"
 #include "mongo/util/concurrent_shared_values_map.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 /**
@@ -171,11 +180,10 @@ private:
      *
      * Returns the number of pre-image documents removed.
      */
-    size_t _deleteExpiredPreImagesWithCollScanCommon(
-        OperationContext* opCtx,
-        const ScopedCollectionAcquisition& preImageColl,
-        const MatchExpression* filterPtr,
-        Timestamp maxRecordIdTimestamp);
+    size_t _deleteExpiredPreImagesWithCollScanCommon(OperationContext* opCtx,
+                                                     const CollectionAcquisition& preImageColl,
+                                                     const MatchExpression* filterPtr,
+                                                     Timestamp maxRecordIdTimestamp);
 
     /**
      * Removes expired pre-images in a single tenant environment.

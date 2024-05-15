@@ -33,18 +33,37 @@
 
 #pragma once
 
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <utility>
+#include <vector>
+
+// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
+
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/catalog/catalog_test_fixture.h"
+#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
+#include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
 #include "mongo/db/exec/sbe/stages/limit_skip.h"
 #include "mongo/db/exec/sbe/stages/project.h"
+#include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/stages/unwind.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/plan_yield_policy_sbe.h"
 #include "mongo/db/query/sbe_stage_builder.h"
 #include "mongo/db/query/sbe_stage_builder_helpers.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/yieldable.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/id_generator.h"
 
 namespace mongo::sbe {
 
@@ -101,6 +120,10 @@ public:
 
     value::SlotId generateSlotId() {
         return _slotIdGenerator->generate();
+    }
+
+    value::SlotVector generateMultipleSlotIds(int numSlots) {
+        return _slotIdGenerator->generateMultiple(numSlots);
     }
 
     SpoolId generateSpoolId() {

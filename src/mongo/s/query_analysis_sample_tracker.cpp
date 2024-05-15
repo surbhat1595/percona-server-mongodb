@@ -29,9 +29,19 @@
 
 #include "mongo/s/query_analysis_sample_tracker.h"
 
-#include "mongo/logv2/log.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <mutex>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
+
+#include "mongo/db/cluster_role.h"
+#include "mongo/db/server_options.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
-#include "mongo/s/is_mongos.h"
+#include "mongo/util/assert_util_core.h"
+#include "mongo/util/clock_source.h"
+#include "mongo/util/decorable.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -68,10 +78,10 @@ void QueryAnalysisSampleTracker::refreshConfigurations(
                 configuration.getNs(),
                 std::make_shared<CollectionSampleTracker>(configuration.getNs(),
                                                           configuration.getCollectionUuid(),
-                                                          configuration.getSampleRate(),
+                                                          configuration.getSamplesPerSecond(),
                                                           configuration.getStartTime())));
         } else {
-            it->second->setSampleRate(configuration.getSampleRate());
+            it->second->setSamplesPerSecond(configuration.getSamplesPerSecond());
             it->second->setStartTime(configuration.getStartTime());
             newTrackers.emplace(std::make_pair(configuration.getNs(), it->second));
         }
@@ -121,7 +131,7 @@ QueryAnalysisSampleTracker::_getOrCreateCollectionSampleTracker(
                  .emplace(std::make_pair(
                      nss,
                      std::make_shared<QueryAnalysisSampleTracker::CollectionSampleTracker>(
-                         nss, *collUuid, 0 /* sampleRate */, startTime)))
+                         nss, *collUuid, 0 /* samplesPerSec */, startTime)))
                  .first;
         _sampledNamespaces.insert(nss);
     }
@@ -141,12 +151,13 @@ BSONObj QueryAnalysisSampleTracker::CollectionSampleTracker::reportForCurrentOp(
     report.setCollUuid(_collUuid);
     report.setSampledReadsCount(_sampledReadsCount);
     report.setSampledWritesCount(_sampledWritesCount);
-    if (!isMongos()) {
+    if (!serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer)) {
         report.setSampledReadsBytes(_sampledReadsBytes);
         report.setSampledWritesBytes(_sampledWritesBytes);
     }
-    if (isMongos() || serverGlobalParams.clusterRole.has(ClusterRole::None)) {
-        report.setSampleRate(_sampleRate);
+    if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer) ||
+        serverGlobalParams.clusterRole.has(ClusterRole::None)) {
+        report.setSamplesPerSecond(_samplesPerSec);
     }
     report.setStartTime(_startTime);
 
@@ -161,7 +172,7 @@ BSONObj QueryAnalysisSampleTracker::reportForServerStatus() const {
     res.setTotalCollections(static_cast<int64_t>(_sampledNamespaces.size()));
     res.setTotalSampledReadsCount(_totalSampledReadsCount);
     res.setTotalSampledWritesCount(_totalSampledWritesCount);
-    if (!isMongos()) {
+    if (!serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer)) {
         res.setTotalSampledReadsBytes(_totalSampledReadsBytes);
         res.setTotalSampledWritesBytes(_totalSampledWritesBytes);
     }

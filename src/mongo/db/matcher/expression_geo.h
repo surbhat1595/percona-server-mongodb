@@ -31,10 +31,29 @@
 #pragma once
 
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <memory>
+#include <ostream>
+#include <s2cellid.h>
+#include <string>
+
+#include "mongo/base/clonable_ptr.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/geo/geometry_container.h"
 #include "mongo/db/geo/geoparser.h"
+#include "mongo/db/geo/shapes.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
+#include "mongo/db/matcher/expression_visitor.h"
+#include "mongo/db/matcher/match_details.h"
+#include "mongo/db/query/serialization_options.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -107,7 +126,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int indentationLevel = 0) const;
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final;
+    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -211,7 +230,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int indentationLevel = 0) const;
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final;
+    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -272,7 +291,7 @@ public:
     // These won't be called.
     //
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final {
+    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final {
         MONGO_UNREACHABLE;
     }
 

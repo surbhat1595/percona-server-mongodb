@@ -29,17 +29,36 @@
 
 #pragma once
 
+#include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
 
+#include "mongo/base/clonable_ptr.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonelement_comparator.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
+#include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_path.h"
+#include "mongo/db/matcher/expression_visitor.h"
+#include "mongo/db/matcher/match_details.h"
+#include "mongo/db/matcher/path.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/serialization_options.h"
 #include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
@@ -149,9 +168,10 @@ public:
         }
     }
 
+    template <typename T>
     ComparisonMatchExpressionBase(MatchType type,
                                   boost::optional<StringData> path,
-                                  Value rhs,
+                                  T&& rhs,
                                   ElementPath::LeafArrayBehavior,
                                   ElementPath::NonLeafArrayBehavior,
                                   clonable_ptr<ErrorAnnotation> annotation = nullptr,
@@ -161,7 +181,8 @@ public:
 
     virtual void debugString(StringBuilder& debug, int indentationLevel = 0) const;
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final;
+    virtual void appendSerializedRightHandSide(BSONObjBuilder* bob,
+                                               SerializationOptions opts) const;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -248,9 +269,10 @@ public:
         return isComparisonMatchExpression(expr->matchType());
     }
 
+    template <typename T>
     ComparisonMatchExpression(MatchType type,
                               boost::optional<StringData> path,
-                              Value rhs,
+                              T&& rhs,
                               clonable_ptr<ErrorAnnotation> annotation = nullptr,
                               const CollatorInterface* collator = nullptr);
 
@@ -272,7 +294,9 @@ public:
                             const BSONElement& rhs,
                             clonable_ptr<ErrorAnnotation> annotation = nullptr,
                             const CollatorInterface* collator = nullptr)
-        : ComparisonMatchExpression(EQ, path, Value(rhs), std::move(annotation), collator) {}
+        : ComparisonMatchExpression(EQ, path, rhs, std::move(annotation), collator) {
+        invariant(!rhs.eoo());
+    }
 
     StringData name() const final {
         return kName;
@@ -280,7 +304,7 @@ public:
 
     std::unique_ptr<MatchExpression> clone() const final {
         std::unique_ptr<ComparisonMatchExpression> e =
-            std::make_unique<EqualityMatchExpression>(path(), Value(getData()), _errorAnnotation);
+            std::make_unique<EqualityMatchExpression>(path(), getData(), _errorAnnotation);
         if (getTag()) {
             e->setTag(getTag()->clone());
         }
@@ -311,7 +335,9 @@ public:
     LTEMatchExpression(boost::optional<StringData> path,
                        const BSONElement& rhs,
                        clonable_ptr<ErrorAnnotation> annotation = nullptr)
-        : ComparisonMatchExpression(LTE, path, Value(rhs), std::move(annotation)) {}
+        : ComparisonMatchExpression(LTE, path, rhs, std::move(annotation)) {
+        invariant(!rhs.eoo());
+    }
 
     StringData name() const final {
         return kName;
@@ -350,7 +376,9 @@ public:
     LTMatchExpression(boost::optional<StringData> path,
                       const BSONElement& rhs,
                       clonable_ptr<ErrorAnnotation> annotation = nullptr)
-        : ComparisonMatchExpression(LT, path, Value(rhs), std::move(annotation)) {}
+        : ComparisonMatchExpression(LT, path, rhs, std::move(annotation)) {
+        invariant(!rhs.eoo());
+    }
 
     StringData name() const final {
         return kName;
@@ -394,7 +422,9 @@ public:
     GTMatchExpression(boost::optional<StringData> path,
                       const BSONElement& rhs,
                       clonable_ptr<ErrorAnnotation> annotation = nullptr)
-        : ComparisonMatchExpression(GT, path, Value(rhs), std::move(annotation)) {}
+        : ComparisonMatchExpression(GT, path, rhs, std::move(annotation)) {
+        invariant(!rhs.eoo());
+    }
 
     StringData name() const final {
         return kName;
@@ -437,7 +467,9 @@ public:
     GTEMatchExpression(boost::optional<StringData> path,
                        const BSONElement& rhs,
                        clonable_ptr<ErrorAnnotation> annotation = nullptr)
-        : ComparisonMatchExpression(GTE, path, Value(rhs), std::move(annotation)) {}
+        : ComparisonMatchExpression(GTE, path, rhs, std::move(annotation)) {
+        invariant(!rhs.eoo());
+    }
 
     StringData name() const final {
         return kName;
@@ -508,7 +540,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final;
+    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final;
 
     void serializeToBSONTypeRegex(BSONObjBuilder* out) const;
 
@@ -590,7 +622,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final;
+    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -657,7 +689,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final;
+    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -691,7 +723,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final;
+    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -767,7 +799,7 @@ private:
      * A helper to serialize to something like {$in: "?array<?number>"} or similar, depending on
      * 'opts' and whether we have a mixed-type $in or not.
      */
-    BSONObj serializeToShape(SerializationOptions opts) const;
+    void serializeToShape(BSONObjBuilder* bob, SerializationOptions opts) const;
 
     // Whether or not '_equalities' has a jstNULL element in it.
     bool _hasNull = false;
@@ -840,7 +872,7 @@ public:
 
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
-    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final;
+    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -920,7 +952,8 @@ public:
     BitsAllSetMatchExpression(boost::optional<StringData> path,
                               std::vector<uint32_t> bitPositions,
                               clonable_ptr<ErrorAnnotation> annotation = nullptr)
-        : BitTestMatchExpression(BITS_ALL_SET, path, bitPositions, std::move(annotation)) {}
+        : BitTestMatchExpression(
+              BITS_ALL_SET, path, std::move(bitPositions), std::move(annotation)) {}
 
     BitsAllSetMatchExpression(boost::optional<StringData> path,
                               uint64_t bitMask,
@@ -964,7 +997,8 @@ public:
     BitsAllClearMatchExpression(boost::optional<StringData> path,
                                 std::vector<uint32_t> bitPositions,
                                 clonable_ptr<ErrorAnnotation> annotation = nullptr)
-        : BitTestMatchExpression(BITS_ALL_CLEAR, path, bitPositions, std::move(annotation)) {}
+        : BitTestMatchExpression(
+              BITS_ALL_CLEAR, path, std::move(bitPositions), std::move(annotation)) {}
 
     BitsAllClearMatchExpression(boost::optional<StringData> path,
                                 uint64_t bitMask,
@@ -1008,7 +1042,8 @@ public:
     BitsAnySetMatchExpression(boost::optional<StringData> path,
                               std::vector<uint32_t> bitPositions,
                               clonable_ptr<ErrorAnnotation> annotation = nullptr)
-        : BitTestMatchExpression(BITS_ANY_SET, path, bitPositions, std::move(annotation)) {}
+        : BitTestMatchExpression(
+              BITS_ANY_SET, path, std::move(bitPositions), std::move(annotation)) {}
 
     BitsAnySetMatchExpression(boost::optional<StringData> path,
                               uint64_t bitMask,
@@ -1052,7 +1087,8 @@ public:
     BitsAnyClearMatchExpression(boost::optional<StringData> path,
                                 std::vector<uint32_t> bitPositions,
                                 clonable_ptr<ErrorAnnotation> annotation = nullptr)
-        : BitTestMatchExpression(BITS_ANY_CLEAR, path, bitPositions, std::move(annotation)) {}
+        : BitTestMatchExpression(
+              BITS_ANY_CLEAR, path, std::move(bitPositions), std::move(annotation)) {}
 
     BitsAnyClearMatchExpression(boost::optional<StringData> path,
                                 uint64_t bitMask,

@@ -26,13 +26,26 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#include "mongo/platform/basic.h"
+#include <memory>
+#include <string>
 
+#include "mongo/base/error_codes.h"
+#include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/notify_sharding_event_gen.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/repl/change_stream_oplog_notification.h"
 #include "mongo/db/s/sharding_state.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/service_context.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/rpc/op_msg.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -76,17 +89,21 @@ public:
                     "_shardsvrNotifyShardingEvent can only run on shard servers",
                     serverGlobalParams.clusterRole.has(ClusterRole::ShardServer));
 
-            switch (request().getEventType()) {
-                case EventTypeEnum::kDatabasesAdded: {
-                    const auto event = DatabasesAdded::parse(
-                        IDLParserContext("_shardsvrNotifyShardingEvent"), request().getDetails());
-                    notifyChangeStreamsOnDatabaseAdded(opCtx, event);
-
-                } break;
-
-                default:
-                    uasserted(ErrorCodes::InvalidOptions, "Unsupported sharding event type");
+            if (request().getEventType() == notify_sharding_event::kDatabasesAdded) {
+                const auto event = DatabasesAdded::parse(
+                    IDLParserContext("_shardsvrNotifyShardingEvent"), request().getDetails());
+                notifyChangeStreamsOnDatabaseAdded(opCtx, event);
+                return;
             }
+
+            if (request().getEventType() == notify_sharding_event::kCollectionResharded) {
+                const auto event = CollectionResharded::parse(
+                    IDLParserContext("_shardsvrNotifyShardingEvent"), request().getDetails());
+                notifyChangeStreamsOnReshardCollectionComplete(opCtx, event);
+                return;
+            }
+
+            MONGO_UNREACHABLE;
         }
 
     private:
@@ -102,8 +119,9 @@ public:
             uassert(ErrorCodes::Unauthorized,
                     "Unauthorized",
                     AuthorizationSession::get(opCtx->getClient())
-                        ->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
-                                                           ActionType::internal));
+                        ->isAuthorizedForActionsOnResource(
+                            ResourcePattern::forClusterResource(request().getDbName().tenantId()),
+                            ActionType::internal));
         }
     };
 

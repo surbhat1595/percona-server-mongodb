@@ -29,11 +29,16 @@
 
 #pragma once
 
-#include "mongo/platform/basic.h"
-
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/db/keypattern.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/platform/basic.h"
 #include "mongo/s/shard_key_pattern.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 namespace analyze_shard_key {
@@ -61,11 +66,11 @@ constexpr int kMaxBSONObjSizePerInsertBatch = BSONObjMaxUserSize - 2 * 1024 * 10
 Status validateNamespace(const NamespaceString& nss);
 
 /*
- * If the namespace doesn't exist locally, returns a NamespaceNotFound error. If the namespace
- * corresponds to a view, returns a CommandNotSupportedOnView error. If the collection has
- * queryable encryption enabled, returns an IllegalOperation error. Throws DBException on any error
- * that occurs during the validation. If the validation passed, returns an OK status and the
- * collection UUID for the collection when the validation occurred.
+ * If the namespace doesn't exist locally, returns a NamespaceNotFound error. If the collection is a
+ * timeseries collection or has queryable encryption enabled, returns an IllegalOperation error. If
+ * the namespace corresponds to a view, returns a CommandNotSupportedOnView error. Throws
+ * DBException on any error that occurs during the validation. If the validation passed, returns an
+ * OK status and the collection UUID for the collection when the validation occurred.
  */
 StatusWith<UUID> validateCollectionOptions(OperationContext* opCtx, const NamespaceString& nss);
 
@@ -110,6 +115,11 @@ double round(double val, int n);
  * Returns the percentage between 'part' and 'whole' (between 0 and 100).
  */
 double calculatePercentage(double part, double whole);
+
+/*
+ * Returns true if the client is internal.
+ */
+bool isInternalClient(OperationContext* opCtx);
 
 }  // namespace analyze_shard_key
 }  // namespace mongo

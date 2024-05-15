@@ -31,31 +31,51 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <boost/predef/hardware/simd.h>
+// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
+// IWYU pragma: no_include "boost/predef/hardware/simd/x86.h"
+// IWYU pragma: no_include "boost/predef/hardware/simd/x86/versions.h"
+#include <boost/preprocessor/control/iif.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
+// IWYU pragma: no_include "emmintrin.h"
+#include <algorithm>
 #include <array>
 #include <bitset>
-#include <boost/predef/hardware/simd.h>
+#include <climits>
 #include <cstdint>
+#include <cstring>
+#include <limits>
+#include <memory>
 #include <ostream>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsontypes.h"
 #include "mongo/bson/ordering.h"
-#include "mongo/config.h"
+#include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/exec/shard_filterer.h"
 #include "mongo/db/fts/fts_matcher.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/query/bson_typemask.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/index_bounds.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/storage/key_string.h"
 #include "mongo/platform/bits.h"
+#include "mongo/platform/compiler.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/platform/endian.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/pcre.h"
 #include "mongo/util/represent_as.h"
+#include "mongo/util/shared_buffer.h"
+#include "mongo/util/str.h"
 
 namespace mongo {
 /**
@@ -68,7 +88,6 @@ class Value;
 }
 
 class TimeZoneDatabase;
-
 class TimeZone;
 
 class JsFunction;
@@ -103,6 +122,8 @@ using IndexKeysInclusionSet = std::bitset<Ordering::kMaxCompoundIndexKeys>;
 namespace value {
 class SortSpec;
 struct CsiCell;
+struct ValueBlock;
+struct CellBlock;
 
 static constexpr size_t kNewUUIDLength = 16;
 
@@ -169,7 +190,7 @@ enum class TypeTags : uint8_t {
     // Local lambda value
     LocalLambda,
 
-    // KeyString::Value
+    // key_string::Value
     ksValue,
 
     // Pointer to a compiled PCRE regular expression object.
@@ -201,6 +222,12 @@ enum class TypeTags : uint8_t {
 
     // Pointer to a timezone object
     timeZone,
+
+    // Pointer to a ValueBlock object.
+    valueBlock,
+
+    // Pointer to a CellBlock object.
+    cellBlock,
 };
 
 inline constexpr bool isNumber(TypeTags tag) noexcept {
@@ -316,6 +343,7 @@ std::ostream& operator<<(std::ostream& os, TypeTags tag);
 str::stream& operator<<(str::stream& str, TypeTags tag);
 std::ostream& operator<<(std::ostream& os, const std::pair<TypeTags, Value>& value);
 str::stream& operator<<(str::stream& str, const std::pair<TypeTags, Value>& value);
+std::string print(const std::pair<TypeTags, Value>& value);
 
 /**
  * Three ways value comparison (aka spaceship operator).
@@ -1161,6 +1189,14 @@ std::pair<TypeTags, Value> makeNewRecordId(int64_t rid);
 std::pair<TypeTags, Value> makeNewRecordId(const char* str, int32_t size);
 std::pair<TypeTags, Value> makeCopyRecordId(const RecordId&);
 
+inline ValueBlock* getValueBlock(Value v) {
+    return reinterpret_cast<ValueBlock*>(v);
+}
+
+inline CellBlock* getCellBlock(Value v) {
+    return reinterpret_cast<CellBlock*>(v);
+}
+
 inline bool canUseSmallString(StringData input) {
     auto length = input.size();
     auto ptr = input.rawData();
@@ -1272,8 +1308,8 @@ inline std::pair<TypeTags, Value> makeCopyDecimal(const Decimal128& inD) {
     return {TypeTags::NumberDecimal, reinterpret_cast<Value>(valueBuffer)};
 }
 
-inline KeyString::Value* getKeyStringView(Value val) noexcept {
-    return reinterpret_cast<KeyString::Value*>(val);
+inline key_string::Value* getKeyStringView(Value val) noexcept {
+    return reinterpret_cast<key_string::Value*>(val);
 }
 
 std::pair<TypeTags, Value> makeNewPcreRegex(StringData pattern, StringData options);
@@ -1281,6 +1317,10 @@ std::pair<TypeTags, Value> makeNewPcreRegex(StringData pattern, StringData optio
 std::pair<TypeTags, Value> makeCopyPcreRegex(const pcre::Regex& regex);
 
 std::pair<TypeTags, Value> makeCopyTimeZone(const TimeZone& tz);
+
+std::pair<TypeTags, Value> makeCopyValueBlock(const ValueBlock& block);
+
+std::pair<TypeTags, Value> makeCopyCellBlock(const CellBlock& block);
 
 inline pcre::Regex* getPcreRegexView(Value val) noexcept {
     return reinterpret_cast<pcre::Regex*>(val);
@@ -1438,7 +1478,7 @@ inline std::pair<TypeTags, Value> makeCopyBsonCodeWScope(const BsonCodeWScope& c
     return makeNewBsonCodeWScope(cws.code, cws.scope);
 }
 
-std::pair<TypeTags, Value> makeCopyKeyString(const KeyString::Value& inKey);
+std::pair<TypeTags, Value> makeCopyKeyString(const key_string::Value& inKey);
 
 std::pair<TypeTags, Value> makeCopyJsFunction(const JsFunction&);
 
@@ -1542,6 +1582,10 @@ inline std::pair<TypeTags, Value> copyValue(TypeTags tag, Value val) {
             return makeCopyIndexBounds(*getIndexBoundsView(val));
         case TypeTags::timeZone:
             return makeCopyTimeZone(*getTimeZoneView(val));
+        case TypeTags::valueBlock:
+            return makeCopyValueBlock(*getValueBlock(val));
+        case TypeTags::cellBlock:
+            return makeCopyCellBlock(*getCellBlock(val));
         default:
             break;
     }

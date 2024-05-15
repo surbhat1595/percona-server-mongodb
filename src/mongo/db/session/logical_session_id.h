@@ -29,12 +29,29 @@
 
 #pragma once
 
+#include <boost/container_hash/extensions.hpp>
+#include <boost/cstdint.hpp>
 #include <boost/functional/hash.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <cstddef>
+#include <cstdint>
+#include <ostream>
 #include <string>
 
 #include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/bson/util/builder_fwd.h"
+#include "mongo/crypto/hash_block.h"
+#include "mongo/crypto/sha256_block.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo {
@@ -55,10 +72,7 @@ const TxnRetryCounter kUninitializedTxnRetryCounter = -1;
 class BSONObjBuilder;
 class OperationContext;
 
-// The constant kLocalLogicalSessionTimeoutMinutesDefault comes from the generated
-// header logical_session_id_gen.h.
-constexpr Minutes kLogicalSessionDefaultTimeout =
-    Minutes(kLocalLogicalSessionTimeoutMinutesDefault);
+constexpr Minutes kLogicalSessionDefaultTimeout{Minutes(kLocalLogicalSessionTimeoutMinutesDefault)};
 
 inline bool operator==(const LogicalSessionId& lhs, const LogicalSessionId& rhs) {
     return (lhs.getId() == rhs.getId()) && (lhs.getTxnNumber() == rhs.getTxnNumber()) &&
@@ -108,13 +122,12 @@ private:
 
 struct LogicalSessionRecordHash {
     std::size_t operator()(const LogicalSessionRecord& lsid) const {
-        return LogicalSessionIdHash{}(lsid.getId());
+        return _hasher(lsid.getId());
     }
 
 private:
-    UUID::Hash _hasher;
+    LogicalSessionIdHash _hasher;
 };
-
 
 inline std::ostream& operator<<(std::ostream& s, const LogicalSessionId& lsid) {
     return (s << lsid.getId() << " - " << lsid.getUid() << " - "
@@ -159,9 +172,10 @@ public:
 
     BSONObj toBSON() const {
         BSONObjBuilder bob;
-        bob.append(OperationSessionInfo::kTxnNumberFieldName, _txnNumber);
+        bob.append(OperationSessionInfoFromClientBase::kTxnNumberFieldName, _txnNumber);
         if (_txnRetryCounter) {
-            bob.append(OperationSessionInfo::kTxnRetryCounterFieldName, *_txnRetryCounter);
+            bob.append(OperationSessionInfoFromClientBase::kTxnRetryCounterFieldName,
+                       *_txnRetryCounter);
         }
         return bob.obj();
     }
@@ -194,5 +208,25 @@ inline bool operator==(const TxnNumberAndRetryCounter& l, const TxnNumberAndRetr
 inline bool operator!=(const TxnNumberAndRetryCounter& l, const TxnNumberAndRetryCounter& r) {
     return !(l == r);
 }
+
+/**
+ * Represents all the session-related state that a client can attach when invoking a command against
+ * the server. Clients are allowed to invoke commands without attaching a session in which case the
+ * default-constructed value means "no logical session". However, if a client sends a session, they
+ * must specify at least the "lsid" field.
+ */
+class OperationSessionInfoFromClient : public OperationSessionInfoFromClientBase {
+public:
+    /**
+     * Returns a default-constructed object meaning "there is no logical session".
+     */
+    OperationSessionInfoFromClient() = default;
+    OperationSessionInfoFromClient(LogicalSessionFromClient lsidFromClient);
+
+    OperationSessionInfoFromClient(LogicalSessionId lsid, boost::optional<TxnNumber> txnNumber);
+
+    explicit OperationSessionInfoFromClient(OperationSessionInfoFromClientBase other)
+        : OperationSessionInfoFromClientBase(std::move(other)) {}
+};
 
 }  // namespace mongo

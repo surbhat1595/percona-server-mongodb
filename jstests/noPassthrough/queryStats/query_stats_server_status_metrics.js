@@ -2,11 +2,6 @@
  * Test the telemetry related serverStatus metrics.
  * @tags: [featureFlagQueryStats]
  */
-load('jstests/libs/analyze_plan.js');
-
-(function() {
-"use strict";
-
 function runTestWithMongodOptions(mongodOptions, test, testOptions) {
     const conn = MongoRunner.runMongod(mongodOptions);
     const testDB = conn.getDB('test');
@@ -17,6 +12,48 @@ function runTestWithMongodOptions(mongodOptions, test, testOptions) {
     MongoRunner.stopMongod(conn);
 }
 
+// Helper to round up to the next highest power of 2 for our estimation.
+function align(number) {
+    return Math.pow(2, Math.ceil(Math.log2(number)));
+}
+
+function addApprox2MBOfStatsData(testDB, coll) {
+    const k2MB = 2 * 1024 * 1024;
+
+    const cmdObjTemplate = {
+        find: coll.getName(),
+        filter: {foo123: {$eq: "?"}},
+    };
+
+    const kEstimatedEntrySizeBytes = (() => {
+        // Metrics stored per shape.
+        const kNumCountersAndDates =
+            4 /* top-level */ + (4 * 3) /* those with sum, min, max, sumOfSquares */;
+
+        // Just a sample, will change based on where the test is run - shouldn't be off by too much
+        // though.
+        const kClientMetadataEst = {
+            client: {application: {name: "MongoDB Shell"}},
+            driver: {name: "MongoDB Internal Client", version: "7.1.0-alpha"},
+            os: {type: "Linux", name: "Ubuntu", architecture: "aarch64", version: "22.04"}
+        };
+
+        const kCmdNsObj = {cmdNs: {db: testDB.getName(), coll: coll.getName()}};
+
+        // This is likely not to be exact - we are probably forgetting something. But we don't need
+        // to be exact, just "good enough."
+        return align(kNumCountersAndDates * 4 + Object.bsonsize(cmdObjTemplate) +
+                     Object.bsonsize(kClientMetadataEst) + Object.bsonsize(kCmdNsObj));
+    })();
+    const nIterations = k2MB / kEstimatedEntrySizeBytes;
+    for (let i = 0; i <= nIterations; i++) {
+        let newQuery = {["foo" + i]: "bar"};
+        const cmdObj = cmdObjTemplate;
+        cmdObj.filter = newQuery;
+        const cmdRes = assert.commandWorked(testDB.runCommand(cmdObj));
+        new DBCommandCursor(testDB, cmdRes).itcount();
+    }
+}
 /**
  * Test serverStatus metric which counts the number of evicted entries.
  *
@@ -25,13 +62,7 @@ function runTestWithMongodOptions(mongodOptions, test, testOptions) {
 function evictionTest(conn, testDB, coll, testOptions) {
     const evictedBefore = testDB.serverStatus().metrics.queryStats.numEvicted;
     assert.eq(evictedBefore, 0);
-    // Each telemetry entry is 208 bytes (key and value included). We must create at least ~5000
-    // entries to reach 1MB.
-    for (var i = 0; i < 10000; i++) {
-        let query = {};
-        query["foo" + i] = "bar";
-        coll.aggregate([{$match: query}]).itcount();
-    }
+    addApprox2MBOfStatsData(testDB, coll);
     if (!testOptions.resetCacheSize) {
         const evictedAfter = testDB.serverStatus().metrics.queryStats.numEvicted;
         assert.gt(evictedAfter, 0);
@@ -129,15 +160,18 @@ function telemetryStoreWriteErrorsTest(conn, testDB, coll, testOptions) {
  * eviction.
  */
 runTestWithMongodOptions({
-    setParameter: {internalQueryStatsCacheSize: "1MB", internalQueryStatsSamplingRate: -1},
+    setParameter: {internalQueryStatsCacheSize: "1MB", internalQueryStatsRateLimit: -1},
 },
                          evictionTest,
                          {resetCacheSize: false});
 /**
  * In this configuration, eviction is triggered only when the telemetry store size is reset.
- * */
+ *
+ * Use an 8MB upper limit since our estimated size of the query stats entry is pretty rough and
+ * meant to give us some wiggle room so we don't have to keep adjusting this test as we tweak it.
+ */
 runTestWithMongodOptions({
-    setParameter: {internalQueryStatsCacheSize: "4MB", internalQueryStatsSamplingRate: -1},
+    setParameter: {internalQueryStatsCacheSize: "8MB", internalQueryStatsRateLimit: -1},
 },
                          evictionTest,
                          {resetCacheSize: true});
@@ -146,7 +180,7 @@ runTestWithMongodOptions({
  * In this configuration, every query is sampled, so no requests should be rate-limited.
  */
 runTestWithMongodOptions({
-    setParameter: {internalQueryStatsSamplingRate: -1},
+    setParameter: {internalQueryStatsRateLimit: -1},
 },
                          countRateLimitedRequestsTest,
                          {samplingRate: 2147483647, numRequests: 20});
@@ -156,7 +190,7 @@ runTestWithMongodOptions({
  * rate-limited.
  */
 runTestWithMongodOptions({
-    setParameter: {internalQueryStatsSamplingRate: 10},
+    setParameter: {internalQueryStatsRateLimit: 10},
 },
                          countRateLimitedRequestsTest,
                          {samplingRate: 10, numRequests: 20});
@@ -166,7 +200,7 @@ runTestWithMongodOptions({
  * size
  */
 runTestWithMongodOptions({
-    setParameter: {internalQueryStatsSamplingRate: -1},
+    setParameter: {internalQueryStatsRateLimit: -1},
 },
                          telemetryStoreSizeEstimateTest);
 
@@ -175,7 +209,6 @@ runTestWithMongodOptions({
  * are tracked.
  */
 runTestWithMongodOptions({
-    setParameter: {internalQueryStatsCacheSize: "0.00001MB", internalQueryStatsSamplingRate: -1},
+    setParameter: {internalQueryStatsCacheSize: "0.00001MB", internalQueryStatsRateLimit: -1},
 },
                          telemetryStoreWriteErrorsTest);
-}());

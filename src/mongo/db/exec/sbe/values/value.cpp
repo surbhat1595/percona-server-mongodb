@@ -27,21 +27,41 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/db/exec/sbe/values/value.h"
+#include <absl/container/flat_hash_map.h>
+#include <absl/hash/hash.h>
+#include <absl/strings/string_view.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/numeric/conversion/converter_policies.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <cmath>
 
 #include "mongo/base/compare_numbers.h"
+#include "mongo/base/string_data_comparator_interface.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/util/builder.h"
 #include "mongo/db/exec/js_function.h"
 #include "mongo/db/exec/sbe/makeobj_spec.h"
-#include "mongo/db/exec/sbe/size_estimator.h"
+#include "mongo/db/exec/sbe/util/print_options.h"
+#include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/bson.h"
+#include "mongo/db/exec/sbe/values/cell_interface.h"
+#include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/sort_spec.h"
+#include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/values/value_builder.h"
 #include "mongo/db/exec/sbe/values/value_printer.h"
+#include "mongo/db/index/btree_key_generator.h"
+#include "mongo/db/index/sort_key_generator.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/datetime/date_time_support.h"
+#include "mongo/db/query/sort_pattern.h"
 #include "mongo/db/storage/key_string.h"
+#include "mongo/util/bufreader.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/pcre_util.h"
 
@@ -131,9 +151,9 @@ std::pair<TypeTags, Value> makeNewBsonCodeWScope(StringData code, const char* sc
     return {TypeTags::bsonCodeWScope, bitcastFrom<char*>(buffer.release())};
 }
 
-std::pair<TypeTags, Value> makeCopyKeyString(const KeyString::Value& inKey) {
-    auto k = new KeyString::Value(inKey);
-    return {TypeTags::ksValue, bitcastFrom<KeyString::Value*>(k)};
+std::pair<TypeTags, Value> makeCopyKeyString(const key_string::Value& inKey) {
+    auto k = new key_string::Value(inKey);
+    return {TypeTags::ksValue, bitcastFrom<key_string::Value*>(k)};
 }
 
 std::pair<TypeTags, Value> makeNewPcreRegex(StringData pattern, StringData options) {
@@ -153,7 +173,17 @@ std::pair<TypeTags, Value> makeCopyTimeZone(const TimeZone& tz) {
     return {TypeTags::timeZone, bitcastFrom<TimeZone*>(tzCopy.release())};
 }
 
-KeyString::Value SortSpec::generateSortKey(const BSONObj& obj, const CollatorInterface* collator) {
+std::pair<TypeTags, Value> makeCopyValueBlock(const ValueBlock& block) {
+    auto blockCopy = block.clone();
+    return {TypeTags::valueBlock, bitcastFrom<ValueBlock*>(blockCopy.release())};
+}
+
+std::pair<TypeTags, Value> makeCopyCellBlock(const CellBlock& block) {
+    auto blockCopy = block.clone();
+    return {TypeTags::cellBlock, bitcastFrom<CellBlock*>(blockCopy.release())};
+}
+
+key_string::Value SortSpec::generateSortKey(const BSONObj& obj, const CollatorInterface* collator) {
     _sortKeyGen.setCollator(collator);
     return _sortKeyGen.computeSortKeyString(obj);
 }
@@ -263,7 +293,7 @@ BtreeKeyGenerator SortSpec::initKeyGen() const {
     }
 
     const bool isSparse = false;
-    auto version = KeyString::Version::kLatestVersion;
+    auto version = key_string::Version::kLatestVersion;
     auto ordering = Ordering::make(_sortPatternBson);
 
     return {std::move(fields), std::move(fixed), isSparse, version, ordering};
@@ -391,6 +421,12 @@ void releaseValueDeep(TypeTags tag, Value val) noexcept {
         case TypeTags::timeZone:
             delete getTimeZoneView(val);
             break;
+        case TypeTags::valueBlock:
+            delete getValueBlock(val);
+            break;
+        case TypeTags::cellBlock:
+            delete getCellBlock(val);
+            break;
         default:
             break;
     }
@@ -414,6 +450,11 @@ std::ostream& operator<<(std::ostream& os, const std::pair<TypeTags, Value>& val
 str::stream& operator<<(str::stream& str, const std::pair<TypeTags, Value>& value) {
     ValuePrinters::make(str, PrintOptions()).writeValueToStream(value.first, value.second);
     return str;
+}
+std::string print(const std::pair<TypeTags, Value>& value) {
+    auto stream = str::stream();
+    stream << value;
+    return stream;
 }
 
 BSONType tagToType(TypeTags tag) noexcept {
@@ -979,7 +1020,7 @@ StringData ObjectEnumerator::getFieldName() const {
     }
 }
 
-void readKeyStringValueIntoAccessors(const KeyString::Value& keyString,
+void readKeyStringValueIntoAccessors(const key_string::Value& keyString,
                                      const Ordering& ordering,
                                      BufBuilder* valueBufferBuilder,
                                      std::vector<OwnedValueAccessor>* accessors,
@@ -988,8 +1029,8 @@ void readKeyStringValueIntoAccessors(const KeyString::Value& keyString,
     invariant(!indexKeysToInclude || indexKeysToInclude->count() == accessors->size());
 
     BufReader reader(keyString.getBuffer(), keyString.getSize());
-    KeyString::TypeBits typeBits(keyString.getTypeBits());
-    KeyString::TypeBits::Reader typeBitsReader(typeBits);
+    key_string::TypeBits typeBits(keyString.getTypeBits());
+    key_string::TypeBits::Reader typeBitsReader(typeBits);
 
     bool keepReading = true;
     size_t componentIndex = 0;
@@ -1001,7 +1042,7 @@ void readKeyStringValueIntoAccessors(const KeyString::Value& keyString,
             ? (ordering.get(componentIndex) == -1)
             : false;
 
-        keepReading = KeyString::readSBEValue(
+        keepReading = key_string::readSBEValue(
             &reader, &typeBitsReader, inverted, typeBits.version, &valBuilder);
 
         invariant(componentIndex < Ordering::kMaxCompoundIndexKeys || !keepReading);
@@ -1009,7 +1050,7 @@ void readKeyStringValueIntoAccessors(const KeyString::Value& keyString,
         // If 'indexKeysToInclude' indicates that this index key component is not part of the
         // projection, remove it from the list of values that will be fed to the 'accessors'
         // list. Note that, even when we are excluding a key component, we can't skip the call
-        // to 'KeyString::readSBEValue()' because it is needed to advance the 'reader' and
+        // to 'key_string::readSBEValue()' because it is needed to advance the 'reader' and
         // 'typeBitsReader' stream.
         if (indexKeysToInclude && (componentIndex < Ordering::kMaxCompoundIndexKeys) &&
             !(*indexKeysToInclude)[componentIndex]) {

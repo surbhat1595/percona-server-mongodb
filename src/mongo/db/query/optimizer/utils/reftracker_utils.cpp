@@ -29,7 +29,13 @@
 
 #include "mongo/db/query/optimizer/utils/reftracker_utils.h"
 
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
+
+#include "mongo/db/query/optimizer/algebra/operator.h"
 #include "mongo/db/query/optimizer/reference_tracker.h"
+#include "mongo/db/query/optimizer/syntax/expr.h"
 
 
 namespace mongo::optimizer {
@@ -103,8 +109,10 @@ public:
 
     ProjectionNameSet walk(const RIDUnionNode& /*node*/,
                            const ABT& /*leftChild*/,
-                           const ABT& /*rightChild*/) {
-        return {};
+                           const ABT& /*rightChild*/,
+                           const ABT& /*binder*/,
+                           const ABT& refs) {
+        return extractFromABT(refs);
     }
 
     ProjectionNameSet walk(const BinaryJoinNode& /*node*/,

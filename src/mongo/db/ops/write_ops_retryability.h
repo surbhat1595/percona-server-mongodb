@@ -29,9 +29,16 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/ops/single_write_result_gen.h"
 #include "mongo/db/ops/write_ops.h"
+#include "mongo/db/ops/write_ops_gen.h"
 #include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/oplog_entry_gen.h"
 
 namespace mongo {
 
@@ -52,8 +59,10 @@ bool isWouldChangeOwningShardSentinelOplogEntry(const OplogEntryType& oplogEntry
  * the single write result that would have been returned by the statement that would have resulted
  * in the given oplog entry. The oplog entries are assumed to be properly formed and have the
  * correct op type.
+ * Uses the 'upsertedId' for an upsert operation if it's provided.
  */
-SingleWriteResult parseOplogEntryForUpdate(const repl::OplogEntry& entry);
+SingleWriteResult parseOplogEntryForUpdate(
+    const repl::OplogEntry& entry, const boost::optional<BSONElement>& upsertedId = boost::none);
 
 /**
  * Populates the passed-in builder with the result of a findAndModify based on the oplog entries

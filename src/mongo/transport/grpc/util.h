@@ -29,11 +29,41 @@
 
 #pragma once
 
+#include <type_traits>
+
 #include <grpcpp/security/server_credentials.h>
+#include <grpcpp/support/status_code_enum.h>
 
+#include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
+#include "mongo/util/net/hostandport.h"
 
-namespace mongo::transport::grpc {
+namespace mongo::transport::grpc::util {
+namespace constants {
+/**
+ * Placeholder wire version constant corresponding to the first wire version that supports using
+ * gRPC.
+ * TODO SERVER-78614: Move this to the WireVersion enum closer to the initial release containing
+ * gRPC support.
+ */
+static constexpr auto kMinimumWireVersion = 22;
+
+static constexpr auto kAuthenticatedCommandStreamMethodName =
+    "/mongodb.CommandService/AuthenticatedCommandStream";
+static constexpr auto kUnauthenticatedCommandStreamMethodName =
+    "/mongodb.CommandService/UnauthenticatedCommandStream";
+
+// Server-provided metadata keys.
+// This is defined as a std::string instead of StringData to avoid having to copy it when passing to
+// gRPC APIs that expect a const std::string&.
+extern const std::string kClusterMaxWireVersionKey;
+
+// Client-provided metadata keys.
+static constexpr StringData kAuthenticationTokenKey = "authorization"_sd;
+static constexpr StringData kClientIdKey = "mongodb-clientid"_sd;
+static constexpr StringData kClientMetadataKey = "mongodb-client"_sd;
+static constexpr StringData kWireVersionKey = "mongodb-wireversion"_sd;
+}  // namespace constants
 
 /**
  * Parse a PEM-encoded file that contains a single certificate and its associated private key
@@ -41,4 +71,36 @@ namespace mongo::transport::grpc {
  */
 ::grpc::SslServerCredentialsOptions::PemKeyCertPair parsePEMKeyFile(StringData filePath);
 
-}  // namespace mongo::transport::grpc
+/**
+ * Converts a Mongo URI into a gRPC formatted string.
+ */
+std::string formatHostAndPortForGRPC(const HostAndPort& address);
+
+/**
+ * Converts a gRPC status code into its corresponding MongoDB error code.
+ */
+ErrorCodes::Error statusToErrorCode(::grpc::StatusCode statusCode);
+
+/**
+ * Converts a MongoDB error code into its corresponding gRPC status code.
+ * Note that the mapping between gRPC status codes and MongoDB errors codes is not 1 to 1, so the
+ * following does not have to evaluate to true:
+ * `errorToStatusCode(statusToErrorCode(sc)) == sc`
+ */
+::grpc::StatusCode errorToStatusCode(ErrorCodes::Error errorCode);
+
+/**
+ * Converts a MongoDB status to its gRPC counterpart, and vice versa.
+ * Prefer using this over direct invocations of `errorToStatusCode` and `statusToErrorCode`.
+ */
+template <typename StatusType>
+inline auto convertStatus(StatusType status) {
+    if constexpr (std::is_same<StatusType, Status>::value) {
+        return ::grpc::Status(errorToStatusCode(status.code()), status.reason());
+    } else {
+        static_assert(std::is_same<StatusType, ::grpc::Status>::value == true);
+        return Status(statusToErrorCode(status.error_code()), status.error_message());
+    }
+}
+
+}  // namespace mongo::transport::grpc::util

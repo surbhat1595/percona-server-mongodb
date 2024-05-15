@@ -9,11 +9,6 @@
 // Cannot run the filtering metadata check on tests that run refineCollectionShardKey.
 TestData.skipCheckShardFilteringMetadata = true;
 
-(function() {
-"use strict";
-
-load("jstests/core/timeseries/libs/timeseries.js");
-
 // Connections.
 const mongo = new ShardingTest({shards: 2, rs: {nodes: 3}});
 const dbName = 'testDB';
@@ -168,10 +163,7 @@ function assertRangeMatch(savedRange, paramRange) {
     assert.commandFailedWithCode(
         mongo.s0.adminCommand(
             {reshardCollection: viewNss, key: {[metaField]: 1, [controlTimeField]: 1}}),
-        [
-            ErrorCodes.NotImplemented,
-            ErrorCodes.NamespaceNotSharded /* TODO SERVER-67929 Remove this error code */
-        ]);
+        [ErrorCodes.NotImplemented]);
     assert.commandFailedWithCode(
         mongo.s0.adminCommand(
             {reshardCollection: bucketNss, key: {[metaField]: 1, [controlTimeField]: 1}}),
@@ -238,10 +230,8 @@ function assertRangeMatch(savedRange, paramRange) {
 // Can add control.min.time as the last shard key component on the timeseries collection.
 (function checkRefineCollectionShardKeyCommand() {
     createTimeSeriesColl({index: {[metaField]: 1, [timeField]: 1}, shardKey: {[metaField]: 1}});
-    assert.commandWorkedOrFailedWithCode(
-        mongo.s0.adminCommand(
-            {refineCollectionShardKey: viewNss, key: {[metaField]: 1, [controlTimeField]: 1}}),
-        ErrorCodes.NamespaceNotSharded /* TODO SERVER-67929 Remove this error code */);
+    assert.commandWorked(mongo.s0.adminCommand(
+        {refineCollectionShardKey: viewNss, key: {[metaField]: 1, [controlTimeField]: 1}}));
     assert.commandWorked(mongo.s0.adminCommand(
         {refineCollectionShardKey: bucketNss, key: {[metaField]: 1, [controlTimeField]: 1}}));
     const coll = mongo.s0.getDB(dbName)[collName];
@@ -277,21 +267,4 @@ function assertRangeMatch(savedRange, paramRange) {
     dropTimeSeriesColl();
 })();
 
-// Check renameCollection command cannot modify name through the view namespace.
-(function checkRenameCollectionCommand() {
-    createTimeSeriesColl(
-        {index: {[metaField]: 1, [timeField]: 1}, shardKey: {[metaField]: 1, [timeField]: 1}});
-    const newCollName = `${collName}New`;
-    const newViewNss = `${dbName}.${newCollName}`;
-    // Rename collection is not supported through view namespace.
-    assert.commandFailedWithCode(
-        mongo.s.adminCommand({renameCollection: viewNss, to: newViewNss}), [
-            ErrorCodes.IllegalOperation,
-            ErrorCodes.CommandNotSupportedOnView, /* TODO SERVER-67929 Remove this error code */
-            ErrorCodes.NamespaceNotFound,         /* TODO SERVER-67929 Remove this error code */
-        ]);
-    dropTimeSeriesColl();
-})();
-
 mongo.stop();
-})();

@@ -13,13 +13,11 @@
 //   # Plan cache state is node-local and will not get migrated alongside tenant data.
 //   tenant_migration_incompatible,
 //   # TODO SERVER-67607: Test plan cache with CQF enabled.
-//   cqf_incompatible,
+//   cqf_experimental_incompatible,
 // ]
-(function() {
-'use strict';
 load('jstests/aggregation/extras/utils.js');  // For assertArrayEq.
-load("jstests/libs/analyze_plan.js");         // For getPlanCacheKeyFromShape.
-load("jstests/libs/sbe_util.js");             // For checkSBEEnabled.
+import {getPlanCacheKeyFromShape} from "jstests/libs/analyze_plan.js";
+import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
 const isSbeEnabled = checkSBEEnabled(db);
 var coll = db.jstests_plan_cache_shell_helpers;
@@ -179,4 +177,3 @@ assertCacheLength(0);
 planCache.clear();
 const explain = coll.find(queryB, projectionB).sort(sortC).explain(true);
 assertCacheLength(0);
-}());

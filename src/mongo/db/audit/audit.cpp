@@ -69,8 +69,10 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/rpc/metadata/impersonated_user_metadata.h"
 #include "mongo/stdx/variant.h"
 #include "mongo/util/concurrency/mutex.h"
+#include "mongo/util/database_name_util.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/exit_code.h"
+#include "mongo/util/namespace_string_util.h"
 #include "mongo/util/net/sock.h"
 #include "mongo/util/overloaded_visitor.h"
 #include "mongo/util/string_map.h"
@@ -871,7 +873,7 @@ namespace audit {
         }
 
         BSONObjBuilder params;
-        params.append("ns", nsname.ns());
+        params.append("ns", NamespaceStringUtil::serialize(nsname));
         params.append("indexName", indexname);
         params.append("indexSpec", *indexSpec);
         params.append("indexBuildState", indexBuildState);
@@ -883,7 +885,7 @@ namespace audit {
             return;
         }
 
-        const BSONObj params = BSON("ns" << nsname.ns());
+        const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname));
         _auditEvent(client, "createCollection", params);
     }
 
@@ -896,8 +898,8 @@ namespace audit {
             return;
         }
 
-        const BSONObj params =
-            BSON("ns" << nsname.ns() << "viewOn" << viewOn << "pipeline" << pipeline);
+        const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname) << "viewOn"
+                                         << viewOn << "pipeline" << pipeline);
         _auditEvent(client, "createView", params, code);
     }
 
@@ -906,18 +908,16 @@ namespace audit {
             return;
         }
 
-        const BSONObj params = BSON("ns" << nsname.ns());
+        const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname));
         _auditEvent(client, "importCollection", params);
     }
 
-    void logCreateDatabase(Client* client,
-                           StringData nsname) {
+    void logCreateDatabase(Client* client, const DatabaseName& dbname) {
         if (!_auditLog) {
             return;
         }
 
-        const BSONObj params = BSON("ns" << nsname);
-        _auditEvent(client, "createDatabase", params);
+        _auditEvent(client, "createDatabase", BSON("db" << DatabaseNameUtil::serialize(dbname)));
     }
 
     void logDropIndex(Client* client, StringData indexname, const NamespaceString& nsname) {
@@ -925,7 +925,8 @@ namespace audit {
             return;
         }
 
-        const BSONObj params = BSON("ns" << nsname.ns() << "indexName" << indexname);
+        const BSONObj params =
+            BSON("ns" << NamespaceStringUtil::serialize(nsname) << "indexName" << indexname);
         _auditEvent(client, "dropIndex", params);
     }
 
@@ -934,7 +935,7 @@ namespace audit {
             return;
         }
 
-        const BSONObj params = BSON("ns" << nsname.ns());
+        const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname));
         _auditEvent(client, "dropCollection", params);
     }
 
@@ -948,20 +949,18 @@ namespace audit {
         }
 
         BSONObjBuilder params;
-        params.append("ns", nsname.ns());
+        params.append("ns", NamespaceStringUtil::serialize(nsname));
         params.append("viewOn", viewOn);
         params.append("pipeline", pipeline);
         _auditEvent(client, "dropView", params.done(), code);
     }
 
-    void logDropDatabase(Client* client,
-                         StringData nsname) {
+    void logDropDatabase(Client* client, const DatabaseName& dbname) {
         if (!_auditLog) {
             return;
         }
 
-        const BSONObj params = BSON("ns" << nsname);
-        _auditEvent(client, "dropDatabase", params);
+        _auditEvent(client, "dropDatabase", BSON("db" << DatabaseNameUtil::serialize(dbname)));
     }
 
     void logRenameCollection(Client* client,
@@ -1048,13 +1047,12 @@ namespace audit {
         _auditEvent(client, "dropUser", params);
     }
 
-    void logDropAllUsersFromDatabase(Client* client,
-                                     StringData dbname) {
+    void logDropAllUsersFromDatabase(Client* client, const DatabaseName& dbname) {
         if (!_auditLog) {
             return;
         }
 
-        _auditEvent(client, "dropAllUsers", BSON("db" << dbname));
+        _auditEvent(client, "dropAllUsers", BSON("db" << DatabaseNameUtil::serialize(dbname)));
     }
 
     void logUpdateUser(Client* client,
@@ -1156,13 +1154,12 @@ namespace audit {
         _auditEvent(client, "dropRole", params);
     }
 
-    void logDropAllRolesFromDatabase(Client* client,
-                                     StringData dbname) {
+    void logDropAllRolesFromDatabase(Client* client, const DatabaseName& dbname) {
         if (!_auditLog) {
             return;
         }
 
-        _auditEvent(client, "dropAllRoles", BSON("db" << dbname));
+        _auditEvent(client, "dropAllRoles", BSON("db" << DatabaseNameUtil::serialize(dbname)));
     }
 
     void logGrantRolesToRole(Client* client,

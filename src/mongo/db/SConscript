@@ -750,6 +750,7 @@ audit_libdeps = [
     '$BUILD_DIR/mongo/db/query_expressions',
     '$BUILD_DIR/mongo/db/server_base',
     '$BUILD_DIR/mongo/util/background_job',
+    '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
 ]
 if has_option('audit'):
     # The Percona's `audit` library is intended to be a drop-in replacement of

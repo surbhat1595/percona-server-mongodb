@@ -23,6 +23,8 @@ last-continuous:
   all:
   - test_file: jstests/replsets/dbcheck_skip_applying_batch_on_secondary_parameter.js
     ticket: SERVER-88885
+  - test_file: jstests/replsets/dbcheck_fails_on_write_concern_error.js
+    ticket: SERVER-88318
   - test_file: src/mongo/db/modules/enterprise/jstests/fcbis/fcbis_pauses_watchdog_checks_during_storage_change.js
     ticket: SERVER-83508
   - test_file: jstests/sharding/query/find_and_modify_without_two_phase.js
@@ -461,7 +463,7 @@ last-continuous:
     ticket: SERVER-72703
   - test_file: jstests/core/timeseries/timeseries_lookup.js
     ticket: SERVER-79637
-  - test_file: jstests/core/notablescan.js
+  - test_file: jstests/noPassthrough/notablescan.js
     ticket: SERVER-83119
   - test_file: jstests/sharding/clustered_coll_scan.js
     ticket: SERVER-83119
@@ -477,8 +479,6 @@ last-continuous:
     ticket: SERVER-87987
   - test_file: jstests/core/administrative/apply_ops/apply_ops1.js
     ticket: SERVER-82349
-  - test_file: jstests/core/query/bittest.js
-    ticket: SERVER-88173
   - test_file: jstests/sharding/swallow_unnecessary_uuid_mismatch_error.js
     ticket: SERVER-79049
   - test_file: jstests/core/timeseries/timeseries_collmod.js
@@ -493,11 +493,19 @@ last-continuous:
     ticket: SERVER-77427
   - test_file: jstests/replsets/reconstruct_prepared_transactions_initial_sync.js
     ticket: SERVER-89618
+  - test_file: jstests/core/timeseries/timeseries_computed_field.js
+    ticket: SERVER-88072
+  - test_file: jstests/core/timeseries/timeseries_geonear_lookup.js
+    ticket: SERVER-81454
+  - test_file: jstests/sharding/move_chunk_deferred_lookup.js
+    ticket: SERVER-89859
   suites: null
 last-lts:
   all:
   - test_file: jstests/replsets/dbcheck_skip_applying_batch_on_secondary_parameter.js
     ticket: SERVER-88885
+  - test_file: jstests/replsets/dbcheck_fails_on_write_concern_error.js
+    ticket: SERVER-88318
   - test_file: jstests/replsets/ignore_dbcheck_in_startup_recovery.js
     ticket: SERVER-30832
   - test_file: jstests/replsets/ignore_dbcheck_in_rollback.js
@@ -1002,7 +1010,7 @@ last-lts:
     ticket: SERVER-72703
   - test_file: jstests/core/timeseries/timeseries_lookup.js
     ticket: SERVER-79637
-  - test_file: jstests/core/notablescan.js
+  - test_file: jstests/noPassthrough/notablescan.js
     ticket: SERVER-83119
   - test_file: jstests/sharding/clustered_coll_scan.js
     ticket: SERVER-83119
@@ -1018,8 +1026,6 @@ last-lts:
     ticket: SERVER-87987
   - test_file: jstests/core/administrative/apply_ops/apply_ops1.js
     ticket: SERVER-82349
-  - test_file: jstests/core/query/bittest.js
-    ticket: SERVER-88173
   - test_file: jstests/sharding/swallow_unnecessary_uuid_mismatch_error.js
     ticket: SERVER-79049
   - test_file: jstests/core/timeseries/timeseries_collmod.js
@@ -1036,4 +1042,10 @@ last-lts:
     ticket: SERVER-78509
   - test_file: jstests/replsets/reconstruct_prepared_transactions_initial_sync.js
     ticket: SERVER-89618
+  - test_file: jstests/core/timeseries/timeseries_computed_field.js
+    ticket: SERVER-88072
+  - test_file: jstests/core/timeseries/timeseries_geonear_lookup.js
+    ticket: SERVER-81454
+  - test_file: jstests/sharding/move_chunk_deferred_lookup.js
+    ticket: SERVER-89859
   suites: null

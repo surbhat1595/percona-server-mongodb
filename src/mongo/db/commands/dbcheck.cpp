@@ -55,11 +55,11 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 MONGO_FAIL_POINT_DEFINE(sleepAfterExtraIndexKeysHashing);
+MONGO_FAIL_POINT_DEFINE(hangBeforeProcessingDbCheckRun);
+MONGO_FAIL_POINT_DEFINE(hangBeforeAddingDBCheckBatchToOplog);
 
 namespace mongo {
-
 namespace {
-
 repl::OpTime _logOp(OperationContext* opCtx,
                     const NamespaceString& nss,
                     const boost::optional<UUID>& uuid,
@@ -314,6 +314,11 @@ protected:
 
         DbCheckStartAndStopLogger startStop(opCtx);
 
+        if (MONGO_unlikely(hangBeforeProcessingDbCheckRun.shouldFail())) {
+            LOGV2(7949000, "Hanging dbcheck due to failpoint 'hangBeforeProcessingDbCheckRun'");
+            hangBeforeProcessingDbCheckRun.pauseWhileSet();
+        }
+
         for (const auto& coll : *_run) {
             try {
                 _doCollection(opCtx, coll);
@@ -460,11 +465,14 @@ private:
             WriteConcernResult unused;
             auto status = waitForWriteConcern(opCtx, stats.time, info.writeConcern, &unused);
             if (!status.isOK()) {
-                auto entry = dbCheckWarningHealthLogEntry(info.nss,
-                                                          "dbCheck failed waiting for writeConcern",
-                                                          OplogEntriesEnum::Batch,
-                                                          status);
+                // TODO SERVER-89817: Add context with batch ID and lastKey once those are
+                // backported.
+                auto entry = dbCheckErrorHealthLogEntry(info.nss,
+                                                        "dbCheck failed waiting for writeConcern",
+                                                        OplogEntriesEnum::Batch,
+                                                        status);
                 HealthLogInterface::get(opCtx)->log(*entry);
+                return;
             }
 
             if (MONGO_unlikely(sleepAfterExtraIndexKeysHashing.shouldFail())) {
@@ -534,36 +542,20 @@ private:
         // time it takes between starting and replicating a batch on the primary. Otherwise, the
         // readTimestamp will not be available on a secondary by the time it processes the oplog
         // entry.
-        opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoOverlap);
-
-        // dbCheck writes to the oplog, so we need to take an IX lock. We don't need to write to the
-        // collection, however, so we only take an intent lock on it.
-        Lock::GlobalLock glob(opCtx, MODE_IX);
-
-        // The CollectionCatalog to use for lock-free reads with point-in-time catalog lookups.
-        std::shared_ptr<const CollectionCatalog> catalog;
-
-        boost::optional<AutoGetCollection> autoColl;
-        const Collection* collection = nullptr;
-        // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-        if (feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
-            // Make sure we get a CollectionCatalog in sync with our snapshot.
-            catalog = getConsistentCatalogAndSnapshot(opCtx);
-
-            collection = catalog->establishConsistentCollection(
-                opCtx,
-                {info.nss.dbName(), info.uuid},
-                opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx));
-        } else {
-            autoColl.emplace(opCtx, info.nss, MODE_IS);
-            collection = autoColl->getCollection().get();
-        }
+        const auto readSource = ReadSourceWithTimestamp{RecoveryUnit::ReadSource::kNoOverlap};
+        const DbCheckAcquisition acquisition(opCtx,
+                                             info.nss,
+                                             readSource,
+                                             // On the primary we must always block on prepared
+                                             // updates to guarantee snapshot isolation.
+                                             PrepareConflictBehavior::kEnforce);
 
         if (_stepdownHasOccurred(opCtx, info.nss)) {
             _done = true;
             return Status(ErrorCodes::PrimarySteppedDown, "dbCheck terminated due to stepdown");
         }
 
+        const auto& collection = acquisition.coll;
         if (!collection) {
             const auto msg = "Collection under dbCheck no longer exists";
             return {ErrorCodes::NamespaceNotFound, msg};
@@ -582,13 +574,10 @@ private:
                                   << " due to pending catalog changes"};
         }
 
-        // The CollectionPtr needs to outlive the DbCheckHasher as it's used internally.
-        const CollectionPtr collectionPtr(collection);
-
         boost::optional<DbCheckHasher> hasher;
         try {
             hasher.emplace(opCtx,
-                           collectionPtr,
+                           acquisition,
                            first,
                            info.end,
                            std::min(batchDocs, info.maxCount),
@@ -598,7 +587,7 @@ private:
         }
 
         const auto batchDeadline = Date_t::now() + Milliseconds(info.maxBatchTimeMillis);
-        Status status = hasher->hashAll(opCtx, batchDeadline);
+        Status status = hasher->hashAll(opCtx, acquisition.coll, batchDeadline);
 
         if (!status.isOK()) {
             return status;
@@ -613,6 +602,12 @@ private:
         batch.setMinKey(first);
         batch.setMaxKey(BSONKey(hasher->lastKey()));
         batch.setReadTimestamp(readTimestamp);
+
+        if (MONGO_unlikely(hangBeforeAddingDBCheckBatchToOplog.shouldFail())) {
+            LOGV2(8589000,
+                  "Hanging dbCheck due to failpoint 'hangBeforeAddingDBCheckBatchToOplog'");
+            hangBeforeAddingDBCheckBatchToOplog.pauseWhileSet();
+        }
 
         // Send information on this batch over the oplog.
         BatchStats result;

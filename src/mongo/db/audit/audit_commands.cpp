@@ -118,7 +118,8 @@ namespace mongo {
             }
             return ok;
         }
-    } cmdLogApplicationMessage;
+    };
+    MONGO_REGISTER_COMMAND(LogApplicationMessageCommand);
 
     class AuditGetOptionsCommand : public AuditCommand {
     public:
@@ -144,13 +145,5 @@ namespace mongo {
             return true;
         }
     };
-
-    // so tests can determine where the audit log lives
-    MONGO_INITIALIZER(RegisterAuditGetOptionsCommand)(InitializerContext* context) {
-        if (getTestCommandsEnabled()) {
-            // Leaked intentionally: a Command registers itself when constructed.
-            new AuditGetOptionsCommand();
-        }
-    }
-
+    MONGO_REGISTER_COMMAND(AuditGetOptionsCommand);
 }  // namespace mongo

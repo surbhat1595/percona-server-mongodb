@@ -82,7 +82,8 @@ public:
                    std::string& errmsg,
                    BSONObjBuilder& result) override;
     void snipForLogging(mutablebson::Document* cmdObj) const override;
-} createBackupCmd;
+};
+MONGO_REGISTER_COMMAND(CreateBackupCommand);
 
 bool CreateBackupCommand::errmsgRun(mongo::OperationContext* opCtx,
                                     const DatabaseName& db,

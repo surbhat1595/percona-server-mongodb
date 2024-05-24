@@ -113,7 +113,6 @@ roles:
                 - planCacheWrite
                 - reIndex
                 - renameCollectionSameDB # readWrite gets this also
-                - startBackup
                 - storageDetails
                 - validate
 
@@ -121,6 +120,7 @@ roles:
               tenancy: single # Not granted in multitenancy mode
               actions: &dbAdminRoleSingleTenantActions
                 - configureQueryAnalyzer # clusterManager gets this also
+                - startBackup
 
             - matchType: exact_namespace
               collection: 'system.profile'

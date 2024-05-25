@@ -77,18 +77,18 @@ public:
         return false;
     }
     bool errmsgRun(mongo::OperationContext* opCtx,
-             const std::string& db,
-             const BSONObj& cmdObj,
-             std::string& errmsg,
-             BSONObjBuilder& result) override;
+                   const DatabaseName& db,
+                   const BSONObj& cmdObj,
+                   std::string& errmsg,
+                   BSONObjBuilder& result) override;
     void snipForLogging(mutablebson::Document* cmdObj) const override;
 } createBackupCmd;
 
 bool CreateBackupCommand::errmsgRun(mongo::OperationContext* opCtx,
-                              const std::string& db,
-                              const BSONObj& cmdObj,
-                              std::string& errmsg,
-                              BSONObjBuilder& result) {
+                                    const DatabaseName& db,
+                                    const BSONObj& cmdObj,
+                                    std::string& errmsg,
+                                    BSONObjBuilder& result) {
     BSONElement destPathElem = cmdObj["backupDir"];
     BSONElement archiveElem = cmdObj["archive"];
     BSONElement s3Elem = cmdObj["s3"];

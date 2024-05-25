@@ -648,7 +648,8 @@ TEST_F(MongodbCAPITest, RunListCommands) {
     std::sort(allowlist.begin(), allowlist.end());
 
     mongo::BSONObj listCommandsObj = mongo::fromjson("{ listCommands: 1 }");
-    auto listCommandsOpMsg = mongo::OpMsgRequest::fromDBAndBody("db_name", listCommandsObj);
+    auto listCommandsOpMsg = mongo::OpMsgRequest::fromDBAndBody(
+        mongo::DatabaseName::createDatabaseName_forTest(boost::none, "db_name"), listCommandsObj);
     auto output = performRpc(client, listCommandsOpMsg);
     auto commandsBSON = output["commands"];
     std::vector<std::string> commands;

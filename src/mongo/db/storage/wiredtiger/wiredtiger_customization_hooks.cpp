@@ -30,6 +30,7 @@
 #include <memory>
 #include <utility>
 
+#include <boost/none.hpp>
 #include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -38,7 +39,9 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_customization_hooks.h"
 #include "mongo/util/assert_util_core.h"
+#include "mongo/util/database_name_util.h"
 #include "mongo/util/decorable.h"
+#include "mongo/util/namespace_string_util.h"
 
 namespace mongo {
 namespace {
@@ -57,8 +60,9 @@ public:
      *  `WT_SESSION::create` call.
      */
     virtual std::string getTableCreateConfig(StringData tableName) {
-        NamespaceString ns(tableName);
-        auto keyid = ns.db();
+        NamespaceString ns = NamespaceStringUtil::deserialize(boost::none, tableName);
+        std::string keyIdStr = DatabaseNameUtil::serialize(ns.dbName());
+        StringData keyid(keyIdStr);
         // Keep compatibility with v3.6 after SERVER-34617
         const size_t minsize = 6; // Minimum size which allows following condition to be true
         if (keyid.size() >= minsize && (keyid == "system"_sd || keyid.startsWith("table:"_sd)))

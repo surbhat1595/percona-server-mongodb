@@ -17,6 +17,7 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/encryption/encryption_options',
         '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
     ],
 )
 

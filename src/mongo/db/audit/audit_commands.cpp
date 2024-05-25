@@ -102,7 +102,11 @@ namespace mongo {
         //    out->push_back(Privilege{ResourcePattern::forClusterResource(), ActionType::applicationMessage});
         //}
 
-        bool errmsgRun(OperationContext* txn, const std::string& dbname, const BSONObj& jsobj, std::string& errmsg, BSONObjBuilder& result) override {
+        bool errmsgRun(OperationContext* txn,
+                       const DatabaseName& dbname,
+                       const BSONObj& jsobj,
+                       std::string& errmsg,
+                       BSONObjBuilder& result) override {
             bool ok = true;
             const BSONElement &e = jsobj["logApplicationMessage"];
 
@@ -131,7 +135,11 @@ namespace mongo {
             return Status::OK();
         }
 
-        bool errmsgRun(OperationContext* txn, const std::string& dbname, const BSONObj& jsobj, std::string& errmsg, BSONObjBuilder& result) override {
+        bool errmsgRun(OperationContext* txn,
+                       const DatabaseName& dbname,
+                       const BSONObj& jsobj,
+                       std::string& errmsg,
+                       BSONObjBuilder& result) override {
             result.appendElements(auditOptions.toBSON());
             return true;
         }

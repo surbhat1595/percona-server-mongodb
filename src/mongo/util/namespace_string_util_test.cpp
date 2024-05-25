@@ -276,6 +276,12 @@ TEST(NamespaceStringUtilTest, SerializeExpectPrefixTrue_CommandReply) {
     }
 }
 
+TEST(NamespaceStringUtilTest, SerializeEmptyCollectionName) {
+    auto nss = NamespaceString::createNamespaceString_forTest(
+        DatabaseName::createDatabaseName_forTest(boost::none, "admin"), /* collection = */ "");
+    ASSERT_EQ(NamespaceStringUtil::serialize(nss), "admin.");
+}
+
 TEST(NamespaceStringUtilTest, DeserializeMissingExpectPrefix_CommandRequest) {
     RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
     TenantId tenantId(OID::gen());

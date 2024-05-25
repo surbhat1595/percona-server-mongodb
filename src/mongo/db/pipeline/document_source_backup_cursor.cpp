@@ -68,7 +68,7 @@ const char* DocumentSourceBackupCursor::getSourceName() const {
     return kStageName.rawData();
 }
 
-Value DocumentSourceBackupCursor::serialize(SerializationOptions opts) const {
+Value DocumentSourceBackupCursor::serialize(const SerializationOptions& opts) const {
     return Value(Document{
         {getSourceName(),
          Document{

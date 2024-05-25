@@ -60,10 +60,14 @@ void rotateAuditLog() {}
 namespace {
 const auto getAuditInterface = ServiceContext::declareDecoration<std::unique_ptr<AuditInterface>>();
 
+#if !PERCONA_AUDIT_ENABLED
+// @see the `src/mongo/audit/audit.cpp` file for registeting Percona's
+// implementation of `AuditInterface`.
 ServiceContext::ConstructorActionRegisterer registerCreateNoopAudit{
     "CreateNoopAudit", [](ServiceContext* service) {
         AuditInterface::set(service, std::make_unique<AuditNoOp>());
     }};
+#endif
 }  // namespace
 
 

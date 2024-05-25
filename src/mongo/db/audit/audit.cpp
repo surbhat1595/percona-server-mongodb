@@ -55,6 +55,7 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/audit/audit_parameters_gen.h"
+#include "mongo/db/audit_interface.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
@@ -518,19 +519,16 @@ BSONField<BSONObj> param("param");
 BSONField<int> result("result");
 }  // namespace AuditFields
 
-// This exists because NamespaceString::toString() prints "admin."
+// This exists because NamespaceString::serialize() prints "admin."
 // when dbname == "admin" and coll == "", which isn't so great.
+// @see the `SerializeEmptyCollectionName` test case in the
+// `namespace_string_util_test.cpp` file.
 static std::string nssToString(const NamespaceString& nss) {
-    std::stringstream ss;
-    if (!nss.db().empty()) {
-        ss << nss.db();
+    std::string nssStr = DatabaseNameUtil::serialize(nss.dbName());
+    if (StringData collStr = nss.coll(); !collStr.empty()) {
+        nssStr.append(1, '.').append(collStr.rawData(), collStr.size());
     }
-
-    if (!nss.coll().empty()) {
-        ss << '.' << nss.coll();
-    }
-
-    return ss.str();
+    return nssStr;
 }
 
 static void appendRoles(BSONObjBuilder& builder, RoleNameIterator it) {
@@ -657,612 +655,574 @@ ImpersonatedClientAttrs::ImpersonatedClientAttrs(Client* client) {
 
 void rotateAuditLog() {}
 
-void logClientMetadata(Client* client) {
-    if (!_auditLog) {
-        return;
+class AuditPercona : public AuditInterface {
+public:
+    void logClientMetadata(Client* client) const override {
+        if (!_auditLog) {
+            return;
+        }
+
+        _auditEvent(client, "clientMetadata", BSONObj{}, ErrorCodes::OK, false);
     }
 
-    _auditEvent(client, "clientMetadata", BSONObj{}, ErrorCodes::OK, false);
-}
-void logAuthentication(Client* client, const AuthenticateEvent& event) {
-    if (!_auditLog) {
-        return;
+    void logAuthentication(Client* client, const AuthenticateEvent& event) const override {
+        if (!_auditLog) {
+            return;
+        }
+
+        // clang-format off
+        const BSONObj params = BSON(
+            "user" << event.getUser().getName() <<
+            "db" << DatabaseNameUtil::serialize(event.getUser().getDatabaseName()) <<
+            "mechanism" << event.getMechanism());
+        // clang-format on
+        _auditEvent(client, "authenticate", params, event.getResult(), false);
     }
 
-    const BSONObj params = BSON("user" << event.getUser() << "db" << event.getDatabase()
-                                       << "mechanism" << event.getMechanism());
-    _auditEvent(client, "authenticate", params, event.getResult(), false);
-}
+    void logCommandAuthzCheck(Client* client,
+                              const OpMsgRequest& cmdObj,
+                              const CommandInterface& command,
+                              ErrorCodes::Error result) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logCommandAuthzCheck(Client* client,
-                          const OpMsgRequest& cmdObj,
-                          const CommandInterface& command,
-                          ErrorCodes::Error result) {
-    if (!_auditLog) {
-        return;
+        _auditAuthz(
+            client, command.ns(), cmdObj.body.firstElement().fieldName(), cmdObj.body, result);
     }
 
-    _auditAuthz(client, command.ns(), cmdObj.body.firstElement().fieldName(), cmdObj.body, result);
-}
+    void logKillCursorsAuthzCheck(Client* client,
+                                  const NamespaceString& ns,
+                                  long long cursorId,
+                                  ErrorCodes::Error result) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-
-void logDeleteAuthzCheck(Client* client,
-                         const NamespaceString& ns,
-                         const BSONObj& pattern,
-                         ErrorCodes::Error result) {
-    if (!_auditLog) {
-        return;
+        _auditAuthz(client, ns, "killCursors", BSON("cursorId" << cursorId), result);
     }
 
-    _auditAuthz(client, ns, "delete", BSON("pattern" << pattern), result);
-    _auditSystemUsers(
-        client, ns, "dropUser", BSON("db" << ns.db() << "pattern" << pattern), result);
-}
+    void logReplSetReconfig(Client* client,
+                            const BSONObj* oldConfig,
+                            const BSONObj* newConfig) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logGetMoreAuthzCheck(Client* client,
-                          const NamespaceString& ns,
-                          long long cursorId,
-                          ErrorCodes::Error result) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params = BSON("old" << *oldConfig << "new" << *newConfig);
+        _auditEvent(client, "replSetReconfig", params);
     }
 
-    _auditAuthz(client, ns, "getMore", BSON("cursorId" << cursorId), result);
-}
+    void logApplicationMessage(Client* client, StringData msg) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logInsertAuthzCheck(Client* client,
-                         const NamespaceString& ns,
-                         const BSONObj& insertedObj,
-                         ErrorCodes::Error result) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params = BSON("msg" << msg);
+        _auditEvent(client, "applicationMessage", params, ErrorCodes::OK, false);
     }
 
-    _auditAuthz(client, ns, "insert", BSON("obj" << insertedObj), result);
-    _auditSystemUsers(
-        client, ns, "createUser", BSON("db" << ns.db() << "userObj" << insertedObj), result);
-}
+    void logStartupOptions(Client* client, const BSONObj& startupOptions) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logKillCursorsAuthzCheck(Client* client,
-                              const NamespaceString& ns,
-                              long long cursorId,
-                              ErrorCodes::Error result) {
-    if (!_auditLog) {
-        return;
+        _auditEvent(client, "startupOptions", startupOptions, ErrorCodes::OK, false);
     }
 
-    _auditAuthz(client, ns, "killCursors", BSON("cursorId" << cursorId), result);
-}
+    void logShutdown(Client* client) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logQueryAuthzCheck(Client* client,
-                        const NamespaceString& ns,
-                        const BSONObj& query,
-                        ErrorCodes::Error result) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params = BSONObj();
+        _auditEvent(client, "shutdown", params);
+
+        // This is always the last event
+        // Destroy audit log here
+        _setGlobalAuditLog(nullptr);
     }
 
-    _auditAuthz(client, ns, "query", BSON("query" << query), result);
-}
+    void logLogout(Client* client,
+                   StringData reason,
+                   const BSONArray& initialUsers,
+                   const BSONArray& updatedUsers) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logUpdateAuthzCheck(Client* client,
-                         const NamespaceString& ns,
-                         const BSONObj& query,
-                         const write_ops::UpdateModification& update,
-                         bool isUpsert,
-                         bool isMulti,
-                         ErrorCodes::Error result) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params = BSON("reason" << reason << "initialUsers" << initialUsers
+                                             << "updatedUsers" << updatedUsers);
+        _auditEvent(client, "logout", params, ErrorCodes::OK, false);
     }
 
-    using UpdateType = write_ops::UpdateModification::Type;
-    const auto updateType = update.type();
-    invariant(updateType == UpdateType::kReplacement || updateType == UpdateType::kModifier);
-    const auto& updateObj = updateType == UpdateType::kReplacement ? update.getUpdateReplacement()
-                                                                   : update.getUpdateModifier();
-    {
-        const BSONObj args = BSON("pattern" << query << "updateObj" << updateObj << "upsert"
-                                            << isUpsert << "multi" << isMulti);
-        _auditAuthz(client, ns, "update", args, result);
+    void logCreateIndex(Client* client,
+                        const BSONObj* indexSpec,
+                        StringData indexname,
+                        const NamespaceString& nsname,
+                        StringData indexBuildState,
+                        ErrorCodes::Error result) const override {
+        if (!_auditLog) {
+            return;
+        }
+
+        BSONObjBuilder params;
+        params.append("ns", NamespaceStringUtil::serialize(nsname));
+        params.append("indexName", indexname);
+        params.append("indexSpec", *indexSpec);
+        params.append("indexBuildState", indexBuildState);
+        _auditEvent(client, "createIndex", params.done(), result);
     }
-    {
+
+    void logCreateCollection(Client* client, const NamespaceString& nsname) const override {
+        if (!_auditLog) {
+            return;
+        }
+
+        const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname));
+        _auditEvent(client, "createCollection", params);
+    }
+
+    void logCreateView(Client* client,
+                       const NamespaceString& nsname,
+                       StringData viewOn,
+                       BSONArray pipeline,
+                       ErrorCodes::Error code) const override {
+        if (!_auditLog) {
+            return;
+        }
+
+        const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname) << "viewOn"
+                                         << viewOn << "pipeline" << pipeline);
+        _auditEvent(client, "createView", params, code);
+    }
+
+    void logImportCollection(Client* client, const NamespaceString& nsname) const override {
+        if (!_auditLog) {
+            return;
+        }
+
+        const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname));
+        _auditEvent(client, "importCollection", params);
+    }
+
+    void logCreateDatabase(Client* client, const DatabaseName& dbname) const override {
+        if (!_auditLog) {
+            return;
+        }
+
+        _auditEvent(client, "createDatabase", BSON("ns" << DatabaseNameUtil::serialize(dbname)));
+    }
+
+    void logDropIndex(Client* client,
+                      StringData indexname,
+                      const NamespaceString& nsname) const override {
+        if (!_auditLog) {
+            return;
+        }
+
         const BSONObj params =
-            BSON("db" << ns.db() << "pattern" << query << "updateObj" << updateObj << "upsert"
-                      << isUpsert << "multi" << isMulti);
-        _auditSystemUsers(client, ns, "updateUser", params, result);
-    }
-}
-
-void logReplSetReconfig(Client* client, const BSONObj* oldConfig, const BSONObj* newConfig) {
-    if (!_auditLog) {
-        return;
+            BSON("ns" << NamespaceStringUtil::serialize(nsname) << "indexName" << indexname);
+        _auditEvent(client, "dropIndex", params);
     }
 
-    const BSONObj params = BSON("old" << *oldConfig << "new" << *newConfig);
-    _auditEvent(client, "replSetReconfig", params);
-}
+    void logDropCollection(Client* client, const NamespaceString& nsname) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logApplicationMessage(Client* client, StringData msg) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname));
+        _auditEvent(client, "dropCollection", params);
     }
 
-    const BSONObj params = BSON("msg" << msg);
-    _auditEvent(client, "applicationMessage", params, ErrorCodes::OK, false);
-}
+    void logDropView(Client* client,
+                     const NamespaceString& nsname,
+                     StringData viewOn,
+                     const std::vector<BSONObj>& pipeline,
+                     ErrorCodes::Error code) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logStartupOptions(Client* client, const BSONObj& startupOptions) {
-    if (!_auditLog) {
-        return;
+        BSONObjBuilder params;
+        params.append("ns", NamespaceStringUtil::serialize(nsname));
+        params.append("viewOn", viewOn);
+        params.append("pipeline", pipeline);
+        _auditEvent(client, "dropView", params.done(), code);
     }
 
-    _auditEvent(client, "startupOptions", startupOptions, ErrorCodes::OK, false);
-}
+    void logDropDatabase(Client* client, const DatabaseName& dbname) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logShutdown(Client* client) {
-    if (!_auditLog) {
-        return;
+        _auditEvent(client, "dropDatabase", BSON("ns" << DatabaseNameUtil::serialize(dbname)));
     }
 
-    const BSONObj params = BSONObj();
-    _auditEvent(client, "shutdown", params);
+    void logRenameCollection(Client* client,
+                             const NamespaceString& source,
+                             const NamespaceString& target) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-    // This is always the last event
-    // Destroy audit log here
-    _setGlobalAuditLog(nullptr);
-}
-
-void logLogout(Client* client,
-               StringData reason,
-               const BSONArray& initialUsers,
-               const BSONArray& updatedUsers) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params = BSON("old" << nssToString(source) << "new" << nssToString(target));
+        _auditEvent(client, "renameCollection", params);
     }
 
-    const BSONObj params = BSON("reason" << reason << "initialUsers" << initialUsers
-                                         << "updatedUsers" << updatedUsers);
-    _auditEvent(client, "logout", params, ErrorCodes::OK, false);
-}
+    void logEnableSharding(Client* client, StringData nsname) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logCreateIndex(Client* client,
-                    const BSONObj* indexSpec,
-                    StringData indexname,
-                    const NamespaceString& nsname,
-                    StringData indexBuildState,
-                    ErrorCodes::Error result) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params = BSON("ns" << nsname);
+        _auditEvent(client, "enableSharding", params);
     }
 
-    BSONObjBuilder params;
-    params.append("ns", NamespaceStringUtil::serialize(nsname));
-    params.append("indexName", indexname);
-    params.append("indexSpec", *indexSpec);
-    params.append("indexBuildState", indexBuildState);
-    _auditEvent(client, "createIndex", params.done(), result);
-}
+    void logAddShard(Client* client, StringData name, const std::string& servers) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logCreateCollection(Client* client, const NamespaceString& nsname) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params = BSON("shard" << name << "connectionString" << servers);
+        _auditEvent(client, "addShard", params);
     }
 
-    const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname));
-    _auditEvent(client, "createCollection", params);
-}
+    void logRemoveShard(Client* client, StringData shardname) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logCreateView(Client* client,
-                   const NamespaceString& nsname,
-                   StringData viewOn,
-                   BSONArray pipeline,
-                   ErrorCodes::Error code) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params = BSON("shard" << shardname);
+        _auditEvent(client, "removeShard", params);
     }
 
-    const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname) << "viewOn" << viewOn
-                                     << "pipeline" << pipeline);
-    _auditEvent(client, "createView", params, code);
-}
+    void logShardCollection(Client* client,
+                            StringData ns,
+                            const BSONObj& keyPattern,
+                            bool unique) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logImportCollection(Client* client, const NamespaceString& nsname) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params =
+            BSON("ns" << ns << "key" << keyPattern << "options" << BSON("unique" << unique));
+        _auditEvent(client, "shardCollection", params);
     }
 
-    const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname));
-    _auditEvent(client, "importCollection", params);
-}
+    void logCreateUser(Client* client,
+                       const UserName& username,
+                       bool password,
+                       const BSONObj* customData,
+                       const std::vector<RoleName>& roles,
+                       const boost::optional<BSONArray>& restrictions) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logCreateDatabase(Client* client, const DatabaseName& dbname) {
-    if (!_auditLog) {
-        return;
+        BSONObjBuilder params;
+        params << "user" << username.getUser() << "db" << username.getDB() << "password" << password
+               << "customData" << (customData ? *customData : BSONObj());
+        appendRoles(params, roles);
+        _auditEvent(client, "createUser", params.done());
     }
 
-    _auditEvent(client, "createDatabase", BSON("ns" << DatabaseNameUtil::serialize(dbname)));
-}
+    void logDropUser(Client* client, const UserName& username) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logDropIndex(Client* client, StringData indexname, const NamespaceString& nsname) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params = BSON("user" << username.getUser() << "db" << username.getDB());
+        _auditEvent(client, "dropUser", params);
     }
 
-    const BSONObj params =
-        BSON("ns" << NamespaceStringUtil::serialize(nsname) << "indexName" << indexname);
-    _auditEvent(client, "dropIndex", params);
-}
+    void logDropAllUsersFromDatabase(Client* client, const DatabaseName& dbname) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logDropCollection(Client* client, const NamespaceString& nsname) {
-    if (!_auditLog) {
-        return;
+        _auditEvent(client, "dropAllUsers", BSON("db" << DatabaseNameUtil::serialize(dbname)));
     }
 
-    const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname));
-    _auditEvent(client, "dropCollection", params);
-}
+    void logUpdateUser(Client* client,
+                       const UserName& username,
+                       bool password,
+                       const BSONObj* customData,
+                       const std::vector<RoleName>* roles,
+                       const boost::optional<BSONArray>& restrictions) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logDropView(Client* client,
-                 const NamespaceString& nsname,
-                 StringData viewOn,
-                 const std::vector<BSONObj>& pipeline,
-                 ErrorCodes::Error code) {
-    if (!_auditLog) {
-        return;
+        BSONObjBuilder params;
+        params << "user" << username.getUser() << "db" << username.getDB() << "password" << password
+               << "customData" << (customData ? *customData : BSONObj());
+        if (roles) {
+            appendRoles(params, *roles);
+        }
+
+        _auditEvent(client, "updateUser", params.done());
     }
 
-    BSONObjBuilder params;
-    params.append("ns", NamespaceStringUtil::serialize(nsname));
-    params.append("viewOn", viewOn);
-    params.append("pipeline", pipeline);
-    _auditEvent(client, "dropView", params.done(), code);
-}
+    void logGrantRolesToUser(Client* client,
+                             const UserName& username,
+                             const std::vector<RoleName>& roles) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logDropDatabase(Client* client, const DatabaseName& dbname) {
-    if (!_auditLog) {
-        return;
+        BSONObjBuilder params;
+        params << "user" << username.getUser() << "db" << username.getDB();
+        appendRoles(params, roles);
+        _auditEvent(client, "grantRolesToUser", params.done());
     }
 
-    _auditEvent(client, "dropDatabase", BSON("ns" << DatabaseNameUtil::serialize(dbname)));
-}
+    void logRevokeRolesFromUser(Client* client,
+                                const UserName& username,
+                                const std::vector<RoleName>& roles) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logRenameCollection(Client* client,
-                         const NamespaceString& source,
-                         const NamespaceString& target) {
-    if (!_auditLog) {
-        return;
+        BSONObjBuilder params;
+        params << "user" << username.getUser() << "db" << username.getDB();
+        appendRoles(params, roles);
+        _auditEvent(client, "revokeRolesFromUser", params.done());
     }
 
-    const BSONObj params = BSON("old" << nssToString(source) << "new" << nssToString(target));
-    _auditEvent(client, "renameCollection", params);
-}
+    void logCreateRole(Client* client,
+                       const RoleName& role,
+                       const std::vector<RoleName>& roles,
+                       const PrivilegeVector& privileges,
+                       const boost::optional<BSONArray>& restrictions) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logEnableSharding(Client* client, StringData nsname) {
-    if (!_auditLog) {
-        return;
+        BSONObjBuilder params;
+        params << "role" << role.getRole() << "db" << role.getDB();
+        appendRoles(params, roles);
+        appendPrivileges(params, privileges);
+        _auditEvent(client, "createRole", params.done());
     }
 
-    const BSONObj params = BSON("ns" << nsname);
-    _auditEvent(client, "enableSharding", params);
-}
+    void logUpdateRole(Client* client,
+                       const RoleName& role,
+                       const std::vector<RoleName>* roles,
+                       const PrivilegeVector* privileges,
+                       const boost::optional<BSONArray>& restrictions) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logAddShard(Client* client, StringData name, const std::string& servers) {
-    if (!_auditLog) {
-        return;
+        BSONObjBuilder params;
+        params << "role" << role.getRole() << "db" << role.getDB();
+        if (roles) {
+            appendRoles(params, *roles);
+        }
+        if (privileges) {
+            appendPrivileges(params, *privileges);
+        }
+        _auditEvent(client, "updateRole", params.done());
     }
 
-    const BSONObj params = BSON("shard" << name << "connectionString" << servers);
-    _auditEvent(client, "addShard", params);
-}
+    void logDropRole(Client* client, const RoleName& role) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logRemoveShard(Client* client, StringData shardname) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params = BSON("role" << role.getRole() << "db" << role.getDB());
+        _auditEvent(client, "dropRole", params);
     }
 
-    const BSONObj params = BSON("shard" << shardname);
-    _auditEvent(client, "removeShard", params);
-}
+    void logDropAllRolesFromDatabase(Client* client, const DatabaseName& dbname) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logShardCollection(Client* client, StringData ns, const BSONObj& keyPattern, bool unique) {
-    if (!_auditLog) {
-        return;
+        _auditEvent(client, "dropAllRoles", BSON("db" << DatabaseNameUtil::serialize(dbname)));
     }
 
-    const BSONObj params =
-        BSON("ns" << ns << "key" << keyPattern << "options" << BSON("unique" << unique));
-    _auditEvent(client, "shardCollection", params);
-}
+    void logGrantRolesToRole(Client* client,
+                             const RoleName& role,
+                             const std::vector<RoleName>& roles) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logCreateUser(Client* client,
-                   const UserName& username,
-                   bool password,
-                   const BSONObj* customData,
-                   const std::vector<RoleName>& roles,
-                   const boost::optional<BSONArray>& restrictions) {
-    if (!_auditLog) {
-        return;
+        BSONObjBuilder params;
+        params << "role" << role.getRole() << "db" << role.getDB();
+        appendRoles(params, roles);
+        _auditEvent(client, "grantRolesToRole", params.done());
     }
 
-    BSONObjBuilder params;
-    params << "user" << username.getUser() << "db" << username.getDB() << "password" << password
-           << "customData" << (customData ? *customData : BSONObj());
-    appendRoles(params, roles);
-    _auditEvent(client, "createUser", params.done());
-}
+    void logRevokeRolesFromRole(Client* client,
+                                const RoleName& role,
+                                const std::vector<RoleName>& roles) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logDropUser(Client* client, const UserName& username) {
-    if (!_auditLog) {
-        return;
+        BSONObjBuilder params;
+        params << "role" << role.getRole() << "db" << role.getDB();
+        appendRoles(params, roles);
+        _auditEvent(client, "revokeRolesFromRole", params.done());
     }
 
-    const BSONObj params = BSON("user" << username.getUser() << "db" << username.getDB());
-    _auditEvent(client, "dropUser", params);
-}
+    void logGrantPrivilegesToRole(Client* client,
+                                  const RoleName& role,
+                                  const PrivilegeVector& privileges) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logDropAllUsersFromDatabase(Client* client, const DatabaseName& dbname) {
-    if (!_auditLog) {
-        return;
+        BSONObjBuilder params;
+        params << "role" << role.getRole() << "db" << role.getDB();
+        appendPrivileges(params, privileges);
+        _auditEvent(client, "grantPrivilegesToRole", params.done());
     }
 
-    _auditEvent(client, "dropAllUsers", BSON("db" << DatabaseNameUtil::serialize(dbname)));
-}
+    void logRevokePrivilegesFromRole(Client* client,
+                                     const RoleName& role,
+                                     const PrivilegeVector& privileges) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logUpdateUser(Client* client,
-                   const UserName& username,
-                   bool password,
-                   const BSONObj* customData,
-                   const std::vector<RoleName>* roles,
-                   const boost::optional<BSONArray>& restrictions) {
-    if (!_auditLog) {
-        return;
+        BSONObjBuilder params;
+        params << "role" << role.getRole() << "db" << role.getDB();
+        appendPrivileges(params, privileges);
+        _auditEvent(client, "revokePrivilegesFromRole", params.done());
     }
 
-    BSONObjBuilder params;
-    params << "user" << username.getUser() << "db" << username.getDB() << "password" << password
-           << "customData" << (customData ? *customData : BSONObj());
-    if (roles) {
-        appendRoles(params, *roles);
+    void logRefineCollectionShardKey(Client* client,
+                                     StringData ns,
+                                     const BSONObj& keyPattern) const override {
+        if (!_auditLog) {
+            return;
+        }
+
+        const BSONObj params = BSON("ns" << ns << "key" << keyPattern);
+        _auditEvent(client, "refineCollectionShardKey", params);
     }
 
-    _auditEvent(client, "updateUser", params.done());
-}
+    void logInsertOperation(Client* client,
+                            const NamespaceString& nss,
+                            const BSONObj& doc) const override {
+        if (!_auditLog) {
+            return;
+        }
+        if (!nss.isPrivilegeCollection()) {
+            return;
+        }
 
-void logGrantRolesToUser(Client* client,
-                         const UserName& username,
-                         const std::vector<RoleName>& roles) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params = BSON("ns" << nssToString(nss) << "document" << doc << "operation"
+                                         << "insert");
+        _auditEvent(client, "directAuthMutation", params);
     }
 
-    BSONObjBuilder params;
-    params << "user" << username.getUser() << "db" << username.getDB();
-    appendRoles(params, roles);
-    _auditEvent(client, "grantRolesToUser", params.done());
-}
+    void logUpdateOperation(Client* client,
+                            const NamespaceString& nss,
+                            const BSONObj& doc) const override {
+        if (!_auditLog) {
+            return;
+        }
+        if (!nss.isPrivilegeCollection()) {
+            return;
+        }
 
-void logRevokeRolesFromUser(Client* client,
-                            const UserName& username,
-                            const std::vector<RoleName>& roles) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params = BSON("ns" << nssToString(nss) << "document" << doc << "operation"
+                                         << "update");
+        _auditEvent(client, "directAuthMutation", params);
     }
 
-    BSONObjBuilder params;
-    params << "user" << username.getUser() << "db" << username.getDB();
-    appendRoles(params, roles);
-    _auditEvent(client, "revokeRolesFromUser", params.done());
-}
+    void logRemoveOperation(Client* client,
+                            const NamespaceString& nss,
+                            const BSONObj& doc) const override {
+        if (!_auditLog) {
+            return;
+        }
+        if (!nss.isPrivilegeCollection()) {
+            return;
+        }
 
-void logCreateRole(Client* client,
-                   const RoleName& role,
-                   const std::vector<RoleName>& roles,
-                   const PrivilegeVector& privileges,
-                   const boost::optional<BSONArray>& restrictions) {
-    if (!_auditLog) {
-        return;
+        const BSONObj params = BSON("ns" << nssToString(nss) << "document" << doc << "operation"
+                                         << "remove");
+        _auditEvent(client, "directAuthMutation", params);
     }
 
-    BSONObjBuilder params;
-    params << "role" << role.getRole() << "db" << role.getDB();
-    appendRoles(params, roles);
-    appendPrivileges(params, privileges);
-    _auditEvent(client, "createRole", params.done());
-}
+    void logGetClusterParameter(Client* client,
+                                const stdx::variant<std::string, std::vector<std::string>>&
+                                    requestedParameters) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logUpdateRole(Client* client,
-                   const RoleName& role,
-                   const std::vector<RoleName>* roles,
-                   const PrivilegeVector* privileges,
-                   const boost::optional<BSONArray>& restrictions) {
-    if (!_auditLog) {
-        return;
+        BSONObjBuilder params;
+        stdx::visit(OverloadedVisitor{[&](const std::string& strParameterName) {
+                                          params << "requestedClusterServerParameters"
+                                                 << strParameterName;
+                                      },
+                                      [&](const std::vector<std::string>& listParameterNames) {
+                                          BSONArrayBuilder abuilder(params.subarrayStart(
+                                              "requestedClusterServerParameters"));
+                                          for (auto p : listParameterNames) {
+                                              abuilder.append(p);
+                                          }
+                                          abuilder.doneFast();
+                                      }},
+                    requestedParameters);
+        _auditEvent(client, "getClusterParameter", params.done());
     }
 
-    BSONObjBuilder params;
-    params << "role" << role.getRole() << "db" << role.getDB();
-    if (roles) {
-        appendRoles(params, *roles);
-    }
-    if (privileges) {
-        appendPrivileges(params, *privileges);
-    }
-    _auditEvent(client, "updateRole", params.done());
-}
+    void logSetClusterParameter(Client* client,
+                                const BSONObj& oldValue,
+                                const BSONObj& newValue,
+                                boost::optional<TenantId> const& tenantId) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logDropRole(Client* client, const RoleName& role) {
-    if (!_auditLog) {
-        return;
-    }
-
-    const BSONObj params = BSON("role" << role.getRole() << "db" << role.getDB());
-    _auditEvent(client, "dropRole", params);
-}
-
-void logDropAllRolesFromDatabase(Client* client, const DatabaseName& dbname) {
-    if (!_auditLog) {
-        return;
+        BSONObjBuilder params;
+        params << "originalClusterServerParameter" << oldValue;
+        params << "updatedClusterServerParameter" << newValue;
+        if (tenantId != boost::none) {
+            params << "tenantId" << *tenantId;
+        }
+        _auditEvent(client, "setClusterParameter", params.done());
     }
 
-    _auditEvent(client, "dropAllRoles", BSON("db" << DatabaseNameUtil::serialize(dbname)));
-}
+    void logUpdateCachedClusterParameter(Client* client,
+                                         const BSONObj& oldValue,
+                                         const BSONObj& newValue,
+                                         boost::optional<TenantId> const& tenantId) const override {
+        if (!_auditLog) {
+            return;
+        }
 
-void logGrantRolesToRole(Client* client, const RoleName& role, const std::vector<RoleName>& roles) {
-    if (!_auditLog) {
-        return;
+        BSONObjBuilder params;
+        params << "originalClusterServerParameter" << oldValue;
+        params << "updatedClusterServerParameter" << newValue;
+        if (tenantId != boost::none) {
+            params << "tenantId" << *tenantId;
+        }
+        _auditEvent(client, "updateCachedClusterServerParameter", params.done());
     }
 
-    BSONObjBuilder params;
-    params << "role" << role.getRole() << "db" << role.getDB();
-    appendRoles(params, roles);
-    _auditEvent(client, "grantRolesToRole", params.done());
-}
+    void logRotateLog(Client* client,
+                      const Status& logStatus,
+                      const std::vector<Status>& errors,
+                      const std::string& suffix) const override {}
 
-void logRevokeRolesFromRole(Client* client,
-                            const RoleName& role,
-                            const std::vector<RoleName>& roles) {
-    if (!_auditLog) {
-        return;
-    }
+    void logConfigEvent(Client* client, const AuditConfigDocument& config) const override {}
+};
 
-    BSONObjBuilder params;
-    params << "role" << role.getRole() << "db" << role.getDB();
-    appendRoles(params, roles);
-    _auditEvent(client, "revokeRolesFromRole", params.done());
-}
-
-void logGrantPrivilegesToRole(Client* client,
-                              const RoleName& role,
-                              const PrivilegeVector& privileges) {
-    if (!_auditLog) {
-        return;
-    }
-
-    BSONObjBuilder params;
-    params << "role" << role.getRole() << "db" << role.getDB();
-    appendPrivileges(params, privileges);
-    _auditEvent(client, "grantPrivilegesToRole", params.done());
-}
-
-void logRevokePrivilegesFromRole(Client* client,
-                                 const RoleName& role,
-                                 const PrivilegeVector& privileges) {
-    if (!_auditLog) {
-        return;
-    }
-
-    BSONObjBuilder params;
-    params << "role" << role.getRole() << "db" << role.getDB();
-    appendPrivileges(params, privileges);
-    _auditEvent(client, "revokePrivilegesFromRole", params.done());
-}
-
-void logRefineCollectionShardKey(Client* client, StringData ns, const BSONObj& keyPattern) {
-    if (!_auditLog) {
-        return;
-    }
-
-    const BSONObj params = BSON("ns" << ns << "key" << keyPattern);
-    _auditEvent(client, "refineCollectionShardKey", params);
-}
-
-void logInsertOperation(Client* client, const NamespaceString& nss, const BSONObj& doc) {
-    if (!_auditLog) {
-        return;
-    }
-    if (!nss.isPrivilegeCollection()) {
-        return;
-    }
-
-    const BSONObj params = BSON("ns" << nssToString(nss) << "document" << doc << "operation"
-                                     << "insert");
-    _auditEvent(client, "directAuthMutation", params);
-}
-
-void logUpdateOperation(Client* client, const NamespaceString& nss, const BSONObj& doc) {
-    if (!_auditLog) {
-        return;
-    }
-    if (!nss.isPrivilegeCollection()) {
-        return;
-    }
-
-    const BSONObj params = BSON("ns" << nssToString(nss) << "document" << doc << "operation"
-                                     << "update");
-    _auditEvent(client, "directAuthMutation", params);
-}
-
-void logRemoveOperation(Client* client, const NamespaceString& nss, const BSONObj& doc) {
-    if (!_auditLog) {
-        return;
-    }
-    if (!nss.isPrivilegeCollection()) {
-        return;
-    }
-
-    const BSONObj params = BSON("ns" << nssToString(nss) << "document" << doc << "operation"
-                                     << "remove");
-    _auditEvent(client, "directAuthMutation", params);
-}
-
-void logGetClusterParameter(
-    Client* client,
-    const stdx::variant<std::string, std::vector<std::string>>& requestedParameters) {
-    if (!_auditLog) {
-        return;
-    }
-
-    BSONObjBuilder params;
-    stdx::visit(OverloadedVisitor{[&](const std::string& strParameterName) {
-                                      params << "requestedClusterServerParameters"
-                                             << strParameterName;
-                                  },
-                                  [&](const std::vector<std::string>& listParameterNames) {
-                                      BSONArrayBuilder abuilder(
-                                          params.subarrayStart("requestedClusterServerParameters"));
-                                      for (auto p : listParameterNames) {
-                                          abuilder.append(p);
-                                      }
-                                      abuilder.doneFast();
-                                  }},
-                requestedParameters);
-    _auditEvent(client, "getClusterParameter", params.done());
-}
-
-void logSetClusterParameter(Client* client,
-                            const BSONObj& oldValue,
-                            const BSONObj& newValue,
-                            boost::optional<TenantId> const& tenantId) {
-    if (!_auditLog) {
-        return;
-    }
-
-    BSONObjBuilder params;
-    params << "originalClusterServerParameter" << oldValue;
-    params << "updatedClusterServerParameter" << newValue;
-    if (tenantId != boost::none) {
-        params << "tenantId" << *tenantId;
-    }
-    _auditEvent(client, "setClusterParameter", params.done());
-}
-
-void logUpdateCachedClusterParameter(Client* client,
-                                     const BSONObj& oldValue,
-                                     const BSONObj& newValue,
-                                     boost::optional<TenantId> const& tenantId) {
-    if (!_auditLog) {
-        return;
-    }
-
-    BSONObjBuilder params;
-    params << "originalClusterServerParameter" << oldValue;
-    params << "updatedClusterServerParameter" << newValue;
-    if (tenantId != boost::none) {
-        params << "tenantId" << *tenantId;
-    }
-    _auditEvent(client, "updateCachedClusterServerParameter", params.done());
-}
+namespace {
+ServiceContext::ConstructorActionRegisterer registerCreateAuditPercona{
+    "CreatePerconaAudit", [](ServiceContext* service) {
+        AuditInterface::set(service, std::make_unique<AuditPercona>());
+    }};
+}  // namespace
 
 void writeImpersonatedUsersToMetadata(OperationContext* txn, BSONObjBuilder* metadata) {}
 

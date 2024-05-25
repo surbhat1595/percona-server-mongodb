@@ -917,7 +917,7 @@ namespace audit {
             return;
         }
 
-        _auditEvent(client, "createDatabase", BSON("db" << DatabaseNameUtil::serialize(dbname)));
+        _auditEvent(client, "createDatabase", BSON("ns" << DatabaseNameUtil::serialize(dbname)));
     }
 
     void logDropIndex(Client* client, StringData indexname, const NamespaceString& nsname) {
@@ -960,7 +960,7 @@ namespace audit {
             return;
         }
 
-        _auditEvent(client, "dropDatabase", BSON("db" << DatabaseNameUtil::serialize(dbname)));
+        _auditEvent(client, "dropDatabase", BSON("ns" << DatabaseNameUtil::serialize(dbname)));
     }
 
     void logRenameCollection(Client* client,

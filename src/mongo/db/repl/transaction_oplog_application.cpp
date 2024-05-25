@@ -709,9 +709,6 @@ void _reconstructPreparedTransaction(OperationContext* opCtx,
                                      repl::OplogApplication::Mode mode) {
     repl::UnreplicatedWritesBlock uwb(opCtx);
 
-    // Snapshot transaction can never conflict with the PBWM lock.
-    opCtx->lockState()->setShouldConflictWithSecondaryBatchApplication(false);
-
     // The operations here are reconstructed at their prepare time. However, that time
     // will be ignored because there is an outer write unit of work during their
     // application. The prepare time of the transaction is set explicitly below.
@@ -840,12 +837,6 @@ void reconstructPreparedTransactions(OperationContext* opCtx, repl::OplogApplica
             // transaction oplog entry.
             auto newClient =
                 opCtx->getServiceContext()->makeClient("reconstruct-prepared-transactions");
-
-            // TODO(SERVER-74656): Please revisit if this thread could be made killable.
-            {
-                stdx::lock_guard<Client> lk(*newClient.get());
-                newClient.get()->setSystemOperationUnkillableByStepdown(lk);
-            }
 
             AlternativeClientRegion acr(newClient);
             const auto newOpCtx = cc().makeOperationContext();

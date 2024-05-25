@@ -106,6 +106,19 @@ ABT translateFieldRef(const FieldRef& fieldRef, ABT initial) {
     return result;
 }
 
+ABT translateShardKeyField(std::string shardKey) {
+    auto abt = make<PathIdentity>();
+    size_t curPos = 0;
+    size_t nextPos = 0;
+    while (nextPos != std::string::npos) {
+        nextPos = shardKey.find('.', curPos);
+        abt =
+            make<PathGet>(FieldNameType{shardKey.substr(curPos, nextPos - curPos)}, std::move(abt));
+        curPos = nextPos + 1;
+    }
+    return abt;
+}
+
 std::pair<boost::optional<ABT>, bool> getMinMaxBoundForType(const bool isMin,
                                                             const sbe::value::TypeTags& tag) {
     switch (tag) {
@@ -114,7 +127,7 @@ std::pair<boost::optional<ABT>, bool> getMinMaxBoundForType(const bool isMin,
         case sbe::value::TypeTags::NumberDouble:
         case sbe::value::TypeTags::NumberDecimal:
             if (isMin) {
-                return {Constant::fromDouble(std::numeric_limits<double>::quiet_NaN()), true};
+                return {Constant::fromDouble(std::numeric_limits<double>::quiet_NaN()), false};
             } else {
                 return {Constant::str(""), false};
             }
@@ -163,7 +176,7 @@ std::pair<boost::optional<ABT>, bool> getMinMaxBoundForType(const bool isMin,
         case sbe::value::TypeTags::ArraySet:
         case sbe::value::TypeTags::bsonArray:
             if (isMin) {
-                return {Constant::emptyArray(), true};
+                return {Constant::array(), true};
             } else {
                 const auto [tag1, val1] = sbe::value::makeValue(Value(BSONBinData()));
                 return {make<Constant>(sbe::value::TypeTags::bsonBinData, val1), false};

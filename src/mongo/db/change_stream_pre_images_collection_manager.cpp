@@ -257,6 +257,8 @@ void ChangeStreamPreImagesCollectionManager::insertPreImage(OperationContext* op
             insertionStatus != ErrorCodes::DuplicateKey);
     uassertStatusOK(insertionStatus);
 
+    _docsInserted.fetchAndAddRelaxed(1);
+
     if (useUnreplicatedTruncates()) {
         // This is a no-op until the 'tenantId' is registered with the 'truncateManager' in the
         // expired pre-image removal path.
@@ -429,6 +431,7 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithCollSc
     // users from running out of disk space.
     ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
                                                         AdmissionContext::Priority::kImmediate);
+
     // Acquire intent-exclusive lock on the change collection.
     const auto preImageColl =
         acquireCollection(opCtx,
@@ -487,6 +490,10 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithTrunca
 
     auto truncateStats = _truncateManager.truncateExpiredPreImages(
         opCtx, tenantId, preImagesColl.getCollectionPtr());
+
+    if (truncateStats.maxStartWallTime > _purgingJobStats.maxStartWallTime.loadRelaxed()) {
+        _purgingJobStats.maxStartWallTime.store(truncateStats.maxStartWallTime);
+    }
 
     _purgingJobStats.docsDeleted.fetchAndAddRelaxed(truncateStats.docsDeleted);
     _purgingJobStats.bytesDeleted.fetchAndAddRelaxed(truncateStats.bytesDeleted);

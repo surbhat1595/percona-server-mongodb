@@ -2,8 +2,8 @@
 // invalidate the plan (and discard its results) at the end of the trial unless replanning is
 // needed.
 //
-// The test runs commands that are not allowed with security token: setProfilingLevel.
 // @tags: [
+//   # The test runs commands that are not allowed with security token: setProfilingLevel.
 //   not_allowed_with_security_token,
 //   # This test attempts to perform queries and introspect the server's plan cache entries. The
 //   # former operation may be routed to a secondary in the replica set, whereas the latter must be
@@ -20,7 +20,7 @@
 //   # TODO SERVER-67607: Test plan cache with CQF enabled.
 //   cqf_experimental_incompatible,
 // ]
-load("jstests/libs/profiler.js");  // getLatestProfileEntry.
+import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
 if (!checkSBEEnabled(db)) {
@@ -28,7 +28,7 @@ if (!checkSBEEnabled(db)) {
     quit();
 }
 
-const testDb = db.getSiblingDB('trial_does_not_discard_work');
+const testDb = db.getSiblingDB(jsTestName());
 assert.commandWorked(testDb.dropDatabase());
 const coll = testDb.getCollection('test');
 

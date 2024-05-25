@@ -75,6 +75,7 @@ class MongoDFixture(interface.Fixture):
         mongod, _ = launcher.launch_mongod_program(self.logger, self.job_num,
                                                    executable=self.mongod_executable,
                                                    mongod_options=self.mongod_options)
+
         try:
             self.logger.info("Starting mongod on port %d...\n%s", self.port, mongod.as_command())
             mongod.start()
@@ -85,6 +86,14 @@ class MongoDFixture(interface.Fixture):
             raise self.fixturelib.ServerFailure(msg)
 
         self.mongod = mongod
+
+    def get_options(self):
+        """Return the mongod options of this fixture."""
+        launcher = MongodLauncher(self.fixturelib)
+        _, mongod_options = launcher.launch_mongod_program(self.logger, self.job_num,
+                                                           executable=self.mongod_executable,
+                                                           mongod_options=self.mongod_options)
+        return mongod_options
 
     def pids(self):
         """:return: pids owned by this fixture if any."""
@@ -251,14 +260,6 @@ class MongodLauncher(object):
             suite_set_parameters[
                 "logComponentVerbosity"] = self.get_default_log_component_verbosity_for_mongod()
 
-        # minNumChunksForSessionsCollection controls the minimum number of chunks the balancer will
-        # enforce for the sessions collection. If the actual number of chunks is less, the balancer will
-        # issue split commands to create more chunks. As a result, the balancer will also end up moving
-        # chunks for the sessions collection to balance the chunks across shards. Unless the suite is
-        # explicitly prepared to handle these background migrations, set the parameter to 1.
-        if "configsvr" in mongod_options and "minNumChunksForSessionsCollection" not in suite_set_parameters:
-            suite_set_parameters["minNumChunksForSessionsCollection"] = 1
-
         # orphanCleanupDelaySecs controls an artificial delay before cleaning up an orphaned chunk
         # that has migrated off of a shard, meant to allow most dependent queries on secondaries to
         # complete first. It defaults to 900, or 15 minutes, which is prohibitively long for tests.
@@ -390,7 +391,6 @@ def _add_testing_set_parameters(suite_set_parameters):
     """
     suite_set_parameters.setdefault("testingDiagnosticsEnabled", True)
     suite_set_parameters.setdefault("enableTestCommands", True)
-    suite_set_parameters.setdefault("requireConfirmInSetFcv", False)
     # The exact file location is on a per-process basis, so it'll have to be determined when the process gets spun up.
     # Set it to true for now as a placeholder that will error if no further processing is done.
     # The placeholder is needed so older versions don't have this option won't have this value set.

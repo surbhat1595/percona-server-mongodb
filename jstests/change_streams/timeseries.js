@@ -7,7 +7,8 @@
  *     requires_fcv_61,
  * ]
  */
-load("jstests/libs/change_stream_util.js");  // For ChangeStreamTest.
+import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
+import {ChangeStreamTest} from "jstests/libs/change_stream_util.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 let testDB = db.getSiblingDB(jsTestName());
@@ -40,12 +41,11 @@ let curNoEvents = testDB.watch([], {showExpandedEvents: true});
 
 assert.commandWorked(testDB.createCollection(
     jsTestName(),
-    {timeseries: {timeField: "ts", metaField: "meta"}}));          // on buckets ns and view ns
-coll.createIndex({ts: 1, "meta.b": 1}, {name: "dropMe"});          // on buckets ns
-coll.insertOne({_id: 1, ts: new Date(1000), meta: {a: 1}});        // on buckets ns
-coll.insertOne({_id: 1, ts: new Date(1000), meta: {a: 1}});        // on buckets ns
-coll.update({"meta.a": 1}, {$set: {"meta.b": 2}}, {multi: true});  // on buckets ns
-coll.remove({"meta.a": 1});                                        // on buckets ns
+    {timeseries: {timeField: "ts", metaField: "meta"}}));    // on buckets ns and view ns
+coll.createIndex({ts: 1, "meta.b": 1}, {name: "dropMe"});    // on buckets ns
+coll.insertOne({_id: 1, ts: new Date(1000), meta: {a: 1}});  // on buckets ns
+coll.insertOne({_id: 1, ts: new Date(1000), meta: {a: 1}});  // on buckets ns
+coll.remove({"meta.a": 1});                                  // on buckets ns
 // collMod granularity. on both buckets ns and view ns
 assert.commandWorked(testDB.runCommand({collMod: collName, timeseries: {granularity: "hours"}}));
 // collMod expiration. just on buckets ns
@@ -140,7 +140,7 @@ let expectedChanges = [
         "operationType": "insert",
         "fullDocument": {
             "control": {
-                "version": 1,
+                "version": TimeseriesTest.BucketVersion.kUncompressed,
                 "min": {"_id": 1, "ts": ISODate("1970-01-01T00:00:00Z")},
                 "max": {"_id": 1, "ts": ISODate("1970-01-01T00:00:01Z")}
             },
@@ -158,16 +158,6 @@ let expectedChanges = [
             "truncatedArrays": [],
             "disambiguatedPaths":
                 {"data._id.1": ["data", "_id", "1"], "data.ts.1": ["data", "ts", "1"]}
-        }
-    },
-    {
-        "operationType": "update",
-        "ns": {"db": dbName, "coll": bucketsCollName},
-        "updateDescription": {
-            "updatedFields": {"meta.b": 2},
-            "removedFields": [],
-            "truncatedArrays": [],
-            "disambiguatedPaths": {}
         }
     },
     {"operationType": "delete", "ns": {"db": dbName, "coll": bucketsCollName}},
@@ -300,6 +290,45 @@ let expectedChanges = [
 if (!FeatureFlagUtil.isEnabled(db, "TimeseriesScalabilityImprovements")) {
     // Remove implicitly create index
     expectedChanges = [expectedChanges[0], ...expectedChanges.slice(2)];
+}
+
+if (TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(db)) {
+    // Check for compressed bucket changes when using always compressed buckets.
+    expectedChanges[4] = {
+        "operationType": "insert",
+        "fullDocument": {
+            "control": {
+                "count": 1,
+                "max": {"_id": 1, "ts": ISODate("1970-01-01T00:00:01Z")},
+                "min": {
+                    "_id": 1,
+                    "ts": ISODate("1970-01-01T00:00:00Z"),
+                },
+                "version": TimeseriesTest.BucketVersion.kCompressed,
+            },
+            "data": {"ts": BinData(7, "CQDoAwAAAAAAAAA="), "_id": BinData(7, "AQAAAAAAAADwPwA=")},
+            "meta": {"a": 1},
+        },
+        "ns": {"db": dbName, "coll": bucketsCollName}
+
+    };
+    expectedChanges[5] = {
+        "operationType": "replace",
+        "fullDocument": {
+            "control": {
+                "version": TimeseriesTest.BucketVersion.kCompressed,
+                "min": {"_id": 1, "ts": ISODate("1970-01-01T00:00:00Z")},
+                "max": {"_id": 1, "ts": ISODate("1970-01-01T00:00:01Z")},
+                "count": 2
+            },
+            "meta": {"a": 1},
+            "data": {
+                "ts": BinData(7, "CQDoAwAAAAAAAIAOAAAAAAAAAAA="),
+                "_id": BinData(7, "AQAAAAAAAADwP5AOAAAAAAAAAAA=")
+            }
+        },
+        "ns": {"db": "timeseries", "coll": "system.buckets.timeseries"}
+    };
 }
 
 cst.assertNextChangesEqual({cursor: curWithEvents, expectedChanges});

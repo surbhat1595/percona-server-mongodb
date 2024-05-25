@@ -91,6 +91,7 @@
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
 #include "mongo/db/timeseries/timeseries_write_util.h"
+#include "mongo/db/transaction/retryable_writes_stats.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/write_concern_options.h"
@@ -214,13 +215,9 @@ void populateReply(OperationContext* opCtx,
     {
         // Undocumented repl fields that mongos depends on.
         auto* replCoord = repl::ReplicationCoordinator::get(opCtx->getServiceContext());
-        const auto replMode = replCoord->getReplicationMode();
-        if (replMode != repl::ReplicationCoordinator::modeNone) {
+        if (replCoord->getSettings().isReplSet()) {
             replyBase.setOpTime(repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp());
-
-            if (replMode == repl::ReplicationCoordinator::modeReplSet) {
-                replyBase.setElectionId(replCoord->getElectionId());
-            }
+            replyBase.setElectionId(replCoord->getElectionId());
         }
     }
 
@@ -352,7 +349,8 @@ public:
             throw;
         }
     };
-} cmdInsert;
+};
+MONGO_REGISTER_COMMAND(CmdInsert);
 
 class CmdUpdate final : public write_ops::UpdateCmdVersion1Gen<CmdUpdate> {
 public:
@@ -458,6 +456,10 @@ public:
                 !shardVersion.eoo()) {
                 bob->append(shardVersion);
             }
+            if (const auto& encryptionInfo = _commandObj.getField("encryptionInformation");
+                !encryptionInfo.eoo()) {
+                bob->append(encryptionInfo);
+            }
         }
 
         write_ops::UpdateCommandReply typedRun(OperationContext* opCtx) final try {
@@ -494,6 +496,16 @@ public:
                     ? ReplicaSetNodeProcessInterface::getReplicaSetNodeExecutor(
                           opCtx->getServiceContext())
                     : Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+                ON_BLOCK_EXIT([&] {
+                    // Increments the counter if the command contains retries. This is normally done
+                    // within write_ops_exec::performUpdates. But for retryable timeseries updates,
+                    // we should handle the metrics only once at the caller since each statement
+                    // will be run as a separate update command through the internal transaction
+                    // API. See write_ops_exec::performUpdates for more details.
+                    if (!reply.retriedStmtIds.empty()) {
+                        RetryableWritesStats::get(opCtx)->incrementRetriedCommandsCount();
+                    }
+                });
                 write_ops_exec::runTimeseriesRetryableUpdates(
                     opCtx, bucketNs, request(), executor, &reply);
             } else {
@@ -635,7 +647,8 @@ public:
 
     // Update related command execution metrics.
     static UpdateMetrics updateMetrics;
-} cmdUpdate;
+};
+MONGO_REGISTER_COMMAND(CmdUpdate);
 
 UpdateMetrics CmdUpdate::updateMetrics{"update"};
 
@@ -811,7 +824,8 @@ public:
 
         const BSONObj& _commandObj;
     };
-} cmdDelete;
+};
+MONGO_REGISTER_COMMAND(CmdDelete);
 
 }  // namespace
 }  // namespace mongo

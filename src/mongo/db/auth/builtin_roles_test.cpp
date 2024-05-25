@@ -148,12 +148,14 @@ TEST(BuiltinRoles, addSystemBucketsPrivilegesForBuiltinRoleClusterManager) {
         ActionType::clearJumboFlag,
         ActionType::splitChunk,
         ActionType::moveChunk,
+        ActionType::moveCollection,
         ActionType::enableSharding,
         ActionType::splitVector,
         ActionType::refineCollectionShardKey,
         ActionType::reshardCollection,
         ActionType::analyzeShardKey,
         ActionType::configureQueryAnalyzer,
+        ActionType::unshardCollection,
     });
 
     for (const auto& priv : privs) {

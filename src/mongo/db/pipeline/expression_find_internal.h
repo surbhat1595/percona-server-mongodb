@@ -96,7 +96,7 @@ public:
         return visitor->visit(this);
     }
 
-    Value serialize(SerializationOptions options) const final {
+    Value serialize(const SerializationOptions& options) const final {
         MONGO_UNREACHABLE;
     }
 
@@ -166,7 +166,7 @@ public:
         return visitor->visit(this);
     }
 
-    Value serialize(SerializationOptions options) const final {
+    Value serialize(const SerializationOptions& options) const final {
         MONGO_UNREACHABLE;
     }
 
@@ -188,6 +188,9 @@ private:
     const FieldPath _path;
     const boost::optional<int> _skip;
     const int _limit;
+
+    template <typename H>
+    friend class ExpressionHashVisitor;
 };
 
 /**
@@ -219,7 +222,7 @@ public:
         return visitor->visit(this);
     }
 
-    Value serialize(SerializationOptions options) const final {
+    Value serialize(const SerializationOptions& options) const final {
         MONGO_UNREACHABLE;
     }
 

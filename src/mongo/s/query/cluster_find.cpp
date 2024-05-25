@@ -828,8 +828,7 @@ StatusWith<CursorResponse> ClusterFind::runGetMore(OperationContext* opCtx,
             : Status(ErrorCodes::Unauthorized, "User not authorized to access cursor");
     };
 
-    NamespaceString nss(
-        NamespaceStringUtil::parseNamespaceFromRequest(cmd.getDbName(), cmd.getCollection()));
+    NamespaceString nss(NamespaceStringUtil::deserialize(cmd.getDbName(), cmd.getCollection()));
     int64_t cursorId = cmd.getCommandParameter();
 
     auto pinnedCursor = cursorManager->checkOutCursor(cursorId, opCtx, authChecker);
@@ -870,7 +869,7 @@ StatusWith<CursorResponse> ClusterFind::runGetMore(OperationContext* opCtx,
         [&opCtx, nss](const BSONObj& data) {
             auto dataForFailCommand =
                 data.addField(BSON("failCommands" << BSON_ARRAY("getMore")).firstElement());
-            auto* getMoreCommand = CommandHelpers::findCommand("getMore");
+            auto* getMoreCommand = CommandHelpers::findCommand(opCtx, "getMore");
             return CommandHelpers::shouldActivateFailCommandFailPoint(
                 dataForFailCommand, nss, getMoreCommand, opCtx->getClient());
         });

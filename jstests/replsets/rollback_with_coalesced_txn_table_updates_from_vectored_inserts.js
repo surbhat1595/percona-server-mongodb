@@ -7,9 +7,7 @@
  * @tags: [requires_persistence]
  */
 
-(function() {
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/write_concern_util.js");
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 
 const rst = new ReplSetTest({
     nodes: {
@@ -90,15 +88,15 @@ assert.commandWorked(secondary1.adminCommand({replSetStepUp: 1}));
 rst.freeze(primary);
 rst.awaitNodesAgreeOnPrimary(undefined, undefined, secondary1);
 
-for (const fp of stopReplProducerOnDocumentFailpoints) {
-    fp.off();
-}
-
 rst.getPrimary();  // Wait for secondary1 to be a writable primary.
 
 // Do a write which becomes majority committed and wait for the old primary to have completed its
 // rollback.
 assert.commandWorked(secondary1.getCollection("test.dummy").insert({}, {writeConcern: {w: 3}}));
+
+for (const fp of stopReplProducerOnDocumentFailpoints) {
+    fp.off();
+}
 
 // Reconnect to the primary after it completes its rollback and step it up to be the primary again.
 rst.awaitNodesAgreeOnPrimary(undefined, undefined, secondary1);
@@ -118,4 +116,3 @@ assert.commandWorked(primary.getCollection(ns).runCommand("insert", {
 }));
 
 rst.stopSet();
-})();

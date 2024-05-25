@@ -105,6 +105,7 @@
 #include "mongo/db/ops/update_request.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_group.h"
+#include "mongo/db/pipeline/document_source_set_window_fields.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/inner_pipeline_stage_interface.h"
 #include "mongo/db/query/canonical_query.h"
@@ -134,6 +135,7 @@
 #include "mongo/db/query/projection.h"
 #include "mongo/db/query/projection_parser.h"
 #include "mongo/db/query/projection_policies.h"
+#include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
@@ -478,7 +480,7 @@ void fillOutPlannerParams(OperationContext* opCtx,
 
     // If the caller wants a shard filter, make sure we're actually sharded.
     if (plannerParams->options & QueryPlannerParams::INCLUDE_SHARD_FILTER) {
-        if (collection.isSharded()) {
+        if (collection.isSharded_DEPRECATED()) {
             const auto& shardKeyPattern = collection.getShardKeyPattern();
 
             // If the shard key is specified exactly, the query is guaranteed to only target one
@@ -594,14 +596,13 @@ bool shouldWaitForOplogVisibility(OperationContext* opCtx,
     // commits before an operation with an earlier optime, and readers should wait so that all data
     // is consistent.
     //
-    // Secondaries can't wait for oplog visibility without the PBWM lock because it can introduce a
-    // hang while a batch application is in progress. The wait is done while holding a global lock,
-    // and the oplog visibility timestamp is updated at the end of every batch on a secondary,
-    // signalling the wait to complete. If a replication worker had a global lock and temporarily
-    // released it, a reader could acquire the lock to read the oplog. If the secondary reader were
-    // to wait for the oplog visibility timestamp to be updated, it would wait for a replication
-    // batch that would never complete because it couldn't reacquire its own lock, the global lock
-    // held by the waiting reader.
+    // On secondaries, the wait is done while holding a global lock, and the oplog visibility
+    // timestamp is updated at the end of every batch on a secondary, signalling the wait to
+    // complete. If a replication worker had a global lock and temporarily released it, a reader
+    // could acquire the lock to read the oplog. If the secondary reader were to wait for the oplog
+    // visibility timestamp to be updated, it would wait for a replication batch that would never
+    // complete because it couldn't reacquire its own lock, the global lock held by the waiting
+    // reader.
     return repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesForDatabase(
         opCtx, DatabaseName::kAdmin);
 }
@@ -847,6 +848,12 @@ public:
             _cq->setCollator(mainColl->getDefaultCollator()->clone());
         }
 
+        // Before consulting the plan cache, check if we should short-circuit and construct a
+        // find-by-_id plan.
+        if (auto result = buildIdHackPlan()) {
+            return {std::move(result)};
+        }
+
         auto planCacheKey = buildPlanCacheKey();
         getResult()->planCacheInfo().queryHash = planCacheKey.queryHash();
         getResult()->planCacheInfo().planCacheKey = planCacheKey.planCacheKeyHash();
@@ -961,6 +968,12 @@ protected:
     virtual PlanStageType buildExecutableTree(const QuerySolution& solution) const = 0;
 
     /**
+     * Attempts to build a special cased fast-path query plan for a find-by-_id query. Returns
+     * nullptr if this optimization does not apply.
+     */
+    virtual std::unique_ptr<ResultType> buildIdHackPlan() = 0;
+
+    /**
      * Constructs the plan cache key.
      */
     virtual KeyType buildPlanCacheKey() const = 0;
@@ -1031,7 +1044,8 @@ protected:
         return stage_builder::buildClassicExecutableTree(_opCtx, _collection, *_cq, solution, _ws);
     }
 
-    std::unique_ptr<ClassicPrepareExecutionResult> buildIdHackPlan() {
+    std::unique_ptr<ClassicPrepareExecutionResult> buildIdHackPlan() final {
+        initializePlannerParamsIfNeeded();
         if (!isIdHackEligibleQuery(getMainCollection(), *_cq))
             return nullptr;
 
@@ -1044,6 +1058,7 @@ protected:
                     2,
                     "Using classic engine idhack",
                     "canonicalQuery"_attr = redact(_cq->toStringShort()));
+        planCacheCounters.incrementClassicMissesCounter();
 
         auto result = releaseResult();
         std::unique_ptr<PlanStage> stage =
@@ -1114,15 +1129,6 @@ protected:
         const PlanCacheKey& planCacheKey) final {
         initializePlannerParamsIfNeeded();
 
-        // Before consulting the plan cache, check if we should short-circuit and construct a
-        // find-by-_id plan.
-        std::unique_ptr<ClassicPrepareExecutionResult> result = buildIdHackPlan();
-
-        if (result) {
-            planCacheCounters.incrementClassicMissesCounter();
-            return result;
-        }
-
         if (shouldCacheQuery(*_cq)) {
             // Try to look up a cached solution for the query.
             if (auto cs = CollectionQueryInfo::get(getMainCollection())
@@ -1142,7 +1148,7 @@ protected:
                                     "query"_attr = redact(_cq->toStringShort()));
                     }
 
-                    result = releaseResult();
+                    auto result = releaseResult();
                     auto&& root = buildExecutableTree(*querySolution);
 
                     // Add a CachedPlanStage on top of the previous root.
@@ -1237,6 +1243,10 @@ public:
     }
 
 protected:
+    std::unique_ptr<SlotBasedPrepareExecutionResult> buildIdHackPlan() final {
+        // TODO SERVER-66437 SBE is not currently used for IDHACK plans.
+        return nullptr;
+    }
     sbe::PlanCacheKey buildPlanCacheKey() const {
         return plan_cache_key_factory::make(*_cq, _collections);
     }
@@ -1513,6 +1523,16 @@ bool shouldUseRegularSbe(const CanonicalQuery& cq) {
                 return false;
             }
         }
+        if (auto windowStage =
+                dynamic_cast<DocumentSourceInternalSetWindowFields*>(stage->documentSource())) {
+            // Window stage wouldn't be pushed down if it's not supported in SBE.
+            tassert(7914600,
+                    "Unexpected SBE compatibility value",
+                    windowStage->sbeCompatibility() != SbeCompatibility::notCompatible);
+            if (windowStage->sbeCompatibility() != SbeCompatibility::fullyCompatible) {
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -1612,19 +1632,18 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
             optimizer::QueryHints queryHints = getHintsFromQueryKnobs();
             const bool fastIndexNullHandling = queryHints._fastIndexNullHandling;
             auto maybeExec = getSBEExecutorViaCascadesOptimizer(
-                mainColl, std::move(queryHints), canonicalQuery.get());
+                collections, std::move(queryHints), canonicalQuery.get());
             if (maybeExec) {
                 auto exec = uassertStatusOK(
                     makeExecFromParams(std::move(canonicalQuery), std::move(*maybeExec)));
                 return StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>>(
                     std::move(exec));
             } else {
-                const auto queryControl =
-                    ServerParameterSet::getNodeParameterSet()->get<QueryFrameworkControl>(
-                        "internalQueryFrameworkControl");
+                auto queryControl = QueryKnobConfiguration::decoration(opCtx)
+                                        .getInternalQueryFrameworkControlForOp();
                 tassert(7319400,
                         "Optimization failed either with forceBonsai set, or without a hint.",
-                        queryControl->_data.get() != QueryFrameworkControlEnum::kForceBonsai &&
+                        queryControl != QueryFrameworkControlEnum::kForceBonsai &&
                             !canonicalQuery->getFindCommandRequest().getHint().isEmpty() &&
                             !fastIndexNullHandling);
             }
@@ -1727,13 +1746,20 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind(
     OperationContext* opCtx,
-    const CollectionPtr* coll,
+    VariantCollectionPtrOrAcquisition coll,
     std::unique_ptr<CanonicalQuery> canonicalQuery,
     std::function<void(CanonicalQuery*, bool)> extractAndAttachPipelineStages,
     bool permitYield,
     size_t plannerOptions) {
 
-    MultipleCollectionAccessor multi{*coll};
+    auto multi = stdx::visit(OverloadedVisitor{[](const CollectionPtr* collPtr) {
+                                                   return MultipleCollectionAccessor{*collPtr};
+                                               },
+                                               [](const CollectionAcquisition& acq) {
+                                                   return MultipleCollectionAccessor{acq};
+                                               }},
+                             coll.get());
+
     return getExecutorFind(opCtx,
                            multi,
                            std::move(canonicalQuery),
@@ -1802,13 +1828,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
     const DeleteRequest* request = parsedDelete->getRequest();
 
     const NamespaceString& nss(request->getNsString());
-    if (!request->getGod()) {
-        if (nss.isSystem() && opCtx->lockState()->shouldConflictWithSecondaryBatchApplication()) {
-            uassert(12050,
-                    "cannot delete from system namespace",
-                    nss.isLegalClientSystemNS(serverGlobalParams.featureCompatibility));
-        }
-    }
 
     if (collectionPtr && collectionPtr->isCapped()) {
         expCtx->setIsCappedDelete();
@@ -2033,12 +2052,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
     UpdateDriver* driver = parsedUpdate->getDriver();
 
     const NamespaceString& nss = request->getNamespaceString();
-
-    if (nss.isSystem() && opCtx->lockState()->shouldConflictWithSecondaryBatchApplication()) {
-        uassert(10156,
-                str::stream() << "cannot update a system namespace: " << nss.toStringForErrorMsg(),
-                nss.isLegalClientSystemNS(serverGlobalParams.featureCompatibility));
-    }
 
     // If there is no collection and this is an upsert, callers are supposed to create
     // the collection prior to calling this method. Explain, however, will never do

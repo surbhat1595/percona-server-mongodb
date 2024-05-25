@@ -80,10 +80,6 @@ public:
 
         Response typedRun(OperationContext* opCtx) {
             uassert(ErrorCodes::IllegalOperation,
-                    "Feature 'shard split' not supported",
-                    repl::feature_flags::gShardSplit.isEnabled(
-                        serverGlobalParams.featureCompatibility));
-            uassert(ErrorCodes::IllegalOperation,
                     "Shard split is not available on config servers",
                     serverGlobalParams.clusterRole.has(ClusterRole::None) ||
                         serverGlobalParams.clusterRole.has(ClusterRole::ShardServer));
@@ -150,7 +146,8 @@ public:
     BasicCommand::AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return BasicCommand::AllowedOnSecondary::kNever;
     }
-} commitShardSplitCmd;
+};
+MONGO_REGISTER_COMMAND(CommitShardSplitCmd);
 
 class AbortShardSplitCmd : public TypedCommand<AbortShardSplitCmd> {
 public:
@@ -162,10 +159,6 @@ public:
         using InvocationBase::InvocationBase;
 
         void typedRun(OperationContext* opCtx) {
-            uassert(ErrorCodes::IllegalOperation,
-                    "Feature 'shard split' not supported",
-                    repl::feature_flags::gShardSplit.isEnabled(
-                        serverGlobalParams.featureCompatibility));
             uassert(ErrorCodes::CommandNotSupported,
                     "Shard split is only supported in serverless mode",
                     getGlobalReplSettings().isServerless());
@@ -229,7 +222,8 @@ public:
     BasicCommand::AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return BasicCommand::AllowedOnSecondary::kNever;
     }
-} abortShardSplitCmd;
+};
+MONGO_REGISTER_COMMAND(AbortShardSplitCmd);
 
 class ForgetShardSplitCmd : public TypedCommand<ForgetShardSplitCmd> {
 public:
@@ -241,10 +235,6 @@ public:
         using InvocationBase::InvocationBase;
 
         void typedRun(OperationContext* opCtx) {
-            uassert(ErrorCodes::IllegalOperation,
-                    "Feature 'shard split' not supported",
-                    repl::feature_flags::gShardSplit.isEnabled(
-                        serverGlobalParams.featureCompatibility));
             uassert(ErrorCodes::CommandNotSupported,
                     "Shard split is only supported in serverless mode",
                     getGlobalReplSettings().isServerless());
@@ -307,7 +297,8 @@ public:
     BasicCommand::AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return BasicCommand::AllowedOnSecondary::kNever;
     }
-} forgetShardSplitCmd;
+};
+MONGO_REGISTER_COMMAND(ForgetShardSplitCmd);
 
 
 }  // namespace

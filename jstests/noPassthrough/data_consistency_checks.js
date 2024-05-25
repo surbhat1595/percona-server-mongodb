@@ -8,12 +8,6 @@
  * ]
  */
 
-// The global 'db' variable is used by the data consistency hooks.
-var db;
-
-(function() {
-"use strict";
-
 // We skip doing the data consistency checks while terminating the cluster because they conflict
 // with the counts of the number of times the "dbhash" and "validate" commands are run.
 TestData.skipCollectionAndIndexValidation = true;
@@ -43,20 +37,23 @@ function countMatches(pattern, output) {
 }
 
 function runDataConsistencyChecks(testCase) {
-    db = testCase.conn.getDB("test");
-    try {
-        clearRawMongoProgramOutput();
+    clearRawMongoProgramOutput();
 
-        load("jstests/hooks/run_check_repl_dbhash.js");
-        load("jstests/hooks/run_validate_collections.js");
+    // NOTE: once modules are imported they are cached, so we need to run this in a parallel shell.
+    const awaitShell = startParallelShell(async function() {
+        globalThis.db = db.getSiblingDB("test");
+        await import("jstests/hooks/run_check_repl_dbhash.js");
+        await import("jstests/hooks/run_validate_collections.js");
+    }, testCase.conn.port);
 
-        // We terminate the processes to ensure that the next call to rawMongoProgramOutput()
-        // will return all of their output.
-        testCase.teardown();
-        return rawMongoProgramOutput();
-    } finally {
-        db = undefined;
-    }
+    awaitShell();
+    const output = rawMongoProgramOutput();
+
+    // We terminate the processes to ensure that the next call to rawMongoProgramOutput()
+    // will return all of their output.
+    testCase.teardown();
+
+    return output;
 }
 
 (function testReplicaSetWithVotingSecondaries() {
@@ -197,5 +194,4 @@ function runDataConsistencyChecks(testCase) {
               countMatches(pattern, output),
               "expected to find " + tojson(pattern) +
                   " from each replica set shard node in the log output");
-})();
 })();

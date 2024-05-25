@@ -45,6 +45,22 @@
 
 namespace mongo::optimizer {
 
+namespace {
+
+// Computes the top level field names of the given shard key spec.
+// For example: {"a": 1, "b.c": 1, "d.e": "hashed"} -> ["a", "b", "d"].
+std::vector<FieldNameType> computeTopLevelShardKeyFields(const IndexCollationSpec& shardKey) {
+    auto topLevelShardKeyFieldNames = std::vector<FieldNameType>{};
+    for (auto&& e : shardKey) {
+        const PathGet* pathGet = e._path.cast<PathGet>();
+        tassert(7903401, "First component of shard key field was not a PathGet", pathGet);
+        const auto& fieldName = FieldNameType{pathGet->name().value().toString()};
+        topLevelShardKeyFieldNames.push_back(fieldName);
+    }
+    return topLevelShardKeyFieldNames;
+}
+}  // namespace
+
 DistributionAndPaths::DistributionAndPaths(DistributionType type)
     : DistributionAndPaths(type, {}) {}
 
@@ -113,12 +129,13 @@ IndexCollationEntry::IndexCollationEntry(ABT path, CollationOp op)
     : _path(std::move(path)), _op(op) {}
 
 IndexDefinition::IndexDefinition(IndexCollationSpec collationSpec, bool isMultiKey)
-    : IndexDefinition(std::move(collationSpec), isMultiKey, {DistributionType::Centralized}, {}) {}
+    : IndexDefinition(
+          std::move(collationSpec), isMultiKey, {DistributionType::Centralized}, psr::makeNoOp()) {}
 
 IndexDefinition::IndexDefinition(IndexCollationSpec collationSpec,
                                  bool isMultiKey,
                                  DistributionAndPaths distributionAndPaths,
-                                 PartialSchemaRequirements partialReqMap)
+                                 PSRExpr::Node partialReqMap)
     : IndexDefinition(std::move(collationSpec),
                       1 /*version*/,
                       0 /*orderingBits*/,
@@ -131,7 +148,7 @@ IndexDefinition::IndexDefinition(IndexCollationSpec collationSpec,
                                  uint32_t orderingBits,
                                  bool isMultiKey,
                                  DistributionAndPaths distributionAndPaths,
-                                 PartialSchemaRequirements partialReqMap)
+                                 PSRExpr::Node partialReqMap)
     : _collationSpec(std::move(collationSpec)),
       _version(version),
       _orderingBits(orderingBits),
@@ -159,11 +176,11 @@ const DistributionAndPaths& IndexDefinition::getDistributionAndPaths() const {
     return _distributionAndPaths;
 }
 
-const PartialSchemaRequirements& IndexDefinition::getPartialReqMap() const {
+const PSRExpr::Node& IndexDefinition::getPartialReqMap() const {
     return _partialReqMap;
 }
 
-PartialSchemaRequirements& IndexDefinition::getPartialReqMap() {
+PSRExpr::Node& IndexDefinition::getPartialReqMap() {
     return _partialReqMap;
 }
 
@@ -219,7 +236,18 @@ const boost::optional<CEType>& ScanDefinition::getCE() const {
     return _ce;
 }
 
-ShardingMetadata ScanDefinition::shardingMetadata() const {
+ShardingMetadata::ShardingMetadata() : ShardingMetadata({}, false) {}
+
+ShardingMetadata::ShardingMetadata(IndexCollationSpec shardKey, bool mayContainOrphans)
+    : _shardKey(shardKey),
+      _mayContainOrphans(mayContainOrphans),
+      _topLevelShardKeyFieldNames(computeTopLevelShardKeyFields(shardKey)) {}
+
+const ShardingMetadata& ScanDefinition::shardingMetadata() const {
+    return _shardingMetadata;
+}
+
+ShardingMetadata& ScanDefinition::shardingMetadata() {
     return _shardingMetadata;
 }
 

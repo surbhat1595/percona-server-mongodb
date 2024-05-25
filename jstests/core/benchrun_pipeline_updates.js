@@ -1,17 +1,12 @@
 /**
  * Tests that benchRun can understand pipeline-style updates and findAndModifys.
  *
- * The test runs commands that are not allowed with security token: benchRun.
  * @tags: [
- *     not_allowed_with_security_token,
  *     uses_multiple_connections,
- *     # This test uses exhaust which does not use runCommand (required by the
- *     # inject_tenant_prefix.js override).
- *     tenant_migration_incompatible,
+ *     # benchRun does not use runCommand which is required by the `simulate_atlas_proxy` override.
+ *     simulate_atlas_proxy_incompatible,
  * ]
  */
-(function() {
-"use strict";
 const coll = db.benchrun_pipeline_updates;
 coll.drop();
 
@@ -58,4 +53,3 @@ res = benchRun(benchArgs);
 assert.eq(res.errCount, 0);
 assert.lte(
     coll.findOne({_id: 0}).x, 3, "Expected 'x' to be no more than 3 after randInt replacement");
-}());

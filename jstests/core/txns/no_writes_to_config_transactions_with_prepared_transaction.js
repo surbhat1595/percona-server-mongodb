@@ -2,14 +2,16 @@
  * Tests that other than insertions, it is illegal to modify config.transactions while the session
  * has a prepared transaction.
  *
- * The test runs commands that are not allowed with security token: endSession, prepareTransaction.
  * @tags: [
- *   not_allowed_with_security_token,uses_transactions, uses_prepare_transaction]
+ *   # The test runs commands that are not allowed with security token: endSession,
+ *   # prepareTransaction.
+ *   not_allowed_with_security_token,
+ *   uses_transactions,
+ *   uses_prepare_transaction
+ * ]
  */
 
-(function() {
-"use strict";
-load("jstests/core/txns/libs/prepare_helpers.js");
+import {PrepareHelpers} from "jstests/core/txns/libs/prepare_helpers.js";
 
 TestData.disableImplicitSessions = true;
 
@@ -100,4 +102,3 @@ session.endSession();
 
 assert.commandWorked(session2.abortTransaction_forTesting());
 session2.endSession();
-}());

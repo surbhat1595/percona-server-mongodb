@@ -43,24 +43,10 @@ feature_flags:
     default: true
     version: 6.3
     shouldBeFCVGated: true
-  featureFlagStopUsingConfigVersion:
-  # TODO SERVER-68889 remove once 7.0 becomes last LTS
-    description: "Stop using deprecated config version fields to check metadata compatibility between different version"
-    cpp_varname: feature_flags::gStopUsingConfigVersion
-    default: true
-    version: 6.2
-    shouldBeFCVGated: true
   # TODO (SERVER-70396): Remove once 7.0 becomes last LTS
   featureFlagCheckMetadataConsistency:
     description: "Feature flag for checking metadata consistency in the cluster, database or collection"
     cpp_varname: feature_flags::gCheckMetadataConsistency
-    default: true
-    version: 7.0
-    shouldBeFCVGated: true
-  # TODO SERVER-73627: Remove once 7.0 becomes last LTS.
-  featureFlagDropCollectionHoldingCriticalSection:
-    description: "Feature flag for enabling the new implementation of the dropCollection DDL operation."
-    cpp_varname: feature_flags::gDropCollectionHoldingCriticalSection
     default: true
     version: 7.0
     shouldBeFCVGated: true
@@ -71,13 +57,39 @@ feature_flags:
     version: 7.1
     shouldBeFCVGated: true
   # TODO (SERVER-73632): Remove once 8.0 becomes last LTS.
-  featureFlagCohostedRouter:
+  featureFlagEmbeddedRouter:
     description: "Feature flag to enable shard to double as router"
-    cpp_varname: feature_flags::gCohostedRouter
+    cpp_varname: feature_flags::gEmbeddedRouter
     default: false
     shouldBeFCVGated: true
+  # TODO SERVER-79064: Remove once 8.0 becomes last LTS.
+  featureFlagAuthoritativeRefineCollectionShardKey:
+    description: "Feature flag for enabling the authoritative version of the refine collection shard key."
+    cpp_varname: feature_flags::gAuthoritativeRefineCollectionShardKey
+    default: true
+    version: 7.1
+    shouldBeFCVGated: true
+  # TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
+  featureFlagTrackUnshardedCollectionsOnShardingCatalog:
+    description: "Feature flag for enabling the tracking of user unsharded collection by turning them into a fixed-1-chunk sharded collections"
+    cpp_varname: feature_flags::gTrackUnshardedCollectionsOnShardingCatalog
+    default: false
+    shouldBeFCVGated: true
+  # TODO (SERVER-68132): Remove once 8.0 becomes last LTS.
   featureFlagClusterFsyncLock:
     description: "Feature flag to enable locking of a cluster through mongos"
     cpp_varname: feature_flags::gClusterFsyncLock
+    default: true
+    version: 7.1
+    shouldBeFCVGated: true
+  featureFlagAuthoritativeShardCollection:
+    description: "Feature flag for enabling the authoritative version of the shardCollection DDL operation."
+    cpp_varname: feature_flags::gAuthoritativeShardCollection
+    default: false
+    shouldBeFCVGated: true
+  # TODO (SERVER-76436): Remove once 8.0 becomes last LTS.
+  featureFlagBalanceUnshardedCollections:
+    description: "Feature flag for enabling the balancing of user unsharded collections"
+    cpp_varname: feature_flags::gBalanceUnshardedCollections
     default: false
     shouldBeFCVGated: true

@@ -251,11 +251,8 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
     auto opCtx = cc().makeOperationContext();
     opCtx->setEnforceConstraints(false);
 
-    // TODO(SERVER-74656): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnkillableByStepdown(lk);
-    }
+    // This thread is killable since it is only used by initial sync which does not
+    // interact with repl state changes.
 
     // DocumentValidationSettings::kDisableInternalValidation is currently inert.
     // But, it's logically ok to disable internal validation as this function gets called
@@ -587,7 +584,7 @@ Status StorageInterfaceImpl::renameCollection(OperationContext* opCtx,
                                               const NamespaceString& fromNS,
                                               const NamespaceString& toNS,
                                               bool stayTemp) {
-    if (fromNS.db() != toNS.db()) {
+    if (!fromNS.isEqualDb(toNS)) {
         return Status(ErrorCodes::InvalidNamespace,
                       str::stream() << "Cannot rename collection between databases. From NS: "
                                     << fromNS.toStringForErrorMsg()
@@ -701,11 +698,13 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
         using Result = StatusWith<std::vector<BSONObj>>;
 
         auto collectionAccessMode = isFind ? MODE_IS : MODE_IX;
-        const auto collection =
-            acquireCollection(opCtx,
-                              CollectionAcquisitionRequest::fromOpCtx(
-                                  opCtx, nsOrUUID, AcquisitionPrerequisites::kWrite),
-                              collectionAccessMode);
+        const auto collection = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx,
+                                                    nsOrUUID,
+                                                    isFind ? AcquisitionPrerequisites::kRead
+                                                           : AcquisitionPrerequisites::kWrite),
+            collectionAccessMode);
         if (!collection.exists()) {
             return Status{ErrorCodes::NamespaceNotFound,
                           str::stream()

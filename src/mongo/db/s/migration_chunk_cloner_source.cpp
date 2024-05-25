@@ -359,7 +359,7 @@ MigrationChunkClonerSource::MigrationChunkClonerSource(OperationContext* opCtx,
       _recipientHost(std::move(recipientHost)),
       _forceJumbo(_args.getForceJumbo() != ForceJumbo::kDoNotForce) {
     auto const replCoord = repl::ReplicationCoordinator::get(opCtx);
-    if (replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet) {
+    if (replCoord->getSettings().isReplSet()) {
         _sessionCatalogSource = std::make_unique<SessionCatalogMigrationSource>(
             opCtx, nss(), ChunkRange(getMin(), getMax()), _shardKeyPattern.getKeyPattern());
     }
@@ -487,9 +487,6 @@ StatusWith<BSONObj> MigrationChunkClonerSource::commitClone(OperationContext* op
     auto responseStatus = _callRecipient(opCtx, [&] {
         BSONObjBuilder builder;
         builder.append(kRecvChunkCommit, NamespaceStringUtil::serialize(nss()));
-        // For backward compatibility with v6.0 recipients.
-        // TODO (SERVER-67844): Remove it once 7.0 becomes LTS.
-        builder.append("acquireCSOnRecipient", true);
         _sessionId.append(&builder);
         return builder.obj();
     }());
@@ -1019,7 +1016,7 @@ StatusWith<BSONObj> MigrationChunkClonerSource::_callRecipient(OperationContext*
 
     auto executor = Grid::get(getGlobalServiceContext())->getExecutorPool()->getFixedExecutor();
     auto scheduleStatus = executor->scheduleRemoteCommand(
-        executor::RemoteCommandRequest(_recipientHost, "admin", cmdObj, nullptr),
+        executor::RemoteCommandRequest(_recipientHost, DatabaseName::kAdmin, cmdObj, nullptr),
         [&responseStatus](const executor::TaskExecutor::RemoteCommandCallbackArgs& args) {
             responseStatus = args.response;
         });

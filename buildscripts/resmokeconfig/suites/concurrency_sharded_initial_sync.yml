@@ -97,10 +97,6 @@ selector:
   # Time-series collections are not supported on mongos.
   - jstests/concurrency/fsm_workloads/create_timeseries_collection.js
 
-  # This test concurrently creates views and collections on the same namespace, which causes issues
-  # for dbCheck. TODO (SERVER-63951): Remove this exclusion.
-  - jstests/concurrency/fsm_workloads/create_collection_and_view.js
-
   # ChunkHelper directly talks to the config servers and doesn't support retries for network errors
   - jstests/concurrency/fsm_workloads/sharded_base_partitioned.js
   - jstests/concurrency/fsm_workloads/sharded_mergeChunks_partitioned.js
@@ -193,6 +189,7 @@ selector:
   # if the initial sync node stepup happens at a specific timing.
   - jstests/concurrency/fsm_workloads/create_capped_collection.js
   - jstests/concurrency/fsm_workloads/rename_capped_collection_droptarget.js
+  - jstests/concurrency/fsm_workloads/agg_graph_lookup.js
 
   exclude_with_any_tags:
   - requires_non_retryable_writes
@@ -221,8 +218,8 @@ executor:
     shell_options:
       eval: >-
         globalThis.testingReplication = true;
-        load("jstests/libs/override_methods/set_read_preference_secondary.js");
-        load('jstests/libs/override_methods/enable_causal_consistency_without_read_pref.js');
+        await import("jstests/libs/override_methods/set_read_preference_secondary.js");
+        await import('jstests/libs/override_methods/enable_causal_consistency_without_read_pref.js');
       global_vars:
         TestData:
           defaultReadPreference: {mode: "secondaryPreferred", tags: [{tag: "INIT_SYNC"}, {}]}
@@ -280,6 +277,7 @@ executor:
         collectionClonerBatchSize: 10
         initialSyncOplogFetcherBatchSize: 10
         queryAnalysisWriterIntervalSecs: 1
+        skipDroppingHashedShardKeyIndex: true
     num_rs_nodes_per_shard: 3
     num_shards: 2
     num_mongos: 2

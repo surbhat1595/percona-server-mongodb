@@ -2,8 +2,8 @@
  * Tests that the shell helper db.currentOpCursor isn't constrained by the legacy currentOp server
  * command - ie. the result set isn't limited to 16MB and long operations aren't truncated.
  *
- * The test runs commands that are not allowed with security token: getLog.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: getLog.
  *   not_allowed_with_security_token,
  *   uses_parallel_shell,
  *   # This test uses currentOp to check whether an aggregate command is running. In replica set
@@ -18,10 +18,7 @@
  * ]
  */
 
-(function() {
-"use strict";
-
-load("jstests/libs/fixture_helpers.js");  // for FixtureHelpers
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const coll = db.currentOp_cursor;
 coll.drop();
@@ -142,4 +139,3 @@ res.inprog.forEach((op) => {
 });
 
 shellHelperTest();
-})();

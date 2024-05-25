@@ -10,18 +10,14 @@
  *   does_not_support_stepdowns,
  * ]
  */
-load("jstests/aggregation/extras/utils.js");  // For arrayEq.
-import {getWinningPlan, getPlanStages, isIndexOnly} from "jstests/libs/analyze_plan.js";
+import {arrayEq} from "jstests/aggregation/extras/utils.js";
+import {getPlanStages, getWinningPlan, isIndexOnly} from "jstests/libs/analyze_plan.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const assertArrayEq = (l, r) => assert(arrayEq(l, r));
 
 const coll = db.wildcard_covered_query;
 coll.drop();
-
-// TODO SERVER-68303: Remove the feature flag and update corresponding tests.
-const allowCompoundWildcardIndexes =
-    FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "CompoundWildcardIndexes");
 
 // Confirms that the $** index can answer the given query and projection, that it produces a
 // covered solution, and that the results are identical to those obtained by a COLLSCAN. If
@@ -64,9 +60,6 @@ const wildcardIndexes = [
 
 for (const indexSpec of wildcardIndexes) {
     const isCompound = Object.keys(indexSpec.keyPattern).length > 1;
-    if (!allowCompoundWildcardIndexes && isCompound) {
-        continue;
-    }
     const option = {};
     if (indexSpec.wildcardProjection) {
         option['wildcardProjection'] = indexSpec.wildcardProjection;

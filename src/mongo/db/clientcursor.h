@@ -57,7 +57,7 @@
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/query_request_helper.h"
-#include "mongo/db/query/query_stats_key_generator.h"
+#include "mongo/db/query/query_stats/key_generator.h"
 #include "mongo/db/query/tailable_mode_gen.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/optime.h"
@@ -147,7 +147,7 @@ struct ClientCursorParams {
  * caller as "no timeout", it will be automatically destroyed by its cursor manager after a period
  * of inactivity.
  */
-class ClientCursor : public Decorable<ClientCursor> {
+class ClientCursor : public Decorable<ClientCursor>, public TransactionResourcesStasher {
     ClientCursor(const ClientCursor&) = delete;
     ClientCursor& operator=(const ClientCursor&) = delete;
 
@@ -352,6 +352,15 @@ public:
         return _shouldOmitDiagnosticInformation;
     }
 
+    // Releases the stashed TransactionResources to the caller.
+    StashedTransactionResources releaseStashedTransactionResources() override {
+        return std::move(_transactionResources);
+    }
+
+    void stashTransactionResources(StashedTransactionResources resources) override {
+        _transactionResources = std::move(resources);
+    }
+
 private:
     friend class CursorManager;
     friend class ClientCursorPin;
@@ -442,6 +451,11 @@ private:
     // '_exec' as we cannot destroy the recovery unit until the plan executor and its resources
     // (cursors) have been destroyed.
     std::unique_ptr<RecoveryUnit> _stashedRecoveryUnit;
+
+    // The transaction resources used throughout executions. This contains the yielded version of
+    // all collection/view acquisitions so that in a getMore call we can restore the acquisitions.
+    // Will only be set if the underlying plan executor uses shard role acquisitions.
+    StashedTransactionResources _transactionResources;
 
     // The underlying query execution machinery. Must be non-null.
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> _exec;

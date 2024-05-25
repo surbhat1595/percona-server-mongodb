@@ -5,13 +5,9 @@
  * @tags: [
  *   not_allowed_with_security_token,
  *   does_not_support_stepdowns,
- *   featureFlagCompoundWildcardIndexes,
  *   requires_fcv_70,
  * ]
  */
-
-(function() {
-"use strict";
 
 function testCount(coll, indexKeyPattern, doc, filter) {
     coll.drop();
@@ -73,4 +69,3 @@ const filter = {
 for (const doc of docs) {
     testCount(db.testColl, indexKeyPattern, doc, filter);
 }
-}());

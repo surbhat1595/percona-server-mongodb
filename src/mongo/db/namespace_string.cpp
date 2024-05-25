@@ -153,7 +153,7 @@ bool NamespaceString::mustBeAppliedInOwnOplogBatch() const {
 }
 
 NamespaceString NamespaceString::makeBulkWriteNSS(const boost::optional<TenantId>& tenantId) {
-    return NamespaceString(DatabaseName::kAdmin.db(), bulkWriteCursorCol, tenantId);
+    return NamespaceString(tenantId, DatabaseName::kAdmin.db(), bulkWriteCursorCol);
 }
 
 NamespaceString NamespaceString::makeClusterParametersNSS(
@@ -202,21 +202,6 @@ NamespaceString NamespaceString::makeGlobalIndexNSS(const UUID& id) {
                            NamespaceString::kGlobalIndexCollectionPrefix + id.toString());
 }
 
-NamespaceString NamespaceString::makeMovePrimaryOplogBufferNSS(const UUID& migrationId) {
-    return NamespaceString(DatabaseName::kConfig,
-                           "movePrimaryOplogBuffer." + migrationId.toString());
-}
-
-NamespaceString NamespaceString::makeMovePrimaryCollectionsToCloneNSS(const UUID& migrationId) {
-    return NamespaceString(DatabaseName::kConfig,
-                           "movePrimaryCollectionsToClone." + migrationId.toString());
-}
-
-NamespaceString NamespaceString::makeMovePrimaryTempCollectionsPrefix(const UUID& migrationId) {
-    return NamespaceString(DatabaseName::kConfig,
-                           "movePrimaryRecipient." + migrationId.toString() + ".willBeDeleted.");
-}
-
 NamespaceString NamespaceString::makePreImageCollectionNSS(
     const boost::optional<TenantId>& tenantId) {
     return NamespaceString{tenantId, DatabaseName::kConfig.db(), kPreImagesCollectionName};
@@ -256,7 +241,7 @@ NamespaceString NamespaceString::makeDummyNamespace(const boost::optional<Tenant
 
 std::string NamespaceString::getSisterNS(StringData local) const {
     MONGO_verify(local.size() && local[0] != '.');
-    return db().toString() + "." + local.toString();
+    return db_deprecated().toString() + "." + local.toString();
 }
 
 void NamespaceString::serializeCollectionName(BSONObjBuilder* builder, StringData fieldName) const {
@@ -273,10 +258,10 @@ bool NamespaceString::isDropPendingNamespace() const {
 
 NamespaceString NamespaceString::makeDropPendingNamespace(const repl::OpTime& opTime) const {
     StringBuilder ss;
-    ss << db() << "." << dropPendingNSPrefix;
+    ss << db_deprecated() << "." << dropPendingNSPrefix;
     ss << opTime.getSecs() << "i" << opTime.getTimestamp().getInc() << "t" << opTime.getTerm();
     ss << "." << coll();
-    return NamespaceString(ss.stringData());
+    return NamespaceString(tenantId(), ss.stringData());
 }
 
 StatusWith<repl::OpTime> NamespaceString::getDropPendingNamespaceOpTime() const {
@@ -328,7 +313,7 @@ StatusWith<repl::OpTime> NamespaceString::getDropPendingNamespaceOpTime() const 
     return repl::OpTime(Timestamp(Seconds(seconds), increment), term);
 }
 
-bool NamespaceString::isNamespaceAlwaysUnsharded() const {
+bool NamespaceString::isNamespaceAlwaysUntracked() const {
     // Local and admin never have sharded collections
     if (isLocalDB() || isAdminDB())
         return true;
@@ -348,15 +333,15 @@ bool NamespaceString::isNamespaceAlwaysUnsharded() const {
 }
 
 bool NamespaceString::isConfigDotCacheDotChunks() const {
-    return db() == "config" && coll().startsWith("cache.chunks.");
+    return db_deprecated() == "config" && coll().startsWith("cache.chunks.");
 }
 
 bool NamespaceString::isReshardingLocalOplogBufferCollection() const {
-    return db() == "config" && coll().startsWith(kReshardingLocalOplogBufferPrefix);
+    return db_deprecated() == "config" && coll().startsWith(kReshardingLocalOplogBufferPrefix);
 }
 
 bool NamespaceString::isReshardingConflictStashCollection() const {
-    return db() == "config" && coll().startsWith(kReshardingConflictStashPrefix);
+    return db_deprecated() == "config" && coll().startsWith(kReshardingConflictStashPrefix);
 }
 
 bool NamespaceString::isTemporaryReshardingCollection() const {
@@ -389,6 +374,12 @@ bool NamespaceString::isFLE2StateCollection() const {
          coll().endsWith(fle2EcocSuffix));
 }
 
+bool NamespaceString::isFLE2StateCollection(StringData coll) {
+    return coll.startsWith(fle2Prefix) &&
+        (coll.endsWith(fle2EscSuffix) || coll.endsWith(fle2EccSuffix) ||
+         coll.endsWith(fle2EcocSuffix));
+}
+
 bool NamespaceString::isOplogOrChangeCollection() const {
     return isOplog() || isChangeCollection();
 }
@@ -412,7 +403,7 @@ NamespaceString NamespaceString::getTimeseriesViewNamespace() const {
 }
 
 bool NamespaceString::isImplicitlyReplicated() const {
-    if (db() == DatabaseName::kConfig.db()) {
+    if (db_deprecated() == DatabaseName::kConfig.db()) {
         if (isChangeStreamPreImagesCollection() || isConfigImagesCollection() ||
             isChangeCollection()) {
             // Implicitly replicated namespaces are replicated, although they only replicate a

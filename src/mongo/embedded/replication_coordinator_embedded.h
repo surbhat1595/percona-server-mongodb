@@ -103,10 +103,8 @@ public:
 
     const repl::ReplSettings& getSettings() const override;
 
-    Mode getReplicationMode() const override;
     bool getMaintenanceMode() override;
 
-    bool isReplEnabled() const override;
     bool isWritablePrimaryForReportingPurposes() override;
     bool isInPrimaryOrSecondaryState(OperationContext* opCtx) const override;
     bool isInPrimaryOrSecondaryState_UNSAFE() const override;
@@ -380,7 +378,7 @@ public:
     void cancelCbkHandle(executor::TaskExecutor::CallbackHandle activeHandle) override;
 
     BSONObj runCmdOnPrimaryAndAwaitResponse(OperationContext* opCtx,
-                                            const std::string& dbName,
+                                            const DatabaseName& dbName,
                                             const BSONObj& cmdObj,
                                             OnRemoteCmdScheduledFn onRemoteCmdScheduled,
                                             OnRemoteCmdCompleteFn onRemoteCmdComplete) final;

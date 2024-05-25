@@ -102,7 +102,7 @@ public:
         if (collectionName.empty())
             collectionName = "fs";
         collectionName += ".chunks";
-        return NamespaceStringUtil::parseNamespaceFromRequest(dbName, collectionName);
+        return NamespaceStringUtil::deserialize(dbName, collectionName);
     }
 
     Status checkAuthForOperation(OperationContext* opCtx,
@@ -133,7 +133,7 @@ public:
         const auto callShardFn = [&](const BSONObj& cmdObj, const BSONObj& routingQuery) {
             auto shardResults =
                 scatterGatherVersionedTargetByRoutingTable(opCtx,
-                                                           nss.db_forSharding(),
+                                                           nss.dbName(),
                                                            nss,
                                                            cri,
                                                            cmdObj,
@@ -229,8 +229,8 @@ public:
 
         MONGO_UNREACHABLE;
     }
-
-} fileMD5Cmd;
+};
+MONGO_REGISTER_COMMAND(FileMD5Cmd);
 
 }  // namespace
 }  // namespace mongo

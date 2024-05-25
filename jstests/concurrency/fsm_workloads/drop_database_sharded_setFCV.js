@@ -8,6 +8,7 @@
  *  ]
  */
 
+import {assertAlways} from "jstests/concurrency/fsm_libs/assert.js";
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/drop_database_sharded.js";
 
@@ -18,7 +19,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         jsTestLog('Executing FCV state, setting to:' + targetFCV);
         try {
             assertAlways.commandWorked(
-                db.adminCommand({setFeatureCompatibilityVersion: targetFCV}));
+                db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}));
         } catch (e) {
             if (e.code === 5147403) {
                 // Invalid fcv transition (e.g lastContinuous -> lastLTS)
@@ -32,6 +33,14 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
                 jsTestLog(
                     'setFCV: Cannot upgrade FCV if a previous FCV downgrade stopped in the middle \
                     of cleaning up internal server metadata');
+                return;
+            }
+            if (e.code === 12587) {
+                // Cannot downgrade FCV that requires a collMod command when index builds are
+                // concurrently taking place.
+                jsTestLog(
+                    'setFCV: Cannot downgrade the FCV that requires a collMod command when index \
+                    builds are concurrently running');
                 return;
             }
             throw e;
@@ -71,7 +80,8 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
     };
 
     $config.teardown = function(db, collName) {
-        assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+        assert.commandWorked(
+            db.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
         $super.teardown(db, collName);
     };
 

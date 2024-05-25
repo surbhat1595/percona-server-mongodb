@@ -110,13 +110,11 @@ public:
         const OpMsgRequest& opMsgRequest,
         boost::optional<ExplainOptions::Verbosity> explainVerbosity) override {
 
-        SerializationContext serializationCtx = SerializationContext::stateCommandRequest();
-        serializationCtx.setTenantIdSource(opMsgRequest.getValidatedTenantId() != boost::none);
+        SerializationContext serializationCtx = opMsgRequest.getSerializationContext();
 
         const auto aggregationRequest = aggregation_request_helper::parseFromBSON(
             opCtx,
-            DatabaseNameUtil::deserialize(opMsgRequest.getValidatedTenantId(),
-                                          opMsgRequest.getDatabase()),
+            opMsgRequest.getDbName(),
             opMsgRequest.body,
             explainVerbosity,
             APIParameters::get(opCtx).getAPIStrict().value_or(false),
@@ -136,6 +134,18 @@ public:
         return true;
     }
 
+    /**
+     * A pipeline/aggregation command does not increment the command counter, but rather increments
+     * the query counter.
+     */
+    bool shouldAffectCommandCounter() const override {
+        return false;
+    }
+
+    bool shouldAffectQueryCounter() const override {
+        return true;
+    }
+
     bool shouldAffectReadConcernCounter() const override {
         return true;
     }
@@ -152,8 +162,7 @@ public:
                    PrivilegeVector privileges)
             : CommandInvocation(cmd),
               _request(request),
-              _dbName(DatabaseNameUtil::deserialize(request.getValidatedTenantId(),
-                                                    request.getDatabase())),
+              _dbName(request.getDbName()),
               _aggregationRequest(std::move(aggregationRequest)),
               _liteParsedPipeline(_aggregationRequest),
               _privileges(std::move(privileges)) {
@@ -333,8 +342,8 @@ public:
     bool allowedInTransactions() const final {
         return true;
     }
-
-} pipelineCmd;
+};
+MONGO_REGISTER_COMMAND(PipelineCommand);
 
 }  // namespace
 }  // namespace mongo

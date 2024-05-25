@@ -1,11 +1,8 @@
 /**
  * Test that $queryStats properly tokenizes find commands, on mongod and mongos.
  */
-load("jstests/libs/query_stats_utils.js");
-(function() {
-"use strict";
+import {getQueryStatsFindCmd} from "jstests/libs/query_stats_utils.js";
 
-const kHashedCollName = "w6Ax20mVkbJu4wQWAMjL8Sl+DfXAr2Zqdc3kJRB7Oo0=";
 const kHashedFieldName = "lU7Z0mLRPRUL+RfAD5jhYPRRpXBsZBxS/20EzDwfOG4=";
 
 function runTest(conn) {
@@ -42,7 +39,7 @@ function runTest(conn) {
               queryStats[1].key.queryShape.filter);
 }
 
-const conn = MongoRunner.runMongod({
+let conn = MongoRunner.runMongod({
     setParameter: {
         internalQueryStatsRateLimit: -1,
         featureFlagQueryStats: true,
@@ -51,7 +48,7 @@ const conn = MongoRunner.runMongod({
 runTest(conn);
 MongoRunner.stopMongod(conn);
 
-const st = new ShardingTest({
+let st = new ShardingTest({
     mongos: 1,
     shards: 1,
     config: 1,
@@ -66,4 +63,20 @@ const st = new ShardingTest({
 });
 runTest(st.s);
 st.stop();
-}());
+
+// TODO SERVER-79494 remove second run with find-command-only feature flag
+st = new ShardingTest({
+    mongos: 1,
+    shards: 1,
+    config: 1,
+    rs: {nodes: 1},
+    mongosOptions: {
+        setParameter: {
+            internalQueryStatsRateLimit: -1,
+            featureFlagQueryStatsFindCommand: true,
+            'failpoint.skipClusterParameterRefresh': "{'mode':'alwaysOn'}"
+        }
+    },
+});
+runTest(st.s);
+st.stop();

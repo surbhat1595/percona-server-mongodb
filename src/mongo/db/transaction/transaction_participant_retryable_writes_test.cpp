@@ -136,14 +136,9 @@ public:
         const TransactionOperations& transactionOperations,
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         size_t numberOfPrePostImagesToWrite,
-        Date_t wallClockTime) override {
+        Date_t wallClockTime,
+        OpStateAccumulator* opAccumulator = nullptr) override {
         ASSERT_TRUE(opCtx->lockState()->inAWriteUnitOfWork());
-        OpObserverNoop::onTransactionPrepare(opCtx,
-                                             reservedSlots,
-                                             transactionOperations,
-                                             applyOpsOperationAssignment,
-                                             numberOfPrePostImagesToWrite,
-                                             Date_t::now());
 
         uassert(ErrorCodes::OperationFailed,
                 "onTransactionPrepare() failed",
@@ -1052,6 +1047,12 @@ TEST_F(TransactionParticipantRetryableWritesTest, ErrorOnlyWhenStmtIdBeingChecke
     }
 
     ASSERT_THROWS(txnParticipant.checkStatementExecuted(opCtx(), 2), AssertionException);
+}
+
+TEST_F(TransactionParticipantRetryableWritesTest, RefreshFromStorageAsSecondary) {
+    ASSERT_OK(repl::ReplicationCoordinator::get(getServiceContext())
+                  ->setFollowerMode(repl::MemberState::RS_SECONDARY));
+    TransactionParticipant::get(opCtx()).refreshFromStorageIfNeeded(opCtx());
 }
 
 /**

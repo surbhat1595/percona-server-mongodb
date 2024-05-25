@@ -225,43 +225,7 @@ public:
         }
     }
 
-    void operator()(const PhysProperty&, const IndexingRequirement& prop) {
-        if (prop.getIndexReqTarget() != IndexReqTarget::Complete) {
-            return;
-        }
-
-        uassert(6624101,
-                "IndexingRequirement without indexing availability",
-                hasProperty<IndexingAvailability>(_logicalProps));
-        const IndexingAvailability& indexingAvailability =
-            getPropertyConst<IndexingAvailability>(_logicalProps);
-
-        // TODO: consider left outer joins. We can propagate rid from the outer side.
-        if (_metadata._scanDefs.at(indexingAvailability.getScanDefName()).getIndexDefs().empty()) {
-            // No indexes on the collection.
-            return;
-        }
-
-        const ProjectionNameOrderPreservingSet& requiredProjections =
-            getPropertyConst<ProjectionRequirement>(_physProps).getProjections();
-        const ProjectionName& scanProjection = indexingAvailability.getScanProjection();
-        const bool requiresScanProjection = requiredProjections.find(scanProjection).has_value();
-
-        if (!requiresScanProjection) {
-            // Try indexScanOnly (covered index) if we do not require scan projection.
-            PhysProps newProps = _physProps;
-            setPropertyOverwrite<IndexingRequirement>(newProps,
-                                                      {IndexReqTarget::Index,
-                                                       prop.getDedupRID(),
-                                                       prop.getSatisfiedPartialIndexesGroupId()});
-
-            optimizeUnderNewProperties<PhysicalRewriteType::AttemptCoveringQuery>(
-                _queue,
-                kDefaultPriority,
-                make<MemoLogicalDelegatorNode>(_groupId),
-                std::move(newProps));
-        }
-    }
+    void operator()(const PhysProperty&, const IndexingRequirement& prop) {}
 
     void operator()(const PhysProperty&, const RepetitionEstimate& prop) {
         // Noop. We do not currently enforce this property. It only affects costing.
@@ -288,7 +252,7 @@ public:
 
         // Constuct a plan fragment which enforces the requirement by projecting all fields of the
         // shard key and invoking the shardFilter FunctionCall in a filter.
-        const auto& shardKey = scanDef.getDistributionAndPaths()._paths;
+        const auto& shardKey = scanDef.shardingMetadata().shardKey();
         tassert(
             7829702,
             "Enforcer for RemoveOrphansRequirement but scan definition doesn't have a shard key.",
@@ -308,13 +272,18 @@ public:
         // Save a pointer to the MemoLogicalDelagatorNode so we can use it in the childPropsMap.
         ABT* childPtr = nullptr;
 
-        for (auto&& field : shardKey) {
+        for (auto&& fieldSpec : shardKey) {
             auto projName = _prefixId.getNextId("shardKey");
             builder.make<EvaluationNode>(ce.getEstimate(),
                                          projName,
-                                         make<EvalPath>(field, make<Variable>(scanProj)),
+                                         make<EvalPath>(fieldSpec._path, make<Variable>(scanProj)),
                                          std::move(builder._node));
-            shardKeyFieldVars.push_back(make<Variable>(projName));
+            ABT shardKeyFieldVar = make<Variable>(std::move(projName));
+            if (fieldSpec._op == CollationOp::Clustered) {
+                shardKeyFieldVar =
+                    make<FunctionCall>("shardHash", makeSeq(std::move(shardKeyFieldVar)));
+            }
+            shardKeyFieldVars.push_back(std::move(shardKeyFieldVar));
             if (childPtr == nullptr) {
                 childPtr = &builder._node.cast<EvaluationNode>()->getChild();
             }
@@ -332,7 +301,7 @@ public:
         childPropsMap.emplace_back(childPtr, std::move(childProps));
 
         optimizeChildrenNoAssert(_queue,
-                                 kDefaultPriority,
+                                 999.0 /* large priority to discourage this rewrite */,
                                  PhysicalRewriteType::EnforceShardFilter,
                                  std::move(builder._node),
                                  std::move(childPropsMap),

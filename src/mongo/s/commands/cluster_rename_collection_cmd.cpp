@@ -143,8 +143,7 @@ public:
                         ActionType::setUserWriteBlockMode));
 
             auto catalogCache = Grid::get(opCtx)->catalogCache();
-            auto swDbInfo =
-                Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, fromNss.db_forSharding());
+            auto swDbInfo = Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, fromNss.dbName());
             if (swDbInfo == ErrorCodes::NamespaceNotFound) {
                 uassert(CollectionUUIDMismatchInfo(fromNss.dbName(),
                                                    *request().getCollectionUUID(),
@@ -161,7 +160,7 @@ public:
             auto cmdResponse = uassertStatusOK(shard->runCommandWithFixedRetryAttempts(
                 opCtx,
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                fromNss.db_forSharding().toString(),
+                fromNss.dbName(),
                 CommandHelpers::appendMajorityWriteConcern(
                     appendDbVersionIfPresent(renameCollRequest.toBSON({}), dbInfo->getVersion())),
                 Shard::RetryPolicy::kNoRetry));
@@ -191,8 +190,8 @@ public:
             return true;
         }
     };
-
-} renameCollectionCmd;
+};
+MONGO_REGISTER_COMMAND(RenameCollectionCmd);
 
 }  // namespace
 }  // namespace mongo

@@ -10,6 +10,7 @@ import {
     hasRejectedPlans,
     planHasStage,
 } from "jstests/libs/analyze_plan.js";
+import {assertEngine} from "jstests/libs/analyze_plan.js";
 import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
 const JoinAlgorithm = {
@@ -201,15 +202,6 @@ function setLookupPushdownDisabled(value) {
             ],
             JoinAlgorithm.HJ /* expectedJoinAlgorithm */);
 
-    // $lookup preceded by $project which features an SBE-incompatible expression.
-    // TODO SERVER-51542: Update or remove this test case once $pow is implemented in SBE.
-    runTest(coll,
-            [
-                {$project: {exp: {$pow: ["$a", 3]}}},
-                {$lookup: {from: foreignCollName, localField: "a", foreignField: "b", as: "out"}}
-            ],
-            JoinAlgorithm.Classic /* expectedJoinAlgorithm */);
-
     // $lookup preceded by $group.
     runTest(coll,
             [
@@ -217,15 +209,6 @@ function setLookupPushdownDisabled(value) {
                 {$lookup: {from: foreignCollName, localField: "a", foreignField: "b", as: "out"}}
             ],
             JoinAlgorithm.HJ /* expectedJoinAlgorithm */);
-
-    // $lookup preceded by $group that is not eligible for pushdown.
-    // TODO SERVER-51542: Update or remove this test case once $pow is implemented in SBE.
-    runTest(coll,
-            [
-                {$group: {_id: {$pow: ["$a", 3]}, sum: {$sum: 1}}},
-                {$lookup: {from: foreignCollName, localField: "a", foreignField: "b", as: "out"}}
-            ],
-            JoinAlgorithm.Classic /* expectedJoinAlgorithm */);
 
     // Consecutive $lookups, where the first $lookup is against a view.
     runTest(coll,
@@ -758,34 +741,28 @@ MongoRunner.stopMongod(conn);
     assert.eq(2, getAggPlanStages(explain, "GROUP").length, explain);
     assert.eq(0, getAggPlanStages(explain, "$group").length, explain);
 
-    function assertEngine(pipeline, engine) {
-        const explain = coll.explain().aggregate(pipeline);
-        assert(explain.hasOwnProperty("explainVersion"), explain);
-        assert.eq(explain.explainVersion, engine === "sbe" ? "2" : "1");
-    }
-
     const matchStage = {$match: {a: 1}};
 
     // $group on its own is SBE compatible.
-    assertEngine([groupStage], "sbe" /* engine */);
+    assertEngine([groupStage], "sbe" /* engine */, coll);
 
     // $group with $match is also SBE compatible.
-    assertEngine([matchStage, groupStage], "sbe" /* engine */);
+    assertEngine([matchStage, groupStage], "sbe" /* engine */, coll);
 
     // A HJ-processed $lookup is also SBE compatible.
-    assertEngine([lookupStage], "sbe" /* engine */);
-    assertEngine([matchStage, lookupStage], "sbe" /* engine */);
-    assertEngine([matchStage, lookupStage, groupStage], "sbe" /* engine */);
+    assertEngine([lookupStage], "sbe" /* engine */, coll);
+    assertEngine([matchStage, lookupStage], "sbe" /* engine */, coll);
+    assertEngine([matchStage, lookupStage, groupStage], "sbe" /* engine */, coll);
 
     // Constructing an index over the foreignField of 'lookupStage' will cause the $lookup to be
     // pushed down.
     assert.commandWorked(foreignColl.createIndex({b: 1}));
-    assertEngine([matchStage, lookupStage, groupStage], "sbe" /* engine */);
+    assertEngine([matchStage, lookupStage, groupStage], "sbe" /* engine */, coll);
     assert.commandWorked(foreignColl.dropIndex({b: 1}));
 
     // Regardless of whether the $lookup will not run in SBE, a preceding $group should still let
     // SBE be used.
-    assertEngine([matchStage, groupStage, lookupStage], "sbe" /* engine */);
+    assertEngine([matchStage, groupStage, lookupStage], "sbe" /* engine */, coll);
     MongoRunner.stopMongod(conn);
 }());
 

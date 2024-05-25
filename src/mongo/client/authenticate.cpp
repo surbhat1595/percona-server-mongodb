@@ -133,7 +133,7 @@ StatusWith<OpMsgRequest> createX509AuthCmd(const BSONObj& params, StringData cli
         return {ErrorCodes::AuthenticationFailed, message.str()};
     }
 
-    return OpMsgRequest::fromDBAndBody(db.getValue(),
+    return OpMsgRequest::fromDBAndBody(DatabaseNameUtil::deserialize(boost::none, db.getValue()),
                                        BSON("authenticate" << 1 << "mechanism"
                                                            << "MONGODB-X509"
                                                            << "user" << username));
@@ -235,7 +235,7 @@ Future<std::string> negotiateSaslMechanism(RunCommandHook runCommand,
     }
     const auto request = builder.obj();
 
-    return runCommand(OpMsgRequest::fromDBAndBody("admin"_sd, std::move(request)))
+    return runCommand(OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin, std::move(request)))
         .then([](BSONObj reply) -> Future<std::string> {
             auto mechsArrayObj = reply.getField("saslSupportedMechs");
             if (mechsArrayObj.type() != Array) {
@@ -292,14 +292,16 @@ Future<void> authenticateInternalClient(
         });
 }
 
-BSONObj buildAuthParams(StringData dbname,
+BSONObj buildAuthParams(const DatabaseName& dbname,
                         StringData username,
                         StringData passwordText,
                         StringData mechanism) {
-
-    return BSON(saslCommandMechanismFieldName << mechanism << saslCommandUserDBFieldName << dbname
-                                              << saslCommandUserFieldName << username
-                                              << saslCommandPasswordFieldName << passwordText);
+    // Direct authentication expects no tenantId to be present.
+    fassert(8032000, dbname.tenantId() == boost::none);
+    return BSON(saslCommandMechanismFieldName
+                << mechanism << saslCommandUserDBFieldName << DatabaseNameUtil::serialize(dbname)
+                << saslCommandUserFieldName << username << saslCommandPasswordFieldName
+                << passwordText);
 }
 
 StringData getSaslCommandUserDBFieldName() {

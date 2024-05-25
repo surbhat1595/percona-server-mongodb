@@ -354,7 +354,9 @@ std::unique_ptr<InitialSplitPolicy> InitialSplitPolicy::calculateOptimizationStr
     const bool presplitHashedZones,
     const std::vector<TagsType>& tags,
     size_t numShards,
-    bool collectionIsEmpty) {
+    bool collectionIsEmpty,
+    bool isUnsplittable,
+    boost::optional<ShardId> dataShard) {
     uassert(ErrorCodes::InvalidOptions,
             str::stream() << "numInitialChunks is only supported when the collection is empty "
                              "and has a hashed field in the shard key pattern",
@@ -364,6 +366,24 @@ std::unique_ptr<InitialSplitPolicy> InitialSplitPolicy::calculateOptimizationStr
                 << "When the prefix of the hashed shard key is a range field, "
                    "'numInitialChunks' can only be used when the 'presplitHashedZones' is true",
             !numInitialChunks || shardKeyPattern.hasHashedPrefix() || presplitHashedZones);
+    uassert(ErrorCodes::InvalidOptions,
+            str::stream() << "dataShard can only be specified in unsplittable collections",
+            !dataShard || (dataShard && isUnsplittable));
+    uassert(ErrorCodes::InvalidOptions,
+            str::stream() << "When dataShard or unsplittable is specified, the collection must be "
+                             "empty and no other option must be specified",
+            !isUnsplittable ||
+                (collectionIsEmpty && !presplitHashedZones && tags.empty() && !numInitialChunks &&
+                 shardKeyPattern.getKeyPattern().toBSON().woCompare((BSON("_id" << 1))) == 0));
+
+    // if unsplittable, the collection is always equivalent to a single chunk collection
+    if (isUnsplittable) {
+        if (dataShard) {
+            return std::make_unique<SingleChunkOnShardSplitPolicy>(opCtx, *dataShard);
+        } else {
+            return std::make_unique<SingleChunkOnPrimarySplitPolicy>();
+        }
+    }
 
     // If 'presplitHashedZones' flag is set, we always use 'PresplitHashedZonesSplitPolicy', to make
     // sure we throw the correct assertion if further validation fails.
@@ -409,6 +429,28 @@ InitialSplitPolicy::ShardCollectionConfig SingleChunkOnPrimarySplitPolicy::creat
                 &version,
                 params.primaryShardId,
                 &chunks);
+
+    return {std::move(chunks)};
+}
+
+SingleChunkOnShardSplitPolicy::SingleChunkOnShardSplitPolicy(OperationContext* opCtx,
+                                                             ShardId dataShard) {
+    uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, dataShard));
+    _dataShard = dataShard;
+}
+
+InitialSplitPolicy::ShardCollectionConfig SingleChunkOnShardSplitPolicy::createFirstChunks(
+    OperationContext* opCtx,
+    const ShardKeyPattern& shardKeyPattern,
+    const SplitPolicyParams& params) {
+    const auto currentTime = VectorClock::get(opCtx)->getTime();
+    const auto validAfter = currentTime.clusterTime().asTimestamp();
+
+    ChunkVersion version({OID::gen(), validAfter}, {1, 0});
+    const auto& keyPattern = shardKeyPattern.getKeyPattern();
+    std::vector<ChunkType> chunks;
+    appendChunk(
+        params, keyPattern.globalMin(), keyPattern.globalMax(), &version, _dataShard, &chunks);
 
     return {std::move(chunks)};
 }

@@ -76,7 +76,7 @@ public:
         Response typedRun(OperationContext* opCtx) {
             uassert(ErrorCodes::IllegalOperation,
                     "analyzeShardKey command is not supported on a standalone mongod",
-                    repl::ReplicationCoordinator::get(opCtx)->isReplEnabled());
+                    repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet());
             uassert(ErrorCodes::IllegalOperation,
                     "analyzeShardKey command is not supported on a multitenant replica set",
                     !gMultitenancySupport);
@@ -185,7 +185,8 @@ public:
     std::string help() const override {
         return "Returns metrics for evaluating a shard key for a collection.";
     }
-} analyzeShardKeyCmd;
+};
+MONGO_REGISTER_COMMAND(AnalyzeShardKeyCmd);
 
 }  // namespace
 

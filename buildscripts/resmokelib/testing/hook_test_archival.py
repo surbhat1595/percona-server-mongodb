@@ -1,19 +1,31 @@
 """Enable support for archiving tests or hooks."""
 
+import logging
 import os
 import threading
+from typing import TYPE_CHECKING
+
+from opentelemetry import trace
 
 from buildscripts.resmokelib import config
 from buildscripts.resmokelib import errors
 from buildscripts.resmokelib import utils
 from buildscripts.resmokelib.flags import HANG_ANALYZER_CALLED
+from buildscripts.resmokelib.testing.suite import Suite
+from buildscripts.resmokelib.testing.testcases.interface import TestCase
 from buildscripts.resmokelib.utils import globstar
+
+# TODO: if we ever fix the circular deps in resmoke we will be able to get rid of this
+if TYPE_CHECKING:
+    from buildscripts.resmokelib.testing.job import FixtureTestCaseManager, TestResult
+
+TRACER = trace.get_tracer("resmoke")
 
 
 class HookTestArchival(object):
     """Archive hooks and tests to S3."""
 
-    def __init__(self, suite, hooks, archive_instance, archive_config):  #pylint: disable=unused-argument
+    def __init__(self, suite: Suite, hooks, archive_instance, archive_config):  #pylint: disable=unused-argument
         """Initialize HookTestArchival."""
         self.archive_instance = archive_instance
         archive_config = utils.default_if_none(archive_config, {})
@@ -39,7 +51,12 @@ class HookTestArchival(object):
         self._tests_repeat = {}
         self._lock = threading.Lock()
 
-    def archive(self, logger, result, manager):
+    def archive(
+            self,
+            logger: logging.Logger,
+            result: 'TestResult',
+            manager: 'FixtureTestCaseManager',
+    ):
         """
         Archive data files for hooks or tests.
 
@@ -72,8 +89,18 @@ class HookTestArchival(object):
         if should_archive or config.FORCE_ARCHIVE_ALL_DATA_FILES:
             self._archive_hook_or_test(logger, test_name, result.test, manager)
 
-    def _archive_hook_or_test(self, logger, test_name, test, manager):
+    @TRACER.start_as_current_span("hook_test_archival._archive_hook_or_test")
+    def _archive_hook_or_test(
+            self,
+            logger: logging.Logger,
+            test_name: str,
+            test: TestCase,
+            manager: 'FixtureTestCaseManager',
+    ):
         """Trigger archive of data files for a test or hook."""
+
+        archive_hook_or_test_span = trace.get_current_span()
+        archive_hook_or_test_span.set_attributes(attributes=test.get_test_otel_attributes())
 
         # We can still attempt archiving even if the teardown fails.
         if not manager.teardown_fixture(logger, abort=True):

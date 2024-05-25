@@ -82,7 +82,7 @@ void waitForQuiescedCluster(OperationContext* opCtx) {
 
     const auto responses =
         sharding_util::sendCommandToShards(opCtx,
-                                           DatabaseName::kAdmin.toString(),
+                                           DatabaseName::kAdmin,
                                            joinShardOnMigrationsRequest.toBSON({}),
                                            unquiescedShardIds,
                                            executor,
@@ -169,6 +169,17 @@ void BalancerCommandsSchedulerImpl::stop() {
     _workerThreadHandle.join();
 }
 
+void BalancerCommandsSchedulerImpl::disableBalancerForCollection(OperationContext* opCtx,
+                                                                 const NamespaceString& nss) {
+    auto commandInfo = std::make_shared<DisableBalancerCommandInfo>(nss, ShardId::kConfigServerId);
+
+    _buildAndEnqueueNewRequest(opCtx, std::move(commandInfo))
+        .then([](const executor::RemoteCommandResponse& remoteResponse) {
+            return processRemoteResponse(remoteResponse);
+        })
+        .getAsync([](auto) {});
+}
+
 SemiFuture<void> BalancerCommandsSchedulerImpl::requestMoveRange(
     OperationContext* opCtx,
     const ShardsvrMoveRange& request,
@@ -247,16 +258,9 @@ SemiFuture<NumMergedChunks> BalancerCommandsSchedulerImpl::requestMergeAllChunks
                 return responseStatus;
             }
 
-            try {
-                return MergeAllChunksOnShardResponse::parse(
-                           IDLParserContext{"MergeAllChunksOnShardResponse"}, remoteResponse.data)
-                    .getNumMergedChunks();
-            } catch (const DBException&) {
-                // TODO SERVER-74573 remove try-catch once 7.0 branches out
-                // It may happen in multiversion scenarios for the command not to return a
-                // MergeAllChunksOnShardResponse (in v6.3 the reply was empty)
-                return 0;
-            }
+            return MergeAllChunksOnShardResponse::parse(
+                       IDLParserContext{"MergeAllChunksOnShardResponse"}, remoteResponse.data)
+                .getNumMergedChunks();
         })
         .semi();
 }

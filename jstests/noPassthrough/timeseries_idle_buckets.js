@@ -6,7 +6,6 @@
  * ]
  */
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const rst = new ReplSetTest({nodes: 1});
 rst.startSet({setParameter: {timeseriesIdleBucketExpiryMemoryUsageThreshold: 10485760}});
@@ -14,8 +13,6 @@ rst.initiate();
 
 const db = rst.getPrimary().getDB(jsTestName());
 
-const alwaysUseCompressedBuckets =
-    FeatureFlagUtil.isEnabled(db, "TimeseriesAlwaysUseCompressedBuckets");
 const isBucketReopeningEnabled = TimeseriesTest.timeseriesScalabilityImprovementsEnabled(db);
 
 assert.commandWorked(db.dropDatabase());
@@ -58,7 +55,7 @@ for (let i = 0; i < numDocs; i++) {
     ]));
 }
 
-// No go back and insert documents with the same metadata, and verify that we at some point
+// Now go back and insert documents with the same metadata, and verify that we at some point
 // insert into a new bucket, indicating the old one was expired.
 let foundExpiredBucket = false;
 for (let i = 0; i < numDocs; i++) {
@@ -70,9 +67,10 @@ for (let i = 0; i < numDocs; i++) {
 
     // Check buckets.
     if (isBucketReopeningEnabled) {
-        let bucketDocs = bucketsColl.find({"control.version": alwaysUseCompressedBuckets ? 1 : 2})
-                             .limit(1)
-                             .toArray();
+        let bucketDocs =
+            bucketsColl.find({"control.version": TimeseriesTest.BucketVersion.kCompressed})
+                .limit(1)
+                .toArray();
         if (bucketDocs.length > 0) {
             foundExpiredBucket = true;
         }
@@ -81,11 +79,11 @@ for (let i = 0; i < numDocs; i++) {
                              .sort({'control.min._id': 1})
                              .toArray();
         if (bucketDocs.length > 1) {
-            // If bucket compression is enabled the expired bucket should have been compressed
-            assert.eq(alwaysUseCompressedBuckets ? 1 : 2,
+            // If bucket compression is enabled the expired bucket should have been compressed.
+            assert.eq(TimeseriesTest.BucketVersion.kCompressed,
                       bucketDocs[0].control.version,
                       'unexpected control.version in first bucket: ' + tojson(bucketDocs));
-            assert.eq(1,
+            assert.eq(TimeseriesTest.BucketVersion.kUncompressed,
                       bucketDocs[1].control.version,
                       'unexpected control.version in second bucket: ' + tojson(bucketDocs));
 
@@ -98,9 +96,9 @@ for (let i = 0; i < numDocs; i++) {
                       1,
                       'Invalid number of buckets for metadata ' + (numDocs - 1) + ': ' +
                           tojson(bucketDocs));
-            assert.eq(1,
+            assert.eq(TimeseriesTest.BucketVersion.kUncompressed,
                       bucketDocs[0].control.version,
-                      'unexpected control.version in second bucket: ' + tojson(bucketDocs));
+                      'unexpected control.version in first bucket: ' + tojson(bucketDocs));
         }
     }
 }

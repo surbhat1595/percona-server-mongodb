@@ -66,9 +66,11 @@
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/scoped_collection_metadata.h"
 #include "mongo/db/s/shard_key_index_util.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
@@ -122,7 +124,7 @@ Status checkReplState(OperationContext* opCtx,
     }
 
     // Disallow index drops on drop-pending namespaces (system.drop.*) if we are primary.
-    auto isPrimary = replCoord->getSettings().usingReplSets() && canAcceptWrites;
+    auto isPrimary = replCoord->getSettings().isReplSet() && canAcceptWrites;
     const auto& nss = collection->ns();
     if (isPrimary && nss.isDropPendingNamespace()) {
         return Status(ErrorCodes::NamespaceNotFound,
@@ -344,12 +346,24 @@ void dropReadyIndexes(OperationContext* opCtx,
                     if (desc->isIdIndex()) {
                         return false;
                     }
-
+                    // For any index that is compatible with the shard key, if
+                    // gFeatureFlagShardKeyIndexOptionalHashedSharding is enabled and
+                    // the shard key is hashed, allow users to drop the hashed index. Note
+                    // skipDroppingHashedShardKeyIndex is used in some tests to prevent dropIndexes
+                    // from dropping the hashed shard key index so we can continue to test chunk
+                    // migration with hashed sharding. Otherwise, dropIndexes with '*' would drop
+                    // the index and prevent chunk migration from running.
+                    const auto& shardKey = collDescription.getShardKeyPattern();
+                    const bool skipDropIndex = skipDroppingHashedShardKeyIndex ||
+                        !(gFeatureFlagShardKeyIndexOptionalHashedSharding.isEnabled(
+                              serverGlobalParams.featureCompatibility) &&
+                          shardKey.isHashedPattern());
                     if (isCompatibleWithShardKey(opCtx,
                                                  CollectionPtr(collection),
                                                  desc->getEntry(),
-                                                 collDescription.getKeyPattern(),
-                                                 false /* requiresSingleKey */)) {
+                                                 shardKey.toBSON(),
+                                                 false /* requiresSingleKey */) &&
+                        skipDropIndex) {
                         return false;
                     }
 
@@ -384,7 +398,7 @@ void dropReadyIndexes(OperationContext* opCtx,
             uassert(
                 ErrorCodes::CannotDropShardKeyIndex,
                 "Cannot drop the only compatible index for this collection's shard key",
-                !isLastNonHiddenShardKeyIndex(
+                !isLastNonHiddenRangedShardKeyIndex(
                     opCtx, CollectionPtr(collection), indexName, collDescription.getKeyPattern()));
         }
 
@@ -410,7 +424,9 @@ void assertNoMovePrimaryInProgress(OperationContext* opCtx, const NamespaceStrin
         auto collDesc = scopedCss->getCollectionDescription(opCtx);
         collDesc.throwIfReshardingInProgress(nss);
 
-        if (!collDesc.isSharded()) {
+        // Only collections that are not registered in the sharding catalog are affected by
+        // movePrimary
+        if (!collDesc.hasRoutingTable()) {
             if (scopedDss->isMovePrimaryInProgress()) {
                 LOGV2(4976500, "assertNoMovePrimaryInProgress", logAttrs(nss));
 
@@ -559,10 +575,10 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
                 if (collDesc.isSharded()) {
                     uassert(ErrorCodes::CannotDropShardKeyIndex,
                             "Cannot drop the only compatible index for this collection's shard key",
-                            !isLastNonHiddenShardKeyIndex(opCtx,
-                                                          collection->getCollection(),
-                                                          indexName,
-                                                          collDesc.getKeyPattern()));
+                            !isLastNonHiddenRangedShardKeyIndex(opCtx,
+                                                                collection->getCollection(),
+                                                                indexName,
+                                                                collDesc.getKeyPattern()));
                 }
 
                 auto writableEntry = indexCatalog->getWritableEntryByName(

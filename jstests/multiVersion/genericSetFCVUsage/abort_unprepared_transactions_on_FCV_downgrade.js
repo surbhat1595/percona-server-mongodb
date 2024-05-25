@@ -4,9 +4,6 @@
  * test's behavior or remove this test entirely if the behavior changes post v4.2.
  * @tags: [uses_transactions, multiversion_incompatible]
  */
-(function() {
-"use strict";
-
 function runTest(downgradeFCV, succeedDowngrade) {
     const rst = new ReplSetTest({nodes: [{binVersion: "latest"}]});
     rst.startSet();
@@ -37,7 +34,7 @@ function runTest(downgradeFCV, succeedDowngrade) {
         if (succeedDowngrade) {
             jsTestLog("Downgrade the featureCompatibilityVersion.");
             assert.commandWorked(
-                testDB.adminCommand({setFeatureCompatibilityVersion: downgradeFCV}));
+                testDB.adminCommand({setFeatureCompatibilityVersion: downgradeFCV, confirm: true}));
             checkFCV(adminDB, downgradeFCV);
         } else {
             jsTestLog(
@@ -45,7 +42,8 @@ function runTest(downgradeFCV, succeedDowngrade) {
             assert.commandWorked(
                 primary.adminCommand({configureFailPoint: 'failDowngrading', mode: "alwaysOn"}));
             assert.commandFailedWithCode(
-                testDB.adminCommand({setFeatureCompatibilityVersion: downgradeFCV}), 549181);
+                testDB.adminCommand({setFeatureCompatibilityVersion: downgradeFCV, confirm: true}),
+                549181);
             checkFCV(adminDB, downgradeFCV, downgradeFCV);
         }
 
@@ -59,7 +57,8 @@ function runTest(downgradeFCV, succeedDowngrade) {
         // We can't upgrade from "downgrading to lastContinuous" -> latest.
         if (succeedDowngrade || downgradeFCV == lastLTSFCV) {
             jsTestLog("Restore the original featureCompatibilityVersion.");
-            assert.commandWorked(testDB.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+            assert.commandWorked(
+                testDB.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
             checkFCV(adminDB, latestFCV);
         }
     }
@@ -74,4 +73,3 @@ if (lastLTSFCV !== lastContinuousFCV) {
     runTest(lastContinuousFCV, true /* succeedDowngrade */);
     runTest(lastContinuousFCV, false /* succeedDowngrade */);
 }
-}());

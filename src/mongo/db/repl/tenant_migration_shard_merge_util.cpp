@@ -59,11 +59,9 @@
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/locker.h"
-#include "mongo/db/cursor_server_params_gen.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/repl/storage_interface.h"
-#include "mongo/db/repl/tenant_file_cloner.h"
 #include "mongo/db/repl/tenant_migration_shared_data.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/top.h"
@@ -82,6 +80,7 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/future_util.h"
 #include "mongo/util/scopeguard.h"
@@ -89,13 +88,11 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTenantMigration
 
-
-// Keep the backup cursor alive by pinging twice as often as the donor's default
-// cursor timeout.
-constexpr int kBackupCursorKeepAliveIntervalMillis = mongo::kCursorTimeoutMillisDefault / 2;
-
 namespace mongo::repl::shard_merge_utils {
 namespace {
+
+MONGO_FAIL_POINT_DEFINE(skipImportFiles);
+
 using namespace fmt::literals;
 
 void moveFile(const std::string& src, const std::string& dst) {
@@ -132,26 +129,6 @@ std::string constructDestinationPath(const std::string& ident) {
     boost::filesystem::path filePath{storageGlobalParams.dbpath};
     filePath /= (ident + kTableExtension);
     return filePath.string();
-}
-
-/**
- * Computes a boost::filesystem::path generic-style relative path (always uses slashes)
- * from a base path and a relative path.
- */
-std::string _getPathRelativeTo(const std::string& path, const std::string& basePath) {
-    if (basePath.empty() || path.find(basePath) != 0) {
-        uasserted(6113319,
-                  str::stream() << "The file " << path << " is not a subdirectory of " << basePath);
-    }
-
-    auto result = path.substr(basePath.size());
-    // Skip separators at the beginning of the relative part.
-    if (!result.empty() && (result[0] == '/' || result[0] == '\\')) {
-        result.erase(result.begin());
-    }
-
-    std::replace(result.begin(), result.end(), '\\', '/');
-    return result;
 }
 
 /**
@@ -194,12 +171,12 @@ std::string moveWithNewIdent(OperationContext* opCtx,
 }
 
 /**
- * Import the collection and its indexes into the main wiretiger instance.
+ * Import the collection and its indexes into the main wiredtiger instance.
  */
-void importCollectionInMainWTInstance(OperationContext* opCtx,
-                                      const CollectionImportMetadata& metadata,
-                                      const UUID& migrationId,
-                                      const BSONObj& storageMetaObj) {
+void importCollectionAndItsIndexesInMainWTInstance(OperationContext* opCtx,
+                                                   const CollectionImportMetadata& metadata,
+                                                   const UUID& migrationId,
+                                                   const BSONObj& storageMetaObj) {
     const auto nss = metadata.ns;
     writeConflictRetry(opCtx, "importCollection", nss, [&] {
         LOGV2_DEBUG(6114303, 1, "Importing donor collection", "ns"_attr = nss);
@@ -250,12 +227,14 @@ void importCollectionInMainWTInstance(OperationContext* opCtx,
         std::shared_ptr<Collection> ownedCollection = Collection::Factory::get(opCtx)->make(
             opCtx, nss, importResult.catalogId, md, std::move(importResult.rs));
         ownedCollection->init(opCtx);
+        historicalIDTrackerAllowsMixedModeWrites(ownedCollection->getSharedDecorations())
+            .store(true);
 
         // Update the number of records and data size on commit.
         opCtx->recoveryUnit()->registerChange(
             makeCountsChange(ownedCollection->getRecordStore(), metadata));
 
-        CollectionCatalog::get(opCtx)->onCreateCollection(opCtx, std::move(ownedCollection));
+        CollectionCatalog::get(opCtx)->onCreateCollection(opCtx, ownedCollection);
 
         auto importedCatalogEntry =
             storageEngine->getCatalog()->getCatalogEntry(opCtx, importResult.catalogId);
@@ -270,8 +249,10 @@ void importCollectionInMainWTInstance(OperationContext* opCtx,
 
         wunit.commit();
 
-        if (metadata.numRecords > 0) {
-            cluster_parameters::maybeUpdateClusterParametersPostImportCollectionCommit(opCtx, nss);
+        if (metadata.numRecords > 0 &&
+            nss == NamespaceString::makeClusterParametersNSS(nss.tenantId())) {
+            cluster_parameters::initializeAllTenantParametersFromCollection(opCtx,
+                                                                            &*ownedCollection);
         }
 
         LOGV2(6114300,
@@ -283,6 +264,22 @@ void importCollectionInMainWTInstance(OperationContext* opCtx,
 }
 
 }  // namespace
+
+std::string getPathRelativeTo(const std::string& path, const std::string& basePath) {
+    if (basePath.empty() || path.find(basePath) != 0) {
+        uasserted(6113319,
+                  str::stream() << "The file " << path << " is not a subdirectory of " << basePath);
+    }
+
+    auto result = path.substr(basePath.size());
+    // Skip separators at the beginning of the relative part.
+    if (!result.empty() && (result[0] == '/' || result[0] == '\\')) {
+        result.erase(result.begin());
+    }
+
+    std::replace(result.begin(), result.end(), '\\', '/');
+    return result;
+}
 
 void createImportDoneMarkerLocalCollection(OperationContext* opCtx, const UUID& migrationId) {
     UnreplicatedWritesBlock writeBlock(opCtx);
@@ -314,7 +311,14 @@ void dropImportDoneMarkerLocalCollection(OperationContext* opCtx, const UUID& mi
     }
 }
 
-void wiredTigerImport(OperationContext* opCtx, const UUID& migrationId) {
+void runRollbackAndThenImportFiles(OperationContext* opCtx, const UUID& migrationId) {
+    if (MONGO_unlikely(skipImportFiles.shouldFail())) {
+        LOGV2(7800200,
+              "Skipping file import due to 'skipImportFiles' failpoint enabled",
+              "migrationId"_attr = migrationId);
+        return;
+    }
+
     auto tempWTDirectory = fileClonerTempDir(migrationId);
     uassert(6113315,
             str::stream() << "Missing file cloner's temporary dbpath directory: "
@@ -385,61 +389,10 @@ void wiredTigerImport(OperationContext* opCtx, const UUID& migrationId) {
         metadata.catalogObject = metadata.catalogObject.addFields(catalogMetaBuilder.obj());
         const auto storageMetaObj = storageMetaBuilder.done();
 
-        importCollectionInMainWTInstance(opCtx, metadata, migrationId, storageMetaObj);
+        importCollectionAndItsIndexesInMainWTInstance(opCtx, metadata, migrationId, storageMetaObj);
 
         revertFileMoves.dismiss();
     }
-
-    createImportDoneMarkerLocalCollection(opCtx, migrationId);
-}
-
-void cloneFile(OperationContext* opCtx,
-               DBClientConnection* clientConnection,
-               ThreadPool* writerPool,
-               TenantMigrationSharedData* sharedData,
-               const BSONObj& metadataDoc) {
-    auto fileName = metadataDoc["filename"].str();
-    auto migrationId = UUID(uassertStatusOK(UUID::parse(metadataDoc[kMigrationIdFieldName])));
-    auto backupId = UUID(uassertStatusOK(UUID::parse(metadataDoc[kBackupIdFieldName])));
-    auto remoteDbpath = metadataDoc["remoteDbpath"].str();
-    size_t fileSize = std::max(0ll, metadataDoc["fileSize"].safeNumberLong());
-    auto relativePath = _getPathRelativeTo(fileName, metadataDoc[kDonorDbPathFieldName].str());
-    LOGV2_DEBUG(6113320,
-                1,
-                "Cloning file",
-                "migrationId"_attr = migrationId,
-                "metadata"_attr = metadataDoc,
-                "destinationRelativePath"_attr = relativePath);
-    invariant(!relativePath.empty());
-
-    auto currentBackupFileCloner =
-        std::make_unique<TenantFileCloner>(backupId,
-                                           migrationId,
-                                           fileName,
-                                           fileSize,
-                                           relativePath,
-                                           sharedData,
-                                           clientConnection->getServerHostAndPort(),
-                                           clientConnection,
-                                           repl::StorageInterface::get(cc().getServiceContext()),
-                                           writerPool);
-
-    auto cloneStatus = currentBackupFileCloner->run();
-    if (!cloneStatus.isOK()) {
-        LOGV2_WARNING(6113321,
-                      "Failed to clone file ",
-                      "migrationId"_attr = migrationId,
-                      "fileName"_attr = fileName,
-                      "error"_attr = cloneStatus);
-    } else {
-        LOGV2_DEBUG(6113322,
-                    1,
-                    "Cloned file",
-                    "migrationId"_attr = migrationId,
-                    "fileName"_attr = fileName);
-    }
-
-    uassertStatusOK(cloneStatus);
 }
 
 SemiFuture<void> keepBackupCursorAlive(CancellationSource cancellationSource,
@@ -449,7 +402,7 @@ SemiFuture<void> keepBackupCursorAlive(CancellationSource cancellationSource,
                                        NamespaceString namespaceString) {
     executor::RemoteCommandRequest getMoreRequest(
         hostAndPort,
-        namespaceString.db().toString(),
+        namespaceString.dbName(),
         std::move(BSON("getMore" << cursorId << "collection" << namespaceString.coll().toString())),
         nullptr);
     getMoreRequest.options.fireAndForget = true;
@@ -460,7 +413,8 @@ SemiFuture<void> keepBackupCursorAlive(CancellationSource cancellationSource,
         .until([](auto&&) { return false; })
         .withDelayBetweenIterations(Milliseconds(kBackupCursorKeepAliveIntervalMillis))
         .on(executor, cancellationSource.token())
-        .onCompletion([](auto&&) {})
+        .onCompletion(
+            [](auto&&) { LOGV2_INFO(7675002, "Keep backup cursor alive thread stopped"); })
         .semi();
 }
 }  // namespace mongo::repl::shard_merge_utils

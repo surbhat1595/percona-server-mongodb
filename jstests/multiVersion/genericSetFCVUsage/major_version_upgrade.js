@@ -11,12 +11,10 @@
  * @tags: [requires_v4_0]
  */
 
-(function() {
-'use strict';
+import "jstests/multiVersion/libs/multi_rs.js";
+import "jstests/multiVersion/libs/verify_versions.js";
 
-load('jstests/libs/index_catalog_helpers.js');
-load('jstests/multiVersion/libs/multi_rs.js');
-load('jstests/multiVersion/libs/verify_versions.js');
+import {IndexCatalogHelpers} from "jstests/libs/index_catalog_helpers.js";
 
 // Setup the dbpath for this test.
 const dbpath = MongoRunner.dataPath + 'major_version_upgrade';
@@ -94,8 +92,19 @@ for (let i = 0; i < versions.length; i++) {
     // Set the appropriate featureCompatibilityVersion upon upgrade, if applicable.
     if (version.hasOwnProperty('featureCompatibilityVersion')) {
         let adminDB = conn.getDB("admin");
-        assert.commandWorked(adminDB.runCommand(
-            {"setFeatureCompatibilityVersion": version.featureCompatibilityVersion}));
+        const res = adminDB.runCommand(
+            {"setFeatureCompatibilityVersion": version.featureCompatibilityVersion});
+        if (!res.ok && res.code === 7369100) {
+            // We failed due to requiring 'confirm: true' on the command. This will only
+            // occur on 7.0+ nodes that have 'enableTestCommands' set to false. Retry the
+            // setFCV command with 'confirm: true'.
+            assert.commandWorked(adminDB.runCommand({
+                "setFeatureCompatibilityVersion": version.featureCompatibilityVersion,
+                confirm: true,
+            }));
+        } else {
+            assert.commandWorked(res);
+        }
     }
 
     // Shutdown the current mongod.
@@ -180,20 +189,28 @@ for (let i = 0; i < versions.length; i++) {
     // Set the appropriate featureCompatibilityVersion upon upgrade, if applicable.
     if (version.hasOwnProperty('featureCompatibilityVersion')) {
         let primaryAdminDB = primary.getDB("admin");
-        assert.commandWorked(primaryAdminDB.runCommand(
-            {setFeatureCompatibilityVersion: version.featureCompatibilityVersion}));
+        const res = primaryAdminDB.runCommand(
+            {"setFeatureCompatibilityVersion": version.featureCompatibilityVersion});
+        if (!res.ok && res.code === 7369100) {
+            // We failed due to requiring 'confirm: true' on the command. This will only
+            // occur on 7.0+ nodes that have 'enableTestCommands' set to false. Retry the
+            // setFCV command with 'confirm: true'.
+            assert.commandWorked(primaryAdminDB.runCommand({
+                "setFeatureCompatibilityVersion": version.featureCompatibilityVersion,
+                confirm: true,
+            }));
+        } else {
+            assert.commandWorked(res);
+        }
         rst.awaitReplication();
+
         // Make sure we reach the new featureCompatibilityVersion in the committed snapshot on
         // on all nodes before continuing to upgrade.
-        // checkFCV does not work for version 3.4 (and below)
-        if (version.featureCompatibilityVersion != '3.4') {
-            for (let n of rst.nodes) {
-                checkFCV(n.getDB("admin"), version.featureCompatibilityVersion);
-            }
+        for (let n of rst.nodes) {
+            checkFCV(n.getDB("admin"), version.featureCompatibilityVersion);
         }
     }
 }
 
 // Stop the replica set.
 rst.stopSet();
-})();

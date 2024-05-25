@@ -166,7 +166,7 @@ std::string DocumentSourceChangeStream::getNsRegexForChangeStream(
         case ChangeStreamType::kSingleDatabase:
             // Match all namespaces that start with db name, followed by ".", then NOT followed by
             // '$' or 'system.' unless 'showSystemEvents' is set.
-            return "^" + regexEscapeNsForChangeStream(nss.db().toString()) + "\\." +
+            return "^" + regexEscapeNsForChangeStream(nss.db_deprecated().toString()) + "\\." +
                 resolveAllCollectionsRegex(expCtx);
         case ChangeStreamType::kAllChangesForCluster:
             // Match all namespaces that start with any db name other than admin, config, or local,
@@ -184,7 +184,8 @@ std::string DocumentSourceChangeStream::getViewNsRegexForChangeStream(
         case ChangeStreamType::kSingleDatabase:
             // For a single database, match any events on the system.views collection on that
             // database.
-            return "^" + regexEscapeNsForChangeStream(nss.db().toString()) + "\\.system.views$";
+            return "^" + regexEscapeNsForChangeStream(nss.db_deprecated().toString()) +
+                "\\.system.views$";
         case ChangeStreamType::kAllChangesForCluster:
             // Match all system.views collections on all databases.
             return kRegexAllDBs + "\\.system.views$";
@@ -355,12 +356,9 @@ void DocumentSourceChangeStream::assertIsLegalSpecification(
     const intrusive_ptr<ExpressionContext>& expCtx, const DocumentSourceChangeStreamSpec& spec) {
     // We can only run on a replica set, or through mongoS. Confirm that this is the case.
     auto replCoord = repl::ReplicationCoordinator::get(expCtx->opCtx);
-    uassert(
-        40573,
-        "The $changeStream stage is only supported on replica sets",
-        expCtx->inMongos ||
-            (replCoord &&
-             replCoord->getReplicationMode() == repl::ReplicationCoordinator::Mode::modeReplSet));
+    uassert(40573,
+            "The $changeStream stage is only supported on replica sets",
+            expCtx->inMongos || (replCoord && replCoord->getSettings().isReplSet()));
 
     // If 'allChangesForCluster' is true, the stream must be opened on the 'admin' database with
     // {aggregate: 1}.

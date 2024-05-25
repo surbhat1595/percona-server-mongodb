@@ -50,6 +50,7 @@
 #include "mongo/db/query/indexability.h"
 #include "mongo/db/query/parsed_find_command.h"
 #include "mongo/db/query/projection_parser.h"
+#include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/server_parameter.h"
@@ -168,9 +169,9 @@ Status CanonicalQuery::init(boost::intrusive_ptr<ExpressionContext> expCtx,
     _expCtx = expCtx;
     _findCommand = std::move(parsedFind->findCommandRequest);
 
-    _forceClassicEngine = ServerParameterSet::getNodeParameterSet()
-                              ->get<QueryFrameworkControl>("internalQueryFrameworkControl")
-                              ->_data.get() == QueryFrameworkControlEnum::kForceClassicEngine;
+    _forceClassicEngine =
+        QueryKnobConfiguration::decoration(expCtx->opCtx).getInternalQueryFrameworkControlForOp() ==
+        QueryFrameworkControlEnum::kForceClassicEngine;
 
     _root = MatchExpression::normalize(std::move(parsedFind->filter));
     if (parsedFind->proj) {
@@ -198,17 +199,22 @@ Status CanonicalQuery::init(boost::intrusive_ptr<ExpressionContext> expCtx,
     _pipeline = std::move(pipeline);
     _isCountLike = isCountLike;
 
-
-    // If caching is disabled, do not perform any autoparameterization.
-    if (!internalQueryDisablePlanCache.load()) {
+    // Perform auto-parameterization only if the query is SBE-compatible and caching is enabled.
+    if (expCtx->sbeCompatibility != SbeCompatibility::notCompatible &&
+        !internalQueryDisablePlanCache.load()) {
         const bool hasNoTextNodes =
             !QueryPlannerCommon::hasNode(_root.get(), MatchExpression::TEXT);
         if (hasNoTextNodes) {
             // When the SBE plan cache is enabled, we auto-parameterize queries in the hopes of
             // caching a parameterized plan. Here we add parameter markers to the appropriate match
-            // expression leaf nodes.
+            // expression leaf nodes unless it has too many predicates. If it did not actually get
+            // parameterized, we mark the query as uncacheable for SBE to avoid plan cache flooding.
+            bool parameterized;
             _inputParamIdToExpressionMap =
-                MatchExpression::parameterize(_root.get(), loadMaxParameterCount());
+                MatchExpression::parameterize(_root.get(), loadMaxParameterCount(), &parameterized);
+            if (!parameterized) {
+                setUncacheableSbe();
+            }
         } else {
             LOGV2_DEBUG(6579310,
                         5,

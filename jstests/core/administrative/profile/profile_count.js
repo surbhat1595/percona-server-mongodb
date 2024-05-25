@@ -1,5 +1,7 @@
-// The test runs commands that are not allowed with security token: setProfilingLevel.
+// Confirms that profiled count execution contains all expected metrics with proper values.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: setProfilingLevel.
 //   not_allowed_with_security_token,
 //   does_not_support_stepdowns,
 //   requires_fastcount,
@@ -7,13 +9,8 @@
 //   requires_profiling,
 // ]
 
-// Confirms that profiled count execution contains all expected metrics with proper values.
-
-(function() {
-"use strict";
-
-load("jstests/libs/os_helpers.js");  // For isLinux().
-load("jstests/libs/profiler.js");    // For 'getLatestProfilerEntry()'.
+import {isLinux} from "jstests/libs/os_helpers.js";
+import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 
 var testDB = db.getSiblingDB("profile_count");
 assert.commandWorked(testDB.dropDatabase());
@@ -101,4 +98,3 @@ profileObj = getLatestProfilerEntry(testDB);
 
 assert.eq(profileObj.fromMultiPlanner, true, tojson(profileObj));
 assert.eq(profileObj.appName, "MongoDB Shell", tojson(profileObj));
-})();

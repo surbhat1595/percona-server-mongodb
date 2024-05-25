@@ -9,12 +9,10 @@
  * shard.
  */
 
-(function() {
-"use strict";
+import "jstests/multiVersion/libs/multi_rs.js";
 
-load("jstests/libs/fail_point_util.js");
-load("jstests/multiVersion/libs/multi_rs.js");
-load('jstests/replsets/rslib.js');
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {reconfig} from "jstests/replsets/rslib.js";
 
 function createUser(rst) {
     rst.getPrimary().getDB("admin").createUser({user: "root", pwd: "root", roles: ["root"]},
@@ -49,7 +47,7 @@ const rstOpts = {
     nodes: numNodes,
     keyFile
 };
-// TODO (SERVER-75472): Support transition from standalone replica set directly to config shard.
+
 if (TestData.configShard) {
     // Used to allow restarting config server as an independent replica set.
     rstOpts["nodeOptions"] = {setParameter: {skipShardingConfigurationChecks: true}};
@@ -160,7 +158,7 @@ if (isShardSvrRst) {
             // Transitioning from last-lts to last-continuous is only allowed when
             // setFeatureCompatibilityVersion is called with fromConfigServer: true.
             assert.commandWorked(rst.getPrimary().adminCommand(
-                {setFeatureCompatibilityVersion: fcv, fromConfigServer: true}));
+                {setFeatureCompatibilityVersion: fcv, confirm: true, fromConfigServer: true}));
 
             // Wait for the new FCV to propagate to all configsvr nodes.
             rst.awaitReplication();
@@ -231,4 +229,3 @@ if (st) {
     st.stop();
 }
 rst.stopSet();
-})();

@@ -1,22 +1,20 @@
 /**
  * Tests write-concern-related bulkWrite protocol functionality
  *
- * The test runs commands that are not allowed with security token: bulkWrite.
  * @tags: [
  *   assumes_against_mongod_not_mongos,
+ *   # The test runs commands that are not allowed with security token: bulkWrite.
  *   not_allowed_with_security_token,
  *   command_not_supported_in_serverless,
  *   # TODO SERVER-52419 Remove this tag.
  *   featureFlagBulkWriteCommand,
  * ]
  */
-(function() {
-
 // Skip this test when running with storage engines other than inMemory, as the test relies on
 // journaling not being active.
 if (jsTest.options().storageEngine !== "inMemory") {
     jsTest.log("Skipping test because it is only applicable for the inMemory storage engine");
-    return;
+    quit();
 }
 
 var request;
@@ -191,4 +189,3 @@ assert.eq(1, coll.find().itcount());
 
 jsTest.log("DONE no journal/repl tests");
 rst.stopSet();
-})();

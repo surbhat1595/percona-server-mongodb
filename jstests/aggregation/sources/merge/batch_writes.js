@@ -1,12 +1,17 @@
-// Tests the behavior of an $merge stage which encounters an error in the middle of processing. We
-// don't guarantee any particular behavior in this scenario, but this test exists to make sure
-// nothing horrendous happens and to characterize the current behavior.
-(function() {
-"use strict";
-
-load("jstests/aggregation/extras/merge_helpers.js");  // For withEachMergeMode and
-                                                      // dropWithoutImplicitRecreate.
-load("jstests/aggregation/extras/utils.js");          // For assertErrorCode.
+/**
+ * Tests the behavior of an $merge stage which encounters an error in the middle of processing. We
+ * don't guarantee any particular behavior in this scenario, but this test exists to make sure
+ * nothing horrendous happens and to characterize the current behavior.
+ * @tags: [
+ *   # TODO SERVER-79448: Investigate why the test timeouts on TSAN variant.
+ *   tsan_incompatible,
+ * ]
+ */
+import {
+    dropWithoutImplicitRecreate,
+    withEachMergeMode
+} from "jstests/aggregation/extras/merge_helpers.js";
+import {assertErrorCode} from "jstests/aggregation/extras/utils.js";
 
 const coll = db.batch_writes;
 const outColl = db.batch_writes_out;
@@ -76,4 +81,3 @@ assertErrorCode(
 assert.soon(() => {
     return outColl.find().itcount() == 9;
 });
-}());

@@ -52,8 +52,8 @@
 #include "mongo/base/string_data_comparator_interface.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/exec/sbe/makeobj_spec.h"
+#include "mongo/db/exec/sbe/sort_spec.h"
 #include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/exec/sbe/values/sort_spec.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/datetime.h"
 #include "mongo/db/exec/sbe/vm/label.h"
@@ -650,6 +650,7 @@ enum class Builtin : uint8_t {
     ln,
     log10,
     sqrt,
+    pow,
     addToArray,        // agg function to append to an array
     addToArrayCapped,  // agg function to append to an array, fails when the array reaches specified
                        // size
@@ -703,12 +704,12 @@ enum class Builtin : uint8_t {
     // Agg function to concatenate arrays, failing when the accumulator reaches a specified size.
     aggConcatArraysCapped,
 
-    // Agg functions to compute the set union of two arrays, failing when the accumulator reaches a
-    // specified size.
+    // Agg functions to compute the set union of two arrays (no size cap).
+    aggSetUnion,
+    aggCollSetUnion,
+    // Agg functions to compute the set union of two arrays (with a size cap).
     aggSetUnionCapped,
     aggCollSetUnionCapped,
-    // Agg function for a simple set union (with no size cap or collation).
-    aggSetUnion,
 
     acos,
     acosh,
@@ -727,7 +728,6 @@ enum class Builtin : uint8_t {
     tanh,
     round,
     isMember,
-    collIsMember,
     indexOfBytes,
     indexOfCP,
     isDayOfWeek,
@@ -810,6 +810,40 @@ enum class Builtin : uint8_t {
     aggRankFinalize,
     aggExpMovingAvg,
     aggExpMovingAvgFinalize,
+    aggRemovableSumAdd,
+    aggRemovableSumRemove,
+    aggRemovableSumFinalize,
+    aggIntegralInit,
+    aggIntegralAdd,
+    aggIntegralRemove,
+    aggIntegralFinalize,
+    aggDerivativeInit,
+    aggDerivativeAdd,
+    aggDerivativeRemove,
+    aggDerivativeFinalize,
+    aggCovarianceAdd,
+    aggCovarianceRemove,
+    aggCovarianceSampFinalize,
+    aggCovariancePopFinalize,
+    aggRemovablePushAdd,
+    aggRemovablePushRemove,
+    aggRemovablePushFinalize,
+    aggRemovableStdDevAdd,
+    aggRemovableStdDevRemove,
+    aggRemovableStdDevSampFinalize,
+    aggRemovableStdDevPopFinalize,
+
+    valueBlockExists,
+    valueBlockFillEmpty,
+    valueBlockMin,
+    valueBlockMax,
+    valueBlockCount,
+    valueBlockGtScalar,
+    valueBlockGteScalar,
+    valueBlockEqScalar,
+    valueBlockLtScalar,
+    valueBlockLteScalar,
+    valueBlockCombine,
 };
 
 std::string builtinToString(Builtin b);
@@ -831,7 +865,7 @@ enum class AggMultiElems { kInternalArr, kStartIdx, kMaxSize, kMemUsage, kMemLim
  * Less than comparison based on a sort pattern.
  */
 struct SortPatternLess {
-    SortPatternLess(const value::SortSpec* sortSpec) : _sortSpec(sortSpec) {}
+    SortPatternLess(const SortSpec* sortSpec) : _sortSpec(sortSpec) {}
 
     bool operator()(const std::pair<value::TypeTags, value::Value>& lhs,
                     const std::pair<value::TypeTags, value::Value>& rhs) const {
@@ -841,14 +875,14 @@ struct SortPatternLess {
     }
 
 private:
-    const value::SortSpec* _sortSpec;
+    const SortSpec* _sortSpec;
 };
 
 /**
  * Greater than comparison based on a sort pattern.
  */
 struct SortPatternGreater {
-    SortPatternGreater(const value::SortSpec* sortSpec) : _sortSpec(sortSpec) {}
+    SortPatternGreater(const SortSpec* sortSpec) : _sortSpec(sortSpec) {}
 
     bool operator()(const std::pair<value::TypeTags, value::Value>& lhs,
                     const std::pair<value::TypeTags, value::Value>& rhs) const {
@@ -858,7 +892,7 @@ struct SortPatternGreater {
     }
 
 private:
-    const value::SortSpec* _sortSpec;
+    const SortSpec* _sortSpec;
 };
 
 /**
@@ -956,6 +990,71 @@ enum class AggArrayWithSize { kValues = 0, kSizeOfValues, kLast = kSizeOfValues 
  * This enum defines indices into an 'Array' that stores the state for $expMovingAvg accumulator
  */
 enum class AggExpMovingAvgElems { kResult, kAlpha, kIsDecimal, kSizeOfArray };
+
+/**
+ * This enum defines indices into an 'Array' that stores the state for $sum window function
+ * accumulator. Index `kSumAcc` stores the accumulator state of aggDoubleDoubleSum. Rest of the
+ * indices store respective count of values encountered.
+ */
+enum class AggRemovableSumElems {
+    kSumAcc,
+    kNanCount,
+    kPosInfinityCount,
+    kNegInfinityCount,
+    kDoubleCount,
+    kDecimalCount,
+    kSizeOfArray
+};
+
+/**
+ * This enum defines indices into an 'Array' that stores the state for $integral accumulator
+ * Element at `kInputQueue` stores the queue of input values
+ * Element at `kSortByQueue` stores the queue of sortBy values
+ * Element at `kIntegral` stores the integral over the current window
+ * Element at `kNanCount` stores the count of NaN values encountered
+ * Element at `kunitMillis` stores the date unit (Null if not valid)
+ * Element at `kIsNonRemovable` stores whether it belongs to a non-removable window
+ */
+enum class AggIntegralElems {
+    kInputQueue,
+    kSortByQueue,
+    kIntegral,
+    kNanCount,
+    kUnitMillis,
+    kIsNonRemovable,
+    kMaxSizeOfArray
+};
+
+/**
+ * This enum defines indices into an 'Array' that stores the state for $derivative accumulator
+ * Element at `kInputQueue` stores the queue of input values
+ * Element at `kSortByQueue` stores the queue of sortBy values
+ * Element at `kunitMillis` stores the date unit (Null if not valid)
+ */
+enum class AggDerivativeElems { kInputQueue, kSortByQueue, kUnitMillis, kMaxSizeOfArray };
+
+/**
+ * This enum defines indices into an 'Array' that stores the state for a queue backed by a
+ * circular array
+ * Element at `kArray` stores the underlying array thats holds the elements. This should be
+ * initialized to a non-zero size initially.
+ * Element at `kStartIdx` stores the start position of the queue
+ * Element at `kQueueSize` stores the size of the queue
+ * The empty values in the array are filled with Null
+ */
+enum class ArrayQueueElems { kArray, kStartIdx, kQueueSize, kSizeOfArray };
+
+/**
+ * This enum defines indices into an 'Array' that store state for the removable
+ * $covarianceSamp/$covariancePop expressions.
+ */
+enum class AggCovarianceElems { kSumX, kSumY, kCXY, kCount, kSizeOfArray };
+
+/**
+ * This enum defines indices into an 'Array' that store state for the removable
+ * $stdDevSamp/$stdDevPop expressions.
+ */
+enum class AggRemovableStdDevElems { kSum, kM2, kCount, kNonFiniteCount, kSizeOfArray };
 
 using SmallArityType = uint8_t;
 using ArityType = uint32_t;
@@ -1269,20 +1368,13 @@ private:
                                                                 value::Value operandValue);
     FastTuple<bool, value::TypeTags, value::Value> genericSqrt(value::TypeTags operandTag,
                                                                value::Value operandValue);
+    FastTuple<bool, value::TypeTags, value::Value> genericPow(value::TypeTags baseTag,
+                                                              value::Value baseValue,
+                                                              value::TypeTags exponentTag,
+                                                              value::Value exponentValue);
     FastTuple<bool, value::TypeTags, value::Value> genericRoundTrunc(
         std::string funcName, Decimal128::RoundingMode roundingMode, ArityType arity);
     std::pair<value::TypeTags, value::Value> genericNot(value::TypeTags tag, value::Value value);
-    std::pair<value::TypeTags, value::Value> genericIsMember(value::TypeTags lhsTag,
-                                                             value::Value lhsVal,
-                                                             value::TypeTags rhsTag,
-                                                             value::Value rhsVal,
-                                                             CollatorInterface* collator = nullptr);
-    std::pair<value::TypeTags, value::Value> genericIsMember(value::TypeTags lhsTag,
-                                                             value::Value lhsVal,
-                                                             value::TypeTags rhsTag,
-                                                             value::Value rhsVal,
-                                                             value::TypeTags collTag,
-                                                             value::Value collVal);
 
     std::pair<value::TypeTags, value::Value> compare3way(
         value::TypeTags lhsTag,
@@ -1348,6 +1440,8 @@ private:
     void aggMergeDoubleDoubleSumsImpl(value::Array* accumulator,
                                       value::TypeTags rhsTag,
                                       value::Value rhsValue);
+    FastTuple<bool, value::TypeTags, value::Value> aggDoubleDoubleSumFinalizeImpl(
+        value::Array* accmulator);
 
     // This is an implementation of the following algorithm:
     // https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
@@ -1579,10 +1673,36 @@ private:
      * not appear before F1 in 'root', -OR- if both F1 and F2 are not in 'root' and F2 does not
      * appear before F1 in the "computed" list, then F2 will appear after F1 in the output object.
      */
-    std::pair<value::TypeTags, value::Value> produceBsonObject(const MakeObjSpec* mos,
-                                                               value::TypeTags rootTag,
-                                                               value::Value rootVal,
-                                                               int stackOffset);
+    void produceBsonObject(const MakeObjSpec* spec,
+                           value::TypeTags rootTag,
+                           value::Value rootVal,
+                           int stackOffset,
+                           const CodeFragment* code,
+                           UniqueBSONObjBuilder& bob);
+
+    /**
+     * This struct is used by traverseAndProduceBsonObj() to hold args that stay the same across
+     * each level of recursion. Also, by making use of this struct, on most common platforms we
+     * will be able to pass all of traverseAndProduceBsonObj()'s args via CPU registers (rather
+     * than passing them via the native stack).
+     */
+    struct TraverseAndProduceBsonObjContext {
+        const MakeObjSpec* spec;
+        int stackStartOffset;
+        const CodeFragment* code;
+    };
+
+    void traverseAndProduceBsonObj(const TraverseAndProduceBsonObjContext& ctx,
+                                   value::TypeTags tag,
+                                   value::Value val,
+                                   int64_t maxDepth,
+                                   UniqueBSONArrayBuilder& bab);
+
+    void traverseAndProduceBsonObj(const TraverseAndProduceBsonObjContext& ctx,
+                                   value::TypeTags tag,
+                                   value::Value val,
+                                   StringData fieldName,
+                                   UniqueBSONObjBuilder& bob);
 
     FastTuple<bool, value::TypeTags, value::Value> builtinSplit(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinDate(ArityType arity);
@@ -1611,6 +1731,7 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinLn(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinLog10(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSqrt(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinPow(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAddToArray(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAddToArrayCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinMergeObjects(ArityType arity);
@@ -1672,6 +1793,7 @@ private:
                                                                bool trimRight);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggConcatArraysCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggSetUnion(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggCollSetUnion(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggSetUnionCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggCollSetUnionCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> aggSetUnionCappedImpl(
@@ -1680,7 +1802,6 @@ private:
         int32_t sizeCap,
         CollatorInterface* collator);
     FastTuple<bool, value::TypeTags, value::Value> builtinIsMember(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinCollIsMember(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinIndexOfBytes(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinIndexOfCP(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinIsDayOfWeek(ArityType arity);
@@ -1712,14 +1833,15 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinGetRegexFlags(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinHash(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinFtsMatch(ArityType arity);
-    std::pair<value::SortSpec*, CollatorInterface*> generateSortKeyHelper(ArityType arity);
+    std::pair<SortSpec*, CollatorInterface*> generateSortKeyHelper(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinGenerateSortKey(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinGenerateCheapSortKey(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSortKeyComponentVectorGetElement(
         ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSortKeyComponentVectorToArray(
         ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinMakeBsonObj(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinMakeBsonObj(ArityType arity,
+                                                                      const CodeFragment* code);
     FastTuple<bool, value::TypeTags, value::Value> builtinTsSecond(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinTsIncrement(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinTypeMatch(ArityType arity);
@@ -1767,8 +1889,70 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinAggRankFinalize(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggExpMovingAvg(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggExpMovingAvgFinalize(ArityType arity);
+    template <int sign>
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableSum(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableSumFinalize(ArityType arity);
+    template <int sign>
+    void aggRemovableSumImpl(value::Array* state, value::TypeTags rhsTag, value::Value rhsVal);
+    FastTuple<bool, value::TypeTags, value::Value> aggRemovableSumFinalizeImpl(value::Array* state);
+    template <class T, int sign>
+    void updateRemovableSumAccForIntegerType(value::Array* sumAcc,
+                                             value::TypeTags rhsTag,
+                                             value::Value rhsVal);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggIntegralInit(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggIntegralAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggIntegralRemove(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggIntegralFinalize(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> integralOfTwoPointsByTrapezoidalRule(
+        std::pair<value::TypeTags, value::Value> prevInput,
+        std::pair<value::TypeTags, value::Value> prevSortByVal,
+        std::pair<value::TypeTags, value::Value> newInput,
+        std::pair<value::TypeTags, value::Value> newSortByVal);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeInit(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeRemove(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeFinalize(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> aggRemovableAvgFinalizeImpl(
+        value::Array* sumState, int64_t count);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggCovarianceAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggCovarianceRemove(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggCovarianceFinalize(ArityType arity,
+                                                                                bool isSamp);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggCovarianceSampFinalize(
+        ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggCovariancePopFinalize(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovablePushAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovablePushRemove(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovablePushFinalize(ArityType arity);
+    template <int quantity>
+    void aggRemovableStdDevImpl(value::TypeTags stateTag,
+                                value::Value stateVal,
+                                value::TypeTags inputTag,
+                                value::Value inputVal);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableStdDevAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableStdDevRemove(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableStdDevFinalize(
+        ArityType arity, bool isSamp);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableStdDevSampFinalize(
+        ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableStdDevPopFinalize(
+        ArityType arity);
 
-    FastTuple<bool, value::TypeTags, value::Value> dispatchBuiltin(Builtin f, ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockExists(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockFillEmpty(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMin(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMax(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCount(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockGtScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockGteScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockEqScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLtScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLteScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCombine(ArityType arity);
+
+    FastTuple<bool, value::TypeTags, value::Value> dispatchBuiltin(Builtin f,
+                                                                   ArityType arity,
+                                                                   const CodeFragment* code);
 
     static constexpr size_t offsetOwned = 0;
     static constexpr size_t offsetTag = 1;

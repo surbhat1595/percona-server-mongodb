@@ -4,8 +4,7 @@
  * @tags: [requires_fcv_62]
  */
 
-(function() {
-"use strict";
+import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 
 const collPrefix = "validate_timeseries_data_indexes";
 const bucketPrefix = "system.buckets.validate_timeseries_data_indexes";
@@ -47,6 +46,16 @@ function setUpCollection(data) {
     assert(result.valid, tojson(result));
     assert(result.warnings.length == 0, tojson(result));
     assert(result.nNonCompliantDocuments == 0, tojson(result));
+
+    // If we are always writing to time-series collections using the compressed format, replace the
+    // compressed bucket with the decompressed bucket in the system.buckets collection. This allows
+    // this test to directly make updates to bucket measurements in order to test validation.
+    if (TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(db)) {
+        const bucket = db.getCollection(bucketName);
+        const bucketDoc = bucket.find().toArray()[0];
+        TimeseriesTest.decompressBucket(bucketDoc);
+        bucket.replaceOne({_id: bucketDoc._id}, bucketDoc);
+    }
 }
 
 // Non-numerical index.
@@ -114,4 +123,3 @@ res = assert.commandWorked(coll.validate());
 assert(res.valid, tojson(res));
 assert(res.warnings.length == 1, tojson(res));
 assert(res.nNonCompliantDocuments == 1, tojson(res));
-})();

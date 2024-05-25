@@ -5,10 +5,8 @@
  * @tags: [multiversion_incompatible]
  */
 
-(function() {
-"use strict";
-
-load("jstests/replsets/libs/rollback_test.js");
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {RollbackTest} from "jstests/replsets/libs/rollback_test.js";
 
 const testName = "initial_sync_fails_on_rollback";
 const dbName = testName;
@@ -99,4 +97,3 @@ rst.stop(initialSyncNode);
 rst.remove(initialSyncNode);
 
 rollbackTest.stop();
-})();

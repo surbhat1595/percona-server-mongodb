@@ -11,20 +11,20 @@
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   serverless,
+ *   requires_fcv_71,
  * ]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {Thread} from "jstests/libs/parallelTester.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {
     forgetMigrationAsync,
     isShardMergeEnabled,
     makeTenantDB
 } from "jstests/replsets/libs/tenant_migration_util.js";
-
-load("jstests/libs/uuid_util.js");        // For extractUUIDFromObject().
-load("jstests/libs/fail_point_util.js");  // For configureFailPoint().
-load("jstests/libs/parallelTester.js");   // For the Thread().
-load('jstests/replsets/rslib.js');        // For 'createRstArgs'
+import {createRstArgs} from "jstests/replsets/rslib.js";
 
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
 
@@ -39,36 +39,61 @@ if (!isShardMergeEnabled(tenantMigrationTest.getDonorPrimary().getDB("admin"))) 
 }
 
 const kMigrationId = UUID();
-const kTenantId = ObjectId().str;
+const kTenantIds = [ObjectId(), ObjectId()];
 const kReadPreference = {
     mode: "primary"
 };
 const migrationOpts = {
     migrationIdString: extractUUIDFromObject(kMigrationId),
     readPreference: kReadPreference,
-    tenantIds: [ObjectId(kTenantId)]
+    tenantIds: kTenantIds
 };
 
 const recipientPrimary = tenantMigrationTest.getRecipientPrimary();
+const recipientNodeList = tenantMigrationTest.getRecipientRst().nodeList();
 
 // Initial inserts to test cloner stats.
 const dbsToClone = ["db0", "db1", "db2"];
 const collsToClone = ["coll0", "coll1"];
 const docs = [...Array(10).keys()].map((i) => ({x: i}));
-for (const db of dbsToClone) {
-    const tenantDB = makeTenantDB(kTenantId, db);
-    for (const coll of collsToClone) {
-        tenantMigrationTest.insertDonorDB(tenantDB, coll, docs);
+
+kTenantIds.forEach(tenantId => {
+    const tenantIdStr = tenantId.str;
+    for (const db of dbsToClone) {
+        const tenantDB = makeTenantDB(tenantIdStr, db);
+        for (const coll of collsToClone) {
+            tenantMigrationTest.insertDonorDB(tenantDB, coll, docs);
+        }
     }
-}
+});
 
 // Makes sure the fields that are always expected to exist, such as the donorConnectionString, are
 // correct.
 function checkStandardFieldsOK(res) {
     assert.eq(res.inprog.length, 1, res);
-    assert.eq(bsonWoCompare(res.inprog[0].instanceID, kMigrationId), 0, res);
-    assert.eq(res.inprog[0].donorConnectionString, tenantMigrationTest.getDonorRst().getURL(), res);
-    assert.eq(bsonWoCompare(res.inprog[0].readPreference, kReadPreference), 0, res);
+
+    const currOp = res.inprog[0];
+    assert.eq(bsonWoCompare(currOp.instanceID, kMigrationId), 0, currOp);
+    assert.eq(currOp.donorConnectionString, tenantMigrationTest.getDonorRst().getURL(), currOp);
+    assert.eq(bsonWoCompare(currOp.readPreference, kReadPreference), 0, currOp);
+    assert(currOp.hasOwnProperty("tenantIds"));
+    assert(bsonBinaryEqual(currOp.tenantIds, kTenantIds), currOp);
+}
+
+function checkStatFieldsOK(res) {
+    const currOp = res.inprog[0];
+    assert(currOp.hasOwnProperty("approxTotalDataSize") &&
+               currOp.approxTotalDataSize instanceof NumberLong,
+           res);
+    assert(currOp.hasOwnProperty("approxTotalBytesCopied") &&
+               currOp.approxTotalBytesCopied instanceof NumberLong,
+           res);
+    assert(currOp.hasOwnProperty("totalReceiveElapsedMillis") &&
+               currOp.totalReceiveElapsedMillis instanceof NumberLong,
+           res);
+    assert(currOp.hasOwnProperty("remainingReceiveEstimatedMillis") &&
+               currOp.remainingReceiveEstimatedMillis instanceof NumberLong,
+           res);
 }
 
 // Check currentOp fields' expected value once the recipient is in state "consistent" or later.
@@ -83,6 +108,9 @@ function checkPostConsistentFieldsOK(res) {
     assert(currOp.hasOwnProperty("cloneFinishedRecipientOpTime") &&
                checkOptime(currOp.cloneFinishedRecipientOpTime),
            res);
+    assert.eq(currOp.importQuorumSatisfied, true, res);
+    assert(currOp.hasOwnProperty("ImportQuorumVoterList"), res);
+    assert.sameMembers(currOp.ImportQuorumVoterList, recipientNodeList, res);
 }
 
 // Validates the fields of an optime object.
@@ -121,6 +149,7 @@ const fpBeforePersistingRejectReadsBeforeTimestamp = configureFailPoint(
 
     let res = recipientPrimary.adminCommand({currentOp: true, desc: "shard merge recipient"});
     checkStandardFieldsOK(res);
+    checkStatFieldsOK(res);
     let currOp = res.inprog[0];
     assert.eq(currOp.state, TenantMigrationTest.ShardMergeRecipientState.kStarted, res);
     assert.eq(currOp.garbageCollectable, false, res);
@@ -130,6 +159,8 @@ const fpBeforePersistingRejectReadsBeforeTimestamp = configureFailPoint(
     assert(!currOp.hasOwnProperty("expireAt"), res);
     assert(!currOp.hasOwnProperty("donorSyncSource"), res);
     assert(!currOp.hasOwnProperty("cloneFinishedRecipientOpTime"), res);
+    assert.eq(currOp.importQuorumSatisfied, false, res);
+    assert(!currOp.hasOwnProperty("ImportQuorumVoterList"), res);
 
     fpAfterPersistingStateDoc.off();
 }
@@ -142,6 +173,7 @@ const fpBeforePersistingRejectReadsBeforeTimestamp = configureFailPoint(
 
     let res = recipientPrimary.adminCommand({currentOp: true, desc: "shard merge recipient"});
     checkStandardFieldsOK(res);
+    checkStatFieldsOK(res);
     let currOp = res.inprog[0];
     assert.gt(new Date(), currOp.receiveStart, tojson(res));
     assert.eq(currOp.state, TenantMigrationTest.ShardMergeRecipientState.kLearnedFilenames, res);
@@ -168,6 +200,7 @@ const fpBeforePersistingRejectReadsBeforeTimestamp = configureFailPoint(
 
     let res = recipientPrimary.adminCommand({currentOp: true, desc: "shard merge recipient"});
     checkStandardFieldsOK(res);
+    checkStatFieldsOK(res);
     checkPostConsistentFieldsOK(res);
     let currOp = res.inprog[0];
     // State should have changed.
@@ -182,6 +215,7 @@ const fpBeforePersistingRejectReadsBeforeTimestamp = configureFailPoint(
 
     res = recipientPrimary.adminCommand({currentOp: true, desc: "shard merge recipient"});
     checkStandardFieldsOK(res);
+    checkStatFieldsOK(res);
     checkPostConsistentFieldsOK(res);
     currOp = res.inprog[0];
     // State should have changed.
@@ -211,6 +245,7 @@ forgetMigrationThread.start();
 
     let res = recipientPrimary.adminCommand({currentOp: true, desc: "shard merge recipient"});
     checkStandardFieldsOK(res);
+    checkStatFieldsOK(res);
     checkPostConsistentFieldsOK(res);
     let currOp = res.inprog[0];
     assert.eq(currOp.state, TenantMigrationTest.ShardMergeRecipientState.kConsistent, res);

@@ -182,7 +182,7 @@ class AsyncRPCRunner {
 public:
     virtual ~AsyncRPCRunner() = default;
     virtual ExecutorFuture<AsyncRPCInternalResponse> _sendCommand(
-        StringData dbName,
+        const DatabaseName& dbName,
         BSONObj cmdBSON,
         Targeter* targeter,
         OperationContext* opCtx,
@@ -191,14 +191,14 @@ public:
         BatonHandle baton,
         boost::optional<UUID> clientOperationKey) = 0;
     ExecutorFuture<AsyncRPCInternalResponse> _sendCommand(
-        StringData dbName,
+        const DatabaseName& dbName,
         BSONObj cmdBSON,
         Targeter* targeter,
         OperationContext* opCtx,
         std::shared_ptr<TaskExecutor> exec,
         CancellationToken token,
         boost::optional<UUID> clientOperationKey) {
-        return _sendCommand(std::move(dbName),
+        return _sendCommand(dbName,
                             std::move(cmdBSON),
                             std::move(targeter),
                             std::move(opCtx),
@@ -216,13 +216,13 @@ public:
  * details about any error, local or remote, contained in `r`.
  */
 inline Status makeErrorIfNeeded(TaskExecutor::ResponseOnAnyStatus r,
-                                std::vector<HostAndPort> targetsAttempted) {
+                                boost::optional<HostAndPort> targetAttempted) {
     if (r.status.isOK() && getStatusFromCommandResult(r.data).isOK() &&
         getWriteConcernStatusFromCommandResult(r.data).isOK() &&
         getFirstWriteErrorStatusFromCommandResult(r.data).isOK()) {
         return Status::OK();
     }
-    return {AsyncRPCErrorInfo(r, targetsAttempted), "Remote command execution failed"};
+    return {AsyncRPCErrorInfo(r, targetAttempted), "Remote command execution failed"};
 }
 
 /**
@@ -274,7 +274,7 @@ ExecutorFuture<AsyncRPCResponse<typename CommandType::Reply>> sendCommandWithRun
         // Execute the command after extracting the db name and bson from the CommandType.
         // Wrapping this function allows us to separate the CommandType parsing logic from the
         // implementation details of executing the remote command asynchronously.
-        return runner->_sendCommand(options->cmd.getDbName().db(),
+        return runner->_sendCommand(options->cmd.getDbName(),
                                     cmdBSON,
                                     targeter.get(),
                                     opCtx,

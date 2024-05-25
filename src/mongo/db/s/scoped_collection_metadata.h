@@ -53,6 +53,10 @@ public:
 
     ScopedCollectionDescription(std::shared_ptr<Impl> impl) : _impl(std::move(impl)) {}
 
+    bool hasRoutingTable() const {
+        return _impl->get().hasRoutingTable();
+    }
+
     bool isSharded() const {
         return _impl->get().isSharded();
     }
@@ -104,6 +108,10 @@ public:
 
     const boost::optional<TypeCollectionTimeseriesFields>& getTimeseriesFields() const {
         return _impl->get().getTimeseriesFields();
+    }
+
+    bool isUniqueShardKey() const {
+        return _impl->get().isUniqueShardKey();
     }
 
 protected:

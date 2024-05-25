@@ -1,6 +1,7 @@
 // Tests the scope argument to the mapReduce command.
-// The test runs commands that are not allowed with security token: mapReduce.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapReduce.
 //   not_allowed_with_security_token,
 //   # mapReduce does not support afterClusterTime.
 //   does_not_support_causal_consistency,
@@ -8,8 +9,6 @@
 //   uses_map_reduce_with_temp_collections,
 //   requires_scripting,
 // ]
-(function() {
-"use strict";
 const coll = db.mr_scope;
 coll.drop();
 const outputColl = db.mr_scope_out;
@@ -24,6 +23,7 @@ assert.commandWorked(coll.insert([
 
 const mapFn = function() {
     this.tags.forEach(tag => {
+        // eslint-disable-next-line
         emit(tag, {count: xx.val});
     });
 };
@@ -54,4 +54,3 @@ assert.eq(1, outputColl.count({_id: "b", "value.count": 6}));
 assert.eq(1, outputColl.count({_id: "c", "value.count": 6}));
 
 outputColl.drop();
-}());

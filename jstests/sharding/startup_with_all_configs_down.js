@@ -4,16 +4,12 @@
 //
 // This test involves restarting a standalone shard, so cannot be run on ephemeral storage engines.
 // A restarted standalone will lose all data when using an ephemeral storage engine.
-// TODO SERVER-71169: Re-enable this test once shard filtering is implemented for CQF.
-// @tags: [requires_persistence, cqf_incompatible]
+// @tags: [requires_persistence]
 
 // The following checks use connections to shards cached on the ShardingTest object, but this test
 // restarts a shard, so the cached connection is not usable.
 TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 TestData.skipCheckShardFilteringMetadata = true;
-
-(function() {
-"use strict";
 
 var st = new ShardingTest({shards: 2});
 
@@ -89,4 +85,3 @@ assert.eq(100, newMongosConn.getDB('test').foo.find().itcount());
 
 st.stop({parallelSupported: false});
 MongoRunner.stopMongos(newMongosInfo);
-}());

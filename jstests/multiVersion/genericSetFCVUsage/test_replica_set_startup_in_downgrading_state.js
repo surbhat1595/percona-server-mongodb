@@ -4,9 +4,7 @@
  *
  * @tags: [requires_fcv_70]
  */
-
-load('jstests/multiVersion/libs/verify_versions.js');
-load('jstests/libs/fail_point_util.js');
+import "jstests/multiVersion/libs/verify_versions.js";
 
 function runReplicaSet() {
     let fcvDoc;
@@ -30,7 +28,8 @@ function runReplicaSet() {
 
     // Start downgrading. It will fail.
     jsTestLog("setFCV command called. Downgrading from latestFCV to lastLTSFCV.");
-    assert.commandFailed(primaryAdminDB.runCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
+    assert.commandFailed(
+        primaryAdminDB.runCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
 
     fcvDoc = primaryAdminDB.system.version.findOne({_id: 'featureCompatibilityVersion'});
     jsTestLog(`Primary's version after downgrading: ${tojson(fcvDoc)}`);
@@ -62,7 +61,8 @@ function runReplicaSet() {
     // Upgrade the replica set to upgraded (latestFCV).
     const newPrimaryAdminDB = rst.getPrimary().getDB("admin");
     jsTestLog("setFCV command called. Finish upgrading to latestFCV.");
-    assert.commandWorked(newPrimaryAdminDB.runCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        newPrimaryAdminDB.runCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
 
     rst.awaitReplication();
 

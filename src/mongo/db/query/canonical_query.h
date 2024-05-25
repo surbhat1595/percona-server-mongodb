@@ -29,7 +29,6 @@
 
 #pragma once
 
-
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/preprocessor/control/iif.hpp>
@@ -52,6 +51,7 @@
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/inner_pipeline_stage_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -61,6 +61,7 @@
 #include "mongo/db/query/projection_policies.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/sort_pattern.h"
+#include "mongo/db/query/stage_types.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 
@@ -308,6 +309,38 @@ public:
         return _isCountLike;
     }
 
+    /**
+     * Called to indicate the query execution plan should not be cached for SBE. See comments on the
+     * '_isUncacheableSbe' member for more details.
+     */
+    void setUncacheableSbe() {
+        _isUncacheableSbe = true;
+    }
+
+    /**
+     * Check if the query execution plan should not be cached for SBE. See comments on the
+     * '_isUncacheableSbe' member for more details.
+     */
+    bool isUncacheableSbe() const {
+        if (_isUncacheableSbe) {
+            return true;
+        }
+
+        // If a $match stage is pushed down into '_pipeline', the plan is treated as uncacheable for
+        // SBE as the binding code to replace the original parameters with those from the current
+        // query has not been implemented yet.
+        //
+        // TODO SERVER-78817 remove this block when binding is implemented. If there are no other
+        // checks left besides '_isUncacheableSbe', change the method to return '_isUncacheableSbe'.
+        for (std::size_t stage = 0; stage < _pipeline.size(); ++stage) {
+            if (dynamic_cast<DocumentSourceMatch*>(_pipeline[stage]->documentSource())) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
 private:
     Status init(boost::intrusive_ptr<ExpressionContext> expCtx,
                 std::unique_ptr<ParsedFindCommand> parsedFind,
@@ -365,6 +398,12 @@ private:
     // the first $group stage needs to access field "y" and this access cannot be incorporated into
     // the index scan.
     bool _isCountLike = false;
+
+    // If true, indicates that we should not cache this plan in the SBE plan cache. This gets set to
+    // true if a MatchExpression was not parameterized because it contains a large number of
+    // predicates (usally > 512). This flag can be reused for additional do-not-cache conditions in
+    // the future.
+    bool _isUncacheableSbe = false;
 };
 
 }  // namespace mongo

@@ -1,11 +1,12 @@
 // Cannot implicitly shard accessed collections because the error response from the shard about
 // using the empty string as the out collection name is converted to an error and no longer retains
 // the "code" property.
-// The test runs commands that are not allowed with security token: cleanupOrphaned,
-// cloneCollectionAsCapped, compact, dataSize, enableSharding, godinsert, mapreduce, mergeChunks,
-// moveChunk, movePrimary, planCacheClear, planCacheClearFilters, planCacheListFilters,
-// planCacheSetFilter, reIndex, shardCollection, split, updateZoneKeyRange.
 // @tags: [
+//   # This test runs commands that are not allowed with security token: cleanupOrphaned,
+//   # cloneCollectionAsCapped, compact, dataSize, enableSharding, godinsert, mapreduce,
+//   # mergeChunks, moveChunk, movePrimary, planCacheClear, planCacheClearFilters,
+//   # planCacheListFilters, planCacheSetFilter, reIndex, shardCollection, split,
+//   # updateZoneKeyRange.
 //   not_allowed_with_security_token,
 //   assumes_unsharded_collection,
 //   does_not_support_stepdowns,
@@ -19,13 +20,11 @@
 //   does_not_support_causal_consistency,
 //   uses_compact,
 // ]
-load("jstests/libs/fixture_helpers.js");
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 // This file tests that commands namespace parsing rejects embedded null bytes.
 // Note that for each command, a properly formatted command object must be passed to the helper
 // function, regardless of the namespace used in the command object.
-(function() {
-"use strict";
 
 const isFullyQualified = true;
 const isNotFullyQualified = false;
@@ -375,4 +374,3 @@ assertFailsWithInvalidNamespacesForField("explain.update",
 // Test validate fails with an invalid collection name.
 assertFailsWithInvalidNamespacesForField(
     "validate", {validate: ""}, isNotFullyQualified, isNotAdminCommand);
-})();

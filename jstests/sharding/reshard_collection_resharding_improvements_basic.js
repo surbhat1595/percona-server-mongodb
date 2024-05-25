@@ -8,7 +8,7 @@
  */
 
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-load("jstests/sharding/libs/reshard_collection_util.js");
+import {ReshardCollectionCmdTest} from "jstests/sharding/libs/reshard_collection_util.js";
 
 const st = new ShardingTest({mongos: 1, shards: 2});
 const kDbName = 'db';
@@ -29,17 +29,6 @@ const testShardDistribution = (mongos) => {
      * Failure cases.
      */
     assert.commandWorked(mongos.adminCommand({shardCollection: ns, key: {oldKey: 1}}));
-
-    jsTest.log("reshardCollection cmd should fail when shardDistribution has duplicate shardId.");
-    assert.commandFailedWithCode(mongos.adminCommand({
-        reshardCollection: ns,
-        key: {newKey: 1},
-        shardDistribution: [
-            {shard: st.shard0.shardName, min: {newKey: MinKey}},
-            {shard: st.shard0.shardName, max: {newKey: MaxKey}}
-        ]
-    }),
-                                 ErrorCodes.InvalidOptions);
 
     jsTest.log("reshardCollection cmd should fail when shardDistribution is missing min or max.");
     assert.commandFailedWithCode(mongos.adminCommand({
@@ -157,6 +146,28 @@ const testForceRedistribution = (mongos) => {
     reshardCmdTest.assertReshardCollOk(
         {reshardCollection: ns, key: {oldKey: 1}, numInitialChunks: 2, forceRedistribution: true},
         2);
+
+    jsTest.log(
+        "When only one shard is provided, we should reshard all data from MIN to MAX into it");
+    reshardCmdTest.assertReshardCollOk(
+        {
+            reshardCollection: ns,
+            key: {oldKey: 1},
+            forceRedistribution: true,
+            shardDistribution:
+                [{shard: st.shard0.shardName, min: {oldKey: MinKey}, max: {oldKey: MaxKey}}]
+        },
+        1,
+        [{recipientShardId: st.shard0.shardName, min: {oldKey: MinKey}, max: {oldKey: MaxKey}}]);
+    reshardCmdTest.assertReshardCollOk(
+        {
+            reshardCollection: ns,
+            key: {oldKey: 1},
+            forceRedistribution: true,
+            shardDistribution: [{shard: st.shard0.shardName}]
+        },
+        1,
+        [{recipientShardId: st.shard0.shardName, min: {oldKey: MinKey}, max: {oldKey: MaxKey}}]);
 
     // Create a sharded collection with 2 zones, then force same-key resharding without specifying
     // zones and the resharding should use existing 2 zones

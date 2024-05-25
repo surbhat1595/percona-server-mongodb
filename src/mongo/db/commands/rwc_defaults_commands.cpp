@@ -105,7 +105,7 @@ void assertNotStandaloneOrShardServer(OperationContext* opCtx, StringData cmdNam
     const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     uassert(51300,
             str::stream() << "'" << cmdName << "' is not supported on standalone nodes.",
-            replCoord->isReplEnabled());
+            replCoord->getSettings().isReplSet());
 
     uassert(51301,
             str::stream() << "'" << cmdName << "' is not supported on shard nodes.",
@@ -197,7 +197,8 @@ public:
             return NamespaceString(request().getDbName());
         }
     };
-} setDefaultRWConcernCommand;
+};
+MONGO_REGISTER_COMMAND(SetDefaultRWConcernCommand);
 
 class GetDefaultRWConcernCommand : public TypedCommand<GetDefaultRWConcernCommand> {
 public:
@@ -250,7 +251,8 @@ public:
             return NamespaceString(request().getDbName());
         }
     };
-} getDefaultRWConcernCommand;
+};
+MONGO_REGISTER_COMMAND(GetDefaultRWConcernCommand);
 
 }  // namespace
 }  // namespace mongo

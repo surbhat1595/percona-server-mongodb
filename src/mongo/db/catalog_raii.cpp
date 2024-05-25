@@ -185,8 +185,12 @@ AutoGetDb AutoGetDb::createForAutoGetCollection(
     // Acquire the global/RSTL and all the database locks (may or may not be multiple
     // databases).
     Lock::DBLockSkipOptions dbLockOptions;
-    dbLockOptions.skipRSTLLock = canSkipRSTLLock(nsOrUUID);
-    dbLockOptions.skipFlowControlTicket = canSkipFlowControlTicket(nsOrUUID);
+    if (options._globalLockSkipOptions) {
+        dbLockOptions = *options._globalLockSkipOptions;
+    } else {
+        dbLockOptions.skipRSTLLock = canSkipRSTLLock(nsOrUUID);
+        dbLockOptions.skipFlowControlTicket = canSkipFlowControlTicket(nsOrUUID);
+    }
 
     return AutoGetDb(opCtx,
                      nsOrUUID.dbName(),
@@ -359,6 +363,7 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
         scopedCss->checkShardVersionOrThrow(opCtx);
 
         auto collDesc = scopedCss->getCollectionDescription(opCtx);
+        // TODO SERVER-79296 remove call to isSharded
         if (collDesc.isSharded()) {
             _coll.setShardKeyPattern(collDesc.getKeyPattern());
         }
@@ -609,8 +614,7 @@ ReadSourceScope::~ReadSourceScope() {
     }
 }
 
-AutoGetOplog::AutoGetOplog(OperationContext* opCtx, OplogAccessMode mode, Date_t deadline)
-    : _shouldNotConflictWithSecondaryBatchApplicationBlock(opCtx->lockState()) {
+AutoGetOplog::AutoGetOplog(OperationContext* opCtx, OplogAccessMode mode, Date_t deadline) {
     auto lockMode = (mode == OplogAccessMode::kRead) ? MODE_IS : MODE_IX;
     if (mode == OplogAccessMode::kLogOp) {
         // Invariant that global lock is already held for kLogOp mode.

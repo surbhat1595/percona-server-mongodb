@@ -1,8 +1,8 @@
 // Test clearing of the plan cache, either manually through the planCacheClear command,
 // or due to system events such as an index build.
 //
-// The test runs commands that are not allowed with security token: planCacheClear, reIndex.
 // @tags: [
+//   # The test runs commands that are not allowed with security token: planCacheClear, reIndex.
 //   not_allowed_with_security_token,
 //   # This test attempts to perform queries and introspect/manipulate the server's plan cache
 //   # entries. The former operation may be routed to a secondary in the replica set, whereas the
@@ -23,8 +23,8 @@
 // ]
 
 import {getPlanCacheKeyFromPipeline, getPlanCacheKeyFromShape} from "jstests/libs/analyze_plan.js";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
-load("jstests/libs/fixture_helpers.js");
 
 const coll = db.jstests_plan_cache_clear;
 coll.drop();

@@ -3,12 +3,15 @@
  * data. Memory checks are per node, so only test when the data is all in one place.
  */
 
-(function() {
-"use strict";
+import {DiscoverTopology} from "jstests/libs/discover_topology.js";
+import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
+import {setParameterOnAllHosts} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
 
-load("jstests/libs/fixture_helpers.js");                         // For FixtureHelpers.isMongos.
-load("jstests/noPassthrough/libs/server_parameter_helpers.js");  // For setParameterOnAllHosts.
-load("jstests/libs/discover_topology.js");                       // For findNonConfigNodes.
+// TODO SERVER-78709: Implement spilling
+if (checkSBEEnabled(db, ["featureFlagSbeFull"])) {
+    jsTestLog("Skipping the test since spilling is not implemented in SBE yet");
+    quit();
+}
 
 const coll = db[jsTestName()];
 coll.drop();
@@ -82,4 +85,3 @@ assert.commandFailedWithCode(coll.runCommand({
 // Reset limit for other tests.
 setParameterOnAllHosts(
     nonConfigNodes, "internalDocumentSourceSetWindowFieldsMaxMemoryBytes", 100 * 1024 * 1024);
-})();

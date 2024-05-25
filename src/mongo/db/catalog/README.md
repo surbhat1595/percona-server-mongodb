@@ -787,20 +787,13 @@ _Code spelunking starting points:_
 
 The oplog applier applies entries out-of-order to provide parallelism for data replication. This
 exposes readers with no set read timestamp to the possibility of seeing inconsistent states of data.
-To solve this problem, the oplog applier takes the ParallelBatchWriterMode (PBWM) lock in X mode,
-and readers using no read timestamp are expected to take the PBWM lock in IS mode to avoid observing
-inconsistent data mid-batch.
 
-Reads on secondaries are able to opt-out of taking the PBWM lock and read at replication's
+Because of this, reads on secondaries are generally required to read at replication's
 [lastApplied](../repl/README.md#replication-timestamp-glossary) optime instead (see
 [SERVER-34192](https://jira.mongodb.org/browse/SERVER-34192)). LastApplied is used because on
 secondaries it is only updated after each oplog batch, which is a known consistent state of data.
-This allows operations to avoid taking the PBWM lock, and thus not conflict with oplog application.
 
-AGCFR provides the mechanism for secondary reads. This is implemented by [opting-out of the
-ParallelBatchWriterMode
-lock](https://github.com/mongodb/mongo/blob/58283ca178782c4d1c4a4d2acd4313f6f6f86fd5/src/mongo/db/db_raii.cpp#L98)
-and switching the ReadSource of [eligible
+AGCFR provides the mechanism for secondary reads. This is implemented by switching the ReadSource of [eligible
 readers](https://github.com/mongodb/mongo/blob/58283ca178782c4d1c4a4d2acd4313f6f6f86fd5/src/mongo/db/storage/snapshot_helper.cpp#L106)
 to read at
 [kLastApplied](https://github.com/mongodb/mongo/blob/58283ca178782c4d1c4a4d2acd4313f6f6f86fd5/src/mongo/db/storage/recovery_unit.h#L411).
@@ -914,7 +907,7 @@ requested lock on that same resource with the given mode compatible?
 Typically, locks are granted in the order they are queued, but some LockRequest behaviors can be
 specially selected to break this rule. One behavior is _enqueueAtFront_, which allows important lock
 acquisitions to cut to the front of the line, in order to expedite them. Currently, all mode X and S
-locks for the three Global Resources (Global, RSTL, and PBWM) automatically use this option.
+locks for the three Global Resources (Global, FCV, RSTL) automatically use this option.
 Another behavior is _compatibleFirst_, which allows compatible lock requests to cut ahead of others
 waiting in the queue and be granted immediately; note that this mode might starve queued lock
 requests indefinitely.
@@ -925,16 +918,6 @@ The Replication State Transition Lock is of ResourceType Global, so it must be l
 locking any Database level resource. This lock is used to synchronize replica state transitions
 (typically transitions between PRIMARY, SECONDARY, and ROLLBACK states).
 More information on the RSTL is contained in the [Replication Architecture Guide](https://github.com/mongodb/mongo/blob/b4db8c01a13fd70997a05857be17548b0adec020/src/mongo/db/repl/README.md#replication-state-transition-lock)
-
-### Parallel Batch Writer Mode Lock (PBWM)
-
-The Parallel Batch Writer Mode lock is of ResourceType Global, so it must be locked prior to locking
-any Database level resource. This lock is used to synchronize secondary oplog application with other
-readers, so that they do not observe inconsistent snapshots of the data. Typically this is only an
-issue with readers that read with no timestamp, readers at explicit timestamps can acquire this lock
-in a compatible mode with the oplog applier and thus are not blocked when the oplog applier is
-running.
-More information on the PBWM lock is contained in the [Replication Architecture Guide.](https://github.com/mongodb/mongo/blob/b4db8c01a13fd70997a05857be17548b0adec020/src/mongo/db/repl/README.md#parallel-batch-writer-mode)
 
 ### Global Lock
 
@@ -1736,7 +1719,7 @@ A ticketing mechanism that limits the number of concurrent storage engine transa
 ### Ticket Management
 There are 2 separate pools of available tickets: one pool for global lock read requests (MODE_S/MODE_IS), and one pool of tickets for global lock write requests (MODE_IX).
 
-The size of each pool can be specified at startup via `storageEngineConcurrentReadTransactions` (read ticket pool), and `storageEngineConcurrentWriteTransactions` (write ticket pool). Additionally, the size of the each ticket pool can be changed through the [TicketHolderManager](https://github.com/mongodb/mongo/blob/r6.3.0-rc0/src/mongo/db/storage/ticketholder_manager.h#L51) at runtime.
+As of v7.0, the size of each ticket pool is managed dynamically by the server to maximize throughput. Details of the algorithm can be found [here](https://github.com/mongodb/mongo/blob/master/src/mongo/db/storage/execution_control/README.md). This dynamic management can be disabled by specifying the size of each pool manually via server parameters `storageEngineConcurrentReadTransactions` (read ticket pool) and `storageEngineConcurrentWriteTransactions` (write ticket pool).
 
 Each pool of tickets is maintained in a [TicketHolder](https://github.com/mongodb/mongo/blob/r6.3.0-rc0/src/mongo/util/concurrency/ticketholder.h#L52). Tickets distributed from a given TicketHolder will always be returned to the same TicketHolder (a write ticket will always be returned to the TicketHolder with the write ticket pool).
 
@@ -2438,3 +2421,22 @@ oplog.
 
 [copy-on-write]: https://en.wikipedia.org/wiki/Copy-on-write
 [Multiversion concurrency control]: https://en.wikipedia.org/wiki/Multiversion_concurrency_control
+
+## Table of MongoDB <-> WiredTiger <-> Log version numbers
+|                MongoDB | WiredTiger | Log |
+|------------------------|------------|-----|
+|                 3.0.15 |      2.5.3 |   1 |
+|                 3.2.20 |      2.9.2 |   1 |
+|                 3.4.15 |      2.9.2 |   1 |
+|                  3.6.4 |      3.0.1 |   2 |
+|                 4.0.16 |      3.1.1 |   3 |
+|                  4.2.1 |      3.2.2 |   3 |
+|                  4.2.6 |      3.3.0 |   3 |
+| 4.2.6 (blessed by 4.4) |      3.3.0 |   4 |
+|                  4.4.0 |     10.0.0 |   5 |
+|                  5.0.0 |     10.0.1 |   5 |
+|          4.4.11, 5.0.6 |     10.0.2 |   5 |
+|                  6.0.0 |     10.0.2 |   5 |
+|                  6.1.0 |     11.0.1 |   5 |
+|                  6.2.0 |     11.2.0 |   5 |
+|                  7.0.0 |     11.2.0 |   5 |

@@ -1,16 +1,13 @@
 /**
  * Test the convertToCapped cmd.
  *
- * The test runs commands that are not allowed with security token: convertToCapped.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: convertToCapped.
  *   not_allowed_with_security_token,
  *   requires_non_retryable_commands,
  *   requires_capped,
  * ]
  */
-
-(function() {
-"use strict";
 
 let testDb = db.getSiblingDB("convert_to_capped");
 let coll = testDb.coll;
@@ -26,4 +23,3 @@ for (let i = 0; i < num; ++i) {
 assert.commandFailedWithCode(
     testDb.runCommand({convertToCapped: coll.getName(), size: 5308156746568725891247}),
     ErrorCodes.BadValue);
-})();

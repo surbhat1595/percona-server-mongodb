@@ -6,18 +6,14 @@
  *   no_selinux,
  * ]
  */
-load("jstests/aggregation/extras/utils.js");  // For arrayEq.
-import {getWinningPlan, getPlanStages, planHasStage} from "jstests/libs/analyze_plan.js";
+import {arrayEq} from "jstests/aggregation/extras/utils.js";
+import {getPlanStages, getWinningPlan, planHasStage} from "jstests/libs/analyze_plan.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const assertArrayEq = (l, r) => assert(arrayEq(l, r), tojson(l) + " != " + tojson(r));
 
 const coll = db.all_paths_distinct_scan;
 coll.drop();
-
-// TODO SERVER-68303: Remove the feature flag and update corresponding tests.
-const allowCompoundWildcardIndexes =
-    FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "CompoundWildcardIndexes");
 
 // Records whether the field which we are distinct-ing over is multikey.
 let distinctFieldIsMultikey = false;
@@ -50,9 +46,6 @@ function assertWildcardDistinctScan(
         {keyPattern: {"$**": 1, other: 1}, wildcardProjection: {other: 0}}
     ];
     for (const indexSpec of wildcardIndexes) {
-        if (!allowCompoundWildcardIndexes && indexSpec.wildcardProjection) {
-            continue;
-        }
         // Drop all indexes before running the test. This allows us to perform the distinct with a
         // COLLSCAN at first, to confirm that the results are as expected.
         assert.commandWorked(coll.dropIndexes());

@@ -112,7 +112,8 @@ public:
             return Reply{};
         }
     };
-} pingCmd;
+};
+MONGO_REGISTER_COMMAND(PingCommand);
 
 class EchoCommand final : public TypedCommand<EchoCommand> {
 public:
@@ -137,7 +138,7 @@ public:
         void doCheckAuthorization(OperationContext* opCtx) const override {}
 
         NamespaceString ns() const override {
-            return NamespaceString(request().request.getDatabase());
+            return NamespaceString(request().request.getDbName());
         }
 
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) override {
@@ -163,7 +164,7 @@ public:
 };
 constexpr StringData EchoCommand::Request::kCommandName;
 
-MONGO_REGISTER_TEST_COMMAND(EchoCommand);
+MONGO_REGISTER_COMMAND(EchoCommand).testOnly();
 
 class ListCommandsCmd : public BasicCommand {
 public:
@@ -205,11 +206,7 @@ public:
              BSONObjBuilder& result) override {
         // Sort the command names before building the result BSON.
         std::vector<Command*> commands;
-        for (const auto& command : globalCommandRegistry()->allCommands()) {
-            // Don't show oldnames
-            if (command.first == command.second->getName())
-                commands.push_back(command.second);
-        }
+        getCommandRegistry(opCtx)->forEachCommand([&](Command* c) { commands.push_back(c); });
         std::sort(commands.begin(), commands.end(), [](Command* lhs, Command* rhs) {
             return (lhs->getName()) < (rhs->getName());
         });
@@ -236,8 +233,8 @@ public:
 
         return 1;
     }
-
-} listCommandsCmd;
+};
+MONGO_REGISTER_COMMAND(ListCommandsCmd);
 
 class CmdLogMessage : public TypedCommand<CmdLogMessage> {
 public:
@@ -321,7 +318,7 @@ public:
     }
 };
 
-MONGO_REGISTER_TEST_COMMAND(CmdLogMessage);
+MONGO_REGISTER_COMMAND(CmdLogMessage).testOnly();
 
 }  // namespace
 }  // namespace mongo

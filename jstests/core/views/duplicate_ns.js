@@ -1,8 +1,8 @@
 /**
  * Tests the creation of view with a duplicate name to a collection.
  *
- * The test runs commands that are not allowed with security token: applyOps.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: applyOps.
  *   not_allowed_with_security_token,
  *   assumes_unsharded_collection,
  *   assumes_against_mongod_not_mongos,
@@ -13,9 +13,6 @@
  *   tenant_migration_incompatible,
  * ]
  */
-(function() {
-"use strict";
-
 const dbName = "views_duplicate_ns";
 const viewsDb = db.getSiblingDB(dbName);
 const collName = "myns";
@@ -46,4 +43,3 @@ assert.eq(2,
                   return coll.name === collName;
               })
               .length);
-}());

@@ -94,6 +94,7 @@ def mongod_program(logger, job_num, executable, process_kwargs, mongod_options):
     remove_set_parameter_if_before_version(suite_set_parameters, "queryAnalysisWriterIntervalSecs",
                                            bin_version, "7.0.0")
     _apply_set_parameters(args, suite_set_parameters)
+    final_mongod_options = mongod_options.copy()
     mongod_options.pop("set_parameters")
 
     # Apply the rest of the command line arguments.
@@ -106,7 +107,8 @@ def mongod_program(logger, job_num, executable, process_kwargs, mongod_options):
         mongod_options.dump_history(f"{logger.name}_config.yml")
     elif config.EXPORT_MONGOD_CONFIG == "detailed":
         mongod_options.dump_history(f"{logger.name}_config.yml", include_location=True)
-    return make_process(logger, args, **process_kwargs), mongod_options["port"]
+
+    return make_process(logger, args, **process_kwargs), final_mongod_options
 
 
 def mongos_program(logger, job_num, executable=None, process_kwargs=None, mongos_options=None):
@@ -123,6 +125,7 @@ def mongos_program(logger, job_num, executable=None, process_kwargs=None, mongos
     remove_set_parameter_if_before_version(
         suite_set_parameters, "queryAnalysisSamplerConfigurationRefreshSecs", bin_version, "7.0.0")
     _apply_set_parameters(args, suite_set_parameters)
+    final_mongos_options = mongos_options.copy()
     mongos_options.pop("set_parameters")
 
     # Apply the rest of the command line arguments.
@@ -131,7 +134,8 @@ def mongos_program(logger, job_num, executable=None, process_kwargs=None, mongos
     _set_keyfile_permissions(mongos_options)
 
     process_kwargs = make_historic(utils.default_if_none(process_kwargs, {}))
-    return make_process(logger, args, **process_kwargs), mongos_options["port"]
+
+    return make_process(logger, args, **process_kwargs), final_mongos_options
 
 
 def mongo_shell_program(logger, executable=None, connection_string=None, filename=None,
@@ -279,42 +283,45 @@ def mongo_shell_program(logger, executable=None, connection_string=None, filenam
         eval_sb.append(str(kwargs.pop("eval")))
 
     # Load a callback to check that the cluster-wide metadata is consistent.
-    eval_sb.append("await import('jstests/libs/override_methods/check_metadata_consistency.js');")
+    eval_sb.append('await import("jstests/libs/override_methods/check_metadata_consistency.js")')
 
     # Load this file to allow a callback to validate collections before shutting down mongod.
-    eval_sb.append("load('jstests/libs/override_methods/validate_collections_on_shutdown.js');")
+    eval_sb.append(
+        'await import("jstests/libs/override_methods/validate_collections_on_shutdown.js")')
 
     # Load a callback to check UUID consistency before shutting down a ShardingTest.
     eval_sb.append(
-        "load('jstests/libs/override_methods/check_uuids_consistent_across_cluster.js');")
+        'await import("jstests/libs/override_methods/check_uuids_consistent_across_cluster.js")')
 
     # Load a callback to check index consistency before shutting down a ShardingTest.
     eval_sb.append(
-        "load('jstests/libs/override_methods/check_indexes_consistent_across_cluster.js');")
+        'await import("jstests/libs/override_methods/check_indexes_consistent_across_cluster.js")')
 
     # Load a callback to check that all orphans are deleted before shutting down a ShardingTest.
-    eval_sb.append("load('jstests/libs/override_methods/check_orphans_are_deleted.js');")
+    eval_sb.append('await import("jstests/libs/override_methods/check_orphans_are_deleted.js")')
 
     # Load a callback to check that the info stored in config.collections and config.chunks is
     # semantically correct before shutting down a ShardingTest.
     eval_sb.append(
-        "await import('jstests/libs/override_methods/check_routing_table_consistency.js');")
+        'await import("jstests/libs/override_methods/check_routing_table_consistency.js")')
 
     # Load a callback to check that all shards have correct filtering information before shutting
     # down a ShardingTest.
-    eval_sb.append("load('jstests/libs/override_methods/check_shard_filtering_metadata.js');")
+    eval_sb.append(
+        'await import("jstests/libs/override_methods/check_shard_filtering_metadata.js")')
 
     if config.FUZZ_MONGOD_CONFIGS is not None and config.FUZZ_MONGOD_CONFIGS is not False:
         # Prevent commands from running with the config fuzzer.
         eval_sb.append(
-            "load('jstests/libs/override_methods/config_fuzzer_incompatible_commands.js');")
+            'await import("jstests/libs/override_methods/config_fuzzer_incompatible_commands.js")')
 
     # Load this file to retry operations that fail due to in-progress background operations.
     eval_sb.append(
-        "load('jstests/libs/override_methods/implicitly_retry_on_background_op_in_progress.js');")
+        'await import("jstests/libs/override_methods/implicitly_retry_on_background_op_in_progress.js")'
+    )
 
     eval_sb.append(
-        "(function() { Timestamp.prototype.toString = function() { throw new Error(\"Cannot toString timestamps. Consider using timestampCmp() for comparison or tojson(<variable>) for output.\"); } })();"
+        "(function() { Timestamp.prototype.toString = function() { throw new Error(\"Cannot toString timestamps. Consider using timestampCmp() for comparison or tojson(<variable>) for output.\"); } })()"
     )
 
     eval_str = "; ".join(eval_sb)

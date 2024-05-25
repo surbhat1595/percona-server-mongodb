@@ -1,8 +1,9 @@
 // Ensure the server counts the server TLS versions used
-(function() {
-'use strict';
-
-load("jstests/ssl/libs/ssl_helpers.js");
+import {
+    detectDefaultTLSProtocol,
+    sslProviderSupportsTLS1_0,
+    sslProviderSupportsTLS1_1,
+} from "jstests/ssl/libs/ssl_helpers.js";
 
 var SERVER_CERT = "jstests/libs/server.pem";
 var CLIENT_CERT = "jstests/libs/client.pem";
@@ -31,10 +32,8 @@ function runTestWithoutSubset(client) {
         sslDisabledProtocols: 'none',
         useLogFiles: true,
         tlsLogVersions: "TLS1_0,TLS1_1,TLS1_2,TLS1_3",
+        tlsCAFile: CA_CERT
     });
-
-    print(disabledProtocols);
-    const version_number = client.replace(/TLS/, "").replace(/_/, ".");
 
     const exitStatus = runMongoProgram('mongo',
                                        '--ssl',
@@ -102,4 +101,3 @@ if (sslProviderSupportsTLS1_1()) {
 }
 runTestWithoutSubset("TLS1_2");
 runTestWithoutSubset("TLS1_3");
-})();

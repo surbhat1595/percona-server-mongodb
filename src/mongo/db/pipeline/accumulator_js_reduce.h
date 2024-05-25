@@ -68,7 +68,7 @@ public:
 
     AccumulatorInternalJsReduce(ExpressionContext* const expCtx, StringData funcSource)
         : AccumulatorState(expCtx), _funcSource(funcSource) {
-        _memUsageBytes = sizeof(*this);
+        _memUsageTracker.set(sizeof(*this));
     }
 
     void processInternal(const Value& input, bool merging) final;
@@ -79,7 +79,7 @@ public:
 
     virtual Document serialize(boost::intrusive_ptr<Expression> initializer,
                                boost::intrusive_ptr<Expression> argument,
-                               SerializationOptions options = {}) const override;
+                               const SerializationOptions& options = {}) const override;
 
 private:
     static std::string parseReduceFunction(BSONElement func);
@@ -116,7 +116,7 @@ public:
 
     Document serialize(boost::intrusive_ptr<Expression> initializer,
                        boost::intrusive_ptr<Expression> argument,
-                       SerializationOptions options = {}) const final;
+                       const SerializationOptions& options = {}) const final;
     void startNewGroup(Value const& input) final;
 
 private:

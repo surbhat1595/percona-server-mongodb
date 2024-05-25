@@ -1,15 +1,9 @@
 // @tags: [
 //   requires_getmore,
-//   # This test uses exhaust which does not use runCommand (required by the inject_tenant_prefix.js
-//   # override).
-//   tenant_migration_incompatible,
-//   no_selinux
+//   no_selinux,
+//   # Exhaust does not use runCommand which is required by the `simulate_atlas_proxy` override.
+//   simulate_atlas_proxy_incompatible,
 // ]
-
-(function() {
-'use strict';
-
-load("jstests/libs/fixture_helpers.js");
 
 var coll = db.exhaustColl;
 coll.drop();
@@ -23,23 +17,11 @@ for (var i = 0; i < docCount; i++) {
 assert.eq(coll.find().batchSize(1).itcount(), docCount);
 
 // Now try to run the same query with exhaust
-try {
-    assert.eq(coll.find().batchSize(1).addOption(DBQuery.Option.exhaust).itcount(), docCount);
-} catch (e) {
-    // The exhaust option is not valid against mongos, ensure that this query throws the right
-    // code
-    assert.eq(e.code, 18526, () => tojson(e));
-}
+assert.eq(coll.find().batchSize(1).addOption(DBQuery.Option.exhaust).itcount(), docCount);
 
 // Test a case where the amount of data requires a response to the initial find operation as well as
 // three getMore reply batches.
 (function() {
-// Skip this test case if we are connected to a mongos, since exhaust queries generally aren't
-// expected to work against a mongos.
-if (FixtureHelpers.isMongos(db)) {
-    return;
-}
-
 coll.drop();
 
 // Include a long string in each document so that the documents are a bit bigger than 16KB.
@@ -82,5 +64,4 @@ assert.eq(Math.min(101, TestData.batchSize || Infinity),
 assert.eq(50,
           coll.find().addOption(DBQuery.Option.exhaust).limit(-numDocs).batchSize(50).itcount());
 assert.eq(1, coll.find().addOption(DBQuery.Option.exhaust).limit(-1).itcount());
-}());
 }());

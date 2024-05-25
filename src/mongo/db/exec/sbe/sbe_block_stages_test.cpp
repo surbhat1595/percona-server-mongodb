@@ -31,6 +31,7 @@
  * This file contains tests for sbe::TsBlockToCellBlockStage and sbe::BlockToRowStage.
  */
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <tuple>
@@ -38,6 +39,7 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/sbe/sbe_plan_stage_test.h"
+#include "mongo/db/exec/sbe/sbe_unittest.h"
 #include "mongo/db/exec/sbe/stages/block_to_row.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/stages/ts_bucket_to_cell_block.h"
@@ -58,8 +60,8 @@ protected:
     std::tuple<std::unique_ptr<PlanStage>, value::SlotVector /*outSlots*/> makeBlockToRow(
         std::unique_ptr<PlanStage> input, value::SlotVector blockSlots) {
         auto outSlots = generateMultipleSlotIds(blockSlots.size());
-        auto blockToRowStage =
-            makeS<BlockToRowStage>(std::move(input), std::move(blockSlots), outSlots, 1 /*nodeId*/);
+        auto blockToRowStage = makeS<BlockToRowStage>(
+            std::move(input), std::move(blockSlots), outSlots, 1 /*nodeId*/, getYieldPolicy());
         return {std::move(blockToRowStage), std::move(outSlots)};
     }
 
@@ -75,12 +77,18 @@ protected:
         const auto metaSlot = tsOptions.getMetaField()
             ? boost::make_optional<value::SlotId>(generateSlotId())
             : boost::none;
+
+        std::vector<value::CellBlock::PathRequest> pathRequests;
+        for (const auto& cellPath : cellPaths) {
+            pathRequests.emplace_back(value::CellBlock::PathRequest{
+                {value::CellBlock::Get{cellPath}, value::CellBlock::Id{}}});
+        }
+
         auto tsBucketStage = makeS<TsBucketToCellBlockStage>(std::move(input),
                                                              inSlot,
-                                                             cellPaths,
+                                                             pathRequests,
                                                              blockSlots,
                                                              metaSlot,
-                                                             metaSlot.has_value() /*hasMetaField*/,
                                                              tsOptions.getTimeField().toString(),
                                                              1 /*nodeId*/);
 
@@ -120,7 +128,8 @@ protected:
                             const std::vector<std::string>& cellPaths,
                             const value::SlotVector& outSlots,
                             const boost::optional<value::SlotId>& metaSlot,
-                            const std::vector<BSONObj>& expectedData) {
+                            const std::vector<BSONObj>& expectedData,
+                            size_t yieldAfter) {
         // Prepares the execution tree.
         auto ctx = makeCompileCtx();
         prepareTree(ctx.get(), blockToRow.get());
@@ -138,18 +147,26 @@ protected:
              st = blockToRow->getNext(), ++i) {
             // Verifies meta field.
             if (metaAccessor) {
-                auto [metaTag, metaVal] = metaAccessor->getViewOfValue();
-                auto [expectedTag, expectedVal] = bson::convertFrom<true>(expectedData[i]["tag"]);
-                assertValuesEqual(expectedTag, expectedVal, metaTag, metaVal);
+                auto metaTagVal = metaAccessor->getViewOfValue();
+                auto expectedTagVal = bson::convertFrom<true>(expectedData[i]["tag"]);
+                ASSERT_THAT(expectedTagVal, ValueEq(metaTagVal)) << "for {}th 'tag'"_format(i);
             }
 
             // Verifies rows.
             for (size_t j = 0; j < cellPaths.size(); ++j) {
-                auto [actualTag, actualVal] = outAccessors[j]->getViewOfValue();
-                auto [expectedTag, expectedVal] =
-                    bson::convertFrom<true>(expectedData[i][cellPaths[j]]);
+                auto actualTagVal = outAccessors[j]->getViewOfValue();
+                auto expectedTagVal = bson::convertFrom<true>(expectedData[i][cellPaths[j]]);
 
-                assertValuesEqual(expectedTag, expectedVal, actualTag, actualVal);
+                ASSERT_THAT(expectedTagVal, ValueEq(actualTagVal))
+                    << "for {}th path '{}'"_format(i, cellPaths[j]);
+            }
+
+            if (i == yieldAfter) {
+                // Yields after 'yieldAfter'th (0-based) documents. Calling saveState() and
+                // restoreState() here is to emulate what happens when the lock is yielded and
+                // unyielded.
+                blockToRow->saveState(false);
+                blockToRow->restoreState(false);
             }
         }
         ASSERT_EQ(expectedData.size(), i);
@@ -168,13 +185,17 @@ protected:
     //  [0] virtual_scan bucketSlot [from 'inputDocs']
     //
     // The 'inputDocs' must be of timeseries bucket format, either compressed or uncompressed.
+    // 'yieldAfter' is the ordinal number (0-based) of documents to yield after. The default is the
+    // max size_t, which means no yield.
     void runUnpackBucketTest(BSONArray inputDocs,
                              const std::vector<std::string>& cellPaths,
                              const TimeseriesOptions& tsOptions,
-                             const std::vector<BSONObj>& expectedData) {
+                             const std::vector<BSONObj>& expectedData,
+                             size_t yieldAfter = std::numeric_limits<size_t>::max()) {
         auto [blockToRow, outSlots, metaSlot] =
             generateUnpackBucketsOnVirtualScan(inputDocs, tsOptions, cellPaths);
-        verifyUnpackBucket(std::move(blockToRow), cellPaths, outSlots, metaSlot, expectedData);
+        verifyUnpackBucket(
+            std::move(blockToRow), cellPaths, outSlots, metaSlot, expectedData, yieldAfter);
     }
 };
 
@@ -210,7 +231,7 @@ TEST_F(BlockStagesTest, TsBucketToCellBlockStageTest) {
     // Builds a TsBucketToCellBlock stage on top of an imaginary buckets collection.
     std::vector<std::string> cellPaths{{"time"}, {"_id"}, {"f"}};
     auto tsOptions =
-        TimeseriesOptions::parse(IDLParserContext{"BlockStagesTest::TsBucketToCellBlockSanityTest"},
+        TimeseriesOptions::parse(IDLParserContext{"BlockStagesTest::TsBucketToCellBlockStageTest"},
                                  fromjson(R"({timeField: "time", metaField: "tag"})"));
     auto [tsBucketStage, blockSlots, metaSlot] = generateTsBucketToCellBlockOnVirtualScan(
         BSON_ARRAY(bucketWithMeta1 << bucketWithMeta2), tsOptions, cellPaths);
@@ -232,11 +253,11 @@ TEST_F(BlockStagesTest, TsBucketToCellBlockStageTest) {
     for (auto st = tsBucketStage->getNext(); st == PlanState::ADVANCED;
          st = tsBucketStage->getNext(), ++i) {
         // Verifies meta field.
-        auto [metaTag, metaVal] = metaAccessor->getViewOfValue();
-        auto [expectedTag, expectedVal] = bson::convertFrom<true>(expectedData[i]["meta"]);
-        assertValuesEqual(expectedTag, expectedVal, metaTag, metaVal);
+        auto metaTagVal = metaAccessor->getViewOfValue();
+        auto expectedTagVal = bson::convertFrom<true>(expectedData[i]["meta"]);
+        ASSERT_THAT(expectedTagVal, ValueEq(metaTagVal));
 
-        // Verifies that cell blocks are produced for requested `cellPaths`.
+        // Verifies that cell blocks are produced for requested 'cellPaths'.
         // We don't verify the actual values of the cell blocks here, as that is done in the
         // 'UnpackBucket*' tests below.
         for (size_t j = 0; j < cellPaths.size(); ++j) {
@@ -269,6 +290,17 @@ TEST_F(BlockStagesTest, UnpackTwoBucketsWithSameSchemaMeasurements) {
                         expectedDataForBucketsWithSameSchemaMeasurements);
 }
 
+TEST_F(BlockStagesTest, UnpackTwoBucketsWithSameSchemaMeasurements_Yield) {
+    // The 'yieldAfter' == 1 means that the execution plan will yield after the second document,
+    // which in turn, means that we yield in the middle of the second bucket for the dataset with
+    // 'bucketWithMeta1' and 'bucketWithMeta2'.
+    runUnpackBucketTest(bucketsWithSameSchemaMeasurements,
+                        cellPathsForBucketsWithSameSchemaMeasurements,
+                        tsOptionsForBucketsWithSameSchemaMeasurements,
+                        expectedDataForBucketsWithSameSchemaMeasurements,
+                        /*yieldAfter*/ 1);
+}
+
 const auto compressedBucketsWithSameSchemaMeasurements =
     BSON_ARRAY(bucketWithMeta1 << bucketWithMeta2);
 TEST_F(BlockStagesTest, Unpack_Compressed_TwoBucketsWithSameSchemaMeasurements) {
@@ -276,6 +308,17 @@ TEST_F(BlockStagesTest, Unpack_Compressed_TwoBucketsWithSameSchemaMeasurements) 
                         cellPathsForBucketsWithSameSchemaMeasurements,
                         tsOptionsForBucketsWithSameSchemaMeasurements,
                         expectedDataForBucketsWithSameSchemaMeasurements);
+}
+
+TEST_F(BlockStagesTest, Unpack_Compressed_TwoBucketsWithSameSchemaMeasurements_Yield) {
+    // The 'yieldAfter' == 1 means that the execution plan will yield after the second document,
+    // which in turn, means that we yield in the middle of the second bucket for the dataset with
+    // 'bucketWithMeta1' and 'bucketWithMeta2'.
+    runUnpackBucketTest(compressedBucketsWithSameSchemaMeasurements,
+                        cellPathsForBucketsWithSameSchemaMeasurements,
+                        tsOptionsForBucketsWithSameSchemaMeasurements,
+                        expectedDataForBucketsWithSameSchemaMeasurements,
+                        /*yieldAfter*/ 1);
 }
 
 // Stages under tests do not require 'control.min' and 'control.max' fields to be present though
@@ -311,11 +354,29 @@ TEST_F(BlockStagesTest, UnpackBucketWithNoMeta) {
                         expectedDataForBucketWithNoMeta);
 }
 
+TEST_F(BlockStagesTest, UnpackBucketWithNoMeta_Yield) {
+    // The 'yieldAfter' == 1 means that the execution plan will yield in the middle of the bucket.
+    runUnpackBucketTest(BSON_ARRAY(bucketWithNoMeta),
+                        cellPathsForBucketWithNoMeta,
+                        tsOptionsForBucketWithNoMeta,
+                        expectedDataForBucketWithNoMeta,
+                        /*yieldAfter*/ 1);
+}
+
 TEST_F(BlockStagesTest, Unpack_Compressed_BucketWithNoMeta) {
     runUnpackBucketTest(BSON_ARRAY(compressBucket(bucketWithNoMeta)),
                         cellPathsForBucketWithNoMeta,
                         tsOptionsForBucketWithNoMeta,
                         expectedDataForBucketWithNoMeta);
+}
+
+TEST_F(BlockStagesTest, Unpack_Compressed_BucketWithNoMeta_Yield) {
+    // The 'yieldAfter' == 0 means that the execution plan will yield in the middle of the bucket.
+    runUnpackBucketTest(BSON_ARRAY(compressBucket(bucketWithNoMeta)),
+                        cellPathsForBucketWithNoMeta,
+                        tsOptionsForBucketWithNoMeta,
+                        expectedDataForBucketWithNoMeta,
+                        /*yieldAfter*/ 0);
 }
 
 // Stages under tests do not require 'control.min' and 'control.max' fields to be present though
@@ -334,6 +395,8 @@ const BSONObj bucketWithOneMissingField = fromjson(R"(
 		}
 	}
 })");
+// Note that the following test cases select only '_id" field and so, we will figure out the number
+// of measurements in a bucket from the time field.
 const auto cellPathsForBucketWithOneMissingField = std::vector<std::string>{{"_id"}};
 const auto tsOptionsForBucketWithOneMissingField =
     TimeseriesOptions::parse(IDLParserContext{"BlockStagesTest::UnpackBucketWithOneMissingField"},
@@ -351,11 +414,77 @@ TEST_F(BlockStagesTest, UnpackBucketWithOneMissingField) {
                         expectedDataForBucketWithOneMissingField);
 }
 
+TEST_F(BlockStagesTest, UnpackBucketWithOneMissingField_Yield) {
+    // The 'yieldAfter' == 0 means that the execution plan will yield in the middle of the bucket.
+    runUnpackBucketTest(BSON_ARRAY(bucketWithOneMissingField),
+                        cellPathsForBucketWithOneMissingField,
+                        tsOptionsForBucketWithOneMissingField,
+                        expectedDataForBucketWithOneMissingField,
+                        /*yieldAfter*/ 0);
+}
+
 TEST_F(BlockStagesTest, Unpack_Compressed_BucketWithOneMissingField) {
     runUnpackBucketTest(BSON_ARRAY(compressBucket(bucketWithOneMissingField)),
                         cellPathsForBucketWithOneMissingField,
                         tsOptionsForBucketWithOneMissingField,
                         expectedDataForBucketWithOneMissingField);
+}
+
+TEST_F(BlockStagesTest, Unpack_Compressed_BucketWithOneMissingField_Yield) {
+    // The 'yieldAfter' == 1 means that the execution plan will yield in the middle of the bucket.
+    runUnpackBucketTest(BSON_ARRAY(compressBucket(bucketWithOneMissingField)),
+                        cellPathsForBucketWithOneMissingField,
+                        tsOptionsForBucketWithOneMissingField,
+                        expectedDataForBucketWithOneMissingField,
+                        /*yieldAfter*/ 1);
+}
+
+// Note that this data has the 'control.count' field. It facilitates testing the case where we
+// extract the number of measurements in a bucket directly from it when the bucket is compressed.
+// To make sure that we are not relying on the 'time' field to figure out the number of measurements
+// in a bucket, we have set the 'time' field to 4 elements array which is actually invalid data.
+//
+// Stages under tests do not require 'control.min' and 'control.max' fields to be present though
+// they are mandatory fields. This data is not valid timeseries data.
+const BSONObj bucketWithOneMissingFieldAndCount = fromjson(R"(
+{
+	"_id" : ObjectId("64a33d9cdf56a62781061048"),
+	"control" : {"version" : 1, "count" : 3},
+	"meta" : "A",
+	"data" : {
+		"_id" : {"1" : 1},
+		"time" : {
+			"0" : {$date: "2023-06-30T21:29:00.568Z"},
+			"1" : {$date: "2023-06-30T21:29:09.968Z"},
+			"2" : {$date: "2023-06-30T21:29:15.088Z"},
+			"3" : {$date: "2023-06-30T21:29:19.088Z"}
+		}
+	}
+})");
+const auto cellPathsForBucketWithOneMissingFieldAndCount = std::vector<std::string>{{"_id"}};
+const auto tsOptionsForBucketWithOneMissingFieldAndCount = TimeseriesOptions::parse(
+    IDLParserContext{"BlockStagesTest::UnpackBucketWithOneMissingFieldAndCount"},
+    fromjson(R"({timeField: "time"})"));
+const auto expectedDataForBucketWithOneMissingFieldAndCount = std::vector{
+    fromjson(R"({})"),
+    fromjson(R"({"_id" : 1})"),
+    fromjson(R"({})"),
+};
+
+TEST_F(BlockStagesTest, Unpack_Compressed_BucketWithOneMissingFieldAndCount) {
+    runUnpackBucketTest(BSON_ARRAY(compressBucket(bucketWithOneMissingFieldAndCount)),
+                        cellPathsForBucketWithOneMissingFieldAndCount,
+                        tsOptionsForBucketWithOneMissingFieldAndCount,
+                        expectedDataForBucketWithOneMissingFieldAndCount);
+}
+
+TEST_F(BlockStagesTest, Unpack_Compressed_BucketWithOneMissingFieldAndCount_Yield) {
+    // The 'yieldAfter' == 1 means that the execution plan will yield in the middle of the bucket.
+    runUnpackBucketTest(BSON_ARRAY(compressBucket(bucketWithOneMissingFieldAndCount)),
+                        cellPathsForBucketWithOneMissingFieldAndCount,
+                        tsOptionsForBucketWithOneMissingFieldAndCount,
+                        expectedDataForBucketWithOneMissingFieldAndCount,
+                        /*yieldAfter*/ 1);
 }
 
 // Stages under tests do not require 'control.min' and 'control.max' fields to be present though
@@ -398,11 +527,29 @@ TEST_F(BlockStagesTest, UnpackBucketWithMultipleMissingFields) {
                         expectedDataForBucketWithMultipleMissingFields);
 }
 
+TEST_F(BlockStagesTest, UnpackBucketWithMultipleMissingFields_Yield) {
+    // The 'yieldAfter' == 0 means that the execution plan will yield in the middle of the bucket.
+    runUnpackBucketTest(BSON_ARRAY(bucketWithMultipleMissingFields),
+                        cellPathsForBucketWithMultipleMissingFields,
+                        tsOptionsForBucketWithMultipleMissingFields,
+                        expectedDataForBucketWithMultipleMissingFields,
+                        /*yieldAfter*/ 0);
+}
+
 TEST_F(BlockStagesTest, Unpack_Compressed_BucketWithMultipleMissingFields) {
     runUnpackBucketTest(BSON_ARRAY(compressBucket(bucketWithMultipleMissingFields)),
                         cellPathsForBucketWithMultipleMissingFields,
                         tsOptionsForBucketWithMultipleMissingFields,
                         expectedDataForBucketWithMultipleMissingFields);
+}
+
+TEST_F(BlockStagesTest, Unpack_Compressed_BucketWithMultipleMissingFields_Yield) {
+    // The 'yieldAfter' == 1 means that the execution plan will yield in the middle of the bucket.
+    runUnpackBucketTest(BSON_ARRAY(compressBucket(bucketWithMultipleMissingFields)),
+                        cellPathsForBucketWithMultipleMissingFields,
+                        tsOptionsForBucketWithMultipleMissingFields,
+                        expectedDataForBucketWithMultipleMissingFields,
+                        /*yieldAfter*/ 1);
 }
 
 // Stages under tests do not require 'control.min' and 'control.max' fields to be present though
@@ -477,11 +624,29 @@ TEST_F(BlockStagesTest, UnpackBucketWithArrayField) {
                         expectedDataForBucketWithArrayField);
 }
 
+TEST_F(BlockStagesTest, UnpackBucketWithArrayField_Yield) {
+    // The 'yieldAfter' == 1 means that the execution plan will yield in the middle of the bucket.
+    runUnpackBucketTest(BSON_ARRAY(bucketWithArrayField),
+                        cellPathsForBucketWithArrayField,
+                        tsOptionsForBucketWithArrayField,
+                        expectedDataForBucketWithArrayField,
+                        /*yieldAfter*/ 1);
+}
+
 TEST_F(BlockStagesTest, Unpack_Compressed_BucketWithArrayField) {
     runUnpackBucketTest(BSON_ARRAY(compressBucket(bucketWithArrayField)),
                         cellPathsForBucketWithArrayField,
                         tsOptionsForBucketWithArrayField,
                         expectedDataForBucketWithArrayField);
+}
+
+TEST_F(BlockStagesTest, Unpack_Compressed_BucketWithArrayField_Yield) {
+    // The 'yieldAfter' == 0 means that the execution plan will yield in the middle of the bucket.
+    runUnpackBucketTest(BSON_ARRAY(compressBucket(bucketWithArrayField)),
+                        cellPathsForBucketWithArrayField,
+                        tsOptionsForBucketWithArrayField,
+                        expectedDataForBucketWithArrayField,
+                        /*yieldAfter*/ 0);
 }
 
 // Stages under tests do not require 'control.min' and 'control.max' fields to be present though
@@ -528,10 +693,28 @@ TEST_F(BlockStagesTest, UnpackBucketWithObjectField) {
                         expectedDataForBucketWithObjectField);
 }
 
+TEST_F(BlockStagesTest, UnpackBucketWithObjectField_Yield) {
+    // The 'yieldAfter' == 0 means that the execution plan will yield in the middle of the bucket.
+    runUnpackBucketTest(BSON_ARRAY(bucketWithObjectField),
+                        cellPathsForBucketWithObjectField,
+                        tsOptionsForBucketWithObjectField,
+                        expectedDataForBucketWithObjectField,
+                        /*yieldAfter*/ 0);
+}
+
 TEST_F(BlockStagesTest, Unpack_Compressed_BucketWithObjectField) {
     runUnpackBucketTest(BSON_ARRAY(compressBucket(bucketWithObjectField)),
                         cellPathsForBucketWithObjectField,
                         tsOptionsForBucketWithObjectField,
                         expectedDataForBucketWithObjectField);
+}
+
+TEST_F(BlockStagesTest, Unpack_Compressed_BucketWithObjectField_Yield) {
+    // The 'yieldAfter' == 1 means that the execution plan will yield in the middle of the bucket.
+    runUnpackBucketTest(BSON_ARRAY(compressBucket(bucketWithObjectField)),
+                        cellPathsForBucketWithObjectField,
+                        tsOptionsForBucketWithObjectField,
+                        expectedDataForBucketWithObjectField,
+                        /*yieldAfter*/ 1);
 }
 }  // namespace mongo::sbe

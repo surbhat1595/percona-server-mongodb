@@ -98,7 +98,7 @@ public:
             auto swCommandResponse = shard->runCommandWithFixedRetryAttempts(
                 opCtx,
                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                "admin",
+                DatabaseName::kAdmin,
                 shardSvrMergeAllChunksOnShard.toBSON({}),
                 Shard::RetryPolicy::kIdempotent);
 
@@ -127,7 +127,8 @@ public:
                                                            ActionType::splitChunk));
         }
     };
-} clusterMergeAllChunksOnShard;
+};
+MONGO_REGISTER_COMMAND(ClusterMergeAllChunksOnShardCommand);
 
 }  // namespace
 }  // namespace mongo

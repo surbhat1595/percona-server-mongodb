@@ -197,8 +197,7 @@ public:
                    const OpMsgRequest& request,
                    ExplainOptions::Verbosity verbosity,
                    rpc::ReplyBuilderInterface* result) const override {
-        const DatabaseName dbName =
-            DatabaseNameUtil::deserialize(request.getValidatedTenantId(), request.getDatabase());
+        const DatabaseName dbName = request.getDbName();
         const BSONObj& cmdObj = request.body;
         // Acquire locks. The RAII object is optional, because in the case of a view, the locks
         // need to be released.
@@ -223,8 +222,7 @@ public:
         auto parsedDistinct = uassertStatusOK(
             ParsedDistinct::parse(opCtx, nss, cmdObj, extensionsCallback, true, defaultCollator));
 
-        SerializationContext sc(SerializationContext::stateCommandRequest());
-        sc.setTenantIdSource(request.getValidatedTenantId() != boost::none);
+        SerializationContext sc = request.getSerializationContext();
 
         if (collectionOrView->isView()) {
             // Relinquish locks. The aggregation command will re-acquire them.
@@ -277,11 +275,11 @@ public:
         // Acquire locks and resolve possible UUID. The RAII object is optional, because in the case
         // of a view, the locks need to be released.
 
-        // TODO: Make nicer. We need to instantiate the AutoStatsTracker before the acquisition in
-        // case it would throw so we can ensure data is written to the profile collection that some
-        // test may rely on. However, we might not know the namespace at this point so it is wrapped
-        // in a boost::optional. If the request is with a UUID we instantiate it after, but this is
-        // fine as the request should not be for sharded collections.
+        // TODO SERVER-79175: Make nicer. We need to instantiate the AutoStatsTracker before the
+        // acquisition in case it would throw so we can ensure data is written to the profile
+        // collection that some test may rely on. However, we might not know the namespace at this
+        // point so it is wrapped in a boost::optional. If the request is with a UUID we instantiate
+        // it after, but this is fine as the request should not be for sharded collections.
         boost::optional<AutoStatsTracker> tracker;
         auto const initializeTracker = [&](const NamespaceString& nss) {
             tracker.emplace(opCtx,
@@ -483,9 +481,8 @@ public:
         // Filter the keys that can be mirrored
         cmdObj.filterFieldsUndotted(bob, kMirrorableKeys, true);
     }
-
-
-} distinctCmd;
+};
+MONGO_REGISTER_COMMAND(DistinctCommand);
 
 }  // namespace
 }  // namespace mongo

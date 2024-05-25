@@ -1,10 +1,8 @@
 /**
- * This test confirms that telemetry store key fields are properly nested and none are missing.
- * @tags: [featureFlagQueryStats]
+ * This test confirms that query stats store key fields are properly nested and none are missing.
+ * @tags: [requires_fcv_71]
  */
-load("jstests/libs/query_stats_utils.js");
-(function() {
-"use strict";
+import {getQueryStats} from "jstests/libs/query_stats_utils.js";
 
 function confirmAllMetaFieldsPresent(clientSubObj) {
     const kApplicationName = "MongoDB Shell";
@@ -32,7 +30,6 @@ function confirmAllFieldsPresent(queryStatsEntries) {
         "filter",
         "sort",
         "projection",
-        "hint",
         "skip",
         "limit",
         "singleBatch",
@@ -61,7 +58,8 @@ function confirmAllFieldsPresent(queryStatsEntries) {
         "apiVersion",
         "apiStrict",
         "collectionType",
-        "client"
+        "client",
+        "hint",
     ];
 
     for (const entry of queryStatsEntries) {
@@ -128,9 +126,9 @@ let commandObj = {
 };
 
 assert.commandWorked(testDB.runCommand(commandObj));
-let telemetry = getQueryStats(conn);
-assert.eq(1, telemetry.length);
-confirmAllFieldsPresent(telemetry);
+let stats = getQueryStats(conn);
+assert.eq(1, stats.length);
+confirmAllFieldsPresent(stats);
 
 // $hint can only be string(index name) or object (index spec).
 assert.throwsWithCode(() => {
@@ -138,4 +136,3 @@ assert.throwsWithCode(() => {
 }, ErrorCodes.FailedToParse);
 
 MongoRunner.stopMongod(conn);
-}());

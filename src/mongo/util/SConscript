@@ -230,7 +230,6 @@ env.Library(
         'namespace_string_util.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/server_feature_flags',
     ],
@@ -288,6 +287,17 @@ env.Library(
         "$BUILD_DIR/mongo/db/service_context",
         'periodic_runner',
         'periodic_runner_impl',
+    ],
+)
+
+env.Library(
+    target="mock_periodic_runner",
+    source=[
+        "mock_periodic_runner.cpp",
+    ],
+    LIBDEPS_PRIVATE=[
+        "$BUILD_DIR/mongo/base",
+        "$BUILD_DIR/mongo/util/periodic_runner",
     ],
 )
 
@@ -938,7 +948,7 @@ pretty_printer_test_program = env.Program(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
     ],
-    AIB_COMPONENT='pretty-printer-test',
+    AIB_COMPONENT='pretty-printer-tests',
     AIB_COMPONENTS_EXTRA=['dist-test'],
 )
 pretty_printer_test_program_installed = env.GetAutoInstalledFiles(pretty_printer_test_program[0])

@@ -91,6 +91,7 @@ extern std::function<void()> shutdownSynchronizeJob;
 extern std::function<void(OperationContext*, boost::optional<Timestamp>)> migrateOldToNew;
 extern std::function<void(OperationContext*)> removeOldConfig;
 extern std::function<void(OperationContext*)> updateAuditConfigOnDowngrade;
+extern std::function<void(ServiceContext*)> setAuditInterface;
 
 /**
  * Struct that temporarily stores client information when an audit hook
@@ -136,25 +137,16 @@ public:
     using Appender = unique_function<void(BSONObjBuilder*)>;
 
     AuthenticateEvent(StringData mechanism,
-                      StringData db,
-                      StringData user,
+                      const UserName& user,
                       Appender appender,
                       ErrorCodes::Error result)
-        : _mechanism(mechanism),
-          _db(db),
-          _user(user),
-          _appender(std::move(appender)),
-          _result(result) {}
+        : _mechanism(mechanism), _user(user), _appender(std::move(appender)), _result(result) {}
 
     StringData getMechanism() const {
         return _mechanism;
     }
 
-    StringData getDatabase() const {
-        return _db;
-    }
-
-    StringData getUser() const {
+    const UserName& getUser() const {
         return _user;
     }
 
@@ -168,8 +160,7 @@ public:
 
 private:
     StringData _mechanism;
-    StringData _db;
-    StringData _user;
+    UserName _user;
 
     Appender _appender;
 

@@ -1,17 +1,20 @@
 // Tests that locks acquisitions for profiling in a transaction have a 0-second timeout.
-// The test runs commands that are not allowed with security token: endSession, profile.
+//
 // @tags: [
-//   not_allowed_with_security_token,uses_transactions,
+//   # The test runs commands that are not allowed with security token: endSession, profile.
+//   not_allowed_with_security_token,
+//   uses_transactions,
 //   uses_parallel_shell,
 //   requires_profiling,
 //   # Uses $where
-//   requires_scripting]
+//   requires_scripting
+// ]
 
-(function() {
-"use strict";
-
-load("jstests/libs/profiler.js");  // For getLatestProfilerEntry.
-load("jstests/libs/wait_for_command.js");
+import {
+    profilerHasSingleMatchingEntryOrThrow,
+    profilerHasZeroMatchingEntriesOrThrow,
+} from "jstests/libs/profiler.js";
+import {waitForCommand} from "jstests/libs/wait_for_command.js";
 
 const dbName = "test";
 const collName = "transactions_profiling_with_drops";
@@ -105,4 +108,3 @@ jsTest.log("Both writes should succeed");
 assert.docEq({_id: "doc", good: 2}, sessionColl.findOne());
 
 session.endSession();
-}());

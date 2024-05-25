@@ -7,11 +7,10 @@
  * ]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {isShardMergeEnabled, makeTenantDB} from "jstests/replsets/libs/tenant_migration_util.js";
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/uuid_util.js");       // for 'extractUUIDFromObject'
-load("jstests/libs/parallelTester.js");  // for 'Thread'
 
 function runTest(downgradeFCV) {
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
@@ -43,7 +42,8 @@ function runTest(downgradeFCV) {
     hangAfterSavingFCV.wait();
 
     // Downgrade the FCV for the donor set and resume migration.
-    assert.commandWorked(donorPrimary.adminCommand({setFeatureCompatibilityVersion: downgradeFCV}));
+    assert.commandWorked(
+        donorPrimary.adminCommand({setFeatureCompatibilityVersion: downgradeFCV, confirm: true}));
     hangAfterSavingFCV.off();
 
     // Make sure we see the FCV mismatch detection message on the recipient.
@@ -54,7 +54,8 @@ function runTest(downgradeFCV) {
     }
 
     // Upgrade again to check on the status of the migration from the donor's point of view.
-    assert.commandWorked(donorPrimary.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        donorPrimary.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
     TenantMigrationTest.assertAborted(
         tenantMigrationTest.waitForMigrationToComplete(migrationOpts));
 

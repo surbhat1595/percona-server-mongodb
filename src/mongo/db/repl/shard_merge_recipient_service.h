@@ -59,7 +59,6 @@
 #include "mongo/db/repl/oplog_fetcher.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/primary_only_service.h"
-#include "mongo/db/repl/tenant_migration_pem_payload_gen.h"
 #include "mongo/db/repl/tenant_migration_shared_data.h"
 #include "mongo/db/repl/tenant_migration_state_machine_gen.h"
 #include "mongo/db/repl/tenant_oplog_applier.h"
@@ -209,9 +208,7 @@ public:
         /**
          * Called when a replica set member (self, or a secondary) finishes importing donated files.
          */
-        void onMemberImportedFiles(const HostAndPort& host,
-                                   bool success,
-                                   const boost::optional<StringData>& reason = boost::none);
+        void onMemberImportedFiles(const HostAndPort& host);
 
         /**
          * Set the oplog creator functor, to allow use of a mock oplog fetcher.
@@ -249,7 +246,7 @@ public:
          */
         void setBackupCursorFetcherExecutor_forTest(
             std::shared_ptr<executor::TaskExecutor> taskExecutor) {
-            _backupCursorExecutor = taskExecutor;
+            _backupCursorExecutor = std::move(taskExecutor);
         }
 
         const NamespaceString _stateDocumentsNS = NamespaceString::kShardMergeRecipientsNamespace;
@@ -329,10 +326,8 @@ public:
             const CancellationToken& token);
 
         /**
-         * Creates a client, connects it to the donor. If '_transientSSLParams' is not none, uses
-         * the migration certificate to do SSL authentication. Otherwise, uses the default
-         * authentication mode. Throws a user assertion on failure.
-         *
+         * Creates a client, connects it to the donor and uses the default
+         * authentication mode (KeyFile Authentication). Throws a user assertion on failure.
          */
         std::unique_ptr<DBClientConnection> _connectAndAuth(const HostAndPort& serverAddress,
                                                             StringData applicationName);
@@ -590,16 +585,11 @@ public:
 
         // This data is provided in the initial state doc and never changes.  We keep copies to
         // avoid having to obtain the mutex to access them.
-        const std::vector<TenantId> _tenantIds;                                          // (R)
-        const UUID _migrationUuid;                                                       // (R)
-        const std::string _donorConnectionString;                                        // (R)
-        const MongoURI _donorUri;                                                        // (R)
-        const ReadPreferenceSetting _readPreference;                                     // (R)
-        const boost::optional<TenantMigrationPEMPayload> _recipientCertificateForDonor;  // (R)
-        // TODO (SERVER-54085): Remove server parameter tenantMigrationDisableX509Auth.
-        // Transient SSL params created based on the state doc if the server parameter
-        // 'tenantMigrationDisableX509Auth' is false.
-        const boost::optional<TransientSSLParams> _transientSSLParams = boost::none;  // (R)
+        const std::vector<TenantId> _tenantIds;       // (R)
+        const UUID _migrationUuid;                    // (R)
+        const std::string _donorConnectionString;     // (R)
+        const MongoURI _donorUri;                     // (R)
+        const ReadPreferenceSetting _readPreference;  // (R)
 
         std::shared_ptr<ReplicaSetMonitor> _donorReplicaSetMonitor;  // (M)
 
@@ -632,8 +622,9 @@ public:
         // Data shared by cloners. Follow TenantMigrationSharedData synchronization rules.
         std::unique_ptr<TenantMigrationSharedData> _sharedData;  // (S)
 
-        // Promise that is resolved when all recipient nodes have imported all donor files.
-        SharedPromise<void> _importedFilesPromise;  // (W)
+        // Promise that is resolved when all voting data-bearing recipient nodes have successfully
+        // imported all donor files.
+        SharedPromise<void> _importQuorumPromise;  // (W)
         // Whether we are waiting for members to import donor files.
         bool _waitingForMembersToImportFiles = true;
         // Which members have imported all donor files.

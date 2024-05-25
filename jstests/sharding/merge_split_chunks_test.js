@@ -1,13 +1,8 @@
 //
 // Tests that merge, split and move chunks via mongos works/doesn't work with different chunk
 // configurations
-// TODO SERVER-71169: Re-enable this test once shard filtering is implemented for CQF.
-// @tags: [cqf_incompatible]
 //
-(function() {
-'use strict';
-
-load("jstests/sharding/libs/find_chunks_util.js");
+import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
 
 var st = new ShardingTest({shards: 2, mongos: 2});
 
@@ -155,4 +150,3 @@ assert.eq(1,
               .itcount());
 
 st.stop();
-})();

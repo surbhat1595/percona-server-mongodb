@@ -116,8 +116,8 @@ public:
     }
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
-        return NamespaceStringUtil::parseNamespaceFromRequest(
-            dbName.tenantId(), CommandHelpers::parseNsFullyQualified(cmdObj));
+        return NamespaceStringUtil::deserialize(dbName.tenantId(),
+                                                CommandHelpers::parseNsFullyQualified(cmdObj));
     }
 
     Status checkAuthForOperation(OperationContext* opCtx,
@@ -141,14 +141,14 @@ public:
     }
 
     bool errmsgRun(OperationContext* opCtx,
-                   const std::string& dbname,
+                   const DatabaseName& dbName,
                    const BSONObj& cmdObj,
                    std::string& errmsg,
                    BSONObjBuilder& result) override {
         opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
         uassertStatusOK(ShardingState::get(opCtx)->canAcceptShardedCommands());
 
-        auto nss = parseNs(DatabaseNameUtil::deserialize(boost::none, dbname), cmdObj);
+        auto nss = parseNs(dbName, cmdObj);
 
         auto cloneRequest = uassertStatusOK(StartChunkCloneRequest::createFromCommand(nss, cmdObj));
 
@@ -172,34 +172,14 @@ public:
         onCollectionPlacementVersionMismatch(opCtx, nss, boost::none);
         const auto shardId = ShardingState::get(opCtx)->shardId();
 
-        const auto collectionEpoch = [&] {
-            AutoGetCollection autoColl(opCtx, nss, MODE_IS);
-            const auto scopedCsr =
-                CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss);
-            auto optMetadata = scopedCsr->getCurrentMetadataIfKnown();
-            uassert(StaleConfigInfo(nss,
-                                    ShardVersionPlacementIgnoredNoIndexes() /* receivedVersion */,
-                                    boost::none /* wantedVersion */,
-                                    shardId,
-                                    boost::none),
-                    "The collection's sharding state was cleared by a concurrent operation",
-                    optMetadata);
-            return optMetadata->getShardPlacementVersion().epoch();
-        }();
-
-        uassertStatusOK(
-            MigrationDestinationManager::get(opCtx)->start(opCtx,
-                                                           nss,
-                                                           std::move(scopedReceiveChunk),
-                                                           cloneRequest,
-                                                           collectionEpoch,
-                                                           writeConcern));
+        uassertStatusOK(MigrationDestinationManager::get(opCtx)->start(
+            opCtx, nss, std::move(scopedReceiveChunk), cloneRequest, writeConcern));
 
         result.appendBool("started", true);
         return true;
     }
-
-} recvChunkStartCmd;
+};
+MONGO_REGISTER_COMMAND(RecvChunkStartCommand);
 
 class RecvChunkStatusCommand : public BasicCommand {
 public:
@@ -246,8 +226,8 @@ public:
         MigrationDestinationManager::get(opCtx)->report(result, opCtx, waitForSteadyOrDone);
         return true;
     }
-
-} recvChunkStatusCommand;
+};
+MONGO_REGISTER_COMMAND(RecvChunkStatusCommand);
 
 class RecvChunkCommitCommand : public BasicCommand {
 public:
@@ -305,8 +285,8 @@ public:
         }
         return true;
     }
-
-} recvChunkCommitCommand;
+};
+MONGO_REGISTER_COMMAND(RecvChunkCommitCommand);
 
 class RecvChunkAbortCommand : public BasicCommand {
 public:
@@ -371,8 +351,8 @@ public:
         uassertStatusOK(migrationSessionIdStatus.getStatus());
         return true;
     }
-
-} recvChunkAbortCommand;
+};
+MONGO_REGISTER_COMMAND(RecvChunkAbortCommand);
 
 class RecvChunkReleaseCritSecCommand : public BasicCommand {
 public:
@@ -429,8 +409,8 @@ public:
         }
         return true;
     }
-
-} recvChunkReleaseCritSecCommand;
+};
+MONGO_REGISTER_COMMAND(RecvChunkReleaseCritSecCommand);
 
 }  // namespace
 }  // namespace mongo

@@ -5,7 +5,7 @@
  *   does_not_support_stepdowns,
  * ]
  */
-load("jstests/aggregation/extras/utils.js");  // For arrayEq.
+import {arrayEq} from "jstests/aggregation/extras/utils.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const coll = db.wildcard_index_minmax;
@@ -25,14 +25,8 @@ const wildcardIndexes = [
     {keyPattern: {a: 1, "$**": -1}, wildcardProjection: {a: 0}},
     {keyPattern: {"$**": 1, other: 1}, wildcardProjection: {other: 0}}
 ];
-// TODO SERVER-68303: Remove the feature flag and update corresponding tests.
-const allowCompoundWildcardIndexes =
-    FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "CompoundWildcardIndexes");
 
 for (const indexSpec of wildcardIndexes) {
-    if (!allowCompoundWildcardIndexes && indexSpec.wildcardProjection) {
-        continue;
-    }
     const option = {};
     if (indexSpec.wildcardProjection) {
         option['wildcardProjection'] = indexSpec.wildcardProjection;

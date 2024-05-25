@@ -1,9 +1,9 @@
 /**
  * Utilities for testing transactions.
  */
-var TransactionsUtil = (function() {
-    load("jstests/libs/override_methods/override_helpers.js");
+import {OverrideHelpers} from "jstests/libs/override_methods/override_helpers.js";
 
+export var TransactionsUtil = (function() {
     // Although createCollection and createIndexes are supported inside multi-document
     // transactions, we intentionally exclude them from this list since they are non-
     // idempotent and, for createIndexes, are not supported inside multi-document
@@ -62,6 +62,11 @@ var TransactionsUtil = (function() {
                 }
                 var db = ns['ns'].split('.', 1)[0];
                 if (db === 'local' || db === 'config' || db === 'system') {
+                    return false;
+                }
+                // Make sure no namespaces are system. collections
+                var coll = ns['ns'].substring(ns['ns'].indexOf('.') + 1);
+                if (coll.startsWith('system.')) {
                     return false;
                 }
             }

@@ -100,15 +100,14 @@ public:
     }
 
     bool errmsgRun(OperationContext* opCtx,
-                   const std::string& dbname,
+                   const DatabaseName& dbName,
                    const BSONObj& cmdObj,
                    std::string& errmsg,
                    BSONObjBuilder& result) override {
         Impl::checkCanRunHere(opCtx);
 
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
-        const NamespaceString nss(
-            parseNs(DatabaseNameUtil::deserialize(boost::none, dbname), cmdObj));
+        const NamespaceString nss(parseNs(dbName, cmdObj));
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "Invalid namespace specified '" << nss.toStringForErrorMsg()
                               << "'",
@@ -142,7 +141,7 @@ public:
             const auto collation = countRequest.getCollation().get_value_or(BSONObj());
             shardResponses = scatterGatherVersionedTargetByRoutingTable(
                 opCtx,
-                nss.db_forSharding(),
+                nss.dbName(),
                 nss,
                 cri,
                 applyReadWriteConcern(
@@ -162,7 +161,7 @@ public:
             auto countRequest = CountCommandRequest::parse(IDLParserContext("count"), cmdObj);
             auto aggCmdOnView =
                 uassertStatusOK(countCommandAsAggregationCommand(countRequest, nss));
-            auto aggCmdOnViewObj = OpMsgRequest::fromDBAndBody(nss.dbName(), aggCmdOnView).body;
+            auto aggCmdOnViewObj = OpMsgRequest::fromDBAndBody(dbName, aggCmdOnView).body;
             auto aggRequestOnView = aggregation_request_helper::parseFromBSON(
                 opCtx,
                 nss,
@@ -175,7 +174,7 @@ public:
                 aggregation_request_helper::serializeToCommandObj(resolvedAggRequest);
 
             BSONObj aggResult = CommandHelpers::runCommandDirectly(
-                opCtx, OpMsgRequest::fromDBAndBody(dbname, std::move(resolvedAggCmd)));
+                opCtx, OpMsgRequest::fromDBAndBody(dbName, std::move(resolvedAggCmd)));
 
             result.resetToEmpty();
             ViewResponseFormatter formatter(aggResult);
@@ -231,9 +230,7 @@ public:
             return exceptionToStatus();
         }
 
-        const NamespaceString nss = parseNs(
-            DatabaseNameUtil::deserialize(request.getValidatedTenantId(), request.getDatabase()),
-            cmdObj);
+        const NamespaceString nss = parseNs(countRequest.getDbName(), cmdObj);
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "Invalid namespace specified '" << nss.toStringForErrorMsg()
                               << "'",
@@ -260,7 +257,7 @@ public:
                 Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
             shardResponses =
                 scatterGatherVersionedTargetByRoutingTable(opCtx,
-                                                           nss.db_forSharding(),
+                                                           nss.dbName(),
                                                            nss,
                                                            cri,
                                                            explainCmd,

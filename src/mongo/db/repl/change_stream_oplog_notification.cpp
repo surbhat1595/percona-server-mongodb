@@ -42,6 +42,7 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/change_stream_helpers.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
@@ -137,12 +138,14 @@ void notifyChangeStreamsOnDatabaseAdded(OperationContext* opCtx,
 
     for (const auto& dbName : databasesAddedNotification.getNames()) {
         repl::MutableOplogEntry oplogEntry;
+        const auto dbNameStr = DatabaseNameUtil::serialize(dbName);
+
         oplogEntry.setOpType(repl::OpTypeEnum::kNoop);
         oplogEntry.setNss(NamespaceString(dbName));
         oplogEntry.setTid(dbName.tenantId());
-        oplogEntry.setObject(BSON("msg" << BSON(operationName << dbName.db())));
+        oplogEntry.setObject(BSON("msg" << BSON(operationName << dbNameStr)));
         BSONObjBuilder o2Builder;
-        o2Builder.append(operationName, dbName.db());
+        o2Builder.append(operationName, dbNameStr);
         if (databasesAddedNotification.getPhase() == CommitPhaseEnum::kPrepare) {
             o2Builder.append("primaryShard", *databasesAddedNotification.getPrimaryShard());
         }
@@ -161,12 +164,14 @@ void notifyChangeStreamsOnMovePrimary(OperationContext* opCtx,
                                       const ShardId& oldPrimary,
                                       const ShardId& newPrimary) {
     repl::MutableOplogEntry oplogEntry;
+    const auto dbNameStr = DatabaseNameUtil::serialize(dbName);
+
     oplogEntry.setOpType(repl::OpTypeEnum::kNoop);
     oplogEntry.setNss(NamespaceString(dbName));
     oplogEntry.setTid(dbName.tenantId());
-    oplogEntry.setObject(BSON("msg" << BSON("movePrimary" << dbName.db())));
+    oplogEntry.setObject(BSON("msg" << BSON("movePrimary" << dbNameStr)));
     oplogEntry.setObject2(
-        BSON("movePrimary" << dbName.db() << "from" << oldPrimary << "to" << newPrimary));
+        BSON("movePrimary" << dbNameStr << "from" << oldPrimary << "to" << newPrimary));
     oplogEntry.setOpTime(repl::OpTime());
     oplogEntry.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
 
@@ -238,4 +243,18 @@ void notifyChangeStreamsOnReshardCollectionComplete(OperationContext* opCtx,
         insertOplogEntry(opCtx, std::move(oplogEntry), "ReshardCollectionWritesOplog");
     }
 }
+
+void notifyChangeStreamOnEndOfTransaction(OperationContext* opCtx,
+                                          const LogicalSessionId& lsid,
+                                          const TxnNumber& txnNumber,
+                                          const std::vector<NamespaceString>& affectedNamespaces) {
+    repl::MutableOplogEntry oplogEntry = change_stream::createEndOfTransactionOplogEntry(
+        lsid,
+        txnNumber,
+        affectedNamespaces,
+        repl::OpTime().getTimestamp(),
+        opCtx->getServiceContext()->getFastClockSource()->now());
+    insertOplogEntry(opCtx, std::move(oplogEntry), "EndOfTransactionWritesOplog");
+}
+
 }  // namespace mongo

@@ -47,6 +47,7 @@
 #include <memory>
 #include <ostream>
 #include <set>
+#include <sstream>
 #include <tuple>
 #include <type_traits>
 #include <vector>
@@ -62,6 +63,7 @@
 #include "mongo/db/query/optimizer/comparison_op.h"
 #include "mongo/db/query/optimizer/containers.h"
 #include "mongo/db/query/optimizer/defs.h"
+#include "mongo/db/query/optimizer/metadata.h"
 #include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
 #include "mongo/db/query/optimizer/syntax/expr.h"
 #include "mongo/db/query/optimizer/syntax/path.h"
@@ -72,8 +74,12 @@
 
 namespace mongo::optimizer {
 
-ABTPrinter::ABTPrinter(PlanAndProps planAndProps, const ExplainVersion explainVersion)
-    : _planAndProps(std::move(planAndProps)), _explainVersion(explainVersion) {}
+ABTPrinter::ABTPrinter(Metadata metadata,
+                       PlanAndProps planAndProps,
+                       const ExplainVersion explainVersion)
+    : _metadata(std::move(metadata)),
+      _planAndProps(std::move(planAndProps)),
+      _explainVersion(explainVersion) {}
 
 BSONObj ABTPrinter::explainBSON() const {
     const auto explainPlanStr = [&](std::string planStr) {
@@ -1495,9 +1501,9 @@ public:
         return printer;
     }
 
-    void printPartialSchemaReqMap(ExplainPrinter& parent, const PartialSchemaRequirements& reqMap) {
+    void printPartialSchemaReqMap(ExplainPrinter& parent, const PSRExpr::Node& reqMap) {
         ExplainPrinter reqs =
-            reqMap.isNoop() ? ExplainPrinter() : printPartialSchemaRequirements(reqMap.getRoot());
+            psr::isNoop(reqMap) ? ExplainPrinter() : printPartialSchemaRequirements(reqMap);
         parent.fieldName("requirements").print(reqs);
     }
 
@@ -3079,14 +3085,75 @@ std::pair<sbe::value::TypeTags, sbe::value::Value> ExplainGenerator::explainMemo
     return gen.printMemo().moveValue();
 }
 
+class ShortPlanSummaryTransport {
+public:
+    ShortPlanSummaryTransport(const Metadata& metadata) : _metadata(metadata) {}
+
+    void transport(const PhysicalScanNode& node, const ABT&) {
+        ss << "COLLSCAN";
+    }
+
+    void transport(const IndexScanNode& node, const ABT&) {
+        std::string idxCombined = getIndexDetails(node);
+        if (ss.str().find(idxCombined) == std::string::npos) {
+            if (ss.tellp() != 0) {
+                ss << ", ";
+            }
+            ss << idxCombined;
+        }
+    }
+
+    std::string getIndexDetails(const IndexScanNode& node) {
+        auto& scanName = node.getScanDefName();
+        auto& idxName = node.getIndexDefName();
+        auto& idxDef = _metadata._scanDefs.at(scanName).getIndexDefs();
+        auto& idxVal = idxDef.at(idxName);
+        std::stringstream idxDetails;
+        idxDetails << "IXSCAN { ";
+        bool firstCollationEntry = true;
+        for (const auto& [projName, op] : idxVal.getCollationSpec()) {
+            if (!firstCollationEntry) {
+                idxDetails << ", ";
+            }
+            idxDetails << PathStringify::stringify(projName);
+            if (op == CollationOp::Ascending) {
+                idxDetails << ": 1";
+            } else if (op == CollationOp::Descending) {
+                idxDetails << ": -1";
+            }
+            firstCollationEntry = false;
+        }
+        idxDetails << " }";
+        return idxDetails.str();
+    }
+
+    template <typename T, typename... Ts>
+    void transport(const T& node, Ts&&...) {
+        static_assert(
+            (!std::is_base_of_v<PhysicalScanNode, T>)&&(!std::is_base_of_v<IndexScanNode, T>));
+    }
+
+    std::string getPlanSummary(const ABT& n) {
+        algebra::transport<false>(n, *this);
+        return ss.str();
+    }
+
+    std::stringstream ss;
+    const Metadata& _metadata;
+};
+
+std::string ABTPrinter::getPlanSummary() const {
+    return ShortPlanSummaryTransport(_metadata).getPlanSummary(_planAndProps._node);
+}
+
 BSONObj ExplainGenerator::explainMemoBSONObj(const cascades::MemoExplainInterface& memoInterface) {
     return convertSbeValToBSONObj(explainMemoBSON(memoInterface));
 }
 
-std::string ExplainGenerator::explainPartialSchemaReqMap(const PartialSchemaRequirements& reqMap) {
+std::string ExplainGenerator::explainPartialSchemaReqExpr(const PSRExpr::Node& reqs) {
     ExplainGeneratorV2 gen;
     ExplainGeneratorV2::ExplainPrinter result;
-    gen.printPartialSchemaReqMap(result, reqMap);
+    gen.printPartialSchemaReqMap(result, reqs);
     return result.str();
 }
 
@@ -3103,7 +3170,7 @@ std::string ExplainGenerator::explainInterval(const IntervalRequirement& interva
     return gen.printInterval(interval);
 }
 
-std::string ExplainGenerator::explainInterval(const CompoundIntervalRequirement& interval) {
+std::string ExplainGenerator::explainCompoundInterval(const CompoundIntervalRequirement& interval) {
     ExplainGeneratorV2 gen;
     return gen.printInterval(interval);
 }
@@ -3113,7 +3180,7 @@ std::string ExplainGenerator::explainIntervalExpr(const IntervalReqExpr::Node& i
     return gen.printIntervalExpr<IntervalRequirement>(intervalExpr).str();
 }
 
-std::string ExplainGenerator::explainIntervalExpr(
+std::string ExplainGenerator::explainCompoundIntervalExpr(
     const CompoundIntervalReqExpr::Node& intervalExpr) {
     ExplainGeneratorV2 gen;
     return gen.printIntervalExpr<CompoundIntervalRequirement>(intervalExpr).str();

@@ -1,8 +1,8 @@
 // Basic tests for a form of stack recursion that's been shown to cause C++ side stack overflows in
 // the past. See SERVER-19614.
 //
-// The test runs commands that are not allowed with security token: mapReduce.
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapReduce.
 //   not_allowed_with_security_token,
 //   does_not_support_stepdowns,
 //   requires_non_retryable_commands,
@@ -10,9 +10,6 @@
 //   # This test has statements that do not support non-local read concern.
 //   does_not_support_causal_consistency,
 // ]
-
-(function() {
-"use strict";
 
 db.recursion.drop();
 
@@ -36,4 +33,3 @@ function mapReduceRecursion() {
 
 assert.commandWorked(db.recursion.insert({}));
 assert.commandFailedWithCode(assert.throws(mapReduceRecursion), ErrorCodes.JSInterpreterFailure);
-}());

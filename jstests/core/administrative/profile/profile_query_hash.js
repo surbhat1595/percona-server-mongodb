@@ -1,7 +1,7 @@
 // Confirms that profile entries for find commands contain the appropriate query hash.
 //
-// The test runs commands that are not allowed with security token: setProfilingLevel.
 // @tags: [
+//   # The test runs commands that are not allowed with security token: setProfilingLevel.
 //   not_allowed_with_security_token,
 //   assumes_against_mongod_not_mongos,
 //   assumes_read_concern_unchanged,
@@ -10,11 +10,8 @@
 //   # TODO SERVER-67607: Test plan cache with CQF enabled.
 //   cqf_experimental_incompatible,
 // ]
-(function() {
-"use strict";
 
-// For getLatestProfilerEntry
-load("jstests/libs/profiler.js");
+import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 
 const testDB = db.getSiblingDB("query_hash");
 assert.commandWorked(testDB.dropDatabase());
@@ -108,4 +105,3 @@ assert.eq(explainQuery2.queryPlanner.queryHash,
           explainQuery2PostCatalogChange.queryPlanner.queryHash);
 assert.neq(explainQuery2.queryPlanner.planCacheKey,
            explainQuery2PostCatalogChange.queryPlanner.planCacheKey);
-})();

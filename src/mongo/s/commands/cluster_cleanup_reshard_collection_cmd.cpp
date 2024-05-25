@@ -75,7 +75,7 @@ public:
             auto cmdResponse = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
                 opCtx,
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                "admin",
+                DatabaseName::kAdmin,
                 configsvrCleanupReshardCollection.toBSON({}),
                 Shard::RetryPolicy::kIdempotent));
             uassertStatusOK(cmdResponse.commandStatus);
@@ -111,7 +111,8 @@ public:
     std::string help() const override {
         return "Abort and cleanup any in-progress resharding operations for this collection.";
     }
-} cleanupReshardCollectionCmd;
+};
+MONGO_REGISTER_COMMAND(CleanupReshardCollectionCmd);
 
 }  // namespace
 }  // namespace mongo

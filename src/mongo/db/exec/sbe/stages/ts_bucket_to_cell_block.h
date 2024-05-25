@@ -35,21 +35,20 @@
 namespace mongo::sbe {
 /**
  * Given an input stage with a single slot containing a time series bucket BSON document, produces a
- * CellBlock for each path in 'paths' into the output slots 'blocksOut'.
+ * CellBlock for each path in 'pathReqs' into the output slots 'blocksOut'.
  *
  * Debug string representations:
  *
- *  ts_bucket_to_cellblock bucketSlot paths[blocksOut[0] = paths[0], ..., blocksOut[N] = paths[N]]
- *     meta = metaOut?
+ *  ts_bucket_to_cellblock bucketSlot pathReqs[blocksOut[0] = paths[0], ...,
+ *      blocksOut[N] = paths[N]] metaOut = meta?
  */
 class TsBucketToCellBlockStage final : public PlanStage {
 public:
     TsBucketToCellBlockStage(std::unique_ptr<PlanStage> input,
                              value::SlotId bucketSlot,
-                             std::vector<std::string> topLevelPaths,
+                             std::vector<value::CellBlock::PathRequest> pathReqs,
                              value::SlotVector blocksOut,
                              boost::optional<value::SlotId> metaOut,
-                             bool hasMetaField,
                              const std::string& timeField,
                              PlanNodeId nodeId,
                              bool participateInTrialRunTracking = true);
@@ -67,20 +66,24 @@ public:
     std::vector<DebugPrinter::Block> debugPrint() const final;
     size_t estimateCompileTimeSize() const final;
 
+protected:
+    void doRestoreState(bool) final;
+
 private:
     PlanState advanceChild();
 
+    void initCellBlocks();
+
     const value::SlotId _bucketSlotId;
-    const std::vector<std::string> _topLevelPaths;
+    const std::vector<value::CellBlock::PathRequest> _pathReqs;
     const value::SlotVector _blocksOutSlotId;
     const boost::optional<value::SlotId> _metaOutSlotId;
-    const bool _hasMetaField;
     const std::string _timeField;
+
+    value::TsBucketPathExtractor _pathExtractor;
 
     value::SlotAccessor* _bucketAccessor = nullptr;
     std::vector<value::OwnedValueAccessor> _blocksOutAccessor;
     value::OwnedValueAccessor _metaOutAccessor;
-
-    std::vector<boost::optional<value::TsCellBlock>> _tsCellBlocks;
 };
 }  // namespace mongo::sbe

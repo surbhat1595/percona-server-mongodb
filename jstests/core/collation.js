@@ -1,8 +1,9 @@
 // Cannot implicitly shard accessed collections because of collection existing when none
 // expected.
-// The test runs commands that are not allowed with security token: applyOps,
-// cloneCollectionAsCapped, mapReduce, reIndex.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: applyOps,
+//   # cloneCollectionAsCapped, mapReduce, reIndex.
 //   not_allowed_with_security_token,
 //   assumes_no_implicit_collection_creation_after_drop,
 //   # Asserts that some queries use a collection scan.
@@ -25,14 +26,10 @@ import {
     isIxscan,
     planHasStage
 } from "jstests/libs/analyze_plan.js";
-
-load("jstests/libs/index_catalog_helpers.js");
-// For isWiredTiger.
-load("jstests/concurrency/fsm_workload_helpers/server_types.js");
-// For isReplSet
-load("jstests/libs/fixture_helpers.js");
-// For areAllCollectionsClustered.
-load("jstests/libs/clustered_collections/clustered_collection_util.js");
+import {
+    ClusteredCollectionUtil
+} from "jstests/libs/clustered_collections/clustered_collection_util.js";
+import {IndexCatalogHelpers} from "jstests/libs/index_catalog_helpers.js";
 
 let testDb = db.getSiblingDB("collation_js");
 var coll = testDb.collation;

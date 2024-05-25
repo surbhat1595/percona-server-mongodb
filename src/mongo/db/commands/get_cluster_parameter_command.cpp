@@ -87,8 +87,7 @@ public:
                     serverGlobalParams.featureCompatibility)) {
                 uassert(ErrorCodes::IllegalOperation,
                         str::stream() << Request::kCommandName << " cannot be run on standalones",
-                        repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
-                            repl::ReplicationCoordinator::modeNone);
+                        repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet());
             }
 
             GetClusterParameterInvocation invocation;
@@ -113,7 +112,8 @@ public:
             return NamespaceString(request().getDbName());
         }
     };
-} getClusterParameterCommand;
+};
+MONGO_REGISTER_COMMAND(GetClusterParameterCommand);
 
 }  // namespace
 }  // namespace mongo

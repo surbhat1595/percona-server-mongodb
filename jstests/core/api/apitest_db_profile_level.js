@@ -1,7 +1,8 @@
 /**
- *  Tests for setting of profile levels
- * The test runs commands that are not allowed with security token: getLog, setProfilingLevel.
+ * Tests for setting of profile levels
+ *
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: getLog, setProfilingLevel.
  *   not_allowed_with_security_token,
  *   does_not_support_stepdowns,
  *   requires_profiling,
@@ -9,10 +10,7 @@
  * ]
  */
 
-(function() {
-'use strict';
-
-load("jstests/libs/log.js");  // For findMatchingLogLine, findMatchingLogLines.
+import {findMatchingLogLines} from "jstests/libs/log.js";
 
 /*
  *  be sure the public collection API is complete
@@ -70,4 +68,3 @@ assert.throws(() => {
 });
 // Check that didn't log an invalid profile level change.
 assert(!profilerChangeWasLogged({from: 0, to: 10, db: profileLevelDB}), "Didn't expect log line");
-})();

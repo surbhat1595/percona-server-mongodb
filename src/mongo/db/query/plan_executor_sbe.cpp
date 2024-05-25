@@ -103,19 +103,17 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
     invariant(!_nss.isEmpty());
     invariant(_root);
 
-    auto& outputs = _rootData.staticData->outputs;
-
-    if (auto slot = outputs.getIfExists(stage_builder::PlanStageSlots::kResult)) {
-        _result = _root->getAccessor(_rootData.env.ctx, *slot);
+    auto& env = _rootData.env;
+    if (auto slot = _rootData.staticData->resultSlot) {
+        _result = _root->getAccessor(env.ctx, *slot);
         uassert(4822865, "Query does not have result slot.", _result);
     }
 
-    if (auto slot = outputs.getIfExists(stage_builder::PlanStageSlots::kRecordId)) {
-        _resultRecordId = _root->getAccessor(_rootData.env.ctx, *slot);
+    if (auto slot = _rootData.staticData->recordIdSlot) {
+        _resultRecordId = _root->getAccessor(env.ctx, *slot);
         uassert(4822866, "Query does not have recordId slot.", _resultRecordId);
     }
 
-    auto& env = _rootData.env;
     if (_rootData.staticData->shouldTrackLatestOplogTimestamp) {
         _oplogTs = env->getAccessor(env->getSlot("oplogTs"_sd));
     }
@@ -316,7 +314,8 @@ PlanExecutor::ExecState PlanExecutorSBE::getNextImpl(ObjectType* out, RecordId* 
     boost::optional<AutoGetCollectionForReadMaybeLockFree> coll;
     std::unique_ptr<insert_listener::Notifier> notifier;
     if (insert_listener::shouldListenForInserts(_opCtx, _cq.get())) {
-        if (!_opCtx->lockState()->isCollectionLockedForMode(_nss, MODE_IS)) {
+        if (!_opCtx->isLockFreeReadsOp() &&
+            !_opCtx->lockState()->isCollectionLockedForMode(_nss, MODE_IS)) {
             coll.emplace(_opCtx, _nss);
         }
 
@@ -452,6 +451,10 @@ BSONObj PlanExecutorSBE::getPostBatchResumeToken() const {
     }
 
     return {};
+}
+
+bool PlanExecutorSBE::usesCollectionAcquisitions() const {
+    return _yieldPolicy->usesCollectionAcquisitions();
 }
 
 namespace {

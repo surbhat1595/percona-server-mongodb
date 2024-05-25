@@ -2,11 +2,8 @@
  * Tests that $out errors when trying to write to time-series collections on older server versions.
  * $out with the 'timeseries' option should only succeed if the FCV >= 7.1.
  */
-
-(function() {
-"use strict";
-
-load('./jstests/multiVersion/libs/multi_cluster.js');  // for upgradeCluster.
+import "jstests/multiVersion/libs/multi_cluster.js";
+import {awaitRSClientHosts} from "jstests/replsets/rslib.js";
 
 const st = new ShardingTest({
     shards: 2,
@@ -29,7 +26,8 @@ coll.drop();
 tColl.drop();
 
 // set up a source collection and a time-series target collection.
-assert.commandWorked(testDB.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
+assert.commandWorked(
+    testDB.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
 assert.commandWorked(coll.insert({t: ISODate(), m: 1}));
 assert.commandWorked(testDB.createCollection(tColl.getName(), {timeseries: {timeField: "t"}}));
 assert.commandWorked(tColl.insert({t: ISODate(), m: 1}));
@@ -71,7 +69,8 @@ assert.throwsWithCode(() => coll.aggregate(replacePipeline), 7406100);
 
 // upgrade the FCV version
 jsTestLog('upgrading the FCV version.');
-assert.commandWorked(mongosConn.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+assert.commandWorked(
+    mongosConn.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
 // assert aggregate with 'timeseries' succeeds.
 assert.doesNotThrow(() => coll.aggregate(pipeline));
 let resultColl = mongosConn.getDB(dbName)["out_time"];
@@ -83,4 +82,3 @@ resultColl = mongosConn.getDB(dbName)["timeseries"];
 assert.eq(1, resultColl.find().itcount());
 
 st.stop();
-}());

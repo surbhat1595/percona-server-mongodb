@@ -24,12 +24,8 @@
 
 import {aggPlanHasStage, getAggPlanStage} from "jstests/libs/analyze_plan.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
-if (!FeatureFlagUtil.isEnabled(db, "TimeseriesMetricIndexes")) {
-    jsTestLog(
-        "Skipped test as the featureFlagTimeseriesMetricIndexes feature flag is not enabled.");
-    quit();
-}
 Random.setRandomSeed();
 
 // Value is taken from geoconstants.h.

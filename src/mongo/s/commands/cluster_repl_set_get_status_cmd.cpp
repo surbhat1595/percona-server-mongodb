@@ -74,7 +74,7 @@ public:
     }
 
     virtual bool errmsgRun(OperationContext* opCtx,
-                           const std::string& dbname,
+                           const DatabaseName& dbName,
                            const BSONObj& cmdObj,
                            std::string& errmsg,
                            BSONObjBuilder& result) {
@@ -87,8 +87,8 @@ public:
 
         return false;
     }
-
-} cmdReplSetGetStatus;
+};
+MONGO_REGISTER_COMMAND(CmdReplSetGetStatus);
 
 }  // namespace
 }  // namespace mongo

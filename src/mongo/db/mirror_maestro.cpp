@@ -321,7 +321,7 @@ Status MirroredReadsServerParameter::setFromString(StringData str,
 void MirrorMaestro::init(ServiceContext* serviceContext) noexcept {
     auto replCoord = repl::ReplicationCoordinator::get(serviceContext);
     invariant(replCoord);
-    if (replCoord->getReplicationMode() != repl::ReplicationCoordinator::modeReplSet) {
+    if (!replCoord->getSettings().isReplSet()) {
         // We only need a maestro if we're in a replica set
         return;
     }
@@ -498,7 +498,7 @@ void MirrorMaestroImpl::_mirror(const std::vector<HostAndPort>& hosts,
         };
 
         auto newRequest = executor::RemoteCommandRequest(
-            host, invocation->ns().db().toString(), payload, nullptr);
+            host, invocation->getDBForReadMirroring(), payload, nullptr);
 
         newRequest.options.fireAndForget = true;
         if (MONGO_unlikely(mirrorMaestroExpectsResponse.shouldFail()))

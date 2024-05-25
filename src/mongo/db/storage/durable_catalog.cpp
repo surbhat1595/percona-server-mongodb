@@ -50,6 +50,7 @@
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/operation_context.h"
@@ -61,6 +62,7 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine_interface.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -115,10 +117,11 @@ constexpr std::array<StringData, 256> escapeTable = {
     ".240"_sd, ".241"_sd, ".242"_sd, ".243"_sd, ".244"_sd, ".245"_sd, ".246"_sd, ".247"_sd,
     ".248"_sd, ".249"_sd, ".250"_sd, ".251"_sd, ".252"_sd, ".253"_sd, ".254"_sd, ".255"_sd};
 
-std::string escapeDbName(StringData dbname) {
+std::string escapeDbName(const DatabaseName& dbName) {
     std::string escaped;
-    escaped.reserve(dbname.size());
-    for (unsigned char c : dbname) {
+    const auto db = DatabaseNameUtil::serializeForCatalog(dbName);
+    escaped.reserve(db.size());
+    for (unsigned char c : db) {
         StringData ce = escapeTable[c];
         escaped.append(ce.begin(), ce.end());
     }
@@ -172,7 +175,7 @@ std::string DurableCatalog::_newInternalIdent(StringData identStem) {
     return buf.str();
 }
 
-std::string DurableCatalog::getFilesystemPathForDb(const std::string& dbName) const {
+std::string DurableCatalog::getFilesystemPathForDb(const DatabaseName& dbName) const {
     if (_directoryPerDb) {
         return storageGlobalParams.dbpath + '/' + escapeDbName(dbName);
     } else {
@@ -185,7 +188,7 @@ std::string DurableCatalog::generateUniqueIdent(NamespaceString nss, const char*
     stdx::lock_guard<Latch> lk(_randLock);
     StringBuilder buf;
     if (_directoryPerDb) {
-        buf << escapeDbName(nss.db()) << '/';
+        buf << escapeDbName(nss.dbName()) << '/';
     }
     buf << kind;
     buf << (_directoryForIndexes ? '/' : '-');
@@ -307,6 +310,10 @@ StatusWith<DurableCatalog::EntryIdentifier> DurableCatalog::_addEntry(
             // to false by default as mixed-schema data is only possible in versions 5.1 and
             // earlier.
             md.timeseriesBucketsMayHaveMixedSchemaData = false;
+            if (feature_flags::gTSBucketingParametersUnchanged.isEnabled(
+                    serverGlobalParams.featureCompatibility)) {
+                md.timeseriesBucketingParametersHaveChanged = false;
+            }
         }
         b.append("md", md.toBSON());
         obj = b.obj();
@@ -519,8 +526,8 @@ StatusWith<std::string> DurableCatalog::newOrphanedIdent(OperationContext* opCtx
     // The collection will be named local.orphan.xxxxx.
     std::string identNs = ident;
     std::replace(identNs.begin(), identNs.end(), '-', '_');
-    NamespaceString nss{DatabaseName::kLocal.db(),
-                        NamespaceString::kOrphanCollectionPrefix + identNs};
+    const auto nss = NamespaceStringUtil::deserialize(
+        DatabaseName::kLocal, NamespaceString::kOrphanCollectionPrefix + identNs);
 
     BSONObj obj;
     {

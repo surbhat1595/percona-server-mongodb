@@ -73,10 +73,6 @@ const ReplSettings& ReplicationCoordinatorEmbedded::getSettings() const {
     return _settings;
 }
 
-ReplicationCoordinator::Mode ReplicationCoordinatorEmbedded::getReplicationMode() const {
-    return ReplicationCoordinator::Mode::modeNone;
-}
-
 bool ReplicationCoordinatorEmbedded::isWritablePrimaryForReportingPurposes() {
     return true;
 }
@@ -132,10 +128,6 @@ bool ReplicationCoordinatorEmbedded::getMaintenanceMode() {
 
 WriteConcernOptions ReplicationCoordinatorEmbedded::getGetLastErrorDefault() {
     return WriteConcernOptions();
-}
-
-bool ReplicationCoordinatorEmbedded::isReplEnabled() const {
-    return false;
 }
 
 WriteConcernOptions ReplicationCoordinatorEmbedded::populateUnsetWriteConcernOptionsSyncMode(
@@ -634,7 +626,7 @@ void ReplicationCoordinatorEmbedded::cancelCbkHandle(
 
 BSONObj ReplicationCoordinatorEmbedded::runCmdOnPrimaryAndAwaitResponse(
     OperationContext* opCtx,
-    const std::string& dbName,
+    const DatabaseName& dbName,
     const BSONObj& cmdObj,
     OnRemoteCmdScheduledFn onRemoteCmdScheduled,
     OnRemoteCmdCompleteFn onRemoteCmdComplete) {

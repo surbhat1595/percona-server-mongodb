@@ -2810,7 +2810,8 @@ TEST(IDLCommand, TestConcatentateWithDbOrUUID_TestUUID) {
                                      << "five");
 
         BSONObjBuilder builder;
-        BasicConcatenateWithDbOrUUIDCommand one_new(NamespaceStringOrUUID("db", uuid));
+        BasicConcatenateWithDbOrUUIDCommand one_new(NamespaceStringOrUUID(
+            DatabaseName::createDatabaseName_forTest(boost::none, "db"), uuid));
         one_new.setField1(3);
         one_new.setField2("five");
         one_new.serialize(BSONObj(), &builder);
@@ -2821,7 +2822,8 @@ TEST(IDLCommand, TestConcatentateWithDbOrUUID_TestUUID) {
 
     // Positive: Test we can serialize from nothing the same document
     {
-        BasicConcatenateWithDbOrUUIDCommand one_new(NamespaceStringOrUUID("db", uuid));
+        BasicConcatenateWithDbOrUUIDCommand one_new(NamespaceStringOrUUID(
+            DatabaseName::createDatabaseName_forTest(boost::none, "db"), uuid));
         one_new.setField1(3);
         one_new.setField2("five");
         ASSERT_BSONOBJ_EQ(testDoc, serializeCmd(one_new));
@@ -3148,7 +3150,8 @@ void TestDocSequence(StringData name) {
                                  << "field1" << 3 << "field2"
                                  << "five");
 
-    OpMsgRequest request = OpMsgRequest::fromDBAndBody("db", testTempDoc);
+    OpMsgRequest request = OpMsgRequest::fromDBAndBody(
+        DatabaseName::createDatabaseName_forTest(boost::none, "db"), testTempDoc);
     request.sequences.push_back({"structs",
                                  {BSON("value"
                                        << "hello"),
@@ -3190,7 +3193,8 @@ void TestBadDocSequences(StringData name, bool extraFieldAllowed) {
 
     // Negative: Duplicate fields in doc sequence
     {
-        OpMsgRequest request = OpMsgRequest::fromDBAndBody("db", testTempDoc);
+        OpMsgRequest request = OpMsgRequest::fromDBAndBody(
+            DatabaseName::createDatabaseName_forTest(boost::none, "db"), testTempDoc);
         request.sequences.push_back({"structs",
                                      {BSON("value"
                                            << "hello"),
@@ -3203,7 +3207,8 @@ void TestBadDocSequences(StringData name, bool extraFieldAllowed) {
 
     // Negative: Extra field in document sequence
     {
-        OpMsgRequest request = OpMsgRequest::fromDBAndBody("db", testTempDoc);
+        OpMsgRequest request = OpMsgRequest::fromDBAndBody(
+            DatabaseName::createDatabaseName_forTest(boost::none, "db"), testTempDoc);
         request.sequences.push_back({"structs",
                                      {BSON("value"
                                            << "hello"),
@@ -3221,7 +3226,8 @@ void TestBadDocSequences(StringData name, bool extraFieldAllowed) {
 
     // Negative: Missing field in both document sequence and body
     {
-        OpMsgRequest request = OpMsgRequest::fromDBAndBody("db", testTempDoc);
+        OpMsgRequest request = OpMsgRequest::fromDBAndBody(
+            DatabaseName::createDatabaseName_forTest(boost::none, "db"), testTempDoc);
         request.sequences.push_back({"objects", {BSON("foo" << 1)}});
 
         ASSERT_THROWS(TestT::parse(ctxt, request), AssertionException);
@@ -3229,7 +3235,8 @@ void TestBadDocSequences(StringData name, bool extraFieldAllowed) {
 
     // Negative: Missing field in both document sequence and body
     {
-        OpMsgRequest request = OpMsgRequest::fromDBAndBody("db", testTempDoc);
+        OpMsgRequest request = OpMsgRequest::fromDBAndBody(
+            DatabaseName::createDatabaseName_forTest(boost::none, "db"), testTempDoc);
         request.sequences.push_back({"structs",
                                      {BSON("value"
                                            << "hello"),
@@ -3263,7 +3270,8 @@ void TestDuplicateDocSequences(StringData name) {
                                                            << "world"))
                                      << "objects" << BSON_ARRAY(BSON("foo" << 1)));
 
-        OpMsgRequest request = OpMsgRequest::fromDBAndBody("db", testTempDoc);
+        OpMsgRequest request = OpMsgRequest::fromDBAndBody(
+            DatabaseName::createDatabaseName_forTest(boost::none, "db"), testTempDoc);
         request.sequences.push_back({"structs",
                                      {BSON("value"
                                            << "hello"),
@@ -3285,7 +3293,8 @@ void TestDuplicateDocSequences(StringData name) {
                                                            << "world"))
                                      << "objects" << BSON_ARRAY(BSON("foo" << 1)));
 
-        OpMsgRequest request = OpMsgRequest::fromDBAndBody("db", testTempDoc);
+        OpMsgRequest request = OpMsgRequest::fromDBAndBody(
+            DatabaseName::createDatabaseName_forTest(boost::none, "db"), testTempDoc);
         request.sequences.push_back({"objects", {BSON("foo" << 1)}});
 
         ASSERT_THROWS(DocSequenceCommand::parse(ctxt, request), AssertionException);
@@ -3315,7 +3324,8 @@ TEST(IDLDocSequence, TestEmptySequence) {
                                                       << "world"))
                                 << "objects" << BSON_ARRAY(BSON("foo" << 1)));
 
-        OpMsgRequest request = OpMsgRequest::fromDBAndBody("db", testTempDoc);
+        OpMsgRequest request = OpMsgRequest::fromDBAndBody(
+            DatabaseName::createDatabaseName_forTest(boost::none, "db"), testTempDoc);
         request.sequences.push_back({"structs", {}});
 
         ASSERT_THROWS(DocSequenceCommand::parse(ctxt, request), AssertionException);
@@ -3329,7 +3339,8 @@ TEST(IDLDocSequence, TestEmptySequence) {
                                 << "five"
                                 << "objects" << BSON_ARRAY(BSON("foo" << 1)));
 
-        OpMsgRequest request = OpMsgRequest::fromDBAndBody("db", testTempDoc);
+        OpMsgRequest request = OpMsgRequest::fromDBAndBody(
+            DatabaseName::createDatabaseName_forTest(boost::none, "db"), testTempDoc);
         request.sequences.push_back({"structs", {}});
 
         auto testStruct = DocSequenceCommand::parse(ctxt, request);
@@ -3369,7 +3380,8 @@ TEST(IDLDocSequence, TestWellKnownFieldsAreIgnored) {
                                 << "objects" << BSON_ARRAY(BSON("foo" << 1)));
 
 
-        OpMsgRequest request = OpMsgRequest::fromDBAndBody("db", testTempDoc);
+        OpMsgRequest request = OpMsgRequest::fromDBAndBody(
+            DatabaseName::createDatabaseName_forTest(boost::none, "db"), testTempDoc);
 
         // Validate it can be parsed as a OpMsgRequest.
         {
@@ -3438,7 +3450,8 @@ TEST(IDLDocSequence, TestNonStrict) {
                                 << "field1" << 3 << "field2"
                                 << "five");
 
-        OpMsgRequest request = OpMsgRequest::fromDBAndBody("db", testTempDoc);
+        OpMsgRequest request = OpMsgRequest::fromDBAndBody(
+            DatabaseName::createDatabaseName_forTest(boost::none, "db"), testTempDoc);
         request.sequences.push_back({"structs",
                                      {BSON("value"
                                            << "hello"),
@@ -3459,7 +3472,8 @@ TEST(IDLDocSequence, TestNonStrict) {
                                 << "five"
                                 << "extra" << 1);
 
-        OpMsgRequest request = OpMsgRequest::fromDBAndBody("db", testTempDoc);
+        OpMsgRequest request = OpMsgRequest::fromDBAndBody(
+            DatabaseName::createDatabaseName_forTest(boost::none, "db"), testTempDoc);
         request.sequences.push_back({"structs",
                                      {BSON("value"
                                            << "hello"),
@@ -5166,5 +5180,19 @@ TEST(IDLDangerousIgnoreChecks, ValidateDuplicateChecking) {
                       AssertionException);
     }
 }
+
+TEST(IDLTrie, TestPrefixes) {
+    ASSERT_FALSE(TestTrieArgs::hasField("foo"));
+    ASSERT_FALSE(TestTrieArgs::hasField("s"));
+    ASSERT_FALSE(TestTrieArgs::hasField("sw"));
+    ASSERT_FALSE(TestTrieArgs::hasField("swi"));
+    ASSERT_TRUE(TestTrieArgs::hasField("swim"));
+    ASSERT_FALSE(TestTrieArgs::hasField("swims"));
+    ASSERT_FALSE(TestTrieArgs::hasField("swimer"));
+    ASSERT_TRUE(TestTrieArgs::hasField("swimmer"));
+    ASSERT_FALSE(TestTrieArgs::hasField("swimmers"));
+    ASSERT_TRUE(TestTrieArgs::hasField("swimmed"));
+}
+
 }  // namespace
 }  // namespace mongo

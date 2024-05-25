@@ -49,6 +49,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/s/resharding/recipient_resume_document_gen.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
@@ -113,6 +114,11 @@ void ensureTemporaryReshardingCollectionRenamed(OperationContext* opCtx,
                                                 const CommonReshardingMetadata& metadata);
 
 /**
+ * Removes all entries matching the given reshardingUUID from the recipient resume data table.
+ */
+void deleteRecipientResumeData(OperationContext* opCtx, const UUID& reshardingUUID);
+
+/**
  * Returns the largest _id value in the collection.
  */
 Value findHighestInsertedId(OperationContext* opCtx, const CollectionPtr& collection);
@@ -132,6 +138,20 @@ boost::optional<Document> findDocWithHighestInsertedId(OperationContext* opCtx,
 std::vector<InsertStatement> fillBatchForInsert(Pipeline& pipeline, int batchSizeLimitBytes);
 
 /**
+ * Atomically inserts a batch of documents in a single multi-document transaction, along with also
+ * storing the resume token in the same transaction. Returns the number of bytes inserted.
+ */
+int insertBatchTransactionally(OperationContext* opCtx,
+                               const NamespaceString& nss,
+                               const boost::optional<ShardingIndexesCatalogCache>& sii,
+                               TxnNumber& txnNumber,
+                               std::vector<InsertStatement>& batch,
+                               const UUID& reshardingUUID,
+                               const ShardId& donorShard,
+                               const HostAndPort& donorHost,
+                               const BSONObj& resumeToken);
+
+/**
  * Atomically inserts a batch of documents in a single storage transaction. Returns the number of
  * bytes inserted.
  *
@@ -141,6 +161,14 @@ int insertBatch(OperationContext* opCtx,
                 const NamespaceString& nss,
                 std::vector<InsertStatement>& batch);
 
+/**
+ * Checks out the logical session in the opCtx and runs the supplied lambda function in a
+ * transaction, using the transaction number supplied in the opCtx.
+ */
+void runWithTransactionFromOpCtx(OperationContext* opCtx,
+                                 const NamespaceString& nss,
+                                 const boost::optional<ShardingIndexesCatalogCache>& sii,
+                                 unique_function<void(OperationContext*)> func);
 /**
  * Checks out the logical session and acts in one of the following ways depending on the state of
  * this shard's config.transactions table:
@@ -177,6 +205,12 @@ void updateSessionRecord(OperationContext* opCtx,
                          std::vector<StmtId> stmtIds,
                          boost::optional<repl::OpTime> preImageOpTime,
                          boost::optional<repl::OpTime> postImageOpTime);
+
+/**
+ * Retrieves the resume data natural order scans for all donor shards.
+ */
+std::vector<ReshardingRecipientResumeData> getRecipientResumeData(OperationContext* opCtx,
+                                                                  const UUID& reshardingUUID);
 
 /**
  * Calls and returns the value from the supplied lambda function.

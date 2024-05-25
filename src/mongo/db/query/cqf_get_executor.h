@@ -52,7 +52,7 @@
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_yield_policy_sbe.h"
 #include "mongo/db/query/query_solution.h"
-#include "mongo/db/query/sbe_stage_builder.h"
+#include "mongo/db/query/sbe_stage_builder_plan_data.h"
 
 namespace mongo {
 
@@ -85,7 +85,7 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
     OperationContext* opCtx,
     boost::intrusive_ptr<ExpressionContext> expCtx,
     const NamespaceString& nss,
-    const CollectionPtr& collection,
+    const MultipleCollectionAccessor& collections,
     optimizer::QueryHints queryHints,
     const boost::optional<BSONObj>& indexHint,
     const Pipeline* pipeline,
@@ -94,9 +94,10 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
 /**
  * Returns a PlanExecutor for the given CanonicalQuery.
  */
-boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(const CollectionPtr& collection,
-                                                               optimizer::QueryHints queryHints,
-                                                               const CanonicalQuery* query);
+boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
+    const MultipleCollectionAccessor& collections,
+    optimizer::QueryHints queryHints,
+    const CanonicalQuery* query);
 
 /**
  * Constructs a plan executor with the given CanonicalQuery and ExecParams.

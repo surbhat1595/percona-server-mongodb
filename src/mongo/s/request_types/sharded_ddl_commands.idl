@@ -164,6 +164,18 @@ structs:
                     the shard key pattern if unique is true. If true then it will verify and if
                     false then it won't.
                 type: optionalBool
+            unsplittable:
+                type: optionalBool
+                description: "Flag that identifies whether the collection is splittable in multiple 
+                            chunks. If unsplittable, the collection is always equivalent to a 1 
+                            chunk collection. The shardKey must be set to {_id:1} in case this 
+                            flag is enabled"
+            dataShard:
+                description: >-
+                    If set, specify shard where the collection should be created, if the collection
+                    doesn't already exist. Only allowed if `unsplittable` is true.
+                type: shard_id
+                optional: true
 
     CreateCollectionResponse:
         description: "Response of the create collection command"
@@ -197,6 +209,27 @@ structs:
                     the shard key pattern if unique is true. If true then it will verify and if
                     false then it won't.
                 type: optionalBool
+
+    CommitRefineCollectionShardKeyRequest:
+        description: "Parameters sent to commit refineCollectionShardKey"
+        strict: false
+        fields:
+            key:
+                type: KeyPattern
+                description: "Index specification to use as the new shard key."
+                optional: false
+            newEpoch:
+                type: objectid
+                description: "The new epoch for the namespace."
+                optional: false
+            newTimestamp:
+                type: timestamp
+                description: "The new timestamp in the collection"
+                optional: false
+            oldTimestamp:
+                type: timestamp
+                description: "Previous collection timestamp, necessary to make the command idempotent"
+                optional: false
 
     ReshardCollectionRequest:
         description: "Parameters for the reshard collection command"
@@ -245,6 +278,10 @@ structs:
                 description: >-
                     "A user-provided identifier used to identify this resharding operation for
                     retryability purposes."
+                optional: true
+            provenance:
+                type: string
+                description: "The source operation that called this resharding operation."
                 optional: true
 
     SetAllowMigrationsRequest:
@@ -441,6 +478,18 @@ commands:
                 description: >-
                     Verifies that the shard key index has the same unique setting as the command.
                 type: optionalBool
+        reply_type: OkReply
+
+    _configsvrCommitRefineCollectionShardKey:
+        command_name: _configsvrCommitRefineCollectionShardKey
+        cpp_name: ConfigsvrCommitRefineCollectionShardKey
+        description: "Internal refineCollectionShardKey commit command on the configsvr."
+        strict: false
+        namespace: type
+        api_version: ""
+        type: namespacestring
+        chained_structs:
+            CommitRefineCollectionShardKeyRequest: CommitRefineCollectionShardKeyRequest
 
     _shardsvrDropIndexes:
         description: "Parser for the _shardsvrDropIndexes command"

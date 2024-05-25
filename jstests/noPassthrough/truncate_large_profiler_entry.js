@@ -1,10 +1,9 @@
 /**
  * Test which verifies that large profiler entries generated for SBE plans do not exceed the max
  * BSON depth. Instead, they get truncated right below the max depth.
+ * TODO: SERVER-79935: Re-enable this test to run with CQF enabled.
+ * @tags: [cqf_incompatible]
  */
-(function() {
-"use strict";
-
 const conn = MongoRunner.runMongod();
 assert.neq(null, conn, "mongod was unable to startup");
 const db = conn.getDB("test");
@@ -32,4 +31,3 @@ assert.eq(1, profilerEntry.length, profilerEntry);
 // Collection validation should detect no issues.
 assert.commandWorked(db.system.profile.validate({full: true}));
 MongoRunner.stopMongod(conn);
-}());

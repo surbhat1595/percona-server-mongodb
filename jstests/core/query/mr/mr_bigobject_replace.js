@@ -1,7 +1,8 @@
 // Cannot implicitly shard accessed collections because of following errmsg: Cannot output to a
 // non-sharded collection because sharded collection exists already.
-// The test runs commands that are not allowed with security token: mapReduce.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapReduce.
 //   not_allowed_with_security_token,
 //   assumes_unsharded_collection,
 //   # mapReduce does not support afterClusterTime.
@@ -16,8 +17,6 @@
  * document larger than 16MB as a result of the reduce() or finalize() functions and using the
  * "replace" action for the out collection.
  */
-(function() {
-"use strict";
 function mapper() {
     // Emit multiple values to ensure that the reducer gets called.
     emit(this._id, 1);
@@ -87,4 +86,3 @@ runTest({
     },
     finalize: createBigDocument
 });
-})();

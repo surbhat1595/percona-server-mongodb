@@ -90,7 +90,7 @@ public:
             const auto commandResponse = uassertStatusOK(configShard->runCommand(
                 opCtx,
                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                DatabaseName::kAdmin.toString(),
+                DatabaseName::kAdmin,
                 configsvrRequest.toBSON(
                     BSON(WriteConcernOptions::kWriteConcernField << WriteConcernOptions::Majority)),
                 Shard::RetryPolicy::kIdempotent));
@@ -114,7 +114,8 @@ public:
                                                            ActionType::moveChunk));
         }
     };
-} resetPlacementHistory;
+};
+MONGO_REGISTER_COMMAND(ClusterResetPlacementHistoryCommand);
 
 }  // namespace
 }  // namespace mongo

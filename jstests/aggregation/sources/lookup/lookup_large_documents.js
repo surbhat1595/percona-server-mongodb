@@ -1,11 +1,12 @@
 /**
  * Test that $lookup can generate documents larger than maximum BSON size, as long as only part of
  * such document is returned to the client.
+ * @tags: [
+ *   # TODO SERVER-79448: Investigate why the test timeouts on TSAN variant.
+ *   tsan_incompatible,
+ * ]
  */
-(function() {
-"use strict";
-
-load("jstests/aggregation/extras/utils.js");  // For arrayEq.
+import {arrayEq} from "jstests/aggregation/extras/utils.js";
 
 const localColl = db.lookup_large_documents_local;
 const foreignCollName = 'lookup_large_documents_foreign';
@@ -35,4 +36,3 @@ for (let preventProjectPushdown of [false, true]) {
     assert(arrayEq(results, [{foo: 3}]),
            "Pipeline:\n" + tojson(pipeline) + "Actual results:\n" + tojson(results));
 }
-}());

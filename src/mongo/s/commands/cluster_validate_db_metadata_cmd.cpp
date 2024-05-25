@@ -100,7 +100,7 @@ public:
         Reply typedRun(OperationContext* opCtx) {
             auto shardResponses = scatterGatherUnversionedTargetAllShards(
                 opCtx,
-                DatabaseNameUtil::serialize(request().getDbName()),
+                request().getDbName(),
                 applyReadWriteConcern(
                     opCtx,
                     this,
@@ -154,6 +154,7 @@ public:
             return reply;
         }
     };
-} validateDBMetadataCmd;
+};
+MONGO_REGISTER_COMMAND(ValidateDBMetadataCmd);
 }  // namespace
 }  // namespace mongo

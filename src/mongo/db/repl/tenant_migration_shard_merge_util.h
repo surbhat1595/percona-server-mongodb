@@ -41,6 +41,7 @@
 #include "mongo/bson/oid.h"
 #include "mongo/client/dbclient_connection.h"
 #include "mongo/db/cursor_id.h"
+#include "mongo/db/cursor_server_params_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
@@ -63,8 +64,12 @@ inline constexpr StringData kImportDoneMarkerPrefix = "importDoneMarker."_sd;
 inline constexpr StringData kMigrationTmpDirPrefix = "migrationTmpFiles"_sd;
 inline constexpr StringData kMigrationIdFieldName = "migrationId"_sd;
 inline constexpr StringData kBackupIdFieldName = "backupId"_sd;
-inline constexpr StringData kDonorFieldName = "donor"_sd;
+inline constexpr StringData kDonorHostNameFieldName = "donorHostName"_sd;
 inline constexpr StringData kDonorDbPathFieldName = "dbpath"_sd;
+
+// Keep the backup cursor alive by pinging twice as often as the donor's default
+// cursor timeout.
+constexpr int kBackupCursorKeepAliveIntervalMillis = mongo::kCursorTimeoutMillisDefault / 2;
 
 inline bool isDonatedFilesCollection(const NamespaceString& ns) {
     return ns.isConfigDB() && ns.coll().startsWith(kDonatedFilesPrefix);
@@ -85,25 +90,34 @@ inline boost::filesystem::path fileClonerTempDir(const UUID& migrationId) {
 }
 
 /**
+ * Computes a boost::filesystem::path generic-style relative path (always uses slashes)
+ * from a base path and a relative path.
+ */
+std::string getPathRelativeTo(const std::string& path, const std::string& basePath);
+
+/**
  * Represents the document structure of config.donatedFiles_<MigrationUUID> collection.
  */
 struct MetadataInfo {
     explicit MetadataInfo(const UUID& backupId,
                           const UUID& migrationId,
-                          const std::string& donor,
+                          const std::string& donorHostAndPort,
                           const std::string& donorDbPath)
-        : backupId(backupId), migrationId(migrationId), donor(donor), donorDbPath(donorDbPath) {}
+        : backupId(backupId),
+          migrationId(migrationId),
+          donorHostAndPort(donorHostAndPort),
+          donorDbPath(donorDbPath) {}
     UUID backupId;
     UUID migrationId;
-    std::string donor;
+    std::string donorHostAndPort;
     std::string donorDbPath;
 
     static MetadataInfo constructMetadataInfo(const UUID& migrationId,
-                                              const std::string& donor,
+                                              const std::string& donorHostAndPort,
                                               const BSONObj& obj) {
         auto backupId = UUID(uassertStatusOK(UUID::parse(obj[kBackupIdFieldName])));
         auto donorDbPath = obj[kDonorDbPathFieldName].String();
-        return MetadataInfo{backupId, migrationId, donor, donorDbPath};
+        return MetadataInfo{backupId, migrationId, donorHostAndPort, donorDbPath};
     }
 
     BSONObj toBSON(const BSONObj& extraFields) const {
@@ -111,7 +125,7 @@ struct MetadataInfo {
 
         migrationId.appendToBuilder(&bob, kMigrationIdFieldName);
         backupId.appendToBuilder(&bob, kBackupIdFieldName);
-        bob.append(kDonorFieldName, donor);
+        bob.append(kDonorHostNameFieldName, donorHostAndPort);
         bob.append(kDonorDbPathFieldName, donorDbPath);
         bob.append("_id", OID::gen());
         bob.appendElements(extraFields);
@@ -127,18 +141,10 @@ void createImportDoneMarkerLocalCollection(OperationContext* opCtx, const UUID& 
 void dropImportDoneMarkerLocalCollection(OperationContext* opCtx, const UUID& migrationId);
 
 /**
- * Copy a file from the donor.
+ * Runs rollback to stable on the cloned files associated with the given migration id,
+ * and then import the stable cloned files into the main WT instance.
  */
-void cloneFile(OperationContext* opCtx,
-               DBClientConnection* clientConnection,
-               ThreadPool* writerPool,
-               TenantMigrationSharedData* sharedData,
-               const BSONObj& metadataDoc);
-
-/**
- * Import a donor collection after its files have been cloned to a temp dir.
- */
-void wiredTigerImport(OperationContext* opCtx, const UUID& migrationId);
+void runRollbackAndThenImportFiles(OperationContext* opCtx, const UUID& migrationId);
 
 /**
  * Send a "getMore" to keep a backup cursor from timing out.

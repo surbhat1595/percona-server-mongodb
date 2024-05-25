@@ -40,6 +40,7 @@
 #include "mongo/db/query/optimizer/containers.h"
 #include "mongo/db/query/optimizer/defs.h"
 #include "mongo/db/query/optimizer/partial_schema_requirements.h"
+#include "mongo/db/query/optimizer/syntax/path.h"
 #include "mongo/db/query/optimizer/syntax/syntax.h"
 
 
@@ -72,7 +73,6 @@ struct DistributionAndPaths {
      */
     ABTVector _paths;
 };
-
 
 /**
  * Structure to represent index field component and its associated collation. The _path field
@@ -145,14 +145,14 @@ public:
     IndexDefinition(IndexCollationSpec collationSpec,
                     bool isMultiKey,
                     DistributionAndPaths distributionAndPaths,
-                    PartialSchemaRequirements partialReqMap);
+                    PSRExpr::Node partialReqMap);
 
     IndexDefinition(IndexCollationSpec collationSpec,
                     int64_t version,
                     uint32_t orderingBits,
                     bool isMultiKey,
                     DistributionAndPaths distributionAndPaths,
-                    PartialSchemaRequirements partialReqMap);
+                    PSRExpr::Node partialReqMap);
 
     const IndexCollationSpec& getCollationSpec() const;
 
@@ -162,8 +162,8 @@ public:
 
     const DistributionAndPaths& getDistributionAndPaths() const;
 
-    const PartialSchemaRequirements& getPartialReqMap() const;
-    PartialSchemaRequirements& getPartialReqMap();
+    const PSRExpr::Node& getPartialReqMap() const;
+    PSRExpr::Node& getPartialReqMap();
 
 private:
     const IndexCollationSpec _collationSpec;
@@ -175,7 +175,7 @@ private:
     const DistributionAndPaths _distributionAndPaths;
 
     // Requirements map for partial filter expression. May be trivially true.
-    PartialSchemaRequirements _partialReqMap;
+    PSRExpr::Node _partialReqMap;
 };
 
 using IndexDefinitions = opt::unordered_map<std::string, IndexDefinition>;
@@ -184,9 +184,43 @@ using ScanDefOptions = opt::unordered_map<std::string, std::string>;
 /**
  * Metadata associated with the sharding state of a collection.
  */
-struct ShardingMetadata {
+class ShardingMetadata {
+public:
+    ShardingMetadata();
+
+    ShardingMetadata(IndexCollationSpec shardKey, bool mayContainOrphans);
+
+    const IndexCollationSpec& shardKey() const {
+        return _shardKey;
+    }
+
+    bool mayContainOrphans() const {
+        return _mayContainOrphans;
+    }
+
+    void setMayContainOrphans(bool val) {
+        _mayContainOrphans = val;
+    }
+
+    const std::vector<FieldNameType>& topLevelShardKeyFieldNames() const {
+        return _topLevelShardKeyFieldNames;
+    }
+
+private:
+    // Shard key of the collection. This is stored as an IndexCollectionSpec because the shard key
+    // is conceptually an index to the shard which contains a particular key. The only collation ops
+    // that are allowed are Ascending and Clustered.
+    // Note: Clustered collation op is intended to represent a hashed shard key; however, if two
+    // keys hash to the same value, it is possible that an index scan of the hashed index will
+    // produce a stream of keys which are not clustered. Hashed indexes are implemented with a
+    // B-tree using the hashed value as a key, which makes it sensitive to insertion order.
+    IndexCollationSpec _shardKey;
+
     // Whether the collection may contain orphans.
-    bool mayContainOrphans{false};
+    bool _mayContainOrphans{false};
+
+    // Top level field name of each component of the shard key.
+    std::vector<FieldNameType> _topLevelShardKeyFieldNames;
 };
 
 /**
@@ -220,7 +254,8 @@ public:
 
     const boost::optional<CEType>& getCE() const;
 
-    ShardingMetadata shardingMetadata() const;
+    const ShardingMetadata& shardingMetadata() const;
+    ShardingMetadata& shardingMetadata();
 
 private:
     ScanDefOptions _options;
@@ -253,13 +288,14 @@ private:
  * info, and data related to associated indexes in addition to other relevant metadata.
  */
 struct Metadata {
+    Metadata() = default;
     Metadata(opt::unordered_map<std::string, ScanDefinition> scanDefs);
     Metadata(opt::unordered_map<std::string, ScanDefinition> scanDefs, size_t numberOfPartitions);
 
     opt::unordered_map<std::string, ScanDefinition> _scanDefs;
 
     // Degree of parallelism.
-    size_t _numberOfPartitions;
+    size_t _numberOfPartitions{1};
 
     bool isParallelExecution() const;
 

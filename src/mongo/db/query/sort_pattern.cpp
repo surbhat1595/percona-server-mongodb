@@ -75,13 +75,7 @@ SortPattern::SortPattern(const BSONObj& obj,
             } else if (metaElem.valueStringDataSafe() == "randVal"_sd) {
                 // Valid meta sort. Just fall through.
             } else if (metaElem.valueStringDataSafe() == "geoNearDistance"_sd) {
-                if (!feature_flags::gTimeseriesMetricIndexes.isEnabled(
-                        serverGlobalParams.featureCompatibility)) {
-                    uasserted(5917100,
-                              "$meta sort by 'geoNearDistance' is allowed only with "
-                              "featureFlagTimeseriesMetricIndexes flag");
-                }
-                // Valid meta sort if the flag is enabled. Just fall through.
+                // Valid meta sort. Just fall through.
             } else if (metaElem.valueStringDataSafe() == "searchScore"_sd) {
                 uasserted(31218, "$meta sort by 'searchScore' metadata is not supported");
             } else if (metaElem.valueStringDataSafe() == "searchHighlights"_sd) {
@@ -135,7 +129,7 @@ QueryMetadataBitSet SortPattern::metadataDeps(QueryMetadataBitSet unavailableMet
 }
 
 Document SortPattern::serialize(SortKeySerialization serializationMode,
-                                SerializationOptions options) const {
+                                const SerializationOptions& options) const {
     MutableDocument keyObj;
     const size_t n = _sortPattern.size();
     for (size_t i = 0; i < n; ++i) {
@@ -149,7 +143,12 @@ Document SortPattern::serialize(SortKeySerialization serializationMode,
                 case SortKeySerialization::kForExplain:
                 case SortKeySerialization::kForPipelineSerialization: {
                     const bool isExplain = (serializationMode == SortKeySerialization::kForExplain);
-                    keyObj[computedFieldName] = _sortPattern[i].expression->serialize(isExplain);
+                    auto opts = SerializationOptions{};
+                    if (isExplain) {
+                        opts.verbosity =
+                            boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner);
+                    }
+                    keyObj[computedFieldName] = _sortPattern[i].expression->serialize(opts);
                     break;
                 }
                 case SortKeySerialization::kForSortKeyMerging: {

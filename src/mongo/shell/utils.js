@@ -29,6 +29,13 @@ function _getErrorWithCode(codeOrObj, message) {
 
         if (codeOrObj.hasOwnProperty("writeErrors")) {
             e.writeErrors = codeOrObj.writeErrors;
+        } else if ((codeOrObj instanceof BulkWriteResult || codeOrObj instanceof BulkWriteError) &&
+                   codeOrObj.hasWriteErrors()) {
+            e.writeErrors = codeOrObj.getWriteErrors();
+        }
+
+        if (codeOrObj instanceof WriteResult && codeOrObj.hasWriteError()) {
+            e.writeErrors = [codeOrObj.getWriteError()];
         }
 
         if (codeOrObj.hasOwnProperty("errorLabels")) {
@@ -39,6 +46,33 @@ function _getErrorWithCode(codeOrObj, message) {
     }
 
     return e;
+}
+
+/**
+ * Executes the specified function and retries it if it fails due to retryable error.
+ * If it exhausts the number of allowed retries, it simply throws the last exception.
+ *
+ * Returns the return value of the input call.
+ */
+
+function retryOnRetryableError(func, numRetries, sleepMs) {
+    numRetries = numRetries || 1;
+    sleepMs = sleepMs || 1000;
+
+    while (true) {
+        try {
+            return func();
+        } catch (e) {
+            if (isRetryableError(e) && numRetries > 0) {
+                print("An error occurred and the call will be retried: " +
+                      tojson({error: e.toString(), stack: e.stack}));
+                numRetries--;
+                sleep(sleepMs);
+            } else {
+                throw e;
+            }
+        }
+    }
 }
 
 /**
@@ -117,7 +151,8 @@ const retryableErrs = [
     "WriteConcernFailed",
     "WriteConcernLegacyOK",
     "UnknownReplWriteConcern",
-    "UnsatisfiableWriteConcern"
+    "UnsatisfiableWriteConcern",
+    "The server is in quiesce mode and will shut down"
 ];
 const retryableErrsPlusShellGeneratedNetworkErrs = [...retryableErrs, ...shellGeneratedNetworkErrs];
 /**
@@ -249,7 +284,7 @@ compareOn = function(field) {
 };
 
 shellPrint = function(x) {
-    it = x;
+    const it = x;
     if (x != undefined)
         shellPrintHelper(x);
 };
@@ -296,6 +331,11 @@ if (typeof TestData == "undefined") {
     TestData = undefined;
 }
 
+function _optimizationsEnabled(flags) {
+    const sanitizeMatch = /(\s|^)-O2(\s|$)/.exec(getBuildInfo()["buildEnvironment"]["ccflags"]);
+    return Boolean(sanitizeMatch);
+}
+
 function __sanitizeMatch(flag) {
     var sanitizeMatch = /-fsanitize=([^\s]+) /.exec(getBuildInfo()["buildEnvironment"]["ccflags"]);
     if (flag && sanitizeMatch && RegExp(flag).exec(sanitizeMatch[1])) {
@@ -322,8 +362,17 @@ function _isUndefinedBehaviorSanitizerActive() {
 }
 
 jsTestName = function() {
-    if (TestData)
+    if (TestData) {
+        // If we are using the jsTestName as a database name and performing tenant prefixing
+        // then it's possible that the prefixed database name will exceed the server's dbName
+        // length. In these cases, hashing the test name improves our chances of success. FNV-1a
+        // hashes are maximum 16 characters, so don't hash dbNames that are up to 16 characters.
+        if (TestData.testName.length > 16 && TestData.hashTestNamesForMultitenancy) {
+            return _fnvHashToHexString(TestData.testName);
+        }
         return TestData.testName;
+    }
+
     return "__unknown_name__";
 };
 
@@ -458,6 +507,8 @@ jsTestOptions = function() {
 
             evergreenTaskId: TestData.evergreenTaskId || null,
             configShard: TestData.configShard || false,
+
+            useAutoBootstrapProcedure: TestData.useAutoBootstrapProcedure || false,
         });
     }
     return _jsTestOptions;
@@ -530,6 +581,7 @@ jsTest.authenticateNodes = function(nodes) {
     assert.soonNoExcept(function() {
         for (var i = 0; i < nodes.length; i++) {
             // Don't try to authenticate to arbiters
+            let res = {};
             try {
                 res = nodes[i].getDB("admin")._runCommandWithoutApiStrict({replSetGetStatus: 1});
             } catch (e) {
@@ -910,9 +962,9 @@ shellHelper.set = function(str) {
         print("bad use parameter");
         return;
     }
-    tokens = str.split(" ");
-    param = tokens[0];
-    value = tokens[1];
+    const tokens = str.split(" ");
+    const param = tokens[0];
+    let value = tokens[1];
 
     if (value == undefined)
         value = true;
@@ -1169,52 +1221,6 @@ shellHelper.show = function(what) {
         }
     }
 
-    if (what == "freeMonitoring") {
-        var dbDeclared, ex;
-        try {
-            // !!db essentially casts db to a boolean
-            // Will throw a reference exception if db hasn't been declared.
-            dbDeclared = !!globalThis.db;
-        } catch (ex) {
-            dbDeclared = false;
-        }
-
-        if (dbDeclared) {
-            const freemonStatus = globalThis.db.adminCommand({getFreeMonitoringStatus: 1});
-
-            if (freemonStatus.ok) {
-                if (freemonStatus.state == 'enabled' &&
-                    freemonStatus.hasOwnProperty('userReminder')) {
-                    print("---");
-                    print(freemonStatus.userReminder);
-                    print("---");
-                } else if (freemonStatus.state === 'undecided') {
-                    //print(
-                    //    "---\n" + messageIndent +
-                    //    "Enable MongoDB's free cloud-based monitoring service, which will then receive and display\n" +
-                    //    messageIndent +
-                    //    "metrics about your deployment (disk utilization, CPU, operation statistics, etc).\n" +
-                    //    "\n" + messageIndent +
-                    //    "The monitoring data will be available on a MongoDB website with a unique URL accessible to you\n" +
-                    //    messageIndent +
-                    //    "and anyone you share the URL with. MongoDB may use this information to make product\n" +
-                    //    messageIndent +
-                    //    "improvements and to suggest MongoDB products and deployment options to you.\n" +
-                    //    "\n" + messageIndent +
-                    //    "To enable free monitoring, run the following command: db.enableFreeMonitoring()\n" +
-                    //    messageIndent +
-                    //    "To permanently disable this reminder, run the following command: db.disableFreeMonitoring()\n" +
-                    //    "---\n");
-                }
-            }
-
-            return "";
-        } else {
-            print("Cannot show freeMonitoring, \"db\" is not set");
-            return "";
-        }
-    }
-
     if (what == "nonGenuineMongoDBCheck") {
         let matchesKnownImposterSignature = false;
 
@@ -1321,10 +1327,10 @@ var Random = (function() {
     function setRandomFixtureSeed() {
         var seed = setRandomSeed(TestData.seed).valueOf();
         print(
-            `Reproduce this randomized jstest fixture topology by adding the --shellSeed 
+            `Reproduce this randomized jstest fixture topology by adding the --shellSeed
             ${seed} option to your resmoke invocation.`);
         print(
-            `ie: buildscripts/resmoke.py run --suites [suite_name] ... --shellSeed 
+            `ie: buildscripts/resmoke.py run --suites [suite_name] ... --shellSeed
             ${seed} [my_jstest.js]`);
     }
 
@@ -1474,6 +1480,7 @@ Geo.sphereDistance = function(a, b) {
     return Math.acos(cross_prod);
 };
 
+// eslint-disable-next-line
 rs = function() {
     return "try rs.help()";
 };
@@ -1633,8 +1640,8 @@ rs._runCmd = function(c) {
 };
 rs.reconfig = function(cfg, options) {
     cfg.version = rs.conf().version + 1;
-    cmd = {replSetReconfig: cfg};
-    for (var i in options) {
+    const cmd = {replSetReconfig: cfg};
+    for (let i in options) {
         cmd[i] = options[i];
     }
     return this._runCmd(cmd);

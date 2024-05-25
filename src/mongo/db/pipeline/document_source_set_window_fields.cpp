@@ -140,6 +140,7 @@ list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::createFro
     FieldRefSet fieldSet;
     std::vector<FieldRef> backingRefs;
 
+    expCtx->sbeWindowCompatibility = SbeCompatibility::flagGuarded;
     std::vector<WindowFunctionStatement> outputFields;
     const auto& output = spec.getOutput();
     backingRefs.reserve(output.nFields());
@@ -151,32 +152,25 @@ list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::createFro
                 fieldSet.insert(&backingRefs.back(), &conflict));
         outputFields.push_back(WindowFunctionStatement::parse(outputElem, sortBy, expCtx.get()));
     }
+    auto sbeCompatibility = std::min(expCtx->sbeWindowCompatibility, expCtx->sbeCompatibility);
+    // TODO: (SERVER-78708) Add collation support to window stage in sbe
+    if (expCtx->getCollator()) {
+        sbeCompatibility = SbeCompatibility::notCompatible;
+    }
 
-    return create(
-        std::move(expCtx), std::move(partitionBy), std::move(sortBy), std::move(outputFields));
-}
-
-WindowFunctionStatement WindowFunctionStatement::parse(BSONElement elem,
-                                                       const boost::optional<SortPattern>& sortBy,
-                                                       ExpressionContext* expCtx) {
-    // 'elem' is a statement like 'v: {$sum: {...}}', whereas the expression is '$sum: {...}'.
-    uassert(ErrorCodes::FailedToParse,
-            str::stream() << "The field '" << elem.fieldName() << "' must be an object",
-            elem.type() == BSONType::Object);
-    return WindowFunctionStatement(
-        elem.fieldName(),
-        window_function::Expression::parse(elem.embeddedObject(), sortBy, expCtx));
-}
-void WindowFunctionStatement::serialize(MutableDocument& outputFields,
-                                        SerializationOptions opts) const {
-    outputFields[opts.serializeFieldPathFromString(fieldName)] = expr->serialize(opts);
+    return create(std::move(expCtx),
+                  std::move(partitionBy),
+                  std::move(sortBy),
+                  std::move(outputFields),
+                  sbeCompatibility);
 }
 
 list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::create(
     const intrusive_ptr<ExpressionContext>& expCtx,
     optional<intrusive_ptr<Expression>> partitionBy,
     const optional<SortPattern>& sortBy,
-    std::vector<WindowFunctionStatement> outputFields) {
+    std::vector<WindowFunctionStatement> outputFields,
+    SbeCompatibility sbeCompatibility) {
 
     // Starting with an input like this:
     //     {$setWindowFields: {partitionBy: {$foo: "$x"}, sortBy: {y: 1}, output: {...}}}
@@ -298,7 +292,8 @@ list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::create(
         simplePartitionByExpr,
         sortBy,
         outputFields,
-        internalDocumentSourceSetWindowFieldsMaxMemoryBytes.load()));
+        internalDocumentSourceSetWindowFieldsMaxMemoryBytes.load(),
+        sbeCompatibility));
 
     // $unset
     if (complexPartitionBy) {
@@ -312,14 +307,26 @@ intrusive_ptr<DocumentSource> DocumentSourceInternalSetWindowFields::optimize() 
     // The _partitionBy is already optimized in create(), along with _iterator which initializes
     // with it. The _executableOutputs will be constructed using the expressions from the
     // '_outputFields' on the first call to doGetNext(). As a result, only expressions in the
-    // '_outputFeilds' are optimized here.
-    for (auto&& outputField : _outputFields) {
-        outputField.expr->optimize();
+    // '_outputFields' are optimized here.
+    if (_outputFields.size() > 0) {
+        // Calculate the new expression SBE compatibility after optimization without overwriting
+        // the previous SBE compatibility value. See the optimize() function for $group for a more
+        // detailed explanation.
+        auto expCtx = _outputFields[0].expr->expCtx();
+        auto origSbeCompatibility = expCtx->sbeCompatibility;
+        expCtx->sbeCompatibility = SbeCompatibility::fullyCompatible;
+
+        for (auto&& outputField : _outputFields) {
+            outputField.expr->optimize();
+        }
+
+        _sbeCompatibility = std::min(_sbeCompatibility, expCtx->sbeCompatibility);
+        expCtx->sbeCompatibility = origSbeCompatibility;
     }
     return this;
 }
 
-Value DocumentSourceInternalSetWindowFields::serialize(SerializationOptions opts) const {
+Value DocumentSourceInternalSetWindowFields::serialize(const SerializationOptions& opts) const {
     MutableDocument spec;
     spec[SetWindowFieldsSpec::kPartitionByFieldName] =
         _partitionBy ? (*_partitionBy)->serialize(opts) : Value();
@@ -378,9 +385,15 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSetWindowFields::crea
         sortBy.emplace(*sortSpec, expCtx);
     }
 
+    expCtx->sbeWindowCompatibility = SbeCompatibility::flagGuarded;
     std::vector<WindowFunctionStatement> outputFields;
     for (auto&& elem : spec.getOutput()) {
         outputFields.push_back(WindowFunctionStatement::parse(elem, sortBy, expCtx.get()));
+    }
+    auto sbeCompatibility = std::min(expCtx->sbeWindowCompatibility, expCtx->sbeCompatibility);
+    // TODO: (SERVER-78708) Add collation support to window stage in sbe
+    if (expCtx->getCollator()) {
+        sbeCompatibility = SbeCompatibility::notCompatible;
     }
 
     return make_intrusive<DocumentSourceInternalSetWindowFields>(
@@ -388,7 +401,8 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSetWindowFields::crea
         partitionBy,
         sortBy,
         outputFields,
-        internalDocumentSourceSetWindowFieldsMaxMemoryBytes.load());
+        internalDocumentSourceSetWindowFieldsMaxMemoryBytes.load(),
+        sbeCompatibility);
 }
 
 void DocumentSourceInternalSetWindowFields::initialize() {
@@ -524,7 +538,7 @@ DocumentSource::GetNextResult DocumentSourceInternalSetWindowFields::doGetNext()
             inMemoryLimit = _numDocsProcessed <= data["maxDocsBeforeSpill"].numberInt();
         });
 
-        if (!inMemoryLimit && _memoryTracker._allowDiskUse) {
+        if (!inMemoryLimit && _memoryTracker.allowDiskUse()) {
             // Attempt to spill where possible.
             _iterator.spillToDisk();
         }
@@ -534,7 +548,7 @@ DocumentSource::GetNextResult DocumentSourceInternalSetWindowFields::doGetNext()
                       str::stream()
                           << "Exceeded memory limit in DocumentSourceSetWindowFields, used "
                           << _memoryTracker.currentMemoryBytes() << " bytes but max allowed is "
-                          << _memoryTracker._maxAllowedMemoryUsageBytes);
+                          << _memoryTracker.maxAllowedMemoryUsageBytes());
         }
     }
 
@@ -543,15 +557,10 @@ DocumentSource::GetNextResult DocumentSourceInternalSetWindowFields::doGetNext()
         case PartitionIterator::AdvanceResult::kAdvanced:
             break;
         case PartitionIterator::AdvanceResult::kNewPartition:
-            // We've advanced to a new partition, reset the state of every function as well as the
-            // memory tracker.
-            _memoryTracker.resetCurrent();
+            // We've advanced to a new partition, reset the state of every function.
             for (auto&& [fieldName, function] : _executableOutputs) {
                 function->reset();
             }
-
-            // Account for the memory in the iterator for the new partition.
-            _memoryTracker.set(_iterator.getApproximateSize());
             break;
         case PartitionIterator::AdvanceResult::kEOF:
             _eof = true;

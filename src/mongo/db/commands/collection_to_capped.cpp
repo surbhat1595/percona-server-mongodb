@@ -86,7 +86,7 @@ public:
                 "'toCollection' must be of type String",
                 nssElt.type() == BSONType::String);
         const NamespaceString nss(
-            NamespaceStringUtil::parseNamespaceFromRequest(dbName, nssElt.valueStringData()));
+            NamespaceStringUtil::deserialize(dbName, nssElt.valueStringData()));
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "Invalid target namespace: " << nss.toStringForErrorMsg(),
                 nss.isValid());
@@ -129,8 +129,8 @@ public:
 
         uassert(ErrorCodes::InvalidOptions, "invalid command spec", size != 0);
 
-        NamespaceString fromNs(NamespaceStringUtil::parseNamespaceFromRequest(dbName, from));
-        NamespaceString toNs(NamespaceStringUtil::parseNamespaceFromRequest(dbName, to));
+        NamespaceString fromNs(NamespaceStringUtil::deserialize(dbName, from));
+        NamespaceString toNs(NamespaceStringUtil::deserialize(dbName, to));
 
         AutoGetCollection autoColl(opCtx, fromNs, MODE_X);
         Lock::CollectionLock collLock(opCtx, toNs, MODE_X);
@@ -150,8 +150,8 @@ public:
         cloneCollectionAsCapped(opCtx, db, fromNs, toNs, size, temp);
         return true;
     }
-
-} cmdCloneCollectionAsCapped;
+};
+MONGO_REGISTER_COMMAND(CmdCloneCollectionAsCapped);
 
 /**
  * Converts the given collection to a capped collection w/ the specified size. This command is not
@@ -199,8 +199,8 @@ public:
         convertToCapped(opCtx, nss, size);
         return true;
     }
-
-} cmdConvertToCapped;
+};
+MONGO_REGISTER_COMMAND(CmdConvertToCapped);
 
 }  // namespace
 }  // namespace mongo

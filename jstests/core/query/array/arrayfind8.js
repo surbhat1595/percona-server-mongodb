@@ -1,11 +1,7 @@
 /**
  * Matching behavior for $elemMatch applied to a top level element.
  * Includes tests for bugs described in SERVER-1264 and SERVER-4180.
- * @tags: [ skip_for_query_stats ] # TODO SERVER-78862 reenable test in query_stats_passthrough
  */
-(function() {
-"use strict";
-
 const collNamePrefix = 'jstests_arrayfind8_';
 let collCount = 0;
 let coll;
@@ -85,7 +81,6 @@ function checkQuery(subQuery, bothMatch, elemMatch, nonElemMatch, additionalCons
     insertValueIfNotNull(bothMatch);
     insertValueIfNotNull(elemMatch);
     insertValueIfNotNull(nonElemMatch);
-
     checkMatch(bothMatch, elemMatch, nonElemMatch, standardQuery, elemMatchQuery, 'unindexed');
 
     // Check matching and index bounds for a single key index.
@@ -146,4 +141,3 @@ checkQuery({b: {$elemMatch: {$gte: 1, $lte: 4}}}, [{b: [1]}]);
 checkQuery({b: {$elemMatch: {$gte: 1, $lte: 4}}}, [{b: [2]}], null, null, {'a.b': {$in: [2, 5]}});
 checkQuery(
     {b: {$elemMatch: {$in: [1, 2]}, $in: [2, 3]}}, [{b: [2]}], null, [{b: [1]}, {b: [3]}], null);
-})();

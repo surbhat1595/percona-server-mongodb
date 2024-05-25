@@ -63,7 +63,6 @@
 #include "mongo/util/uuid.h"
 
 namespace mongo {
-class NamespaceStringUtil;
 
 class NamespaceString {
 public:
@@ -112,7 +111,7 @@ public:
             return _get().ns();
         }
         decltype(auto) db() const {
-            return _get().db();
+            return _get().db_deprecated();
         }
         decltype(auto) coll() const {
             return _get().coll();
@@ -214,18 +213,6 @@ public:
      * Constructs a NamespaceString for the given database.
      */
     explicit NamespaceString(DatabaseName dbName) : _data(std::move(dbName._data)) {}
-
-    // TODO SERVER-65920 Remove this constructor once all constructor call sites have been updated
-    // to pass tenantId explicitly
-    explicit NamespaceString(StringData ns, boost::optional<TenantId> tenantId = boost::none)
-        : NamespaceString(std::move(tenantId), ns) {}
-
-    // TODO SERVER-65920 Remove this constructor once all constructor call sites have been updated
-    // to pass tenantId explicitly
-    NamespaceString(StringData db,
-                    StringData collectionName,
-                    boost::optional<TenantId> tenantId = boost::none)
-        : NamespaceString(std::move(tenantId), db, collectionName) {}
 
     /**
      * Constructs a NamespaceString in the global config db, "config.<collName>".
@@ -413,7 +400,13 @@ public:
         return TenantId{OID::from(&_data[kDataOffset])};
     }
 
-    StringData db() const {
+    /**
+     * This method is deprecated and will be removed as part of SERVER-65456. We strongly
+     * encourage to make the use of `dbName`, which returns a DatabaseName object instead.
+     * In case you would need to a StringData object instead we strongly recommend taking a look
+     * at the DatabaseNameUtil::serialize method which takes in a DatabaseName object.
+     */
+    StringData db_deprecated() const {
         // TODO SERVER-65456 Remove this function.
         auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
         return StringData{_data.data() + offset, _dbNameOffsetEnd()};
@@ -423,7 +416,7 @@ public:
      * This function must only be used in sharding code (src/mongo/s and src/mongo/db/s).
      */
     StringData db_forSharding() const {
-        return db();
+        return db_deprecated();
     }
 
     /**
@@ -537,10 +530,10 @@ public:
         return coll().startsWith(kGlobalIndexCollectionPrefix);
     }
     bool isAdminDB() const {
-        return db() == DatabaseName::kAdmin.db();
+        return db_deprecated() == DatabaseName::kAdmin.db();
     }
     bool isLocalDB() const {
-        return db() == DatabaseName::kLocal.db();
+        return db_deprecated() == DatabaseName::kLocal.db();
     }
     bool isSystemDotProfile() const {
         return coll() == kSystemDotProfileCollectionName;
@@ -565,7 +558,7 @@ public:
         return (coll() == kSystemUsers) || (coll() == kSystemRoles);
     }
     bool isConfigDB() const {
-        return db() == DatabaseName::kConfig.db();
+        return db_deprecated() == DatabaseName::kConfig.db();
     }
     bool isCommand() const {
         return coll() == "$cmd";
@@ -582,10 +575,12 @@ public:
     }
 
     /**
-     * Returns whether the specified namespace is used for internal purposes only and can
-     * never be marked as anything other than UNSHARDED.
+     * Returns whether the specified namespace is never tracked in the sharding catalog.
+     *
+     * These class of namespaces are used for internal purposes only and they are only registered in
+     * the local catalog but not tracked by the sharding catalog.
      */
-    bool isNamespaceAlwaysUnsharded() const;
+    bool isNamespaceAlwaysUntracked() const;
 
     /**
      * Returns whether the specified namespace is config.cache.chunks.<>.
@@ -636,6 +631,8 @@ public:
      * Returns whether the specified namespace is <database>.enxcol_.<.+>.(esc|ecc|ecoc).
      */
     bool isFLE2StateCollection() const;
+
+    static bool isFLE2StateCollection(StringData coll);
 
     /**
      * Returns true if the namespace is an oplog or a change collection, false otherwise.
@@ -735,7 +732,13 @@ public:
      * valid.
      */
     bool isValid(DollarInDbNameBehavior behavior = DollarInDbNameBehavior::Allow) const {
-        return validDBName(dbName(), behavior) && !coll().empty();
+        return validDBName(db_deprecated(), behavior) && !coll().empty();
+    }
+
+    static bool isValid(StringData ns,
+                        DollarInDbNameBehavior behavior = DollarInDbNameBehavior::Allow) {
+        const auto nss = NamespaceString(boost::none, ns);
+        return nss.isValid(behavior);
     }
 
     /**
@@ -777,7 +780,7 @@ public:
 
     static bool validDBName(const DatabaseName& dbName,
                             DollarInDbNameBehavior behavior = DollarInDbNameBehavior::Disallow) {
-        return validDBName(dbName.toStringWithTenantId(), behavior);
+        return validDBName(dbName.db(), behavior);
     }
 
     /**
@@ -820,6 +823,25 @@ public:
             StringData{other._data.data() + kDataOffset, other._data.size() - kDataOffset});
     }
 
+    /**
+     * Checks if a given tenant prefixes or matches the tenantId from this NamespaceString.
+     * TODO SERVER-63517 Since we are removing tenant migration code we might be able to remove this
+     * method from the codebase.
+     */
+    bool isNamespaceForTenant(StringData tenant) const {
+        if (auto tid = tenantId()) {
+            return tid->toString() == tenant;
+        }
+        return db_deprecated().startsWith(tenant + "_");
+    }
+
+    /**
+     * Use to compare the TenantId and `db` part of a NamespaceString.
+     */
+    bool isEqualDb(const NamespaceString& other) const {
+        return tenantId() == other.tenantId() && db_deprecated() == other.db_deprecated();
+    }
+
     friend bool operator==(const NamespaceString& lhs, const NamespaceString& rhs) {
         return lhs._data == rhs._data;
     }
@@ -854,7 +876,7 @@ public:
     }
 
 private:
-    friend NamespaceStringUtil;
+    friend class NamespaceStringUtil;
     friend class NamespaceStringTest;
 
     /**
@@ -1014,12 +1036,6 @@ public:
         : NamespaceStringOrUUID{static_cast<const NamespaceString&>(nss)} {}
     NamespaceStringOrUUID(DatabaseName dbname, UUID uuid)
         : _nssOrUUID(UUIDWithDbName{std::move(dbname), std::move(uuid)}) {}
-    // TODO SERVER-65920 Remove once all call sites have been changed to take tenantId explicitly
-    NamespaceStringOrUUID(std::string db,
-                          UUID uuid,
-                          boost::optional<TenantId> tenantId = boost::none)
-        : _nssOrUUID(
-              UUIDWithDbName{DatabaseName{std::move(tenantId), std::move(db)}, std::move(uuid)}) {}
 
     bool isNamespaceString() const {
         return stdx::holds_alternative<NamespaceString>(_nssOrUUID);

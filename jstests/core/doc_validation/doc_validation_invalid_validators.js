@@ -1,7 +1,8 @@
 // Cannot implicitly shard accessed collections because of collection existing when none
 // expected.
-// The test runs commands that are not allowed with security token: eval.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: eval.
 //   not_allowed_with_security_token,
 //   assumes_no_implicit_collection_creation_after_drop,
 //   requires_non_retryable_commands,
@@ -9,9 +10,6 @@
 
 // Verify invalid validator statements won't work and that we
 // can't create validated collections on restricted databases.
-(function() {
-"use strict";
-
 var collName = "doc_validation_invalid_validators";
 var coll = db[collName];
 coll.drop();
@@ -81,4 +79,3 @@ assert.commandFailed(
     db.runCommand({"collMod": collName, "validator": {$where: "this.a == this.b"}}));
 assert.commandWorked(db.runCommand({"collMod": collName, "validator": {a: {$exists: true}}}));
 coll.drop();
-})();

@@ -93,9 +93,8 @@ void ShardServerTestFixture::setCatalogCacheLoader(std::unique_ptr<CatalogCacheL
 }
 
 void ShardServerTestFixture::tearDown() {
-    CatalogCacheLoader::clearForTests(getServiceContext());
-
     ShardingMongodTestFixture::tearDown();
+    CatalogCacheLoader::clearForTests(getServiceContext());
 }
 
 std::unique_ptr<ShardingCatalogClient> ShardServerTestFixture::makeShardingCatalogClient() {
@@ -115,6 +114,26 @@ std::unique_ptr<CatalogCache> ShardServerTestFixtureWithCatalogCacheMock::makeCa
 
 CatalogCacheMock* ShardServerTestFixtureWithCatalogCacheMock::getCatalogCacheMock() {
     return static_cast<CatalogCacheMock*>(catalogCache());
+}
+
+CatalogCacheLoaderMock* ShardServerTestFixtureWithCatalogCacheMock::getCatalogCacheLoaderMock() {
+    return _cacheLoaderMock;
+}
+
+void ShardServerTestFixtureWithCatalogCacheLoaderMock::setUp() {
+    auto loader = std::make_unique<CatalogCacheLoaderMock>();
+    _cacheLoaderMock = loader.get();
+    setCatalogCacheLoader(std::move(loader));
+    ShardServerTestFixture::setUp();
+}
+
+CatalogCacheMock* ShardServerTestFixtureWithCatalogCacheLoaderMock::getCatalogCacheMock() {
+    return static_cast<CatalogCacheMock*>(catalogCache());
+}
+
+CatalogCacheLoaderMock*
+ShardServerTestFixtureWithCatalogCacheLoaderMock::getCatalogCacheLoaderMock() {
+    return _cacheLoaderMock;
 }
 
 }  // namespace mongo

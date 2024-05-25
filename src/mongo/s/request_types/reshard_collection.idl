@@ -136,3 +136,33 @@ commands:
             "A user-provided identifier used to identify this resharding operation for
             retryability purposes."
         optional: true
+      provenance:
+        type: string
+        description: "The source operation that called this resharding operation."
+        optional: true
+
+  moveCollection:
+    description: "The public command on mongos that moves one unsharded collection from source to destination shard."
+    command_name: moveCollection
+    strict: false
+    namespace: type
+    api_version: ""
+    type: namespacestring
+    fields:
+      toShard:
+        type: shard_id
+        description: "The id specification of the destination shard."
+        optional: false
+
+  unshardCollection:
+    description: "The public command on mongos to unshard a sharded collection."
+    command_name: unshardCollection
+    strict: false
+    namespace: type
+    api_version: ""
+    type: namespacestring
+    fields:
+      toShard:
+        type: shard_id
+        description: "The id specification of the destination shard. If empty, we will pick the emptiest shard."
+        optional: true

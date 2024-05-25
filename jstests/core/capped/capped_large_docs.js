@@ -2,6 +2,10 @@
  * Tests inserting large documents into a capped collection.
  *
  * @tags: [
+ *     # Suites with stepdowns will result in replication rollback, and we do not update tracked
+ *     # collection size for replication rollback. Thus if this occurs during the inserts, we can
+ *     # end up with fewer documents in the capped collection than we would otherwise expect.
+ *     does_not_support_stepdowns,
  *     requires_capped,
  *     requires_collstats,
  *     requires_fastcount,
@@ -9,7 +13,6 @@
  *     assumes_unsharded_collection,
  * ]
  */
-(function() {
 const coll = db.capped_large_docs;
 coll.drop();
 
@@ -28,4 +31,3 @@ for (let i = 0; i < 5; i++) {
 const stats = assert.commandWorked(coll.stats());
 assert.eq(2, stats.count);
 assert(stats.size <= maxSize);
-}());

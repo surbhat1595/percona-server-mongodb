@@ -12,8 +12,7 @@
  * ]
  */
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-load("jstests/libs/fixture_helpers.js");  // For isSharded.
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 if (!TimeseriesTest.timeseriesScalabilityImprovementsEnabled(db)) {
     jsTestLog(
@@ -52,7 +51,7 @@ const checkIfBucketReopened = function(
     assert.eq(stats.timeseries['numBucketsReopened'], expectedReopenedBuckets);
 };
 
-const expectNoBucketReopening = function() {
+(function expectNoBucketReopening() {
     jsTestLog("Entering expectNoBucketReopening...");
     resetCollection();
 
@@ -71,9 +70,9 @@ const expectNoBucketReopening = function() {
     checkIfBucketReopened(measurement2, /* willCreateBucket */ false, /* willReopenBucket */ false);
 
     jsTestLog("Exiting expectNoBucketReopening.");
-}();
+})();
 
-const expectToReopenBuckets = function() {
+(function expectToReopenBuckets() {
     jsTestLog("Entering expectToReopenBuckets...");
     resetCollection();
 
@@ -93,7 +92,7 @@ const expectToReopenBuckets = function() {
     const bucketDoc = {
         "_id": ObjectId("01091c2c050b7495eaef4580"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -113,7 +112,7 @@ const expectToReopenBuckets = function() {
     const missingClosedFlagBucketDoc = {
         "_id": ObjectId("02091c2c050b7495eaef4581"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -144,9 +143,9 @@ const expectToReopenBuckets = function() {
     checkIfBucketReopened(measurement3, /* willCreateBucket */ false, /* willReopenBucket */ true);
 
     jsTestLog("Exiting expectToReopenBuckets.");
-}();
+})();
 
-const expectToReopenBucketsWithComplexMeta = function() {
+(function expectToReopenBucketsWithComplexMeta() {
     jsTestLog("Entering expectToReopenBucketsWithComplexMeta...");
     resetCollection();
 
@@ -159,7 +158,7 @@ const expectToReopenBucketsWithComplexMeta = function() {
     const bucketDoc = {
         "_id": ObjectId("03091c2c050b7495eaef4580"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -186,9 +185,9 @@ const expectToReopenBucketsWithComplexMeta = function() {
     checkIfBucketReopened(measurement2, /* willCreateBucket */ true, /* willReopenBucket */ false);
 
     jsTestLog("Exiting expectToReopenBucketsWithComplexMeta.");
-}();
+})();
 
-const expectToReopenArchivedBuckets = function() {
+(function expectToReopenArchivedBuckets() {
     jsTestLog("Entering expectToReopenArchivedBuckets...");
     resetCollection();
 
@@ -212,11 +211,10 @@ const expectToReopenArchivedBuckets = function() {
     checkIfBucketReopened(measurement3, /* willCreateBucket */ false, /* willReopenBucket */ true);
 
     jsTestLog("Exiting expectToReopenArchivedBuckets.");
-}();
+})();
 
-// TODO SERVER-77454: Investigate re-enabling this.
-const expectToReopenCompressedBuckets = function() {
-    if (!FeatureFlagUtil.isPresentAndEnabled(db, "TimeseriesAlwaysUseCompressedBuckets")) {
+(function expectToReopenCompressedBuckets() {
+    if (!TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(db)) {
         return;
     }
 
@@ -224,9 +222,10 @@ const expectToReopenCompressedBuckets = function() {
     resetCollection();
 
     let initialMeasurements = [];
+    const timestamp = ISODate("2022-08-26T19:19:00Z");
     for (let i = 0; i < 5; ++i) {
         initialMeasurements.push({
-            [timeField]: ISODate("2022-08-26T19:19:00Z"),
+            [timeField]: timestamp,
             [metaField]: "ReopenedBucket1",
         });
     }
@@ -235,25 +234,28 @@ const expectToReopenCompressedBuckets = function() {
         [metaField]: "ReopenedBucket1",
     };
     const backward = {
-        [timeField]: ISODate("2022-08-26T19:19:00Z"),
+        [timeField]: timestamp,
         [metaField]: "ReopenedBucket1",
     };
 
     for (let i = 0; i < initialMeasurements.length; ++i) {
         checkIfBucketReopened(
-            initialMeasurements[i], /* willCreateBucket */ i == 0, /* willReopenBucket */ false);
+            initialMeasurements[i], /* willCreateBucket= */ i == 0, /* willReopenBucket= */ false);
     }
     // Time forwards will open a new bucket, and close and compress the old one.
     checkIfBucketReopened(forward, /* willCreateBucket */ true, /* willReopenBucket */ false);
-    assert.eq(1, bucketsColl.find({"control.version": 2}).toArray().length);
+    assert.eq(2,
+              bucketsColl.find({"control.version": TimeseriesTest.BucketVersion.kCompressed})
+                  .toArray()
+                  .length);
 
     // We expect to reopen the compressed bucket with time backwards.
-    checkIfBucketReopened(backward, /* willCreateBucket */ false, /* willReopenBucket */ true);
+    checkIfBucketReopened(backward, /* willCreateBucket= */ false, /* willReopenBucket= */ true);
 
     jsTestLog("Exiting expectToReopenCompressedBuckets.");
-};
+})();
 
-const failToReopenNonSuitableBuckets = function() {
+(function failToReopenNonSuitableBuckets() {
     jsTestLog("Entering failToReopenNonSuitableBuckets...");
     resetCollection();
 
@@ -281,7 +283,7 @@ const failToReopenNonSuitableBuckets = function() {
     const closedBucketDoc = {
         "_id": ObjectId("04091c2c050b7495eaef4582"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -301,7 +303,7 @@ const failToReopenNonSuitableBuckets = function() {
     const compressedBucketDoc = {
         "_id": ObjectId("05091c2c050b7495eaef4583"),
         "control": {
-            "version": 2,
+            "version": TimeseriesTest.BucketVersion.kCompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -321,7 +323,7 @@ const failToReopenNonSuitableBuckets = function() {
     const closedAndCompressedBucketDoc = {
         "_id": ObjectId("06091c2c050b7495eaef4584"),
         "control": {
-            "version": 2,
+            "version": TimeseriesTest.BucketVersion.kCompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -341,7 +343,7 @@ const failToReopenNonSuitableBuckets = function() {
     const year2000BucketDoc = {
         "_id": ObjectId("07091c2c050b7495eaef4585"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2000-08-26T19:19:00Z")
@@ -361,7 +363,7 @@ const failToReopenNonSuitableBuckets = function() {
     const metaMismatchFieldBucketDoc = {
         "_id": ObjectId("08091c2c050b7495eaef4586"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -401,9 +403,9 @@ const failToReopenNonSuitableBuckets = function() {
     checkIfBucketReopened(measurement5, /* willCreateBucket */ true, /* willReopenBucket */ false);
 
     jsTestLog("Exiting failToReopenNonSuitableBuckets.");
-}();
+})();
 
-const failToReopenBucketWithNoMetaTimeIndex = function() {
+(function failToReopenBucketWithNoMetaTimeIndex() {
     jsTestLog("Entering failToReopenBucketWithNoMetaTimeIndex...");
     resetCollection();
 
@@ -423,7 +425,7 @@ const failToReopenBucketWithNoMetaTimeIndex = function() {
     const closedBucketDoc1 = {
         "_id": ObjectId("09091c2c050b7495eaef4581"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -443,7 +445,7 @@ const failToReopenBucketWithNoMetaTimeIndex = function() {
     const closedBucketDoc2 = {
         "_id": ObjectId("10091c2c050b7495eaef4582"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -463,7 +465,7 @@ const failToReopenBucketWithNoMetaTimeIndex = function() {
     const closedBucketDoc3 = {
         "_id": ObjectId("11091c2c050b7495eaef4583"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -512,9 +514,9 @@ const failToReopenBucketWithNoMetaTimeIndex = function() {
     checkIfBucketReopened(measurement3, /* willCreateBucket */ false, /* willReopenBucket */ true);
 
     jsTestLog("Exiting failToReopenBucketWithNoMetaTimeIndex.");
-}();
+})();
 
-const reopenBucketsWhenSuitableIndexExists = function() {
+(function reopenBucketsWhenSuitableIndexExists() {
     jsTestLog("Entering reopenBucketsWhenSuitableIndexExists...");
     resetCollection();
 
@@ -538,7 +540,7 @@ const reopenBucketsWhenSuitableIndexExists = function() {
     const closedBucketDoc1 = {
         "_id": ObjectId("12091c2c050b7495eaef4584"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -558,7 +560,7 @@ const reopenBucketsWhenSuitableIndexExists = function() {
     const closedBucketDoc2 = {
         "_id": ObjectId("13091c2c050b7495eaef4585"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -578,7 +580,7 @@ const reopenBucketsWhenSuitableIndexExists = function() {
     const closedBucketDoc3 = {
         "_id": ObjectId("14091c2c050b7495eaef4586"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -598,7 +600,7 @@ const reopenBucketsWhenSuitableIndexExists = function() {
     const closedBucketDoc4 = {
         "_id": ObjectId("15091c2c050b7495eaef4587"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -660,9 +662,9 @@ const reopenBucketsWhenSuitableIndexExists = function() {
     checkIfBucketReopened(measurement4, /* willCreateBucket */ false, /* willReopenBucket */ true);
 
     jsTestLog("Exiting reopenBucketsWhenSuitableIndexExists.");
-}();
+})();
 
-const reopenBucketsWhenSuitableIndexExistsNoMeta = function() {
+(function reopenBucketsWhenSuitableIndexExistsNoMeta() {
     jsTestLog("Entering reopenBucketsWhenSuitableIndexExistsNoMeta...");
     coll.drop();
     assert.commandWorked(
@@ -675,7 +677,7 @@ const reopenBucketsWhenSuitableIndexExistsNoMeta = function() {
     const closedBucketDoc1 = {
         "_id": ObjectId("16091c2c050b7495eaef4584"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-09-26T19:19:00Z")
@@ -694,7 +696,7 @@ const reopenBucketsWhenSuitableIndexExistsNoMeta = function() {
     const closedBucketDoc2 = {
         "_id": ObjectId("17091c2c050b7495eaef4585"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -713,7 +715,7 @@ const reopenBucketsWhenSuitableIndexExistsNoMeta = function() {
     const closedBucketDoc3 = {
         "_id": ObjectId("18091c2c050b7495eaef4586"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-07-26T19:19:00Z")
@@ -771,6 +773,6 @@ const reopenBucketsWhenSuitableIndexExistsNoMeta = function() {
     }
 
     jsTestLog("Exiting reopenBucketsWhenSuitableIndexExistsNoMeta.");
-}();
+})();
 
 coll.drop();

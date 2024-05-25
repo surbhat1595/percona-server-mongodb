@@ -9,6 +9,8 @@
  * ]
  *
  */
+import {assertAlways, assertWhenOwnColl} from "jstests/concurrency/fsm_libs/assert.js";
+
 export const $config = (function() {
     var states = (function() {
         function init(db, collName) {
@@ -47,7 +49,7 @@ export const $config = (function() {
                     $queryStats: {
                         transformIdentifiers: {
                             algorithm: "hmac-sha-256",
-                            hmacKey: BinData(0, "MjM0NTY3ODkxMDExMTIxMzE0MTUxNjE3MTgxOTIwMjE=")
+                            hmacKey: BinData(8, "MjM0NTY3ODkxMDExMTIxMzE0MTUxNjE3MTgxOTIwMjE=")
                         }
                     }
                 }],

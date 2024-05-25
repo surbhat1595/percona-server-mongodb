@@ -278,7 +278,7 @@ public:
         return false;
     }
 
-    bool timeseriesBucketingParametersMayHaveChanged() const final {
+    boost::optional<bool> timeseriesBucketingParametersHaveChanged() const final {
         unimplementedTasserted();
         return false;
     }
@@ -296,6 +296,12 @@ public:
 
     void setRequiresTimeseriesExtendedRangeSupport(OperationContext* opCtx) const final {
         unimplementedTasserted();
+    }
+
+    bool areTimeseriesBucketsFixed() const final {
+        // A virtual collection is never a time-series collection, so it can never have fixed
+        // buckets.
+        return false;
     }
 
     bool isClustered() const final {

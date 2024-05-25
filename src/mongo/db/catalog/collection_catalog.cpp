@@ -92,6 +92,19 @@
 
 
 namespace mongo {
+/**
+ * If a collection is initially created with an untimestamped write, but later DDL operations
+ * (including drop) on this collection are timestamped, set this decoration to 'true' for
+ * HistoricalCatalogIdTracker to support this mixed mode write sequence for a collection.
+ *
+ * CAUTION: This decoration is not to support other mixed mode write sequences (such as
+ * timestamped collection creation followed by untimestamped drop) that violates wiredtiger's
+ * timestamp rules.
+ */
+const SharedCollectionDecorations::Decoration<AtomicWord<bool>>
+    historicalIDTrackerAllowsMixedModeWrites =
+        SharedCollectionDecorations::declareDecoration<AtomicWord<bool>>();
+
 namespace {
 constexpr auto kNumDurableCatalogScansDueToMissingMapping = "numScansDueToMissingMapping"_sd;
 
@@ -154,6 +167,49 @@ ViewsForDatabase loadViewsForDatabase(OperationContext* opCtx,
 
 const auto maxUuid = UUID::parse("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF").getValue();
 const auto minUuid = UUID::parse("00000000-0000-0000-0000-000000000000").getValue();
+
+// CSFLE 1 collections have a schema validator with the encrypt keyword
+bool isCSFLE1Validator(BSONObj doc) {
+    if (doc.isEmpty()) {
+        return false;
+    }
+
+    std::stack<BSONObjIterator> frameStack;
+
+    const ScopeGuard frameStackGuard([&] {
+        while (!frameStack.empty()) {
+            frameStack.pop();
+        }
+    });
+
+    frameStack.emplace(BSONObjIterator(doc));
+
+    while (frameStack.size() > 1 || frameStack.top().more()) {
+        if (frameStack.size() == BSONDepth::kDefaultMaxAllowableDepth) {
+            return false;
+        }
+
+        auto& iterator = frameStack.top();
+        if (iterator.more()) {
+            BSONElement elem = iterator.next();
+            if (elem.type() == BSONType::Object) {
+                if (elem.fieldNameStringData() == "encrypt"_sd) {
+                    return true;
+                }
+
+                frameStack.emplace(BSONObjIterator(elem.Obj()));
+            } else if (elem.type() == BSONType::Array) {
+                frameStack.emplace(BSONObjIterator(elem.Obj()));
+            }
+        } else {
+            frameStack.pop();
+        }
+    }
+
+    dassert(frameStack.size() == 1);
+
+    return false;
+}
 }  // namespace
 
 /**
@@ -671,7 +727,7 @@ Status CollectionCatalog::createView(OperationContext* opCtx,
         return Status::OK();
     }
 
-    if (viewName.db() != viewOn.db())
+    if (!viewName.isEqualDb(viewOn))
         return Status(ErrorCodes::BadValue,
                       "View must be created on a view or collection in the same database");
 
@@ -714,7 +770,7 @@ Status CollectionCatalog::modifyView(
     invariant(_viewsForDatabase.find(viewName.dbName()));
     const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, viewName.dbName());
 
-    if (viewName.db() != viewOn.db())
+    if (!viewName.isEqualDb(viewOn))
         return Status(ErrorCodes::BadValue,
                       "View must be created on a view or collection in the same database");
 
@@ -1984,9 +2040,12 @@ void CollectionCatalog::_registerCollection(OperationContext* opCtx,
         coll->setMinimumValidSnapshot(commitTime.value());
     }
 
+    const auto allowMixedModeWrites = coll->getSharedDecorations() &&
+        historicalIDTrackerAllowsMixedModeWrites(coll->getSharedDecorations()).load();
+
     // When restarting from standalone mode to a replica set, the stable timestamp may be null.
     // We still need to register the nss and UUID with the catalog.
-    _catalogIdTracker.create(nss, uuid, coll->getCatalogId(), commitTime);
+    _catalogIdTracker.create(nss, uuid, coll->getCatalogId(), commitTime, allowMixedModeWrites);
 
 
     if (!nss.isOnInternalDb() && !nss.isSystem()) {
@@ -1996,6 +2055,12 @@ void CollectionCatalog::_registerCollection(OperationContext* opCtx,
         }
         if (coll->isClustered()) {
             _stats.userClustered += 1;
+        }
+        if (coll->getCollectionOptions().encryptedFieldConfig) {
+            _stats.queryableEncryption += 1;
+        }
+        if (isCSFLE1Validator(coll->getValidatorDoc())) {
+            _stats.csfle += 1;
         }
     } else {
         _stats.internal += 1;
@@ -2051,6 +2116,12 @@ std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(
         }
         if (coll->isClustered()) {
             _stats.userClustered -= 1;
+        }
+        if (coll->getCollectionOptions().encryptedFieldConfig) {
+            _stats.queryableEncryption -= 1;
+        }
+        if (isCSFLE1Validator(coll->getValidatorDoc())) {
+            _stats.csfle -= 1;
         }
     } else {
         _stats.internal -= 1;

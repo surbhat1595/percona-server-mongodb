@@ -79,7 +79,7 @@ public:
             });
 
             const auto dbInfo = uassertStatusOK(
-                Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, dbNss.db_forSharding()));
+                Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, dbNss.dbName()));
 
             ShardsvrMovePrimary shardsvrRequest{dbNss.dbName()};
             shardsvrRequest.setDbName(DatabaseName::kAdmin);
@@ -87,7 +87,7 @@ public:
 
             const auto commandResponse = executeCommandAgainstDatabasePrimary(
                 opCtx,
-                DatabaseName::kAdmin.toString(),
+                DatabaseName::kAdmin,
                 dbInfo,
                 CommandHelpers::appendMajorityWriteConcern(shardsvrRequest.toBSON({}),
                                                            opCtx->getWriteConcern()),
@@ -133,7 +133,8 @@ private:
     std::string help() const override {
         return "Reassigns the primary shard holding all un-sharded collections in the database";
     }
-} movePrimaryCommand;
+};
+MONGO_REGISTER_COMMAND(MovePrimaryCommand);
 
 }  // namespace
 }  // namespace mongo

@@ -103,6 +103,12 @@ enum class IgnoreBucketState { kYes, kNo };
 enum class BucketPrepareAction { kPrepare, kUnprepare };
 
 /**
+ * Mode enum to control whether getReopeningCandidate() will allow query-based
+ * reopening of buckets when attempting to accommodate a new measurement.
+ */
+enum class AllowQueryBasedReopening { kAllow, kDisallow };
+
+/**
  * Maps bucket key to the stripe that is responsible for it.
  */
 StripeNumber getStripeNumber(const BucketKey& key, size_t numberOfStripes);
@@ -272,7 +278,7 @@ stdx::variant<std::monostate, OID, std::vector<BSONObj>> getReopeningCandidate(
     Stripe& stripe,
     WithLock stripeLock,
     const CreationInfo& info,
-    bool allowQueryBasedReopening);
+    AllowQueryBasedReopening allowQueryBasedReopening);
 
 /**
  * Aborts 'batch', and if the corresponding bucket still exists, proceeds to abort any other
@@ -372,13 +378,20 @@ ExecutionStatsController getOrInitializeExecutionStats(BucketCatalog& catalog,
  */
 std::shared_ptr<ExecutionStats> getExecutionStats(const BucketCatalog& catalog,
                                                   const NamespaceString& ns);
+
 /**
- * Merges the stats of a side bucket catalog into the main one.
+ * Retrieves the execution stats from the side bucket catalog.
  * Assumes the side bucket catalog has the stats of one collection.
  */
-void mergeExecutionStatsToMainBucketCatalog(BucketCatalog& mainBucketCatalog,
-                                            BucketCatalog& sideBucketCatalog,
-                                            const NamespaceString& viewNs);
+std::pair<NamespaceString, std::shared_ptr<ExecutionStats>> getSideBucketCatalogCollectionStats(
+    BucketCatalog& sideBucketCatalog);
+
+/**
+ * Merges the execution stats of a collection into the bucket catalog.
+ */
+void mergeExecutionStatsToBucketCatalog(BucketCatalog& catalog,
+                                        std::shared_ptr<ExecutionStats> collStats,
+                                        const NamespaceString& viewNs);
 
 /**
  * Generates a status with code TimeseriesBucketCleared and an appropriate error message.

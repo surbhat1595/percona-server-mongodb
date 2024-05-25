@@ -1,16 +1,13 @@
 /**
  * Checks that top removes entries after dropping a collection or database.
  *
- * The test runs commands that are not allowed with security token: top.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: top.
  *   not_allowed_with_security_token,
  *   assumes_against_mongod_not_mongos,
  *   requires_non_retryable_writes,
  * ]
  */
-(function() {
-"use strict";
-
 let topDB = db.getSiblingDB("topdrop");
 assert.commandWorked(topDB.dropDatabase());
 
@@ -84,4 +81,3 @@ topDB.bar.remove({});
 checkTopEntries([]);
 
 assert.commandWorked(topDB.dropDatabase());
-}());

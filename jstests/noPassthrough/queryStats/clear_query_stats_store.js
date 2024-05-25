@@ -1,11 +1,8 @@
 /**
- * Test that the telemetry store can be cleared when the cache size is reset to 0.
+ * Test that the query stats store can be cleared when the cache size is reset to 0.
  * @tags: [featureFlagQueryStats]
  */
-load("jstests/libs/query_stats_utils.js");  // For verifyMetrics.
-
-(function() {
-"use strict";
+import {getQueryStats} from "jstests/libs/query_stats_utils.js";
 
 // Turn on the collecting of telemetry metrics.
 let options = {
@@ -26,8 +23,8 @@ for (var j = 0; j < 10; ++j) {
 }
 
 // Confirm number of entries in the store and that none have been evicted.
-let telemetryResults = testDB.getSiblingDB("admin").aggregate([{$queryStats: {}}]).toArray();
-assert.eq(telemetryResults.length, 10, telemetryResults);
+let res = getQueryStats(conn);
+assert.eq(res.length, 10, res);
 assert.eq(testDB.serverStatus().metrics.queryStats.numEvicted, 0);
 
 // Command to clear the cache.
@@ -37,7 +34,6 @@ assert.commandWorked(testDB.adminCommand({setParameter: 1, internalQueryStatsCac
 // cleared.
 assert.eq(testDB.serverStatus().metrics.queryStats.numEvicted, 11);
 
-// Calling $queryStats should fail when the telemetry store size is 0 bytes.
+// Calling $queryStats should fail when the query stats store size is 0 bytes.
 assert.throwsWithCode(() => testDB.getSiblingDB("admin").aggregate([{$queryStats: {}}]), 6579000);
 MongoRunner.stopMongod(conn);
-}());

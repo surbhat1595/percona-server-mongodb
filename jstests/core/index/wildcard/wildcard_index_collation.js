@@ -12,22 +12,18 @@
  *   requires_non_retryable_writes,
  * ]
  */
-load("jstests/aggregation/extras/utils.js");  // For arrayEq.
-import {getWinningPlan, getPlanStages, isIndexOnly} from "jstests/libs/analyze_plan.js";
+import {arrayEq} from "jstests/aggregation/extras/utils.js";
+import {getPlanStages, getWinningPlan, isIndexOnly} from "jstests/libs/analyze_plan.js";
+import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-load("jstests/libs/index_catalog_helpers.js");     // For IndexCatalogHelpers.
-load("jstests/libs/collection_drop_recreate.js");  // For assert[Drop|Create]Collection.
-load("jstests/libs/fixture_helpers.js");           // For isMongos.
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {IndexCatalogHelpers} from "jstests/libs/index_catalog_helpers.js";
 
 const assertArrayEq = (l, r) => assert(arrayEq(l, r));
 
 // Create the collection and assign it a default case-insensitive collation.
 let coll = assertDropAndRecreateCollection(
     db, "wildcard_collation", {collation: {locale: "en_US", strength: 1}});
-
-// TODO SERVER-68303: Remove the feature flag and update corresponding tests.
-const allowCompoundWildcardIndexes =
-    FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "CompoundWildcardIndexes");
 
 // Extracts the winning plan for the given query and projection from the explain output.
 const winningPlan = (query, proj) => FixtureHelpers.isMongos(db)
@@ -68,9 +64,6 @@ const wildcardIndexes =
     [{keyPattern: {"$**": 1}}, {keyPattern: {"$**": 1, b: 1}, wildcardProjection: {b: 0}}];
 
 for (const indexSpec of wildcardIndexes) {
-    if (!allowCompoundWildcardIndexes && indexSpec.wildcardProjection) {
-        continue;
-    }
     const option = {};
     if (indexSpec.wildcardProjection) {
         option['wildcardProjection'] = indexSpec.wildcardProjection;

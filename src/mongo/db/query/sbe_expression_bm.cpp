@@ -59,7 +59,6 @@
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/query_test_service_context.h"
 #include "mongo/db/query/sbe_stage_builder.h"
-#include "mongo/db/query/sbe_stage_builder_eval_frame.h"
 #include "mongo/db/query/sbe_stage_builder_expression.h"
 #include "mongo/db/query/sbe_stage_builder_helpers.h"
 #include "mongo/db/query/stage_types.h"
@@ -112,7 +111,11 @@ public:
         LOGV2_DEBUG(6979800,
                     1,
                     "running sbe expression benchmark on expression",
-                    "expression"_attr = expression->serialize(/*explain = */ true).toString());
+                    "expression"_attr = expression
+                                            ->serialize(SerializationOptions{
+                                                .verbosity = boost::make_optional(
+                                                    ExplainOptions::Verbosity::kQueryPlanner)})
+                                            .toString());
 
         // This stage makes it possible to execute the benchmark in cases when
         // stage_builder::generateExpression adds more stages.
@@ -131,6 +134,8 @@ public:
             &_slotIdGenerator,
             &_frameIdGenerator,
             &_spoolIdGenerator,
+            &_inListsSet,
+            &_collatorsMap,
             false /* needsMerge */,
             false /* allowDiskUse */
         };
@@ -142,7 +147,7 @@ public:
                     "sbe expression benchmark PlanStage",
                     "stage"_attr = debugPrint(stage.get()));
 
-        auto expr = evalExpr.extractExpr(state.slotVarMap, *_env);
+        auto expr = evalExpr.extractExpr(state);
         LOGV2_DEBUG(6979802,
                     1,
                     "sbe expression benchmark EExpression",
@@ -183,12 +188,14 @@ private:
         }
     }
 
-    stage_builder::PlanStageEnvironment _env;
+    stage_builder::Environment _env;
     std::unique_ptr<stage_builder::PlanStageStaticData> _planStageData;
     Variables _variables;
     sbe::value::SlotIdGenerator _slotIdGenerator;
     sbe::value::FrameIdGenerator _frameIdGenerator;
     sbe::value::SpoolIdGenerator _spoolIdGenerator;
+    stage_builder::StageBuilderState::InListsSet _inListsSet;
+    stage_builder::StageBuilderState::CollatorsMap _collatorsMap;
 
     sbe::value::SlotId _inputSlotId;
     std::unique_ptr<TimeZoneDatabase> _timeZoneDB;

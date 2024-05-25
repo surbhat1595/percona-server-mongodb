@@ -1,6 +1,6 @@
 /*
- * The test runs commands that are not allowed with security token: applyOps.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: applyOps.
  *   not_allowed_with_security_token,
  *   requires_non_retryable_commands,
  *   requires_fastcount,
@@ -15,8 +15,6 @@
  * ]
  */
 
-(function() {
-"use strict";
 var t = db.apply_ops_dups;
 t.drop();
 
@@ -57,4 +55,3 @@ var a = assert.commandFailedWithCode(db.adminCommand({
 // We do not applyOps atomically, so the first op is applied and the second is not. The total number
 // is now 2.
 assert.eq(2, t.find().count(), "Expected 2 documents after applyOps");
-})();

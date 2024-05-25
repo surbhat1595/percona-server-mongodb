@@ -1,9 +1,6 @@
 /**
  * Tests the exception handling behavior of the load() function across nested calls.
  */
-(function() {
-"use strict";
-
 let isMain = true;
 
 if (TestData.hasOwnProperty("loadDepth")) {
@@ -19,6 +16,7 @@ if (TestData.loadDepth >= 3) {
 }
 
 try {
+    /* eslint-disable-next-line no-restricted-syntax */
     load("jstests/noPassthrough/shell_load_file.js");
 } catch (e) {
     TestData.loadErrors.push(e);
@@ -39,4 +37,3 @@ for (let i = 0; i < TestData.loadErrors.length; ++i) {
         () => "JavaScript stacktrace from load() didn't include file paths (AKA stack frames): " +
             error.stack);
 }
-})();

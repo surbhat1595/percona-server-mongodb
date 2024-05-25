@@ -5,12 +5,7 @@
  *
  * This hook will run concurrently with tests.
  */
-
-'use strict';
-
-(function() {
-load('jstests/libs/discover_topology.js');  // For Topology and DiscoverTopology.
-load('jstests/libs/parallelTester.js');     // For Thread.
+import {DiscoverTopology, Topology} from "jstests/libs/discover_topology.js";
 
 /**
  * Returns true if the error code is transient.
@@ -168,4 +163,3 @@ try {
 }
 
 assert.commandWorked(res, "reconfig hook failed: " + tojson(res));
-})();

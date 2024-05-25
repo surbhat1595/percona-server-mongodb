@@ -147,22 +147,24 @@ public:
             auto dbname = request().getDbName();
             auto* as = AuthorizationSession::get(opCtx->getClient());
 
-            as->logoutDatabase(opCtx->getClient(),
-                               DatabaseNameUtil::serializeForAuth(dbname),
-                               "Logging out on user request");
+            as->logoutDatabase(opCtx->getClient(), dbname, "Logging out on user request");
             if (getTestCommandsEnabled() && (dbname.isAdminDB())) {
                 // Allows logging out as the internal user against the admin database, however
                 // this actually logs out of the local database as well. This is to
                 // support the auth passthrough test framework on mongos (since you can't use the
                 // local database on a mongos, so you can't logout as the internal user
                 // without this).
-                as->logoutDatabase(opCtx->getClient(),
-                                   DatabaseName::kLocal.db(),
-                                   "Logging out from local database for test purposes");
+                as->logoutDatabase(
+                    opCtx->getClient(),
+                    DatabaseNameUtil::deserialize(dbname.tenantId(),
+                                                  DatabaseName::kLocal.db(),
+                                                  request().getSerializationContext()),
+                    "Logging out from local database for test purposes");
             }
         }
     };
-} cmdLogout;
+};
+MONGO_REGISTER_COMMAND(CmdLogout);
 
 #ifdef MONGO_CONFIG_SSL
 }  // namespace
@@ -235,17 +237,9 @@ void _authenticateX509(OperationContext* opCtx, AuthenticationSession* session) 
 
     auto sslConfiguration = opCtx->getClient()->session()->getSSLManager()->getSSLConfiguration();
 
-    uassert(ErrorCodes::AuthenticationFailed,
-            "Unable to verify x.509 certificate, as no CA has been provided.",
-            sslConfiguration.hasCA);
-
     uassert(ErrorCodes::ProtocolError,
             "X.509 authentication must always use the $external database.",
             userName.getDatabaseName().isExternalDB());
-
-    auto isInternalClient = [&]() -> bool {
-        return opCtx->getClient()->session()->getTags() & transport::Session::kInternalClient;
-    };
 
     const auto clusterAuthMode = ClusterAuthMode::get(opCtx->getServiceContext());
 
@@ -268,7 +262,7 @@ void _authenticateX509(OperationContext* opCtx, AuthenticationSession* session) 
 
             authorizeExternalUser();
         } else {
-            if (!isInternalClient()) {
+            if (!opCtx->getClient()->isInternalClient()) {
                 LOGV2_WARNING(
                     20430,
                     "Client isn't a mongod or mongos, but is connecting with a certificate "
@@ -398,8 +392,8 @@ public:
     HandshakeRole handshakeRole() const final {
         return HandshakeRole::kAuth;
     }
-
-} cmdAuthenticate;
+};
+MONGO_REGISTER_COMMAND(CmdAuthenticate);
 
 }  // namespace
 

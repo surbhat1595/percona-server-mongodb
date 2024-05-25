@@ -66,10 +66,10 @@ selector:
   - jstests/aggregation/api_version_stage_allowance_checks.js
 
   # TODO (SERVER-78200): The tests below sometimes hang when they run concurrently with a setFCV command.
-  - src/mongo/db/modules/enterprise/jstests/fle/fle_admin_e2e.js
-  - src/mongo/db/modules/enterprise/jstests/fle/fle_implicit_encryption.js
-  - src/mongo/db/modules/enterprise/jstests/fle/fle_use_cases.js
-  - src/mongo/db/modules/enterprise/jstests/fle/fle_drivers_integration.js
+  - src/mongo/db/modules/*/jstests/fle/fle_admin_e2e.js
+  - src/mongo/db/modules/*/jstests/fle/fle_implicit_encryption.js
+  - src/mongo/db/modules/*/jstests/fle/fle_use_cases.js
+  - src/mongo/db/modules/*/jstests/fle/fle_drivers_integration.js
 
   # The test uses a resumeToken from previous calls so FCV change will make the token invalid and fail.
   - jstests/core/resume_query_from_non_existent_record.js
@@ -83,6 +83,9 @@ selector:
   - jstests/aggregation/sources/lookup/lookup_query_stats.js
   - jstests/aggregation/sources/facet/facet_stats.js
   - jstests/aggregation/sources/unionWith/unionWith_query_stats.js
+
+  # Expected failure due to interfering collMod commands acquiring a lock that the test does not expect.
+  - jstests/core/write/crud_ops_do_not_throw_locktimeout.js
 
   # The tests below use transactions (which are aborted on fcv upgrade/downgrade) and thus are expected to fail.
   - jstests/core/role_management_helpers.js
@@ -134,7 +137,7 @@ executor:
   config:
     shell_options:
       eval: >-
-        load("jstests/libs/override_methods/retry_aborted_db_and_index_creation.js");
+        await import("jstests/libs/override_methods/retry_aborted_db_and_index_creation.js");
   hooks:
   - class: CheckReplDBHash
   - class: CheckMetadataConsistencyInBackground

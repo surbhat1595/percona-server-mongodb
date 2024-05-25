@@ -1,20 +1,16 @@
-// The test runs commands that are not allowed with security token: mapReduce.
-// @tags: [
-//   not_allowed_with_security_token,
-//   does_not_support_stepdowns,
-//   uses_map_reduce_with_temp_collections,
-//   # Uses $where operator
-//   requires_scripting,
-// ]
-
 /**
  * Demonstrate that mapReduce can accept functions represented by strings.
  * Some drivers do not have a type which represents a Javascript function. These languages represent
  * the arguments to mapReduce as strings.
+ * @tags: [
+ *   # The test runs commands that are not allowed with security token: mapReduce.
+ *   not_allowed_with_security_token,
+ *   does_not_support_stepdowns,
+ *   uses_map_reduce_with_temp_collections,
+ *   # Uses $where operator
+ *   requires_scripting,
+ * ]
  */
-
-(function() {
-"use strict";
 
 const col = db.function_string_representations;
 const out = db.map_reduce_example;
@@ -49,4 +45,3 @@ assert.eq(1, col.find({$where: whereFunction}).itcount());
 
 // system.js does not need to be tested, as its contents types' are preserved, and
 // strings are not promoted into functions.
-})();

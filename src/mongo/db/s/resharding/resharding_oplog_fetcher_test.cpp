@@ -296,10 +296,7 @@ public:
             onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
                 DBDirectClient client(cc().getOperationContext());
                 BSONObj result;
-                bool res = client.runCommand(
-                    DatabaseName::createDatabaseName_forTest(boost::none, request.dbname),
-                    request.cmdObj,
-                    result);
+                bool res = client.runCommand(request.dbname, request.cmdObj, result);
                 if (res == false || result.hasField("cursorsKilled") ||
                     result["cursor"]["id"].Long() == 0) {
                     hasMore = false;
@@ -731,6 +728,46 @@ TEST_F(ReshardingOplogFetcherTest, RetriesOnRemoteInterruptionError) {
     onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
         // Simulate the remote donor shard stepping down or transitioning into rollback.
         return {ErrorCodes::InterruptedDueToReplStateChange, "operation was interrupted"};
+    });
+
+    auto moreToCome = fetcherJob.timed_get(Seconds(5));
+    ASSERT_TRUE(moreToCome);
+}
+
+TEST_F(ReshardingOplogFetcherTest, RetriesOnNetworkTimeoutError) {
+    const NamespaceString outputCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.outputCollection");
+    const NamespaceString dataCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.runFetchIteration");
+
+    create(outputCollectionNss);
+    create(dataCollectionNss);
+    _fetchTimestamp = repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
+
+    const auto& collectionUUID = [&] {
+        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        return dataColl->uuid();
+    }();
+
+    auto fetcherJob = launchAsync([&, this] {
+        ThreadClient tc("RunnerForFetcher", _svcCtx, nullptr);
+
+        ReshardingDonorOplogId startAt{_fetchTimestamp, _fetchTimestamp};
+        ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                       _reshardingUUID,
+                                       collectionUUID,
+                                       startAt,
+                                       _donorShard,
+                                       _destinationShard,
+                                       outputCollectionNss);
+
+        auto factory = makeCancelableOpCtx();
+        return fetcher.iterate(&cc(), factory);
+    });
+
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        // Inject network timeout error.
+        return {ErrorCodes::NetworkInterfaceExceededTimeLimit, "exceeded network time limit"};
     });
 
     auto moreToCome = fetcherJob.timed_get(Seconds(5));

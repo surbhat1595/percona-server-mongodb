@@ -127,6 +127,8 @@ namespace mongo {
 MONGO_FAIL_POINT_DEFINE(skipUnindexingDocumentWhenDeleted);
 MONGO_FAIL_POINT_DEFINE(skipIndexNewRecords);
 
+MONGO_FAIL_POINT_DEFINE(skipUpdatingIndexDocument);
+
 // This failpoint causes the check for TTL indexes on capped collections to be ignored.
 MONGO_FAIL_POINT_DEFINE(ignoreTTLIndexCappedCollectionCheck);
 
@@ -255,12 +257,12 @@ void IndexCatalogImpl::init(OperationContext* opCtx,
         if (spec.hasField(IndexDescriptor::kExpireAfterSecondsFieldName)) {
             // TTL indexes with an invalid 'expireAfterSeconds' field cause problems in multiversion
             // settings.
-            auto hasInvalidExpireAfterSeconds =
-                !index_key_validate::validateExpireAfterSeconds(
-                     spec[IndexDescriptor::kExpireAfterSecondsFieldName],
-                     index_key_validate::ValidateExpireAfterSecondsMode::kSecondaryTTLIndex)
-                     .isOK();
-            if (hasInvalidExpireAfterSeconds) {
+            auto swType = index_key_validate::validateExpireAfterSeconds(
+                spec[IndexDescriptor::kExpireAfterSecondsFieldName],
+                index_key_validate::ValidateExpireAfterSecondsMode::kSecondaryTTLIndex);
+            auto expireAfterSecondsType = index_key_validate::extractExpireAfterSecondsType(swType);
+            if (expireAfterSecondsType ==
+                TTLCollectionCache::Info::ExpireAfterSecondsType::kInvalid) {
                 LOGV2_OPTIONS(
                     6852200,
                     {logv2::LogTag::kStartupWarnings},
@@ -281,17 +283,15 @@ void IndexCatalogImpl::init(OperationContext* opCtx,
                         [svcCtx = opCtx->getServiceContext(),
                          uuid = collection->uuid(),
                          indexName,
-                         hasInvalidExpireAfterSeconds](OperationContext*,
-                                                       boost::optional<Timestamp>) {
+                         expireAfterSecondsType](OperationContext*, boost::optional<Timestamp>) {
                             TTLCollectionCache::get(svcCtx).registerTTLInfo(
-                                uuid,
-                                TTLCollectionCache::Info{indexName, hasInvalidExpireAfterSeconds});
+                                uuid, TTLCollectionCache::Info{indexName, expireAfterSecondsType});
                         });
                 } else {
                     TTLCollectionCache::get(opCtx->getServiceContext())
                         .registerTTLInfo(
                             collection->uuid(),
-                            TTLCollectionCache::Info{indexName, hasInvalidExpireAfterSeconds});
+                            TTLCollectionCache::Info{indexName, expireAfterSecondsType});
                 }
             }
         }
@@ -429,7 +429,7 @@ Status IndexCatalogImpl::_isNonIDIndexAndNotAllowedToBuild(OperationContext* opC
         return Status::OK();
     }
 
-    if (!getGlobalReplSettings().usingReplSets()) {
+    if (!getGlobalReplSettings().isReplSet()) {
         return Status::OK();
     }
 
@@ -737,14 +737,12 @@ constexpr int kMaxNumIndexesAllowed = 64;
  * Recursive function which confirms whether 'expression' is valid for use in partial indexes.
  * Recursion is restricted to 'internalPartialFilterExpressionMaxDepth' levels.
  */
-Status _checkValidFilterExpressions(const MatchExpression* expression,
-                                    bool timeseriesMetricIndexesFeatureFlagEnabled,
-                                    int level = 0) {
+Status _checkValidFilterExpressions(const MatchExpression* expression, int level) {
     if (!expression)
         return Status::OK();
 
     const auto kMaxDepth = internalPartialFilterExpressionMaxDepth.load();
-    if (timeseriesMetricIndexesFeatureFlagEnabled && (level + 1) > kMaxDepth) {
+    if ((level + 1) > kMaxDepth) {
         return Status(ErrorCodes::CannotCreateIndex,
                       str::stream()
                           << "partialFilterExpression depth may not exceed " << kMaxDepth);
@@ -752,28 +750,16 @@ Status _checkValidFilterExpressions(const MatchExpression* expression,
 
     switch (expression->matchType()) {
         case MatchExpression::AND:
-            if (!timeseriesMetricIndexesFeatureFlagEnabled) {
-                if (level > 0)
-                    return Status(ErrorCodes::CannotCreateIndex,
-                                  "$and only supported in partialFilterExpression at top level");
-            }
             for (size_t i = 0; i < expression->numChildren(); i++) {
-                Status status = _checkValidFilterExpressions(
-                    expression->getChild(i), timeseriesMetricIndexesFeatureFlagEnabled, level + 1);
+                Status status = _checkValidFilterExpressions(expression->getChild(i), level + 1);
                 if (!status.isOK())
                     return status;
             }
             return Status::OK();
 
         case MatchExpression::OR:
-            if (!timeseriesMetricIndexesFeatureFlagEnabled) {
-                return Status(ErrorCodes::CannotCreateIndex,
-                              str::stream() << "Expression not supported in partial index: "
-                                            << expression->debugString());
-            }
             for (size_t i = 0; i < expression->numChildren(); i++) {
-                Status status = _checkValidFilterExpressions(
-                    expression->getChild(i), timeseriesMetricIndexesFeatureFlagEnabled, level + 1);
+                Status status = _checkValidFilterExpressions(expression->getChild(i), level + 1);
                 if (!status.isOK()) {
                     return status;
                 }
@@ -787,12 +773,7 @@ Status _checkValidFilterExpressions(const MatchExpression* expression,
         case MatchExpression::INTERNAL_EXPR_GT:
         case MatchExpression::INTERNAL_EXPR_GTE:
         case MatchExpression::MATCH_IN:
-            if (timeseriesMetricIndexesFeatureFlagEnabled) {
-                return Status::OK();
-            }
-            return Status(ErrorCodes::CannotCreateIndex,
-                          str::stream() << "Expression not supported in partial index: "
-                                        << expression->debugString());
+            return Status::OK();
         case MatchExpression::EQ:
         case MatchExpression::LT:
         case MatchExpression::LTE:
@@ -886,9 +867,8 @@ Status validateColumnStoreSpec(const CollectionPtr& collection,
 }
 }  // namespace
 
-Status IndexCatalogImpl::checkValidFilterExpressions(
-    const MatchExpression* expression, bool timeseriesMetricIndexesFeatureFlagEnabled) {
-    return _checkValidFilterExpressions(expression, timeseriesMetricIndexesFeatureFlagEnabled);
+Status IndexCatalogImpl::checkValidFilterExpressions(const MatchExpression* expression) {
+    return _checkValidFilterExpressions(expression, 0);
 }
 
 Status IndexCatalogImpl::_isSpecOk(OperationContext* opCtx,
@@ -1047,11 +1027,7 @@ Status IndexCatalogImpl::_isSpecOk(OperationContext* opCtx,
         }
         const std::unique_ptr<MatchExpression> filterExpr = std::move(statusWithMatcher.getValue());
 
-        Status status = _checkValidFilterExpressions(
-            filterExpr.get(),
-            !serverGlobalParams.featureCompatibility.isVersionInitialized() ||
-                feature_flags::gTimeseriesMetricIndexes.isEnabled(
-                    serverGlobalParams.featureCompatibility));
+        Status status = checkValidFilterExpressions(filterExpr.get());
         if (!status.isOK()) {
             return status;
         }
@@ -1436,33 +1412,29 @@ namespace {
 class IndexRemoveChange final : public RecoveryUnit::Change {
 public:
     IndexRemoveChange(const NamespaceString& nss,
-                      const UUID& uuid,
-                      std::shared_ptr<IndexCatalogEntry> entry,
+                      const IndexDescriptor* desc,
                       SharedCollectionDecorations* collectionDecorations)
-        : _nss(nss),
-          _uuid(uuid),
-          _entry(std::move(entry)),
+        : _indexName(desc->indexName()),
+          _keyPattern(desc->keyPattern().getOwned()),
+          _indexFeatures(IndexFeatures::make(desc, nss.isOnInternalDb())),
           _collectionDecorations(collectionDecorations) {}
 
-    void commit(OperationContext* opCtx, boost::optional<Timestamp>) final {
-        _entry->setDropped();
-    }
+    // Index entries use copy-on-write, so we can modify the instance in-place as it isn't published
+    // yet. This is done by calling setDropped() on the copied index entry. There is no need to do
+    // this in a commit handler.
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) final {}
 
     void rollback(OperationContext* opCtx) final {
-        auto indexDescriptor = _entry->descriptor();
-
         // Refresh the CollectionIndexUsageTrackerDecoration's knowledge of what indices are
         // present as it is shared state across Collection copies.
         CollectionIndexUsageTrackerDecoration::get(_collectionDecorations)
-            .registerIndex(indexDescriptor->indexName(),
-                           indexDescriptor->keyPattern(),
-                           IndexFeatures::make(indexDescriptor, _nss.isOnInternalDb()));
+            .registerIndex(_indexName, _keyPattern, _indexFeatures);
     }
 
 private:
-    const NamespaceString _nss;
-    const UUID _uuid;
-    std::shared_ptr<IndexCatalogEntry> _entry;
+    const std::string _indexName;
+    const BSONObj _keyPattern;
+    const IndexFeatures _indexFeatures;
     SharedCollectionDecorations* _collectionDecorations;
 };
 }  // namespace
@@ -1491,12 +1463,12 @@ Status IndexCatalogImpl::dropIndexEntry(OperationContext* opCtx,
     }();
 
     invariant(released.get() == entry);
-    // TODO SERVER-77131: Remove index catalog entry instance in commit handler.
-    opCtx->recoveryUnit()->registerChange(
-        std::make_unique<IndexRemoveChange>(collection->ns(),
-                                            collection->uuid(),
-                                            entry->shared_from_this(),
-                                            collection->getSharedDecorations()));
+
+    // This index entry is uniquely owned, so it is safe to modify this flag outside of a commit
+    // handler. The index entry is discarded on rollback.
+    entry->setDropped();
+    opCtx->recoveryUnit()->registerChange(std::make_unique<IndexRemoveChange>(
+        collection->ns(), entry->descriptor(), collection->getSharedDecorations()));
 
     CollectionQueryInfo::get(collection).rebuildIndexData(opCtx, CollectionPtr(collection));
     CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
@@ -1728,12 +1700,11 @@ const IndexDescriptor* IndexCatalogImpl::refreshEntry(OperationContext* opCtx,
         _readyIndexes.release(writableEntry->descriptor());
     invariant(writableEntry == deletedEntry.get());
 
-    // TODO SERVER-77131: Remove index catalog entry instance in commit handler.
-    opCtx->recoveryUnit()->registerChange(
-        std::make_unique<IndexRemoveChange>(collection->ns(),
-                                            collection->uuid(),
-                                            writableEntry->shared_from_this(),
-                                            collection->getSharedDecorations()));
+    // This index entry is uniquely owned, so it is safe to modify this flag outside of a commit
+    // handler. The index entry is discarded on rollback.
+    writableEntry->setDropped();
+    opCtx->recoveryUnit()->registerChange(std::make_unique<IndexRemoveChange>(
+        collection->ns(), writableEntry->descriptor(), collection->getSharedDecorations()));
     CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
         .unregisterIndex(indexName);
 
@@ -1806,6 +1777,21 @@ Status IndexCatalogImpl::_updateRecord(OperationContext* const opCtx,
                                        const RecordId& recordId,
                                        int64_t* const keysInsertedOut,
                                        int64_t* const keysDeletedOut) const {
+    // TODO SERVER-80257: This failpoint was added to produce index corruption scenarios where an
+    // index has incorrect keys. Replace this failpoint with a test command instead.
+    if (auto failpoint = skipUpdatingIndexDocument.scoped(); MONGO_unlikely(failpoint.isActive()) &&
+        repl::feature_flags::gSecondaryIndexChecksInDbCheck.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        auto indexName = failpoint.getData()["indexName"].valueStringDataSafe();
+        if (indexName == index->descriptor()->indexName()) {
+            LOGV2_DEBUG(
+                7844805,
+                3,
+                "Skipping updating index record because failpoint skipUpdatingIndexDocument is on",
+                "indexName"_attr = indexName);
+            return Status::OK();
+        }
+    }
     SharedBufferFragmentBuilder pooledBuilder(key_string::HeapBuilder::kHeapAllocatorDefaultBytes);
 
     InsertDeleteOptions options;
@@ -1848,6 +1834,12 @@ void IndexCatalogImpl::_unindexRecord(OperationContext* opCtx,
         MONGO_unlikely(failpoint.isActive())) {
         auto indexName = failpoint.getData()["indexName"].valueStringDataSafe();
         if (indexName == entry->descriptor()->indexName()) {
+            LOGV2_DEBUG(
+                7844806,
+                3,
+                "Skipping unindexing document because failpoint skipUnindexingDocumentWhenDeleted "
+                "is on",
+                "indexName"_attr = indexName);
             return;
         }
     }

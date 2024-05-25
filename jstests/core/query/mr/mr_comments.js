@@ -1,6 +1,7 @@
 // Tests that multi-line strings with comments are allowed within mapReduce.
-// The test runs commands that are not allowed with security token: mapreduce.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapreduce.
 //   not_allowed_with_security_token,
 //   # mapReduce does not support afterClusterTime.
 //   does_not_support_causal_consistency,
@@ -8,9 +9,6 @@
 //   uses_map_reduce_with_temp_collections,
 //   requires_scripting,
 // ]
-(function() {
-"use strict";
-
 const coll = db.mr_comments;
 coll.drop();
 const outColl = db.mr_comments_out;
@@ -57,4 +55,3 @@ assert.commandWorked(db.runCommand({
     out: {merge: outColl.getName()}
 }));
 assert.eq(2, outColl.find().toArray().length);
-}());

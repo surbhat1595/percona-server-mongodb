@@ -111,7 +111,7 @@ public:
             auto response = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
                 opCtx,
                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                DatabaseNameUtil::serialize(cmd.getDbName()),
+                cmd.getDbName(),
                 CommandHelpers::appendMajorityWriteConcern(cmd.toBSON({}),
                                                            opCtx->getWriteConcern()),
                 Shard::RetryPolicy::kIdempotent));
@@ -135,8 +135,8 @@ public:
             return true;
         }
     };
-
-} clusterSetFeatureCompatibilityVersionCmd;
+};
+MONGO_REGISTER_COMMAND(SetFeatureCompatibilityVersionCmd);
 
 }  // namespace
 }  // namespace mongo

@@ -2,10 +2,9 @@
  * Test that a node in rollback state can safely be removed from the replica set
  * config via reconfig. See SERVER-48179.
  */
-(function() {
-"use strict";
-
-load("jstests/replsets/libs/rollback_test.js");
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {restartServerReplication, stopServerReplication} from "jstests/libs/write_concern_util.js";
+import {RollbackTest} from "jstests/replsets/libs/rollback_test.js";
 
 const dbName = "test";
 const collName = "rollbackColl";
@@ -87,4 +86,3 @@ rollbackTest.getTestFixture().waitForState(rollbackNode, ReplSetTest.State.SECON
 rollbackTest.transitionToSteadyStateOperations();
 
 rollbackTest.stop();
-})();

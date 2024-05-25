@@ -256,7 +256,7 @@ struct HandleRequest {
             auto& dbmsg = getDbMessage();
             if (!dbmsg.messageShouldHaveNs())
                 return {};
-            return NamespaceString(dbmsg.getns());
+            return NamespaceStringUtil::deserialize(boost::none, dbmsg.getns());
         }
 
         void assertValidNsString() {
@@ -272,8 +272,8 @@ struct HandleRequest {
          * internal errors escape.
          */
         bool isInternalClient() const {
-            return (client().isInDirectClient()) ||
-                (session() && (session()->getTags() & transport::Session::kInternalClient));
+            return client().isInDirectClient() ||
+                (client().session() && client().isInternalClient());
         }
 
         std::unique_ptr<const ServiceEntryPointCommon::Hooks> behaviors;
@@ -361,7 +361,7 @@ StatusWith<repl::ReadConcernArgs> _extractReadConcern(OperationContext* opCtx,
     };
 
     auto shouldApplyDefaults = (startTransaction || !opCtx->inMultiDocumentTransaction()) &&
-        repl::ReplicationCoordinator::get(opCtx)->isReplEnabled() &&
+        repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() &&
         !opCtx->getClient()->isInDirectClient();
 
     if (readConcernSupport.defaultReadConcernPermit.isOK() && shouldApplyDefaults) {
@@ -477,8 +477,7 @@ StatusWith<repl::ReadConcernArgs> _extractReadConcern(OperationContext* opCtx,
  */
 LogicalTime getClientOperationTime(OperationContext* opCtx) {
     auto const replCoord = repl::ReplicationCoordinator::get(opCtx);
-    const bool isReplSet =
-        replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet;
+    const bool isReplSet = replCoord->getSettings().isReplSet();
 
     if (!isReplSet) {
         return LogicalTime();
@@ -498,8 +497,7 @@ LogicalTime getClientOperationTime(OperationContext* opCtx) {
  */
 LogicalTime computeOperationTime(OperationContext* opCtx, LogicalTime startOperationTime) {
     auto const replCoord = repl::ReplicationCoordinator::get(opCtx);
-    const bool isReplSet =
-        replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet;
+    const bool isReplSet = replCoord->getSettings().isReplSet();
     invariant(isReplSet);
 
     auto operationTime = getClientOperationTime(opCtx);
@@ -533,8 +531,7 @@ void appendClusterAndOperationTime(OperationContext* opCtx,
                                    BSONObjBuilder* commandBodyFieldsBob,
                                    BSONObjBuilder* metadataBob,
                                    LogicalTime startTime) {
-    if (repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
-            repl::ReplicationCoordinator::modeReplSet ||
+    if (!repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() ||
         !VectorClock::get(opCtx)->isEnabled()) {
         return;
     }
@@ -588,8 +585,7 @@ void appendErrorLabelsAndTopologyVersion(OperationContext* opCtx,
     // since we only increment the topologyVersion at shutdown and alert waiting isMaster/hello
     // commands if the server enters quiesce mode.
     const auto shouldAppendTopologyVersion =
-        (replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet &&
-         isNotPrimaryError) ||
+        (replCoord->getSettings().isReplSet() && isNotPrimaryError) ||
         (isShutdownError && replCoord->inQuiesceMode());
 
     if (!shouldAppendTopologyVersion) {
@@ -771,7 +767,6 @@ private:
     // Do any initialization of the lock state required for a transaction.
     void _setLockStateForTransaction(OperationContext* opCtx) {
         opCtx->lockState()->setSharedLocksShouldTwoPhaseLock(true);
-        opCtx->lockState()->setShouldConflictWithSecondaryBatchApplication(false);
     }
 
     // Clear any lock state which may have changed after the locker update.
@@ -1305,8 +1300,7 @@ void RunCommandImpl::_epilogue() {
         });
 
     behaviors.waitForLinearizableReadConcern(opCtx);
-    const DatabaseName requestDbName =
-        DatabaseNameUtil::deserialize(request.getValidatedTenantId(), request.getDatabase());
+    const DatabaseName requestDbName = request.getDbName();
     tenant_migration_access_blocker::checkIfLinearizableReadWasAllowedOrThrow(opCtx, requestDbName);
 
     // Wait for data to satisfy the read concern level, if necessary.
@@ -1553,8 +1547,7 @@ void ExecCommandDatabase::_initiateCommand() {
                                                      request,
                                                      command->requiresAuth(),
                                                      command->attachLogicalSessionsToOpCtx(),
-                                                     replCoord->getReplicationMode() ==
-                                                         repl::ReplicationCoordinator::modeReplSet);
+                                                     replCoord->getSettings().isReplSet());
 
     // Start authz contract tracking before we evaluate failpoints
     auto authzSession = AuthorizationSession::get(client);
@@ -1562,8 +1555,7 @@ void ExecCommandDatabase::_initiateCommand() {
 
     CommandHelpers::evaluateFailCommandFailPoint(opCtx, _invocation.get());
 
-    const auto dbName =
-        DatabaseNameUtil::deserialize(request.getValidatedTenantId(), request.getDatabase());
+    const auto dbName = request.getDbName();
     uassert(ErrorCodes::InvalidNamespace,
             fmt::format("Invalid database name: '{}'", dbName.toStringForErrorMsg()),
             NamespaceString::validDBName(dbName, NamespaceString::DollarInDbNameBehavior::Allow));
@@ -1579,9 +1571,10 @@ void ExecCommandDatabase::_initiateCommand() {
          serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) ||
         client->isFromSystemConnection();
 
-    const auto invocationNss = _invocation->ns();
-    validateSessionOptions(
-        _sessionOptions, command->getName(), invocationNss, allowTransactionsOnConfigDatabase);
+    validateSessionOptions(_sessionOptions,
+                           command->getName(),
+                           _invocation->allNamespaces(),
+                           allowTransactionsOnConfigDatabase);
 
     BSONElement cmdOptionMaxTimeMSField;
     BSONElement maxTimeMSOpOnlyField;
@@ -1664,8 +1657,7 @@ void ExecCommandDatabase::_initiateCommand() {
             uassert(ErrorCodes::NotWritablePrimary, msg, canRunHere);
         }
 
-        if (!command->maintenanceOk() &&
-            replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet &&
+        if (!command->maintenanceOk() && replCoord->getSettings().isReplSet() &&
             !replCoord->canAcceptWritesForDatabase_UNSAFE(opCtx, dbName) &&
             !replCoord->getMemberState().secondary()) {
 
@@ -1708,6 +1700,10 @@ void ExecCommandDatabase::_initiateCommand() {
             analyze_shard_key::QueryAnalysisSampler::get(opCtx).gotCommand(
                 request.getCommandName());
         }
+    }
+
+    if (command->shouldAffectQueryCounter()) {
+        globalOpCounters.gotQuery();
     }
 
     if (cmdOptionMaxTimeMSField || maxTimeMSOpOnlyField) {
@@ -1848,6 +1844,7 @@ void ExecCommandDatabase::_initiateCommand() {
             // We expect all versioned commands to be sent over 'system.buckets' namespace. But it
             // is possible that a stale mongos may send the request over a view namespace. In this
             // case, we initialize the 'OperationShardingState' with buckets namespace.
+            const auto invocationNss = _invocation->ns();
             auto bucketNss = invocationNss.makeTimeseriesBucketsNamespace();
             // Hold reference to the catalog for collection lookup without locks to be safe.
             auto catalog = CollectionCatalog::get(opCtx);
@@ -2104,8 +2101,7 @@ void curOpCommandSetup(OperationContext* opCtx, const OpMsgRequest& request) {
 
     // We construct a legacy $cmd namespace so we can fill in curOp using
     // the existing logic that existed for OP_QUERY commands
-    NamespaceString nss(NamespaceString::makeCommandNamespace(
-        DatabaseNameUtil::deserialize(request.getValidatedTenantId(), request.getDatabase())));
+    NamespaceString nss(NamespaceString::makeCommandNamespace(request.getDbName()));
 
     stdx::lock_guard<Client> lk(*opCtx->getClient());
     curop->setNS_inlock(nss);
@@ -2153,9 +2149,10 @@ Future<void> executeCommand(std::shared_ptr<HandleRequest::ExecutionContext> exe
                 // displaying potentially sensitive information in the logs, we restrict the log
                 // message to the name of the unrecognized command. However, the complete command
                 // object will still be echoed to the client.
-                if (execContext->setCommand(CommandHelpers::findCommand(request.getCommandName()));
+                if (execContext->setCommand(
+                        CommandHelpers::findCommand(opCtx, request.getCommandName()));
                     !execContext->getCommand()) {
-                    globalCommandRegistry()->incrementUnknownCommands();
+                    getCommandRegistry(opCtx)->incrementUnknownCommands();
                     LOGV2_DEBUG(21964,
                                 2,
                                 "No such command: {command}",

@@ -79,9 +79,8 @@ public:
 
         void typedRun(OperationContext* opCtx) {
             const NamespaceString& nss = ns();
-            const std::string dbName = nss.db_forSharding().toString();
             const CachedDatabaseInfo dbInfo =
-                uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, dbName));
+                uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nss.dbName()));
 
             if (MONGO_unlikely(hangRefineCollectionShardKeyAfterRefresh.shouldFail())) {
                 LOGV2(22756, "Hit hangRefineCollectionShardKeyAfterRefresh failpoint");
@@ -98,7 +97,7 @@ public:
 
             auto cmdResponse = executeCommandAgainstDatabasePrimary(
                 opCtx,
-                dbName,
+                nss.dbName(),
                 dbInfo,
                 CommandHelpers::appendMajorityWriteConcern(
                     refineCollectionShardKeyCommand.toBSON({}), opCtx->getWriteConcern()),
@@ -139,7 +138,8 @@ public:
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
-} refineCollectionShardKeyCmd;
+};
+MONGO_REGISTER_COMMAND(RefineCollectionShardKeyCommand);
 
 }  // namespace
 }  // namespace mongo

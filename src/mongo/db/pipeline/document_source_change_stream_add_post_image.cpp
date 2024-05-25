@@ -129,8 +129,10 @@ NamespaceString DocumentSourceChangeStreamAddPostImage::assertValidNamespace(
             .getDocument();
     auto dbName = assertFieldHasType(namespaceObject, "db"_sd, BSONType::String);
     auto collectionName = assertFieldHasType(namespaceObject, "coll"_sd, BSONType::String);
-    NamespaceString nss(NamespaceStringUtil::parseNamespaceFromDoc(
-        pExpCtx->ns.tenantId(), dbName.getString(), collectionName.getString()));
+    NamespaceString nss(NamespaceStringUtil::deserialize(pExpCtx->ns.tenantId(),
+                                                         dbName.getString(),
+                                                         collectionName.getString(),
+                                                         pExpCtx->serializationCtxt));
 
     // Change streams on an entire database only need to verify that the database names match. If
     // the database is 'admin', then this is a cluster-wide $changeStream and we are permitted to
@@ -140,7 +142,7 @@ NamespaceString DocumentSourceChangeStreamAddPostImage::assertValidNamespace(
                           << nss.toStringForErrorMsg() << ", expected "
                           << pExpCtx->ns.toStringForErrorMsg(),
             nss == pExpCtx->ns ||
-                (pExpCtx->isClusterAggregation() || pExpCtx->isDBAggregation(nss.db())));
+                (pExpCtx->isClusterAggregation() || pExpCtx->isDBAggregation(nss)));
 
     return nss;
 }
@@ -227,7 +229,7 @@ boost::optional<Document> DocumentSourceChangeStreamAddPostImage::lookupLatestPo
         pExpCtx, nss, *resumeTokenData.uuid, documentKey, std::move(readConcern));
 }
 
-Value DocumentSourceChangeStreamAddPostImage::serialize(SerializationOptions opts) const {
+Value DocumentSourceChangeStreamAddPostImage::serialize(const SerializationOptions& opts) const {
     return opts.verbosity
         ? Value(Document{
               {DocumentSourceChangeStream::kStageName,

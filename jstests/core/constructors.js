@@ -1,7 +1,7 @@
 // Tests to see what validity checks are done for 10gen specific object construction
 //
-// The test runs commands that are not allowed with security token: mapReduce.
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapReduce.
 //   not_allowed_with_security_token,
 //   does_not_support_stepdowns,
 //   requires_non_retryable_commands,
@@ -12,8 +12,6 @@
 
 // Takes a list of constructors and returns a new list with an extra entry for each constructor with
 // "new" prepended
-(function() {
-"use strict";
 const out = db.map_reduce_constructors_out;
 function addConstructorsWithNew(constructorList) {
     function prependNew(constructor) {
@@ -302,4 +300,3 @@ whereConstructorTest(uuidConstructors);
 whereConstructorTest(md5Constructors);
 whereConstructorTest(hexdataConstructors);
 whereConstructorTest(dateConstructors);
-})();

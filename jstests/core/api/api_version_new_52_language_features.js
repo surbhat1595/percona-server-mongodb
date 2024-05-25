@@ -1,17 +1,15 @@
 /**
  * Tests that language features introduced in version 5.2 are included in API Version 1.
  *
- * The test runs commands that are not allowed with security token: top.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: top.
  *   not_allowed_with_security_token,
  *   requires_fcv_60,
  *   uses_api_parameters,
  * ]
  */
 
-(function() {
-"use strict";
-load("jstests/libs/api_version_helpers.js");  // For 'APIVersionHelpers'.
+import {APIVersionHelpers} from "jstests/libs/api_version_helpers.js";
 
 const testDb = db.getSiblingDB(jsTestName());
 const collName = "api_version_new_52_language_features";
@@ -97,4 +95,3 @@ for (const pipeline of stablePipelines) {
         cursor: {},
     }));
 }
-})();

@@ -1,14 +1,12 @@
 /**
- * The test runs commands that are not allowed with security token: CloneCollectionAsCapped,
- * cloneCollectionAsCapped.
  * @tags: [
- *  not_allowed_with_security_token,
- *  requires_non_retryable_commands,
+ *   # The test runs commands that are not allowed with security token: CloneCollectionAsCapped,
+ *   # cloneCollectionAsCapped.
+ *   not_allowed_with_security_token,
+ *   requires_non_retryable_commands,
  * ]
  */
 
-(function() {
-"use strict";
 // This test ensures that CloneCollectionAsCapped()ing a nonexistent collection will not
 // cause the server to abort (SERVER-13750)
 
@@ -34,4 +32,3 @@ assert.eq(res.errmsg,
           isSharded ? "no such cmd: cloneCollectionAsCapped"
                     : "source collection " + dbname + ".foo does not exist",
           "converting a nonexistent to capped failed but for the wrong reason");
-}());

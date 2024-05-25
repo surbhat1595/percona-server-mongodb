@@ -627,7 +627,8 @@ std::ostream& operator<<(std::ostream& s, const ReplOperation& o) {
     return s << o.toBSON().toString();
 }
 
-OplogEntry::OplogEntry(DurableOplogEntry entry) : _entry(std::move(entry)) {}
+OplogEntry::OplogEntry(DurableOplogEntry entry)
+    : _entry(std::move(entry)), _needsRetryImage(_entry.getNeedsRetryImage()) {}
 
 OplogEntry::OplogEntry(const BSONObj& entry)
     : OplogEntry(uassertStatusOK(DurableOplogEntry::parse(entry))) {}
@@ -747,10 +748,6 @@ const mongo::Date_t& OplogEntry::getWallClockTime() const {
     return _entry.getWallClockTime();
 }
 
-boost::optional<std::int64_t> OplogEntry::getHash() const& {
-    return _entry.getHash();
-}
-
 std::int64_t OplogEntry::getVersion() const {
     return _entry.getVersion();
 }
@@ -780,7 +777,11 @@ const boost::optional<mongo::repl::OpTime>& OplogEntry::getPostImageOpTime() con
 }
 
 boost::optional<RetryImageEnum> OplogEntry::getNeedsRetryImage() const {
-    return _entry.getNeedsRetryImage();
+    return _needsRetryImage;
+}
+
+void OplogEntry::clearNeedsRetryImage() {
+    _needsRetryImage = boost::none;
 }
 
 OpTime OplogEntry::getOpTime() const {

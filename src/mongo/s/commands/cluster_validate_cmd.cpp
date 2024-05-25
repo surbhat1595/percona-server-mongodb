@@ -109,7 +109,7 @@ public:
             uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
         auto results = scatterGatherVersionedTargetByRoutingTable(
             opCtx,
-            nss.db_forSharding(),
+            nss.dbName(),
             nss,
             cri,
             applyReadWriteConcern(
@@ -123,8 +123,8 @@ public:
 
         Status firstFailedShardStatus = Status::OK();
         bool isValid = true;
+        BSONObjBuilder rawResBuilder;
 
-        BSONObjBuilder rawResBuilder(output.subobjStart("raw"));
         for (const auto& cmdResult : results) {
             const auto& shardId = cmdResult.shardId;
 
@@ -161,14 +161,21 @@ public:
         }
         rawResBuilder.done();
 
-        if (firstFailedShardStatus.isOK())
-            output.appendBool("valid", isValid);
+        if (firstFailedShardStatus.isOK()) {
+            if (!cri.cm.isSharded()) {
+                CommandHelpers::filterCommandReplyForPassthrough(
+                    results[0].swResponse.getValue().data, &output);
+            } else {
+                output.appendBool("valid", isValid);
+            }
+        }
+        output.append("raw", rawResBuilder.obj());
 
         uassertStatusOK(firstFailedShardStatus);
         return true;
     }
-
-} validateCmd;
+};
+MONGO_REGISTER_COMMAND(ValidateCmd);
 
 }  // namespace
 }  // namespace mongo

@@ -1,13 +1,12 @@
 /**
  * A transaction with default readConcern ("local") does not see writes from another session.
  *
- * The test runs commands that are not allowed with security token: endSession.
  * @tags: [
- *   not_allowed_with_security_token,uses_transactions]
+ *   # The test runs commands that are not allowed with security token: endSession.
+ *   not_allowed_with_security_token,
+ *   uses_transactions
+ * ]
  */
-(function() {
-"use strict";
-
 const dbName = "test";
 const collName = "default_read_concern";
 const testDB = db.getSiblingDB(dbName);
@@ -47,4 +46,3 @@ assert.commandWorked(session.commitTransaction_forTesting());
 
 assertSameMembers([{_id: 0}, {_id: 1}, {_id: 2}]);
 session.endSession();
-}());

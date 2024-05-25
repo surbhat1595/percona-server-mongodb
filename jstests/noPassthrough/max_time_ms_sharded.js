@@ -4,9 +4,6 @@
 // @tags: [
 //   requires_replication,
 // ]
-(function() {
-'use strict';
-
 var st = new ShardingTest({
     mongos: 1,
     config: 1,
@@ -218,19 +215,27 @@ assert.commandWorked(coll.runCommand("aggregate", {pipeline: [], cursor: {}, max
 // Positive test for "setFeatureCompatibilityVersion"
 configureMaxTimeAlwaysTimeOut("alwaysOn");
 assert.commandFailedWithCode(
-    admin.runCommand({setFeatureCompatibilityVersion: lastLTSFCV, maxTimeMS: 1000 * 60 * 60 * 24}),
+    admin.runCommand({
+        setFeatureCompatibilityVersion: lastLTSFCV,
+        confirm: true,
+        maxTimeMS: 1000 * 60 * 60 * 24
+    }),
     ErrorCodes.MaxTimeMSExpired,
     "expected setFeatureCompatibilityVersion to fail due to maxTimeAlwaysTimeOut fail point");
 
 // Negative test for "setFeatureCompatibilityVersion"
 configureMaxTimeAlwaysTimeOut("off");
-assert.commandWorked(
-    admin.runCommand({setFeatureCompatibilityVersion: lastLTSFCV, maxTimeMS: 1000 * 60 * 60 * 24}),
-    "expected setFeatureCompatibilityVersion to not hit time limit in mongod");
+assert.commandWorked(admin.runCommand({
+    setFeatureCompatibilityVersion: lastLTSFCV,
+    confirm: true,
+    maxTimeMS: 1000 * 60 * 60 * 24
+}),
+                     "expected setFeatureCompatibilityVersion to not hit time limit in mongod");
 
 // Negative test for "setFeatureCompatibilityVersion" to upgrade
 assert.commandWorked(
-    admin.runCommand({setFeatureCompatibilityVersion: latestFCV, maxTimeMS: 1000 * 60 * 60 * 24}),
+    admin.runCommand(
+        {setFeatureCompatibilityVersion: latestFCV, confirm: true, maxTimeMS: 1000 * 60 * 60 * 24}),
     "expected setFeatureCompatibilityVersion to not hit time limit in mongod");
 
 // Test that the maxTimeMS is still enforced on the shards even if we do not spend much time in
@@ -272,4 +277,3 @@ assert.throws(() => cursor.next(), [], "expected mongos to abort getMore due to 
 // TODO SERVER-30179: Re-introduce tests for moveChunk and maxTimeMS.
 
 st.stop();
-})();

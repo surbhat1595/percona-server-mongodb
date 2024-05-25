@@ -205,7 +205,7 @@ BSONObj getNextSessionOplogBatch(OperationContext* opCtx,
     auto shard = shardStatus.getValue();
     auto responseStatus = shard->runCommand(opCtx,
                                             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                            "admin",
+                                            DatabaseName::kAdmin,
                                             buildMigrateSessionCmd(migrationSessionId),
                                             Shard::RetryPolicy::kNoRetry);
 
@@ -519,9 +519,6 @@ SessionCatalogMigrationDestination::_processSessionOplog(const BSONObj& oplogBSO
     oplogEntry.setFromMigrate(true);
     // Reset OpTime so logOp() can assign a new one.
     oplogEntry.setOpTime(OplogSlot());
-
-    // We should not be writing this field so make sure it is always "none".
-    oplogEntry.setHash(boost::none);
 
     writeConflictRetry(
         opCtx, "SessionOplogMigration", NamespaceString::kSessionTransactionsTableNamespace, [&] {

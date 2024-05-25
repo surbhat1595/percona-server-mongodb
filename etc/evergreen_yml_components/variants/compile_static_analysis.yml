@@ -7,9 +7,9 @@ variables:
   - rhel80-xlarge
   activate: true  # These compile variants run on every commit to reduce latency of the auto-reverter.
   tasks:
-  - name: compile_test_and_package_parallel_core_stream_TG
-  - name: compile_test_and_package_parallel_unittest_stream_TG
-  - name: compile_test_and_package_parallel_dbtest_stream_TG
+  - name: compile_test_parallel_core_stream_TG
+  - name: compile_test_parallel_unittest_stream_TG
+  - name: compile_test_parallel_dbtest_stream_TG
   - name: generate_buildid_to_debug_symbols_mapping
 
 - &generic_linux_compile_expansions  # The most commonly used compile expansions.
@@ -74,9 +74,9 @@ buildvariants:
     compile_variant: *linux-x86-dynamic-compile
   tasks:
     - name: compile_ninja_quick_TG
-    - name: compile_test_and_package_parallel_unittest_stream_TG
-    - name: compile_test_and_package_parallel_core_stream_TG
-    - name: compile_test_and_package_parallel_dbtest_stream_TG
+    - name: compile_test_parallel_unittest_stream_TG
+    - name: compile_test_parallel_core_stream_TG
+    - name: compile_test_parallel_dbtest_stream_TG
     - name: compile_integration_and_test_parallel_stream_TG
     - name: generate_buildid_to_debug_symbols_mapping
     - name: run_pretty_printer_tests
@@ -100,7 +100,7 @@ buildvariants:
   - name: version_expansions_gen
     variant: enterprise-rhel-80-64-bit-future-git-tag-multiversion-version-gen
   tasks:
-  - name: compile_test_and_package_serial_TG
+  - name: compile_test_serial_TG
 
 - <<: *generic_linux_compile_params
   name: &linux-x86-dynamic-debug-compile-required linux-x86-dynamic-debug-compile-required  # TODO: replace with Sanitizer.
@@ -113,15 +113,14 @@ buildvariants:
       --opt=on
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      --enable-free-mon=on
       --enable-http-client=on
       --link-model=dynamic
     num_scons_link_jobs_available: 0.99
     compile_variant: *linux-x86-dynamic-debug-compile-required
   tasks:
-  - name: compile_test_and_package_parallel_core_stream_TG
-  - name: compile_test_and_package_parallel_unittest_stream_TG
-  - name: compile_test_and_package_parallel_dbtest_stream_TG
+  - name: compile_test_parallel_core_stream_TG
+  - name: compile_test_parallel_unittest_stream_TG
+  - name: compile_test_parallel_dbtest_stream_TG
   - name: generate_buildid_to_debug_symbols_mapping
 
 - <<: *generic_linux_compile_params
@@ -154,7 +153,6 @@ buildvariants:
       --ocsp-stapling=off
       -j$(grep -c ^processor /proc/cpuinfo)
       --link-model=dynamic
-      --enable-free-mon=on
     compile_variant: *linux-debug-aubsan-compile-required
 
 - <<: *linux-x86-dynamic-compile-params
@@ -205,18 +203,19 @@ buildvariants:
       -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.8")
       --win-version-min=win10
     num_scons_link_jobs_available: 0.2
-    python: '/cygdrive/c/python/python37/python.exe'
+    python: '/cygdrive/c/python/python39/python.exe'
     scons_cache_scope: shared
     compile_variant: *windows-compile-required
   tasks:
   - name: compile_ninja_quick_TG
-  - name: compile_test_and_package_parallel_core_stream_TG
-  - name: compile_test_and_package_parallel_unittest_stream_TG
-  - name: compile_test_and_package_parallel_dbtest_stream_TG
+  - name: compile_test_parallel_core_stream_TG
+  - name: compile_test_parallel_unittest_stream_TG
+  - name: compile_test_parallel_dbtest_stream_TG
   - name: compile_build_tools_next_TG
   - name: server_discovery_and_monitoring_json_test_TG
   - name: server_selection_json_test_TG
   - name: .crypt
+  - name: generate_buildid_to_debug_symbols_mapping
 
 - <<: *linux-arm64-dynamic-compile-params
   name: &amazon-linux2-arm64-compile amazon-linux2-arm64-compile
@@ -230,9 +229,9 @@ buildvariants:
       distros:
         - amazon2-arm64-xlarge
     - name: compile_ninja_quick_TG
-    - name: compile_test_and_package_parallel_unittest_stream_TG
-    - name: compile_test_and_package_parallel_core_stream_TG
-    - name: compile_test_and_package_parallel_dbtest_stream_TG
+    - name: compile_test_parallel_unittest_stream_TG
+    - name: compile_test_parallel_core_stream_TG
+    - name: compile_test_parallel_dbtest_stream_TG
     - name: compile_integration_and_test_parallel_stream_TG
     - name: generate_buildid_to_debug_symbols_mapping
     - name: iwyu_self_test_TG
@@ -278,12 +277,16 @@ buildvariants:
       ENABLE_GRPC_BUILD=1
     compile_variant: *linux-x86-dynamic-grpc-suggested
     clang_tidy_toolchain: v4
+    test_flags: >-
+      --mongosSetParameters="{featureFlagGRPC: true}"
+      --mongodSetParameters="{featureFlagGRPC: true}"
   tasks:
     - name: compile_ninja_quick_TG
-    - name: compile_test_and_package_parallel_unittest_stream_TG
-    - name: compile_test_and_package_parallel_core_stream_TG
-    - name: compile_test_and_package_parallel_dbtest_stream_TG
+    - name: compile_test_parallel_unittest_stream_TG
+    - name: compile_test_parallel_core_stream_TG
+    - name: compile_test_parallel_dbtest_stream_TG
     - name: generate_buildid_to_debug_symbols_mapping
+    - name: .jscore .common
     - name: .lint
     - name: libdeps_graph_linting_TG
       distros:
@@ -291,3 +294,34 @@ buildvariants:
     - name: clang_tidy_TG
       distros:
       - rhel80-xxlarge
+
+- name: &windows-dev-compile-suggested windows-dev-compile-suggested
+  display_name: "* Windows Dev Compile"
+  run_on:
+  - windows-vsCurrent-xlarge
+  modules:
+  - enterprise
+  expansions:
+    exe: ".exe"
+    ext: zip
+    content_type: application/zip
+    compile_flags: >-
+      CPPPATH="c:/sasl/include"
+      LIBPATH="c:/sasl/lib"
+    num_scons_link_jobs_available: 0.2
+    python: '/cygdrive/c/python/python39/python.exe'
+    scons_cache_scope: shared
+    compile_variant: *windows-dev-compile-suggested
+  tasks:
+    - name: scons_compile_smoke_test_TG
+    - name: ninja_compile_smoke_test_TG
+
+- <<: *linux-arm64-dynamic-compile-params
+  name: &amazon-linux2-arm64-dev-compile amazon-linux2-arm64-dev-compile
+  display_name: "* Amazon Linux 2 arm64 Dev Compile"
+  expansions:
+    <<: *linux-arm64-dynamic-compile-expansions
+    compile_variant: *amazon-linux2-arm64-compile
+  tasks:
+    - name: scons_compile_smoke_test_TG
+    - name: ninja_compile_smoke_test_TG

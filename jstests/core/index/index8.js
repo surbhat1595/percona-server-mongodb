@@ -1,6 +1,8 @@
-// The test runs commands that are not allowed with security token: reIndex.
+// Test key uniqueness
+//
 // @tags: [
-//   not_allowed_with_security_token,
+//     # The test runs commands that are not allowed with security token: reIndex.
+//     not_allowed_with_security_token,
 //     # Asserts on the output of listIndexes.
 //     assumes_no_implicit_index_creation,
 //     # Cannot implicitly shard accessed collections because of not being able to create unique
@@ -8,9 +10,6 @@
 //     cannot_create_unique_index_when_using_hashed_shard_key,
 //     requires_fastcount
 // ]
-
-// Test key uniqueness
-(function() {
 
 let t = db.jstests_index8;
 t.drop();
@@ -77,4 +76,3 @@ assert.eq(1, t.find().sort({a: -1}).hint({a: 1}).toArray().length);
 
 assert.eq(t._indexSpec({x: 1}, true), t._indexSpec({x: 1}, [true]), "spec 1");
 assert.eq(t._indexSpec({x: 1}, "eliot"), t._indexSpec({x: 1}, ["eliot"]), "spec 2");
-})();

@@ -13,9 +13,7 @@
  * applicable.
  *
  * This test requires replica set configuration and user credentials to persist across a restart.
- * TODO SERVER-78101: Investigate the test failure and re-enable the test with CQF enabled.
- * @tags: [requires_persistence, uses_transactions, uses_prepare_transaction, requires_fcv_70,
- * cqf_incompatible]
+ * @tags: [requires_persistence, uses_transactions, uses_prepare_transaction, requires_fcv_70]
  */
 
 // Restarts cause issues with authentication for awaiting replication.
@@ -24,11 +22,8 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
 TestData.skipCheckOrphans = true;
 TestData.skipCheckShardFilteringMetadata = true;
 
-(function() {
-"use strict";
-
-load("jstests/libs/fixture_helpers.js");  // For FixtureHelpers.
-load("jstests/libs/namespace_utils.js");  // For getCollectionNameFromFullNamespace.
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {getCollectionNameFromFullNamespace} from "jstests/libs/namespace_utils.js";
 
 // Replica set nodes started with --shardsvr do not enable key generation until they are added
 // to a sharded cluster and reject commands with gossiped clusterTime from users without the
@@ -61,7 +56,6 @@ const st = new ShardingTest(stParams);
 // $currentOp behaviour.
 let shardConn = st.rs0.getPrimary();
 let mongosConn = st.s;
-let shardRS = st.rs0;
 
 let clusterTestDB = mongosConn.getDB(jsTestName());
 let clusterAdminDB = mongosConn.getDB("admin");
@@ -139,7 +133,6 @@ function restartCluster(st, newOpts) {
     // Re-link the cluster components.
     shardConn = st.rs0.getPrimary();
     mongosConn = st.s;
-    shardRS = st.rs0;
     clusterTestDB = mongosConn.getDB(jsTestName());
     clusterAdminDB = mongosConn.getDB("admin");
     shardTestDB = shardConn.getDB(jsTestName());
@@ -199,7 +192,7 @@ function assertCurrentOpHasSingleMatchingEntry({conn, currentOpAggFilter, curOpS
     return curOpResult[0];
 }
 
-function waitForParallelShell({conn, username, password, awaitShell}) {
+function waitForParallelShell({username, password, awaitShell}) {
     runCommandOnAllPrimaries({
         dbName: "admin",
         username: username,
@@ -963,4 +956,3 @@ awaitShell();
 // Add the shard back into the replset so that it can be validated by st.stop().
 shardConn = restartReplSet(st.rs1, {shardsvr: ""});
 st.stop();
-})();

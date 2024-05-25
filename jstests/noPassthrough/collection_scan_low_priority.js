@@ -2,19 +2,14 @@
  * Tests that unbounded collections scans access the storage engine with low priority.
  *
  * @tags: [
- *   cqf_incompatible, # TODO SERVER-64007: This test requires plans which yield in order to count
- *   # low-priority transactions, which CQF cannot generate until this ticket is complete.
  *   featureFlagDeprioritizeLowPriorityOperations,
  *   requires_wiredtiger,
  * ]
  */
-(function() {
-'use strict';
-
-load('jstests/libs/os_helpers.js');
+import {isLinux} from "jstests/libs/os_helpers.js";
 
 if (!isLinux()) {
-    return;
+    quit();
 }
 
 const conn = MongoRunner.runMongod();
@@ -107,4 +102,3 @@ runTest({}, false);
 runTest({clusteredIndex: {key: {_id: 1}, unique: true}}, false);
 
 MongoRunner.stopMongod(conn);
-}());

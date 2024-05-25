@@ -116,24 +116,11 @@ public:
 #undef DBNAME_CONSTANT
 
     static constexpr size_t kMaxDatabaseNameLength = 63;
-    static constexpr size_t kMaxTenantDatabaseNameLength = 38;
 
     /**
      * Constructs an empty DatabaseName.
      */
     DatabaseName() = default;
-
-    /**
-     * This function constructs a DatabaseName without checking for presence of TenantId. It
-     * must only be used by auth systems which are not yet tenant aware.
-     *
-     * TODO SERVER-76294 Remove this function. Any remaining call sites must be changed to use a
-     * function on DatabaseNameUtil.
-     */
-    static DatabaseName createDatabaseNameForAuth(const boost::optional<TenantId>& tenantId,
-                                                  StringData dbString) {
-        return DatabaseName(tenantId, dbString);
-    }
 
     /**
      * This function constructs a DatabaseName without checking for presence of TenantId.
@@ -151,13 +138,6 @@ public:
         }
 
         return TenantId{OID::from(&_data[kDataOffset])};
-    }
-    /**
-     * This function is deprecated. TODO SERVER-77537 Make db() private.
-     */
-    StringData db() const {
-        auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
-        return StringData{_data.data() + offset, _data.size() - offset};
     }
 
     size_t size() const {
@@ -285,11 +265,12 @@ private:
     friend class NamespaceString;
     friend class NamespaceStringOrUUID;
     friend class DatabaseNameUtil;
+    friend class NamespaceStringUtil;
 
     /**
      * Constructs a DatabaseName from the given tenantId and database name.
      * "dbString" is expected only consist of a db name. It is the caller's responsibility to ensure
-     * the dbName is a valid db name.
+     * the dbString is a valid db name.
      */
     DatabaseName(boost::optional<TenantId> tenantId, StringData dbString) {
         uassert(ErrorCodes::InvalidNamespace,
@@ -298,12 +279,11 @@ private:
         uassert(ErrorCodes::InvalidNamespace,
                 "database names cannot have embedded null characters",
                 dbString.find('\0') == std::string::npos);
-
-        size_t maxLen = tenantId ? kMaxTenantDatabaseNameLength : kMaxDatabaseNameLength;
         uassert(ErrorCodes::InvalidNamespace,
-                fmt::format(
-                    "db name must be at most {} characters, found: {}", maxLen, dbString.size()),
-                dbString.size() <= maxLen);
+                fmt::format("db name must be at most {} characters, found: {}",
+                            kMaxDatabaseNameLength,
+                            dbString.size()),
+                dbString.size() <= kMaxDatabaseNameLength);
 
         uint8_t details = dbString.size() & kDatabaseNameOffsetEndMask;
         size_t dbStartIndex = kDataOffset;
@@ -320,6 +300,11 @@ private:
         if (!dbString.empty()) {
             std::memcpy(_data.data() + dbStartIndex, dbString.rawData(), dbString.size());
         }
+    }
+
+    StringData db() const {
+        auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
+        return StringData{_data.data() + offset, _data.size() - offset};
     }
 
     std::string toString() const {

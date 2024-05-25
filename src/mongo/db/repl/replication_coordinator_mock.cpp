@@ -115,17 +115,6 @@ const ReplSettings& ReplicationCoordinatorMock::getSettings() const {
     return _settings;
 }
 
-bool ReplicationCoordinatorMock::isReplEnabled() const {
-    return _settings.usingReplSets();
-}
-
-ReplicationCoordinator::Mode ReplicationCoordinatorMock::getReplicationMode() const {
-    if (_settings.usingReplSets()) {
-        return modeReplSet;
-    }
-    return modeNone;
-}
-
 MemberState ReplicationCoordinatorMock::getMemberState() const {
     stdx::lock_guard<Mutex> lk(_mutex);
 
@@ -819,7 +808,7 @@ void ReplicationCoordinatorMock::cancelCbkHandle(
 
 BSONObj ReplicationCoordinatorMock::runCmdOnPrimaryAndAwaitResponse(
     OperationContext* opCtx,
-    const std::string& dbName,
+    const DatabaseName& dbName,
     const BSONObj& cmdObj,
     OnRemoteCmdScheduledFn onRemoteCmdScheduled,
     OnRemoteCmdCompleteFn onRemoteCmdComplete) {

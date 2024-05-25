@@ -109,6 +109,11 @@ public:
         return _isFromLoadBalancer;
     }
 
+    bool isFromRouterPort() const override {
+        auto routerPort = _tl->routerPort();
+        return _isIngressSession && routerPort && *routerPort == _local.port();
+    }
+
 #ifdef MONGO_CONFIG_SSL
     const std::shared_ptr<SSLManagerInterface>& getSSLManager() const override;
 #endif

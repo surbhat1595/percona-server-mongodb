@@ -185,7 +185,7 @@ protected:
     void expectHello(const HostAndPort& target, StatusWith<BSONObj> helloResponse) {
         onCommandForAddShard([&, target, helloResponse](const RemoteCommandRequest& request) {
             ASSERT_EQ(request.target, target);
-            ASSERT_EQ(request.dbname, "admin");
+            ASSERT_EQ(request.dbname, DatabaseName::kAdmin);
             ASSERT_BSONOBJ_EQ(request.cmdObj, BSON("hello" << 1));
             ASSERT_BSONOBJ_EQ(rpc::makeEmptyMetadata(), request.metadata);
 
@@ -196,7 +196,7 @@ protected:
     void expectListDatabases(const HostAndPort& target, const std::vector<BSONObj>& dbs) {
         onCommandForAddShard([&](const RemoteCommandRequest& request) {
             ASSERT_EQ(request.target, target);
-            ASSERT_EQ(request.dbname, "admin");
+            ASSERT_EQ(request.dbname, DatabaseName::kAdmin);
             ASSERT_BSONOBJ_EQ(request.cmdObj, BSON("listDatabases" << 1 << "nameOnly" << true));
             ASSERT_BSONOBJ_EQ(rpc::makeEmptyMetadata(), request.metadata);
 
@@ -212,7 +212,7 @@ protected:
     void expectCollectionDrop(const HostAndPort& target, const NamespaceString& nss) {
         onCommandForAddShard([&](const RemoteCommandRequest& request) {
             ASSERT_EQ(request.target, target);
-            ASSERT_EQ(request.dbname, nss.db_forTest());
+            ASSERT_EQ(request.dbname, nss.dbName());
             ASSERT_BSONOBJ_EQ(request.cmdObj,
                               BSON("drop" << nss.coll() << "writeConcern"
                                           << BSON("w"
@@ -234,7 +234,7 @@ protected:
 
         onCommandForAddShard([&, target, response](const RemoteCommandRequest& request) {
             ASSERT_EQ(request.target, target);
-            ASSERT_EQ(request.dbname, "admin");
+            ASSERT_EQ(request.dbname, DatabaseName::kAdmin);
             ASSERT_BSONOBJ_EQ(request.cmdObj, setFcvObj);
 
             return response;
@@ -244,7 +244,8 @@ protected:
     void expectRemoveUserWritesCriticalSectionsDocs(const HostAndPort& target) {
         onCommandForAddShard([&](const RemoteCommandRequest& request) {
             ASSERT_EQ(request.target, target);
-            ASSERT_EQ(request.dbname, NamespaceString::kUserWritesCriticalSectionsNamespace.db());
+            ASSERT_EQ(request.dbname,
+                      NamespaceString::kUserWritesCriticalSectionsNamespace.dbName());
             ASSERT_BSONOBJ_EQ(
                 request.cmdObj,
                 BSON("delete" << NamespaceString::kUserWritesCriticalSectionsNamespace.coll()
@@ -279,11 +280,10 @@ protected:
         const std::vector<boost::optional<TenantId>>& tenantsOnTarget,
         const TenantIdMap<std::vector<BSONObj>>& localClusterParameters) {
 
-        std::vector<std::string> dbnamesOnTarget;
+        std::vector<DatabaseName> dbnamesOnTarget;
         for (const auto& tenantId : tenantsOnTarget) {
             dbnamesOnTarget.push_back(
-                DatabaseName::createDatabaseName_forTest(tenantId, DatabaseName::kConfig.db())
-                    .toStringWithTenantId_forTest());
+                DatabaseName::createDatabaseName_forTest(tenantId, DatabaseName::kConfig.db()));
         }
 
         if (gMultitenancySupport) {
@@ -322,7 +322,7 @@ protected:
         const HostAndPort& target, const std::vector<boost::optional<TenantId>>& tenantsOnTarget) {
         onCommandForAddShard([&](const RemoteCommandRequest& request) {
             ASSERT_EQ(request.target, target);
-            ASSERT_EQ(request.dbname, DatabaseName::kAdmin.db());
+            ASSERT_EQ(request.dbname, DatabaseName::kAdmin);
             ASSERT_EQ(request.cmdObj["listDatabasesForAllTenants"].Int(), 1);
             BSONArrayBuilder b;
             for (const auto& tenantId : tenantsOnTarget) {
@@ -340,7 +340,7 @@ protected:
     }
 
     void expectRemoveClusterParameterDocs(const HostAndPort& target,
-                                          std::vector<std::string> dbnamesOnTarget) {
+                                          std::vector<DatabaseName> dbnamesOnTarget) {
         int n = dbnamesOnTarget.size();
         while (n-- > 0) {
             onCommandForAddShard([&](const RemoteCommandRequest& request) {
@@ -394,12 +394,7 @@ protected:
         while (n-- > 0) {
             onCommandForAddShard([&](const RemoteCommandRequest& request) {
                 ASSERT_EQ(request.target, target);
-                int idx = request.dbname.find('_');
-                boost::optional<TenantId> tenantId = boost::none;
-                if (idx == OID::kOIDSize * 2) {
-                    // tenantId exists
-                    tenantId = TenantId(OID(request.dbname.substr(0, OID::kOIDSize * 2)));
-                }
+                boost::optional<TenantId> tenantId = request.dbname.tenantId();
 
                 // Check that the parameter and tenant match a parameter and tenant passed in.
                 auto it = localClusterParameters.find(tenantId);
@@ -420,7 +415,7 @@ protected:
     }
 
     void expectFindClusterParameterDocs(const HostAndPort& target,
-                                        std::vector<std::string> dbnamesOnTarget) {
+                                        std::vector<DatabaseName> dbnamesOnTarget) {
         int n = dbnamesOnTarget.size();
         while (n-- > 0) {
             onCommandForAddShard([&](const RemoteCommandRequest& request) {
@@ -440,7 +435,7 @@ protected:
                         0,
                         {BSON("_id"
                               << "testStrClusterParameter"
-                              << "strData" << request.dbname)});
+                              << "strData" << request.dbname.toStringWithTenantId_forTest())});
                 return cursorRes.toBSON(CursorResponse::ResponseType::InitialResponse);
             });
         }
@@ -479,8 +474,7 @@ protected:
             createAddShardCmd(operationContext(), expectedShardName),
             ShardingCatalogClient::kMajorityWriteConcern);
 
-        const auto opMsgRequest =
-            OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin.db(), upsertCmdObj);
+        const auto opMsgRequest = OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin, upsertCmdObj);
         expectUpdatesReturnSuccess(expectedHost,
                                    NamespaceString(NamespaceString::kServerConfigurationNamespace),
                                    UpdateOp::parse(opMsgRequest));
@@ -495,8 +489,7 @@ protected:
             createAddShardCmd(operationContext(), expectedShardName),
             ShardingCatalogClient::kMajorityWriteConcern);
 
-        const auto opMsgRequest =
-            OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin.db(), upsertCmdObj);
+        const auto opMsgRequest = OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin, upsertCmdObj);
         expectUpdatesReturnFailure(expectedHost,
                                    NamespaceString(NamespaceString::kServerConfigurationNamespace),
                                    UpdateOp::parse(opMsgRequest),
@@ -514,7 +507,7 @@ protected:
             ASSERT_EQUALS(expectedHost, request.target);
 
             // Check that the db name in the request matches the expected db name.
-            ASSERT_EQUALS(expectedNss.db_forTest(), request.dbname);
+            ASSERT_EQUALS(expectedNss.dbName(), request.dbname);
 
             const auto addShardOpMsgRequest =
                 OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
@@ -568,7 +561,7 @@ protected:
             ASSERT_EQUALS(expectedHost, request.target);
 
             // Check that the db name in the request matches the expected db name.
-            ASSERT_EQUALS(expectedNss.db_forTest(), request.dbname);
+            ASSERT_EQUALS(expectedNss.dbName(), request.dbname);
 
             const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
             const auto updateOp = UpdateOp::parse(opMsgRequest);
@@ -1993,6 +1986,45 @@ TEST_F(AddShardTest, AddShardWithOverlappingHosts) {
     future2.timed_get(kLongFutureTimeout);
     // Ensure that the shard document was unchanged.
     assertShardExists(existingShard);
+}
+
+// Test that `maxSize` field is unset from `config.shards` entries
+// TODO SERVER-80266 remove this test once 8.0 becomes last lts
+TEST_F(AddShardTest, DeleteMaxSizeMb) {
+    auto opCtx = operationContext();
+    // add maxSizeMb
+    std::string existingShardName = "myShard";
+    ConnectionString connString =
+        assertGet(ConnectionString::parse("mySet/host1:12345,host2:12345"));
+
+    ShardType existingShard;
+    existingShard.setName(existingShardName);
+    existingShard.setHost(connString.toString());
+    existingShard.setState(ShardType::ShardState::kShardAware);
+    auto bsonShard = existingShard.toBSON();
+
+    // concatenate maxSizeMb to the shard document
+    bsonShard.addFields(BSON("maxSize" << 100));
+
+    ASSERT_OK(catalogClient()->insertConfigDocument(opCtx,
+                                                    NamespaceString::kConfigsvrShardsNamespace,
+                                                    bsonShard,
+                                                    ShardingCatalogClient::kMajorityWriteConcern));
+    // remove maxSize
+    int nModified = ShardingCatalogManager::get(opCtx)->deleteMaxSizeMbFromShardEntries(opCtx);
+
+    ASSERT_EQUALS(1, nModified);
+
+    // ensure maxSize is deleted
+    auto response = uassertStatusOK(
+        getConfigShard()->exhaustiveFindOnConfig(opCtx,
+                                                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                                                 repl::ReadConcernLevel::kLocalReadConcern,
+                                                 NamespaceString::kConfigsvrShardsNamespace,
+                                                 BSON("maxSize" << BSON("$exists" << true)),
+                                                 BSONObj(),
+                                                 boost::none));
+    ASSERT_EQUALS(0, response.docs.size());
 }
 }  // namespace
 }  // namespace mongo

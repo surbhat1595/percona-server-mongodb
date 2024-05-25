@@ -70,7 +70,7 @@ public:
             uassert(ErrorCodes::IllegalOperation,
                     "_refreshQueryAnalyzerConfiguration command is not supported on a standalone "
                     "mongod",
-                    repl::ReplicationCoordinator::get(opCtx)->isReplEnabled());
+                    repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet());
             uassert(ErrorCodes::IllegalOperation,
                     "_refreshQueryAnalyzerConfiguration command is not supported on a multitenant "
                     "replica set",
@@ -120,7 +120,8 @@ public:
     std::string help() const override {
         return "Refreshes the query analyzer configurations for all collections.";
     }
-} refreshQueryAnalyzerConfigurationCmd;
+};
+MONGO_REGISTER_COMMAND(RefreshQueryAnalyzerConfigurationCmd);
 
 }  // namespace
 

@@ -207,7 +207,6 @@ DatabaseType ShardingCatalogManager::createDatabase(
                        DatabaseNameUtil::deserialize(boost::none, str::toLower(dbName)),
                        "createDatabase" /* reason */,
                        MODE_X,
-                       Date_t::now() + DDLLockManager::kDefaultLockTimeout,
                        true /*waitForRecovery*/);
     }
 
@@ -367,7 +366,7 @@ DatabaseType ShardingCatalogManager::createDatabase(
     auto cmdResponse = uassertStatusOK(primaryShardPtr->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        "admin",
+        DatabaseName::kAdmin,
         BSON("_flushDatabaseCacheUpdates" << dbName),
         Shard::RetryPolicy::kIdempotent));
     uassertStatusOK(cmdResponse.commandStatus);

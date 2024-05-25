@@ -36,7 +36,7 @@ global:
     - "mongo/db/query/ce_mode_parameter.h"
     - "mongo/db/query/explain_version_validator.h"
     - "mongo/db/query/sbe_plan_cache_on_parameter_change.h"
-    - "mongo/db/query/query_stats_util.h"
+    - "mongo/db/query/query_stats/util.h"
     - "mongo/platform/atomic_proxy.h"
     - "mongo/platform/atomic_word.h"
 
@@ -138,6 +138,15 @@ server_parameters:
     validator:
       gte: 0
     on_update: plan_cache_util::clearSbeCacheOnParameterChange
+
+  internalQueryPlanTieBreakingWithIndexHeuristics:
+    description: "Tie-breaking rules which choose the plan that fetches the smallest number of
+    documents or examines fewest index keys, as well as one that can be assigned the longest
+    contiguous prefix of equality predicates in any index."
+    set_at: [ startup, runtime ]
+    cpp_varname: "internalQueryPlanTieBreakingWithIndexHeuristics"
+    cpp_vartype: AtomicWord<bool>
+    default: true
 
   internalQueryForceIntersectionPlans:
     description: "Gives a large ranking bonus to index intersection plans, forcing intersection
@@ -308,7 +317,7 @@ server_parameters:
     set_at: [ startup, runtime ]
     cpp_varname: "internalQueryEnumerationPreferLockstepOrEnumeration"
     cpp_vartype: AtomicWord<bool>
-    default: false
+    default: true
     on_update: plan_cache_util::clearSbeCacheOnParameterChange
 
   internalQueryEnumerationMaxOrSolutions:
@@ -1256,7 +1265,7 @@ server_parameters:
     cpp_varname: internalQueryDocumentSourceWriterBatchExtraReservedBytes
     validator:
       gte: 0
-      lte: 
+      lte:
         expr: 8 * 1024 * 1024 # 8MB
     default: 0
 
@@ -1271,3 +1280,7 @@ server_parameters:
 # When adding a new query knob which flushes the SBE plan cache on update, you should test this
 # behavior by including the name of the new knob in the list at the top of the jstest
 # 'sbe_plan_cache_clear_on_param_change.js'.
+#
+# When adding a new runtime query knob, consider adding and accessing it through the
+# 'QueryKnobConfiguration' decoration, especially if it may be accessed multiple times during a
+# query lifetime.

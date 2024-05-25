@@ -1,7 +1,8 @@
 // Tests that the map function can access state of the 'this' object using both the '.x' and ["x"]
 // syntax.
-// The test runs commands that are not allowed with security token: mapReduce.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapReduce.
 //   not_allowed_with_security_token,
 //   # mapReduce does not support afterClusterTime.
 //   does_not_support_causal_consistency,
@@ -10,10 +11,7 @@
 //   # Uses mapReduce command.
 //   requires_scripting,
 // ]
-(function() {
-"use strict";
-
-load("jstests/aggregation/extras/utils.js");  // For resultsEq.
+import {resultsEq} from "jstests/aggregation/extras/utils.js";
 
 const coll = db.mr_use_this_object;
 coll.drop();
@@ -72,4 +70,3 @@ assert.eq(2,
 // Use resultsEq() to avoid any assumptions about order.
 assert(resultsEq([9, 11, 30], resultAsObj["1"].stats));
 assert(resultsEq([9, 41, 41], resultAsObj["2"].stats));
-}());

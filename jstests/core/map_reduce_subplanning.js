@@ -1,5 +1,5 @@
-// The test runs commands that are not allowed with security token: mapReduce.
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapReduce.
 //   not_allowed_with_security_token,
 //   does_not_support_stepdowns,
 //   requires_fastcount,
@@ -11,9 +11,7 @@
 //   requires_scripting,
 // ]
 
-load("jstests/aggregation/extras/utils.js");  // For resultsEq
-(function() {
-"use strict";
+import {resultsEq} from "jstests/aggregation/extras/utils.js";
 
 const coll = db.map_reduce_subplanning;
 coll.drop();
@@ -44,4 +42,3 @@ assert.commandWorked(coll.mapReduce(
 
 assert(resultsEq([{"_id": "a", "value": 4}], db.getCollection("mrOutput").find().toArray()),
        db.getCollection("mrOutput").find().toArray());
-})();

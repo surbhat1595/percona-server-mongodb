@@ -5,12 +5,11 @@
  *   assumes_read_concern_local,
  *   assumes_balancer_off,
  *   does_not_support_stepdowns,
- *   featureFlagCompoundWildcardIndexes,
  *   requires_fcv_70,
  * ]
  */
-load("jstests/aggregation/extras/utils.js");  // For arrayEq().
-import {getWinningPlan, getPlanStages} from "jstests/libs/analyze_plan.js";
+import {assertArrayEq} from "jstests/aggregation/extras/utils.js";
+import {getPlanStages, getWinningPlan} from "jstests/libs/analyze_plan.js";
 import {WildcardIndexHelpers} from "jstests/libs/wildcard_index_helpers.js";
 
 const coll = db.query_on_prefix_of_compound_wildcard_index;

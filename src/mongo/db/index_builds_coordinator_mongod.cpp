@@ -186,8 +186,11 @@ void runVoteCommand(OperationContext* opCtx,
 
         BSONObj voteCmdResponse;
         try {
-            voteCmdResponse = replCoord->runCmdOnPrimaryAndAwaitResponse(
-                opCtx, "admin", voteCmdRequest, onRemoteCmdScheduled, onRemoteCmdComplete);
+            voteCmdResponse = replCoord->runCmdOnPrimaryAndAwaitResponse(opCtx,
+                                                                         DatabaseName::kAdmin,
+                                                                         voteCmdRequest,
+                                                                         onRemoteCmdScheduled,
+                                                                         onRemoteCmdComplete);
         } catch (DBException& ex) {
             // All errors, including CallbackCanceled and network errors, should be retried.
             // If ErrorCodes::CallbackCanceled is due to shutdown, then checkForInterrupt() at the
@@ -301,8 +304,6 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
                 // to fail later on when locks are reacquired. Therefore, this assertion is not
                 // required for correctness, but only intended to rate limit index builds started on
                 // primaries.
-                ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
-                    opCtx->lockState());
                 Lock::GlobalLock globalLk(opCtx, MODE_IX);
 
                 auto replCoord = repl::ReplicationCoordinator::get(opCtx);
@@ -493,8 +494,6 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
                                                  std::move(impersonatedClientAttrs.roleNames));
         }
 
-        ScopedSetShardRole scopedSetShardRole(opCtx.get(), nss, shardVersion, dbVersion);
-
         while (MONGO_unlikely(hangBeforeInitializingIndexBuild.shouldFail())) {
             sleepmillis(100);
         }
@@ -507,12 +506,14 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
             metricsCollector.beginScopedCollecting(opCtx.get(), dbName);
         }
 
-        // Index builds should never take the PBWM lock, even on a primary. This allows the
-        // index build to continue running after the node steps down to a secondary.
-        ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
-            opCtx->lockState());
-
         if (indexBuildOptions.applicationMode != ApplicationMode::kStartupRepair) {
+            // The shard version protocol is only required when setting up the index build and
+            // writing the 'startIndexBuild' oplog entry. If a chunk migration is in-progress while
+            // an index build is started, it will be aborted. A recipient shard will copy
+            // in-progress indexes from the donor shard, and if the index build is aborted on the
+            // donor, the client running createIndexes will receive an error requiring them to retry
+            // the command, and the indexes will become consistent.
+            ScopedSetShardRole scopedSetShardRole(opCtx.get(), nss, shardVersion, dbVersion);
             status = _setUpIndexBuild(opCtx.get(), buildUUID, startTimestamp, indexBuildOptions);
             if (!status.isOK()) {
                 startPromise.setError(status);
@@ -620,20 +621,14 @@ Status IndexBuildsCoordinatorMongod::voteCommitIndexBuild(OperationContext* opCt
     // commit quorum on (i.e., commit value set as non-zero or a valid tag) and vice-versa. So,
     // after this point, it's not possible for the index build's commit quorum value to get updated
     // to CommitQuorumOptions::kDisabled.
-    Status persistStatus = Status::OK();
 
     IndexBuildEntry indexbuildEntry(
         buildUUID, replState->collectionUUID, CommitQuorumOptions(), replState->indexNames);
     std::vector<HostAndPort> votersList{votingNode};
     indexbuildEntry.setCommitReadyMembers(votersList);
 
-    {
-        // Updates don't need to acquire pbwm lock.
-        ShouldNotConflictWithSecondaryBatchApplicationBlock noPBWMBlock(opCtx->lockState());
-        persistStatus =
-            indexbuildentryhelpers::persistCommitReadyMemberInfo(opCtx, indexbuildEntry);
-    }
-
+    auto persistStatus =
+        indexbuildentryhelpers::persistCommitReadyMemberInfo(opCtx, indexbuildEntry);
     if (persistStatus.isOK()) {
         _signalIfCommitQuorumIsSatisfied(opCtx, replState);
     }
@@ -976,8 +971,8 @@ void IndexBuildsCoordinatorMongod::_waitForNextIndexBuildActionAndCommit(
                 needsToRetryWait = true;
                 break;
             case CommitResult::kLockTimeout:
-                LOGV2(4698900,
-                      "Unable to acquire RSTL for commit within deadline. Releasing locks and "
+                LOGV2(7866201,
+                      "Unable to acquire locks for commit within deadline. Releasing locks and "
                       "trying again",
                       "buildUUID"_attr = replState->buildUUID);
                 needsToRetryWait = true;

@@ -61,6 +61,7 @@
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_dependencies.h"
 #include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/pipeline/window_function/window_function_statement.h"
 #include "mongo/db/query/classic_plan_cache.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/index_bounds.h"
@@ -71,6 +72,7 @@
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/record_id_bound.h"
 #include "mongo/db/query/stage_types.h"
+#include "mongo/db/query/timeseries/bucket_spec.h"
 #include "mongo/db/record_id.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
@@ -925,6 +927,42 @@ struct ReturnKeyNode : public QuerySolutionNode {
 };
 
 /**
+ * MatchNode is used for $match aggregation stages that are pushed down to SBE.
+ */
+struct MatchNode : public QuerySolutionNode {
+    MatchNode(std::unique_ptr<QuerySolutionNode> child, std::unique_ptr<MatchExpression> filter)
+        : QuerySolutionNode(std::move(child)) {
+        this->filter = std::move(filter);
+    }
+
+    virtual StageType getType() const {
+        return STAGE_MATCH;
+    }
+
+    /**
+     * Data from the match node is considered fetched iff the child provides fetched data.
+     */
+    bool fetched() const {
+        return children[0]->fetched();
+    }
+
+    FieldAvailability getFieldAvailability(const std::string& field) const {
+        return children[0]->getFieldAvailability(field);
+    }
+
+    bool sortedByDiskLoc() const {
+        return children[0]->sortedByDiskLoc();
+    }
+
+    const ProvidedSortSet& providedSorts() const {
+        return children[0]->providedSorts();
+    }
+
+    void appendToString(str::stream* ss, int indent) const final;
+    std::unique_ptr<QuerySolutionNode> clone() const final;
+};
+
+/**
  * We have a few implementations of the projection functionality. They are chosen by constructing
  * a type derived from this abstract struct. The most general implementation 'ProjectionNodeDefault'
  * is much slower than the fast-path implementations. We only really have all the information
@@ -1075,6 +1113,10 @@ struct SortKeyGeneratorNode : public QuerySolutionNode {
 
 struct SortNode : public QuerySolutionNodeWithSortSet {
     SortNode() : limit(0) {}
+    SortNode(std::unique_ptr<QuerySolutionNode> child, BSONObj pattern, size_t limit)
+        : QuerySolutionNodeWithSortSet(std::move(child)),
+          pattern(std::move(pattern)),
+          limit(limit) {}
 
     virtual ~SortNode() {}
 
@@ -1120,6 +1162,8 @@ private:
  * Represents sort algorithm that can handle any kind of input data.
  */
 struct SortNodeDefault final : public SortNode {
+    using SortNode::SortNode;
+
     virtual StageType getType() const {
         return STAGE_SORT_DEFAULT;
     }
@@ -1138,6 +1182,8 @@ struct SortNodeDefault final : public SortNode {
  *  - The record id can be discarded.
  */
 struct SortNodeSimple final : public SortNode {
+    using SortNode::SortNode;
+
     virtual StageType getType() const {
         return STAGE_SORT_SIMPLE;
     }
@@ -1687,7 +1733,19 @@ struct SentinelNode : public QuerySolutionNode {
 };
 
 struct SearchNode : public QuerySolutionNode {
-    explicit SearchNode(bool isSearchMeta) : isSearchMeta(isSearchMeta) {}
+    SearchNode() = default;
+
+    SearchNode(bool isSearchMeta,
+               BSONObj searchQuery,
+               boost::optional<long long> limit,
+               boost::optional<int> intermediateResultsProtocolVersion)
+        : isSearchMeta(isSearchMeta),
+          searchQuery(searchQuery),
+          limit(limit),
+          intermediateResultsProtocolVersion(intermediateResultsProtocolVersion) {
+        // TODO SERVER-78565: Support $search in SBE plan cache
+        eligibleForPlanCache = false;
+    }
 
     StageType getType() const override {
         return STAGE_SEARCH;
@@ -1717,5 +1775,147 @@ struct SearchNode : public QuerySolutionNode {
      * True for $searchMeta, False for $search query.
      */
     bool isSearchMeta;
+
+    const BSONObj searchQuery;
+
+    /**
+     * This will populate the docsRequested field of the cursorOptions document sent as part of the
+     * command to mongot in the case where the query has an extractable limit that can guide the
+     * number of documents that mongot returns to mongod.
+     */
+    boost::optional<long long> limit;
+
+    /**
+     * Protocol version if it must be communicated via the search request.
+     * If we are in a sharded environment but are targeting unsharded collection we may have a
+     * protocol version even though it should not be sent to mongot.
+     */
+    boost::optional<int> intermediateResultsProtocolVersion;
+};
+
+/**
+ * Represents a node to unpack time-series buckets into measurements. Currently we only support
+ * unpacking buckets with a statically known set of fields in SBE.
+ */
+struct UnpackTsBucketNode : public QuerySolutionNode {
+    UnpackTsBucketNode(std::unique_ptr<QuerySolutionNode> child,
+                       const BucketSpec& spec,
+                       std::unique_ptr<MatchExpression> eventFilter,
+                       std::unique_ptr<MatchExpression> wholeBucketFilter,
+                       bool includeMeta)
+        : QuerySolutionNode(std::move(child)),
+          bucketSpec(spec),
+          eventFilter(std::move(eventFilter)),
+          wholeBucketFilter(std::move(wholeBucketFilter)),
+          includeMeta(includeMeta) {
+        tassert(7969700,
+                "Only support unpacking with a statically known set of fields.",
+                bucketSpec.behavior() == BucketSpec::Behavior::kInclude);
+    }
+
+    StageType getType() const override {
+        return STAGE_UNPACK_TS_BUCKET;
+    }
+
+    void appendToString(str::stream* ss, int indent) const override {
+        *ss << "UNPACK_TS_BUCKET\n";
+    }
+
+    bool fetched() const {
+        return children[0]->fetched();
+    }
+
+    FieldAvailability getFieldAvailability(const std::string& field) const {
+        if (bucketSpec.fieldSet().contains(field)) {
+            // The 'bucketSpec' has a statically known set of fields which include the computed meta
+            // projections and so, are fully provided.
+            return FieldAvailability::kFullyProvided;
+        } else {
+            return FieldAvailability::kNotProvided;
+        }
+    }
+
+    bool sortedByDiskLoc() const override {
+        return children[0]->sortedByDiskLoc();
+    }
+
+    // TODO SERVER-79699 & SERVER-79700: Return the sort set which should be translated from the
+    // child's sort set.
+    const ProvidedSortSet& providedSorts() const final {
+        return kEmptySet;
+    }
+
+    std::unique_ptr<QuerySolutionNode> clone() const final {
+        return std::make_unique<UnpackTsBucketNode>(children[0]->clone(),
+                                                    bucketSpec,
+                                                    eventFilter->clone(),
+                                                    wholeBucketFilter->clone(),
+                                                    includeMeta);
+    }
+
+    BucketSpec bucketSpec;
+    std::unique_ptr<MatchExpression> eventFilter = nullptr;
+    std::unique_ptr<MatchExpression> wholeBucketFilter = nullptr;
+    bool includeMeta = false;
+};
+
+struct WindowNode : public QuerySolutionNode {
+    WindowNode(std::unique_ptr<QuerySolutionNode> child,
+               boost::optional<boost::intrusive_ptr<Expression>> partitionByArg,
+               boost::optional<SortPattern> sortByArg,
+               std::vector<WindowFunctionStatement> outputFieldsArg)
+        : QuerySolutionNode(std::move(child)),
+          partitionBy(std::move(partitionByArg)),
+          sortBy(std::move(sortByArg)),
+          outputFields(std::move(outputFieldsArg)) {
+        DepsTracker partitionByDeps;
+        if (partitionBy) {
+            expression::addDependencies(partitionBy->get(), &partitionByDeps);
+        }
+        partitionByRequiredFields = std::move(partitionByDeps.fields);
+
+        DepsTracker sortByDeps;
+        if (sortBy) {
+            sortBy->addDependencies(&sortByDeps);
+        }
+        sortByRequiredFields = std::move(sortByDeps.fields);
+
+        DepsTracker outputDeps;
+        for (auto& outputField : outputFields) {
+            outputField.addDependencies(&outputDeps);
+        }
+        outputRequiredFields = std::move(outputDeps.fields);
+    }
+
+    StageType getType() const override {
+        return STAGE_WINDOW;
+    }
+
+    void appendToString(str::stream* ss, int indent) const override;
+
+    bool fetched() const {
+        return true;
+    }
+
+    FieldAvailability getFieldAvailability(const std::string& field) const {
+        return FieldAvailability::kFullyProvided;
+    }
+    bool sortedByDiskLoc() const override {
+        return false;
+    }
+
+    const ProvidedSortSet& providedSorts() const final {
+        return children.back()->providedSorts();
+    }
+
+    std::unique_ptr<QuerySolutionNode> clone() const final;
+
+    boost::optional<boost::intrusive_ptr<Expression>> partitionBy;
+    boost::optional<SortPattern> sortBy;
+    std::vector<WindowFunctionStatement> outputFields;
+
+    OrderedPathSet partitionByRequiredFields;
+    OrderedPathSet sortByRequiredFields;
+    OrderedPathSet outputRequiredFields;
 };
 }  // namespace mongo

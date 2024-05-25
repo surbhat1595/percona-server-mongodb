@@ -98,7 +98,7 @@ NamespaceString parseGraphLookupFromAndResolveNamespace(const BSONElement& elem,
 
     if (elem.type() == BSONType::String) {
         NamespaceString fromNss(
-            NamespaceStringUtil::parseNamespaceFromRequest(defaultDb, elem.valueStringData()));
+            NamespaceStringUtil::deserialize(defaultDb, elem.valueStringData()));
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "invalid $graphLookup namespace: "
                               << fromNss.toStringForErrorMsg(),
@@ -111,8 +111,8 @@ NamespaceString parseGraphLookupFromAndResolveNamespace(const BSONElement& elem,
         IDLParserContext{elem.fieldNameStringData(), false /* apiStrict */, defaultDb.tenantId()},
         elem.embeddedObject());
 
-    auto nss = NamespaceStringUtil::parseNamespaceFromRequest(spec.getDb().value_or(DatabaseName()),
-                                                              spec.getColl().value_or(""));
+    auto nss = NamespaceStringUtil::deserialize(spec.getDb().value_or(DatabaseName()),
+                                                spec.getColl().value_or(""));
 
     uassert(ErrorCodes::FailedToParse,
             str::stream()
@@ -609,9 +609,9 @@ void DocumentSourceGraphLookUp::checkMemoryUsage() {
 }
 
 void DocumentSourceGraphLookUp::serializeToArray(std::vector<Value>& array,
-                                                 SerializationOptions opts) const {
+                                                 const SerializationOptions& opts) const {
     // Do not include tenantId in serialized 'from' namespace.
-    auto fromValue = (pExpCtx->ns.db() == _from.db())
+    auto fromValue = pExpCtx->ns.isEqualDb(_from)
         ? Value(opts.serializeIdentifier(_from.coll()))
         : Value(Document{
               {"db",

@@ -18,11 +18,6 @@
 
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 import {getAggPlanStage} from "jstests/libs/analyze_plan.js";
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-
-if (!FeatureFlagUtil.isEnabled(db, "TimeseriesMetricIndexes")) {
-    quit();
-}
 
 TimeseriesTest.run((insert) => {
     const testdb = db.getSiblingDB("timeseries_metric_index_2dsphere_db");
@@ -59,10 +54,17 @@ TimeseriesTest.run((insert) => {
 
     // Create a 2dsphere index on the time-series collection.
     const twoDSphereTimeseriesIndexSpec = {'location': '2dsphere'};
+    const twoDSphereTimeseriesIndexName = "location_2dsphere";
     assert.commandWorked(
-        timeseriescoll.createIndex(twoDSphereTimeseriesIndexSpec),
+        timeseriescoll.createIndex(
+            twoDSphereTimeseriesIndexSpec,
+            {name: twoDSphereTimeseriesIndexName, "2dsphereIndexVersion": 3}),
         'Failed to create a 2dsphere index with: ' + tojson(twoDSphereTimeseriesIndexSpec));
 
+    // Verify that the 2dsphereIndexVersion field is visible on the collection.
+    const created =
+        timeseriescoll.getIndexes().filter((idx) => idx.name === twoDSphereTimeseriesIndexName)[0];
+    assert.eq(created["2dsphereIndexVersion"], 3, "Created index does not have version field.");
     // Insert a 2dsphere index usable document.
     const twoDSphereDocs = [
         {

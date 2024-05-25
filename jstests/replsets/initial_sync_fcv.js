@@ -6,11 +6,7 @@
  * This tests behavior centered around both upgrading and downgrading FCV.
  * @tags: [multiversion_incompatible]
  */
-
-(function() {
-'use strict';
-
-load("jstests/libs/fail_point_util.js");
+import {kDefaultWaitForFailPointTimeout} from "jstests/libs/fail_point_util.js";
 
 const rst = new ReplSetTest({nodes: 2});
 rst.startSet();
@@ -32,7 +28,8 @@ assert.commandWorked(primary.adminCommand(
 assert.commandWorked(primary.getDB(dbName).getCollection(collName).insert({a: 1}));
 
 function runInitialSync(cmd, initialFCV) {
-    assert.commandWorked(primary.adminCommand({setFeatureCompatibilityVersion: initialFCV}));
+    assert.commandWorked(
+        primary.adminCommand({setFeatureCompatibilityVersion: initialFCV, confirm: true}));
 
     jsTestLog('Testing setting fCV with ' + tojson(cmd));
 
@@ -83,10 +80,12 @@ function runInitialSync(cmd, initialFCV) {
 
 // Ensure that attempting to downgrade the featureCompatibilityVersion during initial sync
 // fails.
-runInitialSync({setFeatureCompatibilityVersion: lastLTSFCV}, /*initialFCV*/ latestFCV);
+runInitialSync({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true},
+               /*initialFCV*/ latestFCV);
 
 // Ensure that attempting to upgrade the featureCompatibilityVersion during initial sync fails.
-runInitialSync({setFeatureCompatibilityVersion: latestFCV}, /*initialFCV*/ lastLTSFCV);
+runInitialSync({setFeatureCompatibilityVersion: latestFCV, confirm: true},
+               /*initialFCV*/ lastLTSFCV);
 
 // Modifications to the featureCompatibilityVersion document during initial sync should be
 // caught and cause initial sync to fail.
@@ -97,4 +96,3 @@ runInitialSync({
                /*initialFCV*/ latestFCV);
 
 rst.stopSet();
-})();

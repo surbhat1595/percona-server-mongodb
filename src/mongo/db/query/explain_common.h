@@ -32,6 +32,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/operation_context.h"
 
 /**
  * Namespace for static methods that are shared between explain on mongod and on mongos.
@@ -50,7 +51,7 @@ void generateServerInfo(BSONObjBuilder* out);
  *
  * This section includes various server-wide internal limits/knobs.
  */
-void generateServerParameters(BSONObjBuilder* out);
+void generateServerParameters(OperationContext* opCtx, BSONObjBuilder* out);
 
 /**
  * Conditionally appends a BSONObj to 'bob' depending on whether or not the maximum user size for a

@@ -564,9 +564,6 @@ bool CurOp::completeAndLogOperation(logv2::LogComponent component,
             // We can get here and our lock acquisition be timed out or interrupted, log a
             // message if that happens.
             try {
-                // Retrieving storage stats should not be blocked by oplog application.
-                ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
-                    opCtx->lockState());
                 // Slow query logs are critical for observability and should not wait for ticket
                 // acquisition. Slow queries can happen for various reasons; however, if queries are
                 // slower due to ticket exhaustion, queueing in order to log can compound the issue.
@@ -606,7 +603,6 @@ bool CurOp::completeAndLogOperation(logv2::LogComponent component,
         _debug.report(
             opCtx, (lockerInfo ? &lockerInfo->stats : nullptr), operationMetricsPtr, &attr);
 
-        // TODO SERVER-67020 Ensure the ns in attr has the tenantId as the db prefix
         LOGV2_OPTIONS(51803, {component}, "Slow query", attr);
 
         _checkForFailpointsAfterCommandLogged();
@@ -969,7 +965,7 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("type", networkOpToString(networkOp));
     }
 
-    pAttrs->addDeepCopy("ns", curop.getNS());
+    pAttrs->addDeepCopy("ns", toStringForLogging(curop.getNSS()));
 
     if (client) {
         if (auto clientMetadata = ClientMetadata::get(client)) {

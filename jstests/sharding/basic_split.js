@@ -1,10 +1,7 @@
 /**
  * Perform basic tests for the split command against mongos.
  */
-(function() {
-'use strict';
-
-load("jstests/sharding/libs/find_chunks_util.js");
+import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
 
 var st = new ShardingTest({mongos: 2, shards: 2, other: {chunkSize: 1}});
 var configDB = st.s0.getDB('config');
@@ -90,6 +87,10 @@ assert.neq(null, findChunksUtil.findOneChunkByNs(configDB, 'test.compound', {min
 
 // cannot split on existing chunk boundary.
 assert.commandFailed(configDB.adminCommand({split: 'test.compound', middle: {x: 0, y: 0}}));
+assert.commandFailed(
+    configDB.adminCommand({split: 'test.compound', middle: {x: MinKey, y: MinKey}}));
+assert.commandFailed(
+    configDB.adminCommand({split: 'test.compound', middle: {x: MaxKey, y: MaxKey}}));
 
 bulk = testDB.compound.initializeUnorderedBulkOp();
 for (x = -1200; x < 1200; x++) {
@@ -115,4 +116,3 @@ assert.gt(
     1);
 
 st.stop();
-})();

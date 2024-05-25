@@ -83,7 +83,6 @@ public:
 
     static constexpr TagMask kEmptyTagMask = 0;
     static constexpr TagMask kKeepOpen = 1;
-    static constexpr TagMask kInternalClient = 2;
     static constexpr TagMask kLatestVersionInternalClientKeepOpen = 4;
     static constexpr TagMask kExternalClientKeepOpen = 8;
     static constexpr TagMask kPending = 1 << 31;
@@ -164,6 +163,13 @@ public:
      * Returns true if this session was connected through an L4 load balancer.
      */
     virtual bool isFromLoadBalancer() const = 0;
+
+    /**
+     * Returns true if this session corresponds to a connection accepted from the router port.
+     */
+    virtual bool isFromRouterPort() const {
+        return false;
+    }
 
     virtual const HostAndPort& remote() const = 0;
     virtual const HostAndPort& local() const = 0;

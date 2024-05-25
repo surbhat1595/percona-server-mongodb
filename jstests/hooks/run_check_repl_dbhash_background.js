@@ -15,11 +15,8 @@
  * fails with a non-transient error. The most common case of a transient error is attempting to read
  * from a collection after a catalog operation has been performed on the collection or database.
  */
-'use strict';
-
-(function() {
-load('jstests/libs/discover_topology.js');  // For Topology and DiscoverTopology.
-load('jstests/libs/parallelTester.js');     // For Thread.
+import {DiscoverTopology, Topology} from "jstests/libs/discover_topology.js";
+import {Thread} from "jstests/libs/parallelTester.js";
 
 if (typeof db === 'undefined') {
     throw new Error(
@@ -501,6 +498,7 @@ if (topology.type === Topology.kReplicaSet) {
             }
         });
         if (exception) {
+            // eslint-disable-next-line
             throw exception;
         }
 
@@ -512,4 +510,3 @@ if (topology.type === Topology.kReplicaSet) {
 } else {
     throw new Error('Unsupported topology configuration: ' + tojson(topology));
 }
-})();

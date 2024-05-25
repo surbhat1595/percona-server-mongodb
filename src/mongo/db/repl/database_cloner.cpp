@@ -73,7 +73,7 @@ DatabaseCloner::DatabaseCloner(const DatabaseName& dbName,
           "DatabaseCloner"_sd, sharedData, source, client, storageInterface, dbPool),
       _dbName(dbName),
       _listCollectionsStage("listCollections", this, &DatabaseCloner::listCollectionsStage) {
-    invariant(!dbName.db().empty());
+    invariant(!dbName.isEmpty());
     _stats.dbname = dbName;
 }
 
@@ -107,7 +107,7 @@ BaseCloner::AfterStageBehavior DatabaseCloner::listCollectionsStage() {
         }
 
         NamespaceString collectionNamespace(
-            NamespaceStringUtil::parseNamespaceFromResponse(_dbName, result.getName()));
+            NamespaceStringUtil::deserialize(_dbName, result.getName()));
         if (collectionNamespace.isSystem() && !collectionNamespace.isReplicated()) {
             LOGV2_DEBUG(21146,
                         1,

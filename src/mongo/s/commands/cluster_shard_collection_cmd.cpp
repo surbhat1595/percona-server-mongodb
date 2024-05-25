@@ -97,8 +97,8 @@ public:
     }
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
-        return NamespaceStringUtil::parseNamespaceFromRequest(
-            dbName.tenantId(), CommandHelpers::parseNsFullyQualified(cmdObj));
+        return NamespaceStringUtil::deserialize(dbName.tenantId(),
+                                                CommandHelpers::parseNsFullyQualified(cmdObj));
     }
 
     bool run(OperationContext* opCtx,
@@ -138,8 +138,8 @@ public:
         result.append("collectionsharded", NamespaceStringUtil::serialize(nss));
         return true;
     }
-
-} shardCollectionCmd;
+};
+MONGO_REGISTER_COMMAND(ShardCollectionCmd);
 
 }  // namespace
 }  // namespace mongo

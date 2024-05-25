@@ -301,6 +301,7 @@ public:
         NamespaceString nss,
         UUID uuid,
         KeyPattern shardKeyPattern,
+        bool unsplittable,
         std::unique_ptr<CollatorInterface> defaultCollator,
         bool unique,
         OID epoch,
@@ -457,6 +458,7 @@ private:
     RoutingTableHistory(NamespaceString nss,
                         UUID uuid,
                         KeyPattern shardKeyPattern,
+                        bool unsplittable,
                         std::unique_ptr<CollatorInterface> defaultCollator,
                         bool unique,
                         boost::optional<TypeCollectionTimeseriesFields> timeseriesFields,
@@ -474,6 +476,9 @@ private:
 
     // The key pattern used to shard the collection
     ShardKeyPattern _shardKeyPattern;
+
+    // True for tracked unsharded collections
+    bool _unsplittable;
 
     // Default collation to use for routing data queries for this collection
     std::unique_ptr<CollatorInterface> _defaultCollator;
@@ -652,8 +657,32 @@ public:
 
     // Methods supported on both sharded and unsharded collections
 
-    bool isSharded() const {
+    /*
+     * Returns true if this chunk manager has a routing table.
+     *
+     * True for:
+     *   - sharded collections.
+     *   - unsharded collections tracked by the configsvr.
+     * False for:
+     *   - unsharded collections not tracked by the configsvr.
+     *   - non-existent collections.
+     */
+    bool hasRoutingTable() const {
         return bool(_rt->optRt);
+    }
+
+    /*
+     * Returns true if routing table is present and unsplittable flag is not set
+     */
+    bool isSharded() const {
+        return hasRoutingTable() ? !_rt->optRt->_unsplittable : false;
+    }
+
+    /*
+     * Returns true if routing table is present and unsplittable flag is set
+     */
+    bool isUnsplittable() const {
+        return hasRoutingTable() ? _rt->optRt->_unsplittable : false;
     }
 
     bool isAtPointInTime() const {
@@ -680,7 +709,8 @@ public:
 
     std::string toString() const;
 
-    // Methods only supported on sharded collections (caller must check isSharded())
+    // Methods only supported on collections registered in the sharding catalog (caller must check
+    // hasRoutingTable())
 
     const ShardKeyPattern& getShardKeyPattern() const {
         tassert(7626400, "Expected routing table to be initialized", _rt->optRt);

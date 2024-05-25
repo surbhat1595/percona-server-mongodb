@@ -47,7 +47,6 @@
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/index_scan.h"
 #include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/exec/timeseries/bucket_spec.h"
 #include "mongo/db/exec/timeseries/bucket_unpacker.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/pipeline/dependencies.h"
@@ -58,6 +57,7 @@
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/timeseries/bucket_spec.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -74,6 +74,7 @@ public:
     static constexpr StringData kIncludeMaxTimeAsMetadata = "includeMaxTimeAsMetadata"_sd;
     static constexpr StringData kWholeBucketFilter = "wholeBucketFilter"_sd;
     static constexpr StringData kEventFilter = "eventFilter"_sd;
+    static constexpr StringData kFixedBuckets = "fixedBuckets"_sd;
 
     static boost::intrusive_ptr<DocumentSource> createFromBsonInternal(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);
@@ -83,26 +84,30 @@ public:
     DocumentSourceInternalUnpackBucket(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                        BucketUnpacker bucketUnpacker,
                                        int bucketMaxSpanSeconds,
-                                       bool assumeNoMixedSchemaData = false);
+                                       bool assumeNoMixedSchemaData = false,
+                                       bool fixedBuckets = false);
 
     DocumentSourceInternalUnpackBucket(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                        BucketUnpacker bucketUnpacker,
                                        int bucketMaxSpanSeconds,
                                        const boost::optional<BSONObj>& eventFilterBson,
                                        const boost::optional<BSONObj>& wholeBucketFilterBson,
-                                       bool assumeNoMixedSchemaData = false);
+                                       bool assumeNoMixedSchemaData = false,
+                                       bool fixedBuckets = false);
 
     const char* getSourceName() const override {
         return kStageNameInternal.rawData();
     }
 
-    void serializeToArray(std::vector<Value>& array,
-                          SerializationOptions opts = SerializationOptions()) const final override;
+    void serializeToArray(
+        std::vector<Value>& array,
+        const SerializationOptions& opts = SerializationOptions{}) const final override;
 
     /**
      * Use 'serializeToArray' above.
      */
-    Value serialize(SerializationOptions opts = SerializationOptions()) const final override {
+    Value serialize(
+        const SerializationOptions& opts = SerializationOptions{}) const final override {
         MONGO_UNREACHABLE_TASSERT(7484305);
     }
 
@@ -156,8 +161,8 @@ public:
         return boost::none;
     };
 
-    BucketUnpacker bucketUnpacker() const {
-        return _bucketUnpacker.copy();
+    const BucketUnpacker& bucketUnpacker() const {
+        return _bucketUnpacker;
     }
 
     Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
@@ -242,11 +247,11 @@ public:
     std::pair<BSONObj, bool> extractProjectForPushDown(DocumentSource* src) const;
 
     /**
-     * Helper method which checks if we can avoid unpacking if we have a group stage with min/max
-     * aggregates. If a rewrite is possible, 'container' is modified, and we returns result value
-     * for 'doOptimizeAt'.
+     * Helper method which checks if we can avoid unpacking if we have a group stage with
+     * min/max/count aggregates. If the rewrite is possible, 'container' is modified, bool in the
+     * return pair is set to 'true' and the iterator is set to point to the new group.
      */
-    std::pair<bool, Pipeline::SourceContainer::iterator> rewriteGroupByMinMax(
+    std::pair<bool, Pipeline::SourceContainer::iterator> rewriteGroupStage(
         Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container);
 
     /**
@@ -285,6 +290,16 @@ public:
                                             Pipeline::SourceContainer* container,
                                             bool includeEventFilter) const;
 
+    const MatchExpression* eventFilter() const {
+        return _eventFilter.get();
+    }
+
+    const MatchExpression* wholeBucketFilter() const {
+        return _wholeBucketFilter.get();
+    }
+
+    bool isSbeCompatible();
+
 private:
     GetNextResult doGetNext() final;
 
@@ -296,6 +311,10 @@ private:
     // predicates in order to ensure correctness.
     bool _assumeNoMixedSchemaData = false;
 
+    // This is true if 'bucketRoundingSeconds' and 'bucketMaxSpanSeconds' are set, equal, and
+    // unchanged. Then we can push down certain $match and $group queries.
+    bool _fixedBuckets = false;
+
     // If any bucket contains dates outside the range of 1970-2038, we are unable to rely on
     // the _id index, as _id is truncates to 32 bits
     bool _usesExtendedRange = false;
@@ -306,7 +325,15 @@ private:
     int _bucketMaxCount = 0;
     boost::optional<long long> _sampleSize;
 
-    // Filters pushed from the later $match stages
+    // It's benefitial to do as much filtering at the bucket level as possible to avoid unpacking
+    // buckets that wouldn't contribute to the results anyway. There is a generic mechanism that
+    // allows to swap $match stages with this one (see 'getModifiedPaths()'). It lets us split out
+    // and push down a filter on the metaField "as is". The remaining filters might cause creation
+    // of additional bucket-level filters (see 'createPredicatesOnBucketLevelField()') that are
+    // inserted before this stage while the original filter is incorporated into this stage as
+    // '_eventFilter' (to be applied to each unpacked document) and/or '_wholeBucketFilter' for the
+    // cases when _all_ events in a bucket would match (currently, we only do this for the
+    // timeField).
     std::unique_ptr<MatchExpression> _eventFilter;
     BSONObj _eventFilterBson;
     DepsTracker _eventFilterDeps;
@@ -319,5 +346,8 @@ private:
     bool _triedInternalizeProject = false;
     bool _triedLastpointRewrite = false;
     bool _triedLimitPushDown = false;
+
+    // Caches the SBE-compatibility status result of this stage.
+    boost::optional<bool> _isSbeCompatible = boost::none;
 };
 }  // namespace mongo

@@ -179,6 +179,19 @@ Status validateClusteredIndexSpec(OperationContext* opCtx,
     return Status::OK();
 }
 
+std::tuple<Lock::CollectionLock, Lock::CollectionLock> acquireCollLocksForRename(
+    OperationContext* opCtx, const NamespaceString& ns1, const NamespaceString& ns2) {
+    if (ResourceId{RESOURCE_COLLECTION, ns1} < ResourceId{RESOURCE_COLLECTION, ns2}) {
+        Lock::CollectionLock collLock1{opCtx, ns1, MODE_X};
+        Lock::CollectionLock collLock2{opCtx, ns2, MODE_X};
+        return {std::move(collLock1), std::move(collLock2)};
+    } else {
+        Lock::CollectionLock collLock2{opCtx, ns2, MODE_X};
+        Lock::CollectionLock collLock1{opCtx, ns1, MODE_X};
+        return {std::move(collLock1), std::move(collLock2)};
+    }
+}
+
 void _createSystemDotViewsIfNecessary(OperationContext* opCtx, const Database* db) {
     // Create 'system.views' in a separate WUOW if it does not exist.
     if (!CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx,
@@ -520,8 +533,6 @@ Status _createTimeseries(OperationContext* opCtx,
         uassertStatusOK(db->userCreateNS(opCtx, bucketsNs, bucketsOptions, createIdIndex));
 
         CollectionWriter collectionWriter(opCtx, bucketsNs);
-        collectionWriter.getWritableCollection(opCtx)->setTimeseriesBucketingParametersChanged(
-            opCtx, false);
 
         uassertStatusOK(_createDefaultTimeseriesIndex(opCtx, collectionWriter));
         wuow.commit();
@@ -891,8 +902,9 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
             }
 
             const auto& tmpName = tmpNameResult.getValue();
-            AutoGetCollection tmpCollLock(opCtx, tmpName, LockMode::MODE_X);
-            if (tmpCollLock.getCollection()) {
+            auto [tmpCollLock, newCollLock] =
+                acquireCollLocksForRename(opCtx, tmpName, newCollName);
+            if (catalog->lookupCollectionByNamespace(opCtx, tmpName)) {
                 // Conflicting on generating a unique temp collection name. Try again.
                 continue;
             }
@@ -955,8 +967,10 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
             uassert(40655,
                     str::stream() << "Invalid name " << newCollName.toStringForErrorMsg()
                                   << " for UUID " << uuid,
-                    currentName->db() == newCollName.db());
+                    currentName->isEqualDb(newCollName));
             return writeConflictRetry(opCtx, "createCollectionForApplyOps", newCollName, [&] {
+                auto [currentCollLock, newCollLock] =
+                    acquireCollLocksForRename(opCtx, *currentName, newCollName);
                 WriteUnitOfWork wuow(opCtx);
                 Status status = db->renameCollection(opCtx, *currentName, newCollName, stayTemp);
                 if (!status.isOK())

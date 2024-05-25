@@ -10,6 +10,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
+  - name: generate_buildid_to_debug_symbols_mapping
+    variant: linux-x86-dynamic-compile
 
 - &linux_x86_generic_expansions
   multiversion_platform: rhel80
@@ -78,7 +80,7 @@ buildvariants:
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
   tasks:
-  - name: .aggfuzzer !.sbe_only
+  - name: .aggfuzzer !.sbe_only !.cqf_only
   - name: .aggregation !.sbe_only
   - name: .auth
   - name: .causally_consistent !.sharding
@@ -169,6 +171,8 @@ buildvariants:
   - name: test_api_version_compatibility
   - name: unittest_shell_hang_analyzer_gen
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
 
 - name: &rhel80-debug-asan-classic-engine rhel80-debug-asan-classic-engine
   display_name: "* ASAN Enterprise RHEL 8.0 DEBUG (Classic Engine)"
@@ -192,7 +196,6 @@ buildvariants:
       --sanitize=address
       --ssl
       --ocsp-stapling=off
-      --enable-free-mon=on
       -j$(grep -c ^processor /proc/cpuinfo)
     compile_variant: *rhel80-debug-asan-classic-engine
     test_flags: >-
@@ -217,7 +220,6 @@ buildvariants:
   - name: .misc_js
   - name: .concurrency !.ubsan !.no_txns !.kill_terminate !.compute_mode
   - name: .encrypt
-  - name: free_monitoring
   - name: external_auth
   - name: external_auth_aws
   - name: external_auth_oidc
@@ -277,7 +279,6 @@ buildvariants:
       --sanitize=undefined
       --ssl
       --ocsp-stapling=off
-      --enable-free-mon=on
       -j$(grep -c ^processor /proc/cpuinfo)
     test_flags: >-
       --mongodSetParameters="{internalQueryFrameworkControl: forceClassicEngine}"
@@ -300,7 +301,6 @@ buildvariants:
   - name: .concurrency !.no_txns !.repl !.kill_terminate !.compute_mode
   - name: disk_wiredtiger
   - name: .encrypt
-  - name: free_monitoring
   - name: initial_sync_fuzzer_gen
   - name: compile_integration_and_test_parallel_stream_TG
     distros:

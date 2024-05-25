@@ -47,7 +47,6 @@
 #include "mongo/bson/mutable/document.h"
 #include "mongo/bson/mutable/element.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/exec/timeseries/bucket_spec.h"
 #include "mongo/db/exec/timeseries/bucket_unpacker.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_algo.h"
@@ -56,6 +55,7 @@
 #include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/ops/parsed_writes_common.h"
+#include "mongo/db/query/timeseries/bucket_spec.h"
 #include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 
@@ -331,7 +331,8 @@ BSONObj getBucketLevelPredicateForRouting(const BSONObj& originalQuery,
               false /*haveComputedMetaField*/,
               false /*includeMetaField*/,
               true /*assumeNoMixedSchemaData*/,
-              BucketSpec::IneligiblePredicatePolicy::kIgnore /*policy*/)
+              BucketSpec::IneligiblePredicatePolicy::kIgnore /*policy*/,
+              false /* fixedBuckets */)
               .loosePredicate
         : nullptr;
 
@@ -352,7 +353,8 @@ BSONObj getBucketLevelPredicateForRouting(const BSONObj& originalQuery,
 TimeseriesWritesQueryExprs getMatchExprsForWrites(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const TimeseriesOptions& tsOptions,
-    const BSONObj& writeQuery) {
+    const BSONObj& writeQuery,
+    bool fixedBuckets) {
     auto [metaOnlyExpr, bucketMetricExpr, residualExpr] =
         BucketSpec::getPushdownPredicates(expCtx,
                                           tsOptions,
@@ -360,7 +362,8 @@ TimeseriesWritesQueryExprs getMatchExprsForWrites(
                                           /*haveComputedMetaField*/ false,
                                           tsOptions.getMetaField().has_value(),
                                           /*assumeNoMixedSchemaData*/ true,
-                                          BucketSpec::IneligiblePredicatePolicy::kIgnore);
+                                          BucketSpec::IneligiblePredicatePolicy::kIgnore,
+                                          fixedBuckets);
 
     // Combine the closed bucket filter and the bucket metric filter and the meta-only filter into a
     // single filter by $and-ing them together.

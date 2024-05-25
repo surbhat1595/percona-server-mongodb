@@ -41,14 +41,14 @@
 #include "mongo/db/storage/execution_control/throughput_probing_gen.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util_core.h"
-#include "mongo/util/periodic_runner.h"
+#include "mongo/util/mock_periodic_runner.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/tick_source.h"
 #include "mongo/util/tick_source_mock.h"
 
-namespace mongo::execution_control {
-namespace throughput_probing {
+namespace mongo::execution_control::throughput_probing {
 namespace {
 
 TEST(ThroughputProbingParameterTest, InitialConcurrency) {
@@ -71,63 +71,6 @@ TEST(ThroughputProbingParameterTest, MaxConcurrency) {
     ASSERT_NOT_OK(validateMaxConcurrency(gMinConcurrency - 1, {}));
 }
 
-}  // namespace
-}  // namespace throughput_probing
-
-namespace {
-
-class MockPeriodicJob : public PeriodicRunner::ControllableJob {
-public:
-    explicit MockPeriodicJob(PeriodicRunner::PeriodicJob job) : _job(std::move(job)) {}
-
-    void start() override {}
-    void pause() override {}
-    void resume() override {}
-    void stop() override {}
-
-    Milliseconds getPeriod() const override {
-        return _job.interval;
-    }
-
-    void setPeriod(Milliseconds period) override {
-        _job.interval = period;
-    }
-
-    void run(Client* client) {
-        _job.job(client);
-    }
-
-private:
-    PeriodicRunner::PeriodicJob _job;
-};
-
-class MockPeriodicRunner : public PeriodicRunner {
-public:
-    JobAnchor makeJob(PeriodicJob job) override {
-        invariant(!_job);
-        auto mockJob = std::make_shared<MockPeriodicJob>(std::move(job));
-        _job = mockJob;
-        return JobAnchor{std::move(mockJob)};
-    }
-
-    void run(Client* client) {
-        invariant(_job);
-        _job->run(client);
-    }
-
-private:
-    std::shared_ptr<MockPeriodicJob> _job;
-};
-
-namespace {
-TickSourceMock<Microseconds>* initTickSource(ServiceContext* svcCtx) {
-    auto mockTickSource = std::make_unique<TickSourceMock<Microseconds>>();
-    auto tickSourcePtr = mockTickSource.get();
-    svcCtx->setTickSource(std::move(mockTickSource));
-    return tickSourcePtr;
-}
-}  // namespace
-
 class ThroughputProbingTest : public unittest::Test {
 protected:
     explicit ThroughputProbingTest(int32_t size = 64, double readWriteRatio = 0.5)
@@ -137,7 +80,7 @@ protected:
               svcCtx->setPeriodicRunner(std::move(runner));
               return runnerPtr;
           }()),
-          _tickSource(initTickSource(_svcCtx.get())),
+          _tickSource(initTickSourceMock<ServiceContext, Microseconds>(_svcCtx.get())),
           _throughputProbing([&]() -> ThroughputProbing {
               throughput_probing::gInitialConcurrency = size;
               throughput_probing::gReadWriteRatio.store(readWriteRatio);
@@ -153,6 +96,7 @@ protected:
 
     void _run() {
         _runner->run(_client.get());
+        _statsTester.set(_throughputProbing);
     }
 
     void _tick() {
@@ -167,9 +111,46 @@ protected:
     MockTicketHolder _writeTicketHolder;
     TickSourceMock<Microseconds>* _tickSource;
     ThroughputProbing _throughputProbing;
-};
 
-using namespace throughput_probing;
+    class StatsTester {
+    public:
+        void set(ThroughputProbing& throughputProbing) {
+            BSONObjBuilder stats;
+            throughputProbing.appendStats(stats);
+            _prevStats = std::exchange(_stats, stats.obj());
+        }
+
+        bool concurrencyIncreased() const {
+            return _stats["timesIncreased"].Long() == _prevStats["timesIncreased"].Long() + 1 &&
+                _stats["totalAmountIncreased"].Long() > _prevStats["totalAmountIncreased"].Long() &&
+                _stats["timesDecreased"].Long() == _prevStats["timesDecreased"].Long() &&
+                _stats["totalAmountDecreased"].Long() == _prevStats["totalAmountDecreased"].Long();
+        }
+
+        bool concurrencyDecreased() const {
+            return _stats["timesDecreased"].Long() == _prevStats["timesDecreased"].Long() + 1 &&
+                _stats["totalAmountDecreased"].Long() > _prevStats["totalAmountDecreased"].Long() &&
+                _stats["timesIncreased"].Long() == _prevStats["timesIncreased"].Long() &&
+                _stats["totalAmountIncreased"].Long() == _prevStats["totalAmountIncreased"].Long();
+        }
+
+        bool concurrencyKept() const {
+            return !concurrencyIncreased() && !concurrencyDecreased();
+        }
+
+        std::string toString() const {
+            return str::stream() << "Stats: " << _stats << ", previous stats: " << _prevStats;
+        }
+
+    private:
+        BSONObj _stats =
+            BSON("timesDecreased" << 0ll << "timesIncreased" << 0ll << "totalAmountDecreased" << 0ll
+                                  << "totalAmountIncreased" << 0ll);
+        BSONObj _prevStats =
+            BSON("timesDecreased" << 0ll << "timesIncreased" << 0ll << "totalAmountDecreased" << 0ll
+                                  << "totalAmountIncreased" << 0ll);
+    } _statsTester;
+};
 
 class ThroughputProbingMaxConcurrencyTest : public ThroughputProbingTest {
 protected:
@@ -221,6 +202,7 @@ TEST_F(ThroughputProbingTest, ProbeUpSucceeds) {
     ASSERT_GT(_readTicketHolder.outof(), initialSize);
     ASSERT_LT(_writeTicketHolder.outof(), size);
     ASSERT_GT(_writeTicketHolder.outof(), initialSize);
+    ASSERT(_statsTester.concurrencyIncreased()) << _statsTester.toString();
 }
 
 TEST_F(ThroughputProbingTest, ProbeUpFails) {
@@ -244,6 +226,7 @@ TEST_F(ThroughputProbingTest, ProbeUpFails) {
     _run();
     ASSERT_EQ(_readTicketHolder.outof(), size);
     ASSERT_EQ(_writeTicketHolder.outof(), size);
+    ASSERT(_statsTester.concurrencyKept()) << _statsTester.toString();
 }
 
 TEST_F(ThroughputProbingTest, ProbeDownSucceeds) {
@@ -271,6 +254,7 @@ TEST_F(ThroughputProbingTest, ProbeDownSucceeds) {
     ASSERT_GT(_readTicketHolder.outof(), size);
     ASSERT_LT(_writeTicketHolder.outof(), initialSize);
     ASSERT_GT(_writeTicketHolder.outof(), size);
+    ASSERT(_statsTester.concurrencyIncreased()) << _statsTester.toString();
 }
 
 TEST_F(ThroughputProbingTest, ProbeDownFails) {
@@ -293,6 +277,7 @@ TEST_F(ThroughputProbingTest, ProbeDownFails) {
     _run();
     ASSERT_EQ(_readTicketHolder.outof(), size);
     ASSERT_EQ(_writeTicketHolder.outof(), size);
+    ASSERT(_statsTester.concurrencyKept()) << _statsTester.toString();
 }
 
 TEST_F(ThroughputProbingMaxConcurrencyTest, NoProbeUp) {
@@ -354,6 +339,7 @@ TEST_F(ThroughputProbingMinConcurrencyTest, StepSizeNonZero) {
     _run();
     ASSERT_EQ(_readTicketHolder.outof(), size);
     ASSERT_EQ(_writeTicketHolder.outof(), size);
+    ASSERT(_statsTester.concurrencyKept()) << _statsTester.toString();
 
     // Run another iteration.
 
@@ -376,6 +362,7 @@ TEST_F(ThroughputProbingMinConcurrencyTest, StepSizeNonZero) {
     _run();
     ASSERT_EQ(_readTicketHolder.outof(), size + 1);
     ASSERT_EQ(_writeTicketHolder.outof(), size + 1);
+    ASSERT(_statsTester.concurrencyIncreased()) << _statsTester.toString();
 }
 
 TEST_F(ThroughputProbingTest, ReadWriteRatio) {
@@ -421,6 +408,7 @@ TEST_F(ThroughputProbingTest, ReadWriteRatio) {
     ASSERT_LT(_writeTicketHolder.outof(), writes);
     ASSERT_LT(_writeTicketHolder.outof(), initialWrites);
     ASSERT_GT(_readTicketHolder.outof() + _writeTicketHolder.outof(), initialReads + initialWrites);
+    ASSERT(_statsTester.concurrencyIncreased()) << _statsTester.toString();
 
     // This imbalance should still exist.
     ASSERT_GT(_readTicketHolder.outof(), _writeTicketHolder.outof());
@@ -512,6 +500,5 @@ TEST_F(ThroughputProbingWriteHeavyTest, StepSizeNonZeroDecreasing) {
     ASSERT_LT(_writeTicketHolder.outof(), writes);
 }
 
-
 }  // namespace
-}  // namespace mongo::execution_control
+}  // namespace mongo::execution_control::throughput_probing

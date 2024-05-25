@@ -49,7 +49,8 @@ namespace mongo {
 namespace {
 
 using OptimizePipeline = AggregationContextFixture;
-
+const auto kExplain = SerializationOptions{
+    .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)};
 TEST_F(OptimizePipeline, MixedMatchPushedDown) {
     auto unpack = fromjson(
         "{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: 'myMeta', "
@@ -62,7 +63,7 @@ TEST_F(OptimizePipeline, MixedMatchPushedDown) {
     pipeline->optimizePipeline();
 
     // To get the optimized $match from the pipeline, we have to serialize with explain.
-    auto stages = pipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+    auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(2u, stages.size());
 
     // We should push down the $match on the metaField and the predicates on the control field.
@@ -113,7 +114,7 @@ TEST_F(OptimizePipeline, MixedMatchOr) {
 
     pipeline->optimizePipeline();
 
-    auto stages = pipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+    auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(2u, stages.size());
     auto expected = fromjson(
         "{$match: {$and: ["
@@ -179,7 +180,7 @@ TEST_F(OptimizePipeline, MultipleMatchesPushedDown) {
 
     // We should push down both the $match on the metaField and the predicates on the control field.
     // The created $match stages should be added before $_internalUnpackBucket and merged.
-    auto stages = pipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+    auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(2u, stages.size());
     ASSERT_BSONOBJ_EQ(fromjson("{$match: {$and: [ {meta: {$gte: 0}},"
                                "{meta: {$lte: 5}},"
@@ -208,7 +209,7 @@ TEST_F(OptimizePipeline, MultipleMatchesPushedDownWithSort) {
 
     // We should push down both the $match on the metaField and the predicates on the control field.
     // The created $match stages should be added before $_internalUnpackBucket and merged.
-    auto stages = pipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+    auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(3u, stages.size());
     ASSERT_BSONOBJ_EQ(fromjson("{$match: {$and: [ { meta: { $gte: 0 } },"
                                "{meta: { $lte: 5 } },"
@@ -236,14 +237,14 @@ TEST_F(OptimizePipeline, MetaMatchThenCountPushedDown) {
 
     // We should push down the $match and internalize the empty dependency set.
     auto serialized = pipeline->serializeToBson();
-    ASSERT_EQ(4u, serialized.size());
+    // The $group is rewritten to make use of '$control.count' and the $unpack stage is removed.
+    ASSERT_EQ(3u, serialized.size());
     ASSERT_BSONOBJ_EQ(fromjson("{$match: {meta: {$eq: 'abc'}}}"), serialized[0]);
-    ASSERT_BSONOBJ_EQ(fromjson("{$_internalUnpackBucket: { include: [], timeField: 'time', "
-                               "metaField: 'myMeta', bucketMaxSpanSeconds: 3600}}"),
+    ASSERT_BSONOBJ_EQ(fromjson("{$group: {_id: {$const: null}, foo: { $sum: { $cond: [ { $gte: [ "
+                               "'$control.version', { $const: 2 } ] }, '$control.count', { $size: "
+                               "[ { $objectToArray: ['$data.time']} ] } ] } } } }"),
                       serialized[1]);
-    ASSERT_BSONOBJ_EQ(fromjson("{$group: {_id: {$const: null}, foo: {$sum: {$const: 1}}}}"),
-                      serialized[2]);
-    ASSERT_BSONOBJ_EQ(fromjson("{$project: {foo: true, _id: false}}"), serialized[3]);
+    ASSERT_BSONOBJ_EQ(fromjson("{$project: {foo: true, _id: false}}"), serialized[2]);
 }
 
 TEST_F(OptimizePipeline, SortThenMetaMatchPushedDown) {
@@ -352,7 +353,7 @@ TEST_F(OptimizePipeline, MixedMatchThenProjectPushedDown) {
     pipeline->optimizePipeline();
 
     // We can push down part of the $match and use dependency analysis on the end of the pipeline.
-    auto stages = pipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+    auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(3u, stages.size());
     ASSERT_BSONOBJ_EQ(fromjson("{$match: {$and: [{meta: {$eq: 'abc'}},"
                                "{$or: [ {'control.min.a': { $_internalExprLte: 4 } },"
@@ -401,7 +402,7 @@ TEST_F(OptimizePipeline, ProjectThenMixedMatchPushedDown) {
     pipeline->optimizePipeline();
 
     // We should push down part of the $match and do dependency analysis on the rest.
-    auto stages = pipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+    auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(3u, stages.size());
     ASSERT_BSONOBJ_EQ(fromjson("{$match: {$and: [{meta: {$eq: \"abc\"}},"
                                "{$or: [ {'control.min.a': {$_internalExprLte: 4}},"
@@ -432,7 +433,7 @@ TEST_F(OptimizePipeline, ProjectWithRenameThenMixedMatchPushedDown) {
     pipeline->optimizePipeline();
 
     // We should push down part of the $match and do dependency analysis on the end of the pipeline.
-    auto stages = pipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+    auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(3u, stages.size());
     ASSERT_BSONOBJ_EQ(
         fromjson("{$match: {$and: [{$or: [ {'control.max.y': {$_internalExprGte: \"abc\"}},"

@@ -1,12 +1,11 @@
 // Tests that it is allowed to implicitly create a collection using insert or upsert in a
 // multi-document transaction.
-// The test runs commands that are not allowed with security token: endSession.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: endSession.
 //   not_allowed_with_security_token,
 //   uses_transactions,
 // ]
-(function() {
-"use strict";
 
 const dbName = "test";
 const collName = "implicit_collection_creation_in_txn";
@@ -99,4 +98,3 @@ assert.commandWorked(session.commitTransaction_forTesting());
 assert.eq(null, testColl.findOne({_id: "doc"}));
 
 session.endSession();
-}());

@@ -8,15 +8,14 @@
  *
  * @tags: [
  *   # To avoid multiversion tests
- *   requires_fcv_70,
+ *   requires_fcv_71,
  *   # To avoid burn-in tests in in-memory build variants
  *   requires_persistence,
  * ]
  */
-(function() {
-'use strict';
-
-load('jstests/libs/fail_point_util.js');  // For configureFailPoint
+import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 // Asserts that there is no change stream event.
 function assertNoChanges(csCursor) {
@@ -143,6 +142,16 @@ const mongosDbChangeStream = db.watch([], {showSystemEvents: true});
     // has been removed from the bucket and only the measurement with {_id: 4, f: 40} stays in
     // the bucket.
     const actualBucket = st.shard0.getCollection(sysCollNS).findOne({meta: 0});
+
+    // If we are always using compressed buckets for time-series writes, we must de-compress the
+    // bucket to inspect its contents.
+    if (FeatureFlagUtil.isPresentAndEnabled(db,
+                                            "TimeseriesAlwaysUseCompressedBuckets",
+                                            /*user=*/ undefined,
+                                            /*ignoreFCV=*/ true)) {  // TODO SERVER-79460
+        TimeseriesTest.decompressBucket(actualBucket);
+    }
+
     assert.eq(0, actualBucket.meta, actualBucket);
     assert.eq(4, actualBucket.control.min._id, actualBucket);
     assert.eq(4, actualBucket.control.max._id, actualBucket);
@@ -179,6 +188,16 @@ const mongosDbChangeStream = db.watch([], {showSystemEvents: true});
     // The orphaned bucket on the first shard have not been updated, unlike the mongos collection.
     assert.eq(null, mongosColl.findOne({_id: 4}), mongosColl.find().toArray());
     const shard0Bucket = st.shard0.getCollection(sysCollNS).findOne({meta: 0});
+
+    // If we are always using compressed buckets for time-series writes, we must de-compress the
+    // bucket to inspect its contents.
+    if (FeatureFlagUtil.isPresentAndEnabled(db,
+                                            "TimeseriesAlwaysUseCompressedBuckets",
+                                            /*user=*/ undefined,
+                                            /*ignoreFCV=*/ true)) {  // TODO SERVER-79460
+        TimeseriesTest.decompressBucket(shard0Bucket);
+    }
+
     assert.eq(0, shard0Bucket.meta, shard0Bucket);
     assert.eq(4, shard0Bucket.control.min._id, shard0Bucket);
     assert.eq(4, shard0Bucket.control.max._id, shard0Bucket);
@@ -206,6 +225,9 @@ const mongosDbChangeStream = db.watch([], {showSystemEvents: true});
     assert.eq(null, mongosColl.findOne({_id: 6}), mongosColl.find().toArray());
     assert.eq(null, mongosColl.findOne({_id: 7}), mongosColl.find().toArray());
     const shard0Bucket = st.shard0.getCollection(sysCollNS).findOne({meta: 2});
+    if (TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(st.shard0)) {
+        TimeseriesTest.decompressBucket(shard0Bucket);
+    }
     assert.eq(2, shard0Bucket.meta, shard0Bucket);
     assert.eq(6, shard0Bucket.control.min._id, shard0Bucket);
     assert.eq(7, shard0Bucket.control.max._id, shard0Bucket);
@@ -218,4 +240,3 @@ const mongosDbChangeStream = db.watch([], {showSystemEvents: true});
 suspendRangeDeletionShard0.off();
 
 st.stop();
-})();

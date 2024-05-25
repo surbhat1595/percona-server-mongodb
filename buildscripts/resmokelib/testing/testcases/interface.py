@@ -11,10 +11,12 @@ import uuid
 from buildscripts.resmokelib import logging
 from buildscripts.resmokelib.utils import registry
 
-_TEST_CASES = {}  # type: ignore
+from typing import Any, Dict, Callable
+
+_TEST_CASES: Dict[str, Callable] = {}  # type: ignore
 
 
-def make_test_case(test_kind, *args, **kwargs):
+def make_test_case(test_kind, *args, **kwargs) -> 'TestCase':
     """Provide factory function for creating TestCase instances."""
     if test_kind not in _TEST_CASES:
         raise ValueError("Unknown test kind '%s'" % test_kind)
@@ -74,6 +76,10 @@ class TestCase(unittest.TestCase, metaclass=registry.make_registry_metaclass(_TE
         """Return the id of the test."""
         return self._id
 
+    def get_test_kind(self):
+        """Return the kind of the test. This will be something like JSTest."""
+        return self.test_kind
+
     def short_description(self):
         """Return the short_description of the test."""
         return "%s %s" % (self.test_kind, self.test_name)
@@ -108,6 +114,23 @@ class TestCase(unittest.TestCase, metaclass=registry.make_registry_metaclass(_TE
     def as_command(self):
         """Return the command invocation used to run the test or None."""
         return None
+
+    class METRIC_NAMES:
+        BASE_NAME = "test_base_name"
+        LONG_NAME = "test_long_name"
+        ID = "test_id"
+        KIND = "test_kind"
+        DYNAMIC = "test_dynamic"
+        BACKGROUND = "test_background"
+
+    def get_test_otel_attributes(self) -> Dict[str, Any]:
+        return {
+            TestCase.METRIC_NAMES.BASE_NAME: self.basename(),
+            TestCase.METRIC_NAMES.LONG_NAME: self.long_name(),
+            TestCase.METRIC_NAMES.ID: str(self.id()),
+            TestCase.METRIC_NAMES.KIND: self.get_test_kind(),
+            TestCase.METRIC_NAMES.DYNAMIC: self.dynamic,
+        }
 
 
 class UndoDBUtilsMixin:

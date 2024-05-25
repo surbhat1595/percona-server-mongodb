@@ -234,7 +234,7 @@ public:
             auto commandResponse = configShard->runCommand(
                 opCtx,
                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                DatabaseName::kAdmin.toString(),
+                DatabaseName::kAdmin,
                 CommandHelpers::appendMajorityWriteConcern(configsvrRequest.toBSON({})),
                 Shard::RetryPolicy::kIdempotent);
             uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(std::move(commandResponse)));
@@ -253,9 +253,8 @@ public:
             result->getBodyBuilder().appendElements(resultbson.obj());
         }
     };
-
-
-} clusterMoveChunk;
+};
+MONGO_REGISTER_COMMAND(MoveChunkCmd);
 
 }  // namespace
 }  // namespace mongo

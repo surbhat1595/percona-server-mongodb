@@ -35,7 +35,6 @@ global:
 
 imports:
   - "mongo/client/read_preference_setting.idl"
-  - "mongo/db/repl/tenant_migration_pem_payload.idl"
   - "mongo/db/serverless/serverless_types.idl"
   - "mongo/db/basic_types.idl"
   - "mongo/s/sharding_types.idl"
@@ -82,13 +81,6 @@ structs:
           description: >-
             The read preference settings that the donor will pass on to the recipient.
           type: readPreference
-        recipientCertificateForDonor:
-          description: >-
-            The SSL certificate and private key that the recipient should use to authenticate to the
-            donor.
-          type: TenantMigrationPEMPayload
-          # TODO (SERVER-54085): Remove server parameter tenantMigrationDisableX509Auth.
-          optional: true
         protocol:
           description: "Which migration protocol to use, default 'multitenant migrations'."
           type: MigrationProtocol
@@ -127,8 +119,9 @@ commands:
   recipientVoteImportedFiles:
     command_name: recipientVoteImportedFiles
     cpp_name: RecipientVoteImportedFiles
-    description: "An internal mongod command to coordinate recipient steps of a multitenant
-                  migration."
+    description: >-
+      An internal mongod command to coordinate recipient steps of shard merge.
+      It's used to signal the recipient primary when the node completes file import.
     strict: true
     namespace: ignored
     api_version: ""
@@ -140,13 +133,6 @@ commands:
       from:
         type: HostAndPort
         description: "Replica set member identification."
-      success:
-        type: safeBool
-        description: "Whether the calling node succeeded at importing all files."
-      reason:
-        type: string
-        optional: true
-        description: "Optional failure reason string."
 
   recipientForgetMigration:
     description: "Parser for the 'recipientForgetMigration' command."

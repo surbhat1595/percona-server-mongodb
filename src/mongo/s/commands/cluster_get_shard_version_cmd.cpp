@@ -111,8 +111,7 @@ public:
         uassert(ErrorCodes::BadValue,
                 str::stream() << "namespace has invalid type " << typeName(first.type()),
                 first.canonicalType() == canonicalizeBSONType(mongo::String));
-        return NamespaceStringUtil::parseNamespaceFromRequest(dbName.tenantId(),
-                                                              first.valueStringData());
+        return NamespaceStringUtil::deserialize(dbName.tenantId(), first.valueStringData());
     }
 
     bool run(OperationContext* opCtx,
@@ -124,8 +123,7 @@ public:
 
         if (nss.coll().empty()) {
             // Return the database's information.
-            auto cachedDbInfo = uassertStatusOK(
-                catalogCache->getDatabase(opCtx, NamespaceStringUtil::serialize(nss)));
+            auto cachedDbInfo = uassertStatusOK(catalogCache->getDatabase(opCtx, nss.dbName()));
             result.append("primaryShard", cachedDbInfo->getPrimary().toString());
             result.append("version", cachedDbInfo->getVersion().toBSON());
         } else {
@@ -201,8 +199,8 @@ public:
 
         return true;
     }
-
-} getShardVersionCmd;
+};
+MONGO_REGISTER_COMMAND(GetShardVersion);
 
 }  // namespace
 }  // namespace mongo

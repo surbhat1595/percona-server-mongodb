@@ -158,7 +158,7 @@ public:
 
                 if (validateCmdRequest.getCollection()) {
                     if (!_validateNamespace(opCtx,
-                                            NamespaceStringUtil::parseNamespaceFromRequest(
+                                            NamespaceStringUtil::deserialize(
                                                 dbName, *validateCmdRequest.getCollection()))) {
                         return;
                     }
@@ -268,5 +268,6 @@ public:
         std::vector<ErrorReplyElement> apiVersionErrors;
         ValidateDBMetadataCommandReply _reply;
     };
-} validateDBMetadataCmd;
+};
+MONGO_REGISTER_COMMAND(ValidateDBMetadataCmd);
 }  // namespace mongo

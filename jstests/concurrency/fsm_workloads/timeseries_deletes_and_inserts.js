@@ -14,6 +14,7 @@
  *   requires_fcv_70,
  * ]
  */
+import {assertAlways, assertWhenOwnColl} from "jstests/concurrency/fsm_libs/assert.js";
 
 export const $config = (function() {
     const data = {
@@ -107,7 +108,7 @@ export const $config = (function() {
                 db.adminCommand({setParameter: 1, internalQueryExecYieldIterations: 1000}));
         });
 
-        const logColl = db[data.logColl];
+        const logColl = db[this.logColl];
 
         const deletedSensors = logColl.distinct("sensorId");
         const nSensorsRemaining = data.nSensors - deletedSensors.length;

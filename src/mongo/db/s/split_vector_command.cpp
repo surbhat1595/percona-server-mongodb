@@ -102,18 +102,17 @@ public:
     }
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
-        return NamespaceStringUtil::parseNamespaceFromRequest(
-            dbName.tenantId(), CommandHelpers::parseNsFullyQualified(cmdObj));
+        return NamespaceStringUtil::deserialize(dbName.tenantId(),
+                                                CommandHelpers::parseNsFullyQualified(cmdObj));
     }
 
     bool errmsgRun(OperationContext* opCtx,
-                   const string& dbname,
+                   const DatabaseName& dbName,
                    const BSONObj& jsobj,
                    string& errmsg,
                    BSONObjBuilder& result) override {
 
-        const NamespaceString nss(
-            parseNs(DatabaseNameUtil::deserialize(boost::none, dbname), jsobj));
+        const NamespaceString nss(parseNs(dbName, jsobj));
         BSONObj keyPattern = jsobj.getObjectField("keyPattern");
 
         if (keyPattern.isEmpty()) {
@@ -186,8 +185,8 @@ public:
         result.append("splitKeys", splitKeys);
         return true;
     }
-
-} cmdSplitVector;
+};
+MONGO_REGISTER_COMMAND(SplitVector);
 
 }  // namespace
 }  // namespace mongo

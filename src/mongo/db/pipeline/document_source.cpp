@@ -236,7 +236,9 @@ bool DocumentSource::pushSampleBefore(Pipeline::SourceContainer::iterator itr,
 
 BSONObj DocumentSource::serializeToBSONForDebug() const {
     std::vector<Value> serialized;
-    serializeToArray(serialized, ExplainOptions::Verbosity::kQueryPlanner);
+    auto opts = SerializationOptions{
+        .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)};
+    serializeToArray(serialized, opts);
     if (serialized.empty()) {
         LOGV2_DEBUG(5943501,
                     5,
@@ -283,7 +285,8 @@ Pipeline::SourceContainer::iterator DocumentSource::optimizeAt(
     return doOptimizeAt(itr, container);
 }
 
-void DocumentSource::serializeToArray(vector<Value>& array, SerializationOptions opts) const {
+void DocumentSource::serializeToArray(vector<Value>& array,
+                                      const SerializationOptions& opts) const {
     Value entry = serialize(opts);
     if (!entry.missing()) {
         array.push_back(entry);
@@ -307,7 +310,8 @@ MONGO_INITIALIZER_GROUP(BeginDocumentSourceRegistration,
 MONGO_INITIALIZER_WITH_PREREQUISITES(EndDocumentSourceRegistration,
                                      ("BeginDocumentSourceRegistration"))
 (InitializerContext*) {
-    auto searchStageNames = {"$vectorSearch"_sd, "$search"_sd, "$searchMeta"_sd};
+    auto searchStageNames = {
+        "$vectorSearch"_sd, "$search"_sd, "$searchMeta"_sd, "$listSearchIndexes"_sd};
     for (auto stageName : searchStageNames) {
         auto searchIt = parserMap.find(stageName);
         // If the stage has not been registered at this point, register a parser that errors

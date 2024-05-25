@@ -10,15 +10,14 @@
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   serverless,
+ *   requires_fcv_71,
  * ]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {makeX509Options} from "jstests/replsets/libs/tenant_migration_util.js";
-
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/parallelTester.js");
-load("jstests/libs/uuid_util.js");
 
 const x509Options0 = makeX509Options("jstests/libs/rs0.pem");
 const x509Options1 = makeX509Options("jstests/libs/rs1.pem");

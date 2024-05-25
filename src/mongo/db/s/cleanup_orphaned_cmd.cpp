@@ -211,7 +211,7 @@ public:
     static BSONField<BSONObj> startingFromKeyField;
 
     bool errmsgRun(OperationContext* opCtx,
-                   std::string const& db,
+                   const DatabaseName& dbName,
                    const BSONObj& cmdObj,
                    std::string& errmsg,
                    BSONObjBuilder& result) override {
@@ -249,8 +249,8 @@ public:
 
         return true;
     }
-
-} cleanupOrphanedCmd;
+};
+MONGO_REGISTER_COMMAND(CleanupOrphanedCommand);
 
 BSONField<std::string> CleanupOrphanedCommand::nsField("cleanupOrphaned");
 BSONField<BSONObj> CleanupOrphanedCommand::startingFromKeyField("startingFromKey");

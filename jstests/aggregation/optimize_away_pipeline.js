@@ -14,16 +14,16 @@
 //   requires_pipeline_optimization,
 //   requires_profiling,
 // ]
-load("jstests/concurrency/fsm_workload_helpers/server_types.js");  // For isWiredTiger.
+import {isWiredTiger} from "jstests/concurrency/fsm_workload_helpers/server_types.js";
 import {
-    getPlanStages,
-    getAggPlanStage,
     aggPlanHasStage,
-    planHasStage,
+    getAggPlanStage,
+    getPlanStages,
     isAggregationPlan,
     isQueryPlan,
+    planHasStage,
 } from "jstests/libs/analyze_plan.js";
-load("jstests/libs/fixture_helpers.js");  // For 'isMongos' and 'isSharded'.
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
 const groupPushdownEnabled = checkSBEEnabled(db);
@@ -150,8 +150,6 @@ function testGetMore({command = null, expectedResult = null} = {}) {
 function assertPipelineIfGroupPushdown(assertPushdownEnabled, assertPushdownDisabled) {
     return groupPushdownEnabled ? assertPushdownEnabled() : assertPushdownDisabled();
 }
-
-let explainOutput;
 
 // Basic pipelines.
 
@@ -297,7 +295,6 @@ assertPipelineDoesNotUseAggregation({
     pipeline:
         [{$match: {$text: {$search: "abc"}}}, {$sort: {sortField: 1}}, {$project: {a: 1, b: 1}}],
     expectedStages: ["TEXT_MATCH", "SORT", "PROJECTION_SIMPLE"],
-    optimizedAwayStages: ["$match", "$sort", "$project"]
 });
 assert.commandWorked(coll.dropIndexes());
 
@@ -325,13 +322,20 @@ assertPipelineDoesNotUseAggregation({
     expectedResult: [{_id: 2, x: 20}],
 });
 
-// $limit followed by $match cannot be fully optimized away. The $limit is pushed down, but the
-// $match is executed in the agg layer.
-assertPipelineUsesAggregation({
-    pipeline: [{$limit: 1}, {$match: {x: 20}}],
-    expectedStages: ["COLLSCAN", "LIMIT"],
-    optimizedAwayStages: ["$limit"],
-});
+if (featureFlagSbeFull) {
+    assertPipelineDoesNotUseAggregation({
+        pipeline: [{$limit: 1}, {$match: {x: 20}}],
+        expectedStages: ["COLLSCAN", "LIMIT"],
+    });
+} else {
+    // $limit followed by $match cannot be fully optimized away. The $limit is pushed down, but the
+    // $match is executed in the agg layer.
+    assertPipelineUsesAggregation({
+        pipeline: [{$limit: 1}, {$match: {x: 20}}],
+        expectedStages: ["COLLSCAN", "LIMIT"],
+        optimizedAwayStages: ["$limit"],
+    });
+}
 
 // $match, $project, $limit can be optimized away when the projection is covered.
 assertPipelineDoesNotUseAggregation({
@@ -345,17 +349,26 @@ assertPipelineDoesNotUseAggregation({
     pipeline: [{$match: {x: {$gte: 20}}}, {$project: {_id: 0, x: 1, y: 1}}, {$limit: 1}],
     expectedStages: ["IXSCAN", "FETCH", "LIMIT", "PROJECTION_SIMPLE"],
     expectedResult: [{x: 20}],
-    optimizedAwayStages: ["$limit", "$project"],
 });
 
-// $match, $project, $limit, $sort cannot be optimized away because the $limit comes before the
-// $sort.
-assertPipelineUsesAggregation({
-    pipeline: [{$match: {x: {$gte: 20}}}, {$project: {_id: 0, x: 1}}, {$limit: 1}, {$sort: {x: 1}}],
-    expectedStages: ["IXSCAN", "PROJECTION_COVERED", "LIMIT"],
-    expectedResult: [{x: 20}],
-    optimizedAwayStages: ["$project", "$limit"],
-});
+if (featureFlagSbeFull) {
+    assertPipelineDoesNotUseAggregation({
+        pipeline:
+            [{$match: {x: {$gte: 20}}}, {$project: {_id: 0, x: 1}}, {$limit: 1}, {$sort: {x: 1}}],
+        expectedStages: ["IXSCAN", "PROJECTION_COVERED", "LIMIT", "SORT"],
+        expectedResult: [{x: 20}],
+    });
+} else {
+    // $match, $project, $limit, $sort cannot be optimized away because the $limit comes before the
+    // $sort.
+    assertPipelineUsesAggregation({
+        pipeline:
+            [{$match: {x: {$gte: 20}}}, {$project: {_id: 0, x: 1}}, {$limit: 1}, {$sort: {x: 1}}],
+        expectedStages: ["IXSCAN", "PROJECTION_COVERED", "LIMIT"],
+        expectedResult: [{x: 20}],
+        optimizedAwayStages: ["$project", "$limit"],
+    });
+}
 
 // $match, $sort, $limit can be optimized away.
 assertPipelineDoesNotUseAggregation({
@@ -489,7 +502,6 @@ pipeline = [
 assertPipelineDoesNotUseAggregation({
     pipeline: pipeline,
     expectedStages: ["IXSCAN", "PROJECTION_COVERED", "LIMIT", "SKIP"],
-    optimizedAwayStages: ["$match", "$limit", "$skip"],
 });
 explain = coll.explain().aggregate(pipeline);
 

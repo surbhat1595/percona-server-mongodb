@@ -23,11 +23,14 @@
  * - behavior: Must be one of "unshardedOnly", "targetsPrimaryUsesConnectionVersioning" or
  * "versioned". Determines what system profiler checks are performed.
  */
-(function() {
-"use strict";
-
-load('jstests/libs/profiler.js');
-load('jstests/sharding/libs/last_lts_mongos_commands.js');
+import {
+    buildCommandProfile,
+    profilerHasSingleMatchingEntryOrThrow,
+    profilerHasZeroMatchingEntriesOrThrow,
+} from "jstests/libs/profiler.js";
+import {
+    commandsRemovedFromMongosSinceLastLTS
+} from "jstests/sharding/libs/last_lts_mongos_commands.js";
 
 let db = "test";
 let coll = "foo";
@@ -105,6 +108,7 @@ let testCases = {
     _recvChunkStart: {skip: "primary only"},
     _recvChunkStatus: {skip: "primary only"},
     _transferMods: {skip: "primary only"},
+    abortMoveCollection: {skip: "primary only"},
     abortReshardCollection: {skip: "primary only"},
     abortTransaction: {skip: "primary only"},
     addShard: {skip: "primary only"},
@@ -194,6 +198,7 @@ let testCases = {
     createIndexes: {skip: "primary only"},
     createRole: {skip: "primary only"},
     createSearchIndexes: {skip: "does not return user data"},
+    createUnsplittableCollection: {skip: "primary only"},
     createUser: {skip: "primary only"},
     currentOp: {skip: "does not return user data"},
     dataSize: {skip: "does not return user data"},
@@ -289,7 +294,7 @@ let testCases = {
     listIndexes: {skip: "primary only"},
     listSearchIndexes: {skip: "does not return user data"},
     listShards: {skip: "does not return user data"},
-    lockInfo: {skip: "primary only"},
+    lockInfo: {skip: "does not return user data"},
     logApplicationMessage: {skip: "primary only"},
     logMessage: {skip: "does not return user data"},
     logRotate: {skip: "does not return user data"},
@@ -357,6 +362,7 @@ let testCases = {
     mergeAllChunksOnShard: {skip: "primary only"},
     mergeChunks: {skip: "primary only"},
     moveChunk: {skip: "primary only"},
+    moveCollection: {skip: "primary only"},
     movePrimary: {skip: "primary only"},
     moveRange: {skip: "primary only"},
     multicast: {skip: "does not return user data"},
@@ -412,7 +418,6 @@ let testCases = {
     setDefaultRWConcern: {skip: "primary only"},
     setIndexCommitQuorum: {skip: "primary only"},
     setFeatureCompatibilityVersion: {skip: "primary only"},
-    setFreeMonitoring: {skip: "primary only"},
     setProfilingFilterGlobally: {skip: "does not return user data"},
     setParameter: {skip: "does not return user data"},
     setShardVersion: {skip: "does not return user data"},
@@ -441,6 +446,7 @@ let testCases = {
     top: {skip: "does not return user data"},
     transitionFromDedicatedConfigServer: {skip: "primary only"},
     transitionToDedicatedConfigServer: {skip: "primary only"},
+    unshardCollection: {skip: "primary only"},
     update: {skip: "primary only"},
     updateRole: {skip: "primary only"},
     updateSearchIndex: {skip: "does not return user data"},
@@ -634,4 +640,3 @@ for (let command of commands) {
 }
 
 st.stop();
-})();

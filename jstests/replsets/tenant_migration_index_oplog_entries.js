@@ -6,13 +6,11 @@
  *   incompatible_with_windows_tls,
  *   requires_persistence,
  *   serverless,
+ *   requires_fcv_71,
  * ]
  */
 
-(function() {
-"use strict";
-
-load("jstests/libs/fail_point_util.js");
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 
 const kDbName = "testDb";
 const kCollName = "testColl";
@@ -81,4 +79,3 @@ assert.commandWorked(testDB.runCommand({
 }));
 
 rst.stopSet();
-})();

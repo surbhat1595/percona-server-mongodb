@@ -48,6 +48,7 @@
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/query_shape.h"
 #include "mongo/db/query/query_shape_test_gen.h"
+#include "mongo/db/query/shape_helpers.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
 #include "mongo/util/intrusive_counter.h"
@@ -64,7 +65,7 @@ std::string applyHmacForTest(StringData sd) {
 }
 
 static const SerializationOptions literalAndFieldRedactOpts{
-    applyHmacForTest, LiteralSerializationPolicy::kToDebugTypeString};
+    LiteralSerializationPolicy::kToDebugTypeString, true, applyHmacForTest};
 
 
 BSONObj predicateShape(std::string filterJson) {
@@ -219,13 +220,16 @@ TEST(QueryPredicateShape, Exists) {
 }
 
 TEST(QueryPredicateShape, In) {
-    // Any number of children is always the same shape
+    // Any number of children in any order is always the same shape
     ASSERT_SHAPE_EQ_AUTO(  // NOLINT
         R"({"a":{"$in":"?array<?number>"}})",
         "{a: {$in: [1]}}");
     ASSERT_SHAPE_EQ_AUTO(  // NOLINT
         R"({"a":{"$in":"?array<>"}})",
         "{a: {$in: [1, 4, 'str', /regex/]}}");
+    ASSERT_SHAPE_EQ_AUTO(  // NOLINT
+        R"({"a":{"$in":"?array<>"}})",
+        "{a: {$in: ['str', /regex/, 1, 4]}}");
 }
 
 TEST(QueryPredicateShape, BitTestOperators) {

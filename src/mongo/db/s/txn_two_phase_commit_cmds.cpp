@@ -138,7 +138,7 @@ public:
             // Standalone nodes do not support transactions at all
             uassert(ErrorCodes::ReadConcernMajorityNotEnabled,
                     "'prepareTransaction' is not supported on standalone nodes.",
-                    replCoord->isReplEnabled());
+                    replCoord->getSettings().isReplSet());
 
             auto txnParticipant = TransactionParticipant::get(opCtx);
             uassert(ErrorCodes::CommandFailed,
@@ -251,8 +251,8 @@ public:
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
-
-} prepareTransactionCmd;
+};
+MONGO_REGISTER_COMMAND(PrepareTransactionCmd);
 
 std::set<ShardId> validateParticipants(OperationContext* opCtx,
                                        const std::vector<mongo::CommitParticipant>& participants) {
@@ -446,8 +446,8 @@ public:
     bool allowedInTransactions() const final {
         return true;
     }
-
-} coordinateCommitTransactionCmd;
+};
+MONGO_REGISTER_COMMAND(CoordinateCommitTransactionCmd);
 
 }  // namespace
 }  // namespace mongo

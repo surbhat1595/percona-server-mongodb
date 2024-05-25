@@ -19,9 +19,9 @@
  * using the $planCacheStats aggregation metadata source on the same query shape with the index
  * filters.
  *
- * The test runs commands that are not allowed with security token: planCacheClearFilters,
- * planCacheListFilters, planCacheSetFilter.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: planCacheClearFilters,
+ *   # planCacheListFilters, planCacheSetFilter.
  *   not_allowed_with_security_token,
  *   # Cannot implicitly shard accessed collections because of collection existing when none
  *   # expected.
@@ -49,8 +49,10 @@ import {
     isIdhack,
     isIxscan,
 } from "jstests/libs/analyze_plan.js";
-load("jstests/libs/clustered_collections/clustered_collection_util.js");
-load("jstests/libs/fixture_helpers.js");  // For 'FixtureHelpers'.
+import {
+    ClusteredCollectionUtil
+} from "jstests/libs/clustered_collections/clustered_collection_util.js";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
 const coll = db.jstests_index_filter_commands;

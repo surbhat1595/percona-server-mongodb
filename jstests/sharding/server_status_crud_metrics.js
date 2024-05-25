@@ -3,10 +3,9 @@
  * operations.
  */
 
-(function() {
-"use strict";
-
-load("jstests/sharding/updateOne_without_shard_key/libs/write_without_shard_key_test_util.js");
+import {
+    WriteWithoutShardKeyTestUtil
+} from "jstests/sharding/updateOne_without_shard_key/libs/write_without_shard_key_test_util.js";
 
 const st = new ShardingTest({shards: 2});
 const testDB = st.s.getDB("test");
@@ -100,7 +99,7 @@ if (WriteWithoutShardKeyTestUtil.isWriteWithoutShardKeyFeatureEnabled(st.s)) {
     mongosServerStatus = testDB.adminCommand({serverStatus: 1});
 
     // Verifying metrics for updateOnes commands.
-    assert.eq(1, mongosServerStatus.metrics.query.updateOneNonTargetedShardedCount);
+    assert.eq(5, mongosServerStatus.metrics.query.updateOneNonTargetedShardedCount);
     assert.eq(2, mongosServerStatus.metrics.query.updateOneUnshardedCount);
 
 } else {
@@ -126,4 +125,3 @@ if (WriteWithoutShardKeyTestUtil.isWriteWithoutShardKeyFeatureEnabled(st.s)) {
 }
 
 st.stop();
-})();

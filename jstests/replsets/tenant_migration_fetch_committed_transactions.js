@@ -9,16 +9,17 @@
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   serverless,
+ *   requires_fcv_71,
  *   incompatible_with_shard_merge,
  *   requires_fcv_53
  * ]
  */
 
+import {PrepareHelpers} from "jstests/core/txns/libs/prepare_helpers.js";
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {makeTenantDB} from "jstests/replsets/libs/tenant_migration_util.js";
-load("jstests/core/txns/libs/prepare_helpers.js");
-load("jstests/replsets/rslib.js");
-load("jstests/libs/uuid_util.js");
 
 const tenantId = ObjectId().str;
 const transactionsNS = "config.transactions";

@@ -103,8 +103,12 @@ private:
  * 'clientsLastKnownCommittedOpTime' represents the time passed to the getMore command.
  * If the replication coordinator ever reports a higher committed op time, we should stop waiting
  * for inserts and return immediately to speed up the propagation of commit level changes.
+ *
+ * A boost::none value opts out of the commit point propagation. A null optime compares less than
+ * any non-null optimes and thus will always trigger an empty batch for commit point propagation.
  */
-extern const OperationContext::Decoration<repl::OpTime> clientsLastKnownCommittedOpTime;
+extern const OperationContext::Decoration<boost::optional<repl::OpTime>>
+    clientsLastKnownCommittedOpTime;
 
 /**
  * If a plan yielded because it encountered a sharding critical section,
@@ -472,6 +476,13 @@ public:
      * Sets whether the executor needs to return owned data.
      */
     virtual void setReturnOwnedData(bool returnOwnedData){};
+
+    /** TODO: SERVER-76397 Remove this once we use acquisitions everywhere.
+     *
+     * Returns whether the plan executor uses shard role acquisitions or the legacy
+     * CollectionPtr/AutoGet approach.
+     */
+    virtual bool usesCollectionAcquisitions() const = 0;
 };
 
 }  // namespace mongo

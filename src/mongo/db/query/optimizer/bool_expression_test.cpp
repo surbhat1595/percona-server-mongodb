@@ -39,6 +39,7 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/query/optimizer/index_bounds.h"
+#include "mongo/db/query/optimizer/utils/bool_expression_cnf_dnf_convert.h"
 #include "mongo/db/query/optimizer/utils/bool_expression_printer.h"
 #include "mongo/db/query/optimizer/utils/unit_test_abt_literals.h"
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
@@ -59,7 +60,7 @@ TEST(BoolExpr, IntervalCNFtoDNF) {
             "{{{[Variable [v1], Variable [v2]]}}}\n",  // NOLINT (test auto-update)
             interval);
 
-        auto res = BoolExpr<IntervalRequirement>::convertToCNF(interval);
+        auto res = convertToCNF<IntervalRequirement>(interval);
         ASSERT(res.has_value());
         ASSERT_INTERVAL_AUTO(                          // NOLINT
             "{{{[Variable [v1], Variable [v2]]}}}\n",  // NOLINT (test auto-update)
@@ -78,7 +79,7 @@ TEST(BoolExpr, IntervalCNFtoDNF) {
             "}\n",
             interval);
 
-        auto res = BoolExpr<IntervalRequirement>::convertToCNF(interval);
+        auto res = convertToCNF<IntervalRequirement>(interval);
         ASSERT(res.has_value());
         ASSERT_INTERVAL_AUTO(  // NOLINT
             "{{\n"
@@ -112,7 +113,7 @@ TEST(BoolExpr, IntervalCNFtoDNF) {
             "}\n",
             interval);
 
-        auto res = BoolExpr<IntervalRequirement>::convertToDNF(interval);
+        auto res = convertToDNF<IntervalRequirement>(interval);
         ASSERT(res.has_value());
         ASSERT_INTERVAL_AUTO(  // NOLINT
             "{\n"
@@ -144,8 +145,8 @@ TEST(BoolExpr, IntervalCNFtoDNF) {
 
         // Test conversion clause limit: the same conversion succeeds with a max limit of 4 clauses
         // but fails with a limit of 3.
-        ASSERT(BoolExpr<IntervalRequirement>::convertToDNF(interval, 4).has_value());
-        ASSERT_FALSE(BoolExpr<IntervalRequirement>::convertToDNF(interval, 3).has_value());
+        ASSERT(convertToDNF<IntervalRequirement>(interval, {} /*builder*/, 4).has_value());
+        ASSERT_FALSE(convertToDNF<IntervalRequirement>(interval, {} /*builder*/, 3).has_value());
     }
 }
 
@@ -186,7 +187,7 @@ std::pair<IntBoolExpr::Node, int> buildExpr(int rootChildren, int permutation, i
     };
 
     int varId = 0;
-    IntBoolExpr::Builder builder;
+    BoolExprBuilder<int> builder;
     builder.push(buildCNF);
     for (int i = 0; i < rootChildren; i++) {
         builder.push(!buildCNF);
@@ -225,7 +226,7 @@ TEST(BoolExpr, BoolExprPermutations) {
             {
                 auto [expr, numVars] =
                     buildExpr<false /*CNF*/>(rootNumChildren, permutation, maxBranching);
-                auto transformed = IntBoolExpr::convertToCNF(expr);
+                auto transformed = convertToCNF<int>(expr);
                 ASSERT(transformed.has_value());
                 assertEquiv(expr, *transformed, numVars);
             }
@@ -234,7 +235,7 @@ TEST(BoolExpr, BoolExprPermutations) {
             {
                 auto [expr, numVars] =
                     buildExpr<true /*CNF*/>(rootNumChildren, permutation, maxBranching);
-                auto transformed = IntBoolExpr::convertToDNF(expr);
+                auto transformed = convertToDNF<int>(expr);
                 ASSERT(transformed.has_value());
                 assertEquiv(expr, *transformed, numVars);
             }
@@ -244,7 +245,7 @@ TEST(BoolExpr, BoolExprPermutations) {
 
 TEST(BoolExpr, BoolExprVisitorTest) {
     // Show const visitors
-    IntBoolExpr::Builder b;
+    BoolExprBuilder<int> b;
     b.pushConj().pushDisj().atom(1).atom(2).atom(3).pop().pushDisj().atom(4).atom(5).pop();
     auto intExprCNF = b.finish().get();
 
@@ -290,7 +291,7 @@ TEST(BoolExpr, BoolExprVisitorTest) {
 }
 
 TEST(BoolExpr, BoolExprVisitorEarlyReturnTest) {
-    IntBoolExpr::Builder b;
+    BoolExprBuilder<int> b;
     b.pushConj().pushDisj().atom(1).atom(2).atom(3).pop().pushDisj().atom(4).atom(5).pop();
     auto intExprCNF = b.finish().get();
 
@@ -307,6 +308,33 @@ TEST(BoolExpr, BoolExprVisitorEarlyReturnTest) {
             ctx.returnEarly();
         });
     ASSERT_EQ(1, visitedNodes);
+}
+
+TEST(BoolExpr, BoolExprArbitraryFormTests) {
+    BoolExprBuilder<int> b;
+    b.pushConj().pushConj().atom(1).atom(2).atom(3).pop().pushDisj().atom(4).atom(5).pop();
+    auto intExpr = b.finish().get();
+
+    ASSERT_FALSE(IntBoolExpr::isCNF(intExpr));
+    ASSERT_FALSE(IntBoolExpr::isDNF(intExpr));
+
+    int visitedNodes = 0;
+    IntBoolExpr::visitConjuncts(intExpr,
+                                [&](const IntBoolExpr::Node& node,
+                                    const IntBoolExpr::VisitorContext& ctx) { visitedNodes++; });
+    ASSERT_EQ(2, visitedNodes);
+
+    b.pushDisj().pushConj().atom(1).atom(2).atom(3).pop().pushDisj().atom(4).atom(5).pop();
+    intExpr = b.finish().get();
+
+    ASSERT_FALSE(IntBoolExpr::isCNF(intExpr));
+    ASSERT_FALSE(IntBoolExpr::isDNF(intExpr));
+
+    visitedNodes = 0;
+    IntBoolExpr::visitDisjuncts(intExpr,
+                                [&](const IntBoolExpr::Node& node,
+                                    const IntBoolExpr::VisitorContext& ctx) { visitedNodes++; });
+    ASSERT_EQ(2, visitedNodes);
 }
 }  // namespace
 }  // namespace mongo::optimizer

@@ -7,9 +7,9 @@
  *     dropTarget: <if true, creates target collection that will be dropped. Default: false>,
  * }
  */
-var RenameAcrossDatabasesTest = function(options) {
-    'use strict';
+import {reconfig} from "jstests/replsets/rslib.js";
 
+export var RenameAcrossDatabasesTest = function(options) {
     if (!(this instanceof RenameAcrossDatabasesTest)) {
         return new RenameAcrossDatabasesTest(options);
     }
@@ -31,9 +31,6 @@ var RenameAcrossDatabasesTest = function(options) {
      */
     this.run = function() {
         const options = this.options;
-
-        load('jstests/replsets/rslib.js');
-
         let nodes = [{}, {}, {}];
         if (options.nodes) {
             assert.eq(nodes.length, options.nodes.length);
@@ -60,8 +57,10 @@ var RenameAcrossDatabasesTest = function(options) {
         // If provided in 'options', we set the featureCompatibilityVersion. We do this prior to
         // adding any other members to the replica set.
         if (options.setFeatureCompatibilityVersion) {
-            assert.commandWorked(replTest.getPrimary().adminCommand(
-                {setFeatureCompatibilityVersion: options.setFeatureCompatibilityVersion}));
+            assert.commandWorked(replTest.getPrimary().adminCommand({
+                setFeatureCompatibilityVersion: options.setFeatureCompatibilityVersion,
+                confirm: true
+            }));
         }
 
         for (let i = 1; i < nodes.length; ++i) {

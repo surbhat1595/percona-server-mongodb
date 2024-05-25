@@ -5,14 +5,10 @@
  *
  * @tags: [
  *   does_not_support_stepdowns,
- *   featureFlagCompoundWildcardIndexes,
  *   requires_fcv_70,
  *   uses_full_validation,
  * ]
  */
-
-(function() {
-"use strict";
 
 const coll = db.compound_wildcard_index_validation;
 coll.drop();
@@ -86,4 +82,3 @@ for (let i = 0; i < 10; i++) {
 }
 
 assert.commandWorked(coll.validate({full: true}));
-})();

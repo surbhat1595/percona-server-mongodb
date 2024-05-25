@@ -4,9 +4,7 @@
  * entirely if the locking behavior changes post v4.2.
  * @tags: [uses_transactions, uses_prepare_transaction, multiversion_incompatible]
  */
-(function() {
-"use strict";
-load("jstests/core/txns/libs/prepare_helpers.js");
+import {PrepareHelpers} from "jstests/core/txns/libs/prepare_helpers.js";
 
 function runTest(downgradeFCV) {
     const rst = new ReplSetTest({nodes: [{binVersion: "latest"}]});
@@ -41,7 +39,7 @@ function runTest(downgradeFCV) {
 
         jsTestLog("Attempt to downgrade the featureCompatibilityVersion.");
         assert.commandFailedWithCode(
-            testDB.adminCommand({setFeatureCompatibilityVersion: downgradeFCV}),
+            testDB.adminCommand({setFeatureCompatibilityVersion: downgradeFCV, confirm: true}),
             ErrorCodes.LockTimeout);
 
         assert.commandWorked(testDB.adminCommand(
@@ -51,7 +49,8 @@ function runTest(downgradeFCV) {
         assert.commandWorked(PrepareHelpers.commitTransaction(session, prepareTimestamp));
 
         jsTestLog("Rerun the setFCV command and let it complete successfully.");
-        assert.commandWorked(testDB.adminCommand({setFeatureCompatibilityVersion: downgradeFCV}));
+        assert.commandWorked(
+            testDB.adminCommand({setFeatureCompatibilityVersion: downgradeFCV, confirm: true}));
         checkFCV(adminDB, downgradeFCV);
 
     } finally {
@@ -59,7 +58,8 @@ function runTest(downgradeFCV) {
             {configureFailPoint: "failNonIntentLocksIfWaitNeeded", mode: "off"}));
 
         jsTestLog("Restore the original featureCompatibilityVersion.");
-        assert.commandWorked(testDB.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+        assert.commandWorked(
+            testDB.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
         checkFCV(adminDB, latestFCV);
     }
 
@@ -71,4 +71,3 @@ runTest(lastLTSFCV);
 if (lastLTSFCV !== lastContinuousFCV) {
     runTest(lastContinuousFCV);
 }
-}());

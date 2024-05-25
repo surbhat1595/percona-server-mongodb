@@ -116,12 +116,12 @@ private:
 
 // TODO: a MutableVector, similar to MutableDocument
 /// A heap-allocated reference-counted std::vector
+template <typename T>
 class RCVector : public RefCountable {
 public:
-    ~RCVector();
-    RCVector();
-    RCVector(std::vector<Value> v);
-    std::vector<Value> vec;
+    RCVector() {}
+    RCVector(std::vector<T> v) : vec(std::move(v)) {}
+    std::vector<T> vec;
 };
 
 class RCCodeWScope : public RefCountable {
@@ -196,7 +196,7 @@ public:
         type = t;
         putDocument(std::move(d));
     }
-    ValueStorage(BSONType t, boost::intrusive_ptr<RCVector>&& a) {
+    ValueStorage(BSONType t, boost::intrusive_ptr<RCVector<Value>>&& a) {
         zero();
         type = t;
         putVector(std::move(a));
@@ -299,7 +299,7 @@ public:
 
     /// These are only to be called during Value construction on an empty Value
     void putString(StringData s);
-    void putVector(boost::intrusive_ptr<RCVector>&& v);
+    void putVector(boost::intrusive_ptr<RCVector<Value>>&& v);
     void putDocument(const Document& d);
     void putDocument(Document&& d);
     void putRegEx(const BSONRegEx& re);
@@ -341,8 +341,8 @@ public:
     }
 
     const std::vector<Value>& getArray() const {
-        dassert(typeid(*genericRCPtr) == typeid(const RCVector));
-        const RCVector* arrayPtr = static_cast<const RCVector*>(genericRCPtr);
+        dassert(typeid(*genericRCPtr) == typeid(const RCVector<Value>));
+        const RCVector<Value>* arrayPtr = static_cast<const RCVector<Value>*>(genericRCPtr);
         return arrayPtr->vec;
     }
 
@@ -378,7 +378,56 @@ public:
         memset(bytes, 0, sizeof(bytes));
     }
 
-    void verifyRefCountingIfShould() const;
+    void verifyRefCountingIfShould() const {
+        switch (type) {
+            case MinKey:
+            case MaxKey:
+            case jstOID:
+            case Date:
+            case bsonTimestamp:
+            case EOO:
+            case jstNULL:
+            case Undefined:
+            case Bool:
+            case NumberInt:
+            case NumberLong:
+            case NumberDouble:
+                // the above types never reference external data
+                MONGO_verify(!refCounter);
+                break;
+
+            case String:
+            case RegEx:
+            case Code:
+            case Symbol:
+                // If this is using the short-string optimization, it must not have a ref-counted
+                // pointer.
+                invariant(!shortStr || !refCounter);
+
+                // If this is _not_ using the short string optimization, it must be storing a
+                // ref-counted pointer. One exception: in the BSONElement constructor of Value, it
+                // is possible for this ValueStorage to get constructed as a type but never
+                // initialized; the ValueStorage gets left as a nullptr and not marked as
+                // ref-counted, which is ok (SERVER-43205).
+                invariant(shortStr || (refCounter || !genericRCPtr));
+                break;
+
+            case NumberDecimal:
+            case BinData:  // TODO this should probably support short-string optimization
+            case Array:    // TODO this should probably support empty-is-NULL optimization
+            case DBRef:
+            case CodeWScope:
+                // the above types always reference external data.
+                invariant(refCounter);
+                invariant(bool(genericRCPtr));
+                break;
+
+            case Object:
+                // Objects either hold a NULL ptr or should be ref-counting
+                invariant(refCounter == bool(genericRCPtr));
+                break;
+        }
+    }
 
     // This data is public because this should only be used by Value which would be a friend
     union {

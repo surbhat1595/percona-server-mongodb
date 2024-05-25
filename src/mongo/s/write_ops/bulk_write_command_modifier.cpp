@@ -180,11 +180,8 @@ void BulkWriteCommandModifier::addUpdateOp(
     const BSONObj& update,
     bool upsert,
     bool multi,
-    const StringData& returnField,
     const boost::optional<std::vector<BSONObj>>& arrayFilters,
     const boost::optional<BSONObj>& collation,
-    const boost::optional<BSONObj>& sort,
-    const boost::optional<BSONObj>& returnFields,
     const boost::optional<BSONObj>& hint) {
     auto [nsInfoEntry, idx] = getNsInfoEntry(nss);
 
@@ -192,12 +189,9 @@ void BulkWriteCommandModifier::addUpdateOp(
 
     op.setUpsert(upsert);
     op.setMulti(multi);
-    op.setReturn(returnField);
-    op.setReturnFields(returnFields);
     op.setCollation(collation);
     op.setHint(hint.value_or(BSONObj()));
     op.setArrayFilters(arrayFilters);
-    op.setSort(sort);
 
     _ops.emplace_back(op);
 }
@@ -221,20 +215,14 @@ void BulkWriteCommandModifier::addPipelineUpdateOps(const NamespaceString& nss,
 void BulkWriteCommandModifier::addDeleteOp(const NamespaceString& nss,
                                            const BSONObj& query,
                                            bool multiDelete,
-                                           bool returnField,
                                            const boost::optional<BSONObj>& collation,
-                                           const boost::optional<BSONObj>& sort,
-                                           const boost::optional<BSONObj>& returnFields,
                                            const boost::optional<BSONObj>& hint) {
     auto [nsInfoEntry, idx] = getNsInfoEntry(nss);
 
     auto op = BulkWriteDeleteOp(idx, query);
 
     op.setMulti(multiDelete);
-    op.setReturn(returnField);
-    op.setReturnFields(returnFields);
     op.setHint(hint.value_or(BSONObj()));
-    op.setSort(sort);
     op.setCollation(collation);
 
     _ops.emplace_back(op);

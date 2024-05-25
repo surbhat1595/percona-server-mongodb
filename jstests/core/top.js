@@ -5,9 +5,9 @@
  * former operation may be routed to a secondary in the replica set, whereas the latter must be
  * routed to the primary.
  *
- * The test runs commands that are not allowed with security token: top.
  * @tags: [
- *   not_allowed_with_security_token,
+ *    # The test runs commands that are not allowed with security token: top.
+ *    not_allowed_with_security_token,
  *    assumes_read_preference_unchanged,
  *    requires_fastcount,
  *    # This test contains assertions on the number of executed operations, and tenant migrations
@@ -18,8 +18,7 @@
  * ]
  */
 
-(function() {
-load("jstests/libs/stats.js");
+import {assertTopDiffEq, getTop} from "jstests/libs/stats.js";
 
 var name = "toptest";
 
@@ -33,7 +32,7 @@ assert.eq(testColl.find({}).itcount(), 0);
 //  This variable is used to get differential output
 var lastTop = getTop(testColl);
 if (lastTop === undefined) {
-    return;
+    quit();
 }
 
 var numRecords = 100;
@@ -86,7 +85,7 @@ var res;
 // "count" command
 lastTop = getTop(testColl);  // ignore any commands before this
 if (lastTop === undefined) {
-    return;
+    quit();
 }
 
 for (i = 0; i < numRecords; i++) {
@@ -98,7 +97,7 @@ lastTop = assertTopDiffEq(testColl, lastTop, "commands", numRecords);
 // "findAndModify" command
 lastTop = getTop(testColl);
 if (lastTop === undefined) {
-    return;
+    quit();
 }
 
 for (i = 0; i < numRecords; i++) {
@@ -113,7 +112,7 @@ lastTop = assertTopDiffEq(testColl, lastTop, "commands", numRecords);
 
 lastTop = getTop(testColl);
 if (lastTop === undefined) {
-    return;
+    quit();
 }
 
 for (i = 0; i < numRecords; i++) {
@@ -150,4 +149,3 @@ lastTop = assertTopDiffEq(testColl, lastTop, "commands", 1);
 res = assert.commandWorked(testColl.dropIndex({x: 1}));
 assertTopDiffEq(testColl, lastTop, "commands", 1);
 lastTop = assertTopDiffEq(testColl, lastTop, "writeLock", 1);
-}());

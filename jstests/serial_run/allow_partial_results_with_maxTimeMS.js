@@ -12,9 +12,6 @@
  *   requires_fcv_62,
  *  ]
  */
-(function() {
-"use strict";
-
 function getMillis() {
     const d = new Date();
     return d.getTime();
@@ -173,8 +170,8 @@ searchForAndAssertPartialResults(Math.round(0.5 * fullQueryTimeoutMS), function(
     }
 
     // Try to get partial results with a getMore.
-    // TODO SERVER-71248: Note that the getMore below uses the original firstBatchSize, not
-    // secondBatchSize in the getMores sent to the shards.
+    // Note that the getMore below uses the original firstBatchSize, not secondBatchSize in the
+    // getMores sent to the shards (for details, see SERVER-71248).
     const secondBatchSize = nDocs - firstBatchSize;
     return interpretCommandResult(
         coll.runCommand(
@@ -183,4 +180,3 @@ searchForAndAssertPartialResults(Math.round(0.5 * fullQueryTimeoutMS), function(
 });
 
 st.stop();
-}());

@@ -1044,58 +1044,34 @@ ProvidedSortSet computeSortsForScan(const IndexEntry& index,
                 "The bounds did not have as many fields as the key pattern.",
                 static_cast<size_t>(index.keyPattern.nFields()) == bounds.fields.size());
 
-        // TODO SERVER-68303: Merge this check with the same check below for CWI.
-        //
-        // No sorts are provided if this wildcard index has one single field and the bounds for
-        // '$_path' consist of multiple intervals. This can happen for existence queries. For
-        // example, {a: {$exists: true}} results in bounds
-        // [["a","a"], ["a.", "a/")] for '$_path' so that keys from documents where "a" is a
-        // nested object are in bounds.
-        if (bounds.fields.size() == 2u) {
-            if (bounds.fields[index.wildcardFieldPos - 1].intervals.size() != 1u) {
-                return {};
-            }
-        }
-
         BSONObjBuilder sortPatternStripped;
         // Strip '$_path' and following fields out of 'sortPattern' and then proceed with regular
         // sort analysis.
         // (Ignore FCV check): This is intentional because we want clusters which have wildcard
         // indexes still be able to use the feature even if the FCV is downgraded.
-        if (feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCVUnsafe()) {
-            for (auto elem : sortPatternProvidedByIndex) {
-                if (elem.fieldNameStringData() == "$_path"_sd) {
-                    tassert(7767200,
-                            "The bounds cannot be empty.",
-                            bounds.fields[index.wildcardFieldPos - 1].intervals.size() > 0u);
+        for (auto elem : sortPatternProvidedByIndex) {
+            if (elem.fieldNameStringData() == "$_path"_sd) {
+                tassert(7767200,
+                        "The bounds cannot be empty.",
+                        bounds.fields[index.wildcardFieldPos - 1].intervals.size() > 0u);
 
-                    auto allValuePath = wcp::makeAllValuesForPath();
-                    // No sorts on the following fields should be provided if it's full scan on the
-                    // '$_path' field or the bounds for '$_path' consist of multiple intervals. This
-                    // can happen for existence queries. For example, {a: {$exists: true}} results
-                    // in bounds [["a","a"], ["a.", "a/")] for '$_path' so that keys from documents
-                    // where "a" is a nested object are in bounds.
-                    if (bounds.fields[index.wildcardFieldPos - 1].intervals.size() != 1u ||
-                        std::equal(bounds.fields[index.wildcardFieldPos - 1].intervals.begin(),
-                                   bounds.fields[index.wildcardFieldPos - 1].intervals.end(),
-                                   allValuePath.begin())) {
-                        break;
-                    }
-                } else {
-                    sortPatternStripped.append(elem);
+                auto allValuePath = wcp::makeAllValuesForPath();
+                // No sorts on the following fields should be provided if it's full scan on the
+                // '$_path' field or the bounds for '$_path' consist of multiple intervals. This
+                // can happen for existence queries. For example, {a: {$exists: true}} results
+                // in bounds [["a","a"], ["a.", "a/")] for '$_path' so that keys from documents
+                // where "a" is a nested object are in bounds.
+                if (bounds.fields[index.wildcardFieldPos - 1].intervals.size() != 1u ||
+                    std::equal(bounds.fields[index.wildcardFieldPos - 1].intervals.begin(),
+                               bounds.fields[index.wildcardFieldPos - 1].intervals.end(),
+                               allValuePath.begin())) {
+                    break;
                 }
+            } else {
+                sortPatternStripped.append(elem);
             }
-            sortPatternProvidedByIndex = sortPatternStripped.obj();
-        } else {
-            BSONObjIterator it{sortPatternProvidedByIndex};
-            invariant(it.more());
-            auto pathElement = it.next();
-            invariant(pathElement.fieldNameStringData() == "$_path"_sd);
-            invariant(it.more());
-            auto secondElement = it.next();
-            invariant(!it.more());
-            sortPatternProvidedByIndex = BSONObjBuilder{}.append(secondElement).obj();
         }
+        sortPatternProvidedByIndex = sortPatternStripped.obj();
     }
 
     //
@@ -1252,7 +1228,7 @@ bool filtersAreEquivalent(const MatchExpression* lhs, const MatchExpression* rhs
 bool IndexScanNode::operator==(const IndexScanNode& other) const {
     return filtersAreEquivalent(filter.get(), other.filter.get()) && index == other.index &&
         direction == other.direction && addKeyMetadata == other.addKeyMetadata &&
-        bounds == other.bounds;
+        bounds == other.bounds && iets == other.iets;
 }
 
 //
@@ -1311,6 +1287,30 @@ void ReturnKeyNode::appendToString(str::stream* ss, int indent) const {
 
 std::unique_ptr<QuerySolutionNode> ReturnKeyNode::clone() const {
     return std::make_unique<ReturnKeyNode>(children[0]->clone(), std::vector(sortKeyMetaFields));
+}
+
+//
+// MatchNode
+//
+
+void MatchNode::appendToString(str::stream* ss, int indent) const {
+    addIndent(ss, indent);
+    *ss << "MATCH\n";
+    if (nullptr != filter) {
+        addIndent(ss, indent + 1);
+        *ss << "filter:\n";
+        StringBuilder sb;
+        filter->debugString(sb, indent + 2);
+        *ss << sb.str();
+    }
+    addCommon(ss, indent);
+    addIndent(ss, indent + 1);
+    *ss << "Child:" << '\n';
+    children[0]->appendToString(ss, indent + 2);
+}
+
+std::unique_ptr<QuerySolutionNode> MatchNode::clone() const {
+    return std::make_unique<MatchNode>(children[0]->clone(), filter ? filter->clone() : nullptr);
 }
 
 //
@@ -1732,11 +1732,12 @@ void GroupNode::appendToString(str::stream* ss, int indent) const {
             if (idx > 0) {
                 *ss << ", ";
             }
-            *ss << "{" << groupName << ": " << exprObj->serialize(false).toString() << "}";
+            *ss << "{" << groupName << ": " << exprObj->serialize(SerializationOptions{}).toString()
+                << "}";
             ++idx;
         }
     } else {
-        *ss << "{_id: " << groupByExpression->serialize(false).toString() << "}";
+        *ss << "{_id: " << groupByExpression->serialize(SerializationOptions{}).toString() << "}";
     }
     *ss << '\n';
     addIndent(ss, indent + 1);
@@ -1747,7 +1748,11 @@ void GroupNode::appendToString(str::stream* ss, int indent) const {
         }
         auto& acc = accumulators[idx];
         *ss << "{" << acc.fieldName << ": {" << acc.expr.name << ": "
-            << acc.expr.argument->serialize(true).toString() << "}}";
+            << acc.expr.argument
+                   ->serialize(SerializationOptions{
+                       .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)})
+                   .toString()
+            << "}}";
     }
     *ss << "]" << '\n';
     addCommon(ss, indent);
@@ -1814,7 +1819,8 @@ void SentinelNode::appendToString(str::stream* ss, int indent) const {
 }
 
 std::unique_ptr<QuerySolutionNode> SearchNode::clone() const {
-    return std::make_unique<SearchNode>(isSearchMeta);
+    return std::make_unique<SearchNode>(
+        isSearchMeta, searchQuery, limit, intermediateResultsProtocolVersion);
 }
 
 void SearchNode::appendToString(str::stream* ss, int indent) const {
@@ -1822,5 +1828,53 @@ void SearchNode::appendToString(str::stream* ss, int indent) const {
     *ss << "SEARCH\n";
     addIndent(ss, indent + 1);
     *ss << "isSearchMeta = " << isSearchMeta << '\n';
+    addIndent(ss, indent + 1);
+    *ss << "searchQuery = " << searchQuery << '\n';
+    if (limit) {
+        addIndent(ss, indent + 1);
+        *ss << "limit = " << limit << '\n';
+    }
+}
+
+/**
+ * WindowNode.
+ */
+std::unique_ptr<QuerySolutionNode> WindowNode::clone() const {
+    return std::make_unique<WindowNode>(children[0]->clone(), partitionBy, sortBy, outputFields);
+}
+
+void WindowNode::appendToString(str::stream* ss, int indent) const {
+    addIndent(ss, indent);
+    *ss << "WINDOW\n";
+    if (partitionBy) {
+        addIndent(ss, indent + 1);
+        *ss << "partitionBy = " << (*partitionBy)->serialize(SerializationOptions{}).toString()
+            << '\n';
+    }
+    if (sortBy) {
+        addIndent(ss, indent + 1);
+        *ss << "sortBy = "
+            << sortBy->serialize(SortPattern::SortKeySerialization::kForExplain).toBson().toString()
+            << '\n';
+    }
+    addIndent(ss, indent + 1);
+    *ss << "outputFields = [";
+    for (size_t idx = 0; idx < outputFields.size(); ++idx) {
+        if (idx > 0) {
+            *ss << ", ";
+        }
+        auto& outputField = outputFields[idx];
+        MutableDocument boundsDoc;
+        outputField.expr->bounds().serialize(boundsDoc, SerializationOptions{});
+        auto boundsBson = boundsDoc.freeze().toBson();
+        *ss << "{" << outputField.fieldName << ": {" << outputField.expr->getOpName() << ": "
+            << outputField.expr->input()->serialize(SerializationOptions{}).toString()
+            << "window: " << boundsBson.toString() << "}}";
+    }
+    *ss << "]" << '\n';
+    addCommon(ss, indent);
+    addIndent(ss, indent + 1);
+    *ss << "Child:" << '\n';
+    children[0]->appendToString(ss, indent + 2);
 }
 }  // namespace mongo

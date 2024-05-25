@@ -16,9 +16,10 @@
  * If we did not wait, the latter would get a write conflict when writing to the txn table because
  * it's reading from time 7 and doesn't see the write from time 9.
  *
- * The test runs commands that are not allowed with security token: endSession, prepareTransaction.
  * @tags: [
- *   not_allowed_with_security_token,
+ *  # The test runs commands that are not allowed with security token: endSession,
+ *  # prepareTransaction.
+ *  not_allowed_with_security_token,
  *  uses_transactions,
  *  uses_prepare_transaction,
  *  uses_parallel_shell,
@@ -27,11 +28,9 @@
  * ]
  */
 
-(function() {
-"use strict";
-load("jstests/core/txns/libs/prepare_helpers.js");
-load("jstests/libs/parallel_shell_helpers.js");  // for funWithArgs().
-load("jstests/libs/fail_point_util.js");
+import {PrepareHelpers} from "jstests/core/txns/libs/prepare_helpers.js";
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
 
 /**
  * Launches a parallel shell to start a new transaction on the session with the given lsid. It
@@ -163,4 +162,3 @@ try {
         writeConcern: {w: "majority"}
     }));
 }
-}());

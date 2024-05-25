@@ -164,8 +164,7 @@ Status IndexBuildBlock::init(OperationContext* opCtx, Collection* collection, bo
     bool isBackgroundIndex = _method == IndexBuildMethod::kHybrid;
     bool isBackgroundSecondaryBuild = false;
     if (auto replCoord = repl::ReplicationCoordinator::get(opCtx)) {
-        isBackgroundSecondaryBuild =
-            replCoord->getReplicationMode() == repl::ReplicationCoordinator::Mode::modeReplSet &&
+        isBackgroundSecondaryBuild = replCoord->getSettings().isReplSet() &&
             !replCoord->getMemberState().primary() && isBackgroundIndex;
     }
 
@@ -261,7 +260,7 @@ void IndexBuildBlock::success(OperationContext* opCtx, Collection* collection) {
         [svcCtx,
          indexName = _indexName,
          spec = _spec,
-         entry = indexCatalogEntry,
+         ident = indexCatalogEntry->getIdent(),
          coll = collection,
          buildUUID = _buildUUID](OperationContext*, boost::optional<Timestamp> commitTime) {
             // Note: this runs after the WUOW commits but before we release our X lock on the
@@ -274,7 +273,7 @@ void IndexBuildBlock::success(OperationContext* opCtx, Collection* collection) {
                   "collectionUUID"_attr = coll->uuid(),
                   logAttrs(coll->ns()),
                   "index"_attr = indexName,
-                  "ident"_attr = entry->getIdent(),
+                  "ident"_attr = ident,
                   "collectionIdent"_attr = coll->getSharedIdent()->getIdent(),
                   "commitTimestamp"_attr = commitTime);
 
@@ -285,11 +284,13 @@ void IndexBuildBlock::success(OperationContext* opCtx, Collection* collection) {
                 (feature_flags::gFeatureFlagTTLIndexesOnCappedCollections.isEnabled(
                      serverGlobalParams.featureCompatibility) ||
                  !coll->isCapped())) {
-                auto validateStatus = index_key_validate::validateExpireAfterSeconds(
+                auto swType = index_key_validate::validateExpireAfterSeconds(
                     spec[IndexDescriptor::kExpireAfterSecondsFieldName],
                     index_key_validate::ValidateExpireAfterSecondsMode::kSecondaryTTLIndex);
                 TTLCollectionCache::get(svcCtx).registerTTLInfo(
-                    coll->uuid(), TTLCollectionCache::Info{indexName, !validateStatus.isOK()});
+                    coll->uuid(),
+                    TTLCollectionCache::Info{
+                        indexName, index_key_validate::extractExpireAfterSecondsType(swType)});
             }
         });
 }

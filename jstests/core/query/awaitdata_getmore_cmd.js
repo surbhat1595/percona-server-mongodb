@@ -1,7 +1,7 @@
 // Test the awaitData flag for the find/getMore commands.
 //
-// The test runs commands that are not allowed with security token: getDefaultRWConcern.
 // @tags: [
+//   # The test runs commands that are not allowed with security token: getDefaultRWConcern.
 //   not_allowed_with_security_token,
 //   # This test attempts to perform a getMore command and find it using the currentOp command. The
 //   # former operation may be routed to a secondary in the replica set, whereas the latter must be
@@ -13,11 +13,8 @@
 //   uses_parallel_shell,
 // ]
 
-(function() {
-'use strict';
-
-load("jstests/libs/fixture_helpers.js");
-load('jstests/libs/discover_topology.js');  // For Topology and DiscoverTopology.
+import {DiscoverTopology, Topology} from "jstests/libs/discover_topology.js";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 let collName = 'await_data_non_capped';
 let coll = db[collName];
@@ -213,7 +210,7 @@ try {
         const readConcern =
             assert.commandWorked(db.adminCommand({getDefaultRWConcern: 1})).defaultReadConcern;
         if (readConcern.level == "majority" || TestData.defaultReadConcernLevel === "majority") {
-            return;
+            quit();
         }
     }
 
@@ -274,4 +271,3 @@ try {
     db.setLogLevel(originalCmdLogLevel, 'command');
     db.setLogLevel(originalQueryLogLevel, 'query');
 }
-})();

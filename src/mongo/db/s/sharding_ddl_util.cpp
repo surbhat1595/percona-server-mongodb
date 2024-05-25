@@ -306,7 +306,7 @@ void setAllowMigrations(OperationContext* opCtx,
         Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-            DatabaseName::kAdmin.toString(),
+            DatabaseName::kAdmin,
             CommandHelpers::appendMajorityWriteConcern(
                 configsvrSetAllowMigrationsCmd.toBSON(osi ? osi->toBSON() : BSONObj())),
             Shard::RetryPolicy::kIdempotent  // Although ConfigsvrSetAllowMigrations is not really
@@ -442,7 +442,7 @@ void removeTagsMetadataFromConfig(OperationContext* opCtx,
     const auto swRemoveTagsResult = configShard->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        DatabaseName::kAdmin.toString(),
+        DatabaseName::kAdmin,
         CommandHelpers::appendMajorityWriteConcern(configsvrRemoveTagsCmd.toBSON(osi.toBSON())),
         Shard::RetryPolicy::kIdempotent);
 
@@ -464,7 +464,7 @@ void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx, const BSONOb
     const auto deleteResult = configShard->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        DatabaseName::kConfig.toString(),
+        DatabaseName::kConfig,
         CommandHelpers::appendMajorityWriteConcern(deleteCmd.toBSON({})),
         Shard::RetryPolicy::kIdempotent);
 
@@ -570,11 +570,11 @@ void checkRenamePreconditions(OperationContext* opCtx,
 void checkDbPrimariesOnTheSameShard(OperationContext* opCtx,
                                     const NamespaceString& fromNss,
                                     const NamespaceString& toNss) {
-    const auto fromDB = uassertStatusOK(
-        Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, fromNss.db_forSharding()));
+    const auto fromDB =
+        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, fromNss.dbName()));
 
     const auto toDB = uassertStatusOK(
-        Grid::get(opCtx)->catalogCache()->getDatabaseWithRefresh(opCtx, toNss.db_forSharding()));
+        Grid::get(opCtx)->catalogCache()->getDatabaseWithRefresh(opCtx, toNss.dbName()));
 
     uassert(ErrorCodes::CommandFailed,
             "Source and destination collections must be on same shard",

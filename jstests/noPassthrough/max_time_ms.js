@@ -6,10 +6,7 @@
  *   requires_sharding,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/fixture_helpers.js");  // For runCommandOnEachPrimary().
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 function executeTest(db, isMongos) {
     let cursor;
@@ -230,28 +227,28 @@ function executeTest(db, isMongos) {
         assert.commandWorked(t.insert({}));
 
         // Verify lower boundary for acceptable input (0 is acceptable, 1 isn't).
-        assert.doesNotThrow.automsg(function() {
+        assert.doesNotThrow(function() {
             t.find().maxTimeMS(0).itcount();
         });
-        assert.doesNotThrow.automsg(function() {
+        assert.doesNotThrow(function() {
             t.find().maxTimeMS(NumberInt(0)).itcount();
         });
-        assert.doesNotThrow.automsg(function() {
+        assert.doesNotThrow(function() {
             t.find().maxTimeMS(NumberLong(0)).itcount();
         });
         assert.commandWorked(db.runCommand({ping: 1, maxTimeMS: 0}));
         assert.commandWorked(db.runCommand({ping: 1, maxTimeMS: NumberInt(0)}));
         assert.commandWorked(db.runCommand({ping: 1, maxTimeMS: NumberLong(0)}));
 
-        assert.throws.automsg(function() {
-                         t.find().maxTimeMS(-1).itcount();
-                     });
-        assert.throws.automsg(function() {
-                         t.find().maxTimeMS(NumberInt(-1)).itcount();
-                     });
-        assert.throws.automsg(function() {
-                         t.find().maxTimeMS(NumberLong(-1)).itcount();
-                     });
+        assert.throws(function() {
+            t.find().maxTimeMS(-1).itcount();
+        });
+        assert.throws(function() {
+            t.find().maxTimeMS(NumberInt(-1)).itcount();
+        });
+        assert.throws(function() {
+            t.find().maxTimeMS(NumberLong(-1)).itcount();
+        });
         assert.commandFailedWithCode(db.runCommand({ping: 1, maxTimeMS: -1}), ErrorCodes.BadValue);
         assert.commandFailedWithCode(db.runCommand({ping: 1, maxTimeMS: NumberInt(-1)}),
                                      ErrorCodes.BadValue);
@@ -262,28 +259,28 @@ function executeTest(db, isMongos) {
 
         var maxValue = Math.pow(2, 31) - 1;
 
-        assert.doesNotThrow.automsg(function() {
+        assert.doesNotThrow(function() {
             t.find().maxTimeMS(maxValue).itcount();
         });
-        assert.doesNotThrow.automsg(function() {
+        assert.doesNotThrow(function() {
             t.find().maxTimeMS(NumberInt(maxValue)).itcount();
         });
-        assert.doesNotThrow.automsg(function() {
+        assert.doesNotThrow(function() {
             t.find().maxTimeMS(NumberLong(maxValue)).itcount();
         });
         assert.commandWorked(db.runCommand({ping: 1, maxTimeMS: maxValue}));
         assert.commandWorked(db.runCommand({ping: 1, maxTimeMS: NumberInt(maxValue)}));
         assert.commandWorked(db.runCommand({ping: 1, maxTimeMS: NumberLong(maxValue)}));
 
-        assert.throws.automsg(function() {
-                         t.find().maxTimeMS(maxValue + 1).itcount();
-                     });
-        assert.throws.automsg(function() {
-                         t.find().maxTimeMS(NumberInt(maxValue + 1)).itcount();
-                     });
-        assert.throws.automsg(function() {
-                         t.find().maxTimeMS(NumberLong(maxValue + 1)).itcount();
-                     });
+        assert.throws(function() {
+            t.find().maxTimeMS(maxValue + 1).itcount();
+        });
+        assert.throws(function() {
+            t.find().maxTimeMS(NumberInt(maxValue + 1)).itcount();
+        });
+        assert.throws(function() {
+            t.find().maxTimeMS(NumberLong(maxValue + 1)).itcount();
+        });
         assert.commandFailedWithCode(db.runCommand({ping: 1, maxTimeMS: maxValue + 1}),
                                      ErrorCodes.BadValue);
         assert.commandFailedWithCode(db.runCommand({ping: 1, maxTimeMS: NumberInt(maxValue + 1)}),
@@ -292,24 +289,24 @@ function executeTest(db, isMongos) {
                                      ErrorCodes.BadValue);
 
         // Verify invalid values are rejected.
-        assert.throws.automsg(function() {
-                         t.find().maxTimeMS(0.1).itcount();
-                     });
-        assert.throws.automsg(function() {
-                         t.find().maxTimeMS(-0.1).itcount();
-                     });
-        assert.throws.automsg(function() {
-                         t.find().maxTimeMS().itcount();
-                     });
-        assert.throws.automsg(function() {
-                         t.find().maxTimeMS("").itcount();
-                     });
-        assert.throws.automsg(function() {
-                         t.find().maxTimeMS(true).itcount();
-                     });
-        assert.throws.automsg(function() {
-                         t.find().maxTimeMS({}).itcount();
-                     });
+        assert.throws(function() {
+            t.find().maxTimeMS(0.1).itcount();
+        });
+        assert.throws(function() {
+            t.find().maxTimeMS(-0.1).itcount();
+        });
+        assert.throws(function() {
+            t.find().maxTimeMS().itcount();
+        });
+        assert.throws(function() {
+            t.find().maxTimeMS("").itcount();
+        });
+        assert.throws(function() {
+            t.find().maxTimeMS(true).itcount();
+        });
+        assert.throws(function() {
+            t.find().maxTimeMS({}).itcount();
+        });
         assert.commandFailedWithCode(db.runCommand({ping: 1, maxTimeMS: 0.1}), ErrorCodes.BadValue);
         assert.commandFailedWithCode(db.runCommand({ping: 1, maxTimeMS: -0.1}),
                                      ErrorCodes.BadValue);
@@ -391,7 +388,7 @@ function executeTest(db, isMongos) {
         const coll = db.max_time_ms_always_time_out_positive_get_more;
         assert.commandWorked(coll.insert([{}, {}, {}]));
         cursor = coll.find().maxTimeMS(10 * 1000).batchSize(2);
-        assert.doesNotThrow.automsg(function() {
+        assert.doesNotThrow(function() {
             cursor.next();
             cursor.next();
         });
@@ -499,5 +496,4 @@ const enableTestCmd = {
     } finally {
         st.stop();
     }
-})();
 })();

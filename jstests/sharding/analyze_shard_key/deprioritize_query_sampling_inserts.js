@@ -2,17 +2,19 @@
  * Tests that inserts related to query sampling are deprioritized.
  *
  * @tags: [
+ *   multiversion_incompatible,
  *   featureFlagDeprioritizeLowPriorityOperations,
  *   requires_fcv_70,
  * ]
+ * TODO SERVER-79365 Remove multiversion_incompatible tag for v8.0. This test cannot run
+ * in multiversion tests involving v7.0 binaries because the flag
+ * featureFlagDeprioritizeLowPriorityOperations defaults to false in v7.0 but does not exist
+ * in v7.1. Therefore, resmoke in master and v7.1 is unable to set this flag for v7.0 in
+ * all-feature-flags variants.
  */
 
-(function() {
-
-"use strict";
-
-load("jstests/libs/fail_point_util.js");
-load("jstests/sharding/analyze_shard_key/libs/query_sampling_util.js");
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {QuerySamplingUtil} from "jstests/sharding/analyze_shard_key/libs/query_sampling_util.js";
 
 const samplesPerSecond = 1000;
 const queryAnalysisWriterIntervalSecs = 1;
@@ -100,4 +102,3 @@ function runTest(conn, primary, {st, rst}) {
 
     rst.stopSet();
 }
-})();

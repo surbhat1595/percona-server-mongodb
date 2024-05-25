@@ -1,13 +1,13 @@
 /**
  * Tests transactions that are prepared after no writes.
  *
- * The test runs commands that are not allowed with security token: prepareTransaction.
  * @tags: [
- *   not_allowed_with_security_token,uses_transactions, uses_prepare_transaction]
+ *   # The test runs commands that are not allowed with security token: prepareTransaction.
+ *   not_allowed_with_security_token,
+ *   uses_transactions,
+ *   uses_prepare_transaction
+ * ]
  */
-(function() {
-"use strict";
-
 const dbName = "test";
 const collName = "empty_prepare";
 const testDB = db.getSiblingDB(dbName);
@@ -54,4 +54,3 @@ res = assert.commandWorked(sessionDB.adminCommand({prepareTransaction: 1}));
 // Makes sure prepareTransaction returns prepareTimestamp in its response.
 assert(res.hasOwnProperty("prepareTimestamp"), tojson(res));
 assert.commandWorked(session.abortTransaction_forTesting());
-}());

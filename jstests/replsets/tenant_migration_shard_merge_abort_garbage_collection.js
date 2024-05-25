@@ -8,19 +8,19 @@
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   serverless,
+ *   requires_fcv_71,
  * ]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {Thread} from "jstests/libs/parallelTester.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {
     forgetMigrationAsync,
     isShardMergeEnabled
 } from "jstests/replsets/libs/tenant_migration_util.js";
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/parallelTester.js");
-load("jstests/libs/uuid_util.js");
-load("jstests/replsets/rslib.js");  // `createRstArgs`
-load("jstests/serverless/libs/change_collection_util.js");
+import {createRstArgs} from "jstests/replsets/rslib.js";
 
 // Disabling featureFlagRequireTenantID to allow using a tenantId prefix (instead of $tenant) and
 // reusing the same code to test garbage collection with and without multitenancy support.

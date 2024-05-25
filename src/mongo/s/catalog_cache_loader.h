@@ -82,6 +82,7 @@ public:
             OID epoch,
             Timestamp timestamp,
             UUID uuid,
+            bool unsplittable,
             const BSONObj& collShardKeyPattern,
             const BSONObj& collDefaultCollation,
             bool collShardKeyIsUnique,
@@ -95,6 +96,9 @@ public:
         Timestamp timestamp;
         boost::optional<UUID> uuid;  // This value can never be boost::none,
                                      // except under the default constructor
+
+        bool unsplittable;
+
         BSONObj shardKeyPattern;
         BSONObj defaultCollation;
         bool shardKeyIsUnique;
@@ -182,18 +186,13 @@ public:
      */
     virtual void waitForCollectionFlush(OperationContext* opCtx, const NamespaceString& nss) = 0;
 
-    virtual void waitForDatabaseFlush(OperationContext* opCtx, StringData dbName) = 0;
+    virtual void waitForDatabaseFlush(OperationContext* opCtx, const DatabaseName& dbName) = 0;
 
     /**
      * Only used for unit-tests, clears a previously-created catalog cache loader from the specified
      * service context, so that 'create' can be called again.
      */
     static void clearForTests(ServiceContext* serviceContext);
-
-    /**
-     * TODO: SERVER-74105 remove
-     */
-    virtual void onFCVChanged() {}
 
 protected:
     CatalogCacheLoader() = default;

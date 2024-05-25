@@ -11,6 +11,8 @@ variables:
     LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1"
     ASAN_OPTIONS="detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1:strict_string_checks=true:detect_invalid_pointer_pairs=1:external_symbolizer_path=/opt/mongodbtoolchain/v4/bin/llvm-symbolizer"
 
+- ubsan_options: &ubsan_options UBSAN_OPTIONS="print_stacktrace=1:external_symbolizer_path=/opt/mongodbtoolchain/v4/bin/llvm-symbolizer"
+
 buildvariants:
 
 - name: rhel80-asan
@@ -39,9 +41,8 @@ buildvariants:
     separate_debug: off
     compile_variant: rhel80-asan
   tasks:
-    - name: compile_test_and_package_serial_TG
+    - name: compile_test_serial_TG
     - name: .aggfuzzer .common !.feature_flag_guarded
-    - name: free_monitoring
     - name: .jstestfuzz !.initsync
     - name: generate_buildid_to_debug_symbols_mapping
 
@@ -67,7 +68,6 @@ buildvariants:
       --sanitize=address
       --ssl
       --ocsp-stapling=off
-      --enable-free-mon=on
       -j$(grep -c ^processor /proc/cpuinfo)
     test_flags: --excludeWithAnyTags=requires_fast_memory,requires_ocsp_stapling,requires_increased_memlock_limits
     multiversion_platform: rhel80
@@ -80,7 +80,7 @@ buildvariants:
     large_distro_name: rhel80-build
     compile_variant: rhel80-debug-asan
   tasks:
-  - name: compile_test_benchmark_and_package_serial_TG
+  - name: compile_test_benchmark_serial_TG
   - name: compile_integration_and_test_parallel_stream_TG
     distros:
     - rhel80-large
@@ -93,7 +93,6 @@ buildvariants:
   - name: .misc_js
   - name: .concurrency !.ubsan !.no_txns !.kill_terminate
   - name: .encrypt
-  - name: free_monitoring
   - name: external_auth
   - name: external_auth_aws
   - name: external_auth_oidc
@@ -144,7 +143,7 @@ buildvariants:
       archive-mongocryptd
       archive-mongocryptd-debug
     lang_environment: LANG=C
-    san_options: *aubsan_options
+    san_options: *ubsan_options
     compile_flags: >-
       --variables-files=etc/scons/mongodbtoolchain_stable_clang.vars
       --dbg=on
@@ -152,7 +151,6 @@ buildvariants:
       --sanitize=undefined
       --ssl
       --ocsp-stapling=off
-      --enable-free-mon=on
       -j$(grep -c ^processor /proc/cpuinfo)
     test_flags: --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits
     multiversion_platform: rhel80
@@ -163,7 +161,7 @@ buildvariants:
     large_distro_name: rhel80-build
     compile_variant: rhel80-debug-ubsan
   tasks:
-  - name: compile_test_benchmark_and_package_serial_TG
+  - name: compile_test_benchmark_serial_TG
   - name: compile_integration_and_test_parallel_stream_TG
     distros:
     - rhel80-large
@@ -177,7 +175,6 @@ buildvariants:
   - name: .concurrency !.no_txns !.repl !.kill_terminate
   - name: disk_wiredtiger
   - name: .encrypt
-  - name: free_monitoring
   - name: initial_sync_fuzzer_gen
   - name: .jscore .common
   - name: jsCore_min_batch_repeat_queries_ese_gsm

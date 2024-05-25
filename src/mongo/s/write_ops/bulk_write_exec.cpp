@@ -119,14 +119,17 @@ void executeChildBatches(OperationContext* opCtx,
 
             logical_session_id_helpers::serializeLsidAndTxnNumber(opCtx, &builder);
 
-            auto wc = opCtx->getWriteConcern().toBSON();
-            if (isVerboseWc(wc)) {
-                builder.append(WriteConcernOptions::kWriteConcernField,
-                               opCtx->getWriteConcern().toBSON());
-            } else {
-                // Mongos needs to send to the shard with w > 0 so it will be able to see the
-                // writeErrors
-                builder.append(WriteConcernOptions::kWriteConcernField, upgradeWriteConcern(wc));
+            // Per-operation write concern is not supported in transactions.
+            if (!TransactionRouter::get(opCtx)) {
+                auto wc = opCtx->getWriteConcern().toBSON();
+                if (isVerboseWc(wc)) {
+                    builder.append(WriteConcernOptions::kWriteConcernField, wc);
+                } else {
+                    // Mongos needs to send to the shard with w > 0 so it will be able to see the
+                    // writeErrors
+                    builder.append(WriteConcernOptions::kWriteConcernField,
+                                   upgradeWriteConcern(wc));
+                }
             }
 
             auto obj = builder.obj();
@@ -208,11 +211,158 @@ void noteStaleResponses(
     }
 }
 
+void fillOKInsertReplies(BulkWriteReplyInfo& replies, int size) {
+    replies.first.reserve(size);
+    for (int i = 0; i < size; ++i) {
+        BulkWriteReplyItem reply;
+        reply.setN(1);
+        reply.setOk(1);
+        reply.setIdx(i);
+        replies.first.push_back(reply);
+    }
+}
+
+BulkWriteReplyInfo processFLEResponse(const BulkWriteCRUDOp::OpType& firstOpType,
+                                      const BatchedCommandResponse& response) {
+    BulkWriteReplyInfo replies;
+    if (response.toStatus().isOK()) {
+        if (firstOpType == BulkWriteCRUDOp::kInsert) {
+            fillOKInsertReplies(replies, response.getN());
+        } else {
+            BulkWriteReplyItem reply;
+            reply.setN(response.getN());
+            if (firstOpType == BulkWriteCRUDOp::kUpdate) {
+                if (response.isUpsertDetailsSet()) {
+                    std::vector<BatchedUpsertDetail*> upsertDetails = response.getUpsertDetails();
+                    invariant(upsertDetails.size() == 1);
+                    // BulkWrite needs only _id, not index.
+                    reply.setUpserted(
+                        IDLAnyTypeOwned(upsertDetails[0]->getUpsertedID().firstElement()));
+                }
+
+                reply.setNModified(response.getNModified());
+            }
+            reply.setOk(1);
+            reply.setIdx(0);
+            replies.first.push_back(reply);
+        }
+    } else {
+        if (response.isErrDetailsSet()) {
+            const auto& errDetails = response.getErrDetails();
+            if (firstOpType == BulkWriteCRUDOp::kInsert) {
+                fillOKInsertReplies(replies, response.getN() + errDetails.size());
+                for (const auto& err : errDetails) {
+                    int32_t idx = err.getIndex();
+                    replies.first[idx].setN(0);
+                    replies.first[idx].setOk(0);
+                    replies.first[idx].setStatus(err.getStatus());
+                }
+            } else {
+                invariant(errDetails.size() == 1 && response.getN() == 0);
+                BulkWriteReplyItem reply(0, errDetails[0].getStatus());
+                reply.setN(0);
+                if (firstOpType == BulkWriteCRUDOp::kUpdate) {
+                    reply.setNModified(0);
+                }
+                replies.first.push_back(reply);
+            }
+            replies.second += errDetails.size();
+        } else if (response.isWriteConcernErrorSet()) {
+            // TODO SERVER-76954 handle write concern errors, use getWriteConcernError.
+        } else {
+            // response.toStatus() is not OK but there is no errDetails or writeConcernError, so the
+            // top level status should be not OK instead. Raising an exception.
+            uassertStatusOK(response.getTopLevelStatus());
+            MONGO_UNREACHABLE;
+        }
+    }
+    return replies;
+}
+
 }  // namespace
 
-std::vector<BulkWriteReplyItem> execute(OperationContext* opCtx,
-                                        const std::vector<std::unique_ptr<NSTargeter>>& targeters,
-                                        const BulkWriteCommandRequest& clientRequest) {
+std::pair<FLEBatchResult, BulkWriteReplyInfo> attemptExecuteFLE(
+    OperationContext* opCtx, const BulkWriteCommandRequest& clientRequest) {
+    const auto& ops = clientRequest.getOps();
+    BulkWriteCRUDOp firstOp(ops[0]);
+    auto firstOpType = firstOp.getType();
+    try {
+        BatchedCommandResponse response;
+        FLEBatchResult fleResult;
+
+        if (firstOpType == BulkWriteCRUDOp::kInsert) {
+            std::vector<mongo::BSONObj> documents;
+            documents.reserve(ops.size());
+            for (const auto& opVariant : ops) {
+                BulkWriteCRUDOp op(opVariant);
+                uassert(ErrorCodes::InvalidOptions,
+                        "BulkWrite with Queryable Encryption and multiple operations supports only "
+                        "insert.",
+                        op.getType() == BulkWriteCRUDOp::kInsert);
+                documents.push_back(op.getInsert()->getDocument());
+            }
+
+            write_ops::InsertCommandRequest insertOp =
+                bulk_write_common::makeInsertCommandRequestForFLE(
+                    documents, clientRequest, clientRequest.getNsInfo()[0]);
+
+            BatchedCommandRequest fleRequest(insertOp);
+            fleResult = processFLEBatch(
+                opCtx, fleRequest, nullptr /* stats */, &response, {} /*targetEpoch*/);
+        } else if (firstOpType == BulkWriteCRUDOp::kUpdate) {
+            uassert(ErrorCodes::InvalidOptions,
+                    "BulkWrite update with Queryable Encryption supports only a single operation.",
+                    ops.size() == 1);
+
+            write_ops::UpdateCommandRequest updateCommand =
+                bulk_write_common::makeUpdateCommandRequestFromUpdateOp(
+                    firstOp.getUpdate(), clientRequest, /*currentOpIdx=*/0);
+
+            BatchedCommandRequest fleRequest(updateCommand);
+            fleResult = processFLEBatch(
+                opCtx, fleRequest, nullptr /* stats */, &response, {} /*targetEpoch*/);
+        } else {
+            uassert(ErrorCodes::InvalidOptions,
+                    "BulkWrite delete with Queryable Encryption supports only a single operation.",
+                    ops.size() == 1);
+
+            write_ops::DeleteCommandRequest deleteCommand =
+                bulk_write_common::makeDeleteCommandRequestForFLE(
+                    opCtx, firstOp.getDelete(), clientRequest, clientRequest.getNsInfo()[0]);
+
+            BatchedCommandRequest fleRequest(deleteCommand);
+            fleResult = processFLEBatch(
+                opCtx, fleRequest, nullptr /* stats */, &response, {} /*targetEpoch*/);
+        }
+
+        if (fleResult == FLEBatchResult::kNotProcessed) {
+            return {FLEBatchResult::kNotProcessed, {}};
+        }
+
+        BulkWriteReplyInfo replies = processFLEResponse(firstOpType, response);
+        return {FLEBatchResult::kProcessed, std::move(replies)};
+    } catch (const DBException& ex) {
+        LOGV2_WARNING(7749700,
+                      "Failed to process bulkWrite with Queryable Encryption",
+                      "error"_attr = redact(ex));
+        // If Queryable encryption adds support for update with multi: true, we might have to update
+        // the way we make replies here to handle SERVER-15292 correctly.
+        BulkWriteReplyInfo replies;
+        BulkWriteReplyItem reply(0, ex.toStatus());
+        reply.setN(0);
+        if (firstOpType == BulkWriteCRUDOp::kUpdate) {
+            reply.setNModified(0);
+        }
+
+        replies.first.push_back(reply);
+        replies.second = 1;
+        return {FLEBatchResult::kProcessed, std::move(replies)};
+    }
+}
+
+BulkWriteReplyInfo execute(OperationContext* opCtx,
+                           const std::vector<std::unique_ptr<NSTargeter>>& targeters,
+                           const BulkWriteCommandRequest& clientRequest) {
     LOGV2_DEBUG(7263700,
                 4,
                 "Starting execution of a bulkWrite",
@@ -309,7 +459,7 @@ std::vector<BulkWriteReplyItem> execute(OperationContext* opCtx,
     }
 
     LOGV2_DEBUG(7263701, 4, "Finished execution of bulkWrite");
-    return bulkWriteOp.generateReplyItems();
+    return bulkWriteOp.generateReplyInfo();
 }
 
 BulkWriteOp::BulkWriteOp(OperationContext* opCtx, const BulkWriteCommandRequest& clientRequest)
@@ -352,9 +502,6 @@ StatusWith<WriteType> BulkWriteOp::target(const std::vector<std::unique_ptr<NSTa
                 (_txnNum ? write_ops::kStmtIdSize +
                          write_ops::kWriteCommandBSONArrayPerElementOverheadBytes
                          : 0);
-
-            // TODO SERVER-78084: Determine if we we need to consider the potential size of errors
-            // received in response to the command here.
             return writeSizeBytes;
         },
         getBaseBatchCommandSizeEstimate(),
@@ -412,6 +559,7 @@ BulkWriteCommandRequest BulkWriteOp::buildBulkCommandRequest(
     // internally between the mongos and the mongods.
     request.setOrdered(_clientRequest.getOrdered());
     request.setBypassDocumentValidation(_clientRequest.getBypassDocumentValidation());
+    request.setLet(_clientRequest.getLet());
 
     if (_isRetryableWrite) {
         request.setStmtIds(stmtIds);
@@ -485,7 +633,7 @@ void BulkWriteOp::noteBatchResponse(
         // may be retargeted and retried.
         if (ordered && lastError) {
             invariant(index >= (int)replyItems.size());
-            writeOp.cancelWrites(&*lastError);
+            writeOp.cancelWrites();
             continue;
         }
 
@@ -514,7 +662,7 @@ void BulkWriteOp::noteBatchResponse(
 
         auto& reply = replyItems[index];
         if (reply.getStatus().isOK()) {
-            writeOp.noteWriteComplete(*write);
+            writeOp.noteWriteComplete(*write, reply);
         } else {
             lastError.emplace(write->writeOpRef.first, reply.getStatus());
             writeOp.noteWriteError(*write, *lastError);
@@ -538,26 +686,38 @@ void BulkWriteOp::noteBatchResponse(
     }
 }
 
-std::vector<BulkWriteReplyItem> BulkWriteOp::generateReplyItems() const {
+BulkWriteReplyInfo BulkWriteOp::generateReplyInfo() {
     dassert(isFinished());
     std::vector<BulkWriteReplyItem> replyItems;
+    int numErrors = 0;
     replyItems.reserve(_writeOps.size());
 
     const auto ordered = _clientRequest.getOrdered();
     for (auto& writeOp : _writeOps) {
         dassert(writeOp.getWriteState() != WriteOpState_Pending);
         if (writeOp.getWriteState() == WriteOpState_Completed) {
-            replyItems.emplace_back(writeOp.getWriteItem().getItemIndex());
+            replyItems.push_back(writeOp.takeBulkWriteReplyItem());
         } else if (writeOp.getWriteState() == WriteOpState_Error) {
             replyItems.emplace_back(writeOp.getWriteItem().getItemIndex(),
                                     writeOp.getOpError().getStatus());
+            // TODO SERVER-79510: Remove this. This is necessary right now because the nModified
+            //  field is lost in the BulkWriteReplyItem -> WriteError transformation but
+            // we want to return nModified for failed updates. However, this does not actually
+            // return a correct value for multi:true updates that partially succeed (i.e. succeed
+            // on one or more shard and fail on one or more shards). In SERVER-79510 we should
+            // return a correct nModified count by summing the success responses' nModified
+            // values.
+            if (writeOp.getWriteItem().getOpType() == BatchedCommandRequest::BatchType_Update) {
+                replyItems.back().setNModified(0);
+            }
+            numErrors++;
             // Only return the first error if we are ordered.
             if (ordered)
                 break;
         }
     }
 
-    return replyItems;
+    return {replyItems, numErrors};
 }
 
 int BulkWriteOp::getBaseBatchCommandSizeEstimate() const {
@@ -605,6 +765,33 @@ int BulkWriteOp::getBaseBatchCommandSizeEstimate() const {
 
     return builder.obj().objsize();
 }
+
+void addIdsForInserts(BulkWriteCommandRequest& origCmdRequest) {
+    std::vector<
+        stdx::variant<mongo::BulkWriteInsertOp, mongo::BulkWriteUpdateOp, mongo::BulkWriteDeleteOp>>
+        newOps;
+    newOps.reserve(origCmdRequest.getOps().size());
+
+    for (const auto& op : origCmdRequest.getOps()) {
+        auto crudOp = BulkWriteCRUDOp(op);
+        if (crudOp.getType() == BulkWriteCRUDOp::kInsert &&
+            crudOp.getInsert()->getDocument()["_id"].eoo()) {
+            auto insert = crudOp.getInsert();
+            auto doc = insert->getDocument();
+            BSONObjBuilder idInsertB;
+            idInsertB.append("_id", OID::gen());
+            idInsertB.appendElements(doc);
+            auto newDoc = idInsertB.obj();
+            auto newOp = BulkWriteInsertOp(insert->getInsert(), std::move(newDoc));
+            newOps.push_back(std::move(newOp));
+        } else {
+            newOps.push_back(std::move(op));
+        }
+    }
+
+    origCmdRequest.setOps(newOps);
+}
+
 
 }  // namespace bulk_write_exec
 

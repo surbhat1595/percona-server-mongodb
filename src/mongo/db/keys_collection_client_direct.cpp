@@ -173,11 +173,10 @@ StatusWith<Shard::QueryResponse> KeysCollectionClientDirect::_query(
 }
 
 Status KeysCollectionClientDirect::_insert(OperationContext* opCtx,
-                                           const NamespaceString& nss,
                                            const BSONObj& doc,
                                            const WriteConcernOptions& writeConcern) {
     BatchedCommandRequest request([&] {
-        write_ops::InsertCommandRequest insertOp(nss);
+        write_ops::InsertCommandRequest insertOp(NamespaceString::kKeysCollectionNamespace);
         insertOp.setDocuments({doc});
         return insertOp;
     }());
@@ -186,7 +185,8 @@ Status KeysCollectionClientDirect::_insert(OperationContext* opCtx,
 
     for (int retry = 1; retry <= kOnErrorNumRetries; ++retry) {
         // Note: write commands can only be issued against a primary.
-        auto swResponse = _rsLocalClient.runCommandOnce(opCtx, nss.db().toString(), cmdObj);
+        auto swResponse = _rsLocalClient.runCommandOnce(
+            opCtx, NamespaceString::kKeysCollectionNamespace.dbName(), cmdObj);
 
         BatchedCommandResponse batchResponse;
         auto writeStatus =
@@ -197,7 +197,7 @@ Status KeysCollectionClientDirect::_insert(OperationContext* opCtx,
                         2,
                         "Batch write command to {nss_db}failed with retriable error and will be "
                         "retried{causedBy_writeStatus}",
-                        "nss_db"_attr = nss.dbName(),
+                        "nss_db"_attr = NamespaceString::kKeysCollectionNamespace.db(),
                         "causedBy_writeStatus"_attr = causedBy(redact(writeStatus)));
             continue;
         }
@@ -208,10 +208,7 @@ Status KeysCollectionClientDirect::_insert(OperationContext* opCtx,
 }
 
 Status KeysCollectionClientDirect::insertNewKey(OperationContext* opCtx, const BSONObj& doc) {
-    return _insert(opCtx,
-                   NamespaceString::kKeysCollectionNamespace,
-                   doc,
-                   ShardingCatalogClient::kMajorityWriteConcern);
+    return _insert(opCtx, doc, ShardingCatalogClient::kMajorityWriteConcern);
 }
 
 }  // namespace mongo

@@ -208,8 +208,7 @@ public:
         ClusterClientCursorGuard _establishCursorOnDbPrimary(OperationContext* opCtx,
                                                              const NamespaceString& nss) {
             const CachedDatabaseInfo dbInfo =
-                uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(
-                    opCtx, DatabaseNameUtil::serializeForCatalog(nss.dbName())));
+                uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nss.dbName()));
 
             ShardsvrCheckMetadataConsistency shardsvrRequest{nss};
             shardsvrRequest.setDbName(nss.dbName());
@@ -386,8 +385,8 @@ public:
     };
 };
 
-MONGO_REGISTER_FEATURE_FLAGGED_COMMAND(CheckMetadataConsistencyCmd,
-                                       feature_flags::gCheckMetadataConsistency);
+MONGO_REGISTER_COMMAND(CheckMetadataConsistencyCmd)
+    .requiresFeatureFlag(&feature_flags::gCheckMetadataConsistency);
 
 }  // namespace
 }  // namespace mongo

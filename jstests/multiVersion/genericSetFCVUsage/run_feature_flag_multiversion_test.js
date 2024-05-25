@@ -7,9 +7,6 @@
  * @tags: [featureFlagToaster, featureFlagSpoon]
  */
 
-(function() {
-'use strict';
-
 let numLastLTSRuns = 0;
 let numLastContRuns = 0;
 
@@ -25,7 +22,8 @@ function runTest(downgradeFCV) {
     assert.commandWorked(
         primary.adminCommand({configureFailPoint: 'failDowngrading', mode: "alwaysOn"}));
     assert.commandFailedWithCode(
-        adminDB.adminCommand({setFeatureCompatibilityVersion: downgradeFCV}), 549181);
+        adminDB.adminCommand({setFeatureCompatibilityVersion: downgradeFCV, confirm: true}),
+        549181);
     checkFCV(adminDB, downgradeFCV, downgradeFCV);
     if (downgradeFCV === lastLTSFCV) {
         numLastLTSRuns++;
@@ -76,4 +74,3 @@ if (lastLTSFCV === lastContinuousFCV) {
     assert.eq(numLastLTSRuns, 2);
     assert.eq(numLastContRuns, 1);
 }
-})();

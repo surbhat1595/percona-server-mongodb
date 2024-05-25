@@ -51,11 +51,13 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/catalog/catalog_helper.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
+#include "mongo/db/catalog/collection_uuid_mismatch_info.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -103,12 +105,11 @@ struct ResolvedNamespaceOrViewAcquisitionRequest {
 
     // Resources for lock free reads.
     struct LockFreeReadsResources {
-        // If this field is set, the reader will not take the ParallelBatchWriterMode lock and
-        // conflict with secondary batch application.
-        std::shared_ptr<ShouldNotConflictWithSecondaryBatchApplicationBlock> skipPBWMLock;
         std::shared_ptr<LockFreeReadsBlock> lockFreeReadsBlock;
         std::shared_ptr<Lock::GlobalLock> globalLock;
     } lockFreeReadsResources;
+
+    shard_role_details::AcquisitionLocks acquisitionLocks;
 };
 
 using ResolvedNamespaceOrViewAcquisitionRequestsMap =
@@ -197,10 +198,15 @@ void verifyDbAndCollection(OperationContext* opCtx,
     // before taking the lock. One exception is a query by UUID of system.views in a
     // transaction. Usual queries of system.views (by name, not UUID) within a transaction are
     // rejected. However, if the query is by UUID we can't determine whether the namespace is
-    // actually system.views until we take the lock here. So we have this one last assertion.
+    // actually system.views until we take the lock here. So we have these last two assertions.
+    uassert(ErrorCodes::OperationNotSupportedInTransaction,
+            "Cannot access system.views collection in a transaction",
+            !(opCtx->inMultiDocumentTransaction() && nss.isSystemDotViews()));
     uassert(6944500,
             "Modifications to system.views must take an exclusive lock",
-            !nss.isSystemDotViews() || opCtx->lockState()->isCollectionLockedForMode(nss, MODE_X));
+            operationType == AcquisitionPrerequisites::OperationType::kRead ||
+                !nss.isSystemDotViews() ||
+                opCtx->lockState()->isCollectionLockedForMode(nss, MODE_X));
 
     // Verify that we are using the latest instance if we intend to perform writes.
     if (operationType == AcquisitionPrerequisites::OperationType::kWrite) {
@@ -255,12 +261,14 @@ std::variant<CollectionPtr, std::shared_ptr<const ViewDefinition>> acquireLocalC
     if (coll) {
         verifyDbAndCollection(opCtx, nss, coll, prerequisites.operationType);
 
-        // Ban snapshot reads on capped collections.
-        const auto readConcernLevel = prerequisites.readConcern.getLevel();
-        uassert(ErrorCodes::SnapshotUnavailable,
-                "Reading from capped collections with readConcern snapshot is not supported",
-                !coll->isCapped() ||
-                    readConcernLevel != repl::ReadConcernLevel::kSnapshotReadConcern);
+        // TODO SERVER-79401: To mimic the previous behaviour with AutoGetCollectionForRead we only
+        // check for usage of the correct read concern on reads. Otherwise multi-document
+        // transactions cannot perform commits since they perform writes with an "invalid" read
+        // concern for the user (snapshot).
+        if (prerequisites.operationType == AcquisitionPrerequisites::kRead) {
+            assertReadConcernSupported(
+                coll, prerequisites.readConcern, opCtx->recoveryUnit()->getTimestampReadSource());
+        }
 
         return coll;
     } else if (auto view = catalog.lookupView(opCtx, nss)) {
@@ -321,19 +329,28 @@ SnapshotedServices acquireServicesSnapshot(OperationContext* opCtx,
         std::move(collOrView), std::move(collectionDescription), std::move(optOwnershipFilter)};
 }
 
+const Lock::GlobalLockSkipOptions kLockFreeReadsGlobalLockOptions{[] {
+    Lock::GlobalLockSkipOptions options;
+    options.skipRSTLLock = true;
+    return options;
+}()};
+
 CollectionOrViewAcquisitions acquireResolvedCollectionsOrViewsWithoutTakingLocks(
     OperationContext* opCtx,
     const CollectionCatalog& catalog,
     ResolvedNamespaceOrViewAcquisitionRequestsMap sortedAcquisitionRequests) {
     CollectionOrViewAcquisitions acquisitions;
+
+    auto& txnResources = TransactionResources::get(opCtx);
+    invariant(txnResources.state != shard_role_details::TransactionResources::State::YIELDED,
+              "Cannot make a new acquisition in the YIELDED state");
+    invariant(txnResources.state != shard_role_details::TransactionResources::State::FAILED,
+              "Cannot make a new acquisition in the FAILED state");
+
+    auto currentAcquireCallNum = txnResources.increaseAcquireCollectionCallCount();
+
     for (auto& acquisitionRequest : sortedAcquisitionRequests) {
         auto& prerequisites = acquisitionRequest.second.prerequisites;
-        auto& txnResources = TransactionResources::get(opCtx);
-
-        invariant(txnResources.state != shard_role_details::TransactionResources::State::YIELDED,
-                  "Cannot make a new acquisition in the YIELDED state");
-        invariant(txnResources.state != shard_role_details::TransactionResources::State::FAILED,
-                  "Cannot make a new acquisition in the FAILED state");
 
         auto snapshotedServices = acquireServicesSnapshot(opCtx, catalog, prerequisites);
         const bool isCollection =
@@ -350,13 +367,25 @@ CollectionOrViewAcquisitions acquireResolvedCollectionsOrViewsWithoutTakingLocks
                 prerequisites.uuid = collectionPtr->uuid();
             }
 
+            acquisitionRequest.second.acquisitionLocks.hasLockFreeReadsBlock =
+                bool(acquisitionRequest.second.lockFreeReadsResources.lockFreeReadsBlock);
+
+            if (const auto& ptr = acquisitionRequest.second.lockFreeReadsResources.globalLock) {
+                acquisitionRequest.second.acquisitionLocks.globalLock =
+                    ptr->isLocked() ? MODE_IS : MODE_NONE;
+                acquisitionRequest.second.acquisitionLocks.globalLockOptions =
+                    kLockFreeReadsGlobalLockOptions;
+            }
+
             shard_role_details::AcquiredCollection& acquiredCollection =
                 txnResources.addAcquiredCollection(
-                    {prerequisites,
+                    {currentAcquireCallNum,
+                     prerequisites,
                      std::move(acquisitionRequest.second.dbLock),
                      std::move(acquisitionRequest.second.collLock),
                      std::move(acquisitionRequest.second.lockFreeReadsResources.lockFreeReadsBlock),
                      std::move(acquisitionRequest.second.lockFreeReadsResources.globalLock),
+                     std::move(acquisitionRequest.second.acquisitionLocks),
                      std::move(snapshotedServices.collectionDescription),
                      std::move(snapshotedServices.ownershipFilter),
                      std::move(std::get<CollectionPtr>(snapshotedServices.collectionPtrOrView))});
@@ -463,28 +492,16 @@ void checkShardingPlacement(
     }
 }
 
-const Lock::GlobalLockSkipOptions kLockFreeReadsGlobalLockOptions{[] {
-    Lock::GlobalLockSkipOptions options;
-    options.skipRSTLLock = true;
-    return options;
-}()};
-
 ResolvedNamespaceOrViewAcquisitionRequest::LockFreeReadsResources takeGlobalLock(
     OperationContext* opCtx,
     const std::vector<CollectionOrViewAcquisitionRequest>& acquisitionRequests) {
-    std::shared_ptr<ShouldNotConflictWithSecondaryBatchApplicationBlock> skipPBWMLock;
-    if (!opCtx->isLockFreeReadsOp() &&
-        opCtx->getServiceContext()->getStorageEngine()->supportsReadConcernSnapshot()) {
-        skipPBWMLock = std::make_shared<ShouldNotConflictWithSecondaryBatchApplicationBlock>(
-            opCtx->lockState());
-    }
     auto lockFreeReadsBlock = std::make_shared<LockFreeReadsBlock>(opCtx);
     auto globalLock = std::make_shared<Lock::GlobalLock>(opCtx,
                                                          MODE_IS,
                                                          Date_t::max(),
                                                          Lock::InterruptBehavior::kThrow,
                                                          kLockFreeReadsGlobalLockOptions);
-    return {skipPBWMLock, lockFreeReadsBlock, globalLock};
+    return {lockFreeReadsBlock, globalLock};
 }
 
 std::shared_ptr<const CollectionCatalog> stashConsistentCatalog(
@@ -1034,12 +1051,9 @@ CollectionOrViewAcquisitions acquireCollectionsOrViews(
             return dbLockOptions;
         }();
 
+        const auto dbLockMode = isSharedLockMode(mode) ? MODE_IS : MODE_IX;
         const auto dbLock =
-            std::make_shared<Lock::DBLock>(opCtx,
-                                           dbName,
-                                           isSharedLockMode(mode) ? MODE_IS : MODE_IX,
-                                           Date_t::max(),
-                                           dbLockOptions);
+            std::make_shared<Lock::DBLock>(opCtx, dbName, dbLockMode, Date_t::max(), dbLockOptions);
 
         for (auto& ar : sortedAcquisitionRequests) {
             const auto& nss = ar.second.prerequisites.nss;
@@ -1051,7 +1065,10 @@ CollectionOrViewAcquisitions acquireCollectionsOrViews(
                     dbName == nss.dbName());
 
             ar.second.dbLock = dbLock;
+            ar.second.acquisitionLocks.dbLock = dbLockMode;
+            ar.second.acquisitionLocks.dbLockOptions = dbLockOptions;
             ar.second.collLock.emplace(opCtx, nss, mode);
+            ar.second.acquisitionLocks.collLock = mode;
         }
 
         // Wait for a configured amount of time after acquiring locks if the failpoint is
@@ -1124,10 +1141,13 @@ CollectionAcquisition acquireCollectionForLocalCatalogOnlyWithPotentialDataLoss(
     invariant(!OperationShardingState::isComingFromRouter(opCtx));
 
     auto& txnResources = TransactionResources::get(opCtx);
+
+    auto currentAcquireCallNum = txnResources.increaseAcquireCollectionCallCount();
+
     txnResources.assertNoAcquiredCollections();
 
-    auto dbLock = std::make_shared<Lock::DBLock>(
-        opCtx, nss.dbName(), isSharedLockMode(mode) ? MODE_IS : MODE_IX);
+    const auto dbLockMode = isSharedLockMode(mode) ? MODE_IS : MODE_IX;
+    auto dbLock = std::make_shared<Lock::DBLock>(opCtx, nss.dbName(), dbLockMode);
     Lock::CollectionLock collLock(opCtx, nss, mode);
 
     const auto catalog = CollectionCatalog::get(opCtx);
@@ -1146,8 +1166,17 @@ CollectionAcquisition acquireCollectionForLocalCatalogOnlyWithPotentialDataLoss(
     if (coll)
         prerequisites.uuid = boost::optional<UUID>(coll->uuid());
 
-    shard_role_details::AcquiredCollection& acquiredCollection = txnResources.addAcquiredCollection(
-        {prerequisites, std::move(dbLock), std::move(collLock), std::move(coll)});
+    shard_role_details::AcquisitionLocks lockRequirements;
+    lockRequirements.dbLock = dbLockMode;
+    lockRequirements.collLock = mode;
+
+    shard_role_details::AcquiredCollection& acquiredCollection =
+        txnResources.addAcquiredCollection({currentAcquireCallNum,
+                                            prerequisites,
+                                            std::move(dbLock),
+                                            std::move(collLock),
+                                            std::move(lockRequirements),
+                                            std::move(coll)});
 
     return CollectionAcquisition(txnResources, acquiredCollection);
 }
@@ -1206,6 +1235,13 @@ void YieldedTransactionResources::transitionTransactionResourcesToFailedState(
     }
 }
 
+void StashedTransactionResources::dispose() {
+    if (_yieldedResources) {
+        _yieldedResources->releaseAllResourcesOnCommitOrAbort();
+        _yieldedResources.reset();
+    }
+}
+
 YieldedTransactionResources yieldTransactionResourcesFromOperationContext(OperationContext* opCtx) {
     auto& transactionResources = TransactionResources::get(opCtx);
     invariant(
@@ -1241,6 +1277,52 @@ YieldedTransactionResources yieldTransactionResourcesFromOperationContext(Operat
     return YieldedTransactionResources(TransactionResources::detachFromOpCtx(opCtx), originalState);
 }
 
+void stashTransactionResourcesFromOperationContext(OperationContext* opCtx,
+                                                   TransactionResourcesStasher* stasher) {
+    auto& transactionResources = TransactionResources::get(opCtx);
+    invariant(
+        !(transactionResources.yielded ||
+          transactionResources.state == shard_role_details::TransactionResources::State::YIELDED));
+
+    invariant(transactionResources.state ==
+                  shard_role_details::TransactionResources::State::ACTIVE ||
+              transactionResources.state == shard_role_details::TransactionResources::State::EMPTY);
+
+    for (auto& acquisition : transactionResources.acquiredCollections) {
+        // Yielding kLocalCatalogOnlyWithPotentialDataLoss acquisitions is not allowed.
+        invariant(
+            !stdx::holds_alternative<AcquisitionPrerequisites::PlacementConcernPlaceholder>(
+                acquisition.prerequisites.placementConcern),
+            str::stream() << "Collection " << acquisition.prerequisites.nss.toStringForErrorMsg()
+                          << " acquired with special placement concern and cannot be yielded");
+    }
+
+    // Yielding view acquisitions is not supported.
+    tassert(7750701,
+            "Yielding view acquisitions is forbidden",
+            transactionResources.acquiredViews.empty());
+
+    // TODO SERVER-77213: This should mostly go away once the Locker resides inside
+    // TransactionResources and the underlying locks point to it instead of the opCtx.
+    //
+    // Release all locks acquired since we are going to yield externally and our opCtx is going to
+    // be destroyed.
+    for (auto& acquisition : transactionResources.acquiredCollections) {
+        acquisition.collectionLock.reset();
+        acquisition.dbLock.reset();
+        acquisition.globalLock.reset();
+        acquisition.lockFreeReadsBlock.reset();
+    }
+
+    auto originalState =
+        std::exchange(transactionResources.state, TransactionResources::State::STASHED);
+
+    auto stashedResources =
+        StashedTransactionResources{TransactionResources::detachFromOpCtx(opCtx), originalState};
+
+    stasher->stashTransactionResources(std::move(stashedResources));
+}
+
 void restoreTransactionResourcesToOperationContext(
     OperationContext* opCtx, YieldedTransactionResources yieldedResourcesHolder) {
     if (!yieldedResourcesHolder._yieldedResources) {
@@ -1258,9 +1340,12 @@ void restoreTransactionResourcesToOperationContext(
     });
 
     auto restoreFn = [&] {
-        // Reacquire locks
-        opCtx->lockState()->restoreLockState(opCtx, transactionResources.yielded->yieldedLocker);
-        transactionResources.yielded.reset();
+        // Reacquire locks. External yields do not have a lock snapshot so we only restore for
+        // internal yields.
+        if (auto ptr = transactionResources.yielded.get_ptr()) {
+            opCtx->lockState()->restoreLockState(opCtx, ptr->yieldedLocker);
+            transactionResources.yielded.reset();
+        }
 
         // Reestablish a consistent catalog snapshot (multi document transactions don't yield).
         auto requests = toNamespaceStringOrUUIDs(transactionResources.acquiredCollections);
@@ -1362,6 +1447,19 @@ void restoreTransactionResourcesToOperationContext(
                     continue;
                 }
                 throw;
+            } catch (const ExceptionFor<ErrorCodes::CollectionUUIDMismatch>& ex) {
+                const auto extraInfo = ex.extraInfo<CollectionUUIDMismatchInfo>();
+                const auto dbName = extraInfo->dbName();
+                if (extraInfo->actualCollection()) {
+                    NamespaceString oldNss =
+                        NamespaceStringUtil::deserialize(dbName, extraInfo->expectedCollection());
+                    NamespaceString newNss =
+                        NamespaceStringUtil::deserialize(dbName, *extraInfo->actualCollection());
+                    PlanYieldPolicy::throwCollectionRenamedError(
+                        oldNss, newNss, extraInfo->collectionUUID());
+                } else {
+                    PlanYieldPolicy::throwCollectionDroppedError(extraInfo->collectionUUID());
+                }
             }
         }
     }();
@@ -1375,4 +1473,132 @@ void restoreTransactionResourcesToOperationContext(
     scopeGuard.dismiss();
 }
 
+StashTransactionResourcesForDBDirect::StashTransactionResourcesForDBDirect(OperationContext* opCtx)
+    : _opCtx(opCtx) {
+    if (TransactionResources::isPresent(opCtx)) {
+        _originalTransactionResources = TransactionResources::detachFromOpCtx(opCtx);
+        TransactionResources::attachToOpCtx(opCtx, std::make_unique<TransactionResources>());
+    }
+}
+
+StashTransactionResourcesForDBDirect::~StashTransactionResourcesForDBDirect() {
+    if (TransactionResources::isPresent(_opCtx)) {
+        TransactionResources::detachFromOpCtx(_opCtx);
+    }
+    TransactionResources::attachToOpCtx(_opCtx, std::move(_originalTransactionResources));
+}
+
+HandleTransactionResourcesFromStasher::HandleTransactionResourcesFromStasher(
+    OperationContext* opCtx, TransactionResourcesStasher* stasher)
+    : _opCtx(opCtx), _stasher(stasher) {
+    auto stashedResources = stasher->releaseStashedTransactionResources();
+
+    if (TransactionResources::isPresent(opCtx)) {
+        _originalTransactionResources = TransactionResources::detachFromOpCtx(opCtx);
+    }
+
+    ScopeGuard restoreFailedGuard([&] {
+        if (TransactionResources::isPresent(opCtx)) {
+            // We have attempted to restore the resources but failed, the transaction resources have
+            // been moved to the opCtx, so we must move them back to the stashed object.
+            invariant(!stashedResources._yieldedResources);
+            stashedResources._yieldedResources = TransactionResources::detachFromOpCtx(opCtx);
+        }
+        stashedResources._yieldedResources->releaseAllResourcesOnCommitOrAbort();
+        stashedResources._yieldedResources->state = TransactionResources::State::FAILED;
+        stasher->stashTransactionResources(std::move(stashedResources));
+        TransactionResources::attachToOpCtx(opCtx, std::move(_originalTransactionResources));
+    });
+
+    // Reacquire the locks requested by the acquisitions. All acquisitions with the same
+    // acquireCallCount share the same Global/DB/Lock-free locks. Acquisitions are inserted
+    // in order, so we can perform a single pass over the list to rebuild the locks.
+    //
+    // The following shared_ptrs are set by the first acquisition with a different
+    // acquireCollectionCallNum different from the previous one.
+    std::shared_ptr<Lock::GlobalLock> commonGlobalLock;
+    std::shared_ptr<Lock::DBLock> commonDbLock;
+    std::shared_ptr<LockFreeReadsBlock> lockFreeReadsBlock;
+    int previousAcquireCollectionCallNum = -1;
+
+    // TODO SERVER-77213: This should mostly go away once the Locker resides inside
+    // TransactionResources and the underlying locks point to it instead of the opCtx.
+    for (auto& acquisition : stashedResources._yieldedResources->acquiredCollections) {
+        const auto& locks = acquisition.locks;
+        bool isFromDifferentAcquireCall =
+            previousAcquireCollectionCallNum != acquisition.acquireCollectionCallNum;
+        if (locks.hasLockFreeReadsBlock) {
+            if (isFromDifferentAcquireCall) {
+                lockFreeReadsBlock = std::make_shared<LockFreeReadsBlock>(opCtx);
+            }
+            acquisition.lockFreeReadsBlock = lockFreeReadsBlock;
+        }
+        if (locks.globalLock != MODE_NONE) {
+            if (isFromDifferentAcquireCall) {
+                commonGlobalLock =
+                    std::make_shared<Lock::GlobalLock>(opCtx,
+                                                       locks.globalLock,
+                                                       Date_t::max(),
+                                                       Lock::InterruptBehavior::kThrow,
+                                                       locks.globalLockOptions);
+            }
+            acquisition.globalLock = commonGlobalLock;
+        }
+        if (locks.dbLock != MODE_NONE) {
+            if (isFromDifferentAcquireCall) {
+                commonDbLock =
+                    std::make_shared<Lock::DBLock>(opCtx,
+                                                   acquisition.prerequisites.nss.dbName(),
+                                                   locks.dbLock,
+                                                   Date_t::max(),
+                                                   locks.dbLockOptions);
+            }
+            acquisition.dbLock = commonDbLock;
+        }
+        // Unlike the other locks, this one is always acquired per acquisition if it is not a
+        // lock-free acquisition.
+        if (locks.collLock != MODE_NONE) {
+            acquisition.collectionLock.emplace(
+                opCtx, acquisition.prerequisites.nss, locks.collLock);
+        }
+
+        previousAcquireCollectionCallNum = acquisition.acquireCollectionCallNum;
+    }
+
+    // Wait for a configured amount of time after acquiring locks if the failpoint is enabled
+    catalog_helper::setAutoGetCollectionWaitFailpointExecute(
+        [&](const BSONObj& data) { sleepFor(Milliseconds(data["waitForMillis"].numberInt())); });
+
+    restoreTransactionResourcesToOperationContext(
+        opCtx,
+        YieldedTransactionResources{std::move(stashedResources._yieldedResources),
+                                    stashedResources._originalState});
+
+    restoreFailedGuard.dismiss();
+}
+
+HandleTransactionResourcesFromStasher::~HandleTransactionResourcesFromStasher() {
+    if (TransactionResources::isPresent(_opCtx)) {
+        auto& txnResources = TransactionResources::get(_opCtx);
+        if (_stasher && txnResources.state != TransactionResources::State::FAILED) {
+            // If the resources for the entire transaction are still valid and we haven't dismissed
+            // the resources due to a failure, we yield and stash them.
+            stashTransactionResourcesFromOperationContext(_opCtx, _stasher);
+        } else {
+            // Otherwise, the transaction resources for this operation have to be destroyed since
+            // the operation has failed.
+            TransactionResources::detachFromOpCtx(_opCtx);
+        }
+    }
+    // Since the opCtx must always have valid TransactionResources we reattach the original
+    // resources.
+    TransactionResources::attachToOpCtx(_opCtx, std::move(_originalTransactionResources));
+}
+
+void HandleTransactionResourcesFromStasher::dismissRestoredResources() {
+    auto& txnResources = TransactionResources::get(_opCtx);
+    txnResources.releaseAllResourcesOnCommitOrAbort();
+    txnResources.state = shard_role_details::TransactionResources::State::FAILED;
+    _stasher = nullptr;
+}
 }  // namespace mongo

@@ -27,6 +27,8 @@
  *    it in the license file.
  */
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
 #include "mongo/db/timeseries/timeseries_write_util.h"
 
 #include <absl/container/flat_hash_map.h>
@@ -318,6 +320,24 @@ std::shared_ptr<bucket_catalog::WriteBatch>& extractFromSelf(
     std::shared_ptr<bucket_catalog::WriteBatch>& batch) {
     return batch;
 }
+
+// Updates the batch->decompressed field and returns the compressed BSON to be applied in the
+// transform.
+BSONObj compressAndUpdateBatch(const BSONObj& updated,
+                               std::shared_ptr<bucket_catalog::WriteBatch> batch,
+                               const NamespaceString& bucketsNs) {
+    auto compressedBucket = timeseries::compressBucket(
+        updated, batch->timeField, bucketsNs, gValidateTimeseriesCompression.load());
+
+    if (!compressedBucket.compressedBucket) {
+        tasserted(7734700,
+                  fmt::format("Couldn't compress time-series bucket {}", updated.toString()));
+        return updated;
+    }
+
+    batch->decompressed = DecompressionResult{*compressedBucket.compressedBucket, updated};
+    return *compressedBucket.compressedBucket;
+}
 }  // namespace
 
 write_ops::UpdateCommandRequest buildSingleUpdateOp(const write_ops::UpdateCommandRequest& wholeOp,
@@ -366,8 +386,13 @@ BSONObj makeNewCompressedDocumentForWrite(std::shared_ptr<bucket_catalog::WriteB
     auto compressed =
         timeseries::compressBucket(uncompressedDoc, timeField, nss, validateCompression);
     if (compressed.compressedBucket) {
+        batch->decompressed = DecompressionResult{compressed.compressedBucket->getOwned(),
+                                                  uncompressedDoc.getOwned()};
         return *compressed.compressedBucket;
     }
+
+    tasserted(7745400,
+              fmt::format("Couldn't compress time-series bucket {}", uncompressedDoc.toString()));
 
     // Return the uncompressed document if compression has failed.
     return uncompressedDoc;
@@ -397,12 +422,29 @@ BSONObj makeBucketDocument(const std::vector<BSONObj>& measurements,
         nss, comparator, options, measurements[0]));
     auto time = res.second;
     auto [oid, _] = bucket_catalog::internal::generateBucketOID(time, options);
-    return makeNewDocumentForWrite(
+    auto bucket = makeNewDocumentForWrite(
         oid, measurements, res.first.metadata.toBSON(), options, comparator);
+
+    if (!feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        return bucket;
+    }
+
+    const bool validateCompression = gValidateTimeseriesCompression.load();
+    auto compressed = timeseries::compressBucket(
+        bucket, options.getTimeField(), nss.getTimeseriesViewNamespace(), validateCompression);
+    if (compressed.compressedBucket) {
+        return *compressed.compressedBucket;
+    } else {
+        tasserted(7735101,
+                  fmt::format("Couldn't compress time-series bucket {}", bucket.toString()));
+        return bucket;
+    }
 }
 
 stdx::variant<write_ops::UpdateCommandRequest, write_ops::DeleteCommandRequest> makeModificationOp(
     const OID& bucketId, const CollectionPtr& coll, const std::vector<BSONObj>& measurements) {
+    // A bucket will be fully deleted if no measurements are passed in.
     if (measurements.empty()) {
         write_ops::DeleteOpEntry deleteEntry(BSON("_id" << bucketId), false);
         write_ops::DeleteCommandRequest op(coll->ns(), {deleteEntry});
@@ -420,6 +462,28 @@ stdx::variant<write_ops::UpdateCommandRequest, write_ops::DeleteCommandRequest> 
     }();
     auto replaceBucket = makeNewDocumentForWrite(
         bucketId, measurements, metadata, timeseriesOptions, coll->getDefaultCollator());
+
+    // An update or partial deletion to the bucket document will replace the bucket with an
+    // uncompressed bucket. We attempt to compress this bucket.
+    if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        const bool validateCompression = gValidateTimeseriesCompression.load();
+        auto compressed = timeseries::compressBucket(replaceBucket,
+                                                     timeseriesOptions->getTimeField(),
+                                                     coll->ns().getTimeseriesViewNamespace(),
+                                                     validateCompression);
+
+        // If compression fails, we fall back to writing the uncompressed document.
+        if (compressed.compressedBucket) {
+            replaceBucket = std::move(*compressed.compressedBucket);
+        } else {
+            LOGV2_DEBUG(7743300,
+                        1,
+                        "Bucket compression failed during update or delete",
+                        logAttrs(coll->ns()),
+                        "bucket"_attr = redact(replaceBucket));
+        }
+    }
 
     write_ops::UpdateModification u(replaceBucket);
     write_ops::UpdateOpEntry updateEntry(BSON("_id" << bucketId), std::move(u));
@@ -442,14 +506,12 @@ void getOpTimeAndElectionId(OperationContext* opCtx,
                             boost::optional<repl::OpTime>* opTime,
                             boost::optional<OID>* electionId) {
     auto* replCoord = repl::ReplicationCoordinator::get(opCtx->getServiceContext());
-    const auto replMode = replCoord->getReplicationMode();
+    const auto isReplSet = replCoord->getSettings().isReplSet();
 
-    *opTime = replMode != repl::ReplicationCoordinator::modeNone
+    *opTime = isReplSet
         ? boost::make_optional(repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp())
         : boost::none;
-    *electionId = replMode == repl::ReplicationCoordinator::modeReplSet
-        ? boost::make_optional(replCoord->getElectionId())
-        : boost::none;
+    *electionId = isReplSet ? boost::make_optional(replCoord->getElectionId()) : boost::none;
 }
 
 write_ops::InsertCommandRequest makeTimeseriesInsertOp(
@@ -457,7 +519,13 @@ write_ops::InsertCommandRequest makeTimeseriesInsertOp(
     const NamespaceString& bucketsNs,
     const BSONObj& metadata,
     std::vector<StmtId>&& stmtIds) {
-    write_ops::InsertCommandRequest op{bucketsNs, {makeNewDocumentForWrite(batch, metadata)}};
+    write_ops::InsertCommandRequest op{
+        bucketsNs,
+        {feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
+             serverGlobalParams.featureCompatibility)
+             ? makeNewCompressedDocumentForWrite(
+                   batch, metadata, bucketsNs.getTimeseriesViewNamespace(), batch->timeField)
+             : makeNewDocumentForWrite(batch, metadata)}};
     op.setWriteCommandRequestBase(makeTimeseriesWriteOpBase(std::move(stmtIds)));
     return op;
 }
@@ -484,12 +552,23 @@ write_ops::UpdateCommandRequest makeTimeseriesDecompressAndUpdateOp(
     const bool mustCheckExistenceForInsertOperations =
         static_cast<bool>(repl::tenantMigrationInfo(opCtx));
     auto diff = makeTimeseriesUpdateOpEntry(opCtx, batch, metadata).getU().getDiff();
-    auto after = doc_diff::applyDiff(
+    auto updated = doc_diff::applyDiff(
         batch->decompressed.value().after, diff, mustCheckExistenceForInsertOperations);
 
-    auto bucketDecompressionFunc =
-        [before = std::move(batch->decompressed.value().before),
-         after = std::move(after)](const BSONObj& bucketDoc) -> boost::optional<BSONObj> {
+    // Holds the compressed bucket document that's currently on-disk prior to this write batch
+    // running.
+    auto before = std::move(batch->decompressed.value().before);
+
+    // Holds the bucket document with the operations from the write batch applied when the always
+    // use compressed buckets feature flag is disabled. When enabled, holds the compressed version
+    // of the bucket document mentioned earlier.
+    auto after = feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
+                     serverGlobalParams.featureCompatibility)
+        ? compressAndUpdateBatch(updated, batch, bucketsNs)
+        : updated;
+
+    auto bucketTransformationFunc = [before = std::move(before), after = std::move(after)](
+                                        const BSONObj& bucketDoc) -> boost::optional<BSONObj> {
         // Make sure the document hasn't changed since we read it into the BucketCatalog.
         // This should not happen, but since we can double-check it here, we can guard
         // against the missed update that would result from simply replacing with 'after'.
@@ -499,10 +578,12 @@ write_ops::UpdateCommandRequest makeTimeseriesDecompressAndUpdateOp(
         return after;
     };
 
-    write_ops::UpdateCommandRequest op(
-        bucketsNs,
-        {makeTimeseriesTransformationOpEntry(
-            opCtx, batch->bucketHandle.bucketId.oid, std::move(bucketDecompressionFunc))});
+    auto updates = makeTimeseriesTransformationOpEntry(
+        opCtx,
+        /*bucketId=*/batch->bucketHandle.bucketId.oid,
+        /*transformationFunc=*/std::move(bucketTransformationFunc));
+
+    write_ops::UpdateCommandRequest op(bucketsNs, {updates});
     op.setWriteCommandRequestBase(makeTimeseriesWriteOpBase(std::move(stmtIds)));
     return op;
 }

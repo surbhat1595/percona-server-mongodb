@@ -248,18 +248,7 @@ TEST(IndexKeyValidateTest, WildcardIndexNumericKeyElementValueFailsIfZero) {
               validateKeyPattern(BSON("$**" << -0.0), IndexVersion::kV2));
 }
 
-TEST(IndexKeyValidateTest, WildcardIndexNumericKeyElementValueFailsIfNotPositive) {
-    RAIIServerParameterControllerForTest controller("featureFlagCompoundWildcardIndexes", false);
-    ASSERT_EQ(ErrorCodes::CannotCreateIndex,
-              validateKeyPattern(BSON("$**" << -0.1), IndexVersion::kV2));
-    ASSERT_EQ(ErrorCodes::CannotCreateIndex,
-              validateKeyPattern(BSON("$**" << -1), IndexVersion::kV2));
-    ASSERT_EQ(ErrorCodes::CannotCreateIndex,
-              validateKeyPattern(BSON("$**" << INT_MIN), IndexVersion::kV2));
-}
-
 TEST(IndexKeyValidateTest, WildcardIndexNumericKeyElementValueSucceedsIfNotPositive) {
-    RAIIServerParameterControllerForTest controller("featureFlagCompoundWildcardIndexes", true);
     ASSERT_OK(validateKeyPattern(BSON("$**" << -0.1), IndexVersion::kV2));
     ASSERT_OK(validateKeyPattern(BSON("$**" << -1), IndexVersion::kV2));
     ASSERT_OK(validateKeyPattern(BSON("$**" << INT_MIN), IndexVersion::kV2));
@@ -277,15 +266,7 @@ TEST(IndexKeyValidateTest, KeyElementNameWildcardFailsOnSubPathRepeat) {
     ASSERT_EQ(status, ErrorCodes::CannotCreateIndex);
 }
 
-TEST(IndexKeyValidateTest, KeyElementNameWildcardFailsOnCompound) {
-    RAIIServerParameterControllerForTest controller("featureFlagCompoundWildcardIndexes", false);
-    auto status = validateKeyPattern(BSON("$**" << 1 << "a" << 1), IndexVersion::kV2);
-    ASSERT_NOT_OK(status);
-    ASSERT_EQ(status, ErrorCodes::CannotCreateIndex);
-}
-
 TEST(IndexKeyValidateTest, KeyElementNameWildcardSucceedsOnCompound) {
-    RAIIServerParameterControllerForTest controller("featureFlagCompoundWildcardIndexes", true);
     ASSERT_OK(validateKeyPattern(BSON("$**" << 1 << "a" << 1), IndexVersion::kV2));
     ASSERT_OK(validateKeyPattern(BSON("a" << 1 << "$**" << 1), IndexVersion::kV2));
     ASSERT_OK(validateKeyPattern(BSON("a" << 1 << "$**" << -1 << "b" << 1), IndexVersion::kV2));
@@ -298,12 +279,10 @@ TEST(IndexKeyValidateTest, KeyElementNameWildcardFailsOnIncorrectValue) {
 }
 
 TEST(IndexKeyValidateTest, KeyElementNameWildcardFailsWhenValueIsPluginNameWithInvalidKeyName) {
-    RAIIServerParameterControllerForTest controller("featureFlagCompoundWildcardIndexes", false);
     auto status = validateKeyPattern(BSON("a"
                                           << "wildcard"),
                                      IndexVersion::kV2);
     ASSERT_NOT_OK(status);
-    ASSERT_EQ(status, ErrorCodes::CannotCreateIndex);
 }
 
 TEST(IndexKeyValidateTest, KeyElementNameWildcardFailsWhenValueIsPluginNameWithValidKeyName) {
@@ -466,6 +445,35 @@ TEST(IndexKeyValidateTest, RepairIndexSpecs) {
                    NamespaceString::createNamespaceString_forTest("coll"),
                    fromjson("{key: {a: 1}, name: 'index', sparse: 'true', background: '1', safe: "
                             "true, force: true}"))));
+
+    ASSERT(fromjson("{key: {a: 1}, name: 'index'}")
+               .binaryEqual(index_key_validate::repairIndexSpec(
+                   NamespaceString::createNamespaceString_forTest("coll"),
+                   fromjson("{key: {a: 1}, name: 'index', weights: {key: 1, name: 1}}"))));
+
+    ASSERT(fromjson("{key: {'a': 'text'}, name: 'index', weights: {key: 1, name: 1}}")
+               .binaryEqual(index_key_validate::repairIndexSpec(
+                   NamespaceString::createNamespaceString_forTest("coll"),
+                   fromjson("{key: {'a': 'text'}, name: 'index', weights: {key: 1, name: 1}}"))));
+
+    ASSERT(fromjson("{key: {'$**': 'text'}, name: 'index', weights: {key: 1, name: 1}}")
+               .binaryEqual(index_key_validate::repairIndexSpec(
+                   NamespaceString::createNamespaceString_forTest("coll"),
+                   fromjson("{key: {'$**': 'text'}, name: 'index', weights: {key: 1, name: 1}}"))));
+
+    ASSERT(fromjson("{key: {'data.loc' : '2dsphere_bucket'}, 'name': 'loc_2dsphere', "
+                    "'2dsphereIndexVersion' : 3}")
+               .binaryEqual(index_key_validate::repairIndexSpec(
+                   NamespaceString::createNamespaceString_forTest("coll"),
+                   fromjson("{key: {'data.loc' : '2dsphere_bucket'}, 'name': 'loc_2dsphere', "
+                            "'2dsphereIndexVersion' : 3}"))));
+
+    ASSERT(
+        fromjson("{key: {a: 1, 'name': 'text'}, name: 'index', weights: {key: 1, name: 1}}")
+            .binaryEqual(index_key_validate::repairIndexSpec(
+                NamespaceString::createNamespaceString_forTest("coll"),
+                fromjson(
+                    "{key: {a: 1, 'name': 'text'}, name: 'index', weights: {key: 1, name: 1}}"))));
 
     ASSERT(BSON("key" << BSON("a" << 1) << "name"
                       << "index"

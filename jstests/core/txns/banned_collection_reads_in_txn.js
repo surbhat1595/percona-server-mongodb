@@ -1,11 +1,13 @@
 // Tests that it is illegal to read from system.views and system.profile within a transaction.
-// The test runs commands that are not allowed with security token: profile.
+//
 // @tags: [
-//   not_allowed_with_security_token,uses_transactions, uses_snapshot_read_concern]
-(function() {
-"use strict";
+//   # The test runs commands that are not allowed with security token: profile.
+//   not_allowed_with_security_token,
+//   uses_transactions,
+//   uses_snapshot_read_concern
+// ]
 
-load("jstests/libs/fixture_helpers.js");  // For 'FixtureHelpers'.
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const session = db.getMongo().startSession();
 
@@ -16,7 +18,8 @@ assert.commandWorked(testDB.dropDatabase());
 testDB.runCommand({create: "foo", viewOn: "bar", pipeline: []});
 
 session.startTransaction({readConcern: {level: "snapshot"}});
-assert.commandFailedWithCode(testDB.runCommand({find: "system.views", filter: {}}), 51071);
+assert.commandFailedWithCode(testDB.runCommand({find: "system.views", filter: {}}),
+                             [ErrorCodes.OperationNotSupportedInTransaction, 51071]);
 assert.commandFailedWithCode(session.abortTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
 
 session.startTransaction({readConcern: {level: "snapshot"}});
@@ -25,9 +28,7 @@ assert.commandFailedWithCode(testDB.runCommand({find: "system.profile", filter: 
 assert.commandFailedWithCode(session.abortTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
 
 if (FixtureHelpers.isMongos(testDB)) {
-    // The rest of the test is concerned with a find by UUID which is not supported against
-    // mongos.
-    return;
+    quit();
 }
 
 const collectionInfos =
@@ -43,6 +44,5 @@ assert.neq(null, systemViewsUUID, "did not find UUID for system.views");
 
 session.startTransaction({readConcern: {level: "snapshot"}});
 assert.commandFailedWithCode(testDB.runCommand({find: systemViewsUUID, filter: {}}),
-                             [51070, 7195700]);
+                             [ErrorCodes.OperationNotSupportedInTransaction, 51070, 7195700]);
 assert.commandFailedWithCode(session.abortTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
-}());

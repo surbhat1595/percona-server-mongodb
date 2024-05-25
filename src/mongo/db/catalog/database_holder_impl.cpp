@@ -78,7 +78,7 @@ Database* DatabaseHolderImpl::getDb(OperationContext* opCtx, const DatabaseName&
             NamespaceString::validDBName(dbName, NamespaceString::DollarInDbNameBehavior::Allow));
 
     invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_IS) ||
-              (dbName.db().compare("local") == 0 && opCtx->lockState()->isLocked()));
+              (dbName.isLocalDB() && opCtx->lockState()->isLocked()));
 
     stdx::lock_guard<SimpleMutex> lk(_m);
     DBs::const_iterator it = _dbs.find(dbName);
@@ -228,7 +228,7 @@ void DatabaseHolderImpl::dropDb(OperationContext* opCtx, Database* db) {
         // dropCollectionEvenIfSystem(). For standalones, `system.views` and the ViewCatalog are
         // dropped/cleared here.
         auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-        if (!replCoord->isReplEnabled() && coll->ns().isSystemDotViews()) {
+        if (!replCoord->getSettings().isReplSet() && coll->ns().isSystemDotViews()) {
             opCtx->getServiceContext()->getOpObserver()->onDropCollection(
                 opCtx,
                 coll->ns(),

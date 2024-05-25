@@ -40,6 +40,7 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/service_context.h"
+#include "mongo/executor/task_executor_cursor.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/uuid.h"
 
@@ -60,11 +61,25 @@ public:
                                              ExpressionContext* expCtx);
 
     /**
-     * Injects shard filterer for $_internalSearchIdLookup stage on shard only. This method is not
-     * invoked for inner collection in $lookup, for instance, only when expanded pipeline is passed
-     * to the specific shard.
+     * This method works on preparation for $search in top level pipeline, or inner pipeline that is
+     * dispatched to shards. Nothing is done if first stage in the pipeline is not $search, and this
+     * method should only be invoked for the DocumentSource-based implementation.
+     * The preparation works includes:
+     * 1. Desugars $search stage into $_internalSearchMongotRemote and $_internalSearchIdLookup
+     * stages.
+     * 2. injects shard filterer for $_internalSearchIdLookup stage on shard only.
      */
-    virtual void injectSearchShardFiltererIfNeeded(Pipeline* pipeline){};
+    virtual void prepareSearchForTopLevelPipeline(Pipeline* pipeline) {}
+
+    /**
+     * This method works on preparation for $search in nested pipeline, e.g. sub-pipeline of
+     * $lookup, for local read. Nothing is done if first stage in the pipeline is not $search, and
+     * this method should only be invoked for the DocumentSource-based implementation.
+     * The preparation works includes:
+     * 1. Desugars $search stage into $_internalSearchMongotRemote and $_internalSearchIdLookup
+     * stages.
+     */
+    virtual void prepareSearchForNestedPipeline(Pipeline* pipeline) {}
 
     /**
      * Check to see if in the current environment an additional pipeline needs to be run by the
@@ -96,6 +111,51 @@ public:
      */
     virtual bool isSearchMetaPipeline(const Pipeline* pipeline) {
         return false;
+    }
+
+    /**
+     * Establish a cursor given the search query and CursorResponse from the initial execution.
+     */
+    boost::optional<executor::TaskExecutorCursor> establishSearchCursor(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        const BSONObj& query,
+        CursorResponse&& response,
+        boost::optional<long long> docsRequested = boost::none,
+        std::function<void(BSONObjBuilder& bob)> augmentGetMore = nullptr,
+        const boost::optional<int>& protocolVersion = boost::none) {
+        return boost::none;
+    }
+
+    /**
+     * Check if this is a $searchMeta stage.
+     */
+    virtual bool isSearchStage(DocumentSource* stage) {
+        return false;
+    }
+
+    /**
+     * Check if this is a $searchMeta stage.
+     */
+    virtual bool isSearchMetaStage(DocumentSource* stage) {
+        return false;
+    }
+
+    /**
+     * Gets the information for the search QSN from DocumentSourceSearch.
+     * The results are returned as a tuple of the format:
+     * <limit, mongotDocsRequested, searchQuery, taskExecutor, intermediateResultsProtocolVersion>
+     */
+    virtual std::unique_ptr<SearchNode> getSearchNode(DocumentSource* stage) {
+        return nullptr;
+    }
+
+    /**
+     * Executes the initial $search query to get the cursor id and first batch for building the
+     * $search SBE plan.
+     */
+    virtual std::pair<CursorResponse, CursorResponse> establishSearchQueryCursors(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx, const SearchNode* searchNode) {
+        return {CursorResponse(), CursorResponse()};
     }
 };
 

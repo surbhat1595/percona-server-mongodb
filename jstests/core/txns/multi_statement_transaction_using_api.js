@@ -1,13 +1,14 @@
 // Test basic transaction write ops, reads, and commit/abort using the shell helper.
-// The test runs commands that are not allowed with security token: endSession.
+//
 // @tags: [
-//   not_allowed_with_security_token,uses_transactions, uses_snapshot_read_concern]
-(function() {
-"use strict";
+//   # The test runs commands that are not allowed with security token: endSession.
+//   not_allowed_with_security_token,
+//   uses_transactions,
+//   uses_snapshot_read_concern
+// ]
 
 // TODO (SERVER-39704): Remove the following load after SERVER-397074 is completed
-// For withTxnAndAutoRetryOnMongos.
-load('jstests/libs/auto_retry_transaction_in_sharding.js');
+import {withTxnAndAutoRetryOnMongos} from "jstests/libs/auto_retry_transaction_in_sharding.js";
 
 const dbName = "test";
 const collName = "multi_transaction_test_using_api";
@@ -122,4 +123,3 @@ assert.eq(null, sessionColl.findOne({_id: "bulk-1"}));
 assert.eq(null, sessionColl.findOne({_id: "bulk-2"}));
 
 session.endSession();
-}());

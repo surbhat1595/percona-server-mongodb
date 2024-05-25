@@ -90,7 +90,9 @@ MONGO_FAIL_POINT_DEFINE(collModBeforeConfigServerUpdate);
 
 namespace {
 
-bool isShardedColl(OperationContext* opCtx, const NamespaceString& nss) {
+// This method requires callers to hold the DDL lock to ensure no concurrent DDL operations
+// interfere with the stability.
+bool isShardedCollection(OperationContext* opCtx, const NamespaceString& nss) {
     try {
         auto coll = Grid::get(opCtx)->catalogClient()->getCollection(opCtx, nss);
         return true;
@@ -167,7 +169,7 @@ void CollModCoordinator::_saveCollectionInfoOnCoordinatorIfNecessary(OperationCo
         info.timeSeriesOptions = timeseries::getTimeseriesOptions(opCtx, originalNss(), true);
         info.nsForTargeting =
             info.timeSeriesOptions ? originalNss().makeTimeseriesBucketsNamespace() : originalNss();
-        info.isSharded = isShardedColl(opCtx, info.nsForTargeting);
+        info.isSharded = isShardedCollection(opCtx, info.nsForTargeting);
         _collInfo = std::move(info);
     }
 }
@@ -287,7 +289,7 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                     uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(
                         configShard->runCommand(opCtx,
                                                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                                nss().db_forSharding().toString(),
+                                                nss().dbName(),
                                                 cmdObj,
                                                 Shard::RetryPolicy::kIdempotent)));
                 }
@@ -403,9 +405,8 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                         opCtx, originalNss(), cmd, true, &collModResBuilder));
                     auto collModRes = collModResBuilder.obj();
 
-                    const auto dbInfo =
-                        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(
-                            opCtx, nss().db_forSharding()));
+                    const auto dbInfo = uassertStatusOK(
+                        Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nss().dbName()));
                     const auto shard = uassertStatusOK(
                         Grid::get(opCtx)->shardRegistry()->getShard(opCtx, dbInfo->getPrimary()));
                     BSONObjBuilder builder;

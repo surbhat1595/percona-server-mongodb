@@ -2,17 +2,18 @@
  * Tests that the donorStartMigration and recipientSyncData commands throw when a node has options
  * set that are incompatible with protocol shard merge.
  *
- * @tags: [featureFlagShardMerge]
+ * @tags: [
+ *   featureFlagShardMerge,
+ *   serverless,
+ *   requires_fcv_71,
  * ]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {
     isShardMergeEnabled,
     kProtocolShardMerge,
-    makeMigrationCertificatesForTest,
 } from "jstests/replsets/libs/tenant_migration_util.js";
-
-load("jstests/libs/fail_point_util.js");
 
 function runTest(nodeOptions) {
     const rst = new ReplSetTest({nodes: 1, serverless: true, nodeOptions: nodeOptions});
@@ -33,7 +34,6 @@ function runTest(nodeOptions) {
     const adminDB = primary.getDB("admin");
     const kDummyConnStr = "mongodb://localhost/?replicaSet=foo";
     const readPreference = {mode: 'primary'};
-    const migrationCertificates = makeMigrationCertificatesForTest();
 
     // Enable below fail points to prevent starting the donor/recipient POS instance.
     configureFailPoint(primary, "returnResponseCommittedForDonorStartMigrationCmd");
@@ -53,8 +53,6 @@ function runTest(nodeOptions) {
             migrationId: UUID(),
             recipientConnectionString: kDummyConnStr,
             readPreference: readPreference,
-            donorCertificateForRecipient: migrationCertificates.donorCertificateForRecipient,
-            recipientCertificateForDonor: migrationCertificates.recipientCertificateForDonor,
             tenantIds: [ObjectId()]
         }),
         ErrorCodes.InvalidOptions,
@@ -69,8 +67,6 @@ function runTest(nodeOptions) {
             migrationId: UUID(),
             recipientConnectionString: kDummyConnStr,
             readPreference: readPreference,
-            donorCertificateForRecipient: migrationCertificates.donorCertificateForRecipient,
-            recipientCertificateForDonor: migrationCertificates.recipientCertificateForDonor
         }),
         ErrorCodes.InvalidOptions,
         "Expected donorStartMigration to fail when protocol is 'shard merge' and node options " +
@@ -84,8 +80,6 @@ function runTest(nodeOptions) {
             migrationId: UUID(),
             recipientConnectionString: kDummyConnStr,
             readPreference: readPreference,
-            donorCertificateForRecipient: migrationCertificates.donorCertificateForRecipient,
-            recipientCertificateForDonor: migrationCertificates.recipientCertificateForDonor,
             tenantIds: [ObjectId()],
             tenantId: ObjectId().str
         }),
@@ -102,8 +96,6 @@ function runTest(nodeOptions) {
             migrationId: UUID(),
             recipientConnectionString: kDummyConnStr,
             readPreference: readPreference,
-            donorCertificateForRecipient: migrationCertificates.donorCertificateForRecipient,
-            recipientCertificateForDonor: migrationCertificates.recipientCertificateForDonor,
             tenantIds: ["admin"]
         }),
         ErrorCodes.BadValue,
@@ -119,8 +111,6 @@ function runTest(nodeOptions) {
             migrationId: UUID(),
             recipientConnectionString: kDummyConnStr,
             readPreference: readPreference,
-            donorCertificateForRecipient: migrationCertificates.donorCertificateForRecipient,
-            recipientCertificateForDonor: migrationCertificates.recipientCertificateForDonor,
             tenantIds: [{}, ObjectId()]
         }),
         ErrorCodes.BadValue,
@@ -135,8 +125,6 @@ function runTest(nodeOptions) {
             migrationId: UUID(),
             recipientConnectionString: kDummyConnStr,
             readPreference: readPreference,
-            donorCertificateForRecipient: migrationCertificates.donorCertificateForRecipient,
-            recipientCertificateForDonor: migrationCertificates.recipientCertificateForDonor,
             tenantIds: []
         }),
         ErrorCodes.InvalidOptions,
@@ -153,7 +141,6 @@ function runTest(nodeOptions) {
             donorConnectionString: kDummyConnStr,
             readPreference: readPreference,
             startMigrationDonorTimestamp: Timestamp(1, 1),
-            recipientCertificateForDonor: migrationCertificates.recipientCertificateForDonor
         }),
         ErrorCodes.InvalidOptions,
         "Expected recipientSyncData to fail when protocol is 'shard merge' and node options " +

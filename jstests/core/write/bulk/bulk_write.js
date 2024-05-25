@@ -1,18 +1,16 @@
 /**
  * Tests bulk write command for valid input.
  *
- * The test runs commands that are not allowed with security token: bulkWrite.
  * @tags: [
- *   assumes_against_mongod_not_mongos,
+ *   # The test runs commands that are not allowed with security token: bulkWrite.
  *   not_allowed_with_security_token,
  *   command_not_supported_in_serverless,
  *   # TODO SERVER-52419 Remove this tag.
  *   featureFlagBulkWriteCommand,
+ *   # TODO SERVER-79506 Remove this tag.
+ *   assumes_unsharded_collection,
  * ]
  */
-(function() {
-"use strict";
-
 var coll = db.getCollection("coll");
 var coll1 = db.getCollection("coll1");
 coll.drop();
@@ -89,4 +87,3 @@ assert.eq(res.numErrors, 0);
 assert.eq(1, coll.count({_id: 3}));
 
 coll.drop();
-})();

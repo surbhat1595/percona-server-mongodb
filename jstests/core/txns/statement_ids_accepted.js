@@ -1,17 +1,17 @@
 // Makes sure all commands which are supposed to take statement ids do.  This should test all
 // commands that are allowed in transactions.
-// The test runs commands that are not allowed with security token: endSession, prepareTransaction.
+//
 // @tags: [
-//   not_allowed_with_security_token,
+//    # The test runs commands that are not allowed with security token: endSession,
+//    # prepareTransaction.
+//    not_allowed_with_security_token,
 //    uses_transactions,
 //    uses_prepare_transaction,
 //    # Tenant migrations don't support applyOps.
 //    tenant_migration_incompatible
 // ]
-load("jstests/libs/fixture_helpers.js");
 
-(function() {
-"use strict";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const dbName = "test";
 const collName = "statement_ids_accepted";
@@ -232,4 +232,3 @@ assert.commandWorked(sessionDb.adminCommand({
 }));
 
 session.endSession();
-}());

@@ -2,15 +2,12 @@
  * Tests that a batch size of zero can be used for aggregation commands, and all data can be
  * retrieved via getMores.
  */
-(function() {
-"use strict";
-
 const mongodOptions = {};
 const conn = MongoRunner.runMongod(mongodOptions);
 assert.neq(null, conn, "mongod failed to start with options " + tojson(mongodOptions));
 
 const testDB = conn.getDB("test");
-const coll = testDB[jsTest.name];
+const coll = testDB[jsTest.name()];
 coll.drop();
 
 // Test that an aggregate is successful on a non-existent collection.
@@ -85,4 +82,3 @@ assert.throws(() => cursor.itcount(), [], "expected getMore to fail");
 assertNumOpenCursors(0);
 
 MongoRunner.stopMongod(conn);
-}());

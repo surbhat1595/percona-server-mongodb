@@ -3,12 +3,12 @@
 //   requires_majority_read_concern,
 //   uses_change_streams,
 // ]
-(function() {
-"use strict";
-
-load('jstests/replsets/libs/two_phase_drops.js');  // For TwoPhaseDropCollectionTest.
-load('jstests/aggregation/extras/utils.js');       // For assertErrorCode().
-load('jstests/libs/change_stream_util.js');        // For assertChangeStreamEventEq.
+import {assertErrorCode} from "jstests/aggregation/extras/utils.js";
+import {
+    assertChangeStreamEventEq,
+    canonicalizeEventForTesting
+} from "jstests/libs/change_stream_util.js";
+import {TwoPhaseDropCollectionTest} from "jstests/replsets/libs/two_phase_drops.js";
 
 function runTest(collName, shardKey) {
     const st = new ShardingTest({
@@ -265,4 +265,3 @@ function runTest(collName, shardKey) {
 
 runTest('with_id_shard_key', '_id');
 runTest('with_non_id_shard_key', 'non_id');
-})();

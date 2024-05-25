@@ -28,12 +28,13 @@
  *   uses_transactions,
  * ]
  */
-(function() {
-"use strict";
-
-load('jstests/libs/profiler.js');
-load('jstests/sharding/libs/last_lts_mongod_commands.js');
-load('jstests/sharding/libs/last_lts_mongos_commands.js');
+import {profilerHasSingleMatchingEntryOrThrow} from "jstests/libs/profiler.js";
+import {
+    commandsRemovedFromMongodSinceLastLTS
+} from "jstests/sharding/libs/last_lts_mongod_commands.js";
+import {
+    commandsRemovedFromMongosSinceLastLTS
+} from "jstests/sharding/libs/last_lts_mongos_commands.js";
 
 // TODO SERVER-50144 Remove this and allow orphan checking.
 // This test calls removeShard which can leave docs in config.rangeDeletions in state "pending",
@@ -99,6 +100,7 @@ let testCases = {
     _configsvrCommitIndex: {skip: "internal command"},
     _configsvrCommitMergeAllChunksOnShard: {skip: "internal command"},
     _configsvrCommitMovePrimary: {skip: "internal command"},  // Can be removed once 6.0 is last LTS
+    _configsvrCommitRefineCollectionShardKey: {skip: "internal command"},
     _configsvrCommitReshardCollection: {skip: "internal command"},
     _configsvrConfigureCollectionBalancing: {skip: "internal command"},
     _configsvrCreateDatabase: {skip: "internal command"},
@@ -138,9 +140,6 @@ let testCases = {
     _mergeAuthzCollections: {skip: "internal command"},
     _migrateClone: {skip: "internal command"},
     _mongotConnPoolStats: {skip: "internal command"},
-    _movePrimaryRecipientSyncData: {skip: "internal command"},
-    _movePrimaryRecipientAbortMigration: {skip: "internal command"},
-    _movePrimaryRecipientForgetMigration: {skip: "internal command"},
     _recvChunkAbort: {skip: "internal command"},
     _recvChunkCommit: {skip: "internal command"},
     _recvChunkReleaseCritSec: {skip: "internal command"},
@@ -207,6 +206,7 @@ let testCases = {
     streams_getMetrics: {skip: "internal command"},
     _transferMods: {skip: "internal command"},
     _vectorClockPersist: {skip: "internal command"},
+    abortMoveCollection: {skip: "does not accept read or write concern"},
     abortReshardCollection: {skip: "does not accept read or write concern"},
     abortTransaction: {
         setUp: function(conn) {
@@ -392,8 +392,8 @@ let testCases = {
         shardedTargetsConfigServer: true,
         useLogs: true,
     },
-    createSearchIndex: {skip: "present in v6.3 but renamed to createSearchIndexes in v7.0"},
     createSearchIndexes: {skip: "does not accept read or write concern"},
+    createUnsplittableCollection: {skip: "does not accept read or write concern"},
     createUser: {
         command: {createUser: "foo", pwd: "bar", roles: []},
         checkReadConcern: false,
@@ -534,14 +534,12 @@ let testCases = {
     getDatabaseVersion: {skip: "does not accept read or write concern"},
     getDefaultRWConcern: {skip: "does not accept read or write concern"},
     getDiagnosticData: {skip: "does not accept read or write concern"},
-    getFreeMonitoringStatus: {skip: "does not accept read or write concern"},
     getLog: {skip: "does not accept read or write concern"},
     getMore: {skip: "does not accept read or write concern"},
     getParameter: {skip: "does not accept read or write concern"},
     getQueryableEncryptionCountInfo: {skip: "not profiled or logged"},
     getShardMap: {skip: "internal command"},
     getShardVersion: {skip: "internal command"},
-    getnonce: {skip: "removed in v6.3"},
     godinsert: {skip: "for testing only"},
     grantPrivilegesToRole: {
         setUp: function(conn) {
@@ -627,6 +625,7 @@ let testCases = {
         skip:
             "does not accept read or write concern (accepts writeConcern, but only explicitly and when _secondaryThrottle is true)"
     },
+    moveCollection: {skip: "does not accept read or write concern"},
     movePrimary: {skip: "does not accept read or write concern"},
     moveRange: {
         skip:
@@ -749,7 +748,6 @@ let testCases = {
     setCommittedSnapshot: {skip: "internal command"},
     setDefaultRWConcern: {skip: "special case (must run after all other commands)"},
     setFeatureCompatibilityVersion: {skip: "does not accept read or write concern"},
-    setFreeMonitoring: {skip: "does not accept read or write concern"},
     setProfilingFilterGlobally: {skip: "does not accept read or write concern"},
     setIndexCommitQuorum: {skip: "does not accept read or write concern"},
     setParameter: {skip: "does not accept read or write concern"},
@@ -777,9 +775,11 @@ let testCases = {
     testReshardCloneCollection: {skip: "internal command"},
     testVersions1And2: {skip: "does not accept read or write concern"},
     testVersion2: {skip: "does not accept read or write concern"},
+    timeseriesCatalogBucketParamsChanged: {skip: "internal command"},
     top: {skip: "does not accept read or write concern"},
     transitionFromDedicatedConfigServer: {skip: "does not accept read or write concern"},
     transitionToDedicatedConfigServer: {skip: "does not accept read or write concern"},
+    unshardCollection: {skip: "does not accept read or write concern"},
     update: {
         setUp: function(conn) {
             assert.commandWorked(conn.getCollection(nss).insert({x: 1}, {writeConcern: {w: 1}}));
@@ -939,6 +939,11 @@ function createProfileFilterForTestCase(test, targetId, explicitRWC) {
 function runScenario(
     desc, conn, regularCheckConn, configSvrCheckConn, {explicitRWC, explicitProvenance = false}) {
     let runCommandTest = function(cmdName, test) {
+        // These commands were removed but break this test in multiversion
+        if (cmdName === "getFreeMonitoringStatus" || cmdName === "setFreeMonitoring") {
+            return;
+        }
+
         assert(test !== undefined,
                "coverage failure: must define a RWC defaults application test for " + cmdName);
 
@@ -1122,4 +1127,3 @@ rst.stopSet();
 let st = new ShardingTest({mongos: 1, shards: {rs0: {nodes: 1}}});
 runTests(st.s0, st.rs0.getPrimary(), st.configRS.getPrimary(), true);
 st.stop();
-})();

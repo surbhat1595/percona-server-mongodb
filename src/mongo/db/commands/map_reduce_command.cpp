@@ -56,8 +56,7 @@ public:
     MapReduceCommand() = default;
 
     AllowedOnSecondary secondaryAllowed(ServiceContext* serviceContext) const override {
-        if (repl::ReplicationCoordinator::get(serviceContext)->getReplicationMode() !=
-            repl::ReplicationCoordinator::modeReplSet) {
+        if (!repl::ReplicationCoordinator::get(serviceContext)->getSettings().isReplSet()) {
             return AllowedOnSecondary::kAlways;
         }
         return AllowedOnSecondary::kOptIn;
@@ -81,7 +80,8 @@ public:
              BSONObjBuilder& result) override {
         return map_reduce_agg::runAggregationMapReduce(opCtx, dbName, cmdObj, result, boost::none);
     }
-} mapReduceCommand;
+};
+MONGO_REGISTER_COMMAND(MapReduceCommand);
 
 }  // namespace
 }  // namespace mongo

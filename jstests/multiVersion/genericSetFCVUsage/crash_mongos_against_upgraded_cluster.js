@@ -7,9 +7,6 @@
 
 TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 
-(function() {
-"use strict";
-
 function runTest(downgradeVersion) {
     jsTestLog("Running test with downgradeVersion: " + downgradeVersion);
     const downgradeFCV = binVersionToFCV(downgradeVersion);
@@ -26,7 +23,8 @@ function runTest(downgradeVersion) {
 
     // Assert that a mongos using the downgraded binary version will successfully connect to a
     // cluster running on the 'latest' binary version with the downgraded FCV.
-    assert.commandWorked(mongosAdminDB.runCommand({setFeatureCompatibilityVersion: downgradeFCV}));
+    assert.commandWorked(
+        mongosAdminDB.runCommand({setFeatureCompatibilityVersion: downgradeFCV, confirm: true}));
 
     // wait until all config server nodes are downgraded
     // awaitReplication waits for all secondaries to replicate primary's latest opTime which will
@@ -50,7 +48,8 @@ function runTest(downgradeVersion) {
 
     // Assert that the 'downgradeVersion' binary mongos will crash after the cluster is upgraded to
     // 'latestFCV'.
-    assert.commandWorked(mongosAdminDB.runCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        mongosAdminDB.runCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
     let error = assert.throws(function() {
         downgradedMongos.getDB("test").foo.insert({x: 1});
     });
@@ -62,4 +61,3 @@ function runTest(downgradeVersion) {
 
 runTest('last-continuous');
 runTest('last-lts');
-})();

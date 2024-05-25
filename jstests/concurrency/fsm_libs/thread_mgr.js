@@ -1,13 +1,14 @@
-'use strict';
-
-load('jstests/libs/parallelTester.js');                 // for Thread and CountDownLatch
-load('jstests/concurrency/fsm_libs/worker_thread.js');  // for workerThread
+import {getGlobalAssertLevel} from "jstests/concurrency/fsm_libs/assert.js";
+import {workerThread} from "jstests/concurrency/fsm_libs/worker_thread.js";
+import {Thread} from "jstests/libs/parallelTester.js";
 
 /**
  * Helper for spawning and joining worker threads.
  */
 
-var ThreadManager = function(clusterOptions, executionMode = {composed: false}) {
+export const ThreadManager = function(clusterOptions, executionMode = {
+    composed: false
+}) {
     if (!(this instanceof ThreadManager)) {
         return new ThreadManager(clusterOptions, executionMode);
     }
@@ -21,7 +22,7 @@ var ThreadManager = function(clusterOptions, executionMode = {composed: false}) 
                 return threadFn(workloads, args, options);
             } finally {
                 if (typeof db !== 'undefined') {
-                    db = null;
+                    globalThis.db = undefined;
                     gc();
                 }
             }
@@ -118,7 +119,7 @@ var ThreadManager = function(clusterOptions, executionMode = {composed: false}) 
                     cluster: cluster.getSerializedCluster(),
                     clusterOptions: clusterOptions,
                     seed: Random.randInt(1e13),  // contains range of Date.getTime()
-                    globalAssertLevel: globalAssertLevel,
+                    globalAssertLevel: getGlobalAssertLevel(),
                     errorLatch: errorLatch,
                     sessionOptions: options.sessionOptions
                 };
@@ -196,9 +197,9 @@ var ThreadManager = function(clusterOptions, executionMode = {composed: false}) 
  * workload and a composition of them, respectively.
  */
 
-workerThread.fsm = function(workloads, args, options) {
-    load('jstests/concurrency/fsm_libs/worker_thread.js');  // for workerThread.main
-    load('jstests/concurrency/fsm_libs/fsm.js');            // for fsm.run
+workerThread.fsm = async function(workloads, args, options) {
+    const {workerThread} = await import("jstests/concurrency/fsm_libs/worker_thread.js");
+    const {fsm} = await import("jstests/concurrency/fsm_libs/fsm.js");
 
     return workerThread.main(workloads, args, function(configs) {
         var workloads = Object.keys(configs);
@@ -207,9 +208,9 @@ workerThread.fsm = function(workloads, args, options) {
     });
 };
 
-workerThread.composed = function(workloads, args, options) {
-    load('jstests/concurrency/fsm_libs/worker_thread.js');  // for workerThread.main
-    load('jstests/concurrency/fsm_libs/composer.js');       // for composer.run
+workerThread.composed = async function(workloads, args, options) {
+    const {workerThread} = await import("jstests/concurrency/fsm_libs/worker_thread.js");
+    const {composer} = await import("jstests/concurrency/fsm_libs/composer.js");
 
     return workerThread.main(workloads, args, function(configs) {
         composer.run(workloads, configs, options);

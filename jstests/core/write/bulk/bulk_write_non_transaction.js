@@ -4,21 +4,19 @@
  * These tests are incompatible with the transaction overrides since any failure
  * will cause a transaction abortion which will make the overrides infinite loop.
  *
- * The test runs commands that are not allowed with security token: bulkWrite.
  * @tags: [
- *   assumes_against_mongod_not_mongos,
  *   not_allowed_with_security_token,
+ *   # The test runs commands that are not allowed with security token: bulkWrite.
  *   command_not_supported_in_serverless,
  *   # Contains commands that fail which will fail the entire transaction
  *   does_not_support_transactions,
  *   # TODO SERVER-52419 Remove this tag.
  *   featureFlagBulkWriteCommand,
+ *   # TODO SERVER-79506 Remove this tag.
+ *   assumes_unsharded_collection,
  * ]
  */
-load("jstests/libs/bulk_write_utils.js");  // For cursorEntryValidator.
-
-(function() {
-"use strict";
+import {cursorEntryValidator} from "jstests/libs/bulk_write_utils.js";
 
 var coll = db.getCollection("coll");
 var coll1 = db.getCollection("coll1");
@@ -144,53 +142,6 @@ assert.commandFailedWithCode(
 assert.eq(coll.find().itcount(), 0);
 assert.eq(coll1.find().itcount(), 0);
 
-// Make sure update multi:true + return fails the op.
-res = db.adminCommand({
-    bulkWrite: 1,
-    ops: [
-        {
-            update: 0,
-            filter: {_id: 1},
-            updateMods: {$set: {skey: "MongoDB2"}},
-            multi: true,
-            return: "post"
-        },
-    ],
-    nsInfo: [{ns: "test.coll"}]
-});
-
-assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
-
-cursorEntryValidator(res.cursor.firstBatch[0],
-                     {ok: 0, idx: 0, n: 0, nModified: 0, code: ErrorCodes.InvalidOptions});
-assert(!res.cursor.firstBatch[1]);
-
-// Test update providing returnFields without return option.
-res = db.adminCommand({
-    bulkWrite: 1,
-    ops: [
-        {insert: 0, document: {_id: 0, skey: "MongoDB"}},
-        {
-            update: 0,
-            filter: {_id: 0},
-            updateMods: {$set: {skey: "MongoDB2"}},
-            returnFields: {_id: 1}
-        },
-    ],
-    nsInfo: [{ns: "test.coll"}]
-});
-
-assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
-
-cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, idx: 0, n: 1});
-cursorEntryValidator(res.cursor.firstBatch[1],
-                     {ok: 0, idx: 1, n: 0, nModified: 0, code: ErrorCodes.InvalidOptions});
-assert(!res.cursor.firstBatch[2]);
-
-coll.drop();
-
 // Test update fails userAllowedWriteNS.
 res = db.adminCommand({
     bulkWrite: 1,
@@ -222,13 +173,7 @@ res = db.adminCommand({
     bulkWrite: 1,
     ops: [
         {update: 0, filter: {x: 3}, updateMods: {$inc: {x: 1}}, upsert: true},
-        {
-            update: 1,
-            filter: {_id: 1},
-            updateMods: {$set: {skey: "MongoDB2"}},
-            upsert: true,
-            return: "post"
-        },
+        {update: 1, filter: {_id: 1}, updateMods: {$set: {skey: "MongoDB2"}}, upsert: true},
     ],
     nsInfo: [{ns: "test.coll2"}, {ns: "test.coll"}],
     ordered: false
@@ -241,8 +186,7 @@ cursorEntryValidator(res.cursor.firstBatch[0],
                      {ok: 0, idx: 0, n: 0, nModified: 0, code: ErrorCodes.DuplicateKey});
 cursorEntryValidator(res.cursor.firstBatch[1], {ok: 1, idx: 1, n: 1, nModified: 0});
 
-assert.docEq(res.cursor.firstBatch[1].upserted, {index: 0, _id: 1});
-assert.docEq(res.cursor.firstBatch[1].value, {_id: 1, skey: "MongoDB2"});
+assert.docEq(res.cursor.firstBatch[1].upserted, {_id: 1});
 assert(!res.cursor.firstBatch[2]);
 coll.drop();
 coll2.drop();
@@ -255,13 +199,7 @@ res = db.adminCommand({
     bulkWrite: 1,
     ops: [
         {update: 0, filter: {x: 3}, updateMods: {$inc: {x: 1}}, upsert: true},
-        {
-            update: 1,
-            filter: {_id: 1},
-            updateMods: {$set: {skey: "MongoDB2"}},
-            upsert: true,
-            return: "post"
-        },
+        {update: 1, filter: {_id: 1}, updateMods: {$set: {skey: "MongoDB2"}}, upsert: true},
         {insert: 0, document: {_id: 1, skey: "MongoDB"}},
     ],
     nsInfo: [{ns: "test.coll2"}, {ns: "test.coll"}],
@@ -406,42 +344,6 @@ assert.eq(coll1.find().itcount(), 1);
 coll.drop();
 coll1.drop();
 
-// Make sure delete multi:true + return fails the op.
-res = db.adminCommand({
-    bulkWrite: 1,
-    ops: [
-        {delete: 0, filter: {_id: 1}, multi: true, return: true},
-    ],
-    nsInfo: [{ns: "test.coll"}]
-});
-
-assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
-
-cursorEntryValidator(res.cursor.firstBatch[0],
-                     {ok: 0, n: 0, idx: 0, code: ErrorCodes.InvalidOptions});
-assert(!res.cursor.firstBatch[1]);
-
-// Test delete providing returnFields without return option.
-res = db.adminCommand({
-    bulkWrite: 1,
-    ops: [
-        {insert: 0, document: {_id: 0, skey: "MongoDB"}},
-        {delete: 0, filter: {_id: 0}, returnFields: {_id: 1}},
-    ],
-    nsInfo: [{ns: "test.coll"}]
-});
-
-assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
-
-cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, idx: 0, n: 1});
-cursorEntryValidator(res.cursor.firstBatch[1],
-                     {ok: 0, n: 0, idx: 1, code: ErrorCodes.InvalidOptions});
-assert(!res.cursor.firstBatch[2]);
-
-coll.drop();
-
 // Test delete fails userAllowedWriteNS.
 res = db.adminCommand({
     bulkWrite: 1,
@@ -470,7 +372,7 @@ res = db.adminCommand({
             delete: 0,
             filter: {_id: 0},
         },
-        {delete: 1, filter: {_id: 1}, return: true}
+        {delete: 1, filter: {_id: 1}}
     ],
     nsInfo: [{ns: "test.system.profile"}, {ns: "test.coll"}],
     ordered: false
@@ -482,7 +384,6 @@ assert.eq(res.numErrors, 1);
 cursorEntryValidator(res.cursor.firstBatch[0],
                      {ok: 0, idx: 0, n: 0, code: ErrorCodes.InvalidNamespace});
 cursorEntryValidator(res.cursor.firstBatch[1], {ok: 1, idx: 1, n: 1});
-assert.docEq(res.cursor.firstBatch[1].value, {_id: 1, skey: "MongoDB"});
 assert(!res.cursor.firstBatch[2]);
 
 assert(!coll.findOne());
@@ -498,7 +399,7 @@ res = db.adminCommand({
             delete: 0,
             filter: {_id: 0},
         },
-        {delete: 1, filter: {_id: 1}, return: true},
+        {delete: 1, filter: {_id: 1}},
         {insert: 0, document: {_id: 1, skey: "MongoDB"}},
     ],
     nsInfo: [{ns: "test.system.profile"}, {ns: "test.coll"}],
@@ -512,79 +413,6 @@ cursorEntryValidator(res.cursor.firstBatch[0],
 assert(!res.cursor.firstBatch[1]);
 
 assert.eq(coll.findOne().skey, "MongoDB");
-
-coll.drop();
-
-// Test running multiple findAndModify ops in a command.
-// For normal commands this should succeed and for retryable writes the top level should fail.
-
-// Want to make sure both update + delete handle this correctly so test the following combinations
-// of ops. update + delete, delete + update. This will prove that both ops set and check the flag
-// correctly so doing update + update and delete + delete is redundant.
-
-// update + delete
-res = db.adminCommand({
-    bulkWrite: 1,
-    ops: [
-        {insert: 0, document: {_id: 1, skey: "MongoDB"}},
-        {update: 0, filter: {_id: 1}, updateMods: {$set: {skey: "MongoDB2"}}, return: "pre"},
-        {delete: 0, filter: {_id: 1}, return: true},
-    ],
-    nsInfo: [{ns: "test.coll"}]
-});
-
-let processCursor = true;
-try {
-    assert.commandWorked(res);
-    assert.eq(res.numErrors, 0);
-} catch {
-    processCursor = false;
-    assert.commandFailedWithCode(res, [ErrorCodes.BadValue]);
-    assert.eq(res.errmsg, "BulkWrite can only support 1 op with a return for a retryable write");
-}
-
-if (processCursor) {
-    cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, idx: 0, n: 1});
-    cursorEntryValidator(res.cursor.firstBatch[1], {ok: 1, idx: 1, n: 1, nModified: 1});
-    assert.docEq(res.cursor.firstBatch[1].value, {_id: 1, skey: "MongoDB"});
-    cursorEntryValidator(res.cursor.firstBatch[2], {ok: 1, idx: 2, n: 1});
-    assert.docEq(res.cursor.firstBatch[2].value, {_id: 1, skey: "MongoDB2"});
-    assert(!res.cursor.firstBatch[3]);
-}
-
-coll.drop();
-
-// delete + update
-res = db.adminCommand({
-    bulkWrite: 1,
-    ops: [
-        {insert: 0, document: {_id: 1, skey: "MongoDB"}},
-        {insert: 0, document: {_id: 2, skey: "MongoDB"}},
-        {delete: 0, filter: {_id: 2}, return: true},
-        {update: 0, filter: {_id: 1}, updateMods: {$set: {skey: "MongoDB2"}}, return: "pre"},
-    ],
-    nsInfo: [{ns: "test.coll"}]
-});
-
-processCursor = true;
-try {
-    assert.commandWorked(res);
-    assert.eq(res.numErrors, 0);
-} catch {
-    processCursor = false;
-    assert.commandFailedWithCode(res, [ErrorCodes.BadValue]);
-    assert.eq(res.errmsg, "BulkWrite can only support 1 op with a return for a retryable write");
-}
-
-if (processCursor) {
-    cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, idx: 0, n: 1});
-    cursorEntryValidator(res.cursor.firstBatch[1], {ok: 1, idx: 1, n: 1});
-    cursorEntryValidator(res.cursor.firstBatch[2], {ok: 1, idx: 2, n: 1});
-    assert.docEq(res.cursor.firstBatch[2].value, {_id: 2, skey: "MongoDB"});
-    cursorEntryValidator(res.cursor.firstBatch[3], {ok: 1, idx: 3, n: 1, nModified: 1});
-    assert.docEq(res.cursor.firstBatch[3].value, {_id: 1, skey: "MongoDB"});
-    assert(!res.cursor.firstBatch[4]);
-}
 
 coll.drop();
 
@@ -656,8 +484,7 @@ res = db.adminCommand({
             update: 0,
             filter: {$expr: {$eq: ["$skey", "MongoDB"]}},
             updateMods: {skey: "$$targetKey"},
-            constants: {targetKey: "MongoDB2"},
-            return: "post"
+            constants: {targetKey: "MongoDB2"}
         },
     ],
     nsInfo: [{ns: "test.coll"}],
@@ -672,4 +499,29 @@ assert.eq(res.cursor.firstBatch[0].errmsg,
 assert(!res.cursor.firstBatch[1]);
 
 coll.drop();
-})();
+
+// Test Upsert = True with UpsertSupplied = True (no match and constants.new is missing)
+res = db.adminCommand({
+    bulkWrite: 1,
+    ops: [
+        {
+            update: 0,
+            filter: {_id: 1},
+            updateMods: [{$set: {skey: "MongoDB2"}}],
+            upsert: true,
+            upsertSupplied: true,
+            constants: {},
+        },
+    ],
+    nsInfo: [{ns: "test.coll"}]
+});
+
+assert.commandWorked(res);
+assert.eq(res.numErrors, 1);
+
+cursorEntryValidator(res.cursor.firstBatch[0], {ok: 0, idx: 0, n: 0, nModified: 0, code: 9});
+assert.eq(res.cursor.firstBatch[0].errmsg,
+          "the parameter 'upsertSupplied' is set to 'true', but no document was supplied");
+assert(!res.cursor.firstBatch[1]);
+
+coll.drop();

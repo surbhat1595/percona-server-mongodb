@@ -201,7 +201,7 @@ public:
             uassert(ErrorCodes::InvalidOptions,
                     "The '$_internalReadAtClusterTime' option is only supported when replication is"
                     " enabled",
-                    replCoord->isReplEnabled());
+                    replCoord->getSettings().isReplSet());
 
             uassert(ErrorCodes::TypeMismatch,
                     "The '$_internalReadAtClusterTime' option must be a Timestamp",
@@ -258,15 +258,6 @@ public:
 
         const bool isPointInTimeRead =
             opCtx->recoveryUnit()->getTimestampReadSource() == RecoveryUnit::ReadSource::kProvided;
-
-        boost::optional<ShouldNotConflictWithSecondaryBatchApplicationBlock> shouldNotConflictBlock;
-        if (isPointInTimeRead) {
-            // If we are performing a read at a timestamp, then we allow oplog application to
-            // proceed concurrently with the dbHash command. This is done to ensure a prepare
-            // conflict is able to eventually be resolved by processing a later commitTransaction or
-            // abortTransaction oplog entry.
-            shouldNotConflictBlock.emplace(opCtx->lockState());
-        }
 
         // We take the global lock here as dbHash runs lock-free with point-in-time catalog lookups.
         Lock::GlobalLock globalLock(opCtx, MODE_IS);
@@ -424,18 +415,6 @@ public:
 
 private:
     std::string _hashCollection(OperationContext* opCtx, const CollectionPtr& collection) {
-        boost::optional<Lock::CollectionLock> collLock;
-        if (opCtx->recoveryUnit()->getTimestampReadSource() ==
-            RecoveryUnit::ReadSource::kProvided) {
-            // When performing a read at a timestamp, we are only holding the database lock in
-            // intent mode. We need to also acquire the collection lock in intent mode to ensure
-            // reading from the consistent snapshot doesn't overlap with any catalog operations on
-            // the collection.
-            invariant(opCtx->lockState()->isCollectionLockedForMode(collection->ns(), MODE_IS));
-        } else {
-            invariant(opCtx->lockState()->isDbLockedForMode(collection->ns().dbName(), MODE_S));
-        }
-
         auto desc = collection->getIndexCatalog()->findIdIndex(opCtx);
 
         std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec;
@@ -479,8 +458,8 @@ private:
 
         return hash;
     }
-
-} dbhashCmd;
+};
+MONGO_REGISTER_COMMAND(DBHashCmd);
 
 }  // namespace
 }  // namespace mongo

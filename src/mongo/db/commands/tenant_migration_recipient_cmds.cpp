@@ -53,7 +53,6 @@
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/shard_merge_recipient_service.h"
-#include "mongo/db/repl/tenant_migration_pem_payload_gen.h"
 #include "mongo/db/repl/tenant_migration_recipient_service.h"
 #include "mongo/db/repl/tenant_migration_state_machine_gen.h"
 #include "mongo/db/repl/tenant_migration_util.h"
@@ -86,10 +85,6 @@ public:
     using Request = RecipientSyncData;
     using Response = RecipientSyncDataResponse;
 
-    std::set<StringData> sensitiveFieldNames() const final {
-        return {Request::kRecipientCertificateForDonorFieldName};
-    }
-
     class Invocation : public InvocationBase {
 
     public:
@@ -103,6 +98,10 @@ public:
             uassert(ErrorCodes::IllegalOperation,
                     "tenant migrations are only available if --serverless is enabled",
                     repl::ReplicationCoordinator::get(opCtx)->getSettings().isServerless());
+
+            uassert(ErrorCodes::IllegalOperation,
+                    "Cannot run tenant migration with x509 authentication",
+                    repl::tenantMigrationDisableX509Auth);
 
             // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
             uassert(
@@ -150,15 +149,6 @@ public:
                                                       cmd.getTenantId()->toString(),
                                                       cmd.getStartMigrationDonorTimestamp(),
                                                       cmd.getReadPreference());
-
-            if (!repl::tenantMigrationDisableX509Auth) {
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream() << "'" << Request::kRecipientCertificateForDonorFieldName
-                                      << "' is a required field",
-                        cmd.getRecipientCertificateForDonor());
-                stateDoc.setRecipientCertificateForDonor(cmd.getRecipientCertificateForDonor());
-            }
-
             stateDoc.setProtocol(MigrationProtocolEnum::kMultitenantMigrations);
 
             auto recipientService =
@@ -183,14 +173,6 @@ public:
                                                  *cmd.getTenantIds(),
                                                  cmd.getStartMigrationDonorTimestamp(),
                                                  cmd.getReadPreference());
-
-            if (!repl::tenantMigrationDisableX509Auth) {
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream() << "'" << Request::kRecipientCertificateForDonorFieldName
-                                      << "' is a required field",
-                        cmd.getRecipientCertificateForDonor());
-                stateDoc.setRecipientCertificateForDonor(cmd.getRecipientCertificateForDonor());
-            }
 
             auto recipientService =
                 repl::PrimaryOnlyServiceRegistry::get(opCtx->getServiceContext())
@@ -236,9 +218,8 @@ public:
     BasicCommand::AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return BasicCommand::AllowedOnSecondary::kNever;
     }
-
-} recipientSyncDataCmd;
-
+};
+MONGO_REGISTER_COMMAND(RecipientSyncDataCmd);
 
 class RecipientVoteImportedFilesCommand final
     : public TypedCommand<RecipientVoteImportedFilesCommand> {
@@ -275,18 +256,18 @@ public:
             LOGV2(6112805,
                   "Received RecipientVoteImportedFiles request",
                   "migrationId"_attr = cmd.getMigrationId(),
-                  "from"_attr = cmd.getFrom(),
-                  "success"_attr = cmd.getSuccess(),
-                  "reason"_attr = cmd.getReason());
-
+                  "from"_attr = cmd.getFrom());
             auto recipientService =
                 repl::PrimaryOnlyServiceRegistry::get(opCtx->getServiceContext())
                     ->lookupServiceByName(
                         repl::ShardMergeRecipientService::kShardMergeRecipientServiceName);
             auto [instance, _] = repl::ShardMergeRecipientService::Instance::lookup(
                 opCtx, recipientService, BSON("_id" << cmd.getMigrationId()));
-            uassert(8423340, "Unknown migrationId", instance);
-            (*instance)->onMemberImportedFiles(cmd.getFrom(), cmd.getSuccess(), cmd.getReason());
+            uassert(ErrorCodes::NoSuchTenantMigration,
+                    str::stream() << "Could not find tenant migration with id "
+                                  << cmd.getMigrationId(),
+                    instance);
+            (*instance)->onMemberImportedFiles(cmd.getFrom());
         }
 
     private:
@@ -307,7 +288,8 @@ public:
                             ActionType::internal));
         }
     };
-} recipientVoteImportedFilesCommand;
+};
+MONGO_REGISTER_COMMAND(RecipientVoteImportedFilesCommand);
 
 class RecipientForgetMigrationCmd : public TypedCommand<RecipientForgetMigrationCmd> {
 public:
@@ -318,10 +300,6 @@ public:
     // and persist a state document that's marked garbage collectable (which is done by the
     // main chain).
     static inline const Timestamp kUnusedStartMigrationTimestamp{1, 1};
-
-    std::set<StringData> sensitiveFieldNames() const final {
-        return {Request::kRecipientCertificateForDonorFieldName};
-    }
 
     class Invocation : public InvocationBase {
 
@@ -336,6 +314,10 @@ public:
             uassert(ErrorCodes::IllegalOperation,
                     "tenant migrations are only available if --serverless is enabled",
                     repl::ReplicationCoordinator::get(opCtx)->getSettings().isServerless());
+
+            uassert(ErrorCodes::IllegalOperation,
+                    "Cannot run tenant migration with x509 authentication",
+                    repl::tenantMigrationDisableX509Auth);
 
             const auto& cmd = request();
             const auto migrationProtocol = cmd.getProtocol().value_or(kDefaultMigrationProtocol);
@@ -378,14 +360,6 @@ public:
                                                       kUnusedStartMigrationTimestamp,
                                                       cmd.getReadPreference());
 
-            if (!repl::tenantMigrationDisableX509Auth) {
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream() << "'" << Request::kRecipientCertificateForDonorFieldName
-                                      << "' is a required field",
-                        cmd.getRecipientCertificateForDonor());
-                stateDoc.setRecipientCertificateForDonor(cmd.getRecipientCertificateForDonor());
-            }
-
             stateDoc.setProtocol(MigrationProtocolEnum::kMultitenantMigrations);
             // Set the state to 'kDone' so that we don't create a recipient access blocker
             // unnecessarily if this recipientForgetMigration command is received before a
@@ -412,14 +386,6 @@ public:
                                                  *cmd.getTenantIds(),
                                                  kUnusedStartMigrationTimestamp,
                                                  cmd.getReadPreference());
-
-            if (!repl::tenantMigrationDisableX509Auth) {
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream() << "'" << Request::kRecipientCertificateForDonorFieldName
-                                      << "' is a required field",
-                        cmd.getRecipientCertificateForDonor());
-                stateDoc.setRecipientCertificateForDonor(cmd.getRecipientCertificateForDonor());
-            }
 
             // Set 'startGarbageCollect' true to not start a migration (and install access blocker
             // or get serverless lock) unncessarily if this recipientForgetMigration command is
@@ -469,8 +435,8 @@ public:
     BasicCommand::AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return BasicCommand::AllowedOnSecondary::kNever;
     }
-
-} recipientForgetMigrationCmd;
+};
+MONGO_REGISTER_COMMAND(RecipientForgetMigrationCmd);
 
 }  // namespace
 }  // namespace mongo

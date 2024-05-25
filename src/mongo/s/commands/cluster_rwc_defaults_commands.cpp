@@ -89,7 +89,7 @@ public:
         auto cmdResponse = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-            DatabaseName::kAdmin.toString(),
+            DatabaseName::kAdmin,
             CommandHelpers::appendMajorityWriteConcern(
                 CommandHelpers::filterCommandRequestForPassthrough(cmdObj),
                 opCtx->getWriteConcern()),
@@ -144,7 +144,8 @@ public:
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
-} clusterSetDefaultRWConcernCommand;
+};
+MONGO_REGISTER_COMMAND(ClusterSetDefaultRWConcernCommand);
 
 /**
  * Implements the getDefaultRWConcern command on mongos.
@@ -177,7 +178,7 @@ public:
             auto cmdResponse = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
                 opCtx,
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                DatabaseName::kAdmin.toString(),
+                DatabaseName::kAdmin,
                 applyReadWriteConcern(opCtx, this, configsvrRequest.toBSON({})),
                 Shard::RetryPolicy::kIdempotent));
 
@@ -217,7 +218,8 @@ public:
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
-} clusterGetDefaultRWConcernCommand;
+};
+MONGO_REGISTER_COMMAND(ClusterGetDefaultRWConcernCommand);
 
 }  // namespace
 }  // namespace mongo

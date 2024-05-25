@@ -9,9 +9,7 @@
  * @tags: [requires_persistence]
  */
 
-(function() {
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/write_concern_util.js");
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 
 const oplogApplierBatchSize = 100;
 
@@ -128,16 +126,16 @@ function runTest(crashAfterRollbackTruncation) {
     rst.freeze(primary);
     rst.awaitNodesAgreeOnPrimary(undefined, undefined, secondary2);
 
-    for (const fp of stopReplProducerOnDocumentFailpoints) {
-        fp.off();
-    }
-
     // Wait for secondary2 to be a writable primary.
     rst.getPrimary();
 
     // Do a write which becomes majority committed and wait for secondary1 to complete its rollback.
     assert.commandWorked(
         secondary2.getCollection("test.dummy").insert({}, {writeConcern: {w: 'majority'}}));
+
+    for (const fp of stopReplProducerOnDocumentFailpoints) {
+        fp.off();
+    }
 
     // Wait for rollback to finish truncating oplog.
     // Entering rollback will close connections so we expect some network errors while waiting.
@@ -193,4 +191,3 @@ runTest(false);
 // Extends the test to crash the secondary in the middle of rollback right after oplog truncation.
 // We assert that the update made to the 'config.transactions' table persisted on startup.
 runTest(true);
-})();

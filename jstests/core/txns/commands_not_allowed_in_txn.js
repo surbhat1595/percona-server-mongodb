@@ -1,6 +1,8 @@
 // Test commands that are not allowed in multi-document transactions.
-// The test runs commands that are not allowed with security token: applyOps, endSession, mapReduce.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: applyOps, endSession,
+//   # mapReduce.
 //   not_allowed_with_security_token,
 //   uses_snapshot_read_concern,
 //   uses_transactions,
@@ -8,12 +10,8 @@
 //   tenant_migration_incompatible,
 // ]
 
-(function() {
-"use strict";
-
 // TODO (SERVER-39704): Remove the following load after SERVER-397074 is completed
-// For retryOnceOnTransientOnMongos.
-load('jstests/libs/auto_retry_transaction_in_sharding.js');
+import {retryOnceOnTransientOnMongos} from "jstests/libs/auto_retry_transaction_in_sharding.js";
 
 const dbName = "test";
 const collName = "commands_not_allowed_in_txn";
@@ -176,4 +174,3 @@ if (!runningOnMongos) {
 }
 
 session.endSession();
-}());

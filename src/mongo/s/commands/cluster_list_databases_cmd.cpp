@@ -149,7 +149,7 @@ public:
                 auto response = uassertStatusOK(
                     s->runCommandWithFixedRetryAttempts(opCtx,
                                                         ReadPreferenceSetting::get(opCtx),
-                                                        "admin",
+                                                        DatabaseName::kAdmin,
                                                         filteredCmd,
                                                         Shard::RetryPolicy::kIdempotent));
                 uassertStatusOK(response.commandStatus);
@@ -231,7 +231,8 @@ public:
             return reply;
         }
     };
-} listDatabasesCmd;
+};
+MONGO_REGISTER_COMMAND(ListDatabasesCmd);
 
 }  // namespace
 }  // namespace mongo

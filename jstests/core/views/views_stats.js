@@ -4,8 +4,8 @@
 // stage. The former operation must be routed to the primary in a replica set, whereas the latter
 // may be routed to a secondary.
 //
-// The test runs commands that are not allowed with security token: top.
 // @tags: [
+//     # The test runs commands that are not allowed with security token: top.
 //     not_allowed_with_security_token,
 //     assumes_read_preference_unchanged,
 //     assumes_unsharded_collection,
@@ -14,10 +14,13 @@
 //     does_not_support_repeated_reads,
 // ]
 
-(function() {
-"use strict";
-load("jstests/libs/stats.js");
-load("jstests/libs/fixture_helpers.js");
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {
+    assertHistogramDiffEq,
+    assertTopDiffEq,
+    getHistogramStats,
+    getTop
+} from "jstests/libs/stats.js";
 
 let viewsDB = db.getSiblingDB("views_stats");
 assert.commandWorked(viewsDB.dropDatabase());
@@ -45,13 +48,13 @@ lastHistogram = assertHistogramDiffEq(view, lastHistogram, 0, 1, 0);
 
 if (FixtureHelpers.isMongos(viewsDB)) {
     jsTest.log("Tests are being run on a mongos; skipping top tests.");
-    return;
+    quit();
 }
 
 // Check the top counters.
 let lastTop = getTop(view);
 if (lastTop === undefined) {
-    return;
+    quit();
 }
 
 view.aggregate([{$match: {}}]);
@@ -69,7 +72,7 @@ lastTop = assertTopDiffEq(view, lastTop, "update", 1);
 // Check that operations on the backing collection do not modify the view stats.
 lastTop = getTop(view);
 if (lastTop === undefined) {
-    return;
+    quit();
 }
 
 lastHistogram = getHistogramStats(view);
@@ -82,4 +85,3 @@ assertTopDiffEq(view, lastTop, "insert", 0);
 assertTopDiffEq(view, lastTop, "update", 0);
 assertTopDiffEq(view, lastTop, "remove", 0);
 assertHistogramDiffEq(view, lastHistogram, 0, 0, 0);
-}());

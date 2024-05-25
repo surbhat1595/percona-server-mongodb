@@ -85,9 +85,9 @@
 namespace mongo {
 namespace {
 
-class UnshardedCollection : public ScopedCollectionDescription::Impl {
+class UntrackedCollection : public ScopedCollectionDescription::Impl {
 public:
-    UnshardedCollection() = default;
+    UntrackedCollection() = default;
 
     const CollectionMetadata& get() override {
         return _metadata;
@@ -97,7 +97,7 @@ private:
     CollectionMetadata _metadata;
 };
 
-const auto kUnshardedCollection = std::make_shared<UnshardedCollection>();
+const auto kUntrackedCollection = std::make_shared<UntrackedCollection>();
 
 boost::optional<ShardVersion> getOperationReceivedVersion(OperationContext* opCtx,
                                                           const NamespaceString& nss) {
@@ -131,13 +131,14 @@ CollectionShardingRuntime::ScopedExclusiveCollectionShardingRuntime::
 CollectionShardingRuntime::CollectionShardingRuntime(ServiceContext* service, NamespaceString nss)
     : _serviceContext(service),
       _nss(std::move(nss)),
-      _metadataType(_nss.isNamespaceAlwaysUnsharded() ? MetadataType::kUnsharded
+      _metadataType(_nss.isNamespaceAlwaysUntracked() ? MetadataType::kUntracked
                                                       : MetadataType::kUnknown) {}
 
 CollectionShardingRuntime::ScopedSharedCollectionShardingRuntime
 CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(OperationContext* opCtx,
                                                                   const NamespaceString& nss) {
-    dassert(opCtx->lockState()->isCollectionLockedForMode(nss, MODE_IS));
+    dassert(opCtx->lockState()->isCollectionLockedForMode(nss, MODE_IS) ||
+            (nss.isCommand() && opCtx->inMultiDocumentTransaction()));
     return ScopedSharedCollectionShardingRuntime(
         ScopedCollectionShardingState::acquireScopedCollectionShardingState(opCtx, nss, MODE_IS));
 }
@@ -173,6 +174,7 @@ ScopedCollectionFilter CollectionShardingRuntime::getOwnershipFilter(
         _getMetadataWithVersionCheckAt(opCtx,
                                        repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime(),
                                        optReceivedShardVersion,
+                                       true /* preserveRange */,
                                        supportNonVersionedOperations);
 
     return {std::move(metadata)};
@@ -182,8 +184,10 @@ ScopedCollectionFilter CollectionShardingRuntime::getOwnershipFilter(
     OperationContext* opCtx,
     OrphanCleanupPolicy orphanCleanupPolicy,
     const ShardVersion& receivedShardVersion) const {
-    return _getMetadataWithVersionCheckAt(
-        opCtx, repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime(), receivedShardVersion);
+    return _getMetadataWithVersionCheckAt(opCtx,
+                                          repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime(),
+                                          receivedShardVersion,
+                                          true /* preserveRange */);
 }
 
 ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
@@ -195,17 +199,17 @@ ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
 ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
     OperationContext* opCtx, bool operationIsVersioned) const {
     // If the server has been started with --shardsvr, but hasn't been added to a cluster we should
-    // consider all collections as unsharded
+    // consider all collections as untracked
     if (!ShardingState::get(opCtx)->enabled())
-        return {kUnshardedCollection};
+        return {kUntrackedCollection};
 
     // Present the collection as unsharded to internal or direct commands against shards
     if (!operationIsVersioned)
-        return {kUnshardedCollection};
+        return {kUntrackedCollection};
 
     auto& oss = OperationShardingState::get(opCtx);
 
-    auto optMetadata = _getCurrentMetadataIfKnown(boost::none);
+    auto optMetadata = _getCurrentMetadataIfKnown(boost::none, false /* preserveRange */);
     const auto receivedShardVersion{oss.getShardVersion(_nss)};
     uassert(
         StaleConfigInfo(_nss,
@@ -227,7 +231,7 @@ boost::optional<ShardingIndexesCatalogCache> CollectionShardingRuntime::getIndex
 }
 
 boost::optional<CollectionMetadata> CollectionShardingRuntime::getCurrentMetadataIfKnown() const {
-    auto optMetadata = _getCurrentMetadataIfKnown(boost::none);
+    auto optMetadata = _getCurrentMetadataIfKnown(boost::none, false /* preserveRange */);
     if (!optMetadata)
         return boost::none;
     return optMetadata->get();
@@ -242,7 +246,8 @@ void CollectionShardingRuntime::checkShardVersionOrThrow(OperationContext* opCtx
 
 void CollectionShardingRuntime::checkShardVersionOrThrow(
     OperationContext* opCtx, const ShardVersion& receivedShardVersion) const {
-    (void)_getMetadataWithVersionCheckAt(opCtx, boost::none, receivedShardVersion);
+    (void)_getMetadataWithVersionCheckAt(
+        opCtx, boost::none, receivedShardVersion, false /* preserveRange */);
 }
 
 void CollectionShardingRuntime::enterCriticalSectionCatchUpPhase(const BSONObj& reason) {
@@ -279,8 +284,8 @@ void CollectionShardingRuntime::setFilteringMetadata(OperationContext* opCtx,
                                                      CollectionMetadata newMetadata) {
     tassert(7032302,
             str::stream() << "Namespace " << _nss.toStringForErrorMsg()
-                          << " must never be sharded.",
-            !newMetadata.isSharded() || !_nss.isNamespaceAlwaysUnsharded());
+                          << " must never have a routing table.",
+            !newMetadata.hasRoutingTable() || !_nss.isNamespaceAlwaysUntracked());
 
     stdx::lock_guard lk(_metadataManagerLock);
 
@@ -293,19 +298,16 @@ void CollectionShardingRuntime::setFilteringMetadata(OperationContext* opCtx,
             _cleanupBeforeInstallingNewCollectionMetadata(lk, opCtx);
     }
 
-    if (!newMetadata.isSharded()) {
-        LOGV2(21917,
-              "Marking collection {namespace} as unsharded",
-              "Marking collection as unsharded",
-              logAttrs(_nss));
-        _metadataType = MetadataType::kUnsharded;
+    if (!newMetadata.hasRoutingTable()) {
+        LOGV2(7917801, "Marking collection as untracked", logAttrs(_nss));
+        _metadataType = MetadataType::kUntracked;
         _metadataManager.reset();
         ++_numMetadataManagerChanges;
         return;
     }
 
-    // At this point we know that the new metadata is associated to a sharded collection.
-    _metadataType = MetadataType::kSharded;
+    // At this point we know that the new metadata is associated to a tracked collection.
+    _metadataType = MetadataType::kTracked;
 
     if (!_metadataManager || !newMetadata.uuidMatches(_metadataManager->getCollectionUuid())) {
         _metadataManager =
@@ -322,23 +324,26 @@ void CollectionShardingRuntime::_clearFilteringMetadata(OperationContext* opCtx,
         _placementVersionInRecoverOrRefresh->cancellationSource.cancel();
     }
 
-    stdx::lock_guard lk(_metadataManagerLock);
-    if (!_nss.isNamespaceAlwaysUnsharded()) {
-        LOGV2_DEBUG(4798530,
-                    1,
-                    "Clearing metadata for collection {namespace}",
-                    "Clearing collection metadata",
-                    logAttrs(_nss),
-                    "collIsDropped"_attr = collIsDropped);
-
-        // If the collection is sharded and it's being dropped we might need to clean up some state.
-        if (collIsDropped)
-            _cleanupBeforeInstallingNewCollectionMetadata(lk, opCtx);
-
-        _metadataType = MetadataType::kUnknown;
-        if (collIsDropped)
-            _metadataManager.reset();
+    if (_nss.isNamespaceAlwaysUntracked()) {
+        // The namespace is always marked as untraked thus there is no need to clear anything.
+        return;
     }
+
+    stdx::lock_guard lk(_metadataManagerLock);
+    LOGV2_DEBUG(4798530,
+                1,
+                "Clearing metadata for collection {namespace}",
+                "Clearing collection metadata",
+                logAttrs(_nss),
+                "collIsDropped"_attr = collIsDropped);
+
+    // If the collection is sharded and it's being dropped we might need to clean up some state.
+    if (collIsDropped)
+        _cleanupBeforeInstallingNewCollectionMetadata(lk, opCtx);
+
+    _metadataType = MetadataType::kUnknown;
+    if (collIsDropped)
+        _metadataManager.reset();
 }
 
 void CollectionShardingRuntime::clearFilteringMetadata(OperationContext* opCtx) {
@@ -365,7 +370,7 @@ Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
 
             // If the metadata was reset, or the collection was dropped and recreated since the
             // metadata manager was created, return an error.
-            if (self->_metadataType != MetadataType::kSharded ||
+            if (self->_metadataType != MetadataType::kTracked ||
                 (collectionUuid != self->_metadataManager->getCollectionUuid())) {
                 return {ErrorCodes::ConflictingOperationInProgress,
                         "Collection being migrated was dropped and created or otherwise had its "
@@ -432,7 +437,7 @@ SharedSemiFuture<void> CollectionShardingRuntime::getOngoingQueriesCompletionFut
 
 std::shared_ptr<ScopedCollectionDescription::Impl>
 CollectionShardingRuntime::_getCurrentMetadataIfKnown(
-    const boost::optional<LogicalTime>& atClusterTime) const {
+    const boost::optional<LogicalTime>& atClusterTime, bool preserveRange) const {
     stdx::lock_guard lk(_metadataManagerLock);
     switch (_metadataType) {
         case MetadataType::kUnknown:
@@ -440,13 +445,13 @@ CollectionShardingRuntime::_getCurrentMetadataIfKnown(
             // the only sharded collection.
             if (getGlobalReplSettings().isServerless() &&
                 _nss != NamespaceString::kLogicalSessionsNamespace) {
-                return kUnshardedCollection;
+                return kUntrackedCollection;
             }
             return nullptr;
-        case MetadataType::kUnsharded:
-            return kUnshardedCollection;
-        case MetadataType::kSharded:
-            return _metadataManager->getActiveMetadata(atClusterTime);
+        case MetadataType::kUntracked:
+            return kUntrackedCollection;
+        case MetadataType::kTracked:
+            return _metadataManager->getActiveMetadata(atClusterTime, preserveRange);
     };
     MONGO_UNREACHABLE;
 }
@@ -456,18 +461,19 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
     OperationContext* opCtx,
     const boost::optional<mongo::LogicalTime>& atClusterTime,
     const boost::optional<ShardVersion>& optReceivedShardVersion,
+    bool preserveRange,
     bool supportNonVersionedOperations) const {
     // If the server has been started with --shardsvr, but hasn't been added to a cluster we should
     // consider all collections as unsharded
     if (!ShardingState::get(opCtx)->enabled())
-        return kUnshardedCollection;
+        return kUntrackedCollection;
 
     if (repl::ReadConcernArgs::get(opCtx).getLevel() ==
         repl::ReadConcernLevel::kAvailableReadConcern)
-        return kUnshardedCollection;
+        return kUntrackedCollection;
 
     if (!optReceivedShardVersion && !supportNonVersionedOperations)
-        return kUnshardedCollection;
+        return kUntrackedCollection;
 
     // Assume that the received shard version was IGNORED if the current operation wasn't versioned
     const auto& receivedShardVersion = optReceivedShardVersion
@@ -492,7 +498,7 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
                 !criticalSectionSignal);
     }
 
-    auto optCurrentMetadata = _getCurrentMetadataIfKnown(atClusterTime);
+    auto optCurrentMetadata = _getCurrentMetadataIfKnown(atClusterTime, preserveRange);
     uassert(StaleConfigInfo(_nss,
                             receivedShardVersion,
                             boost::none /* wantedVersion */,
@@ -515,16 +521,47 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
         ShardVersionFactory::make(currentMetadata, wantedCollectionIndexes);
 
     const ChunkVersion receivedPlacementVersion = receivedShardVersion.placementVersion();
-    const bool isPlacementVersionIgnored =
-        ShardVersion::isPlacementVersionIgnored(receivedShardVersion);
+
+    const bool isPlacementVersionIgnored = [&]() {
+        if (feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(
+                serverGlobalParams.featureCompatibility) &&
+            receivedShardVersion == ShardVersion::UNSHARDED() && currentMetadata.isUnsplittable()) {
+            // Any unsplittable collections request should attach a valid non-UNSHARDED ShardVersion
+            // However, this is not the case right now since the unsplittable collections project
+            // is still in progress. So, as a workaround to avoid throwing infinite StaleConfig
+            // errors, we are ignoring the ShardVersion::UNSHARDED for an unsplittable collection
+            // request which is fine as long as the unsplittable collections remain always on the
+            // same shard.
+            //
+            // TODO (SERVER-80337): Stop ignoring ShardVersion::UNSHARDED for unsplittable
+            // collections.
+            return true;
+        }
+        return ShardVersion::isPlacementVersionIgnored(receivedShardVersion);
+    }();
+
     const boost::optional<Timestamp> receivedIndexVersion = receivedShardVersion.indexVersion();
 
     if ((wantedPlacementVersion.isWriteCompatibleWith(receivedPlacementVersion) &&
          (!indexFeatureFlag || receivedIndexVersion == wantedIndexVersion)) ||
         (isPlacementVersionIgnored &&
          (!wantedPlacementVersion.isSet() || !indexFeatureFlag ||
-          receivedIndexVersion == wantedIndexVersion)))
+          receivedIndexVersion == wantedIndexVersion))) {
+        const auto timeOfLastIncomingChunkMigration = currentMetadata.getShardMaxValidAfter();
+        const auto& placementConflictTime = receivedShardVersion.placementConflictTime();
+        if (placementConflictTime &&
+            placementConflictTime->asTimestamp() < timeOfLastIncomingChunkMigration) {
+            uasserted(ErrorCodes::MigrationConflict,
+                      str::stream() << "Collection " << _nss.toStringForErrorMsg()
+                                    << " has undergone a catalog change operation at time "
+                                    << timeOfLastIncomingChunkMigration
+                                    << " and no longer satisfies the "
+                                       "requirements for the current transaction which requires "
+                                    << placementConflictTime->asTimestamp()
+                                    << ". Transaction will be aborted.");
+        }
         return optCurrentMetadata;
+    }
 
     StaleConfigInfo sci(
         _nss, receivedShardVersion, wantedShardVersion, ShardingState::get(opCtx)->shardId());

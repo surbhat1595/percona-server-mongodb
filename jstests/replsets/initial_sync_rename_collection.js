@@ -2,12 +2,9 @@
  * Test that CollectionCloner completes without error when a collection is renamed during cloning.
  */
 
-(function() {
-"use strict";
-
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/uuid_util.js");
-load('jstests/replsets/libs/two_phase_drops.js');
+import {kDefaultWaitForFailPointTimeout} from "jstests/libs/fail_point_util.js";
+import {extractUUIDFromObject, getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
+import {TwoPhaseDropCollectionTest} from "jstests/replsets/libs/two_phase_drops.js";
 
 // Set up replica set. Disallow chaining so nodes always sync from primary.
 const testName = "initial_sync_rename_collection";
@@ -175,7 +172,7 @@ runRenameTest({
 
 // A cross-DB rename will appear as a drop in the context of the source DB.
 // Double escape the backslash as eval will do unescaping
-const expectedLogFor6and8 =
+let expectedLogFor6and8 =
     '`CollectionCloner stopped because collection was dropped on source","attr":{"namespace":"${nss}","uuid":{"uuid":{"$uuid":"${uuid}"}}}}`';
 
 // We don't support 4.2 style two-phase drops with EMRC=false - in that configuration, the
@@ -211,4 +208,3 @@ runRenameTest({
 });
 
 replTest.stopSet();
-})();

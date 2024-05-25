@@ -513,6 +513,17 @@ server_parameters:
         validator:
             gte: 1
 
+    importQuorumTimeoutSeconds:
+        description: >-
+            Period of time, in seconds, shard merge recipient primary will wait for import quorum to get satisfied.
+        set_at: [ startup, runtime ]
+        cpp_vartype: AtomicWord<int>
+        cpp_varname: importQuorumTimeoutSeconds
+        default:
+            expr: 24 * 60 * 60   # 24 hours
+        validator:
+            gte: 1
+
     maxShardSplitDonorServiceThreadPoolSize:
         description: >-
             The maximum number of threads in the shard split donor service's thread pool.
@@ -553,14 +564,13 @@ server_parameters:
         validator:
             gte: 1
 
-    # TODO (SERVER-54085): Remove server parameter tenantMigrationDisableX509Auth.
     tenantMigrationDisableX509Auth:
         description: >-
             Disable x509 authentication for all ingoing and outgoing tenant migrations.
         set_at: [ startup ]
         cpp_vartype: bool
         cpp_varname: tenantMigrationDisableX509Auth
-        default: false
+        default: true
 
     tenantMigrationExcludeDonorHostTimeoutMS:
         description: >-
@@ -601,17 +611,6 @@ server_parameters:
         set_at: [ startup, runtime ]
         cpp_vartype: AtomicWord<bool>
         cpp_varname: enableReconfigRollbackCommittedWritesCheck
-        default: true
-
-    # TODO (SERVER-74398): Remove special handling of 'confirm: true' in setFCV.
-    requireConfirmInSetFcv:
-        description: >-
-            Determines if we must specify 'confirm: true' in the setFCV command. Enabled by default.
-            Test-only.
-        test_only: true
-        set_at: startup
-        cpp_vartype: bool
-        cpp_varname: requireConfirmInSetFcv
         default: true
 
     initialSyncMethod:
@@ -763,19 +762,23 @@ server_parameters:
         cpp_varname: unsupportedSyncSource
         default: ""
         validator: { callback: 'validateHostAndPort' }
+    
+    dbCheckMaxExtraIndexKeysReverseLookupPerSnapshot:
+        description: >-
+            The maximum number of index keys to be checked in reverse lookup in one storage catalog
+            snapshot during dbcheck's extraIndexKeys mode.
+        set_at: [ startup, runtime ]
+        cpp_vartype: AtomicWord<int>
+        cpp_varname: dbCheckMaxExtraIndexKeysReverseLookupPerSnapshot
+        default: 1000
+        validator:
+            gt: 0 
 
 feature_flags:
     featureFlagShardMerge:
         description: When enabled, multitenant migration uses the "shard merge" protocol.
         cpp_varname: feature_flags::gShardMerge
         default: false
-        shouldBeFCVGated: true
-
-    featureFlagShardSplit:
-        description: When enabled, multitenant migration can use the shard split commands.
-        cpp_varname: feature_flags::gShardSplit
-        default: true
-        version: 6.3
         shouldBeFCVGated: true
 
     featureFlagSecondaryIndexChecksInDbCheck:

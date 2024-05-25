@@ -53,9 +53,9 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/query_stats.h"
-#include "mongo/db/query/query_stats_key_generator.h"
-#include "mongo/db/query/query_stats_transform_algorithm_gen.h"
+#include "mongo/db/query/query_stats/key_generator.h"
+#include "mongo/db/query/query_stats/query_stats.h"
+#include "mongo/db/query/query_stats/transform_algorithm_gen.h"
 #include "mongo/db/query/serialization_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/stdx/unordered_set.h"
@@ -81,8 +81,14 @@ public:
             : LiteParsedDocumentSource(std::move(parseTimeName)),
               _algorithm(algorithm),
               _hmacKey(hmacKey),
-              _privileges({Privilege(ResourcePattern::forClusterResource(tenantId),
-                                     ActionType::queryStatsRead)}) {}
+              _privileges(
+                  algorithm == TransformAlgorithmEnum::kNone
+                      ? PrivilegeVector{Privilege(ResourcePattern::forClusterResource(tenantId),
+                                                  ActionType::queryStatsReadTransformed),
+                                        Privilege(ResourcePattern::forClusterResource(tenantId),
+                                                  ActionType::queryStatsRead)}
+                      : PrivilegeVector{Privilege(ResourcePattern::forClusterResource(tenantId),
+                                                  ActionType::queryStatsReadTransformed)}) {}
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const override {
             return stdx::unordered_set<NamespaceString>();
@@ -144,7 +150,7 @@ public:
         return kStageName.rawData();
     }
 
-    Value serialize(SerializationOptions opts = SerializationOptions()) const final override;
+    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final override;
 
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 
@@ -152,7 +158,10 @@ private:
     DocumentSourceQueryStats(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                              TransformAlgorithmEnum algorithm = TransformAlgorithmEnum::kNone,
                              std::string hmacKey = {})
-        : DocumentSource(kStageName, expCtx), _algorithm(algorithm), _hmacKey(hmacKey) {}
+        : DocumentSource(kStageName, expCtx),
+          _transformIdentifiers(algorithm != TransformAlgorithmEnum::kNone),
+          _algorithm(algorithm),
+          _hmacKey(hmacKey) {}
 
     GetNextResult doGetNext() final;
 

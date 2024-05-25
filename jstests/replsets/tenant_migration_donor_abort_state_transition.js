@@ -7,16 +7,16 @@
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   serverless,
+ *   requires_fcv_71,
  * ]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {Thread} from "jstests/libs/parallelTester.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {runMigrationAsync} from "jstests/replsets/libs/tenant_migration_util.js";
-
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/uuid_util.js");
-load("jstests/libs/parallelTester.js");
-load("jstests/replsets/rslib.js");  // 'createRstArgs'
+import {createRstArgs} from "jstests/replsets/rslib.js";
 
 /**
  * Starts a migration and forces the write to insert the donor's state doc to abort on the first few

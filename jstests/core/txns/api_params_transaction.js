@@ -1,20 +1,17 @@
 /**
  * Tests passing API parameters into transaction-continuing commands.
- * The test runs commands that are not allowed with security token: endSession.
+ *
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: endSession.
  *   not_allowed_with_security_token,
  *   uses_api_parameters,
  *   uses_transactions,
  * ]
  */
 
-(function() {
-"use strict";
-
-load("jstests/libs/fixture_helpers.js");  // For FixtureHelpers.isMongos().
-load(
-    "jstests/libs/auto_retry_transaction_in_sharding.js");  // For
-                                                            // retryOnceOnTransientAndRestartTxnOnMongos().
+import {
+    retryOnceOnTransientAndRestartTxnOnMongos
+} from "jstests/libs/auto_retry_transaction_in_sharding.js";
 
 const dbName = jsTestName();
 const collName = "test";
@@ -105,4 +102,3 @@ for (const txnInitiatingParams of apiParamCombos) {
         }
     }
 }
-})();

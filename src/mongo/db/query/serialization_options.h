@@ -88,27 +88,6 @@ struct SerializationOptions {
     static const SerializationOptions kRepresentativeQueryShapeSerializeOptions;
     static const SerializationOptions kDebugQueryShapeSerializeOptions;
 
-    SerializationOptions() {}
-
-    SerializationOptions(bool explain_)
-        // kQueryPlanner is the "base" explain level, used as default in the case explain is
-        // specified without a specific verbosity level
-        : verbosity(explain_ ? boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)
-                             : boost::none) {}
-
-    SerializationOptions(boost::optional<ExplainOptions::Verbosity> verbosity_)
-        : verbosity(verbosity_) {}
-
-    SerializationOptions(ExplainOptions::Verbosity verbosity_) : verbosity(verbosity_) {}
-
-    SerializationOptions(std::function<std::string(StringData)> fieldNamesHmacPolicy_,
-                         LiteralSerializationPolicy policy)
-        : literalPolicy(policy),
-          transformIdentifiers(fieldNamesHmacPolicy_),
-          transformIdentifiersCallback(fieldNamesHmacPolicy_) {}
-
-    SerializationOptions(LiteralSerializationPolicy policy) : literalPolicy(policy) {}
-
     /**
      * Checks if this SerializationOptions represents the same options as another
      * SerializationOptions. Note it cannot compare whether the two 'transformIdentifiersCallback's
@@ -166,7 +145,7 @@ struct SerializationOptions {
 
     // Helper functions for applying hmac to BSONObj. Does not take into account anything to do with
     // MQL semantics, removes all field names and literals in the passed in obj.
-    void addHmacedArrayToBuilder(BSONArrayBuilder* bab, std::vector<BSONElement> array) {
+    void addHmacedArrayToBuilder(BSONArrayBuilder* bab, std::vector<BSONElement> array) const {
         for (const auto& elem : array) {
             if (elem.type() == BSONType::Object) {
                 BSONObjBuilder subObj(bab->subobjStart());
@@ -182,7 +161,7 @@ struct SerializationOptions {
         }
     }
 
-    void addHmacedObjToBuilder(BSONObjBuilder* bob, BSONObj objToHmac) {
+    void addHmacedObjToBuilder(BSONObjBuilder* bob, BSONObj objToHmac) const {
         for (const auto& elem : objToHmac) {
             auto fieldName = serializeFieldPath(elem.fieldName());
             if (elem.type() == BSONType::Object) {
@@ -247,10 +226,9 @@ struct SerializationOptions {
     // If set to false, serializes without including the path. For example {a: {$gt: 2}} would
     // serialize as just {$gt: 2}.
     //
-    // It is expected that most callers want to set 'includePath' to true to
-    // get a correct serialization. Internally, we may set this to false if we have a situation
-    // where an outer expression serializes a path and we don't want to repeat the path in the
-    // inner expression.
+    // It is expected that most callers want to set 'includePath' to true to get a correct
+    // serialization. Internally, we may set this to false if we have a situation where an outer
+    // expression serializes a path and we don't want to repeat the path in the inner expression.
     //
     // For example in {a: {$elemMatch: {$eq: 2}}} the "a" is serialized by the $elemMatch, and
     // should not be serialized by the EQ child.
@@ -260,6 +238,11 @@ struct SerializationOptions {
 
     // For aggregation indicate whether we should use the more verbose serialization format.
     boost::optional<ExplainOptions::Verbosity> verbosity = boost::none;
+
+    // If set to true, serializes InMatchExpresions by using the sorted and de-duped list of
+    // elements. Otherwise, serializes InMatchExpressions using the original (unsorted) list of
+    // elements. This flag has no effect on other types of MatchExpressions.
+    bool inMatchExprSortAndDedupElements = true;
 };
 
 }  // namespace mongo

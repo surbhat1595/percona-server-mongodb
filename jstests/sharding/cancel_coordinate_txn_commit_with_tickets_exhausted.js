@@ -8,8 +8,9 @@
  * WiredTiger tickets.
  *
  * Step 3. Run a transaction in parallel, but do not attempt to commit it until
- * all of the remove operations have taken WiredTiger tickets. Step 4. Wait for the transaction to
- * reach the `deletingCoordinatorDoc` state.
+ * all of the remove operations have taken WiredTiger tickets.
+ *
+ * Step 4. Wait for the transaction to reach the `deletingCoordinatorDoc` state.
  *
  * Step 5. Turn off the `hangWithLockDuringBatchRemoveFp`
  * and join the parallel remove operations and transaction thread.
@@ -21,13 +22,10 @@
  * ]
  */
 
-(function() {
-"use strict";
-
-load("jstests/libs/fail_point_util.js");
-load('jstests/libs/parallelTester.js');
-load("jstests/sharding/libs/create_sharded_collection_util.js");
-load("jstests/libs/auto_retry_transaction_in_sharding.js");  // For withTxnAndAutoRetryOnMongos.
+import {withTxnAndAutoRetryOnMongos} from "jstests/libs/auto_retry_transaction_in_sharding.js";
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {Thread} from "jstests/libs/parallelTester.js";
+import {CreateShardedCollectionUtil} from "jstests/sharding/libs/create_sharded_collection_util.js";
 
 const kNumWriteTickets = 10;
 const st = new ShardingTest({
@@ -90,6 +88,13 @@ withTxnAndAutoRetryOnMongos(session, () => {
     assert.commandWorked(sessionCollection.insert({key: 400}));
     assert.commandWorked(sessionCollection.insert({key: -400}));
 });
+// Wait for transaction coordinator document to be deleted and the transaction to be completed.
+assert.soon(() => {
+    return txnCoordinator.getDB("config").transaction_coordinators.find().toArray().length === 0 &&
+        txnCoordinator.getDB(dbName)
+            .serverStatus()
+            .twoPhaseCommitCoordinator.totalCommittedTwoPhaseCommit.toNumber() === 1;
+});
 
 const hangWithLockDuringBatchRemoveFp = configureFailPoint(txnCoordinator, failpointName);
 
@@ -133,10 +138,16 @@ assert.soon(
     () => {
         twoPhaseCommitCoordinatorServerStatus =
             txnCoordinator.getDB(dbName).serverStatus().twoPhaseCommitCoordinator;
-        const {deletingCoordinatorDoc, waitingForDecisionAcks, writingDecision} =
-            twoPhaseCommitCoordinatorServerStatus.currentInSteps;
-        return deletingCoordinatorDoc.toNumber() === 1 || waitingForDecisionAcks.toNumber() === 1 ||
-            writingDecision.toNumber() === 1;
+        for (let step of ["deletingCoordinatorDoc",
+                          "writingEndOfTransaction",
+                          "waitingForDecisionAcks",
+                          "writingDecision"]) {
+            const currentInStep = twoPhaseCommitCoordinatorServerStatus.currentInSteps[step];
+            if (currentInStep && currentInStep.toNumber() === 1) {
+                return true;
+            }
+        }
+        return false;
     },
     () => `Failed to find 1 total transactions in a state past kWaitingForVotes: ${
         tojson(twoPhaseCommitCoordinatorServerStatus)}`);
@@ -149,4 +160,3 @@ removeOperationThreads.forEach((thread) => {
 });
 
 st.stop();
-})();

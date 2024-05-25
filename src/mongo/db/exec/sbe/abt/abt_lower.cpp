@@ -42,6 +42,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <sstream>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -76,6 +77,7 @@
 #include "mongo/db/query/optimizer/comparison_op.h"
 #include "mongo/db/query/optimizer/containers.h"
 #include "mongo/db/query/optimizer/props.h"
+#include "mongo/db/query/optimizer/utils/path_utils.h"
 #include "mongo/db/query/optimizer/utils/strong_alias.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
 #include "mongo/db/query/query_knobs_gen.h"
@@ -93,6 +95,20 @@ static sbe::EExpression::Vector toInlinedVector(
         inlined.emplace_back(std::move(arg));
     }
     return inlined;
+}
+
+std::unique_ptr<sbe::EExpression> VarResolver::operator()(const ProjectionName& name) const {
+    if (_slotMap) {
+        if (auto it = _slotMap->find(name); it != _slotMap->end()) {
+            return sbe::makeE<sbe::EVariable>(it->second);
+        }
+    }
+
+    if (_lowerFn) {
+        return _lowerFn(name);
+    }
+
+    return {};
 }
 
 std::unique_ptr<sbe::EExpression> SBEExpressionLowering::optimize(const ABT& n) {
@@ -176,12 +192,13 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(const Variabl
             return sbe::makeE<sbe::EVariable>(it->second, 0, _env.isLastRef(var));
         }
     }
+
     // If variable was not defined in the scope of the local expression via a Let or
     // LambdaAbstraction, it must be a reference that will be in the slotMap.
-    if (auto it = _slotMap.find(var.name()); it != _slotMap.end()) {
-        // Found the slot.
-        return sbe::makeE<sbe::EVariable>(it->second);
+    if (auto expr = _varResolver(var.name())) {
+        return expr;
     }
+
     tasserted(6624205, str::stream() << "undefined variable: " << var.name());
     return nullptr;
 }
@@ -191,40 +208,7 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(
     std::unique_ptr<sbe::EExpression> lhs,
     std::unique_ptr<sbe::EExpression> rhs) {
 
-    sbe::EPrimBinary::Op sbeOp = [](const auto abtOp) {
-        switch (abtOp) {
-            case Operations::Eq:
-                return sbe::EPrimBinary::eq;
-            case Operations::Neq:
-                return sbe::EPrimBinary::neq;
-            case Operations::Gt:
-                return sbe::EPrimBinary::greater;
-            case Operations::Gte:
-                return sbe::EPrimBinary::greaterEq;
-            case Operations::Lt:
-                return sbe::EPrimBinary::less;
-            case Operations::Lte:
-                return sbe::EPrimBinary::lessEq;
-            case Operations::Add:
-                return sbe::EPrimBinary::add;
-            case Operations::Sub:
-                return sbe::EPrimBinary::sub;
-            case Operations::FillEmpty:
-                return sbe::EPrimBinary::fillEmpty;
-            case Operations::And:
-                return sbe::EPrimBinary::logicAnd;
-            case Operations::Or:
-                return sbe::EPrimBinary::logicOr;
-            case Operations::Cmp3w:
-                return sbe::EPrimBinary::cmp3w;
-            case Operations::Div:
-                return sbe::EPrimBinary::div;
-            case Operations::Mult:
-                return sbe::EPrimBinary::mul;
-            default:
-                MONGO_UNREACHABLE;
-        }
-    }(op.op());
+    sbe::EPrimBinary::Op sbeOp = getEPrimBinaryOp(op.op());
 
     if (sbe::EPrimBinary::isComparisonOp(sbeOp)) {
         boost::optional<sbe::value::SlotId> collatorSlot =
@@ -241,16 +225,7 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(
 std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(
     const UnaryOp& op, std::unique_ptr<sbe::EExpression> arg) {
 
-    sbe::EPrimUnary::Op sbeOp = [](const auto abtOp) {
-        switch (abtOp) {
-            case Operations::Neg:
-                return sbe::EPrimUnary::negate;
-            case Operations::Not:
-                return sbe::EPrimUnary::logicNot;
-            default:
-                MONGO_UNREACHABLE;
-        }
-    }(op.op());
+    sbe::EPrimUnary::Op sbeOp = getEPrimUnaryOp(op.op());
 
     return sbe::makeE<sbe::EPrimUnary>(sbeOp, std::move(arg));
 }
@@ -261,6 +236,85 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(
     std::unique_ptr<sbe::EExpression> thenBranch,
     std::unique_ptr<sbe::EExpression> elseBranch) {
     return sbe::makeE<sbe::EIf>(std::move(cond), std::move(thenBranch), std::move(elseBranch));
+}
+
+/*
+ * In the ABT, the shard filtering operation is represented by a FunctionCall node with n
+ * arguments, in which each argument is a projection of the value of one field of the
+ * shard key (which has n fields). In the SBE plan, the shard filtering is represented by a
+ * 2-argument function called shardFilter. The first argument is the slotID of a slot that
+ * contains a ShardFilterer instance. The second argument to shardFilter is a function
+ * (makeBsonObj) that takes a spec for the construction of an object which evaluates to the
+ * shard key (e.g. the output of the function is {a:1, b:1, ...}).
+ */
+std::unique_ptr<sbe::EExpression> SBEExpressionLowering::handleShardFilterFunctionCall(
+    const FunctionCall& fn,
+    std::vector<std::unique_ptr<sbe::EExpression>>& args,
+    std::string name) {
+    tassert(7814401, "NodeProps must not be nullptr in shardFilter lowering", _np);
+    tassert(7814402, "Metadata must not be nullptr in shardFilter lowering", _metadata);
+
+    // First, get the paths to the shard key fields.
+    auto indexingAvailabilityProp =
+        getPropertyConst<properties::IndexingAvailability>(_np->_logicalProps);
+    const std::string& scanDefName = indexingAvailabilityProp.getScanDefName();
+    tassert(7814403,
+            "The metadata must contain the scan definition specified by the "
+            "IndexingAvailability property in order to perform shard filtering",
+            _metadata->_scanDefs.contains(scanDefName));
+    const auto& shardKeyPaths = _metadata->_scanDefs.at(scanDefName).shardingMetadata().shardKey();
+
+    // Specify a BSONObj which will contain the shard key values.
+    tassert(7814404,
+            "The number of fields passed to shardFilter does not match the number of fields in "
+            "the shard key",
+            fn.nodes().size() == shardKeyPaths.size());
+    std::vector<std::string> fields;
+    std::vector<sbe::MakeObjSpec::FieldInfo> fieldInfos;
+    sbe::EExpression::Vector projectValues;
+
+    size_t argIdx = 0;
+    for (auto& i : shardKeyPaths) {
+        fields.emplace_back(PathStringify::stringify(i._path));
+        fieldInfos.emplace_back(argIdx);
+        ++argIdx;
+    }
+
+    // Fill out the values with SlotId variables. The specified slot will supply the values
+    // corresponding to the shard key.
+    for (const ABT& node : fn.nodes()) {
+        // If the child of FunctionCall['shardFilter'] is a Variable, look up the variable in the
+        // slot map.
+        if (node.is<Variable>()) {
+            projectValues.push_back(_varResolver(node.cast<Variable>()->name()));
+        } else {
+            // Otherwise, lower the expression to be referenced by the 'shardFilter' function call.
+            SBEExpressionLowering exprLower{_env, _varResolver, _namedSlots};
+            projectValues.push_back(exprLower.optimize(node));
+        }
+    }
+
+    auto fieldBehavior = sbe::MakeObjSpec::FieldBehavior::kOpen;
+    auto makeObjSpec =
+        sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::makeObjSpec,
+                                   sbe::value::bitcastFrom<sbe::MakeObjSpec*>(new sbe::MakeObjSpec(
+                                       fieldBehavior, std::move(fields), std::move(fieldInfos))));
+
+    auto makeObjRoot = sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Nothing, 0);
+    sbe::EExpression::Vector makeObjArgs;
+    makeObjArgs.reserve(2 + projectValues.size());
+    makeObjArgs.push_back(std::move(makeObjSpec));
+    makeObjArgs.push_back(std::move(makeObjRoot));
+    std::move(projectValues.begin(), projectValues.end(), std::back_inserter(makeObjArgs));
+
+    auto shardKeyBSONObjExpression =
+        sbe::makeE<sbe::EFunction>("makeBsonObj", std::move(makeObjArgs));
+
+    // Prepare the FunctionCall expression.
+    sbe::EExpression::Vector argVector;
+    argVector.push_back(sbe::makeE<sbe::EVariable>(_namedSlots.getSlot(kshardFiltererSlotName)));
+    argVector.push_back(std::move(shardKeyBSONObjExpression));
+    return sbe::makeE<sbe::EFunction>(name, std::move(argVector));
 }
 
 std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(
@@ -314,8 +368,12 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(
             "typeMatch",
             sbe::makeEs(std::move(args.at(0)),
                         sbe::makeE<sbe::EConstant>(
-                            sbe::value::TypeTags::NumberInt64,
-                            sbe::value::bitcastFrom<int64_t>(constPtr->getValueInt32()))));
+                            sbe::value::TypeTags::NumberInt32,
+                            sbe::value::bitcastFrom<int32_t>(constPtr->getValueInt32()))));
+    }
+
+    if (name == "shardFilter") {
+        return handleShardFilterFunctionCall(fn, args, name);
     }
 
     // TODO - this is an open question how to do the name mappings.
@@ -453,14 +511,14 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const EvaluationNode& n,
     auto& names = binder.names();
     auto& exprs = binder.exprs();
 
-    sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> projects;
+    sbe::SlotExprPairVector projects;
 
     for (size_t idx = 0; idx < exprs.size(); ++idx) {
-        auto expr = lowerExpression(exprs[idx], slotMap);
+        auto expr = lowerExpression(exprs[idx], slotMap, &_nodeToGroupPropsMap.at(&n));
         auto slot = _slotIdGenerator.generate();
 
         mapProjToSlot(slotMap, names[idx], slot);
-        projects.emplace(slot, std::move(expr));
+        projects.emplace_back(slot, std::move(expr));
     }
 
     const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
@@ -473,8 +531,9 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const FilterNode& n,
                                                       const ABT& child,
                                                       const ABT& filter) {
     auto input = generateInternal(child, slotMap, ridSlot);
-    auto expr = lowerExpression(filter, slotMap);
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
+    const auto groupProps = _nodeToGroupPropsMap.at(&n);
+    auto expr = lowerExpression(filter, slotMap, &groupProps);
+    const PlanNodeId planNodeId = groupProps._planNodeId;
 
     // Check if the filter expression is 'constant' (i.e., does not depend on any variables); then
     // create FilterStage<true> if it is constant, or FilterStage<false> otherwise.
@@ -680,7 +739,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SpoolProducerNode& n
                 std::move(input), n.getSpoolId(), std::move(vals), planNodeId);
 
         case SpoolProducerType::Lazy: {
-            auto expr = lowerExpression(filter, slotMap);
+            auto expr = lowerExpression(filter, slotMap, &_nodeToGroupPropsMap.at(&n));
             return sbe::makeS<sbe::SpoolLazyProducerStage>(
                 std::move(input), n.getSpoolId(), std::move(vals), std::move(expr), planNodeId);
         }
@@ -751,7 +810,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const GroupByNode& n,
     aggs.reserve(exprs.size());
 
     for (size_t idx = 0; idx < exprs.size(); ++idx) {
-        auto expr = lowerExpression(exprs[idx], slotMap);
+        auto expr = lowerExpression(exprs[idx], slotMap, &_nodeToGroupPropsMap.at(&n));
         auto slot = _slotIdGenerator.generate();
 
         mapProjToSlot(slotMap, names[idx], slot);
@@ -800,7 +859,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const NestedLoopJoinNode& 
     correlatedSlots.erase(std::unique(correlatedSlots.begin(), correlatedSlots.end()),
                           correlatedSlots.end());
 
-    auto expr = lowerExpression(filter, slotMap);
+    auto expr = lowerExpression(filter, slotMap, &_nodeToGroupPropsMap.at(&n));
 
     const auto& leftChildProps = _nodeToGroupPropsMap.at(n.getLeftChild().cast<Node>());
     auto outerProjects = convertRequiredProjectionsToSlots(slotMap, leftChildProps);
@@ -1069,7 +1128,9 @@ void SBENodeLowering::generateSlots(SlotVarMap& slotMap,
 static NamespaceStringOrUUID parseFromScanDef(const ScanDefinition& def) {
     const auto& dbName = def.getOptionsMap().at("database");
     const auto& uuidStr = def.getOptionsMap().at("uuid");
-    return {dbName, UUID::parse(uuidStr).getValue()};
+    // TODO SERVER-79427 we should no longer deserialize in this method since NamespaceStringOrUUID
+    // should be part of the ScanDefinition.
+    return {DatabaseNameUtil::deserialize(boost::none, dbName), UUID::parse(uuidStr).getValue()};
 }
 
 
@@ -1105,7 +1166,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const PhysicalScanNode& n,
                                                       boost::none,
                                                       fields,
                                                       vars,
-                                                      nullptr /*yieldPolicy*/,
+                                                      _yieldPolicy,
                                                       planNodeId,
                                                       callbacks);
         }
@@ -1135,7 +1196,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const PhysicalScanNode& n,
             boost::none /* minRecordIdSlot */,
             boost::none /* maxRecordIdSlot */,
             forwardScan,
-            nullptr /*yieldPolicy*/,
+            _yieldPolicy,
             planNodeId,
             callbacks,
             gDeprioritizeUnboundedUserCollectionScans.load(), /* lowPriority */
@@ -1261,7 +1322,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const IndexScanNode& n,
                                                  vars,
                                                  std::move(lowerBoundExpr),
                                                  std::move(upperBoundExpr),
-                                                 nullptr /*yieldPolicy*/,
+                                                 _yieldPolicy,
                                                  planNodeId);
 }
 
@@ -1301,7 +1362,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SeekNode& n,
                                       boost::none /* minRecordIdSlot */,
                                       boost::none /* maxRecordIdSlot */,
                                       true /*forward*/,
-                                      nullptr /*yieldPolicy*/,
+                                      _yieldPolicy,
                                       planNodeId,
                                       callbacks);
 }

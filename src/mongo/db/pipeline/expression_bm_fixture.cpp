@@ -1408,6 +1408,53 @@ void ExpressionBenchmarkFixture::benchmarkMultiplyArray(benchmark::State& state)
     benchmarkExpression(std::move(expr), state, {document});
 }
 
+void ExpressionBenchmarkFixture::benchmarkPowIntegers(benchmark::State& state) {
+    const int kCount = 1000;
+
+    std::vector<Document> documents;
+    documents.reserve(kCount);
+
+    // the combination of base and any value up to exponent in the same idx create result that fits
+    // always in int32_t or in an int64_t
+    std::vector<int> exponent{1'000'000'000, 1'000'000'000, 62, 39, 31, 27, 24, 22, 20, 19, 18};
+
+    for (int i = 0; i < kCount; ++i) {
+        int idx = random.nextInt32(exponent.size());
+        documents.emplace_back(BSON("lhs" << idx << "rhs" << random.nextInt32(exponent[idx])));
+    }
+
+    testBinaryOpExpression("$pow", documents, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkPowDoubles(benchmark::State& state) {
+    const int kCount = 1000;
+    const int kMax = 1'000'000'000;
+    auto generator = [this]() {
+        return random.nextCanonicalDouble() * kMax;
+    };
+    testBinaryOpExpression("$pow", randomPairs(kCount, generator), state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkPowDecimals(benchmark::State& state) {
+    const int kCount = 1000;
+    testBinaryOpExpression("$pow", randomPairs(kCount, getDecimalGenerator(random)), state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkPowNullAndMissing(benchmark::State& state) {
+    const int kCount = 1000;
+
+    std::vector<Document> documents;
+    documents.reserve(kCount);
+
+    for (int i = 0; i < kCount / 4; ++i) {
+        documents.emplace_back(BSON("empty" << true));
+        documents.emplace_back(BSON("lhs" << BSONNULL));
+        documents.emplace_back(BSON("rhs" << BSONNULL));
+        documents.emplace_back(BSON("lhs" << BSONNULL << "rhs" << BSONNULL));
+    }
+    testBinaryOpExpression("$pow", documents, state);
+}
+
 /**
  * Tests performance of aggregation expression
  *   {"$const": "1"}
@@ -1620,6 +1667,36 @@ void ExpressionBenchmarkFixture::benchmarkPercentile(benchmark::State& state,
                                                    << "approximate")),
                         state,
                         std::vector<Document>(1, {{"data"_sd, vectorToBSON(inputs)}}));
+}
+
+/**
+ * Tests performance of $strLenBytes expression against a single string field.
+ */
+void ExpressionBenchmarkFixture::benchmarkStrLenBytes(benchmark::State& state) {
+    benchmarkExpression(BSON("$strLenBytes"
+                             << "$data"),
+                        state,
+                        std::vector<Document>(1, {{"data"_sd, "hello world"_sd}}));
+}
+
+/**
+ * Tests performance of $trim expression against a single string field.
+ */
+void ExpressionBenchmarkFixture::benchmarkTrim(benchmark::State& state, std::string chars) {
+    benchmarkExpression(BSON("$trim" << BSON("input"
+                                             << "$data"
+                                             << "chars" << chars)),
+                        state,
+                        std::vector<Document>(1, {{"data"_sd, " hello world   "_sd}}));
+}
+
+/**
+ * Tests performance of $trunc expression against a single field.
+ */
+void ExpressionBenchmarkFixture::benchmarkTrunc(benchmark::State& state, int place) {
+    benchmarkExpression(BSON("$trunc" << BSON_ARRAY("$value" << place)),
+                        state,
+                        std::vector<Document>(1, {{"value"_sd, 123.45}}));
 }
 
 

@@ -6,9 +6,10 @@
  *   does_not_support_stepdowns,
  * ]
  */
-load("jstests/aggregation/extras/utils.js");  // For arrayEq.
-import {getWinningPlan, getPlanStages} from "jstests/libs/analyze_plan.js";
+import {arrayEq} from "jstests/aggregation/extras/utils.js";
+import {getPlanStages, getWinningPlan} from "jstests/libs/analyze_plan.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const assertArrayEq = (l, r) => assert(arrayEq(l, r), tojson(l) + " != " + tojson(r));
 
@@ -135,15 +136,10 @@ runWildcardIndexTest({'$**': 1}, {'b.c': 0}, ['a', 'b.d.e']);
 runWildcardIndexTest({'$**': 1}, {a: 0, 'b.c': 0}, ['b.d.e']);
 
 // Test compound wildcard indexes.
-// TODO SERVER-68303: Remove the feature flag and update corresponding tests.
-const allowCompoundWildcardIndexes =
-    FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "CompoundWildcardIndexes");
-if (allowCompoundWildcardIndexes) {
-    runWildcardIndexTest({'$**': 1, 'other': 1}, {'other': 0}, ['a', 'b.c', 'b.d.e']);
-    runWildcardIndexTest({'$**': -1, 'other': 1}, {'other': 0}, ['a', 'b.c', 'b.d.e'], -1);
-    runWildcardIndexTest({'a.$**': 1, 'other': 1}, null, ['a']);
-    runWildcardIndexTest({'b.c.$**': 1, 'other': -1}, null, ['b.c']);
-}
+runWildcardIndexTest({'$**': 1, 'other': 1}, {'other': 0}, ['a', 'b.c', 'b.d.e']);
+runWildcardIndexTest({'$**': -1, 'other': 1}, {'other': 0}, ['a', 'b.c', 'b.d.e'], -1);
+runWildcardIndexTest({'a.$**': 1, 'other': 1}, null, ['a']);
+runWildcardIndexTest({'b.c.$**': 1, 'other': -1}, null, ['b.c']);
 
 const wildcardIndexes = [
     {keyPattern: {"$**": 1}},
@@ -156,9 +152,6 @@ for (const indexSpec of wildcardIndexes) {
     coll = db.getCollection(collNamePrefix + collCount++);
     coll.drop();
 
-    if (!allowCompoundWildcardIndexes && indexSpec.wildcardProjection) {
-        continue;
-    }
     const option = {};
     if (indexSpec.wildcardProjection) {
         option['wildcardProjection'] = indexSpec.wildcardProjection;
@@ -186,9 +179,6 @@ coll = db.getCollection(collNamePrefix + collCount++);
 for (const indexSpec of wildcardIndexes) {
     coll.drop();
 
-    if (!allowCompoundWildcardIndexes && indexSpec.wildcardProjection) {
-        continue;
-    }
     const option = {};
     if (indexSpec.wildcardProjection) {
         option['wildcardProjection'] = indexSpec.wildcardProjection;
@@ -267,9 +257,6 @@ coll = db.getCollection(collNamePrefix + collCount++);
 for (const indexSpec of wildcardIndexes) {
     coll.drop();
 
-    if (!allowCompoundWildcardIndexes && indexSpec.wildcardProjection) {
-        continue;
-    }
     const option = {};
     if (indexSpec.wildcardProjection) {
         option['wildcardProjection'] = indexSpec.wildcardProjection;
@@ -323,9 +310,6 @@ coll = db.getCollection(collNamePrefix + collCount++);
 for (const indexSpec of wildcardIndexes) {
     coll.drop();
 
-    if (!allowCompoundWildcardIndexes && indexSpec.wildcardProjection) {
-        continue;
-    }
     const option = {};
     if (indexSpec.wildcardProjection) {
         option['wildcardProjection'] = indexSpec.wildcardProjection;

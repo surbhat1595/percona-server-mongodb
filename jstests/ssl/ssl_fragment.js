@@ -1,9 +1,6 @@
 /**
  * Test that a large request and response works correctly.
  */
-(function() {
-'use strict';
-
 function runTest(conn) {
     // SSL packets have a max size of ~16 kb so to test packet fragmentation support, create a
     // string larger then 16kb.
@@ -24,12 +21,16 @@ let options = {
     sslMode: "requireSSL",
     sslPEMKeyFile: "jstests/libs/server.pem",
     networkMessageCompressors: 'disabled',
+    tlsCAFile: 'jstests/libs/ca.pem',
+    sslAllowInvalidCertificates: ""
 };
 
 let mongosOptions = {
     sslMode: "requireSSL",
     sslPEMKeyFile: "jstests/libs/server.pem",
     networkMessageCompressors: 'disabled',
+    tlsCAFile: 'jstests/libs/ca.pem',
+    sslAllowInvalidCertificates: ""
 };
 
 if (_isWindows()) {
@@ -54,4 +55,3 @@ const st = new ShardingTest({
 
 runTest(st.s0);
 st.stop();
-})();

@@ -88,8 +88,12 @@ DocumentSourceMatch::DocumentSourceMatch(const BSONObj& query,
 
 void DocumentSourceMatch::rebuild(BSONObj predicate) {
     predicate = predicate.getOwned();
-    auto expr = uassertStatusOK(MatchExpressionParser::parse(
+    SbeCompatibility originalSbeCompatibility =
+        std::exchange(pExpCtx->sbeCompatibility, SbeCompatibility::fullyCompatible);
+    ON_BLOCK_EXIT([&] { pExpCtx->sbeCompatibility = originalSbeCompatibility; });
+    std::unique_ptr<MatchExpression> expr = uassertStatusOK(MatchExpressionParser::parse(
         predicate, pExpCtx, ExtensionsCallbackNoop(), Pipeline::kAllowedMatcherFeatures));
+    _sbeCompatibility = pExpCtx->sbeCompatibility;
     rebuild(std::move(predicate), std::move(expr));
 }
 
@@ -108,7 +112,7 @@ const char* DocumentSourceMatch::getSourceName() const {
     return kStageName.rawData();
 }
 
-Value DocumentSourceMatch::serialize(SerializationOptions opts) const {
+Value DocumentSourceMatch::serialize(const SerializationOptions& opts) const {
     if (opts.verbosity || opts.transformIdentifiers ||
         opts.literalPolicy != LiteralSerializationPolicy::kUnchanged) {
         return Value(

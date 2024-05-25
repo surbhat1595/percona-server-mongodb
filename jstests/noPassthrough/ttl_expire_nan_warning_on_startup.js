@@ -7,11 +7,7 @@
  *     requires_replication,
  * ]
  */
-(function() {
-'use strict';
-
-load("jstests/libs/fail_point_util.js");
-load('jstests/noPassthrough/libs/index_build.js');
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 
 const rst = new ReplSetTest({nodes: [{}, {rsConfig: {votes: 0, priority: 0}}]});
 rst.startSet();
@@ -25,8 +21,7 @@ const coll = db.t;
 // 'expireAfterSeconds'. The current createIndexes behavior will overwrite NaN with int32::max
 // unless we use a fail point.
 const fp = configureFailPoint(primary, 'skipTTLIndexValidationOnCreateIndex');
-const fp2 =
-    configureFailPoint(primary, 'skipTTLIndexInvalidExpireAfterSecondsValidationForCreateIndex');
+const fp2 = configureFailPoint(primary, 'skipTTLIndexExpireAfterSecondsValidation');
 try {
     assert.commandWorked(coll.createIndex({t: 1}, {expireAfterSeconds: NaN}));
 } finally {
@@ -56,4 +51,3 @@ checkLog.containsJson(secondary, 6852200, {
 });
 
 rst.stopSet();
-})();

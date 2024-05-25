@@ -29,7 +29,6 @@ env.SConscript(
         'cst',
         'encryption',
         'exec',
-        'free_mon',
         'fts',
         'ftdc',
         'geo',
@@ -65,7 +64,6 @@ env.Library(
     target='server_base',
     source=[
         'basic_types.idl',
-        'catalog_shard_feature_flag.idl',
         'cluster_role.cpp',
         'feature_compatibility_version_document.idl',
         'feature_compatibility_version_parser.cpp',
@@ -124,7 +122,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/clustered_collection_options',
         '$BUILD_DIR/mongo/db/catalog/collection_crud',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/session/logical_session_id_helpers',
         '$BUILD_DIR/mongo/db/storage/key_string',
         '$BUILD_DIR/mongo/db/transaction/transaction',
@@ -202,7 +199,7 @@ env.Library(
         'curop_failpoint_helpers.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         '$BUILD_DIR/mongo/util/fail_point',
     ],
 )
@@ -417,9 +414,11 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/auth/cluster_auth_mode',
         '$BUILD_DIR/mongo/db/ldap_options',
+        '$BUILD_DIR/mongo/db/repl/repl_server_parameters',
         '$BUILD_DIR/mongo/db/repl/repl_settings',
         '$BUILD_DIR/mongo/db/repl/replica_set_messages',
         '$BUILD_DIR/mongo/db/storage/storage_options',
+        '$BUILD_DIR/mongo/s/common_s',
         '$BUILD_DIR/mongo/util/options_parser/options_parser',
         'global_settings',
         'server_base',
@@ -494,6 +493,7 @@ env.Library(
         'change_stream_options',
         'change_stream_serverless_helpers',
         'repl/repl_coordinator_interface',
+        'repl/repl_settings',
         'server_base',
         'service_context',
     ],
@@ -509,6 +509,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter',
         'change_stream_serverless_helpers',
+        'repl/repl_settings',
         'server_base',
     ],
 )
@@ -621,7 +622,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/clustered_collection_options',
         '$BUILD_DIR/mongo/db/catalog/collection_crud',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/repl/storage_interface',
         'change_stream_options_manager',
         'change_stream_pre_image_util',
@@ -751,6 +751,7 @@ audit_libdeps = [
     '$BUILD_DIR/mongo/db/server_base',
     '$BUILD_DIR/mongo/util/background_job',
     '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
+    'service_context',
 ]
 if has_option('audit'):
     # The Percona's `audit` library is intended to be a drop-in replacement of
@@ -829,6 +830,7 @@ env.Library(
         'commands',
         'commands/server_status_core',
         'repl/repl_coordinator_interface',
+        'repl/repl_settings',
         'repl/replica_set_messages',
         'repl/topology_version_observer',
         'server_base',
@@ -842,6 +844,18 @@ env.CppUnitTest(
     ],
     LIBDEPS=[
         'client_out_of_line_executor',
+    ],
+)
+
+env.CppUnitTest(
+    target='mongod_options_test',
+    source=[
+        'mongod_options_test.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/util/options_parser/options_parser',
+        'mongod_options',
+        'server_base',
     ],
 )
 
@@ -1019,7 +1033,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/collection_uuid_mismatch_info',
         '$BUILD_DIR/mongo/db/catalog/local_oplog_info',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         'multitenancy',
         'server_base',
         'storage/capped_snapshots',
@@ -1131,12 +1145,13 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
         'not_primary_error_tracker',
         'ops/write_ops_parsers',
     ],
     LIBDEPS_PRIVATE=[
         'repl/repl_coordinator_interface',
+        'repl/repl_settings',
+        'shard_role',
     ],
 )
 
@@ -1188,7 +1203,7 @@ env.Library(
         'commands/fsync_locked',
         'concurrency/lock_manager',
         'not_primary_error_tracker',
-        'query/op_metrics',
+        'query/query_stats/query_stats',
         'read_concern_d_impl',
         'rw_concern_d',
         's/sharding_runtime_d',
@@ -1285,7 +1300,6 @@ env.Library(
         'catalog/collection_catalog',
         'catalog/index_build_entry_idl',
         'index_build_entry_helpers',
-        'query/op_metrics',
         'repl/tenant_migration_access_blocker',
         'resumable_index_builds_idl',
         's/forwardable_operation_metadata',
@@ -1380,7 +1394,7 @@ env.Library(
         "curop_metrics.cpp",
     ],
     LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/query/op_metrics",
+        "$BUILD_DIR/mongo/db/query/query_stats/query_stats",
         "commands/server_status_core",
     ],
 )
@@ -1406,7 +1420,7 @@ env.Library(
         'write_concern.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         'read_write_concern_defaults',
         'repl/read_concern_args',
         'repl/speculative_majority_read_info',
@@ -1418,6 +1432,7 @@ env.Library(
         'concurrency/lock_manager',
         'repl/repl_coordinator_interface',
         'repl/repl_server_parameters',
+        'repl/repl_settings',
         'shared_request_handling',
         'storage/storage_control',
     ],
@@ -1430,7 +1445,7 @@ env.Library(
         'read_concern_mongod.idl',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         'concurrency/exception_util',
         'repl/repl_coordinator_interface',
         'repl/speculative_majority_read_info',
@@ -1618,7 +1633,6 @@ execEnv.Library(
         'query/plan_ranker.cpp',
         'query/plan_yield_policy_impl.cpp',
         'query/plan_yield_policy_sbe.cpp',
-        'query/query_utils.cpp',
         'query/sbe_cached_solution_planner.cpp',
         'query/sbe_multi_planner.cpp',
         'query/sbe_plan_ranker.cpp',
@@ -1627,7 +1641,6 @@ execEnv.Library(
         'query/sbe_stage_builder_accumulator.cpp',
         'query/sbe_stage_builder_coll_scan.cpp',
         'query/sbe_stage_builder_const_eval.cpp',
-        'query/sbe_stage_builder_eval_frame.cpp',
         'query/sbe_stage_builder_expression.cpp',
         'query/sbe_stage_builder_filter.cpp',
         'query/sbe_stage_builder_abt_helpers.cpp',
@@ -1635,8 +1648,14 @@ execEnv.Library(
         'query/sbe_stage_builder_helpers.cpp',
         'query/sbe_stage_builder_index_scan.cpp',
         'query/sbe_stage_builder_lookup.cpp',
+        'query/sbe_stage_builder_plan_data.cpp',
         'query/sbe_stage_builder_projection.cpp',
+        'query/sbe_stage_builder_sbexpr.cpp',
+        'query/sbe_stage_builder_sbexpr_helpers.cpp',
+        'query/sbe_stage_builder_state.cpp',
+        'query/sbe_stage_builder_ts.cpp',
         'query/sbe_stage_builder_type_checker.cpp',
+        'query/sbe_stage_builder_window_function.cpp',
         'query/sbe_sub_planner.cpp',
         'query/shard_filterer_factory_impl.cpp',
         'query/stage_builder_util.cpp',
@@ -1646,7 +1665,7 @@ execEnv.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/auth/auth_checks',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         '$BUILD_DIR/mongo/scripting/scripting',
         '$BUILD_DIR/mongo/util/background_job',
         '$BUILD_DIR/mongo/util/elapsed_tracker',
@@ -1731,6 +1750,33 @@ env.Library(
 )
 
 env.Library(
+    target='sbe_values',
+    source=[
+        'exec/sbe/values/arith_common.cpp',
+        'exec/sbe/values/block_interface.cpp',
+        'exec/sbe/values/bson.cpp',
+        'exec/sbe/values/bson_block.cpp',
+        'exec/sbe/values/cell_interface.cpp',
+        'exec/sbe/values/row.cpp',
+        'exec/sbe/values/slot_printer.cpp',
+        'exec/sbe/values/ts_block.cpp',
+        'exec/sbe/values/value.cpp',
+        'exec/sbe/values/value_printer.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/bson/util/bson_column',
+        '$BUILD_DIR/mongo/util/indexed_string_vector',
+        '$BUILD_DIR/mongo/util/pcre_util',
+        '$BUILD_DIR/mongo/util/summation',
+        'exec/js_function',
+        'query/collation/collator_interface',
+        'query/datetime/date_time_support',
+        'storage/key_string',
+    ],
+)
+
+env.Library(
     target='query_expressions',
     source=[
         'matcher/doc_validation_error.cpp',
@@ -1741,6 +1787,7 @@ env.Library(
         'matcher/expression_expr.cpp',
         'matcher/expression_geo.cpp',
         'matcher/expression_geo_serializer.cpp',
+        'matcher/expression_hasher.cpp',
         'matcher/expression_internal_bucket_geo_within.cpp',
         'matcher/expression_leaf.cpp',
         'matcher/expression_parameterization.cpp',
@@ -1754,6 +1801,7 @@ env.Library(
         'matcher/extensions_callback.cpp',
         'matcher/extensions_callback_noop.cpp',
         'matcher/implicit_validator.cpp',
+        'matcher/in_list_data.cpp',
         'matcher/match_details.cpp',
         'matcher/match_expression_dependencies.cpp',
         'matcher/match_expression_util.cpp',
@@ -1815,7 +1863,8 @@ env.Library(
         'query/collation/collator_interface',
         'query/datetime/date_time_support',
         'query/query_knobs',
-        'serialization_options',
+        'query_shape_common',
+        'sbe_values',
         'stats/counters',
         'update/pattern_cmp',
     ],
@@ -1828,17 +1877,17 @@ env.Library(
 )
 
 env.Library(
-    target='serialization_options',
-    source=[
+    target='query_shape_common', source=[
+        'query/query_shape.idl',
+        'query/shape_helpers.cpp',
         'query/serialization_options.cpp',
-    ],
-    LIBDEPS=[
+    ], LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
         '$BUILD_DIR/mongo/db/pipeline/field_path',
-    ],
-    LIBDEPS_PRIVATE=[],
-)
+    ], LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
+    ])
 
 env.Library(
     target='startup_recovery',
@@ -2066,6 +2115,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
         'dbdirectclient',
+        'rw_concern_d',
     ],
 )
 
@@ -2214,6 +2264,17 @@ env.Library(
     ],
 )
 
+env.Library(
+    target='feature_compatibility_version_metrics',
+    source=[
+        'feature_compatibility_version_metrics.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/commands/server_status_core',
+        'server_base',
+    ],
+)
+
 # This library is the base class for tests which require the presence of ServiceContext. However it
 # does not perform any default initialisation of the relevant services, such as lockers and
 # transaction resources, so any test which directly references it must perform its own
@@ -2246,6 +2307,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/util/clock_source_mock',
+        'auth/auth_impl_internal',
         'catalog/catalog_impl',
         'commands/mongod',
         'index_builds_coordinator_mongod',
@@ -2266,12 +2328,13 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/util/net/network',
-        'repl/repl_coordinator_interface',
-        'repl/replica_set_messages',
         'server_options_servers',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/util/processinfo',
+        'repl/repl_coordinator_interface',
+        'repl/repl_settings',
+        'repl/replica_set_messages',
     ],
 )
 
@@ -2392,7 +2455,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         # NOTE: If you need to add a static or mongo initializer to mongod startup,
         # please add that library here, as a private library dependency.
-        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         '$BUILD_DIR/mongo/executor/async_rpc_error_info',
         '$BUILD_DIR/mongo/executor/network_interface_factory',
         '$BUILD_DIR/mongo/rpc/rpc',
@@ -2436,7 +2499,7 @@ env.Library(
         'dbdirectclient',
         'dbhelpers',
         'exec/working_set',
-        'free_mon/free_mon_mongod',
+        'feature_compatibility_version_metrics',
         'ftdc/ftdc_mongod',
         'fts/ftsmongod',
         'index/index_access_method',
@@ -2550,7 +2613,6 @@ env.Library(
         'concurrency/flow_control_ticketholder',
         'concurrency/lock_manager',
         'fle_crud_mongod',
-        'free_mon/free_mon_mongod',
         'ftdc/ftdc_mongod',
         'index/index_access_method',
         'index_builds_coordinator_mongod',
@@ -2562,6 +2624,7 @@ env.Library(
         'op_observer/change_stream_pre_images_op_observer',
         'op_observer/fallback_op_observer',
         'op_observer/fcv_op_observer',
+        'op_observer/find_and_modify_images_op_observer',
         'op_observer/op_observer',
         'op_observer/oplog_writer_impl',
         'op_observer/oplog_writer_transaction_proxy',
@@ -2570,7 +2633,7 @@ env.Library(
         'pipeline/change_stream_expired_pre_image_remover',
         'pipeline/process_interface/mongod_process_interface_factory',
         'query/query_settings_manager',
-        'query/stats/query_stats',
+        'query/stats/stats',
         'repl/drop_pending_collection_reaper',
         'repl/initial_syncer',
         'repl/repl_coordinator_impl',
@@ -2822,7 +2885,7 @@ if wiredtiger:
             'ops/write_ops',
             'pipeline/change_stream_expired_pre_image_remover',
             'query/common_query_enums_and_helpers',
-            'query/op_metrics',
+            'query/query_stats/query_stats',
             'query/query_test_service_context',
             'query_exec',
             'read_write_concern_defaults_mock',

@@ -4,12 +4,13 @@
  * @tags: [
  *   requires_persistence,
  *   requires_fcv_70,
- *   featureFlagTransitionToCatalogShard,
+ *   # TODO SERVER-71169: Re-enable this test
+ *   cqf_incompatible,
  * ]
  */
 import {ConfigShardUtil} from "jstests/libs/config_shard_util.js";
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/write_concern_util.js");
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {Thread} from "jstests/libs/parallelTester.js";
 
 const dbName = "foo";
 const collName = "bar";

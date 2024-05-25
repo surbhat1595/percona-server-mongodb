@@ -1,9 +1,6 @@
 // Test that the stepdown command can be run successfully during drain mode
 
-(function() {
-"use strict";
-
-load("jstests/replsets/rslib.js");
+import {reconnect} from "jstests/replsets/rslib.js";
 
 var replSet = new ReplSetTest({name: 'testSet', nodes: 3});
 var nodes = replSet.nodeList();
@@ -75,7 +72,7 @@ assert.soon(
         return bufferCountChange == numDocuments - 1;
     },
     'secondary did not buffer operations for new inserts on primary',
-    replSet.kDefaultTimeoutMs,
+    ReplSetTest.kDefaultTimeoutMS,
     1000);
 
 reconnect(secondary);
@@ -106,4 +103,3 @@ assert.soon(function() {
     return secondary.getDB("foo").foo.find().itcount() == numDocuments;
 });
 replSet.stopSet();
-})();

@@ -4,12 +4,12 @@
 //   # Asserts that some queries use a collection scan.
 //   assumes_no_implicit_index_creation,
 // ]
-load("jstests/libs/fixture_helpers.js");  // For FixtureHelpers.
 import {
+    assertStagesForExplainOfCommand,
     getWinningPlan,
-    planHasStage,
-    assertStagesForExplainOfCommand
+    planHasStage
 } from "jstests/libs/analyze_plan.js";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const coll = db.distinct_multikey_index;
 
@@ -56,9 +56,7 @@ assertStagesForExplainOfCommand({
 
 assert.commandWorked(coll.dropIndexes());
 assert.commandWorked(coll.createIndex({a: 1, b: 1, text: "text"}));
-// TODO SERVER-76084: build a test similar to this to check that the distinct output contains the
-// prefix according to expectPrefix value/presence ie.
-// if (!expectPrefix) assert.eq(result["queryPlanner"]["namespace"], "test.distinct_multikey_index")
+
 let result = assertStagesForExplainOfCommand({
     coll: coll,
     cmdObj: cmdObj,

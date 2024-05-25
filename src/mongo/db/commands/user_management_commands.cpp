@@ -261,7 +261,7 @@ Status checkOkayToGrantPrivilegesToRole(const RoleName& role, const PrivilegeVec
     for (PrivilegeVector::const_iterator it = privileges.begin(); it != privileges.end(); ++it) {
         const ResourcePattern& resource = (*it).getResourcePattern();
         if ((resource.isDatabasePattern() || resource.isExactNamespacePattern()) &&
-            (resource.databaseToMatch() == role.getDB())) {
+            (resource.dbNameToMatch() == role.getDatabaseName())) {
             continue;
         }
 
@@ -301,7 +301,15 @@ Status insertAuthzDocument(OperationContext* opCtx,
                            const NamespaceString& nss,
                            const BSONObj& document) try {
     DBDirectClient client(opCtx);
-    write_ops::checkWriteErrors(client.insert(write_ops::InsertCommandRequest(nss, {document})));
+
+    // The sc is used to control serialization behavior executed on the request in client.insert,
+    // and tenantIds should not be prefixed on the $db field.  Indicating that the request received
+    // a tenantId from something other than a prefix, in this case the nss, will prevent prefixing.
+    auto sc = SerializationContext::stateCommandRequest();
+    sc.setTenantIdSource(nss.tenantId() != boost::none);
+
+    write_ops::checkWriteErrors(
+        client.insert(write_ops::InsertCommandRequest(nss, {document}, sc)));
     return Status::OK();
 } catch (const DBException& e) {
     return e.toStatus();
@@ -320,8 +328,15 @@ StatusWith<std::int64_t> updateAuthzDocuments(OperationContext* opCtx,
                                               bool upsert,
                                               bool multi) try {
     DBDirectClient client(opCtx);
+
+    // The sc is used to control serialization behavior executed on the request in client.update,
+    // and tenantIds should not be prefixed on the $db field.  Indicating that the request received
+    // a tenantId from something other than a prefix, in this case the nss, will prevent prefixing.
+    auto sc = SerializationContext::stateCommandRequest();
+    sc.setTenantIdSource(nss.tenantId() != boost::none);
+
     auto result = client.update([&] {
-        write_ops::UpdateCommandRequest updateOp(nss);
+        write_ops::UpdateCommandRequest updateOp(nss, sc);
         updateOp.setUpdates({[&] {
             write_ops::UpdateOpEntry entry;
             entry.setQ(query);
@@ -381,8 +396,15 @@ StatusWith<std::int64_t> removeAuthzDocuments(OperationContext* opCtx,
                                               const NamespaceString& nss,
                                               const BSONObj& query) try {
     DBDirectClient client(opCtx);
+
+    // The sc is used to control serialization behavior executed on the request in client.remove,
+    // and tenantIds should not be prefixed on the $db field.  Indicating that the request received
+    // a tenantId from something other than a prefix, in this case the nss, will prevent prefixing.
+    auto sc = SerializationContext::stateCommandRequest();
+    sc.setTenantIdSource(nss.tenantId() != boost::none);
+
     auto result = client.remove([&] {
-        write_ops::DeleteCommandRequest deleteOp(nss);
+        write_ops::DeleteCommandRequest deleteOp(nss, sc);
         deleteOp.setDeletes({[&] {
             write_ops::DeleteOpEntry entry;
             entry.setQ(query);
@@ -777,8 +799,7 @@ public:
                    StringData forCommand,
                    const boost::optional<TenantId>& tenant)
         :  // Don't transactionalize on standalone.
-          _isReplSet{repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() ==
-                     repl::ReplicationCoordinator::modeReplSet},
+          _isReplSet{repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()},
           // Subclient used by transaction operations.
           _client{opCtx->getServiceContext()->makeClient(forCommand.toString())},
           _dbName{DatabaseNameUtil::deserialize(tenant, kAdminDB)},
@@ -853,7 +874,7 @@ public:
 
 private:
     static bool validNamespace(const NamespaceString& nss) {
-        return (nss.dbName().db() == kAdminDB);
+        return (nss.isAdminDB());
     }
 
     StatusWith<std::uint32_t> doCrudOp(BSONObj op) try {
@@ -1038,8 +1059,7 @@ public:
         NamespaceString ns() const final {
             const auto& cmd = request();
             if constexpr (hasGetCmdParamStringData<RequestT>) {
-                return NamespaceStringUtil::parseNamespaceFromRequest(cmd.getDbName(),
-                                                                      cmd.getCommandParameter());
+                return NamespaceStringUtil::deserialize(cmd.getDbName(), cmd.getCommandParameter());
             }
             return NamespaceString(cmd.getDbName());
         }
@@ -1086,7 +1106,8 @@ public:
     std::set<StringData> sensitiveFieldNames() const final {
         return {kPwdField};
     }
-} cmdCreateUser;
+};
+MONGO_REGISTER_COMMAND(CmdCreateUser);
 
 template <>
 void CmdUMCTyped<CreateUserCommand>::Invocation::typedRun(OperationContext* opCtx) {
@@ -1198,7 +1219,8 @@ public:
     std::set<StringData> sensitiveFieldNames() const final {
         return {kPwdField};
     }
-} cmdUpdateUser;
+};
+MONGO_REGISTER_COMMAND(CmdUpdateUser);
 
 template <>
 void CmdUMCTyped<UpdateUserCommand>::Invocation::typedRun(OperationContext* opCtx) {
@@ -1297,7 +1319,7 @@ void CmdUMCTyped<UpdateUserCommand>::Invocation::typedRun(OperationContext* opCt
     uassertStatusOK(status);
 }
 
-CmdUMCTyped<DropUserCommand> cmdDropUser;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<DropUserCommand>);
 template <>
 void CmdUMCTyped<DropUserCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1325,7 +1347,7 @@ void CmdUMCTyped<DropUserCommand>::Invocation::typedRun(OperationContext* opCtx)
             numMatched > 0);
 }
 
-CmdUMCTyped<DropAllUsersFromDatabaseCommand> cmdDropAllUsersFromDatabase;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<DropAllUsersFromDatabaseCommand>);
 template <>
 DropAllUsersFromDatabaseReply CmdUMCTyped<DropAllUsersFromDatabaseCommand>::Invocation::typedRun(
     OperationContext* opCtx) {
@@ -1353,7 +1375,7 @@ DropAllUsersFromDatabaseReply CmdUMCTyped<DropAllUsersFromDatabaseCommand>::Invo
     return reply;
 }
 
-CmdUMCTyped<GrantRolesToUserCommand> cmdGrantRolesToUser;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<GrantRolesToUserCommand>);
 template <>
 void CmdUMCTyped<GrantRolesToUserCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1388,7 +1410,7 @@ void CmdUMCTyped<GrantRolesToUserCommand>::Invocation::typedRun(OperationContext
     uassertStatusOK(status);
 }
 
-CmdUMCTyped<RevokeRolesFromUserCommand> cmdRevokeRolesFromUser;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<RevokeRolesFromUserCommand>);
 template <>
 void CmdUMCTyped<RevokeRolesFromUserCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1423,7 +1445,7 @@ void CmdUMCTyped<RevokeRolesFromUserCommand>::Invocation::typedRun(OperationCont
     uassertStatusOK(status);
 }
 
-CmdUMCTyped<UsersInfoCommand, UMCInfoParams> cmdUsersInfo;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<UsersInfoCommand, UMCInfoParams>);
 template <>
 UsersInfoReply CmdUMCTyped<UsersInfoCommand, UMCInfoParams>::Invocation::typedRun(
     OperationContext* opCtx) {
@@ -1583,7 +1605,7 @@ UsersInfoReply CmdUMCTyped<UsersInfoCommand, UMCInfoParams>::Invocation::typedRu
     return reply;
 }
 
-CmdUMCTyped<CreateRoleCommand> cmdCreateRole;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<CreateRoleCommand>);
 template <>
 void CmdUMCTyped<CreateRoleCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1641,7 +1663,7 @@ void CmdUMCTyped<CreateRoleCommand>::Invocation::typedRun(OperationContext* opCt
     uassertStatusOK(insertRoleDocument(opCtx, roleObjBuilder.done(), roleName.getTenant()));
 }
 
-CmdUMCTyped<UpdateRoleCommand> cmdUpdateRole;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<UpdateRoleCommand>);
 template <>
 void CmdUMCTyped<UpdateRoleCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1723,7 +1745,7 @@ void CmdUMCTyped<UpdateRoleCommand>::Invocation::typedRun(OperationContext* opCt
     uassertStatusOK(status);
 }
 
-CmdUMCTyped<GrantPrivilegesToRoleCommand> cmdGrantPrivilegesToRole;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<GrantPrivilegesToRoleCommand>);
 template <>
 void CmdUMCTyped<GrantPrivilegesToRoleCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1776,7 +1798,7 @@ void CmdUMCTyped<GrantPrivilegesToRoleCommand>::Invocation::typedRun(OperationCo
     uassertStatusOK(status);
 }
 
-CmdUMCTyped<RevokePrivilegesFromRoleCommand> cmdRevokePrivilegesFromRole;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<RevokePrivilegesFromRoleCommand>);
 template <>
 void CmdUMCTyped<RevokePrivilegesFromRoleCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1834,7 +1856,7 @@ void CmdUMCTyped<RevokePrivilegesFromRoleCommand>::Invocation::typedRun(Operatio
     uassertStatusOK(status);
 }
 
-CmdUMCTyped<GrantRolesToRoleCommand> cmdGrantRolesToRole;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<GrantRolesToRoleCommand>);
 template <>
 void CmdUMCTyped<GrantRolesToRoleCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1874,7 +1896,7 @@ void CmdUMCTyped<GrantRolesToRoleCommand>::Invocation::typedRun(OperationContext
     uassertStatusOK(status);
 }
 
-CmdUMCTyped<RevokeRolesFromRoleCommand> cmdRevokeRolesFromRole;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<RevokeRolesFromRoleCommand>);
 template <>
 void CmdUMCTyped<RevokeRolesFromRoleCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1980,7 +2002,7 @@ Status retryTransactionOps(OperationContext* opCtx,
     return status;
 }
 
-CmdUMCTyped<DropRoleCommand> cmdDropRole;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<DropRoleCommand>);
 template <>
 void CmdUMCTyped<DropRoleCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -2047,7 +2069,7 @@ void CmdUMCTyped<DropRoleCommand>::Invocation::typedRun(OperationContext* opCtx)
     }
 }
 
-CmdUMCTyped<DropAllRolesFromDatabaseCommand> cmdDropAllRolesFromDatabase;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<DropAllRolesFromDatabaseCommand>);
 template <>
 DropAllRolesFromDatabaseReply CmdUMCTyped<DropAllRolesFromDatabaseCommand>::Invocation::typedRun(
     OperationContext* opCtx) {
@@ -2142,7 +2164,7 @@ DropAllRolesFromDatabaseReply CmdUMCTyped<DropAllRolesFromDatabaseCommand>::Invo
  *   "asUserFragment" Render results as a partial user document as-if a user existed which possessed
  *                    these roles. This format may change over time with changes to the auth schema.
  */
-CmdUMCTyped<RolesInfoCommand, UMCInfoParams> cmdRolesInfo;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<RolesInfoCommand, UMCInfoParams>);
 template <>
 RolesInfoReply CmdUMCTyped<RolesInfoCommand, UMCInfoParams>::Invocation::typedRun(
     OperationContext* opCtx) {
@@ -2192,7 +2214,7 @@ RolesInfoReply CmdUMCTyped<RolesInfoCommand, UMCInfoParams>::Invocation::typedRu
     return reply;
 }
 
-CmdUMCTyped<InvalidateUserCacheCommand, UMCInvalidateUserCacheParams> cmdInvalidateUserCache;
+MONGO_REGISTER_COMMAND(CmdUMCTyped<InvalidateUserCacheCommand, UMCInvalidateUserCacheParams>);
 template <>
 void CmdUMCTyped<InvalidateUserCacheCommand, UMCInvalidateUserCacheParams>::Invocation::typedRun(
     OperationContext* opCtx) {
@@ -2201,8 +2223,7 @@ void CmdUMCTyped<InvalidateUserCacheCommand, UMCInvalidateUserCacheParams>::Invo
     authzManager->invalidateUsersByTenant(opCtx, request().getDbName().tenantId());
 }
 
-CmdUMCTyped<GetUserCacheGenerationCommand, UMCGetUserCacheGenParams> cmdGetUserCacheGeneration;
-
+MONGO_REGISTER_COMMAND(CmdUMCTyped<GetUserCacheGenerationCommand, UMCGetUserCacheGenParams>);
 template <>
 GetUserCacheGenerationReply
 CmdUMCTyped<GetUserCacheGenerationCommand, UMCGetUserCacheGenParams>::Invocation::typedRun(
@@ -2211,7 +2232,7 @@ CmdUMCTyped<GetUserCacheGenerationCommand, UMCGetUserCacheGenParams>::Invocation
             "_getUserCacheGeneration can only be run on config servers",
             serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
 
-    cmdGetUserCacheGeneration.skipApiVersionCheck();
+    definition()->skipApiVersionCheck();
     GetUserCacheGenerationReply reply;
     auto* authzManager = AuthorizationManager::get(opCtx->getServiceContext());
     reply.setCacheGeneration(authzManager->getCacheGeneration());
@@ -2263,7 +2284,8 @@ public:
         // TODO (SERVER-TBD) Support mergeAuthzCollections in multitenancy
         return false;
     }
-} cmdMergeAuthzCollections;
+};
+MONGO_REGISTER_COMMAND(CmdMergeAuthzCollections);
 
 UserName _extractUserNameFromBSON(const BSONObj& userObj) {
     std::string name;
@@ -2380,7 +2402,14 @@ Status queryAuthzDocument(OperationContext* opCtx,
                           const BSONObj& projection,
                           const std::function<void(const BSONObj&)>& resultProcessor) try {
     DBDirectClient client(opCtx);
-    FindCommandRequest findRequest{nss};
+
+    // The sc is used to control serialization behavior executed on the request in client.find, and
+    // tenantIds should not be prefixed on the $db field.  Indicating that the request received a
+    // tenantId from something other than a prefix, in this case the nss, will prevent prefixing.
+    auto sc = SerializationContext::stateCommandRequest();
+    sc.setTenantIdSource(nss.tenantId() != boost::none);
+
+    FindCommandRequest findRequest{nss, sc};
     findRequest.setFilter(query);
     findRequest.setProjection(projection);
     client.find(std::move(findRequest), resultProcessor);
@@ -2398,7 +2427,8 @@ void _processUsers(OperationContext* opCtx,
                    AuthorizationManager* authzManager,
                    StringData usersCollName,
                    StringData db,
-                   const bool drop) {
+                   const bool drop,
+                   const boost::optional<TenantId>& tenantId) {
     // When the "drop" argument has been provided, we use this set to store the users
     // that are currently in the system, and remove from it as we encounter
     // same-named users in the collection we are restoring from.  Once we've fully
@@ -2429,7 +2459,7 @@ void _processUsers(OperationContext* opCtx,
 
     uassertStatusOK(queryAuthzDocument(
         opCtx,
-        NamespaceString(usersCollName),
+        NamespaceStringUtil::deserialize(tenantId, usersCollName),
         db.empty() ? BSONObj() : BSON(AuthorizationManager::USER_DB_FIELD_NAME << db),
         BSONObj(),
         [&](const BSONObj& userObj) {
@@ -2527,7 +2557,8 @@ void _processRoles(OperationContext* opCtx,
                    AuthorizationManager* authzManager,
                    StringData rolesCollName,
                    StringData db,
-                   const bool drop) {
+                   const bool drop,
+                   const boost::optional<TenantId>& tenantId) {
     // When the "drop" argument has been provided, we use this set to store the roles
     // that are currently in the system, and remove from it as we encounter
     // same-named roles in the collection we are restoring from.  Once we've fully
@@ -2557,7 +2588,7 @@ void _processRoles(OperationContext* opCtx,
 
     uassertStatusOK(queryAuthzDocument(
         opCtx,
-        NamespaceString(rolesCollName),
+        NamespaceStringUtil::deserialize(tenantId, rolesCollName),
         db.empty() ? BSONObj() : BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << db),
         BSONObj(),
         [&](const BSONObj& roleObj) {
@@ -2591,13 +2622,14 @@ void CmdMergeAuthzCollections::Invocation::typedRun(OperationContext* opCtx) {
     ScopeGuard invalidateGuard([&] { authzManager->invalidateUserCache(opCtx); });
     const auto db = cmd.getDb();
     const bool drop = cmd.getDrop();
+    const auto tenantId = cmd.getDollarTenant();
 
     if (!tempUsersColl.empty()) {
-        _processUsers(opCtx, authzManager, tempUsersColl, db, drop);
+        _processUsers(opCtx, authzManager, tempUsersColl, db, drop, tenantId);
     }
 
     if (!tempRolesColl.empty()) {
-        _processRoles(opCtx, authzManager, tempRolesColl, db, drop);
+        _processRoles(opCtx, authzManager, tempRolesColl, db, drop, tenantId);
     }
 }
 

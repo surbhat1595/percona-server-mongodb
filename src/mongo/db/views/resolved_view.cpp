@@ -114,17 +114,28 @@ ResolvedView ResolvedView::fromBSON(const BSONObj& commandResponseObj) {
         usesExtendedRange = boost::optional<bool>(usesExtendedRangeElem.boolean());
     }
 
-    return {NamespaceString(viewDef["ns"].valueStringData()),
+    boost::optional<bool> fixedBuckets = boost::none;
+    if (auto fixedBucketsElem = viewDef[kTimeseriesfixedBuckets]) {
+        uassert(7823304,
+                str::stream() << "view definition must have " << kTimeseriesfixedBuckets
+                              << " of type bool or no such field",
+                fixedBucketsElem.type() == BSONType::Bool);
+
+        fixedBuckets = boost::optional<bool>(fixedBucketsElem.boolean());
+    }
+
+    return {NamespaceStringUtil::deserializeForErrorMsg(viewDef["ns"].valueStringData()),
             std::move(pipeline),
             std::move(collationSpec),
             std::move(timeseriesOptions),
             std::move(mixedSchema),
-            std::move(usesExtendedRange)};
+            std::move(usesExtendedRange),
+            std::move(fixedBuckets)};
 }
 
 void ResolvedView::serialize(BSONObjBuilder* builder) const {
     BSONObjBuilder subObj(builder->subobjStart("resolvedView"));
-    subObj.append("ns", NamespaceStringUtil::serialize(_namespace));
+    subObj.append("ns", _namespace.toStringForErrorMsg());
     subObj.append("pipeline", _pipeline);
     if (_timeseriesOptions) {
         BSONObjBuilder tsObj(builder->subobjStart(kTimeseriesOptions));
@@ -136,6 +147,9 @@ void ResolvedView::serialize(BSONObjBuilder* builder) const {
 
     if ((_timeseriesUsesExtendedRange && (*_timeseriesUsesExtendedRange)))
         subObj.append(kTimeseriesUsesExtendedRange, *_timeseriesUsesExtendedRange);
+
+    if ((_timeseriesfixedBuckets && (*_timeseriesfixedBuckets)))
+        subObj.append(kTimeseriesfixedBuckets, *_timeseriesfixedBuckets);
 
     if (!_defaultCollation.isEmpty()) {
         subObj.append("collation", _defaultCollation);
@@ -198,6 +212,9 @@ void ResolvedView::handleTimeseriesRewrites(std::vector<BSONObj>* resolvedPipeli
 
         builder.append(DocumentSourceInternalUnpackBucket::kUsesExtendedRange,
                        ((_timeseriesUsesExtendedRange && *_timeseriesUsesExtendedRange)));
+
+        builder.append(DocumentSourceInternalUnpackBucket::kFixedBuckets,
+                       ((_timeseriesfixedBuckets && *_timeseriesfixedBuckets)));
 
         (*resolvedPipeline)[0] =
             BSON(DocumentSourceInternalUnpackBucket::kStageNameInternal << builder.obj());

@@ -36,8 +36,8 @@ namespace mongo::sbe {
 
 class WindowStageTest : public PlanStageTestFixture {
 public:
-    using WindowOffset =
-        std::tuple<value::SlotId, boost::optional<int32_t>, boost::optional<int32_t>>;
+    using WindowOffset = std::
+        tuple<value::SlotId, value::SlotId, boost::optional<int32_t>, boost::optional<int32_t>>;
 
     std::pair<std::unique_ptr<PlanStage>, value::SlotVector> createSimpleWindowStage(
         std::unique_ptr<PlanStage> stage,
@@ -48,32 +48,33 @@ public:
         using namespace stage_builder;
         value::SlotVector windowSlots;
         std::vector<WindowStage::Window> windows;
-        for (auto [boundSlot, lowerOffset, higherOffset] : windowOffsets) {
-            auto boundTestingSlot = generateSlotId();
+        for (auto [lowBoundSlot, highBoundSlot, lowerOffset, higherOffset] : windowOffsets) {
             auto windowSlot = generateSlotId();
+            auto lowBoundTestingSlot = generateSlotId();
+            auto highBoundTestingSlot = generateSlotId();
             windowSlots.push_back(windowSlot);
 
             WindowStage::Window window;
-            window.boundSlot = boundSlot;
-            window.boundTestingSlot = boundTestingSlot;
             window.windowSlot = windowSlot;
+            window.lowBoundSlot = lowBoundSlot;
+            window.lowBoundTestingSlot = lowBoundTestingSlot;
             window.lowBoundExpr = nullptr;
             if (lowerOffset) {
-                window.lowBoundExpr = makeBinaryOp(
-                    EPrimBinary::greaterEq,
-                    makeVariable(boundTestingSlot),
-                    makeBinaryOp(EPrimBinary::add,
-                                 makeVariable(boundSlot),
-                                 makeConstant(value::TypeTags::NumberInt32, *lowerOffset)));
+                window.lowBoundExpr = makeBinaryOp(EPrimBinary::greaterEq,
+                                                   makeVariable(lowBoundTestingSlot),
+                                                   makeBinaryOp(EPrimBinary::add,
+                                                                makeVariable(lowBoundSlot),
+                                                                makeInt32Constant(*lowerOffset)));
             }
+            window.highBoundSlot = highBoundSlot;
+            window.highBoundTestingSlot = highBoundTestingSlot;
             window.highBoundExpr = nullptr;
             if (higherOffset) {
-                window.highBoundExpr = makeBinaryOp(
-                    EPrimBinary::lessEq,
-                    makeVariable(boundTestingSlot),
-                    makeBinaryOp(EPrimBinary::add,
-                                 makeVariable(boundSlot),
-                                 makeConstant(value::TypeTags::NumberInt32, *higherOffset)));
+                window.highBoundExpr = makeBinaryOp(EPrimBinary::lessEq,
+                                                    makeVariable(highBoundTestingSlot),
+                                                    makeBinaryOp(EPrimBinary::add,
+                                                                 makeVariable(highBoundSlot),
+                                                                 makeInt32Constant(*higherOffset)));
             }
             window.initExpr = nullptr;
             window.addExpr = makeFunction("aggDoubleDoubleSum", makeVariable(valueSlot));
@@ -89,16 +90,17 @@ public:
                                    kEmptyPlanNodeId);
 
         value::SlotVector resultSlots;
-        value::SlotMap<std::unique_ptr<EExpression>> slotMap;
+        SlotExprPairVector projects;
         for (auto windowSlot : windowSlots) {
             auto resultSlot = generateSlotId();
             resultSlots.push_back(resultSlot);
-            slotMap[resultSlot] =
+            projects.emplace_back(
+                resultSlot,
                 makeE<EIf>(makeFunction("exists", makeVariable(windowSlot)),
                            makeFunction("doubleDoubleSumFinalize", makeVariable(windowSlot)),
-                           makeConstant(value::TypeTags::NumberInt32, 0));
+                           makeInt32Constant(0)));
         }
-        stage = makeS<ProjectStage>(std::move(stage), std::move(slotMap), kEmptyPlanNodeId);
+        stage = makeS<ProjectStage>(std::move(stage), std::move(projects), kEmptyPlanNodeId);
         return {std::move(stage), std::move(resultSlots)};
     }
 };
@@ -125,18 +127,21 @@ TEST_F(WindowStageTest, WindowTest) {
         // Both boundSlot1 and boundSlot2 are evenly spaced 2 units apart, we expect a range of [-2,
         // +2] to cover
         // 1 document on either side of the current document, similarly for other ranges.
-        {boundSlot1, -2, 2},
-        {boundSlot2, -2, 2},
-        {boundSlot1, boost::none, 0},
-        {boundSlot1, 0, boost::none},
-        {boundSlot1, -6, -2},
-        {boundSlot1, 2, 6},
+        {boundSlot1, boundSlot1, -2, 2},
+        {boundSlot1, boundSlot2, -2, 2},
+        {boundSlot2, boundSlot2, -2, 2},
+        {boundSlot1, boundSlot1, boost::none, 0},
+        {boundSlot1, boundSlot1, 0, boost::none},
+        {boundSlot1, boundSlot1, -6, -2},
+        {boundSlot1, boundSlot1, 2, 6},
+        {boundSlot1, boundSlot1, boost::none, -3},
     };
     auto [resultStage, resultSlots] = createSimpleWindowStage(std::move(inputStage),
                                                               std::move(partitionSlots),
                                                               std::move(forwardSlots),
                                                               valueSlot,
                                                               std::move(windowOffsets));
+
     prepareTree(ctx.get(), resultStage.get());
     std::vector<value::SlotAccessor*> resultAccessors;
     for (auto resultSlot : resultSlots) {
@@ -148,10 +153,13 @@ TEST_F(WindowStageTest, WindowTest) {
     std::vector<std::vector<int32_t>> expected{
         {300, 600, 900, 1200, 900, 300, 600, 900, 1200, 900},
         {300, 600, 900, 1200, 900, 300, 600, 900, 1200, 900},
+        {300, 600, 900, 1200, 900, 300, 600, 900, 1200, 900},
         {100, 300, 600, 1000, 1500, 100, 300, 600, 1000, 1500},
         {1500, 1400, 1200, 900, 500, 1500, 1400, 1200, 900, 500},
         {0, 100, 300, 600, 900, 0, 100, 300, 600, 900},
-        {900, 1200, 900, 500, 0, 900, 1200, 900, 500, 0}};
+        {900, 1200, 900, 500, 0, 900, 1200, 900, 500, 0},
+        {0, 0, 100, 300, 600, 0, 0, 100, 300, 600},
+    };
     for (size_t i = 0; i < expected[0].size(); i++) {
         auto planState = resultStage->getNext();
         ASSERT_EQ(PlanState::ADVANCED, planState);

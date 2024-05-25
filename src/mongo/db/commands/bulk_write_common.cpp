@@ -45,6 +45,8 @@
 #include "mongo/db/commands/bulk_write_crud_op.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/write_ops.h"
+#include "mongo/db/pipeline/variables.h"
+#include "mongo/db/repl/oplog.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
@@ -52,7 +54,7 @@
 namespace mongo {
 namespace bulk_write_common {
 
-void validateRequest(const BulkWriteCommandRequest& req, bool isRetryableWrite) {
+void validateRequest(const BulkWriteCommandRequest& req) {
     const auto& ops = req.getOps();
     const auto& nsInfos = req.getNsInfo();
 
@@ -87,8 +89,6 @@ void validateRequest(const BulkWriteCommandRequest& req, bool isRetryableWrite) 
     }
 
     // Validate that every ops entry has a valid nsInfo index.
-    // Also validate that we only have one findAndModify for retryable writes.
-    bool seenFindAndModify = false;
     for (const auto& op : ops) {
         const auto& bulkWriteOp = BulkWriteCRUDOp(op);
         unsigned int nsInfoIdx = bulkWriteOp.getNsInfoIdx();
@@ -96,35 +96,6 @@ void validateRequest(const BulkWriteCommandRequest& req, bool isRetryableWrite) 
                 str::stream() << "BulkWrite ops entry " << bulkWriteOp.toBSON()
                               << " has an invalid nsInfo index.",
                 nsInfoIdx < nsInfos.size());
-
-        if (isRetryableWrite) {
-            switch (bulkWriteOp.getType()) {
-                case BulkWriteCRUDOp::kInsert:
-                    break;
-                case BulkWriteCRUDOp::kUpdate: {
-                    auto update = bulkWriteOp.getUpdate();
-                    if (update->getReturn()) {
-                        uassert(
-                            ErrorCodes::BadValue,
-                            "BulkWrite can only support 1 op with a return for a retryable write",
-                            !seenFindAndModify);
-                        seenFindAndModify = true;
-                    }
-                    break;
-                }
-                case BulkWriteCRUDOp::kDelete: {
-                    auto deleteOp = bulkWriteOp.getDelete();
-                    if (deleteOp->getReturn()) {
-                        uassert(
-                            ErrorCodes::BadValue,
-                            "BulkWrite can only support 1 op with a return for a retryable write",
-                            !seenFindAndModify);
-                        seenFindAndModify = true;
-                    }
-                    break;
-                }
-            }
-        }
     }
 }
 
@@ -181,6 +152,89 @@ NamespaceInfoEntry getFLENamespaceInfoEntry(const BSONObj& bulkWrite) {
             "BulkWrite with Queryable Encryption supports only a single namespace",
             nss.size() == 1);
     return nss[0];
+}
+
+write_ops::InsertCommandRequest makeInsertCommandRequestForFLE(
+    const std::vector<mongo::BSONObj>& documents,
+    const BulkWriteCommandRequest& req,
+    const mongo::NamespaceInfoEntry& nsInfoEntry) {
+    write_ops::InsertCommandRequest request(nsInfoEntry.getNs(), documents);
+    request.setDollarTenant(req.getDollarTenant());
+    request.setExpectPrefix(req.getExpectPrefix());
+    auto& requestBase = request.getWriteCommandRequestBase();
+    requestBase.setEncryptionInformation(nsInfoEntry.getEncryptionInformation());
+    requestBase.setOrdered(req.getOrdered());
+    requestBase.setBypassDocumentValidation(req.getBypassDocumentValidation());
+
+    return request;
+}
+
+write_ops::UpdateCommandRequest makeUpdateCommandRequestFromUpdateOp(
+    const BulkWriteUpdateOp* op, const BulkWriteCommandRequest& req, size_t currentOpIdx) {
+    auto idx = op->getUpdate();
+    auto nsEntry = req.getNsInfo()[idx];
+
+    auto stmtId = bulk_write_common::getStatementId(req, currentOpIdx);
+
+    write_ops::UpdateOpEntry update;
+    update.setQ(op->getFilter());
+    update.setMulti(op->getMulti());
+    update.setC(op->getConstants());
+    update.setU(op->getUpdateMods());
+    update.setHint(op->getHint());
+    if (op->getCollation()) {
+        update.setCollation(op->getCollation().value());
+    }
+    update.setArrayFilters(op->getArrayFilters().value_or(std::vector<BSONObj>()));
+    update.setUpsert(op->getUpsert());
+
+    std::vector<write_ops::UpdateOpEntry> updates{update};
+    write_ops::UpdateCommandRequest updateCommand(nsEntry.getNs(), updates);
+
+    updateCommand.setDollarTenant(req.getDollarTenant());
+    updateCommand.setExpectPrefix(req.getExpectPrefix());
+    updateCommand.setLet(req.getLet());
+
+    updateCommand.getWriteCommandRequestBase().setIsTimeseriesNamespace(
+        nsEntry.getIsTimeseriesNamespace());
+    updateCommand.getWriteCommandRequestBase().setCollectionUUID(nsEntry.getCollectionUUID());
+
+    updateCommand.getWriteCommandRequestBase().setEncryptionInformation(
+        nsEntry.getEncryptionInformation());
+    updateCommand.getWriteCommandRequestBase().setBypassDocumentValidation(
+        req.getBypassDocumentValidation());
+
+    updateCommand.getWriteCommandRequestBase().setStmtIds(std::vector<StmtId>{stmtId});
+    updateCommand.getWriteCommandRequestBase().setOrdered(req.getOrdered());
+
+    return updateCommand;
+}
+
+write_ops::DeleteCommandRequest makeDeleteCommandRequestForFLE(
+    OperationContext* opCtx,
+    const BulkWriteDeleteOp* op,
+    const BulkWriteCommandRequest& req,
+    const mongo::NamespaceInfoEntry& nsInfoEntry) {
+    write_ops::DeleteOpEntry deleteEntry;
+    if (op->getCollation()) {
+        deleteEntry.setCollation(op->getCollation());
+    }
+    deleteEntry.setHint(op->getHint());
+    deleteEntry.setMulti(op->getMulti());
+    deleteEntry.setQ(op->getFilter());
+
+    std::vector<write_ops::DeleteOpEntry> deletes{deleteEntry};
+    write_ops::DeleteCommandRequest deleteRequest(nsInfoEntry.getNs(), deletes);
+    deleteRequest.setDollarTenant(req.getDollarTenant());
+    deleteRequest.setExpectPrefix(req.getExpectPrefix());
+    deleteRequest.setLet(req.getLet());
+    deleteRequest.setLegacyRuntimeConstants(Variables::generateRuntimeConstants(opCtx));
+    deleteRequest.getWriteCommandRequestBase().setEncryptionInformation(
+        nsInfoEntry.getEncryptionInformation());
+    deleteRequest.getWriteCommandRequestBase().setBypassDocumentValidation(
+        req.getBypassDocumentValidation());
+
+    return deleteRequest;
 }
 
 }  // namespace bulk_write_common

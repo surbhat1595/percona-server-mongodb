@@ -332,6 +332,8 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
 
                 triggerCleanup(opCtx, status);
             }
+
+            return status;
         });
 }
 
@@ -426,8 +428,7 @@ std::vector<NamespaceString> MovePrimaryCoordinator::getUnshardedCollections(
             std::string collName;
             uassertStatusOK(bsonExtractStringField(collInfo, "name", &collName));
 
-            const NamespaceString nss(
-                NamespaceStringUtil::parseNamespaceFromDoc(_dbName, collName));
+            const NamespaceString nss(NamespaceStringUtil::deserialize(_dbName, collName));
             if (!nss.isSystem() ||
                 nss.isLegalClientSystemNS(serverGlobalParams.featureCompatibility)) {
                 colls.push_back(nss);
@@ -476,7 +477,7 @@ void MovePrimaryCoordinator::assertNoOrphanedDataOnRecipient(
         const auto listResponse = uassertStatusOK(
             toShard->runExhaustiveCursorCommand(opCtx,
                                                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                                DatabaseNameUtil::serialize(_dbName),
+                                                _dbName,
                                                 listCommand,
                                                 Milliseconds(-1)));
 
@@ -484,7 +485,7 @@ void MovePrimaryCoordinator::assertNoOrphanedDataOnRecipient(
         for (const auto& bsonColl : listResponse.docs) {
             std::string collName;
             uassertStatusOK(bsonExtractStringField(bsonColl, "name", &collName));
-            colls.push_back(NamespaceStringUtil::parseNamespaceFromResponse(_dbName, collName));
+            colls.push_back(NamespaceStringUtil::deserialize(_dbName, collName));
         }
 
         std::sort(colls.begin(), colls.end());
@@ -521,7 +522,7 @@ std::vector<NamespaceString> MovePrimaryCoordinator::cloneDataToRecipient(
     const auto cloneResponse =
         toShard->runCommand(opCtx,
                             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                            DatabaseName::kAdmin.db().toString(),
+                            DatabaseName::kAdmin,
                             cloneCommand,
                             Shard::RetryPolicy::kNoRetry);
 
@@ -570,7 +571,7 @@ void MovePrimaryCoordinator::commitMetadataToConfig(
     const auto commitResponse =
         config->runCommandWithFixedRetryAttempts(opCtx,
                                                  ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                                 DatabaseName::kAdmin.db().toString(),
+                                                 DatabaseName::kAdmin,
                                                  commitCommand,
                                                  Shard::RetryPolicy::kIdempotent);
 
@@ -711,7 +712,7 @@ void MovePrimaryCoordinator::enterCriticalSectionOnRecipient(OperationContext* o
         return toShard->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-            DatabaseName::kAdmin.toString(),
+            DatabaseName::kAdmin,
             enterCriticalSectionCommand,
             Shard::RetryPolicy::kIdempotent);
     }();
@@ -741,7 +742,7 @@ void MovePrimaryCoordinator::exitCriticalSectionOnRecipient(OperationContext* op
         return toShard->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-            DatabaseName::kAdmin.toString(),
+            DatabaseName::kAdmin,
             exitCriticalSectionCommand,
             Shard::RetryPolicy::kIdempotent);
     }();

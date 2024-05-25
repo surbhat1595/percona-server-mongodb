@@ -1,15 +1,11 @@
 // @tags: [
 //   requires_non_retryable_commands,
-//   skip_for_query_stats, # TODO SERVER-78864 reenable test in query_stats_passthrough
 // ]
 
 /**
  * Tests for the JSON Schema 'patternProperties' keyword.
  */
-(function() {
-"use strict";
-
-load("jstests/libs/assert_schema_match.js");
+import {assertSchemaMatch} from "jstests/libs/assert_schema_match.js";
 
 const coll = db.schema_pattern_properties;
 
@@ -86,4 +82,3 @@ assertSchemaMatch(
     },
     {obj: {aa: 1}},
     false);
-}());

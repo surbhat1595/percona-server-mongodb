@@ -17,20 +17,12 @@
  *   requires_non_retryable_commands,
  *   requires_non_retryable_writes,
  *   requires_replication,
- *   # This test depends on hardcoded database name equality.
- *   tenant_migration_incompatible,
+ *   # Test depends on hardcoded database name equality which is incompatible with tenant prefixing.
+ *   simulate_atlas_proxy_incompatible,
  *   references_foreign_collection,
  * ]
  */
-(function() {
-"use strict";
-
-// For isWiredTiger.
-load("jstests/concurrency/fsm_workload_helpers/server_types.js");
-// For isReplSet
-load("jstests/libs/fixture_helpers.js");
-// For arrayEq.
-load("jstests/aggregation/extras/utils.js");
+import {arrayEq} from "jstests/aggregation/extras/utils.js";
 
 const testName = "json_schema_misc_validation";
 const testDB = db.getSiblingDB(testName);
@@ -299,4 +291,3 @@ assert.eq(1, coll.find({$jsonSchema: {required: ["a"]}, $text: {$search: "test"}
 assert.eq(
     3, coll.find({$or: [{$jsonSchema: {required: ["a"]}}, {$text: {$search: "TEST"}}]}).itcount());
 assert.eq(1, coll.find({$and: [{$jsonSchema: {}}, {$text: {$search: "TEST"}}]}).itcount());
-}());

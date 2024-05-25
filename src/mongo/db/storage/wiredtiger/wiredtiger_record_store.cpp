@@ -540,10 +540,6 @@ StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
     ss << "split_pct=90,";
     ss << "leaf_value_max=64MB,";
 
-    // Report errors on writes without ordered timestamps.
-    ss << "assert=(write_timestamp=on),";
-    ss << "verbose=[write_timestamp],";
-
     ss << "checksum=on,";
     if (wiredTigerGlobalOptions.useCollectionPrefixCompression) {
         ss << "prefix_compression,";
@@ -653,7 +649,11 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
                                .getStatus();
 
     if (!versionStatus.isOK()) {
-        std::cout << " Version: " << versionStatus.reason() << std::endl;
+        LOGV2_ERROR(7887900,
+                    "Metadata format version check failed.",
+                    "uri"_attr = _uri,
+                    "namespace"_attr = params.nss.toStringForErrorMsg(),
+                    "version"_attr = versionStatus.reason());
         if (versionStatus.code() == ErrorCodes::FailedToParse) {
             uasserted(28548, versionStatus.reason());
         } else {

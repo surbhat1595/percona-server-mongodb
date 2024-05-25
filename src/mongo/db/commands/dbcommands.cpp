@@ -162,8 +162,7 @@ public:
                           "with --configsvr");
             }
 
-            if ((repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
-                 repl::ReplicationCoordinator::modeNone) &&
+            if ((repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()) &&
                 (dbName == DatabaseName::kLocal)) {
                 uasserted(ErrorCodes::IllegalOperation,
                           str::stream() << "Cannot drop '" << dbName.toStringForErrorMsg()
@@ -181,7 +180,8 @@ public:
             return {};
         }
     };
-} cmdDropDatabase;
+};
+MONGO_REGISTER_COMMAND(CmdDropDatabase);
 
 /* drop collection */
 class CmdDrop : public DropCmdVersion1Gen<CmdDrop> {
@@ -223,7 +223,7 @@ public:
             if (request().getNamespace().isOplog()) {
                 uassert(5255000,
                         "can't drop live oplog while replicating",
-                        !repl::ReplicationCoordinator::get(opCtx)->isReplEnabled());
+                        !repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet());
                 auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
                 invariant(storageEngine);
                 // We use the method supportsRecoveryTimestamp() to detect whether we are using
@@ -247,7 +247,8 @@ public:
             return reply;
         }
     };
-} cmdDrop;
+};
+MONGO_REGISTER_COMMAND(CmdDrop);
 
 class CmdDataSize final : public TypedCommand<CmdDataSize> {
 public:
@@ -308,7 +309,7 @@ public:
                 return reply;
             }
 
-            if (collection.isSharded()) {
+            if (collection.isSharded_DEPRECATED()) {
                 const auto& shardKeyPattern = collection.getShardKeyPattern();
                 uassert(ErrorCodes::BadValue,
                         "keyPattern must be empty or must be an object that equals the shard key",
@@ -434,8 +435,8 @@ public:
     std::string help() const final {
         return Request::kCommandDescription.toString();
     }
-
-} cmdDatasize;
+};
+MONGO_REGISTER_COMMAND(CmdDataSize);
 
 Rarely _collStatsSampler;
 
@@ -507,7 +508,8 @@ public:
             }
         }
     };
-} cmdCollStats;
+};
+MONGO_REGISTER_COMMAND(CmdCollStats);
 
 class CollectionModCommand : public TypedCommand<CollectionModCommand> {
 public:
@@ -618,7 +620,8 @@ public:
             coll_mod_reply_validation::validateReply(reply);
         }
     };
-} collectionModCommand;
+};
+MONGO_REGISTER_COMMAND(CollectionModCommand);
 
 class CmdDbStats final : public TypedCommand<CmdDbStats> {
 public:
@@ -675,7 +678,7 @@ public:
 
             // We need to copy the serialization context from the request to the reply object
             Reply reply(SerializationContext::stateCommandReply(cmd.getSerializationContext()));
-            reply.setDB(dbname.db());
+            reply.setDB(DatabaseNameUtil::serialize(dbname, reply.getSerializationContext()));
 
             if (!db) {
                 // This preserves old behavior where we used to create an empty database even when
@@ -729,8 +732,8 @@ public:
     std::string help() const final {
         return Request::kCommandDescription.toString();
     }
-
-} cmdDBStats;
+};
+MONGO_REGISTER_COMMAND(CmdDbStats);
 
 // Provides the means to asynchronously run `buildinfo` commands.
 class BuildInfoExecutor final : public AsyncRequestExecutor {
@@ -807,8 +810,8 @@ public:
         auto opCtx = rec->getOpCtx();
         return BuildInfoExecutor::get(opCtx->getServiceContext())->schedule(std::move(rec));
     }
-
-} cmdBuildInfo;
+};
+MONGO_REGISTER_COMMAND(CmdBuildInfo);
 
 }  // namespace
 }  // namespace mongo

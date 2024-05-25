@@ -8,11 +8,7 @@
  *
  */
 
-(function() {
-'use strict';
-
-load("jstests/libs/fail_point_util.js");
-load('jstests/libs/parallel_shell_helpers.js');
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 
 function runTest(downgradeFCV) {
     const rst = new ReplSetTest({name: jsTestName(), nodes: 2});
@@ -28,7 +24,7 @@ function runTest(downgradeFCV) {
 
     const parallelFn = `
     assert.commandFailedWithCode(
-        db.adminCommand({setFeatureCompatibilityVersion: "${downgradeFCV}"}),
+        db.adminCommand({setFeatureCompatibilityVersion: "${downgradeFCV}", confirm: true}),
         ErrorCodes.InterruptedDueToReplStateChange); `;
 
     const awaitShell = startParallelShell(parallelFn, primary.port);
@@ -44,7 +40,8 @@ function runTest(downgradeFCV) {
     const secondary = rst.getSecondaries()[0];
 
     jsTestLog("Issue a setFeatureCompatibilityVersion command on the new primary");
-    assert.commandWorked(primary.adminCommand({setFeatureCompatibilityVersion: downgradeFCV}));
+    assert.commandWorked(
+        primary.adminCommand({setFeatureCompatibilityVersion: downgradeFCV, confirm: true}));
     rst.awaitReplication();
 
     jsTestLog("Unset the failpoint on the former primary so it finishes running " +
@@ -66,4 +63,3 @@ if (lastLTSFCV !== lastContinuousFCV) {
     jsTestLog("Running test against lastContinuousFCV");
     runTest(lastContinuousFCV);
 }
-})();

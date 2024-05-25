@@ -126,7 +126,8 @@ public:
 
     virtual void debugString(StringBuilder& debug, int indentationLevel = 0) const;
 
-    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final;
+    void appendSerializedRightHandSide(BSONObjBuilder* bob,
+                                       const SerializationOptions& opts) const final;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -165,6 +166,9 @@ private:
     // Share ownership of our query with all of our clones
     std::shared_ptr<const GeoExpression> _query;
     bool _canSkipValidation;
+
+    template <typename H>
+    friend class MatchExpressionHashVisitor;
 };
 
 
@@ -230,7 +234,8 @@ public:
 
     virtual void debugString(StringBuilder& debug, int indentationLevel = 0) const;
 
-    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final;
+    void appendSerializedRightHandSide(BSONObjBuilder* bob,
+                                       const SerializationOptions& opts) const final;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -260,6 +265,9 @@ private:
 
     // Share ownership of our query with all of our clones
     std::shared_ptr<const GeoNearExpression> _query;
+
+    template <typename H>
+    friend class MatchExpressionHashVisitor;
 };
 
 /**
@@ -272,7 +280,7 @@ public:
     TwoDPtInAnnulusExpression(const R2Annulus& annulus, boost::optional<StringData> twoDPath)
         : LeafMatchExpression(INTERNAL_2D_POINT_IN_ANNULUS, twoDPath), _annulus(annulus) {}
 
-    void serialize(BSONObjBuilder* out, SerializationOptions opts) const final {
+    void serialize(BSONObjBuilder* out, const SerializationOptions& opts) const final {
         out->append("$TwoDPtInAnnulusExpression", true);
     }
 
@@ -291,7 +299,8 @@ public:
     // These won't be called.
     //
 
-    void appendSerializedRightHandSide(BSONObjBuilder* bob, SerializationOptions opts) const final {
+    void appendSerializedRightHandSide(BSONObjBuilder* bob,
+                                       const SerializationOptions& opts) const final {
         MONGO_UNREACHABLE;
     }
 

@@ -29,6 +29,7 @@
 
 #include "mongo/db/ops/write_ops_exec.h"
 
+#include "mongo/base/error_codes.h"
 #include <absl/container/flat_hash_map.h>
 #include <absl/hash/hash.h>
 #include <algorithm>
@@ -769,25 +770,43 @@ boost::optional<BSONObj> advanceExecutor(OperationContext* opCtx,
     return boost::none;
 }
 
-UpdateResult writeConflictRetryUpsert(OperationContext* opCtx,
-                                      const NamespaceString& nss,
-                                      CurOp* curOp,
-                                      OpDebug* opDebug,
-                                      bool inTransaction,
-                                      bool remove,
-                                      bool upsert,
-                                      boost::optional<BSONObj>& docFound,
-                                      const UpdateRequest& updateRequest) {
+UpdateResult performUpdate(OperationContext* opCtx,
+                           const NamespaceString& nss,
+                           CurOp* curOp,
+                           OpDebug* opDebug,
+                           bool inTransaction,
+                           bool remove,
+                           bool upsert,
+                           const boost::optional<mongo::UUID>& collectionUUID,
+                           boost::optional<BSONObj>& docFound,
+                           const UpdateRequest& updateRequest) {
     auto [isTimeseriesUpdate, nsString] = timeseries::isTimeseries(opCtx, updateRequest);
     // TODO SERVER-76583: Remove this check.
     uassert(7314600,
             "Retryable findAndModify on a timeseries is not supported",
             !isTimeseriesUpdate || !opCtx->isRetryableWrite());
 
-    auto collection = acquireCollection(
+    CurOpFailpointHelpers::waitWhileFailPointEnabled(
+        &hangDuringBatchUpdate,
         opCtx,
-        CollectionAcquisitionRequest::fromOpCtx(opCtx, nsString, AcquisitionPrerequisites::kWrite),
-        MODE_IX);
+        "hangDuringBatchUpdate",
+        [&nss]() {
+            LOGV2(7280400,
+                  "Batch update - hangDuringBatchUpdate fail point enabled for a namespace. "
+                  "Blocking until fail point is disabled",
+                  logAttrs(nss));
+        },
+        nss);
+
+    if (MONGO_unlikely(failAllUpdates.shouldFail())) {
+        uasserted(ErrorCodes::InternalError, "failAllUpdates failpoint active!");
+    }
+
+    auto collection =
+        acquireCollection(opCtx,
+                          CollectionAcquisitionRequest::fromOpCtx(
+                              opCtx, nsString, AcquisitionPrerequisites::kWrite, collectionUUID),
+                          MODE_IX);
     auto dbName = nsString.dbName();
     Database* db = [&]() {
         AutoGetDb autoDb(opCtx, dbName, MODE_IX);
@@ -879,27 +898,51 @@ UpdateResult writeConflictRetryUpsert(OperationContext* opCtx,
         metricsCollector.incrementDocUnitsReturned(curOp->getNS(), docUnitsReturned);
     }
 
+    CurOpFailpointHelpers::waitWhileFailPointEnabled(
+        &hangAfterBatchUpdate, opCtx, "hangAfterBatchUpdate");
+
     return updateResult;
 }
 
-long long writeConflictRetryRemove(OperationContext* opCtx,
-                                   const NamespaceString& nss,
-                                   const DeleteRequest& deleteRequest,
-                                   CurOp* curOp,
-                                   OpDebug* opDebug,
-                                   bool inTransaction,
-                                   boost::optional<BSONObj>& docFound) {
+long long performDelete(OperationContext* opCtx,
+                        const NamespaceString& nss,
+                        const DeleteRequest& deleteRequest,
+                        CurOp* curOp,
+                        OpDebug* opDebug,
+                        bool inTransaction,
+                        const boost::optional<mongo::UUID>& collectionUUID,
+                        boost::optional<BSONObj>& docFound) {
     auto [isTimeseriesDelete, nsString] = timeseries::isTimeseries(opCtx, deleteRequest);
     // TODO SERVER-76583: Remove this check.
     uassert(7308305,
             "Retryable findAndModify on a timeseries is not supported",
-            !isTimeseriesDelete || !opCtx->isRetryableWrite());
+            !isTimeseriesDelete || !deleteRequest.getReturnDeleted() || !opCtx->isRetryableWrite());
 
-    const auto collection = acquireCollection(
-        opCtx,
-        CollectionAcquisitionRequest::fromOpCtx(opCtx, nsString, AcquisitionPrerequisites::kWrite),
-        MODE_IX);
+    CurOpFailpointHelpers::waitWhileFailPointEnabled(
+        &hangDuringBatchRemove, opCtx, "hangDuringBatchRemove", []() {
+            LOGV2(7280401,
+                  "Batch remove - hangDuringBatchRemove fail point enabled. Blocking until fail "
+                  "point is disabled");
+        });
+    if (MONGO_unlikely(failAllRemoves.shouldFail())) {
+        uasserted(ErrorCodes::InternalError, "failAllRemoves failpoint active!");
+    }
+
+    const auto collection =
+        acquireCollection(opCtx,
+                          CollectionAcquisitionRequest::fromOpCtx(
+                              opCtx, nsString, AcquisitionPrerequisites::kWrite, collectionUUID),
+                          MODE_IX);
     const auto& collectionPtr = collection.getCollectionPtr();
+
+    if (const auto& coll = collection.getCollectionPtr()) {
+        // Transactions are not allowed to operate on capped collections.
+        uassertStatusOK(checkIfTransactionOnCappedColl(opCtx, coll));
+    }
+
+    if (isTimeseriesDelete) {
+        timeseries::assertTimeseriesBucketsCollection(collection.getCollectionPtr().get());
+    }
 
     ParsedDelete parsedDelete(opCtx, &deleteRequest, collectionPtr, isTimeseriesDelete);
     uassertStatusOK(parsedDelete.parseRequest());
@@ -911,15 +954,6 @@ long long writeConflictRetryRemove(OperationContext* opCtx,
     }
 
     assertCanWrite_inlock(opCtx, nsString);
-
-    if (collectionPtr && collectionPtr->isCapped()) {
-        uassert(
-            ErrorCodes::OperationNotSupportedInTransaction,
-            str::stream() << "Collection '" << collection.nss().toStringForErrorMsg()
-                          << "' is a capped collection. Writes in transactions are not allowed on "
-                             "capped collections.",
-            !inTransaction);
-    }
 
     const auto exec = uassertStatusOK(
         getExecutorDelete(opDebug, collection, &parsedDelete, boost::none /* verbosity */));
@@ -1405,12 +1439,6 @@ void runTimeseriesRetryableUpdates(OperationContext* opCtx,
                                    const write_ops::UpdateCommandRequest& wholeOp,
                                    std::shared_ptr<executor::TaskExecutor> executor,
                                    write_ops_exec::WriteResult* reply) {
-    ON_BLOCK_EXIT([&] {
-        // Increments the counter if the command contains retries.
-        if (!reply->retriedStmtIds.empty()) {
-            RetryableWritesStats::get(opCtx)->incrementRetriedCommandsCount();
-        }
-    });
     size_t nextOpIndex = 0;
     for (auto&& singleOp : wholeOp.getUpdates()) {
         auto singleUpdateOp = timeseries::buildSingleUpdateOp(wholeOp, nextOpIndex);
@@ -2321,6 +2349,7 @@ bool commitTimeseriesBucket(OperationContext* opCtx,
                             boost::optional<repl::OpTime>* opTime,
                             boost::optional<OID>* electionId,
                             std::vector<size_t>* docsToRetry,
+                            absl::flat_hash_map<int, int>& retryAttemptsForDup,
                             const write_ops::InsertCommandRequest& request) try {
     auto& bucketCatalog = timeseries::bucket_catalog::BucketCatalog::get(opCtx);
 
@@ -2341,9 +2370,17 @@ bool commitTimeseriesBucket(OperationContext* opCtx,
             performTimeseriesInsert(opCtx, batch, metadata, std::move(stmtIds), request);
         if (auto error = write_ops_exec::generateError(
                 opCtx, output.result.getStatus(), start + index, errors->size())) {
-            errors->emplace_back(std::move(*error));
+            bool canContinue = output.canContinue;
+            // Automatically attempts to retry on DuplicateKey error.
+            if (error->getStatus().code() == ErrorCodes::DuplicateKey &&
+                retryAttemptsForDup[index]++ < gTimeseriesInsertMaxRetriesOnDuplicates.load()) {
+                docsToRetry->push_back(index);
+                canContinue = true;
+            } else {
+                errors->emplace_back(std::move(*error));
+            }
             abort(bucketCatalog, batch, output.result.getStatus());
-            return output.canContinue;
+            return canContinue;
         }
 
         invariant(output.result.getValue().getN() == 1,
@@ -2450,6 +2487,9 @@ bool commitTimeseriesBucketsAtomically(OperationContext* opCtx,
 
         auto result = write_ops_exec::performAtomicTimeseriesWrites(opCtx, insertOps, updateOps);
         if (!result.isOK()) {
+            if (result.code() == ErrorCodes::DuplicateKey) {
+                timeseries::bucket_catalog::resetBucketOIDCounter();
+            }
             abortStatus = result;
             return false;
         }
@@ -2755,25 +2795,18 @@ std::vector<size_t> performUnorderedTimeseriesWrites(
             auto stmtIds = isTimeseriesWriteRetryable(opCtx)
                 ? std::move(bucketStmtIds[batch->bucketHandle.bucketId.oid])
                 : std::vector<StmtId>{};
-            try {
-                canContinue = commitTimeseriesBucket(opCtx,
-                                                     batch,
-                                                     start,
-                                                     index,
-                                                     std::move(stmtIds),
-                                                     errors,
-                                                     opTime,
-                                                     electionId,
-                                                     &docsToRetry,
-                                                     request);
-            } catch (const ExceptionFor<ErrorCodes::DuplicateKey>&) {
-                // Automatically attempts to retry on DuplicateKey error.
-                if (retryAttemptsForDup[index]++ < gTimeseriesInsertMaxRetriesOnDuplicates.load()) {
-                    docsToRetry.push_back(index);
-                } else {
-                    throw;
-                }
-            }
+            canContinue = commitTimeseriesBucket(opCtx,
+                                                 batch,
+                                                 start,
+                                                 index,
+                                                 std::move(stmtIds),
+                                                 errors,
+                                                 opTime,
+                                                 electionId,
+                                                 &docsToRetry,
+                                                 retryAttemptsForDup,
+                                                 request);
+
             batch.reset();
             if (!canContinue) {
                 break;
@@ -2810,6 +2843,9 @@ void performUnorderedTimeseriesWritesWithRetries(OperationContext* opCtx,
                                                        containsRetry,
                                                        request,
                                                        retryAttemptsForDup);
+        if (!retryAttemptsForDup.empty()) {
+            timeseries::bucket_catalog::resetBucketOIDCounter();
+        }
     } while (!docsToRetry.empty());
 }
 

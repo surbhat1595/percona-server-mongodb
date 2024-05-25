@@ -96,6 +96,7 @@ private:
 class CreateFirstChunksTest : public ShardCollectionTestBase {
 protected:
     const ShardKeyPattern kShardKeyPattern{BSON("x" << 1)};
+    const ShardKeyPattern kIdShardKeyPattern{BSON("_id" << 1)};
 };
 
 TEST_F(CreateFirstChunksTest, NonEmptyCollection_NoZones_OneChunkToPrimary) {
@@ -138,7 +139,9 @@ TEST_F(CreateFirstChunksTest, NonEmptyCollection_NoZones_OneChunkToPrimary) {
             request.getPresplitHashedZones().value(),
             {}, /* tags */
             3 /* numShards */,
-            false /* collectionIsEmpty */);
+            false /* collectionIsEmpty */,
+            false /*unsplittable*/,
+            boost::none /* dataShard */);
         return optimization->createFirstChunks(
             opCtx.get(), kShardKeyPattern, {uuid, ShardId("shard1")});
     });
@@ -171,8 +174,9 @@ TEST_F(CreateFirstChunksTest, NonEmptyCollection_WithZones_OneChunkToPrimary) {
                                                           request.getPresplitHashedZones().value(),
                                                           zones,
                                                           3 /* numShards */,
-                                                          collectionIsEmpty);
-    ASSERT(optimization->isOptimized());
+                                                          collectionIsEmpty,
+                                                          false /*unsplittable*/,
+                                                          boost::none /* dataShard */);
 
     const auto firstChunks = optimization->createFirstChunks(
         operationContext(), kShardKeyPattern, {UUID::gen(), ShardId("shard1")});
@@ -203,6 +207,7 @@ TEST_F(CreateFirstChunksTest, EmptyCollection_NoSplitPoints_OneChunkToPrimary) {
 
         std::vector<TagsType> zones{};
         bool collectionIsEmpty = true;
+        bool isUnsplittable = false;
 
         CreateCollectionRequest request;
         request.setNumInitialChunks(0);
@@ -214,11 +219,57 @@ TEST_F(CreateFirstChunksTest, EmptyCollection_NoSplitPoints_OneChunkToPrimary) {
             request.getPresplitHashedZones().value(),
             zones,
             3 /* numShards */,
-            collectionIsEmpty);
-        ASSERT(optimization->isOptimized());
+            collectionIsEmpty,
+            isUnsplittable,
+            boost::none /* dataShard */);
 
         return optimization->createFirstChunks(
             operationContext(), kShardKeyPattern, {UUID::gen(), ShardId("shard1")});
+    });
+
+    const auto& firstChunks = future.default_timed_get();
+    ASSERT_EQ(1U, firstChunks.chunks.size());
+    ASSERT_EQ(kShards[1].getName(), firstChunks.chunks[0].getShard());
+}
+
+TEST_F(CreateFirstChunksTest, Unsplittable_OneChunkToPrimary) {
+    const std::vector<ShardType> kShards{ShardType("shard0", "rs0/shard0:123"),
+                                         ShardType("shard1", "rs1/shard1:123"),
+                                         ShardType("shard2", "rs2/shard2:123")};
+
+    const auto connStr = assertGet(ConnectionString::parse(kShards[1].getHost()));
+
+    std::unique_ptr<RemoteCommandTargeterMock> targeter(
+        std::make_unique<RemoteCommandTargeterMock>());
+    targeter->setConnectionStringReturnValue(connStr);
+    targeter->setFindHostReturnValue(connStr.getServers()[0]);
+    targeterFactory()->addTargeterToReturn(connStr, std::move(targeter));
+
+    setupShards(kShards);
+    shardRegistry()->reload(operationContext());
+
+    auto future = launchAsync([&] {
+        ThreadClient tc("Test", getServiceContext());
+        auto opCtx = cc().makeOperationContext();
+
+        std::vector<TagsType> zones{};
+
+        CreateCollectionRequest request;
+        request.setNumInitialChunks(0);
+        request.setPresplitHashedZones(false);
+        auto optimization = InitialSplitPolicy::calculateOptimizationStrategy(
+            operationContext(),
+            kIdShardKeyPattern,
+            request.getNumInitialChunks().value(),
+            request.getPresplitHashedZones().value(),
+            zones,
+            3 /* numShards */,
+            true /*collectionIsEmpty*/,
+            true /*unsplittable*/,
+            boost::none /* dataShard */);
+
+        return optimization->createFirstChunks(
+            operationContext(), kIdShardKeyPattern, {UUID::gen(), ShardId("shard1")});
     });
 
     const auto& firstChunks = future.default_timed_get();
@@ -248,8 +299,9 @@ TEST_F(CreateFirstChunksTest, EmptyCollection_WithZones_ManyChunksOnFirstZoneSha
                                                           request.getPresplitHashedZones().value(),
                                                           zones,
                                                           3 /* numShards */,
-                                                          collectionIsEmpty);
-    ASSERT(optimization->isOptimized());
+                                                          collectionIsEmpty,
+                                                          false /*unsplittable*/,
+                                                          boost::none /* dataShard */);
 
     const auto firstChunks = optimization->createFirstChunks(
         operationContext(), kShardKeyPattern, {UUID::gen(), ShardId("shard1")});

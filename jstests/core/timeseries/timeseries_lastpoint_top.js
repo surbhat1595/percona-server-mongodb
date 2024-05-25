@@ -1,8 +1,8 @@
 /**
  * Tests the optimization of "lastpoint"-type queries on time-series collections.
  *
- * The test runs commands that are not allowed with security token: top.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: top.
  *   not_allowed_with_security_token,
  *   # Explain of a resolved view must be executed by mongos.
  *   directly_against_shardsvrs_incompatible,
@@ -13,28 +13,22 @@
  *   does_not_support_stepdowns,
  *   # We need a timeseries collection.
  *   requires_timeseries,
+ *   assumes_no_implicit_index_creation,
  * ]
  */
-load("jstests/aggregation/extras/utils.js");
 import {TimeseriesAggTests} from "jstests/core/timeseries/libs/timeseries_agg_helpers.js";
 import {
     createBoringCollections,
-    getMapInterestingValuesToEquivalentsStage,
     createInterestingCollections,
-    expectDistinctScan,
     expectCollScan,
+    expectDistinctScan,
     expectIxscan,
+    getMapInterestingValuesToEquivalentsStage,
     testAllTimeMetaDirections,
 } from "jstests/core/timeseries/libs/timeseries_lastpoint_helpers.js";
 
 const testDB = TimeseriesAggTests.getTestDb();
 assert.commandWorked(testDB.dropDatabase());
-
-// TODO SERVER-73509 The test doesn't work yet, even though this feature flag is gone.
-if (true /* previously guarded by featureFlagLastPointQuery */) {
-    jsTestLog("Skipping the test.");
-    quit();
-}
 
 /**
  * Returns a lastpoint $group stage of the form:
@@ -134,8 +128,11 @@ function getGroupStage({time, sortBy, n, extraFields = []}) {
         }));
 }
 
-// Test interesting metaField values.
-{
+// Don't run this test if we are running on a debug build
+// TODO: SERVER-80374
+const debugBuild = db.adminCommand("buildInfo").debug;
+if (!debugBuild) {
+    // Test interesting metaField values.
     const [tsColl, observerColl] = createInterestingCollections();
     const expectIxscanNoSort = ({explain}) => expectIxscan({explain, noSortInCursor: true});
 

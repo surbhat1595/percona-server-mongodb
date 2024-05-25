@@ -5,10 +5,8 @@
  *   requires_fcv_70,
  * ]
  */
-(function() {
-'use strict';
-load("jstests/sharding/libs/find_chunks_util.js");
-load("jstests/libs/fail_point_util.js");
+import {configureFailPointForRS} from "jstests/libs/fail_point_util.js";
+import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
 
 /* Create new sharded collection on testDB */
 let _collCounter = 0;
@@ -112,6 +110,13 @@ function assertExpectedChunksOnShard(configDB, coll, shardName, expectedChunks) 
                "Couldn't find expected range {min: " + tojson(expectedChunk.min) +
                    ", max: " + tojson(expectedChunk.max) + "} on shard " + tojson(shardName));
     });
+}
+
+function waitForAutomergerToCompleteAndAssert(configDB, coll, shardName, expectedChunks) {
+    assert.soonNoExcept(() => {
+        assertExpectedChunksOnShard(configDB, coll, shardName, expectedChunks);
+        return true;
+    }, "Automerger didn't merge the expected chunks within a reasonable time");
 }
 
 /* Build the following scenario:
@@ -356,22 +361,19 @@ function balancerTriggersAutomergerWhenIsEnabledTest(st, testDB) {
     setBalanceRoundInterval(st, 100 /* ms */);
     setBalancerMergeThrottling(st, 0);
 
-    // Enable Automerger
+    // Enable the AutoMerger
     st.startBalancer();
 
-    // Perform a couple of balancer rounds to give automerger time to do its job
-    for (let i = 0; i < 3; ++i) {
-        st.awaitBalancerRound();
-    }
-
-    // All mergeable chunks should be merged
+    // All mergeable chunks should be eventually merged by the AutoMerger
     colls.forEach((coll) => {
-        assertExpectedChunksOnShard(
+        waitForAutomergerToCompleteAndAssert(
             configDB,
             coll,
             shard0,
             [{min: MinKey, max: 1}, {min: 3, max: 7}, {min: 10, max: MaxKey}]);
-        assertExpectedChunksOnShard(configDB, coll, shard1, [{min: 1, max: 3}, {min: 7, max: 10}]);
+
+        waitForAutomergerToCompleteAndAssert(
+            configDB, coll, shard1, [{min: 1, max: 3}, {min: 7, max: 10}]);
     });
 }
 
@@ -435,4 +437,3 @@ executeTestCase(balancerTriggersAutomergerWhenIsEnabledTest);
 executeTestCase(testConfigurableAutoMergerIntervalSecs);
 
 st.stop();
-})();

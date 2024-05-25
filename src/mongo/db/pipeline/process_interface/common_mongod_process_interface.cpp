@@ -72,6 +72,7 @@
 #include "mongo/db/pipeline/document_source_cursor.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline_d.h"
+#include "mongo/db/pipeline/search_helper.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collection_index_usage_tracker_decoration.h"
@@ -321,8 +322,8 @@ std::deque<BSONObj> CommonMongodProcessInterface::listCatalog(OperationContext* 
 
                 NamespaceString ns(NamespaceStringUtil::deserialize(svns.nss().tenantId(),
                                                                     obj.getStringField("_id")));
-                NamespaceString viewOnNs(NamespaceStringUtil::parseNamespaceFromDoc(
-                    ns.dbName(), obj.getStringField("viewOn")));
+                NamespaceString viewOnNs(
+                    NamespaceStringUtil::deserialize(ns.dbName(), obj.getStringField("viewOn")));
 
                 BSONObjBuilder builder;
                 builder.append("db", DatabaseNameUtil::serialize(ns.dbName()));
@@ -474,6 +475,8 @@ CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(
     invariant(!firstStage || !dynamic_cast<DocumentSourceCursor*>(*firstStage));
     if (firstStage && !(*firstStage)->constraints().requiresInputDocSource) {
         // There's no need to attach a cursor here.
+        getSearchHelpers(expCtx->opCtx->getServiceContext())
+            ->prepareSearchForNestedPipeline(pipeline.get());
         return pipeline;
     }
 
@@ -492,25 +495,27 @@ CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(
         }
     }
 
-    boost::optional<AutoGetCollectionForReadCommandMaybeLockFree> autoColl;
-    const NamespaceStringOrUUID nsOrUUID =
-        expCtx->uuid ? NamespaceStringOrUUID{expCtx->ns.dbName(), *expCtx->uuid} : expCtx->ns;
-
     // Reparse 'pipeline' to discover whether there are secondary namespaces that we need to lock
     // when constructing our query executor.
     auto lpp = LiteParsedPipeline(expCtx->ns, pipeline->serializeToBson());
     std::vector<NamespaceStringOrUUID> secondaryNamespaces = lpp.getForeignExecutionNamespaces();
 
-    autoColl.emplace(expCtx->opCtx,
-                     nsOrUUID,
-                     AutoGetCollection::Options{}.secondaryNssOrUUIDs(secondaryNamespaces.cbegin(),
-                                                                      secondaryNamespaces.cend()),
-                     AutoStatsTracker::LogMode::kUpdateTop);
+    AutoGetCollectionForReadCommandMaybeLockFree autoColl(
+        expCtx->opCtx,
+        expCtx->ns,
+        AutoGetCollection::Options{}.secondaryNssOrUUIDs(secondaryNamespaces.cbegin(),
+                                                         secondaryNamespaces.cend()),
+        AutoStatsTracker::LogMode::kUpdateTop);
+
+    uassert(ErrorCodes::NamespaceNotFound,
+            fmt::format("collection '{}' does not match the expected uuid",
+                        expCtx->ns.toStringForErrorMsg()),
+            !expCtx->uuid || (autoColl && autoColl->uuid() == expCtx->uuid));
 
     MultipleCollectionAccessor holder{expCtx->opCtx,
-                                      &autoColl->getCollection(),
-                                      autoColl->getNss(),
-                                      autoColl->isAnySecondaryNamespaceAViewOrSharded(),
+                                      &autoColl.getCollection(),
+                                      autoColl.getNss(),
+                                      autoColl.isAnySecondaryNamespaceAViewOrSharded(),
                                       secondaryNamespaces};
     auto resolvedAggRequest = aggRequest ? &aggRequest.get() : nullptr;
     PipelineD::buildAndAttachInnerQueryExecutorToPipeline(

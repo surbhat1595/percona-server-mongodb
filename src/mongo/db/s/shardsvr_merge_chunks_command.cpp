@@ -98,7 +98,7 @@ Shard::CommandResponse commitMergeOnConfigServer(OperationContext* opCtx,
         uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommand(
             opCtx,
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-            DatabaseName::kAdmin.toString(),
+            DatabaseName::kAdmin,
             request.toBSON(BSON(WriteConcernOptions::kWriteConcernField
                                 << ShardingCatalogClient::kMajorityWriteConcern.toBSON())),
             Shard::RetryPolicy::kIdempotent));
@@ -168,8 +168,8 @@ public:
     }
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
-        return NamespaceStringUtil::parseNamespaceFromRequest(
-            dbName.tenantId(), CommandHelpers::parseNsFullyQualified(cmdObj));
+        return NamespaceStringUtil::deserialize(dbName.tenantId(),
+                                                CommandHelpers::parseNsFullyQualified(cmdObj));
     }
 
     bool adminOnly() const override {
@@ -190,14 +190,13 @@ public:
     static BSONField<Timestamp> timestampField;
 
     bool errmsgRun(OperationContext* opCtx,
-                   const std::string& dbname,
+                   const DatabaseName& dbName,
                    const BSONObj& cmdObj,
                    std::string& errmsg,
                    BSONObjBuilder& result) override {
         uassertStatusOK(ShardingState::get(opCtx)->canAcceptShardedCommands());
 
-        const NamespaceString nss(
-            parseNs(DatabaseNameUtil::deserialize(boost::none, dbname), cmdObj));
+        const NamespaceString nss(parseNs(dbName, cmdObj));
 
         std::vector<BSONObj> bounds;
         if (!FieldParser::extract(cmdObj, boundsField, &bounds, &errmsg)) {
@@ -243,8 +242,8 @@ public:
         mergeChunks(opCtx, nss, minKey, maxKey, epoch, timestamp);
         return true;
     }
-
-} mergeChunksCmd;
+};
+MONGO_REGISTER_COMMAND(MergeChunksCommand);
 
 BSONField<std::string> MergeChunksCommand::nsField("mergeChunks");
 BSONField<std::vector<BSONObj>> MergeChunksCommand::boundsField("bounds");

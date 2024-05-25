@@ -17,13 +17,7 @@ import {
     getRejectedPlan,
     getRejectedPlans
 } from "jstests/libs/analyze_plan.js";
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-
-if (!FeatureFlagUtil.isEnabled(db, "TimeseriesMetricIndexes")) {
-    jsTestLog(
-        "Skipped test as the featureFlagTimeseriesMetricIndexes feature flag is not enabled.");
-    quit();
-}
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const coll = db.timeseries_index_partial;
 const timeField = 'time';

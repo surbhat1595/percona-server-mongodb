@@ -4,9 +4,6 @@
  *
  * @tags: [requires_replication]
  */
-(function() {
-"use strict";
-
 const numNodes = 2;
 
 function checkOplogEntry(entry, lsid, txnNum, stmtId, prevTs, retryImageArgs) {
@@ -49,6 +46,9 @@ function assertRetryCommand(cmdResponse, retryResponse) {
     // The retry response can contain a different 'clusterTime' from the initial response.
     delete cmdResponse.$clusterTime;
     delete retryResponse.$clusterTime;
+    // The retry response can contain a different 'operationTime' from the initial response.
+    delete cmdResponse.operationTime;
+    delete retryResponse.operationTime;
     // The retry response contains the "retriedStmtId" field but the initial response does not.
     delete retryResponse.retriedStmtId;
 
@@ -308,4 +308,3 @@ const st = new ShardingTest({shards: {rs0: {nodes: numNodes}}});
 runTests(lsid, st.s, st.rs0.getPrimary(), st.rs0.getSecondary(), 70);
 runTests(lsid, st.s, st.rs0.getPrimary(), st.rs0.getSecondary(), 80);
 st.stop();
-})();

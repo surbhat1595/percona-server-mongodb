@@ -413,14 +413,15 @@ Value ExpressionInternalOwningShard::evaluate(const Document& root, Variables* v
     }
 
     // Retrieve the values from the incoming document.
-    NamespaceString ns(NamespaceStringUtil::parseNamespaceFromDoc(
-        getExpressionContext()->ns.tenantId(), input["ns"_sd].getStringData()));
+    auto expCtx = getExpressionContext();
+    NamespaceString ns(NamespaceStringUtil::deserialize(
+        expCtx->ns.tenantId(), input["ns"_sd].getStringData(), expCtx->serializationCtxt));
     const auto shardVersionObj = input["shardVersion"_sd].getDocument().toBson();
     const auto shardVersion = ShardVersion::parse(BSON("" << shardVersionObj).firstElement());
     const auto shardKeyVal = input["shardKeyVal"_sd].getDocument().toBson();
 
     // Get the 'chunkManager' from the catalog cache.
-    auto opCtx = getExpressionContext()->opCtx;
+    auto opCtx = expCtx->opCtx;
     const auto catalogCache = Grid::get(opCtx)->catalogCache();
     uassert(6868602,
             "$_internalOwningShard expression only makes sense in sharded environment",
@@ -503,7 +504,7 @@ boost::intrusive_ptr<Expression> ExpressionInternalIndexKey::optimize() {
     return this;
 }
 
-Value ExpressionInternalIndexKey::serialize(SerializationOptions options) const {
+Value ExpressionInternalIndexKey::serialize(const SerializationOptions& options) const {
     invariant(_doc);
     invariant(_spec);
 
@@ -525,8 +526,8 @@ Value ExpressionInternalIndexKey::evaluate(const Document& root, Variables* vari
     auto specObj = _spec->evaluate(root, variables).getDocument().toBson();
 
     // Parse and validate the index spec and then create the index descriptor object from it.
-    auto indexSpec = index_key_validate::parseAndValidateIndexSpecs(
-        getExpressionContext()->opCtx, specObj, false /* checkFCV */);
+    auto indexSpec =
+        index_key_validate::parseAndValidateIndexSpecs(getExpressionContext()->opCtx, specObj);
     BSONObj keyPattern = indexSpec.getObjectField(kIndexSpecKeyField);
     auto indexDescriptor =
         std::make_unique<IndexDescriptor>(IndexNames::findPluginName(keyPattern), indexSpec);

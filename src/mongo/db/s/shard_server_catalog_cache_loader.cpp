@@ -49,15 +49,16 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/client.h"
 #include "mongo/db/cluster_role.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/logical_time.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/operation_context_group.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -70,6 +71,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_id.h"
+#include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -295,6 +297,7 @@ CollectionAndChangedChunks getPersistedMetadataSinceVersion(OperationContext* op
     return CollectionAndChangedChunks{shardCollectionEntry.getEpoch(),
                                       shardCollectionEntry.getTimestamp(),
                                       shardCollectionEntry.getUuid(),
+                                      shardCollectionEntry.getUnsplittable(),
                                       shardCollectionEntry.getKeyPattern().toBSON(),
                                       shardCollectionEntry.getDefaultCollation(),
                                       shardCollectionEntry.getUnique(),
@@ -363,7 +366,7 @@ void forcePrimaryDatabaseRefreshAndWaitForReplication(OperationContext* opCtx, S
     auto cmdResponse = uassertStatusOK(selfShard->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        "admin",
+        DatabaseName::kAdmin,
         BSON("_flushDatabaseCacheUpdates" << dbName.toString()),
         Seconds{30},
         Shard::RetryPolicy::kIdempotent));
@@ -372,6 +375,34 @@ void forcePrimaryDatabaseRefreshAndWaitForReplication(OperationContext* opCtx, S
 
     uassertStatusOK(repl::ReplicationCoordinator::get(opCtx)->waitUntilOpTimeForRead(
         opCtx, {LogicalTime::fromOperationTime(cmdResponse.response), boost::none}));
+}
+
+void performNoopMajorityWriteLocally(OperationContext* opCtx, StringData msg) {
+    const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+
+    {
+        AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
+        uassert(ErrorCodes::NotWritablePrimary,
+                "Not primary when performing noop write for {}"_format(msg),
+                replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin));
+
+        writeConflictRetry(
+            opCtx, "performNoopWrite", NamespaceString::kRsOplogNamespace, [&opCtx, &msg] {
+                WriteUnitOfWork wuow(opCtx);
+                opCtx->getClient()->getServiceContext()->getOpObserver()->onOpMessage(
+                    opCtx, BSON("msg" << msg));
+                wuow.commit();
+            });
+    }
+    auto& replClient = repl::ReplClientInfo::forClient(opCtx->getClient());
+    WriteConcernResult writeConcernResult;
+    uassertStatusOK(
+        waitForWriteConcern(opCtx,
+                            replClient.getLastOp(),
+                            WriteConcernOptions(WriteConcernOptions::kMajority,
+                                                WriteConcernOptions::SyncMode::UNSET,
+                                                WriteConcernOptions::kWriteConcernTimeoutSharding),
+                            &writeConcernResult));
 }
 
 }  // namespace
@@ -458,11 +489,11 @@ void ShardServerCatalogCacheLoader::shutDown() {
 
 SemiFuture<CollectionAndChangedChunks> ShardServerCatalogCacheLoader::getChunksSince(
     const NamespaceString& nss, ChunkVersion version) {
-    // There's no need to refresh if a collection is always unsharded. Further, attempting to refesh
-    // config.collections or config.chunks would trigger recursive refreshes, and, if this is
-    // running on a config server secondary, the refresh would not succeed if the primary is
-    // unavailable, unnecessarily reducing availability.
-    if (nss.isNamespaceAlwaysUnsharded()) {
+    // If the collecction is never registered on the sharding catalog there is no need to refresh.
+    // Further, attempting to refesh config.collections or config.chunks would trigger recursive
+    // refreshes, and, if this is running on a config server secondary, the refresh would not
+    // succeed if the primary is unavailable, unnecessarily reducing availability.
+    if (nss.isNamespaceAlwaysUntracked()) {
         return Status(ErrorCodes::NamespaceNotFound,
                       str::stream() << "Collection " << nss.toStringForErrorMsg() << " not found");
     }
@@ -620,7 +651,7 @@ void ShardServerCatalogCacheLoader::waitForCollectionFlush(OperationContext* opC
 }
 
 void ShardServerCatalogCacheLoader::waitForDatabaseFlush(OperationContext* opCtx,
-                                                         StringData dbName) {
+                                                         const DatabaseName& dbName) {
 
     stdx::unique_lock<Latch> lg(_mutex);
     const auto initialTerm = _term;
@@ -630,11 +661,12 @@ void ShardServerCatalogCacheLoader::waitForDatabaseFlush(OperationContext* opCtx
     while (true) {
         uassert(ErrorCodes::NotWritablePrimary,
                 str::stream() << "Unable to wait for database metadata flush for "
-                              << dbName.toString()
+                              << dbName.toStringForErrorMsg()
                               << " because the node's replication role changed.",
                 _role == ReplicaSetRole::Primary && _term == initialTerm);
 
-        auto it = _dbTaskLists.find(dbName.toString());
+        // TODO SERVER-80342 _dbTaskLists to pass a DatabaseName
+        auto it = _dbTaskLists.find(DatabaseNameUtil::serialize(dbName));
 
         // If there are no tasks for the specified namespace, everything must have been completed
         if (it == _dbTaskLists.end())
@@ -679,7 +711,7 @@ void ShardServerCatalogCacheLoader::waitForDatabaseFlush(OperationContext* opCtx
             // It is only correct to wait again on condVar if the taskNum has not changed, meaning
             // that it must still be the same task list.
             opCtx->waitForConditionOrInterrupt(*condVar, lg, [&]() {
-                const auto it = _dbTaskLists.find(dbName.toString());
+                const auto it = _dbTaskLists.find(DatabaseNameUtil::serialize(dbName));
                 return it == _dbTaskLists.end() || it->second.empty() ||
                     it->second.front().taskNum != activeTaskNum;
             });
@@ -1008,6 +1040,10 @@ std::pair<bool, CollectionAndChangedChunks> ShardServerCatalogCacheLoader::_getE
 void ShardServerCatalogCacheLoader::_ensureMajorityPrimaryAndScheduleCollAndChunksTask(
     OperationContext* opCtx, const NamespaceString& nss, CollAndChunkTask task) {
 
+    // Ensure that this node is primary before using or persisting the information fetched from the
+    // config server. This prevents using incorrect filtering information in split brain scenarios.
+    performNoopMajorityWriteLocally(opCtx, "ensureMajorityPrimaryAndScheduleCollAndChunksTask");
+
     {
         stdx::lock_guard<Latch> lock(_mutex);
 
@@ -1034,6 +1070,11 @@ void ShardServerCatalogCacheLoader::_ensureMajorityPrimaryAndScheduleCollAndChun
 void ShardServerCatalogCacheLoader::_ensureMajorityPrimaryAndScheduleDbTask(OperationContext* opCtx,
                                                                             StringData dbName,
                                                                             DBTask task) {
+
+    // Ensure that this node is primary before using or persisting the information fetched from the
+    // config server. This prevents using incorrect filtering information in split brain scenarios.
+    performNoopMajorityWriteLocally(opCtx, "ensureMajorityPrimaryAndScheduleDbTask");
+
     {
         stdx::lock_guard<Latch> lock(_mutex);
 
@@ -1319,7 +1360,7 @@ ShardServerCatalogCacheLoader::_forcePrimaryCollectionRefreshAndWaitForReplicati
     auto cmdResponse = uassertStatusOK(selfShard->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        "admin",
+        DatabaseName::kAdmin,
         BSON("_flushRoutingTableCacheUpdates" << NamespaceStringUtil::serialize(nss)),
         Seconds{30},
         Shard::RetryPolicy::kIdempotent));
@@ -1555,12 +1596,6 @@ ShardServerCatalogCacheLoader::CollAndChunkTaskList::getEnqueuedMetadataForTerm(
         }
     }
     return collAndChunks;
-}
-
-void ShardServerCatalogCacheLoader::onFCVChanged() {
-    stdx::lock_guard<Latch> lg(_mutex);
-    _contexts.interrupt(ErrorCodes::Interrupted);
-    ++_term;
 }
 
 }  // namespace mongo

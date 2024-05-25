@@ -1,8 +1,5 @@
 // Tests user queries over the config servers.
-(function() {
-'use strict';
-
-load("jstests/sharding/libs/find_chunks_util.js");
+import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
 
 var getListCollectionsCursor = function(database, options, subsequentBatchSize) {
     return new DBCommandCursor(
@@ -28,10 +25,6 @@ var sortArrayByName = function(array) {
     return array.sort(function(a, b) {
         return a.name > b.name;
     });
-};
-
-var cursorGetIndexNames = function(cursor) {
-    return arrayGetNames(sortArrayByName(cursor.toArray()));
 };
 
 var sortArrayById = function(array) {
@@ -115,15 +108,14 @@ var testListConfigChunksIndexes = function(st) {
     // This test depends on all the indexes in the configChunksIndexes being the exact indexes
     // in the config chunks collection.
     var configDB = st.s.getDB("config");
-    var expectedConfigChunksIndexes =
-        ["_id_", "uuid_1_lastmod_1", "uuid_1_min_1", "uuid_1_shard_1_min_1"];
+    var expectedConfigChunksIndexes = [
+        "_id_",
+        "uuid_1_lastmod_1",
+        "uuid_1_min_1",
+        "uuid_1_shard_1_min_1",
+        "uuid_1_shard_1_onCurrentShardSince_1"
+    ];
     const foundIndexesArray = getListIndexesCursor(configDB.chunks).toArray();
-    // TODO SERVER-74573 always consider new index once 7.0 branches out
-    if (foundIndexesArray.length == expectedConfigChunksIndexes.length + 1) {
-        // CSRS nodes in v7.0 create a new index on config.chunks. Since the creation is not
-        // FCV-gated, this code is handling mixed binaries scenarios
-        expectedConfigChunksIndexes.push("uuid_1_shard_1_onCurrentShardSince_1");
-    }
 
     assert.eq(foundIndexesArray.length, expectedConfigChunksIndexes.length);
     assert.eq(arrayGetNames(sortArrayByName(foundIndexesArray)), expectedConfigChunksIndexes);
@@ -222,6 +214,7 @@ var queryConfigChunks = function(st) {
 
     // Map reduce query.
     const coll = configDB.collections.findOne({_id: testColl.getFullName()});
+    /* eslint-disable */
     var mapFunction = function() {
         if (xx.timestamp) {
             if (this.uuid.toString() == xx.uuid.toString()) {
@@ -233,6 +226,7 @@ var queryConfigChunks = function(st) {
             }
         }
     };
+    /* eslint-enable */
     var reduceFunction = function(key, values) {
         // We may be re-reducing values that have already been partially reduced. In that case, we
         // expect to see an object like {chunks: <count>} in the array of input values.
@@ -369,4 +363,3 @@ queryConfigChunks(st);
 queryUserCreated(configDB);
 queryUserCreated(adminDB);
 st.stop();
-})();

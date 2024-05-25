@@ -1,13 +1,15 @@
 /**
  * Tests that we can successfully prepare a prepared transaction.
  *
- * The test runs commands that are not allowed with security token: endSession, prepareTransaction.
  * @tags: [
- *   not_allowed_with_security_token,uses_transactions, uses_prepare_transaction]
+ *   # The test runs commands that are not allowed with security token: endSession,
+ *   # prepareTransaction.
+ *   not_allowed_with_security_token,
+ *   uses_transactions,
+ *   uses_prepare_transaction
+ * ]
  */
-(function() {
-"use strict";
-load("jstests/core/txns/libs/prepare_helpers.js");
+import {PrepareHelpers} from "jstests/core/txns/libs/prepare_helpers.js";
 
 const dbName = "test";
 const collName = "prepare_prepared_transaction";
@@ -39,4 +41,3 @@ assert.eq(firstTimestamp, secondTimestamp);
 assert.commandWorked(session.abortTransaction_forTesting());
 
 session.endSession();
-}());

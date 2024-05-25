@@ -2,26 +2,24 @@
  * Tests bulk write command in conjunction with using getMore to obtain the rest
  * of the cursor response.
  *
- * These tests are incompatible with various overrides due to using getMore.
  *
- * The test runs commands that are not allowed with security token: bulkWrite.
  * @tags: [
- *   assumes_against_mongod_not_mongos,
+ *   # The test runs commands that are not allowed with security token: bulkWrite.
  *   not_allowed_with_security_token,
  *   command_not_supported_in_serverless,
  *   does_not_support_retryable_writes,
  *   requires_non_retryable_writes,
+ *   # These tests are incompatible with various overrides due to using getMore.
  *   requires_getmore,
  *   # Contains commands that fail which will fail the entire transaction
  *   does_not_support_transactions,
  *   # TODO SERVER-52419 Remove this tag.
  *   featureFlagBulkWriteCommand,
+ *   # TODO SERVER-79506 Remove this tag.
+ *   assumes_unsharded_collection,
  * ]
  */
-load("jstests/libs/bulk_write_utils.js");  // For cursorEntryValidator.
-
-(function() {
-"use strict";
+import {cursorEntryValidator} from "jstests/libs/bulk_write_utils.js";
 
 var coll = db.getCollection("coll");
 var coll1 = db.getCollection("coll1");
@@ -59,4 +57,3 @@ assert.eq(coll.find().itcount(), 1);
 assert.eq(coll1.find().itcount(), 1);
 coll.drop();
 coll1.drop();
-})();

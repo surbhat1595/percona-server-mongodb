@@ -5,13 +5,9 @@
  * @tags: [requires_fcv_52, serverless]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {Thread} from "jstests/libs/parallelTester.js";
 import {ShardedServerlessTest} from "jstests/serverless/libs/sharded_serverless_test.js";
-
-(function() {
-"use strict";
-
-load("jstests/libs/fail_point_util.js");
-load('jstests/concurrency/fsm_libs/worker_thread.js');
 
 // A function, not a constant, to ensure unique UUIDs.
 function donorStartMigrationCmd(tenantID, realConnUrl) {
@@ -129,4 +125,3 @@ let adminDB = donor.getPrimary().getDB('admin');
 })();
 
 st.stop();
-})();

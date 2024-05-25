@@ -5,11 +5,8 @@
  *   multiversion_incompatible
  * ]
  */
-(function() {
-'use strict';
-
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/log.js");  // For findMatchingLogLine
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {findMatchingLogLines} from "jstests/libs/log.js";
 
 const expectedLogId = 6983000;
 const sleepMillisInSendResponse = 200;
@@ -48,7 +45,7 @@ function runTest(conn) {
 
     // Wait, then do a query beyond the 100ms threshold. Make sure the slow loop log line exists.
     const fp = configureFailPoint(
-        conn, "sessionWorkflowDelaySendMessage", {millis: sleepMillisInSendResponse});
+        conn, "sessionWorkflowDelayOrFailSendMessage", {millis: sleepMillisInSendResponse});
     coll.find().toArray();
     fp.off();
     let logAndCount = getSlowLogAndCount(conn);
@@ -78,7 +75,7 @@ function runTest(conn) {
     // Wait, then do a query beyond the 100ms threshold. Make sure the slow loop log line does not
     // exist this time.
     const fp2 = configureFailPoint(
-        conn, "sessionWorkflowDelaySendMessage", {millis: sleepMillisInSendResponse});
+        conn, "sessionWorkflowDelayOrFailSendMessage", {millis: sleepMillisInSendResponse});
     coll.find().toArray();
     fp2.off();
     logAndCount = getSlowLogAndCount(conn);
@@ -100,4 +97,3 @@ if (testEnabled) {
     runTest(st.s0);
     st.stop();
 }
-})();

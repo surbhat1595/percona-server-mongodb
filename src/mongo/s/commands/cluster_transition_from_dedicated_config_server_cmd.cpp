@@ -35,7 +35,6 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/feature_flag.h"
@@ -89,7 +88,7 @@ public:
             auto cmdResponseWithStatus = configShard->runCommandWithFixedRetryAttempts(
                 opCtx,
                 kPrimaryOnlyReadPreference,
-                "admin",
+                DatabaseName::kAdmin,
                 CommandHelpers::appendMajorityWriteConcern(cmdToSend.toBSON({}),
                                                            opCtx->getWriteConcern()),
                 Shard::RetryPolicy::kIdempotent);
@@ -119,9 +118,7 @@ public:
         }
     };
 };
-
-MONGO_REGISTER_FEATURE_FLAGGED_COMMAND(TransitionFromDedicatedConfigServerCommand,
-                                       gFeatureFlagTransitionToCatalogShard);
+MONGO_REGISTER_COMMAND(TransitionFromDedicatedConfigServerCommand);
 
 }  // namespace
 }  // namespace mongo

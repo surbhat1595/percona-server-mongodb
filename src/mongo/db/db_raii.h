@@ -148,16 +148,6 @@ public:
     }
 
 private:
-    // The caller was expecting to conflict with batch application before entering this
-    // function.
-    // i.e. the caller does not currently have a ShouldNotConflict... block in scope.
-    bool _callerWasConflicting;
-    // If this field is set, the reader will not take the ParallelBatchWriterMode lock and conflict
-    // with secondary batch application. This stays in scope with the _autoColl so that locks are
-    // taken and released in the right order.
-    boost::optional<ShouldNotConflictWithSecondaryBatchApplicationBlock>
-        _shouldNotConflictWithSecondaryBatchApplicationBlock;
-
     // Ordering matters, the _collLocks should destruct before the _autoGetDb releases the
     // rstl/global/database locks.
     AutoGetDb _autoDb;
@@ -176,8 +166,8 @@ private:
 
 /**
  * Same as AutoGetCollectionForRead above except does not take collection, database or rstl locks.
- * Takes the global lock and may take the PBWM, same as AutoGetCollectionForRead. Ensures a
- * consistent in-memory and on-disk view of the storage catalog.
+ * Takes the global lock, same as AutoGetCollectionForRead. Ensures a consistent in-memory and
+ * on-disk view of the storage catalog.
  *
  * This implementation uses the point-in-time (PIT) catalog.
  */
@@ -213,15 +203,6 @@ private:
     // Whether or not this AutoGetCollectionForReadLockFree is being constructed while
     // there's already a lock-free read in progress.
     bool _isLockFreeReadSubOperation;
-
-    // Whether or not the calling context expects to conflict with secondary batch application. This
-    // is just used for invariant checking.
-    bool _callerExpectedToConflictWithSecondaryBatchApplication;
-
-    // If this field is set, the reader will not take the ParallelBatchWriterMode lock and conflict
-    // with secondary batch application.
-    boost::optional<ShouldNotConflictWithSecondaryBatchApplicationBlock>
-        _shouldNotConflictWithSecondaryBatchApplicationBlock;
 
     // Increments a counter on the OperationContext for the number of lock-free reads when
     // constructed, and decrements on destruction.
@@ -343,8 +324,8 @@ public:
     }
 
 protected:
+    boost::optional<AutoStatsTracker> _statsTracker;
     AutoGetCollectionForReadType _autoCollForRead;
-    AutoStatsTracker _statsTracker;
 };
 
 /**
@@ -365,13 +346,15 @@ public:
 /**
  * Same as AutoGetCollectionForReadCommand except no collection, database or RSTL lock is taken.
  */
-class AutoGetCollectionForReadCommandLockFree {
+class AutoGetCollectionForReadCommandLockFree
+    : public AutoGetCollectionForReadCommandBase<AutoGetCollectionForReadLockFree> {
 public:
     AutoGetCollectionForReadCommandLockFree(
         OperationContext* opCtx,
         const NamespaceStringOrUUID& nsOrUUID,
         AutoGetCollection::Options options = {},
-        AutoStatsTracker::LogMode logMode = AutoStatsTracker::LogMode::kUpdateTopAndCurOp);
+        AutoStatsTracker::LogMode logMode = AutoStatsTracker::LogMode::kUpdateTopAndCurOp)
+        : AutoGetCollectionForReadCommandBase(opCtx, nsOrUUID, options, logMode) {}
 
     explicit operator bool() const {
         return static_cast<bool>(getCollection());
@@ -384,26 +367,6 @@ public:
     const CollectionPtr& operator*() const {
         return getCollection();
     }
-
-    const CollectionPtr& getCollection() const {
-        return _autoCollForReadCommandBase->getCollection();
-    }
-
-    const ViewDefinition* getView() const {
-        return _autoCollForReadCommandBase->getView();
-    }
-
-    const NamespaceString& getNss() const {
-        return _autoCollForReadCommandBase->getNss();
-    }
-
-    bool isAnySecondaryNamespaceAViewOrSharded() const {
-        return _autoCollForReadCommandBase->isAnySecondaryNamespaceAViewOrSharded();
-    }
-
-private:
-    boost::optional<AutoGetCollectionForReadCommandBase<AutoGetCollectionForReadLockFree>>
-        _autoCollForReadCommandBase;
 };
 
 /**
@@ -571,4 +534,9 @@ private:
     PrepareConflictBehavior _originalValue;
 };
 
+// Asserts whether the read concern is supported for the given collection with the specified read
+// source.
+void assertReadConcernSupported(const CollectionPtr& coll,
+                                const repl::ReadConcernArgs& readConcernArgs,
+                                const RecoveryUnit::ReadSource& readSource);
 }  // namespace mongo

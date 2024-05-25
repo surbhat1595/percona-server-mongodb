@@ -2,14 +2,13 @@
  * Tests the resuming behavior of resharding's collection cloning.
  *
  * @tags: [
+ *   multiversion_incompatible,
  *   uses_atclustertime,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/uuid_util.js");
-load("jstests/sharding/libs/create_sharded_collection_util.js");
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+import {extractUUIDFromObject, getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
+import {CreateShardedCollectionUtil} from "jstests/sharding/libs/create_sharded_collection_util.js";
 
 const st = new ShardingTest({
     mongos: 1,
@@ -22,6 +21,12 @@ const st = new ShardingTest({
         }
     },
 });
+
+if (FeatureFlagUtil.isEnabled(st.s, "ReshardingImprovements")) {
+    jsTestLog("Skipping test since featureFlagReshardingImprovements is enabled");
+    st.stop();
+    quit();
+}
 
 const inputCollection = st.s.getCollection("reshardingDb.coll");
 
@@ -110,4 +115,3 @@ assert.commandFailedWithCode(st.shard0.adminCommand({
                              ErrorCodes.DuplicateKey);
 
 st.stop();
-})();

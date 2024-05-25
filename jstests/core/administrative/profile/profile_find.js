@@ -1,18 +1,15 @@
-// The test runs commands that are not allowed with security token: setProfilingLevel.
+// Confirms that profiled find execution contains all expected metrics with proper values.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: setProfilingLevel.
 //   not_allowed_with_security_token,
 //   does_not_support_stepdowns,
 //   requires_fcv_70,
 //   requires_profiling,
 // ]
 
-// Confirms that profiled find execution contains all expected metrics with proper values.
-
-(function() {
-"use strict";
-
-load("jstests/libs/os_helpers.js");  // For isLinux().
-load("jstests/libs/profiler.js");    // For 'getLatestProfilerEntry()'.
+import {isLinux} from "jstests/libs/os_helpers.js";
+import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 
 var testDB = db.getSiblingDB("profile_find");
 assert.commandWorked(testDB.dropDatabase());
@@ -186,4 +183,3 @@ assert.eq(profileObj.command.comment, "profile_find", profileObj);
 coll.find({query: "foo"}).itcount();
 profileObj = getLatestProfilerEntry(testDB, profileEntryFilter);
 assert.eq(profileObj.command.filter, {query: "foo"}, profileObj);
-})();

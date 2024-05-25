@@ -6,14 +6,14 @@
  *   does_not_support_stepdowns,
  *   # We need a timeseries collection.
  *   requires_timeseries,
+ *   # We assume that all nodes in a mixed-mode replica set are using compressed inserts to a
+ *   # time-series collection.
+ *   requires_fcv_71,
  * ]
  */
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 
 TimeseriesTest.run((insert) => {
-    const isTimeseriesScalabilityImprovementsEnabled =
-        TimeseriesTest.timeseriesScalabilityImprovementsEnabled(db);
-
     const collNamePrefix = 'timeseries_bucket_limit_time_range_';
 
     const timeFieldName = 'time';
@@ -84,14 +84,9 @@ TimeseriesTest.run((insert) => {
         assert.eq(docTimes[2],
                   bucketDocs[0].control.max[timeFieldName],
                   'invalid control.max for time in first bucket: ' + tojson(bucketDocs[0].control));
-        if (!isTimeseriesScalabilityImprovementsEnabled) {  // If enabled, we will archive instead
-                                                            // of closing, but another simultaneous
-                                                            // operation may close it in the
-                                                            // background.
-            assert.eq(2,
-                      bucketDocs[0].control.version,
-                      'unexpected control.version in first bucket: ' + tojson(bucketDocs));
-        }
+        assert.eq(TimeseriesTest.BucketVersion.kCompressed,
+                  bucketDocs[0].control.version,
+                  'unexpected control.version in first bucket: ' + tojson(bucketDocs));
 
         // Second bucket should contain the remaining document.
         assert.eq(numDocs - 1,
@@ -114,9 +109,15 @@ TimeseriesTest.run((insert) => {
             docTimes[numDocs - 1],
             bucketDocs[1].control.max[timeFieldName],
             'invalid control.max for time in second bucket: ' + tojson(bucketDocs[1].control));
-        assert.eq(1,
-                  bucketDocs[1].control.version,
-                  'unexpected control.version in first bucket: ' + tojson(bucketDocs));
+        if (TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(db)) {
+            assert.eq(TimeseriesTest.BucketVersion.kCompressed,
+                      bucketDocs[1].control.version,
+                      'unexpected control.version in second bucket: ' + tojson(bucketDocs));
+        } else {
+            assert.eq(TimeseriesTest.BucketVersion.kUncompressed,
+                      bucketDocs[1].control.version,
+                      'unexpected control.version in second bucket: ' + tojson(bucketDocs));
+        }
     };
 
     runTest(1);

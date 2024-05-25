@@ -44,6 +44,7 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -58,6 +59,7 @@
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
@@ -115,16 +117,28 @@ public:
                     requestToForward.setTimeseries(std::move(timeseriesOptions));
                 }
 
+                FixedFCVRegion fixedFcvRegion{opCtx};
+
                 auto coordinatorDoc = [&] {
-                    auto doc = CreateCollectionCoordinatorDocument();
-                    doc.setShardingDDLCoordinatorMetadata(
-                        {{ns(), DDLCoordinatorTypeEnum::kCreateCollection}});
-                    doc.setCreateCollectionRequest(requestToForward);
-                    return doc.toBSON();
+                    if (feature_flags::gAuthoritativeShardCollection.isEnabled(*fixedFcvRegion)) {
+                        const DDLCoordinatorTypeEnum coordType =
+                            DDLCoordinatorTypeEnum::kCreateCollection;
+                        auto doc = CreateCollectionCoordinatorDocument();
+                        doc.setShardingDDLCoordinatorMetadata({{ns(), coordType}});
+                        doc.setCreateCollectionRequest(requestToForward);
+                        return doc.toBSON();
+                    } else {
+                        const DDLCoordinatorTypeEnum coordType =
+                            DDLCoordinatorTypeEnum::kCreateCollectionPre71Compatible;
+                        auto doc = CreateCollectionCoordinatorDocumentLegacy();
+                        doc.setShardingDDLCoordinatorMetadata({{ns(), coordType}});
+                        doc.setCreateCollectionRequest(requestToForward);
+                        return doc.toBSON();
+                    }
                 }();
 
                 auto service = ShardingDDLCoordinatorService::getService(opCtx);
-                return checked_pointer_cast<CreateCollectionCoordinator>(
+                return dynamic_pointer_cast<CreateCollectionResponseProvider>(
                     service->getOrCreateInstance(opCtx, std::move(coordinatorDoc)));
             }();
 
@@ -149,8 +163,8 @@ public:
                             ActionType::internal));
         }
     };
-
-} shardsvrCreateCollectionCommand;
+};
+MONGO_REGISTER_COMMAND(ShardsvrCreateCollectionCommand);
 
 }  // namespace
 }  // namespace mongo

@@ -9,8 +9,7 @@
  *   5. Downgrade binaries and FCV of the cluster to an old version
  *   6. Verify the data consistency after the downgrade procedure
  */
-
-load('jstests/multiVersion/libs/multi_cluster.js');  // For upgradeCluster
+import "jstests/multiVersion/libs/multi_cluster.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const dbName = jsTestName();
@@ -40,35 +39,6 @@ function setupClusterAndDatabase(binVersion) {
 function getNodeName(node) {
     const info = node.adminCommand({hello: 1});
     return info.setName + '_' + (info.secondary ? 'secondary' : 'primary');
-}
-
-function checkConfigVersionDoc() {
-    // TODO: SERVER-68889 remove this function once 7.0 becomes last LTS
-    const versionDoc = st.s.getCollection('config.version').findOne();
-
-    if (FeatureFlagUtil.isPresentAndEnabled(st.s, "StopUsingConfigVersion")) {
-        // Check that the version doc doesn't contain any of the deprecatedFields
-        const deprecatedFields = [
-            "excluding",
-            "upgradeId",
-            "upgradeState",
-            "currentVersion",
-            "minCompatibleVersion",
-        ];
-
-        deprecatedFields.forEach(deprecatedField => {
-            assert(!versionDoc.hasOwnProperty(deprecatedField),
-                   `Found deprecated field '${deprecatedField}' in version document ${
-                       tojson(versionDoc)}`);
-        });
-    } else {
-        assert.eq(versionDoc.minCompatibleVersion,
-                  5,
-                  "Version doc does not contain expected value for minCompatibleVersion field");
-        assert.eq(versionDoc.currentVersion,
-                  6,
-                  "Version doc does not contain expected value for currentVersion field");
-    }
 }
 
 function checkConfigAndShardsFCV(expectedFCV) {
@@ -125,28 +95,23 @@ function checkReshardingActiveIndex() {
 
 function checkClusterBeforeUpgrade(fcv) {
     checkConfigAndShardsFCV(fcv);
-    checkConfigVersionDoc();
     checkReshardingActiveIndex();
 }
 
 function checkClusterAfterBinaryUpgrade() {
-    checkConfigVersionDoc();
 }
 
 function checkClusterAfterFCVUpgrade(fcv) {
     checkConfigAndShardsFCV(fcv);
-    checkConfigVersionDoc();
     checkReshardingActiveIndex();
 }
 
 function checkClusterAfterFCVDowngrade() {
-    checkConfigVersionDoc();
     checkReshardingActiveIndex();
 }
 
 function checkClusterAfterBinaryDowngrade(fcv) {
     checkConfigAndShardsFCV(fcv);
-    checkConfigVersionDoc();
 }
 
 for (const oldVersion of [lastLTSFCV, lastContinuousFCV]) {
@@ -167,7 +132,8 @@ for (const oldVersion of [lastLTSFCV, lastContinuousFCV]) {
     checkClusterAfterBinaryUpgrade();
 
     jsTest.log('Upgrading FCV to ' + latestFCV);
-    assert.commandWorked(st.s.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        st.s.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
 
     checkClusterAfterFCVUpgrade(latestFCV);
 
@@ -175,7 +141,8 @@ for (const oldVersion of [lastLTSFCV, lastContinuousFCV]) {
     // Setting and testing cluster using old binaries in old FCV mode
 
     jsTest.log('Downgrading FCV to ' + oldVersion);
-    assert.commandWorked(st.s.adminCommand({setFeatureCompatibilityVersion: oldVersion}));
+    assert.commandWorked(
+        st.s.adminCommand({setFeatureCompatibilityVersion: oldVersion, confirm: true}));
 
     checkClusterAfterFCVDowngrade();
 

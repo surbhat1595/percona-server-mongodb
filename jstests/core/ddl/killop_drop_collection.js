@@ -4,8 +4,8 @@
  * This test confirms that killOp won't interrupt a collection drop, and that the drop occurs
  * successfully.
  *
- * The test runs commands that are not allowed with security token: fsyncUnlock.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: fsyncUnlock.
  *   not_allowed_with_security_token,
  *   assumes_superuser_permissions,
  *   # Uses index building in background
@@ -13,9 +13,6 @@
  *   uses_parallel_shell
  * ]
  */
-(function() {
-"use strict";
-
 var collectionName = "killop_drop";
 let collection = db.getCollection(collectionName);
 collection.drop();
@@ -31,7 +28,7 @@ if (!fsyncRes.ok) {
     assert.commandFailedWithCode(fsyncRes, ErrorCodes.CommandNotSupported);
     jsTest.log("Skipping test on storage engine " + storageEngine +
                ", which does not support fsyncLock.");
-    return;
+    quit();
 }
 
 // Kick off a drop on the collection.
@@ -72,4 +69,3 @@ assert.eq(0,
           "Expected the number of fsyncLocks to be zero after issuing fsyncUnlock");
 
 awaitDropCommand();
-}());

@@ -9,14 +9,13 @@
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   serverless,
+ *   requires_fcv_71,
  * ]
  */
 
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {makeX509OptionsForTest} from "jstests/replsets/libs/tenant_migration_util.js";
-
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/uuid_util.js");
 
 const kGarbageCollectionParams = {
     // Set the delay before a donor state doc is garbage collected to be short to speed up

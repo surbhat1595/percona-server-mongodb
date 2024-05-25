@@ -5,6 +5,8 @@
  *   assumes_unsharded_collection,
  *   does_not_support_stepdowns,
  *   does_not_support_transactions,
+ *   # The killCursors command is not allowed with a security token.
+ *   not_allowed_with_security_token,
  *   requires_getmore,
  *   requires_non_retryable_commands,
  *   # Explain of a resolved view must be executed by mongos.
@@ -12,14 +14,15 @@
  *   references_foreign_collection,
  * ]
  */
-(function() {
-"use strict";
+import {assertMergeFailsForAllModesWithCode} from "jstests/aggregation/extras/merge_helpers.js";
+import {arrayEq, assertErrorCode, orderedArrayEq} from "jstests/aggregation/extras/utils.js";
+import {
+    FixtureHelpers
+} from "jstests/libs/fixture_helpers.js";  // For arrayEq, assertErrorCode, and
+import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
-// For assertMergeFailsForAllModesWithCode.
-load("jstests/aggregation/extras/merge_helpers.js");
-load("jstests/aggregation/extras/utils.js");  // For arrayEq, assertErrorCode, and
-                                              // orderedArrayEq.
-load("jstests/libs/fixture_helpers.js");      // For FixtureHelpers.
+// TODO SERVER-72549: Remove 'featureFlagSbeFull' used by SBE Pushdown feature here and below.
+const featureFlagSbeFull = checkSBEEnabled(db, ["featureFlagSbeFull"]);
 
 let viewsDB = db.getSiblingDB("views_aggregation");
 assert.commandWorked(viewsDB.dropDatabase());
@@ -144,64 +147,75 @@ assert.commandWorked(viewsDB.runCommand({
                     "Expected in-memory sort to fail due to excessive memory usage",
                     {allowDiskUse: false});
 
-    assert.commandWorked(
+    const result1 = assert.commandWorked(
         viewsDB.runCommand(
             {aggregate: "largeView", pipeline: [{$sort: {x: -1}}], cursor: {}, allowDiskUse: true}),
         "Expected aggregate to succeed since 'allowDiskUse' was specified");
 
-    assert.commandWorked(
+    const result2 = assert.commandWorked(
         viewsDB.runCommand({aggregate: "largeView", pipeline: [{$sort: {x: -1}}], cursor: {}}),
         "Expected aggregate to succeed since 'allowDiskUse' is true by default");
+
+    // These pipelines can consume significant memory and disk space, so we manually close them to
+    // prevent them from interfering with other tests. We ignore the return value here, because an
+    // error closing cursors does not usually represent a failure.
+    viewsDB.runCommand({killCursors: "largeView", cursors: [result1.cursor.id, result2.cursor.id]});
 })();
 
 // Test explain modes on a view.
 (function testExplainOnView() {
     let explainPlan = assert.commandWorked(
         viewsDB.popSortedView.explain("queryPlanner").aggregate([{$limit: 1}, {$match: {pop: 3}}]));
-    assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace,
-              "views_aggregation.coll",
-              explainPlan);
-    assert(!explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"), explainPlan);
+    if (explainPlan.hasOwnProperty("stages")) {
+        explainPlan = explainPlan.stages[0].$cursor;
+    }
+    assert.eq(explainPlan.queryPlanner.namespace, "views_aggregation.coll", explainPlan);
+    assert(!explainPlan.hasOwnProperty("executionStats"), explainPlan);
 
     explainPlan = assert.commandWorked(viewsDB.popSortedView.explain("executionStats")
                                            .aggregate([{$limit: 1}, {$match: {pop: 3}}]));
-    assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace,
-              "views_aggregation.coll",
-              explainPlan);
-    assert(explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"), explainPlan);
-    assert.eq(explainPlan.stages[0].$cursor.executionStats.nReturned, 1, explainPlan);
-    assert(!explainPlan.stages[0].$cursor.executionStats.hasOwnProperty("allPlansExecution"),
-           explainPlan);
+    if (explainPlan.hasOwnProperty("stages")) {
+        explainPlan = explainPlan.stages[0].$cursor;
+    }
+    assert.eq(explainPlan.queryPlanner.namespace, "views_aggregation.coll", explainPlan);
+    assert(explainPlan.hasOwnProperty("executionStats"), explainPlan);
+    assert.eq(explainPlan.executionStats.nReturned, 1, explainPlan);
+    assert(!explainPlan.executionStats.hasOwnProperty("allPlansExecution"), explainPlan);
 
     explainPlan = assert.commandWorked(viewsDB.popSortedView.explain("allPlansExecution")
                                            .aggregate([{$limit: 1}, {$match: {pop: 3}}]));
-    assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace,
-              "views_aggregation.coll",
-              explainPlan);
-    assert(explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"), explainPlan);
-    assert.eq(explainPlan.stages[0].$cursor.executionStats.nReturned, 1, explainPlan);
-    assert(explainPlan.stages[0].$cursor.executionStats.hasOwnProperty("allPlansExecution"),
-           explainPlan);
+    if (explainPlan.hasOwnProperty("stages")) {
+        explainPlan = explainPlan.stages[0].$cursor;
+    }
+    assert.eq(explainPlan.queryPlanner.namespace, "views_aggregation.coll", explainPlan);
+    assert(explainPlan.hasOwnProperty("executionStats"), explainPlan);
+    assert.eq(explainPlan.executionStats.nReturned, 1, explainPlan);
+    assert(explainPlan.executionStats.hasOwnProperty("allPlansExecution"), explainPlan);
 
     // Passing a value of true for the explain option to the aggregation command, without using the
     // shell explain helper, should continue to work.
     explainPlan = assert.commandWorked(
         viewsDB.popSortedView.aggregate([{$limit: 1}, {$match: {pop: 3}}], {explain: true}));
-    assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace,
-              "views_aggregation.coll",
-              explainPlan);
-    assert(!explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"), explainPlan);
+    if (explainPlan.hasOwnProperty("stages")) {
+        explainPlan = explainPlan.stages[0].$cursor;
+    }
+    assert.eq(explainPlan.queryPlanner.namespace, "views_aggregation.coll", explainPlan);
+    assert(!explainPlan.hasOwnProperty("executionStats"), explainPlan);
 
     // Test allPlansExecution explain mode on the base collection.
     explainPlan = assert.commandWorked(
         viewsDB.coll.explain("allPlansExecution").aggregate([{$limit: 1}, {$match: {pop: 3}}]));
-    assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace,
-              "views_aggregation.coll",
-              explainPlan);
-    assert(explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"), explainPlan);
-    assert.eq(explainPlan.stages[0].$cursor.executionStats.nReturned, 1, explainPlan);
-    assert(explainPlan.stages[0].$cursor.executionStats.hasOwnProperty("allPlansExecution"),
-           explainPlan);
+    if (explainPlan.hasOwnProperty("stages")) {
+        explainPlan = explainPlan.stages[0].$cursor;
+    }
+    assert.eq(explainPlan.queryPlanner.namespace, "views_aggregation.coll", explainPlan);
+    assert(explainPlan.hasOwnProperty("executionStats"), explainPlan);
+    if (featureFlagSbeFull) {
+        assert.eq(explainPlan.executionStats.nReturned, 0, explainPlan);
+    } else {
+        assert.eq(explainPlan.executionStats.nReturned, 1, explainPlan);
+    }
+    assert(explainPlan.executionStats.hasOwnProperty("allPlansExecution"), explainPlan);
 
     // The explain:true option should not work when paired with the explain shell helper.
     assert.throws(function() {
@@ -398,5 +412,4 @@ assert.commandWorked(viewsDB.runCommand({
     assert.eq(allDocuments.length,
               viewsDB[viewName].aggregate([{$group: {_id: "$_id"}}]).itcount());
     assert.eq(allDocuments.length, viewsDB[viewName].distinct("_id").length);
-})();
 })();

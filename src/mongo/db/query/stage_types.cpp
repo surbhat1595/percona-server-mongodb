@@ -56,6 +56,7 @@ StringData stageTypeToString(StageType stageType) {
         {STAGE_IDHACK, "IDHACK"_sd},
         {STAGE_IXSCAN, "IXSCAN"_sd},
         {STAGE_LIMIT, "LIMIT"_sd},
+        {STAGE_MATCH, "MATCH"_sd},
         {STAGE_MOCK, "MOCK"_sd},
         {STAGE_MULTI_ITERATOR, "MULTI_ITERATOR"_sd},
         {STAGE_MULTI_PLAN, "MULTI_PLAN"_sd},
@@ -81,8 +82,10 @@ StringData stageTypeToString(StageType stageType) {
         {STAGE_TIMESERIES_MODIFY, "TIMESERIES_MODIFY"_sd},
         {STAGE_TRIAL, "TRIAL"_sd},
         {STAGE_UNKNOWN, "UNKNOWN"_sd},
-        {STAGE_UNPACK_TIMESERIES_BUCKET, "UNPACK_TIMESERIES_BUCKET"_sd},
+        {STAGE_UNPACK_SAMPLED_TS_BUCKET, "UNPACK_SAMPLED_TS_BUCKET"_sd},
+        {STAGE_UNPACK_TS_BUCKET, "UNPACK_TS_BUCKET"_sd},
         {STAGE_UPDATE, "UPDATE"_sd},
+        {STAGE_WINDOW, "WINDOW"_sd},
     };
     if (auto it = kStageTypesMap.find(stageType); it != kStageTypesMap.end()) {
         return it->second;

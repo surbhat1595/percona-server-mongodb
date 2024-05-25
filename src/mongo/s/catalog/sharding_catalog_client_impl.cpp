@@ -51,7 +51,6 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
@@ -487,7 +486,7 @@ HistoricalPlacement ShardingCatalogClientImpl::_fetchPlacementMetadata(
     auto remoteResponse = uassertStatusOK(_getConfigShard(opCtx)->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        DatabaseName::kAdmin.toString(),
+        DatabaseName::kAdmin,
         request.toBSON(BSONObj()),
         Shard::kDefaultConfigCommandTimeout,
         Shard::RetryPolicy::kIdempotentOrCursorInvalidated));
@@ -987,7 +986,7 @@ StatusWith<repl::OpTimeWith<std::vector<ShardType>>> ShardingCatalogClientImpl::
 
 Status ShardingCatalogClientImpl::runUserManagementWriteCommand(OperationContext* opCtx,
                                                                 StringData commandName,
-                                                                StringData dbname,
+                                                                const DatabaseName& dbname,
                                                                 const BSONObj& cmdObj,
                                                                 BSONObjBuilder* result) {
     BSONObj cmdToRun = cmdObj;
@@ -1046,7 +1045,7 @@ Status ShardingCatalogClientImpl::runUserManagementWriteCommand(OperationContext
     auto swResponse = _getConfigShard(opCtx)->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        dbname.toString(),
+        dbname,
         cmdToRun,
         Shard::kDefaultConfigCommandTimeout,
         Shard::RetryPolicy::kNotIdempotent);
@@ -1070,7 +1069,7 @@ Status ShardingCatalogClientImpl::runUserManagementWriteCommand(OperationContext
 }
 
 bool ShardingCatalogClientImpl::runUserManagementReadCommand(OperationContext* opCtx,
-                                                             const std::string& dbname,
+                                                             const DatabaseName& dbname,
                                                              const BSONObj& cmdObj,
                                                              BSONObjBuilder* result) {
     auto resultStatus = _getConfigShard(opCtx)->runCommandWithFixedRetryAttempts(

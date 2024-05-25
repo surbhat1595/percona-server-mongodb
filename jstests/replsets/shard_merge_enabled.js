@@ -1,13 +1,17 @@
 /**
  * Tests that the "shard merge" protocol is enabled only in the proper FCV.
- * @tags: [featureFlagShardMerge]
+ *
+ * @tags: [
+ *   featureFlagShardMerge,
+ *   serverless,
+ *   requires_fcv_71,
+ * ]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {
     isShardMergeEnabled,
-    makeMigrationCertificatesForTest
 } from "jstests/replsets/libs/tenant_migration_util.js";
-load("jstests/libs/fail_point_util.js");
 
 function runTest(downgradeFCV) {
     const rst = new ReplSetTest({nodes: 1, serverless: true});
@@ -29,7 +33,6 @@ function runTest(downgradeFCV) {
     const adminDB = primary.getDB("admin");
     const kDummyConnStr = "mongodb://localhost/?replicaSet=foo";
     const readPreference = {mode: 'primary'};
-    const migrationCertificates = makeMigrationCertificatesForTest();
 
     // A function, not a constant, to ensure unique UUIDs.
     function donorStartMigrationCmd() {
@@ -39,8 +42,6 @@ function runTest(downgradeFCV) {
             migrationId: UUID(),
             recipientConnectionString: kDummyConnStr,
             readPreference: readPreference,
-            donorCertificateForRecipient: migrationCertificates.donorCertificateForRecipient,
-            recipientCertificateForDonor: migrationCertificates.recipientCertificateForDonor,
             tenantIds: [ObjectId()]
         };
     }
@@ -54,7 +55,6 @@ function runTest(downgradeFCV) {
             donorConnectionString: kDummyConnStr,
             readPreference: readPreference,
             startMigrationDonorTimestamp: Timestamp(1, 1),
-            recipientCertificateForDonor: migrationCertificates.recipientCertificateForDonor
         };
     }
 
@@ -66,7 +66,6 @@ function runTest(downgradeFCV) {
             tenantIds: [ObjectId()],
             donorConnectionString: kDummyConnStr,
             readPreference: readPreference,
-            recipientCertificateForDonor: migrationCertificates.recipientCertificateForDonor,
             decision: "committed"
         };
     }
@@ -120,7 +119,8 @@ function runTest(downgradeFCV) {
         testCommandWithShardMerge(cmd);
     });
 
-    assert.commandWorked(adminDB.adminCommand({setFeatureCompatibilityVersion: downgradeFCV}));
+    assert.commandWorked(
+        adminDB.adminCommand({setFeatureCompatibilityVersion: downgradeFCV, confirm: true}));
     // Now that FCV is downgraded, shard merge is automatically disabled.
     cmds.forEach((cmd) => {
         if (MongoRunner.compareBinVersions(downgradeFCV, "5.2") >= 0) {

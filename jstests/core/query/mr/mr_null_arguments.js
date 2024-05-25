@@ -1,8 +1,9 @@
 // Test that MapReduce only runs when certain arguments are explicit null. This is required because
 // the Java Driver adds null as an argument to these fields if they are missing in the command from
 // the user.
-// The test runs commands that are not allowed with security token: mapReduce.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapReduce.
 //   not_allowed_with_security_token,
 //   # mapReduce does not support afterClusterTime.
 //   does_not_support_causal_consistency,
@@ -10,9 +11,6 @@
 //   uses_map_reduce_with_temp_collections,
 //   requires_scripting,
 // ]
-(function() {
-"use strict";
-
 const coll = db.mr_null_test;
 const outColl = db.mr_null_test_out;
 assert.commandWorked(coll.insert({val: 1}));
@@ -59,4 +57,3 @@ assert.commandWorked(db.runCommand({
     scope: null,
     out: {merge: outColl.getName()}
 }));
-})();

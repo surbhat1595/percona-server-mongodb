@@ -155,9 +155,6 @@ protected:
         const bool readOnly = (profilingLevel < 0 || profilingLevel > 2) && !request.getFilter();
         const LockMode dbMode = readOnly ? MODE_IS : MODE_IX;
 
-        // Accessing system.profile collection should not conflict with oplog application.
-        ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
-            opCtx->lockState());
         NamespaceString nss(NamespaceString::makeSystemDotProfileNamespace(dbName));
         AutoGetCollection ctx(opCtx, nss, dbMode);
         Database* db = ctx.getDb();
@@ -192,10 +189,7 @@ protected:
 
         return oldSettings;
     }
-
-} cmdProfile;
-
-SetProfilingFilterGloballyCmd cmdSetProfilingFilterGlobally;
+};
 
 class CmdFileMD5 : public BasicCommand {
 public:
@@ -229,7 +223,7 @@ public:
         if (collectionName.empty())
             collectionName = "fs";
         collectionName += ".chunks";
-        return NamespaceStringUtil::parseNamespaceFromRequest(dbName, collectionName);
+        return NamespaceStringUtil::deserialize(dbName, collectionName);
     }
 
     Status checkAuthForOperation(OperationContext* opCtx,
@@ -401,8 +395,11 @@ public:
             LOGV2(20454, "Chunk: {chunk}", "Dumping chunks", "chunk"_attr = c->nextSafe());
         }
     }
+};
 
-} cmdFileMD5;
+MONGO_REGISTER_COMMAND(CmdProfile);
+MONGO_REGISTER_COMMAND(SetProfilingFilterGloballyCmd);
+MONGO_REGISTER_COMMAND(CmdFileMD5);
 
 }  // namespace
 }  // namespace mongo

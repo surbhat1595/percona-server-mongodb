@@ -15,9 +15,6 @@
  * Note: This file should _only_ be included in a test if it has been observed that the test fails
  * due to differences in error codes when SBE mode is enabled.
  */
-(function() {
-"use strict";
-
 // Below is the list of known equivalent error code groups. As new groups of equivalent error codes
 // are discovered, they should be added to this list.
 const equivalentErrorCodesList = [
@@ -169,6 +166,11 @@ const equivalentErrorCodesList = [
     [50698, 5156305],
     [5155800, 34473],
     [5155801, 34470],
+    [5429513, 7956500],
+    [5624900, 7821005],
+    [5624901, 7821006],
+    [5423901, 7821110],
+    [5423902, 7821111],
 ];
 
 // This map is generated based on the contents of 'equivalentErrorCodesList'. This map should _not_
@@ -256,4 +258,3 @@ assert.errorCodeEq = function(actualErrorCode, expectedErrorCodes, msg) {
            actualErrorCode + " not found in the list of expected error codes: " +
                tojson(equivalentErrorCodes) + ": " + msg);
 };
-}());

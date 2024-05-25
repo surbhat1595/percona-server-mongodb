@@ -7,13 +7,9 @@
  *   uses_atclustertime,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/discover_topology.js");
-load("jstests/sharding/libs/resharding_test_fixture.js");
-load("jstests/libs/fail_point_util.js");
-load('jstests/libs/parallel_shell_helpers.js');
+import {DiscoverTopology} from "jstests/libs/discover_topology.js";
+import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
+import {ReshardingTest} from "jstests/sharding/libs/resharding_test_fixture.js";
 
 const databaseName = "reshardingDb";
 const collectionName = "coll";
@@ -171,11 +167,7 @@ withReshardingInBackground(() => {
     assert.commandFailedWithCode(
         mongos.adminCommand(
             {moveChunk: sourceNamespace, find: {oldKey: -10}, to: donorShardNames[1]}),
-
-        [
-            ErrorCodes.LockBusy,  // TODO SERVER-68551: remove LockBusy from expected error set
-            ErrorCodes.ConflictingOperationInProgress
-        ]);
+        [ErrorCodes.ConflictingOperationInProgress]);
     assert.commandFailedWithCode(
         mongos.adminCommand({reshardCollection: otherNamespace, key: {newKey: 1}}),
         ErrorCodes.ReshardCollectionInProgress);
@@ -194,4 +186,3 @@ withReshardingInBackground(() => {
 });
 
 reshardingTest.teardown();
-})();

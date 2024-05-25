@@ -155,7 +155,7 @@ public:
     }
 };
 
-MONGO_REGISTER_TEST_COMMAND(GodInsert);
+MONGO_REGISTER_COMMAND(GodInsert).testOnly();
 
 // Testing only, enabled via command-line.
 class CapTrunc : public BasicCommand {
@@ -235,7 +235,7 @@ public:
     }
 };
 
-MONGO_REGISTER_TEST_COMMAND(CapTrunc);
+MONGO_REGISTER_COMMAND(CapTrunc).testOnly();
 
 // Testing-only, enabled via command line.
 class EmptyCapped : public BasicCommand {
@@ -267,7 +267,7 @@ public:
     }
 };
 
-MONGO_REGISTER_TEST_COMMAND(EmptyCapped);
+MONGO_REGISTER_COMMAND(EmptyCapped).testOnly();
 
 class DurableHistoryReplicatedTestCmd : public BasicCommand {
 public:
@@ -351,7 +351,57 @@ public:
     }
 };
 
-MONGO_REGISTER_TEST_COMMAND(DurableHistoryReplicatedTestCmd);
+MONGO_REGISTER_COMMAND(DurableHistoryReplicatedTestCmd).testOnly();
+
+// TODO SERVER-80003 remove this test command when 8.0 branches off.
+class TimeseriesCatalogBucketParamsChangedTestCmd : public BasicCommand {
+public:
+    TimeseriesCatalogBucketParamsChangedTestCmd()
+        : BasicCommand("timeseriesCatalogBucketParamsChanged") {}
+
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
+    }
+
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
+        return false;
+    }
+
+    bool adminOnly() const override {
+        return false;
+    }
+
+    bool requiresAuth() const override {
+        return false;
+    }
+
+    // No auth needed because it only works when enabled via command line.
+    Status checkAuthForOperation(OperationContext*,
+                                 const DatabaseName&,
+                                 const BSONObj&) const override {
+        return Status::OK();
+    }
+
+    std::string help() const override {
+        return "return the value of timeseriesCatalogBucketParamsChanged";
+    }
+
+    bool run(OperationContext* opCtx,
+             const DatabaseName& dbName,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
+        const NamespaceString fullNs = CommandHelpers::parseNsCollectionRequired(dbName, cmdObj);
+        AutoGetCollection autoColl(opCtx, fullNs, MODE_IS);
+        uassert(7927100, "Could not find a collection with the requested namespace", autoColl);
+        auto output = autoColl->timeseriesBucketingParametersHaveChanged();
+        if (output) {
+            result.append("changed", *output);
+        }
+        return true;
+    }
+};
+
+MONGO_REGISTER_COMMAND(TimeseriesCatalogBucketParamsChangedTestCmd).testOnly();
 
 }  // namespace
 

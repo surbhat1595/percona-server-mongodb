@@ -3,18 +3,7 @@
 // while a tailable awaitData query is running. See SERVER-35239. This also tests that when the
 // client's lastKnownCommittedOpTime is behind the node's lastCommittedOpTime, getMore returns early
 // with an empty batch.
-//
-// The test runs a secondary read (getMore) that is blocked on a failpoint while waiting for
-// replication. If the storage engine supports snapshot reads, secondary reads do not acquire PBWM
-// locks. So in order to not block secondary oplog application while the secondary read is blocked
-// on a failpoint, we only run this test with storage engine that supports snapshot read.
-// @tags: [
-//   requires_snapshot_read,
-// ]
-
-(function() {
-'use strict';
-load('jstests/replsets/rslib.js');
+import {restartServerReplication, stopServerReplication} from "jstests/libs/write_concern_util.js";
 
 const name = 'awaitdata_getmore_new_last_committed_optime';
 const replSet = new ReplSetTest({name: name, nodes: 5, settings: {chainingAllowed: false}});
@@ -55,8 +44,8 @@ jsTestLog('Secondary has replicated data');
 
 jsTestLog('Starting parallel shell');
 // Start a parallel shell because we'll be enabling a failpoint that will make the thread hang.
-let waitForGetMoreToFinish = startParallelShell(() => {
-    load('jstests/replsets/rslib.js');
+let waitForGetMoreToFinish = startParallelShell(async () => {
+    const {getLastOpTime} = await import("jstests/replsets/rslib.js");
 
     const secondary = db.getMongo();
     secondary.setSecondaryOk();
@@ -131,4 +120,3 @@ waitForGetMoreToFinish();
 jsTestLog('Parallel shell successfully exited');
 
 replSet.stopSet();
-})();

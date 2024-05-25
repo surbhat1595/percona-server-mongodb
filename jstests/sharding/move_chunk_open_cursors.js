@@ -1,11 +1,7 @@
 /**
  * Tests that cursors opened before a chunk is moved will not see the effects of the chunk
  * migration.
- * TODO SERVER-71169: Re-enable this test once shard filtering is implemented for CQF.
- * @tags: [cqf_incompatible]
  */
-(function() {
-"use strict";
 const dbName = "test";
 const collName = jsTest.name();
 const testNs = dbName + "." + collName;
@@ -51,4 +47,3 @@ assert.eq(findCursor.itcount(),
           nDocs,
           "expected find cursor to return all matching documents, even though some have migrated");
 st.stop();
-}());

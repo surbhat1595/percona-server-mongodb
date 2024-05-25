@@ -249,12 +249,11 @@ void validateMaxTimeMS(const boost::optional<std::int64_t>& commandMaxTimeMS,
  * Apply the read concern from the cursor to this operation.
  */
 void applyCursorReadConcern(OperationContext* opCtx, repl::ReadConcernArgs rcArgs) {
-    const auto replicationMode = repl::ReplicationCoordinator::get(opCtx)->getReplicationMode();
+    const auto isReplSet = repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet();
 
     // Select the appropriate read source. If we are in a transaction with read concern majority,
     // this will already be set to kNoTimestamp, so don't set it again.
-    if (replicationMode == repl::ReplicationCoordinator::modeReplSet &&
-        rcArgs.getLevel() == repl::ReadConcernLevel::kMajorityReadConcern &&
+    if (isReplSet && rcArgs.getLevel() == repl::ReadConcernLevel::kMajorityReadConcern &&
         !opCtx->inMultiDocumentTransaction()) {
         switch (rcArgs.getMajorityReadMechanism()) {
             case repl::ReadConcernArgs::MajorityReadMechanism::kMajoritySnapshot: {
@@ -273,8 +272,7 @@ void applyCursorReadConcern(OperationContext* opCtx, repl::ReadConcernArgs rcArg
         }
     }
 
-    if (replicationMode == repl::ReplicationCoordinator::modeReplSet &&
-        rcArgs.getLevel() == repl::ReadConcernLevel::kSnapshotReadConcern &&
+    if (isReplSet && rcArgs.getLevel() == repl::ReadConcernLevel::kSnapshotReadConcern &&
         !opCtx->inMultiDocumentTransaction()) {
         auto atClusterTime = rcArgs.getArgsAtClusterTime();
         invariant(atClusterTime && *atClusterTime != LogicalTime::kUninitialized);
@@ -380,8 +378,8 @@ public:
         Invocation(Command* cmd, const OpMsgRequest& request)
             : CommandInvocation(cmd),
               _cmd(GetMoreCommandRequest::parse(IDLParserContext{"getMore"}, request)) {
-            NamespaceString nss(NamespaceStringUtil::parseNamespaceFromRequest(
-                _cmd.getDbName(), _cmd.getCollection()));
+            NamespaceString nss(
+                NamespaceStringUtil::deserialize(_cmd.getDbName(), _cmd.getCollection()));
             uassert(ErrorCodes::InvalidNamespace,
                     str::stream() << "Invalid namespace for getMore: " << nss.toStringForErrorMsg(),
                     nss.isValid());
@@ -406,8 +404,7 @@ public:
         }
 
         NamespaceString ns() const override {
-            return NamespaceStringUtil::parseNamespaceFromRequest(_cmd.getDbName(),
-                                                                  _cmd.getCollection());
+            return NamespaceStringUtil::deserialize(_cmd.getDbName(), _cmd.getCollection());
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
@@ -540,8 +537,8 @@ public:
             // the stats twice.
             boost::optional<AutoGetCollectionForReadMaybeLockFree> readLock;
             boost::optional<AutoStatsTracker> statsTracker;
-            NamespaceString nss(NamespaceStringUtil::parseNamespaceFromRequest(
-                _cmd.getDbName(), _cmd.getCollection()));
+            NamespaceString nss(
+                NamespaceStringUtil::deserialize(_cmd.getDbName(), _cmd.getCollection()));
 
             const bool disableAwaitDataFailpointActive =
                 MONGO_unlikely(disableAwaitDataForGetMoreCmd.shouldFail());
@@ -554,11 +551,22 @@ public:
             // virtual collections in the new 'opCtx'.
             ExternalDataSourceScopeGuard::updateOperationContext(cursorPin.getCursor(), opCtx);
 
+            boost::optional<HandleTransactionResourcesFromStasher> txnResourcesHandler;
+
             // On early return, typically due to a failed assertion, delete the cursor.
-            ScopeGuard cursorDeleter([&] { cursorPin.deleteUnderlying(); });
+            ScopeGuard cursorDeleter([&] {
+                if (txnResourcesHandler) {
+                    txnResourcesHandler->dismissRestoredResources();
+                }
+                cursorPin.deleteUnderlying();
+            });
 
             if (cursorPin->getExecutor()->lockPolicy() ==
                 PlanExecutor::LockPolicy::kLocksInternally) {
+                // TODO SERVER-78724: This invariant can be safely removed once aggregations uses
+                // collection acquisitions.
+                invariant(!cursorPin->getExecutor()->usesCollectionAcquisitions());
+
                 if (!nss.isCollectionlessCursorNamespace()) {
                     statsTracker.emplace(
                         opCtx,
@@ -571,25 +579,35 @@ public:
                 invariant(cursorPin->getExecutor()->lockPolicy() ==
                           PlanExecutor::LockPolicy::kLockExternally);
 
-                // Lock the backing collection by using the executor's namespace. Note that it may
-                // be different from the cursor's namespace. One such possible scenario is when
-                // getMore() is executed against a view. Technically, views are pipelines and under
-                // normal circumstances use 'kLocksInternally' policy, so we shouldn't be getting
-                // into here in the first place. However, if the pipeline was optimized away and
-                // replaced with a query plan, its lock policy would have also been changed to
-                // 'kLockExternally'. So, we'll use the executor's namespace to take the lock (which
-                // is always the backing collection namespace), but will use the namespace provided
-                // in the user request for profiling.
-                // Otherwise, these two namespaces will match.
-                // Note that some pipelines which were optimized away may require locking multiple
-                // namespaces. As such, we pass any secondary namespaces required by the pinned
-                // cursor's executor when constructing 'readLock'.
-                const auto& secondaryNamespaces =
-                    cursorPin->getExecutor()->getSecondaryNamespaces();
-                readLock.emplace(opCtx,
-                                 cursorPin->getExecutor()->nss(),
-                                 AutoGetCollection::Options{}.secondaryNssOrUUIDs(
-                                     secondaryNamespaces.cbegin(), secondaryNamespaces.cend()));
+                if (cursorPin->getExecutor()->usesCollectionAcquisitions()) {
+                    // Restore the acquisitions used in the original call. This takes care of
+                    // checking that the preconditions for the original acquisition still hold and
+                    // restores any locks necessary.
+                    txnResourcesHandler.emplace(opCtx, cursorPin.getCursor());
+                } else {
+                    // Lock the backing collection by using the executor's namespace. Note that it
+                    // may be different from the cursor's namespace. One such possible scenario is
+                    // when getMore() is executed against a view. Technically, views are pipelines
+                    // and under normal circumstances use 'kLocksInternally' policy, so we shouldn't
+                    // be getting into here in the first place. However, if the pipeline was
+                    // optimized away and replaced with a query plan, its lock policy would have
+                    // also been changed to 'kLockExternally'. So, we'll use the executor's
+                    // namespace to take the lock (which is always the backing collection
+                    // namespace), but will use the namespace provided in the user request for
+                    // profiling.
+                    //
+                    // Otherwise, these two namespaces will match.
+                    //
+                    // Note that some pipelines which were optimized away may require locking
+                    // multiple namespaces. As such, we pass any secondary namespaces required by
+                    // the pinned cursor's executor when constructing 'readLock'.
+                    const auto& secondaryNamespaces =
+                        cursorPin->getExecutor()->getSecondaryNamespaces();
+                    readLock.emplace(opCtx,
+                                     cursorPin->getExecutor()->nss(),
+                                     AutoGetCollection::Options{}.secondaryNssOrUUIDs(
+                                         secondaryNamespaces.cbegin(), secondaryNamespaces.cend()));
+                }
 
                 statsTracker.emplace(
                     opCtx,
@@ -664,7 +682,7 @@ public:
                 [&opCtx, &cursorPin](const BSONObj& data) {
                     auto dataForFailCommand =
                         data.addField(BSON("failCommands" << BSON_ARRAY("getMore")).firstElement());
-                    auto* getMoreCommand = CommandHelpers::findCommand("getMore");
+                    auto* getMoreCommand = CommandHelpers::findCommand(opCtx, "getMore");
                     return CommandHelpers::shouldActivateFailCommandFailPoint(
                         dataForFailCommand, cursorPin->nss(), getMoreCommand, opCtx->getClient());
                 });
@@ -691,9 +709,7 @@ public:
                     // Use the commit point of the last batch for exhaust cursors.
                     lastKnownCommittedOpTime = cursorPin->getLastKnownCommittedOpTime();
                 }
-                if (lastKnownCommittedOpTime) {
-                    clientsLastKnownCommittedOpTime(opCtx) = lastKnownCommittedOpTime.value();
-                }
+                clientsLastKnownCommittedOpTime(opCtx) = lastKnownCommittedOpTime;
 
                 awaitDataState(opCtx).shouldWaitForInserts = true;
             }
@@ -743,10 +759,19 @@ public:
 
                 cursorPin->setLeftoverMaxTimeMicros(opCtx->getRemainingMaxTimeMicros());
 
-                if (opCtx->isExhaust() && !clientsLastKnownCommittedOpTime(opCtx).isNull()) {
-                    // Set the commit point of the latest batch.
+                if (opCtx->isExhaust() && clientsLastKnownCommittedOpTime(opCtx)) {
+                    // Update the cursor's lastKnownCommittedOpTime to the current
+                    // lastCommittedOpTime. The lastCommittedOpTime now may be staler than the
+                    // actual lastCommittedOpTime returned in the metadata of this latest batch (see
+                    // appendReplyMetadata).  As a result, we may sometimes return more empty
+                    // batches than we need to. But it is fine to be conservative in this.
                     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-                    cursorPin->setLastKnownCommittedOpTime(replCoord->getLastCommittedOpTime());
+                    auto myLastCommittedOpTime = replCoord->getLastCommittedOpTime();
+                    auto clientsLastKnownCommittedOpTime = cursorPin->getLastKnownCommittedOpTime();
+                    if (!clientsLastKnownCommittedOpTime.has_value() ||
+                        clientsLastKnownCommittedOpTime.value() < myLastCommittedOpTime) {
+                        cursorPin->setLastKnownCommittedOpTime(myLastCommittedOpTime);
+                    }
                 }
             } else {
                 curOp->debug().cursorExhausted = true;
@@ -903,7 +928,8 @@ public:
     bool adminOnly() const override {
         return false;
     }
-} getMoreCmd;
+};
+MONGO_REGISTER_COMMAND(GetMoreCmd);
 
 }  // namespace
 }  // namespace mongo

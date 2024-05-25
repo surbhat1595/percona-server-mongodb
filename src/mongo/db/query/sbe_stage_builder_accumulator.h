@@ -50,6 +50,12 @@ namespace AccArgs {
 const StringData kTopBottomNSortSpec = "sortSpec"_sd;
 const StringData kTopBottomNKey = "key"_sd;
 const StringData kTopBottomNValue = "value"_sd;
+
+const StringData kCovarianceX = "x"_sd;
+const StringData kCovarianceY = "y"_sd;
+
+const StringData kInput = "input"_sd;
+const StringData kSortBy = "sortBy"_sd;
 }  // namespace AccArgs
 
 /**

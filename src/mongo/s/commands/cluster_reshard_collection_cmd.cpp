@@ -116,12 +116,11 @@ public:
                 std::move(reshardCollectionRequest));
 
             auto catalogCache = Grid::get(opCtx)->catalogCache();
-            const auto dbInfo =
-                uassertStatusOK(catalogCache->getDatabase(opCtx, nss.db_forSharding()));
+            const auto dbInfo = uassertStatusOK(catalogCache->getDatabase(opCtx, nss.dbName()));
 
             auto cmdResponse = executeCommandAgainstDatabasePrimary(
                 opCtx,
-                "admin",
+                DatabaseName::kAdmin,
                 dbInfo,
                 CommandHelpers::appendMajorityWriteConcern(shardsvrReshardCollection.toBSON({}),
                                                            opCtx->getWriteConcern()),
@@ -161,7 +160,8 @@ public:
     std::string help() const override {
         return "Reshard an already sharded collection on a new shard key.";
     }
-} reshardCollectionCmd;
+};
+MONGO_REGISTER_COMMAND(ReshardCollectionCmd);
 
 }  // namespace
 }  // namespace mongo

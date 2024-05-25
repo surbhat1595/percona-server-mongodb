@@ -1,9 +1,9 @@
 /**
  * A speculative snapshot must not include any writes ordered after any uncommitted writes.
  *
- * The test runs commands that are not allowed with security token: endSession.
  * @tags: [
- *   not_allowed_with_security_token,
+ *  # The test runs commands that are not allowed with security token: endSession.
+ *  not_allowed_with_security_token,
  *  uses_transactions,
  *  requires_majority_read_concern,
  *  uses_parallel_shell,
@@ -11,10 +11,8 @@
  *  command_not_supported_in_serverless,
  * ]
  */
-(function() {
-"use strict";
 
-load("jstests/libs/fail_point_util.js");
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 
 const dbName = "test";
 const collName = "speculative_snapshot_includes_all_writes_1";
@@ -121,4 +119,3 @@ try {
         writeConcern: {w: "majority"}
     }));
 }
-}());

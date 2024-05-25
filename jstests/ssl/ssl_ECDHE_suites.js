@@ -1,13 +1,11 @@
 // Test that the server supports ECDHE and DHE tls cipher suites.
 
-load('jstests/ssl/libs/ssl_helpers.js');
-
-(function() {
-"use strict";
+import {getPython3Binary} from "jstests/libs/python.js";
+import {CA_CERT, CLIENT_CERT, determineSSLProvider} from "jstests/ssl/libs/ssl_helpers.js";
 
 // Need to use toolchain python, which is unsupported on Windows
 if (_isWindows()) {
-    return;
+    quit();
 }
 
 // Amazon linux does not currently support ECDHE
@@ -35,10 +33,7 @@ const x509_options = {
 const mongod = MongoRunner.runMongod(x509_options);
 
 // Use new toolchain python, if it exists
-let python_binary = '/opt/mongodbtoolchain/v4/bin/python3';
-if (runProgram('/bin/sh', '-c', 'ls ' + python_binary) !== 0) {
-    python_binary = '/usr/bin/python3';
-}
+let python_binary = getPython3Binary();
 
 // Run the tls cipher suite enumerator
 const python = '/usr/bin/env ' + python_binary;
@@ -97,4 +92,3 @@ if (determineSSLProvider() !== 'apple') {
 }
 
 MongoRunner.stopMongod(mongod);
-}());

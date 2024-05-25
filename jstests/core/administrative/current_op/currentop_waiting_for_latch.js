@@ -2,8 +2,8 @@
  * Tests that a backtrace will appear in the $currentOp output if the backtrace option is
  * set to true and there is a latch timeout.
  *
- * The test runs commands that are not allowed with security token: whatsmyuri.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: whatsmyuri.
  *   not_allowed_with_security_token,
  *   assumes_read_concern_unchanged,
  *   assumes_read_preference_unchanged,
@@ -12,9 +12,6 @@
  *   requires_latch_analyzer
  * ]
  */
-(function() {
-"use strict";
-
 const adminDB = db.getSiblingDB("admin");
 
 // This test causes an extra thread with a self-contended lock to be created so that currentOp can
@@ -106,4 +103,3 @@ try {
         }
     });
 }
-})();

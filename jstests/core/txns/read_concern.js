@@ -1,11 +1,13 @@
 // Test that no matter the readConcern specified on a multi-statement transaction, it has snapshot
 // isolation. Also test that readConcern linearizable and available are not allowed with a
 // transaction.
-// The test runs commands that are not allowed with security token: endSession.
+//
 // @tags: [
-//   not_allowed_with_security_token,uses_transactions, requires_majority_read_concern]
-(function() {
-"use strict";
+//   # The test runs commands that are not allowed with security token: endSession.
+//   not_allowed_with_security_token,
+//   uses_transactions,
+//   requires_majority_read_concern
+// ]
 
 const dbName = "test";
 const collName = "read_concern";
@@ -113,4 +115,3 @@ assert.commandFailedWithCode(
 assert.commandWorked(session.commitTransaction_forTesting());
 
 session.endSession();
-}());

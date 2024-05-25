@@ -88,8 +88,8 @@ using std::string;
 using std::unique_ptr;
 using std::vector;
 
-const OperationContext::Decoration<repl::OpTime> clientsLastKnownCommittedOpTime =
-    OperationContext::declareDecoration<repl::OpTime>();
+const OperationContext::Decoration<boost::optional<repl::OpTime>> clientsLastKnownCommittedOpTime =
+    OperationContext::declareDecoration<boost::optional<repl::OpTime>>();
 
 // This failpoint is also accessed by the SBE executor so we define it outside of an anonymous
 // namespace.
@@ -755,5 +755,9 @@ MultiPlanStage* PlanExecutorImpl::getMultiPlanStage() const {
     PlanStage* ps = getStageByType(_root.get(), StageType::STAGE_MULTI_PLAN);
     invariant(ps == nullptr || ps->stageType() == StageType::STAGE_MULTI_PLAN);
     return static_cast<MultiPlanStage*>(ps);
+}
+
+bool PlanExecutorImpl::usesCollectionAcquisitions() const {
+    return _yieldPolicy->usesCollectionAcquisitions();
 }
 }  // namespace mongo

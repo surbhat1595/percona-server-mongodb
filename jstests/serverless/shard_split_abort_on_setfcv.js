@@ -5,9 +5,8 @@
  * @tags: [requires_fcv_63, serverless]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ShardSplitTest} from "jstests/serverless/libs/shard_split_test.js";
-
-load("jstests/libs/fail_point_util.js");
 
 // Skip db hash check because secondary is left with a different config.
 TestData.skipCheckDBHashes = true;
@@ -23,7 +22,7 @@ const split = test.createSplitOperation(tenantIds);
 const commitThread = split.commitAsync();
 pauseAfterBlockingFp.wait();
 assert.commandWorked(
-    donorPrimary.adminCommand({setFeatureCompatibilityVersion: lastContinuousFCV}));
+    donorPrimary.adminCommand({setFeatureCompatibilityVersion: lastContinuousFCV, confirm: true}));
 pauseAfterBlockingFp.off();
 assert.commandFailedWithCode(commitThread.returnData(), ErrorCodes.TenantMigrationAborted);
 
@@ -42,7 +41,8 @@ if (lastContinuousFCV == "6.2") {
     const secondSplit = test.createSplitOperation(tenantIds);
     const commitThread = secondSplit.commitAsync();
     pauseAfterBlockingFp.wait();
-    assert.commandWorked(donorPrimary.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        donorPrimary.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
     pauseAfterBlockingFp.off();
     assert.commandFailedWithCode(commitThread.returnData(), ErrorCodes.TenantMigrationAborted);
     secondSplit.forget();

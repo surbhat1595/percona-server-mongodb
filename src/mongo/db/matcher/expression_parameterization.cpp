@@ -122,16 +122,16 @@ void MatchExpressionParameterizationVisitor::visitComparisonMatchExpression(
         case BSONType::NumberInt:
         case BSONType::bsonTimestamp:
         case BSONType::NumberLong:
-            expr->setInputParamId(_context->nextInputParamId(expr));
+            expr->setInputParamId(_context->nextReusableInputParamId(expr));
             break;
         case BSONType::NumberDouble:
             if (!std::isnan(expr->getData().numberDouble())) {
-                expr->setInputParamId(_context->nextInputParamId(expr));
+                expr->setInputParamId(_context->nextReusableInputParamId(expr));
             }
             break;
         case BSONType::NumberDecimal:
             if (!expr->getData().numberDecimal().isNaN()) {
-                expr->setInputParamId(_context->nextInputParamId(expr));
+                expr->setInputParamId(_context->nextReusableInputParamId(expr));
             }
             break;
     }
@@ -143,22 +143,12 @@ void MatchExpressionParameterizationVisitor::visit(InMatchExpression* expr) {
         return;
     }
 
-    for (auto&& equality : expr->getEqualities()) {
-        switch (equality.type()) {
-            case BSONType::jstNULL:
-            case BSONType::Array:
-            case BSONType::Object:
-                // We don't set inputParamId if a InMatchExpression contains one of the values
-                // above.
-                return;
-            case BSONType::Undefined:
-                tasserted(6142000, "Unexpected type in $in expression");
-            default:
-                break;
-        };
+    if (expr->hasNull() || expr->hasArray() || expr->hasObject()) {
+        // We don't set inputParamId if an InMatchExpression contains null, arrays, or objects.
+        return;
     }
 
-    expr->setInputParamId(_context->nextInputParamId(expr));
+    expr->setInputParamId(_context->nextReusableInputParamId(expr));
 }
 
 void MatchExpressionParameterizationVisitor::visit(TypeMatchExpression* expr) {

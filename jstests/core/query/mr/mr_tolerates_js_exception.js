@@ -2,8 +2,8 @@
  * Test that the mapReduce command fails gracefully when user-provided JavaScript code throws and
  * that the user gets back a JavaScript stacktrace.
  *
- * The test runs commands that are not allowed with security token: mapReduce.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: mapReduce.
  *   not_allowed_with_security_token,
  *   # mapReduce does not support afterClusterTime.
  *   does_not_support_causal_consistency,
@@ -11,9 +11,6 @@
  *   requires_scripting,
  * ]
  */
-(function() {
-"use strict";
-
 let coll = db.mr_tolerates_js_exception;
 coll.drop();
 for (let i = 0; i < 100; i++) {
@@ -69,4 +66,3 @@ assert(!cmdOutput.hasOwnProperty("stack"),
        () => "mapReduce shouldn't return JavaScript stacktrace separately: " + tojson(cmdOutput));
 assert(!cmdOutput.hasOwnProperty("originalError"),
        () => "mapReduce shouldn't return wrapped version of the error: " + tojson(cmdOutput));
-}());

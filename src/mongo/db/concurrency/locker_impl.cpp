@@ -387,7 +387,10 @@ void LockerImpl::reacquireTicket(OperationContext* opCtx) {
     do {
         for (auto it = _requests.begin(); it; it.next()) {
             invariant(it->mode == LockMode::MODE_IS || it->mode == LockMode::MODE_IX);
-            opCtx->checkForInterrupt();
+            // TODO SERVER-80206: Remove opCtx->checkForInterrupt().
+            if (!_uninterruptibleLocksRequested) {
+                opCtx->checkForInterrupt();
+            }
 
             // If we've reached this point then that means we tried to acquire a ticket but were
             // unsuccessful, implying that tickets are currently exhausted. Additionally, since
@@ -715,9 +718,6 @@ bool LockerImpl::isDbLockedForMode(const DatabaseName& dbName, LockMode mode) co
 bool LockerImpl::isCollectionLockedForMode(const NamespaceString& nss, LockMode mode) const {
     invariant(nss.coll().size());
 
-    if (!shouldConflictWithSecondaryBatchApplication())
-        return true;
-
     if (auto lockedForMode =
             _globalAndTenantLocksImplyDBOrCollectionLockedForMode(nss.tenantId(), mode);
         lockedForMode) {
@@ -849,8 +849,7 @@ void LockerImpl::saveLockStateAndUnlock(Locker::LockSnapshot* stateOut) {
 
         // We should never have to save and restore metadata locks.
         invariant(RESOURCE_DATABASE == resType || RESOURCE_COLLECTION == resType ||
-                  resId == resourceIdParallelBatchWriterMode || RESOURCE_TENANT == resType ||
-                  resId == resourceIdFeatureCompatibilityVersion ||
+                  RESOURCE_TENANT == resType || resId == resourceIdFeatureCompatibilityVersion ||
                   resId == resourceIdReplicationStateTransitionLock);
 
         // And, stuff the info into the out parameter.
@@ -875,13 +874,6 @@ void LockerImpl::restoreLockState(OperationContext* opCtx, const Locker::LockSna
     getFlowControlTicket(opCtx, state.globalMode);
 
     std::vector<OneLock>::const_iterator it = state.locks.begin();
-    // If we locked the PBWM, it must be locked before the
-    // resourceIdFeatureCompatibilityVersion, resourceIdReplicationStateTransitionLock, and
-    // resourceIdGlobal resources.
-    if (it != state.locks.end() && it->resourceId == resourceIdParallelBatchWriterMode) {
-        lock(opCtx, it->resourceId, it->mode);
-        it++;
-    }
 
     // If we locked the FCV lock, it must be locked before the
     // resourceIdReplicationStateTransitionLock and resourceIdGlobal resources.
@@ -955,7 +947,7 @@ LockResult LockerImpl::_lockBegin(OperationContext* opCtx, ResourceId resId, Loc
     globalStats.recordAcquisition(_id, resId, mode);
     _stats.recordAcquisition(resId, mode);
 
-    // Give priority to the full modes for Global, PBWM, and RSTL resources so we don't stall global
+    // Give priority to the full modes for Global and RSTL resources so we don't stall global
     // operations such as shutdown or stepdown.
     if (resType == RESOURCE_GLOBAL) {
         if (mode == MODE_S || mode == MODE_X) {

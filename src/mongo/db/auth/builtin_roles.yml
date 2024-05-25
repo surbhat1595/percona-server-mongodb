@@ -94,7 +94,6 @@ roles:
                 - collMod
                 - collStats # clusterMonitor gets this also
                 - compact
-                - configureQueryAnalyzer # clusterManager gets this also
                 - convertToCapped # readWrite gets this also
                 - createCollection # readWrite gets this also
                 - dbStats # clusterMonitor gets this also
@@ -118,6 +117,11 @@ roles:
                 - storageDetails
                 - validate
 
+            - matchType: database
+              tenancy: single # Not granted in multitenancy mode
+              actions: &dbAdminRoleSingleTenantActions
+                - configureQueryAnalyzer # clusterManager gets this also
+
             - matchType: exact_namespace
               collection: 'system.profile'
               actions:
@@ -135,8 +139,10 @@ roles:
               actions:
                 - analyzeShardKey
                 - enableSharding
+                - moveCollection
                 - refineCollectionShardKey
                 - reshardCollection
+                - unshardCollection
 
     readAnyDatabase:
         adminOnly: true
@@ -218,6 +224,9 @@ roles:
                   - applyOps
             - matchType: any_normal
               actions: *dbAdminRoleActions
+            - matchType: any_normal
+              tenancy: single
+              actions: *dbAdminRoleSingleTenantActions
             - matchType: collection
               collection: 'system.profile'
               actions:
@@ -238,7 +247,6 @@ roles:
         privileges:
             - matchType: cluster
               actions: &clusterMonitorRoleClusterActions
-                  - checkFreeMonitoringStatus
                   - connPoolStats
                   - getCmdLineOpts
                   - getDefaultRWConcern # clusterManager gets this also
@@ -350,12 +358,13 @@ roles:
                   - runTenantMigration
                   - setDefaultRWConcern
                   - setFeatureCompatibilityVersion
-                  - setFreeMonitoring
                   - setClusterParameter
                   - getClusterParameter
                   - setChangeStreamState
                   - getChangeStreamState
+                  - querySettings
                   - queryStatsRead
+                  - queryStatsReadTransformed
                   - checkMetadataConsistency
                   - transitionFromDedicatedConfigServer
                   - transitionToDedicatedConfigServer
@@ -367,10 +376,12 @@ roles:
                   - clearJumboFlag
                   - splitChunk
                   - moveChunk
+                  - moveCollection
                   - enableSharding
                   - splitVector
                   - refineCollectionShardKey
                   - reshardCollection
+                  - unshardCollection
 
             - matchType: any_system_buckets
               actions: *clusterManagerRoleDatabaseActions

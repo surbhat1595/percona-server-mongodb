@@ -1,6 +1,7 @@
 // Confirms that the mapReduce reduce function will process data sets larger than 16MB.
-// The test runs commands that are not allowed with security token: mapReduce.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapReduce.
 //   not_allowed_with_security_token,
 //   # mapReduce does not support afterClusterTime.
 //   does_not_support_causal_consistency,
@@ -9,8 +10,6 @@
 //   uses_map_reduce_with_temp_collections,
 //   requires_scripting,
 // ]
-(function() {
-"use strict";
 const coll = db.mr_bigobject;
 coll.drop();
 const outputColl = db.mr_bigobject_out;
@@ -50,4 +49,3 @@ reduceFn = function(k, v) {
 
 assert.commandWorked(coll.mapReduce(mapFn, reduceFn, {out: {"merge": outputColl.getName()}}));
 assert.eq([{_id: 1, value: coll.count() * largeString.length}], outputColl.find().toArray());
-}());

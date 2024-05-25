@@ -1,9 +1,10 @@
 // Tests that cursors created in transactions may be killed outside of the transaction.
-// The test runs commands that are not allowed with security token: endSession, killCursors.
+//
 // @tags: [
-//   not_allowed_with_security_token,uses_transactions]
-(function() {
-"use strict";
+//   # The test runs commands that are not allowed with security token: endSession, killCursors.
+//   not_allowed_with_security_token,
+//   uses_transactions
+// ]
 
 const dbName = "test";
 const collName = "kill_transaction_cursors";
@@ -34,4 +35,3 @@ assert.commandWorked(session.commitTransaction_forTesting());
 assert.commandWorked(testDB.runCommand({killCursors: collName, cursors: [res.cursor.id]}));
 
 session.endSession();
-}());

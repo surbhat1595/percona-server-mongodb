@@ -2,7 +2,7 @@
 // plan. For instance, there are helpers for checking whether a plan is a collection
 // scan or whether the plan is covered (index only).
 
-load("jstests/libs/fixture_helpers.js");  // For FixtureHelpers.
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 /**
  * Returns a sub-element of the 'queryPlanner' explain output which represents a winning plan.
@@ -13,6 +13,23 @@ export function getWinningPlan(queryPlanner) {
     // field itself.
     return queryPlanner.winningPlan.hasOwnProperty("queryPlan") ? queryPlanner.winningPlan.queryPlan
                                                                 : queryPlanner.winningPlan;
+}
+
+/**
+ * Returns the winning plan from the corresponding sub-node of classic/SBE explain output. Takes
+ * into account that the plan may or may not have agg stages.
+ */
+export function getWinningPlanFromExplain(explain) {
+    if (explain.hasOwnProperty("shards")) {
+        for (const shardName in explain.shards) {
+            getWinningPlan(explain.shards[shardName].stages[0]["$cursor"].queryPlanner);
+        }
+    }
+
+    const queryPlanner = explain.hasOwnProperty("queryPlanner)")
+        ? explain.queryPlanner
+        : explain.stages[0].$cursor.queryPlanner;
+    return getWinningPlan(queryPlanner);
 }
 
 /**
@@ -639,4 +656,13 @@ export function assertFetchFilter({coll, predicate, expectedFilter, nReturned}) 
                   nReturned,
                   "Expected " + nReturned + " documents, got " + exp.executionStats.nReturned);
     }
+}
+
+/**
+ * Assert that a pipeline runs with the engine that is passed in as a parameter.
+ */
+export function assertEngine(pipeline, engine, coll) {
+    const explain = coll.explain().aggregate(pipeline);
+    assert(explain.hasOwnProperty("explainVersion"), explain);
+    assert.eq(explain.explainVersion, engine === "sbe" ? "2" : "1", explain);
 }

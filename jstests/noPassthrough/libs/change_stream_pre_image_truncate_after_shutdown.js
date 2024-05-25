@@ -1,10 +1,3 @@
-"use strict";
-
-load('jstests/replsets/rslib.js');                 // For getLatestOp, getFirstOplogEntry.
-load("jstests/libs/collection_drop_recreate.js");  // For assertDropAndRecreateCollection.
-load("jstests/libs/change_stream_util.js");        // For kPreImagesCollectionDatabase,
-                                                   // kPreImagesCollectionName, getPreImages.
-
 /**
  * Test fixture which exposes several methods to test different pre-image truncate behaviors after
  * shutdown.
@@ -29,7 +22,17 @@ load("jstests/libs/change_stream_util.js");        // For kPreImagesCollectionDa
  *      ...
  *      truncateAfterShutdownTest.teardown();
  */
-var PreImageTruncateAfterShutdownTest = class {
+
+import {
+    getPreImages,
+    getPreImagesCollection,
+    kPreImagesCollectionDatabase,
+    kPreImagesCollectionName
+} from "jstests/libs/change_stream_util.js";
+import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
+import {getFirstOplogEntry, getLatestOp} from "jstests/replsets/rslib.js";
+
+export class PreImageTruncateAfterShutdownTest {
     constructor(testName) {
         this.testName = testName;
 
@@ -206,7 +209,8 @@ var PreImageTruncateAfterShutdownTest = class {
 
         if (runAsPrimary) {
             // The 'checkPreImageCollection' check relies on there being a writable primary.
-            assert.commandWorked(conn.adminCommand({replSetStepUp: 1}));
+            this._stepUp(conn);
+            assert.soon(() => conn.adminCommand('hello').isWritablePrimary);
         }
 
         this._assertNumPreImagesAfterShutdown({
@@ -217,6 +221,18 @@ var PreImageTruncateAfterShutdownTest = class {
         });
 
         this._rst.checkPreImageCollection(this.testName);
+    }
+
+    /** @private */
+    _stepUp(connection) {
+        assert.soonNoExcept(() => {
+            const res = connection.adminCommand({replSetStepUp: 1});
+            if (!res.ok) {
+                jsTestLog(`Failed to step up with ${res}`);
+            }
+            return res.ok;
+        }, "Failed to step up");
+        jsTestLog(`Forced step up to ${connection}`);
     }
 
     /** @private */
@@ -505,4 +521,4 @@ var PreImageTruncateAfterShutdownTest = class {
             restartFn,
         });
     }
-};
+}

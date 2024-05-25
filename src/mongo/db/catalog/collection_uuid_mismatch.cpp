@@ -78,7 +78,7 @@ void checkCollectionUUIDMismatch(OperationContext* opCtx,
         (CollectionUUIDMismatchInfo{ns.dbName(),
                                     *uuid,
                                     ns.coll().toString(),
-                                    actualNamespace && actualNamespace->db() == ns.db()
+                                    actualNamespace && actualNamespace->isEqualDb(ns)
                                         ? boost::make_optional(actualNamespace->coll().toString())
                                         : boost::none}),
         "Collection UUID does not match that specified",

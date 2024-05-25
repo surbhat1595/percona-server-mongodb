@@ -37,7 +37,6 @@
 
 #include <boost/move/utility_core.hpp>
 
-#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/client.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/feature_flag.h"
@@ -83,6 +82,7 @@ CollectionAndChangedChunks getChangedChunks(OperationContext* opCtx,
     return CollectionAndChangedChunks{coll.getEpoch(),
                                       coll.getTimestamp(),
                                       coll.getUuid(),
+                                      coll.getUnsplittable(),
                                       coll.getKeyPattern().toBSON(),
                                       coll.getDefaultCollation(),
                                       coll.getUnique(),
@@ -137,7 +137,7 @@ void ConfigServerCatalogCacheLoader::waitForCollectionFlush(OperationContext* op
 }
 
 void ConfigServerCatalogCacheLoader::waitForDatabaseFlush(OperationContext* opCtx,
-                                                          StringData dbName) {
+                                                          const DatabaseName& dbName) {
     MONGO_UNREACHABLE;
 }
 

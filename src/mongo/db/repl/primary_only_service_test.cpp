@@ -361,20 +361,13 @@ public:
         _testExecutor = makeTestExecutor();
     }
 
-    void tearDown() override {
-        // Ensure that even on test failures all failpoint state gets reset.
-        globalFailPointRegistry().disableAllFailpoints();
-
-        WaitForMajorityService::get(getServiceContext()).shutDown();
-
+    void shutdownHook() override {
         _testExecutor->shutdown();
         _testExecutor->join();
         _testExecutor.reset();
 
         _registry->onShutdown();
         _service = nullptr;
-
-        ServiceContextMongoDTest::tearDown();
     }
 
     void stepUp() {
@@ -1212,6 +1205,7 @@ TEST_F(PrimaryOnlyServiceTest, StateTransitionFromRebuildingShouldWakeUpConditio
 }
 
 TEST_F(PrimaryOnlyServiceTest, PrimaryOnlyServiceLogSlowServices) {
+    primaryOnlyServiceTestStepUpWaitForRebuildComplete.setMode(FailPoint::alwaysOn);
     // We change slow stepUp threshold to a extremely large value to avoid test failure in some slow
     // test environments.
     const auto oldSlowServiceOnStepUpCompleteThresholdMS =

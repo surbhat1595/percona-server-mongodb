@@ -84,7 +84,8 @@ int64_t setReplyItems(OperationContext* opCtx,
                       bool nameOnly,
                       const std::unique_ptr<MatchExpression>& filter,
                       bool setTenantId,
-                      bool authorizedDatabases) {
+                      bool authorizedDatabases,
+                      const SerializationContext serializationCtxt) {
     auto* as = AuthorizationSession::get(opCtx->getClient());
 
     const bool filterNameOnly = filter &&
@@ -97,9 +98,7 @@ int64_t setReplyItems(OperationContext* opCtx,
             continue;
         }
 
-        // If setTenantId is true, always return the dbName without the tenantId
-        ReplyItemType item(setTenantId ? dbName.db().toString()
-                                       : DatabaseNameUtil::serialize(dbName));
+        ReplyItemType item(DatabaseNameUtil::serialize(dbName, serializationCtxt));
         if (setTenantId) {
             initializeItemWithTenantId(item, dbName);
         }

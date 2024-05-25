@@ -170,8 +170,8 @@ Status refreshDbMetadata(OperationContext* opCtx,
     });
 
     // Force a refresh of the cached database metadata from the config server.
-    const auto swDbMetadata = Grid::get(opCtx)->catalogCache()->getDatabaseWithRefresh(
-        opCtx, DatabaseNameUtil::serialize(dbName));
+    const auto swDbMetadata =
+        Grid::get(opCtx)->catalogCache()->getDatabaseWithRefresh(opCtx, dbName);
 
     // Before setting the database metadata, exit early if the database version received by the
     // config server is not newer than the cached one. This is a best-effort optimization to reduce
@@ -253,15 +253,15 @@ SharedSemiFuture<void> recoverRefreshDbVersion(OperationContext* opCtx,
 }
 
 void onDbVersionMismatch(OperationContext* opCtx,
-                         const StringData dbName,
+                         const DatabaseName& dbName,
                          boost::optional<DatabaseVersion> receivedDbVersion) {
     invariant(!opCtx->lockState()->isLocked());
     invariant(!opCtx->getClient()->isInDirectClient());
     invariant(ShardingState::get(opCtx)->canAcceptShardedCommands());
 
     tassert(ErrorCodes::IllegalOperation,
-            "Can't check version of {} database"_format(dbName),
-            dbName != DatabaseName::kAdmin.db() && dbName != DatabaseName::kConfig.db());
+            "Can't check version of {} database"_format(dbName.toStringForErrorMsg()),
+            !dbName.isAdminDB() && !dbName.isConfigDB());
 
     Timer t{};
     ScopeGuard finishTiming([&] {
@@ -279,12 +279,11 @@ void onDbVersionMismatch(OperationContext* opCtx,
 
         {
             boost::optional<Lock::DBLock> dbLock;
-            dbLock.emplace(opCtx, DatabaseNameUtil::deserialize(boost::none, dbName), MODE_IS);
+            dbLock.emplace(opCtx, dbName, MODE_IS);
 
             if (receivedDbVersion) {
-                auto scopedDss =
-                    boost::make_optional(DatabaseShardingState::assertDbLockedAndAcquireShared(
-                        opCtx, DatabaseNameUtil::deserialize(boost::none, dbName)));
+                auto scopedDss = boost::make_optional(
+                    DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, dbName));
 
                 if (joinDbVersionOperation(opCtx, &dbLock, &scopedDss)) {
                     // Waited for another thread to exit from the critical section or to complete an
@@ -309,9 +308,8 @@ void onDbVersionMismatch(OperationContext* opCtx,
                 return;
             }
 
-            auto scopedDss =
-                boost::make_optional(DatabaseShardingState::assertDbLockedAndAcquireExclusive(
-                    opCtx, DatabaseNameUtil::deserialize(boost::none, dbName)));
+            auto scopedDss = boost::make_optional(
+                DatabaseShardingState::assertDbLockedAndAcquireExclusive(opCtx, dbName));
 
             if (joinDbVersionOperation(opCtx, &dbLock, &scopedDss)) {
                 // Waited for another thread to exit from the critical section or to complete an
@@ -328,9 +326,7 @@ void onDbVersionMismatch(OperationContext* opCtx,
             CancellationToken cancellationToken = cancellationSource.token();
             (*scopedDss)
                 ->setDbMetadataRefreshFuture(
-                    recoverRefreshDbVersion(opCtx,
-                                            DatabaseNameUtil::deserialize(boost::none, dbName),
-                                            cancellationToken),
+                    recoverRefreshDbVersion(opCtx, dbName, cancellationToken),
                     std::move(cancellationSource));
             dbMetadataRefreshFuture = (*scopedDss)->getDbMetadataRefreshFuture();
         }
@@ -429,7 +425,8 @@ SharedSemiFuture<void> recoverRefreshCollectionPlacementVersion(
 
             if (runRecover) {
                 auto* const replCoord = repl::ReplicationCoordinator::get(opCtx);
-                if (!replCoord->isReplEnabled() || replCoord->getMemberState().primary()) {
+                if (!replCoord->getSettings().isReplSet() ||
+                    replCoord->getMemberState().primary()) {
                     migrationutil::recoverMigrationCoordinations(opCtx, nss, cancellationToken);
                 }
             }
@@ -545,7 +542,7 @@ void onCollectionPlacementVersionMismatch(OperationContext* opCtx,
         CurOp::get(opCtx)->debug().placementVersionRefreshMillis += Milliseconds(t.millis());
     });
 
-    if (nss.isNamespaceAlwaysUnsharded()) {
+    if (nss.isNamespaceAlwaysUntracked()) {
         return;
     }
 
@@ -562,9 +559,7 @@ void onCollectionPlacementVersionMismatch(OperationContext* opCtx,
 
         {
             // The refresh threads do not perform any data reads themselves, therefore they don't
-            // need to synchronise with secondary oplog application or go through admission control.
-            ShouldNotConflictWithSecondaryBatchApplicationBlock skipParallelBatchWriterMutex(
-                opCtx->lockState());
+            // need to go through admission control.
             ScopedAdmissionPriorityForLock skipAdmissionControl(
                 opCtx->lockState(), AdmissionContext::Priority::kImmediate);
 
@@ -660,7 +655,7 @@ CollectionMetadata forceGetCurrentMetadata(OperationContext* opCtx, const Namesp
             Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithPlacementRefresh(opCtx,
                                                                                            nss));
 
-        if (!cm.isSharded()) {
+        if (!cm.hasRoutingTable()) {
             return CollectionMetadata();
         }
 
@@ -690,7 +685,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
     const auto [cm, _] = uassertStatusOK(
         Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithPlacementRefresh(opCtx, nss));
 
-    if (!cm.isSharded()) {
+    if (!cm.hasRoutingTable()) {
         // DBLock and CollectionLock are used here to avoid throwing further recursive stale
         // config errors, as well as a possible InvalidViewDefinition error if an invalid view
         // is in the 'system.views' collection.
@@ -715,7 +710,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
             CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss);
         if (auto optMetadata = scopedCsr->getCurrentMetadataIfKnown()) {
             const auto& metadata = *optMetadata;
-            if (metadata.isSharded() &&
+            if (metadata.hasRoutingTable() &&
                 (cm.getVersion().isOlderOrEqualThan(metadata.getCollPlacementVersion()))) {
                 LOGV2_DEBUG(22063,
                             1,
@@ -740,7 +735,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
         CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss);
     if (auto optMetadata = scopedCsr->getCurrentMetadataIfKnown()) {
         const auto& metadata = *optMetadata;
-        if (metadata.isSharded() &&
+        if (metadata.hasRoutingTable() &&
             (cm.getVersion().isOlderOrEqualThan(metadata.getCollPlacementVersion()))) {
             LOGV2_DEBUG(22064,
                         1,
@@ -761,7 +756,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
 }
 
 Status onDbVersionMismatchNoExcept(OperationContext* opCtx,
-                                   const StringData dbName,
+                                   const DatabaseName& dbName,
                                    boost::optional<DatabaseVersion> clientDbVersion) noexcept {
     try {
         onDbVersionMismatch(opCtx, dbName, clientDbVersion);

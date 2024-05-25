@@ -3,15 +3,16 @@
  * be allowed to be called on a prepared transaction. All other cases should fail with
  * PreparedTransactionInProgress.
  *
- * The test runs commands that are not allowed with security token: endSession, killCursors,
- * prepareTransaction.
  * @tags: [
- *   not_allowed_with_security_token,uses_transactions, uses_prepare_transaction]
+ *   # The test runs commands that are not allowed with security token: endSession, killCursors,
+ *   # prepareTransaction.
+ *   not_allowed_with_security_token,
+ *   uses_transactions,
+ *   uses_prepare_transaction
+ * ]
  */
 
-(function() {
-"use strict";
-load("jstests/core/txns/libs/prepare_helpers.js");
+import {PrepareHelpers} from "jstests/core/txns/libs/prepare_helpers.js";
 
 const dbName = "test";
 const collName = "disallow_operations_on_prepared_transaction";
@@ -116,4 +117,3 @@ assert.commandFailedWithCode(
 assert.commandWorked(session.abortTransaction_forTesting());
 
 session.endSession();
-}());

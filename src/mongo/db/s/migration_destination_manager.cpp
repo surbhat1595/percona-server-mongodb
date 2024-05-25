@@ -527,7 +527,6 @@ Status MigrationDestinationManager::start(OperationContext* opCtx,
                                           const NamespaceString& nss,
                                           ScopedReceiveChunk scopedReceiveChunk,
                                           const StartChunkCloneRequest& cloneRequest,
-                                          const OID& epoch,
                                           const WriteConcernOptions& writeConcern) {
     stdx::lock_guard<Latch> lk(_mutex);
     invariant(!_sessionId);
@@ -552,8 +551,6 @@ Status MigrationDestinationManager::start(OperationContext* opCtx,
     _min = cloneRequest.getMinKey();
     _max = cloneRequest.getMaxKey();
     _shardKeyPattern = cloneRequest.getShardKeyPattern();
-
-    _epoch = epoch;
 
     _writeConcern = writeConcern;
 
@@ -887,7 +884,7 @@ MigrationDestinationManager::IndexesAndIdIndex MigrationDestinationManager::getC
     auto indexes = uassertStatusOK(
         fromShard->runExhaustiveCursorCommand(opCtx,
                                               ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                              DatabaseNameUtil::serialize(nssOrUUID.dbName()),
+                                              nssOrUUID.dbName(),
                                               cmd,
                                               Milliseconds(-1)));
     for (auto&& spec : indexes.docs) {
@@ -932,7 +929,7 @@ MigrationDestinationManager::getCollectionOptions(OperationContext* opCtx,
     auto infosRes = uassertStatusOK(
         fromShard->runExhaustiveCursorCommand(opCtx,
                                               ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                              DatabaseNameUtil::serialize(nssOrUUID.dbName()),
+                                              nssOrUUID.dbName(),
                                               cmd,
                                               Milliseconds(-1)));
 
@@ -1269,18 +1266,14 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                        _toShard,
                        _fromShard);
 
-        LOGV2(
-            22000,
-            "Starting receiving end of migration of chunk {chunkMin} -> {chunkMax} for collection "
-            "{namespace} from {fromShard} at epoch {epoch} with session id {sessionId}",
-            "Starting receiving end of chunk migration",
-            "chunkMin"_attr = redact(_min),
-            "chunkMax"_attr = redact(_max),
-            logAttrs(_nss),
-            "fromShard"_attr = _fromShard,
-            "epoch"_attr = _epoch,
-            "sessionId"_attr = *_sessionId,
-            "migrationId"_attr = _migrationId->toBSON());
+        LOGV2(22000,
+              "Starting receiving end of chunk migration",
+              "chunkMin"_attr = redact(_min),
+              "chunkMax"_attr = redact(_max),
+              logAttrs(_nss),
+              "fromShard"_attr = _fromShard,
+              "sessionId"_attr = *_sessionId,
+              "migrationId"_attr = _migrationId->toBSON());
 
         const auto initialState = getState();
 
@@ -1488,7 +1481,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                 auto commandResponse = uassertStatusOKWithContext(
                     fromShard->runCommand(opCtx,
                                           ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                          "admin",
+                                          DatabaseName::kAdmin,
                                           xferModsRequest,
                                           Shard::RetryPolicy::kNoRetry),
                     "_transferMods failed: ");
@@ -1608,7 +1601,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                 auto res = uassertStatusOKWithContext(
                     fromShard->runCommand(opCtx,
                                           ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                          "admin",
+                                          DatabaseName::kAdmin,
                                           xferModsRequest,
                                           Shard::RetryPolicy::kNoRetry),
                     "_transferMods failed in STEADY STATE: ");

@@ -11,13 +11,16 @@
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   serverless,
+ *   # We assume that all nodes in a mixed-mode replica set are using compressed inserts to
+ *   # a time-series collection.
+ *   requires_fcv_71,
  * ]
  */
 
+import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {makeX509OptionsForTest} from "jstests/replsets/libs/tenant_migration_util.js";
-
-load("jstests/libs/uuid_util.js");
 
 function testOplogCloning(ordered) {
     const migrationX509Options = makeX509OptionsForTest();
@@ -81,7 +84,16 @@ function testOplogCloning(ordered) {
             return Object.values(oplogEntry.o.data.tag);
         }
         if (oplogEntry.op == "u") {
-            return Object.values(oplogEntry.o.diff.sdata.stag.i);
+            if (TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(
+                    donorPrimary.getDB("admin"))) {
+                // With the feature flag enabled, the behavior of updates is changed. They are now
+                // compressed, and also full replacements. We can decompress to inspect the op in
+                // this case.
+                TimeseriesTest.decompressBucket(oplogEntry.o);
+                return Object.values(oplogEntry.o.data.tag).slice(3);
+            } else {
+                return Object.values(oplogEntry.o.diff.sdata.stag.i);
+            }
         }
         throw Error("Unknown op type " + oplogEntry.op);
     }
@@ -268,7 +280,6 @@ function testOplogCloning(ordered) {
     assert.eq(docs[0].stmtId.length, 3);
     assert.eq(docs[1].stmtId.length, 3);
 
-    // Verify that docs contain the right oplog entry.
     getTagsFromOplog(docs[0]).forEach(tag => {
         assert.eq(tag, insertTag);
     });

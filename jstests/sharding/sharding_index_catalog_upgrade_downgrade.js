@@ -5,9 +5,6 @@
  * @tags: [multiversion_incompatible, featureFlagGlobalIndexesShardingCatalog, requires_fcv_70]
  */
 
-(function() {
-'use strict';
-
 const st = new ShardingTest({shards: 1});
 
 const csrsIndexesCollection = 'csrs.indexes';
@@ -57,9 +54,10 @@ assert.eq(1, st.rs0.getPrimary().getCollection(shardCollectionsCollectionNss).co
     indexVersion: {$exists: true}
 }));
 
-assert.commandFailedWithCode(st.s.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV}),
-                             ErrorCodes.CannotDowngrade);
-assert.commandWorked(st.s.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+assert.commandFailedWithCode(
+    st.s.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}),
+    ErrorCodes.CannotDowngrade);
+assert.commandWorked(st.s.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
 
 // Drop global index before downgrade
 st.rs0.getPrimary().adminCommand({
@@ -70,7 +68,8 @@ st.rs0.getPrimary().adminCommand({
     writeConcern: {w: 'majority'}
 });
 
-assert.commandWorked(st.s.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
+assert.commandWorked(
+    st.s.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
 
 assert.commandFailedWithCode(
     st.configRS.getPrimary().getDB('config').runCommand({listIndexes: csrsIndexesCollection}),
@@ -92,7 +91,7 @@ assert.commandFailedWithCode(
     st.rs0.getPrimary().getDB('config').runCommand({listIndexes: shardCollectionsCollection}),
     ErrorCodes.NamespaceNotFound);
 
-st.s.adminCommand({setFeatureCompatibilityVersion: latestFCV});
+st.s.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true});
 
 const afterUpgradeCSRSIndexes = st.configRS.getPrimary()
                                     .getDB('config')
@@ -107,4 +106,3 @@ const afterUpgradeShardIndexes = st.rs0.getPrimary()
 assert.eq(3, afterUpgradeShardIndexes.length);
 
 st.stop();
-})();

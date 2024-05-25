@@ -24,20 +24,20 @@
  *     jstests/libs/txns/txn_passthrough_runner_selftest.js
  */
 
-(function() {
-"use strict";
-
-load("jstests/libs/error_code_utils.js");
-load('jstests/libs/override_methods/override_helpers.js');
-load("jstests/libs/override_methods/read_and_write_concern_helpers.js");
-load("jstests/libs/retryable_writes_util.js");
-load("jstests/libs/transactions_util.js");
+import {OverrideHelpers} from "jstests/libs/override_methods/override_helpers.js";
+import {
+    kCommandsSupportingReadConcern,
+    kCommandsSupportingWriteConcern,
+    kCommandsSupportingWriteConcernInTransaction
+} from "jstests/libs/override_methods/read_and_write_concern_helpers.js";
+import {RetryableWritesUtil} from "jstests/libs/retryable_writes_util.js";
+import {TransactionsUtil} from "jstests/libs/transactions_util.js";
 
 // Truncates the 'print' output if it's too long to print.
 const kMaxPrintLength = 5000;
 const kNumPrintEndChars = kMaxPrintLength / 2;
 const originalPrint = print;
-print = function(msg) {
+globalThis.print = function(msg) {
     if (typeof msg !== "string") {
         originalPrint(msg);
         return;
@@ -147,13 +147,6 @@ function isAcceptableRetryFailedResponse(cmdName, res) {
              res.code === ErrorCodes.IndexNotFound));
 }
 
-const kCmdsThatInsert = new Set([
-    'insert',
-    'update',
-    'findAndModify',
-    'findandmodify',
-]);
-
 // Commands that may return different values or fail if retried on a new primary after a
 // failover.
 const kNonFailoverTolerantCommands = new Set([
@@ -262,7 +255,8 @@ function isFailedToSatisfyPrimaryReadPreferenceError(res) {
 }
 
 function hasError(res) {
-    return res.ok !== 1 || res.writeErrors;
+    return res.ok !== 1 || res.writeErrors ||
+        (res.hasOwnProperty("numErrors") && res.numErrors != 0);
 }
 
 function hasWriteConcernError(res) {
@@ -584,6 +578,8 @@ function calculateStmtIdInc(cmdName, cmdObj) {
                 return cmdObj.updates.length;
             case "delete":
                 return cmdObj.deletes.length;
+            case "bulkWrite":
+                return cmdObj.ops.length;
             default:
                 return 1;
         }
@@ -1132,7 +1128,7 @@ function runCommandOverride(conn, dbName, cmdName, cmdObj, clientFunction, makeF
 if (configuredForNetworkRetry()) {
     const connectOriginal = connect;
 
-    connect = function(url, user, pass) {
+    globalThis.connect = function(url, user, pass) {
         let retVal;
 
         let connectionAttempts = 0;
@@ -1159,14 +1155,14 @@ if (configuredForNetworkRetry()) {
             "logout() isn't resilient to network errors. Please add requires_non_retryable_commands to your test");
     };
 
-    startParallelShell = function() {
+    globalThis.startParallelShell = function() {
         throw new Error("Cowardly refusing to run test with network retries enabled when it uses " +
                         "startParallelShell()");
     };
 }
 
 if (configuredForTxnOverride()) {
-    startParallelShell = function() {
+    globalThis.startParallelShell = function() {
         throw new Error(
             "Cowardly refusing to run test with transaction override enabled when it uses " +
             "startParallelShell()");
@@ -1174,4 +1170,3 @@ if (configuredForTxnOverride()) {
 }
 
 OverrideHelpers.overrideRunCommand(runCommandOverride);
-})();

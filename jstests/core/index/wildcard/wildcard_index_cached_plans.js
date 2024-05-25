@@ -27,17 +27,14 @@ import {
     getPlanStages,
     getWinningPlan,
 } from "jstests/libs/analyze_plan.js";
-load("jstests/libs/collection_drop_recreate.js");  // For assert[Drop|Create]Collection.
+import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-load('jstests/libs/fixture_helpers.js');  // For getPrimaryForNodeHostingDatabase and isMongos.
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
 const coll = db.wildcard_cached_plans;
 
 const wildcardIndexes = [{keyPattern: {"b.$**": 1}}, {keyPattern: {"b.$**": 1, "other": 1}}];
-// TODO SERVER-68303: Remove the feature flag and update corresponding tests.
-const allowCompoundWildcardIndexes =
-    FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "CompoundWildcardIndexes");
 
 function getCacheEntryForQuery(query) {
     const match = {
@@ -57,9 +54,6 @@ function getCacheEntryForQuery(query) {
 const isSbeEnabled = checkSBEEnabled(db);
 
 for (const indexSpec of wildcardIndexes) {
-    if (!allowCompoundWildcardIndexes && indexSpec.keyPattern.other) {
-        continue;
-    }
     coll.drop();
     assert.commandWorked(coll.createIndex(indexSpec.keyPattern));
     assert.commandWorked(coll.createIndex({"a": 1}));

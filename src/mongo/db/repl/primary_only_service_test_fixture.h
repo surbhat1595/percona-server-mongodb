@@ -54,6 +54,8 @@ namespace repl {
 class PrimaryOnlyService;
 class PrimaryOnlyServiceRegistry;
 
+extern FailPoint primaryOnlyServiceTestStepUpWaitForRebuildComplete;
+
 class PrimaryOnlyServiceMongoDTest : public ServiceContextMongoDTest {
 public:
     void setUp() override;
@@ -85,6 +87,8 @@ protected:
      * running your tests.
      */
     virtual void setUpPersistence(OperationContext* opCtx){};
+
+    virtual void shutdownHook();
 
     OpObserverRegistry* _opObserverRegistry = nullptr;
     repl::PrimaryOnlyServiceRegistry* _registry = nullptr;

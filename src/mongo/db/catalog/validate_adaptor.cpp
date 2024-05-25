@@ -324,11 +324,13 @@ Status _validateTimeSeriesDataTimeField(const CollectionPtr& coll,
             }
             // Checks that indices are consecutively increasing numbers starting from 0.
             if (auto idx = _idxInt(metric.fieldNameStringData()); idx != *bucketCount) {
-                return Status(ErrorCodes::BadValue,
-                              fmt::format("The index '{}' in time-series bucket data field '{}' is "
-                                          "not consecutively increasing from '0'",
-                                          metric.fieldNameStringData(),
-                                          fieldName));
+                return Status(
+                    ErrorCodes::BadValue,
+                    fmt::format("The indexes in time-series bucket data field '{}' is "
+                                "not consecutively increasing from '0'. Expected: {}, but got: {}",
+                                fieldName,
+                                *bucketCount,
+                                idx));
             }
             minmax.update(metric.wrap(fieldName), boost::none, coll->getDefaultCollator());
             ++(*bucketCount);
@@ -762,9 +764,11 @@ void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
                 nNonCompliantDocuments++;
                 schemaValidationFailed(_validateState, result.first, results);
             } else if (coll->getTimeseriesOptions()) {
+                BSONObj recordBson = record->data.toBson();
+                _enforceTimeseriesBucketsAreAlwaysCompressed(recordBson, results);
+
                 // Checks for time-series collection consistency.
-                Status bucketStatus =
-                    _validateTimeSeriesBucketRecord(coll, record->data.toBson(), results);
+                Status bucketStatus = _validateTimeSeriesBucketRecord(coll, recordBson, results);
                 // This log id should be kept in sync with the associated warning messages that are
                 // returned to the client.
                 if (!bucketStatus.isOK()) {
@@ -898,6 +902,27 @@ void ValidateAdaptor::repairIndexEntries(OperationContext* opCtx, ValidateResult
 void ValidateAdaptor::addIndexEntryErrors(OperationContext* opCtx, ValidateResults* results) {
     _columnIndexConsistency.addIndexEntryErrors(opCtx, results);
     _keyBasedIndexConsistency.addIndexEntryErrors(opCtx, results);
+}
+
+void ValidateAdaptor::_enforceTimeseriesBucketsAreAlwaysCompressed(const BSONObj& recordBson,
+                                                                   ValidateResults* results) {
+    if (!_validateState->enforceTimeseriesBucketsAreAlwaysCompressed()) {
+        return;
+    }
+
+    int bucketVersion = recordBson.getField(timeseries::kBucketControlFieldName)
+                            .Obj()
+                            .getIntField(timeseries::kBucketControlVersionFieldName);
+
+    if (bucketVersion != timeseries::kTimeseriesControlCompressedVersion) {
+        LOGV2(7735100,
+              "Expected time-series bucket to be compressed",
+              "bucket"_attr = recordBson.toString());
+        results->errors.push_back(
+            "Expected time-series bucket to be compressed. Search logs for message "
+            "with id 7735100.");
+        results->valid = false;
+    }
 }
 
 }  // namespace mongo

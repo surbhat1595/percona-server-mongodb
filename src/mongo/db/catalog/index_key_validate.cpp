@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -73,6 +72,7 @@
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/ttl_collection_cache.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -92,7 +92,7 @@
 namespace mongo {
 namespace index_key_validate {
 
-std::function<void(std::set<StringData>&)> filterAllowedIndexFieldNames;
+std::function<void(std::map<StringData, std::set<IndexType>>&)> filterAllowedIndexFieldNames;
 
 using IndexVersion = IndexDescriptor::IndexVersion;
 
@@ -102,9 +102,9 @@ namespace {
 // specification.
 MONGO_FAIL_POINT_DEFINE(skipIndexCreateFieldNameValidation);
 
-// When the skipTTLIndexInvalidExpireAfterSecondsValidationForCreateIndex failpoint is enabled,
+// When the skipTTLIndexExpireAfterSecondsValidation failpoint is enabled,
 // validation for TTL index 'expireAfterSeconds' will be disabled in certain codepaths.
-MONGO_FAIL_POINT_DEFINE(skipTTLIndexInvalidExpireAfterSecondsValidationForCreateIndex);
+MONGO_FAIL_POINT_DEFINE(skipTTLIndexExpireAfterSecondsValidation);
 
 static const std::set<StringData> allowedIdIndexFieldNames = {
     IndexDescriptor::kCollationFieldName,
@@ -142,12 +142,16 @@ Status isIndexVersionAllowedForCreation(IndexVersion indexVersion, const BSONObj
 BSONObj buildRepairedIndexSpec(
     const NamespaceString& ns,
     const BSONObj& indexSpec,
-    const std::set<StringData>& allowedFieldNames,
+    const std::map<StringData, std::set<IndexType>>& allowedFieldNames,
     std::function<void(const BSONElement&, BSONObjBuilder*)> indexSpecHandleFn) {
+    const auto key = indexSpec.getObjectField(IndexDescriptor::kKeyPatternFieldName);
+    const auto indexName = IndexNames::nameToType(IndexNames::findPluginName(key));
     BSONObjBuilder builder;
     for (const auto& indexSpecElem : indexSpec) {
         StringData fieldName = indexSpecElem.fieldNameStringData();
-        if (allowedFieldNames.count(fieldName)) {
+        auto it = allowedFieldNames.find(fieldName);
+        if (it != allowedFieldNames.end() &&
+            (it->second.empty() || it->second.count(indexName) != 0)) {
             indexSpecHandleFn(indexSpecElem, &builder);
         } else {
             LOGV2_WARNING(23878,
@@ -161,9 +165,7 @@ BSONObj buildRepairedIndexSpec(
 }
 }  // namespace
 
-Status validateKeyPattern(const BSONObj& key,
-                          IndexDescriptor::IndexVersion indexVersion,
-                          bool checkFCV) {
+Status validateKeyPattern(const BSONObj& key, IndexDescriptor::IndexVersion indexVersion) {
     const ErrorCodes::Error code = ErrorCodes::CannotCreateIndex;
 
     if (key.objsize() > 2048)
@@ -182,17 +184,7 @@ Status validateKeyPattern(const BSONObj& key,
             return Status(code, str::stream() << "Unknown index plugin '" << pluginName << '\'');
     }
 
-    // (Ignore FCV check): This is intentional because we want clusters which have wildcard indexes
-    // still be able to use the feature even if the FCV is downgraded.
-    auto compoundWildcardIndexesAllowed =
-        feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCVUnsafe();
-    if (serverGlobalParams.featureCompatibility.isVersionInitialized() && checkFCV) {
-        compoundWildcardIndexesAllowed =
-            feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabled(
-                serverGlobalParams.featureCompatibility);
-    }
-
-    if (pluginName == IndexNames::WILDCARD && compoundWildcardIndexesAllowed) {
+    if (pluginName == IndexNames::WILDCARD) {
         auto status = validateWildcardIndex(key);
         if (!status.isOK()) {
             return status;
@@ -221,10 +213,6 @@ Status validateKeyPattern(const BSONObj& key,
                         return {code, "Values in the index key pattern cannot be NaN."};
                     } else if (value == 0.0) {
                         return {code, "Values in the index key pattern cannot be 0."};
-                    } else if (value < 0.0 && pluginName == IndexNames::WILDCARD &&
-                               !compoundWildcardIndexesAllowed) {
-                        return {code,
-                                "A numeric value in a $** index key pattern must be positive."};
                     }
                 } else if (keyElement.type() != BSONType::String) {
                     return {code,
@@ -250,11 +238,9 @@ Status validateKeyPattern(const BSONObj& key,
 
         StringData fieldName(keyElement.fieldNameStringData());
 
-        // TODO SERVER-68303: Remove the CompoundWildcardIndexes feature flag.
-        if ((pluginName == IndexNames::WILDCARD && !compoundWildcardIndexesAllowed) ||
-            pluginName == IndexNames::COLUMN) {
+        if (pluginName == IndexNames::COLUMN) {
             if (key.nFields() != 1) {
-                // Columnstore and wildcard indexes do not support compound indexes.
+                // Columnstore indexes do not support compound indexes.
                 return Status(code,
                               str::stream() << pluginName << " indexes do not allow compounding");
             } else if (!WildcardNames::isWildcardFieldName(fieldName)) {
@@ -326,7 +312,7 @@ BSONObj removeUnknownFields(const NamespaceString& ns, const BSONObj& indexSpec)
 
 BSONObj repairIndexSpec(const NamespaceString& ns,
                         const BSONObj& indexSpec,
-                        const std::set<StringData>& allowedFieldNames) {
+                        const std::map<StringData, std::set<IndexType>>& allowedFieldNames) {
     auto fixIndexSpecFn = [&indexSpec, &ns](const BSONElement& indexSpecElem,
                                             BSONObjBuilder* builder) {
         StringData fieldName = indexSpecElem.fieldNameStringData();
@@ -362,13 +348,12 @@ BSONObj repairIndexSpec(const NamespaceString& ns,
     return buildRepairedIndexSpec(ns, indexSpec, allowedFieldNames, fixIndexSpecFn);
 }
 
-StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx,
-                                      const BSONObj& indexSpec,
-                                      bool checkFCV) {
+StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& indexSpec) {
     bool hasKeyPatternField = false;
     bool hasIndexNameField = false;
     bool hasNamespaceField = false;
     bool isTTLIndexWithInvalidExpireAfterSeconds = false;
+    bool isTTLIndexWithNonIntExpireAfterSeconds = false;
     bool hasVersionField = false;
     bool hasCollationField = false;
     bool hasWeightsField = false;
@@ -418,7 +403,7 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx,
             // Here we always validate the key pattern according to the most recent rules, in order
             // to enforce that all new indexes have well-formed key patterns.
             Status keyPatternValidateStatus =
-                validateKeyPattern(keyPattern, IndexDescriptor::kLatestIndexVersion, checkFCV);
+                validateKeyPattern(keyPattern, IndexDescriptor::kLatestIndexVersion);
             if (!keyPatternValidateStatus.isOK()) {
                 return keyPatternValidateStatus;
             }
@@ -577,12 +562,7 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx,
             }
             try {
                 if (isWildcard) {
-                    // (Ignore FCV check): This is intentional because we want clusters which have
-                    // wildcard indexes still be able to use the feature even if the FCV is
-                    // downgraded.
-                    if (key.nFields() > 1 &&
-                        feature_flags::gFeatureFlagCompoundWildcardIndexes
-                            .isEnabledAndIgnoreFCVUnsafe()) {
+                    if (key.nFields() > 1) {
                         auto validationStatus =
                             validateWildcardProjection(key, indexSpecElem.embeddedObject());
                         if (!validationStatus.isOK()) {
@@ -647,12 +627,15 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx,
                     str::stream() << "The field '" << indexSpecElemFieldName
                                   << "' must be a number, but got "
                                   << typeName(indexSpecElem.type())};
-        } else if (IndexDescriptor::kExpireAfterSecondsFieldName == indexSpecElemFieldName &&
-                   !validateExpireAfterSeconds(indexSpecElem,
-                                               ValidateExpireAfterSecondsMode::kSecondaryTTLIndex)
-                        .isOK() &&
-                   !skipTTLIndexInvalidExpireAfterSecondsValidationForCreateIndex.shouldFail()) {
-            isTTLIndexWithInvalidExpireAfterSeconds = true;
+        } else if (IndexDescriptor::kExpireAfterSecondsFieldName == indexSpecElemFieldName) {
+            auto swType = validateExpireAfterSeconds(
+                indexSpecElem, ValidateExpireAfterSecondsMode::kSecondaryTTLIndex);
+            if (!swType.isOK()) {
+                isTTLIndexWithInvalidExpireAfterSeconds = true;
+            } else if (extractExpireAfterSecondsType(swType) ==
+                       TTLCollectionCache::Info::ExpireAfterSecondsType::kNonInt) {
+                isTTLIndexWithNonIntExpireAfterSeconds = true;
+            }
         } else if (IndexDescriptor::kColumnStoreCompressorFieldName == indexSpecElemFieldName) {
             if (IndexNames::findPluginName(indexSpec.getObjectField(
                     IndexDescriptor::kKeyPatternFieldName)) != IndexNames::COLUMN) {
@@ -745,16 +728,27 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx,
         modifiedSpec = modifiedSpec.removeField(IndexDescriptor::kNamespaceFieldName);
     }
 
-    if (isTTLIndexWithInvalidExpireAfterSeconds) {
-        // We create a new index specification with the 'expireAfterSeconds' field set as
-        // kExpireAfterSecondsForInactiveTTLIndex if the current value is invalid. A similar
-        // treatment is done in repairIndexSpec(). This rewrites the 'expireAfterSeconds'
-        // value to be compliant with the 'safeInt' IDL type for the listIndexes response.
-        BSONObjBuilder builder;
-        builder.appendNumber(IndexDescriptor::kExpireAfterSecondsFieldName,
-                             durationCount<Seconds>(kExpireAfterSecondsForInactiveTTLIndex));
-        auto obj = builder.obj();
-        modifiedSpec = modifiedSpec.addField(obj.firstElement());
+    if (!skipTTLIndexExpireAfterSecondsValidation.shouldFail()) {
+        if (isTTLIndexWithInvalidExpireAfterSeconds) {
+            // We create a new index specification with the 'expireAfterSeconds' field set as
+            // kExpireAfterSecondsForInactiveTTLIndex if the current value is invalid. A similar
+            // treatment is done in repairIndexSpec(). This rewrites the 'expireAfterSeconds'
+            // value to be compliant with the 'safeInt' IDL type for the listIndexes response.
+            BSONObjBuilder builder;
+            builder.appendNumber(IndexDescriptor::kExpireAfterSecondsFieldName,
+                                 durationCount<Seconds>(kExpireAfterSecondsForInactiveTTLIndex));
+            auto obj = builder.obj();
+            modifiedSpec = modifiedSpec.addField(obj.firstElement());
+        }
+
+        if (isTTLIndexWithNonIntExpireAfterSeconds) {
+            BSONObjBuilder builder;
+            builder.appendNumber(
+                IndexDescriptor::kExpireAfterSecondsFieldName,
+                indexSpec[IndexDescriptor::kExpireAfterSecondsFieldName].safeNumberInt());
+            auto obj = builder.obj();
+            modifiedSpec = modifiedSpec.addField(obj.firstElement());
+        }
     }
 
     if (!hasVersionField) {
@@ -767,7 +761,7 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx,
 
     if (hasOriginalSpecField) {
         StatusWith<BSONObj> modifiedOriginalSpec = validateIndexSpec(
-            opCtx, indexSpec.getObjectField(IndexDescriptor::kOriginalSpecFieldName), checkFCV);
+            opCtx, indexSpec.getObjectField(IndexDescriptor::kOriginalSpecFieldName));
         if (!modifiedOriginalSpec.isOK()) {
             return modifiedOriginalSpec.getStatus();
         }
@@ -958,8 +952,8 @@ Status validateExpireAfterSeconds(std::int64_t expireAfterSeconds,
     return Status::OK();
 }
 
-Status validateExpireAfterSeconds(BSONElement expireAfterSeconds,
-                                  ValidateExpireAfterSecondsMode mode) {
+StatusWith<TTLCollectionCache::Info::ExpireAfterSecondsType> validateExpireAfterSeconds(
+    BSONElement expireAfterSeconds, ValidateExpireAfterSecondsMode mode) {
     if (!expireAfterSeconds.isNumber()) {
         return {ErrorCodes::CannotCreateIndex,
                 str::stream() << "TTL index '" << IndexDescriptor::kExpireAfterSecondsFieldName
@@ -987,7 +981,15 @@ Status validateExpireAfterSeconds(BSONElement expireAfterSeconds,
         return {ErrorCodes::CannotCreateIndex, str::stream() << status.reason()};
     }
 
-    return Status::OK();
+    return expireAfterSeconds.type() == BSONType::NumberInt
+        ? TTLCollectionCache::Info::ExpireAfterSecondsType::kInt
+        : TTLCollectionCache::Info::ExpireAfterSecondsType::kNonInt;
+}
+
+TTLCollectionCache::Info::ExpireAfterSecondsType extractExpireAfterSecondsType(
+    const StatusWith<TTLCollectionCache::Info::ExpireAfterSecondsType>& swType) {
+    return swType.isOK() ? swType.getValue()
+                         : TTLCollectionCache::Info::ExpireAfterSecondsType::kInvalid;
 }
 
 bool isIndexTTL(const BSONObj& indexSpec) {
@@ -999,11 +1001,11 @@ Status validateIndexSpecTTL(const BSONObj& indexSpec) {
         return Status::OK();
     }
 
-    if (auto status =
+    if (auto swType =
             validateExpireAfterSeconds(indexSpec[IndexDescriptor::kExpireAfterSecondsFieldName],
                                        ValidateExpireAfterSecondsMode::kSecondaryTTLIndex);
-        !status.isOK()) {
-        return status.withContext(str::stream() << ". Index spec: " << indexSpec);
+        !swType.isOK()) {
+        return swType.getStatus().withContext(str::stream() << ". Index spec: " << indexSpec);
     }
 
     const BSONObj key = indexSpec["key"].Obj();
@@ -1023,15 +1025,13 @@ bool isIndexAllowedInAPIVersion1(const IndexDescriptor& indexDesc) {
         !indexDesc.isSparse();
 }
 
-BSONObj parseAndValidateIndexSpecs(OperationContext* opCtx,
-                                   const BSONObj& indexSpecObj,
-                                   bool checkFCV) {
+BSONObj parseAndValidateIndexSpecs(OperationContext* opCtx, const BSONObj& indexSpecObj) {
     constexpr auto k_id_ = "_id_"_sd;
     constexpr auto kStar = "*"_sd;
 
     BSONObj parsedIndexSpec = indexSpecObj;
 
-    auto indexSpecStatus = index_key_validate::validateIndexSpec(opCtx, parsedIndexSpec, checkFCV);
+    auto indexSpecStatus = index_key_validate::validateIndexSpec(opCtx, parsedIndexSpec);
     uassertStatusOK(indexSpecStatus.getStatus().withContext(
         str::stream() << "Error in specification " << parsedIndexSpec.toString()));
 

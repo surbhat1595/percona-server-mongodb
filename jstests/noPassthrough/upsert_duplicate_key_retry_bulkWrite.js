@@ -7,10 +7,7 @@
  * @tags: [requires_replication]
  */
 
-(function() {
-"use strict";
-
-load("jstests/libs/curop_helpers.js");  // For waitForCurOpByFailPoint().
+import {waitForCurOpByFailPointNoNS} from "jstests/libs/curop_helpers.js";
 
 const rst = new ReplSetTest({
     nodes: {
@@ -34,7 +31,7 @@ function performUpsert() {
     var res = testDB.adminCommand({
         bulkWrite: 1,
         ops: [
-            {update: 0, filter: {x: 3}, updateMods: {$inc: {y: 1}}, upsert: true, return: "post"},
+            {update: 0, filter: {x: 3}, updateMods: {$inc: {y: 1}}, upsert: true},
         ],
         nsInfo: [{ns: "test.upsert_duplicate_key_retry_bulkWrite"}]
     });
@@ -84,7 +81,7 @@ assert.commandWorked(testColl.insert({_id: 1, 'a': 12345}));
 var res = testDB.adminCommand({
     bulkWrite: 1,
     ops: [
-        {update: 0, filter: {x: 3}, updateMods: {}, upsert: true, return: "post"},
+        {update: 0, filter: {x: 3}, updateMods: {}, upsert: true},
     ],
     nsInfo: [{ns: "test.upsert_duplicate_key_retry_bulkWrite"}]
 });
@@ -99,7 +96,7 @@ assert.commandWorked(testColl.insert({x: 4}));
 res = testDB.adminCommand({
     bulkWrite: 1,
     ops: [
-        {update: 0, filter: {x: 3}, updateMods: {$inc: {x: 1}}, upsert: true, return: "post"},
+        {update: 0, filter: {x: 3}, updateMods: {$inc: {x: 1}}, upsert: true},
     ],
     nsInfo: [{ns: "test.upsert_duplicate_key_retry_bulkWrite"}]
 });
@@ -107,4 +104,3 @@ res = testDB.adminCommand({
 assert(res.cursor.firstBatch[0].code == ErrorCodes.DuplicateKey);
 
 rst.stopSet();
-})();

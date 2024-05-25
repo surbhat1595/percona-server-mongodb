@@ -1,6 +1,6 @@
 // Test basic db operations in multitenancy using a securityToken.
 
-load('jstests/aggregation/extras/utils.js');  // For arrayEq()
+import {arrayEq} from "jstests/aggregation/extras/utils.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 function checkNsSerializedCorrectly(kDbName, kCollectionName, nsField) {
@@ -206,9 +206,7 @@ const tokenDB = tokenConn.getDB(kDbName);
         const dbs =
             assert.commandWorked(tokenAdminDB.runCommand({listDatabases: 1, nameOnly: true}));
         assert.eq(3, dbs.databases.length, tojson(dbs));
-        const expectedDbs = featureFlagRequireTenantId
-            ? ["admin", kDbName, kOtherDbName]
-            : [kTenant + "_admin", kTenant + "_" + kDbName, kTenant + "_" + kOtherDbName];
+        const expectedDbs = ["admin", kDbName, kOtherDbName];
         assert(arrayEq(expectedDbs, dbs.databases.map(db => db.name)), tojson(dbs));
     }
 
@@ -552,7 +550,7 @@ const tokenDB = tokenConn.getDB(kDbName);
         tokenConn.getDB('admin').runCommand({listDatabases: 1, nameOnly: true}));
     // Only the 'admin' db exists
     assert.eq(1, dbsWithDiffToken.databases.length, tojson(dbsWithDiffToken));
-    const expectedAdminDb = featureFlagRequireTenantId ? "admin" : kOtherTenant + "_admin";
+    const expectedAdminDb = "admin";
     assert(arrayEq([expectedAdminDb], dbsWithDiffToken.databases.map(db => db.name)),
            tojson(dbsWithDiffToken));
 

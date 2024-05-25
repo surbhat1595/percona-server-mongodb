@@ -101,7 +101,7 @@ BSONObj selectMedianKey(OperationContext* opCtx,
     auto cmdResponse = uassertStatusOK(
         shard->runCommandWithFixedRetryAttempts(opCtx,
                                                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                                "admin",
+                                                DatabaseName::kAdmin,
                                                 cmd.obj(),
                                                 Shard::RetryPolicy::kIdempotent));
 
@@ -153,17 +153,16 @@ public:
     }
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
-        return NamespaceStringUtil::parseNamespaceFromRequest(
-            dbName.tenantId(), CommandHelpers::parseNsFullyQualified(cmdObj));
+        return NamespaceStringUtil::deserialize(dbName.tenantId(),
+                                                CommandHelpers::parseNsFullyQualified(cmdObj));
     }
 
     bool errmsgRun(OperationContext* opCtx,
-                   const std::string& dbname,
+                   const DatabaseName& dbName,
                    const BSONObj& cmdObj,
                    std::string& errmsg,
                    BSONObjBuilder& result) override {
-        const NamespaceString nss(
-            parseNs(DatabaseNameUtil::deserialize(boost::none, dbname), cmdObj));
+        const NamespaceString nss(parseNs(dbName, cmdObj));
 
         const auto cri = uassertStatusOK(
             Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(opCtx,
@@ -315,8 +314,8 @@ public:
 
         return true;
     }
-
-} splitChunk;
+};
+MONGO_REGISTER_COMMAND(SplitCollectionCmd);
 
 }  // namespace
 }  // namespace mongo

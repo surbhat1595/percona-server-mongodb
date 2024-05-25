@@ -272,6 +272,9 @@ selector:
   # Does not support tojson of command objects.
   - jstests/core/**/SERVER-23626.js
 
+  # Assumes no orphan documents.
+  - jstests/core/index/indexu.js
+
   exclude_with_any_tags:
   # "Cowardly refusing to override read concern of command: ..."
   - assumes_read_concern_unchanged
@@ -316,11 +319,11 @@ executor:
     shell_options:
       eval: >-
         globalThis.testingReplication = true;
-        load('jstests/libs/override_methods/implicitly_shard_accessed_collections.js');
+        await import("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
         ImplicitlyShardAccessCollSettings.setMode(ImplicitlyShardAccessCollSettings.Modes.kHashedMoveToSingleShard);
-        load('jstests/libs/override_methods/enable_sessions.js');
-        load('jstests/libs/override_methods/txn_passthrough_cmd_massage.js');
-        load('jstests/libs/override_methods/network_error_and_txn_override.js');
+        await import("jstests/libs/override_methods/enable_sessions.js");
+        await import("jstests/libs/override_methods/txn_passthrough_cmd_massage.js");
+        await import("jstests/libs/override_methods/network_error_and_txn_override.js");
       global_vars:
         TestData:
           networkErrorAndTxnOverrideConfig:
@@ -369,5 +372,6 @@ executor:
         numInitialSyncAttempts: 1
         writePeriodicNoops: true
         coordinateCommitReturnImmediatelyAfterPersistingDecision: true
+        skipDroppingHashedShardKeyIndex: true
     num_rs_nodes_per_shard: 2
     num_shards: 2

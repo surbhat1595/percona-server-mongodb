@@ -51,6 +51,7 @@
 namespace mongo::query_shape {
 
 using QueryShapeHash = SHA256Block;
+
 /**
  * Computes a BSONObj that is meant to be used to classify queries according to their shape, for the
  * purposes of collecting queryStats.
@@ -78,14 +79,6 @@ BSONObj extractSortShape(const BSONObj& sortSpec,
                          const boost::intrusive_ptr<ExpressionContext>& expCtx,
                          const SerializationOptions& opts);
 
-/**
- * Tries to extract the QueryShape out of the 'cmd' represented as a raw BSONObj. In case when the
- * QueryShape can not be extracted, boost::none is returned.
- */
-BSONObj extractQueryShape(const BSONObj& cmd,
-                          const SerializationOptions& opts,
-                          const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                          const boost::optional<TenantId>& tenantId);
 BSONObj extractQueryShape(const ParsedFindCommand& findRequest,
                           const SerializationOptions& opts,
                           const boost::intrusive_ptr<ExpressionContext>& expCtx);
@@ -94,11 +87,6 @@ BSONObj extractQueryShape(const AggregateCommandRequest& aggregateCommand,
                           const SerializationOptions& opts,
                           const boost::intrusive_ptr<ExpressionContext>& expCtx,
                           const NamespaceString& nss);
-
-NamespaceStringOrUUID parseNamespaceShape(BSONElement cmdNsElt);
-void appendNamespaceShape(BSONObjBuilder& bob,
-                          const NamespaceString& nss,
-                          const SerializationOptions& opts);
 
 QueryShapeHash hash(const BSONObj& queryShape);
 }  // namespace mongo::query_shape

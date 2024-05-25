@@ -9,6 +9,7 @@ import pymongo.errors
 
 from buildscripts.resmokelib.testing.fixtures import interface
 from buildscripts.resmokelib.testing.fixtures import external
+from buildscripts.resmokelib.testing.fixtures import _builder
 
 
 class ShardedClusterFixture(interface.Fixture):
@@ -24,7 +25,7 @@ class ShardedClusterFixture(interface.Fixture):
                  preserve_dbpath=False, num_shards=1, num_rs_nodes_per_shard=1, num_mongos=1,
                  enable_sharding=None, enable_balancer=True, auth_options=None,
                  configsvr_options=None, shard_options=None, cluster_logging_prefix=None,
-                 config_shard=None):
+                 config_shard=None, use_auto_bootstrap_procedure=None):
         """Initialize ShardedClusterFixture with different options for the cluster processes."""
 
         interface.Fixture.__init__(self, logger, job_num, fixturelib, dbpath_prefix=dbpath_prefix)
@@ -54,6 +55,7 @@ class ShardedClusterFixture(interface.Fixture):
             self.fixturelib.default_if_none(configsvr_options, {}))
         self.shard_options = self.fixturelib.make_historic(
             self.fixturelib.default_if_none(shard_options, {}))
+        self.use_auto_bootstrap_procedure = use_auto_bootstrap_procedure
 
         # The logging prefix used in cluster to cluster replication.
         self.cluster_logging_prefix = "" if cluster_logging_prefix is None else f"{cluster_logging_prefix}:"
@@ -125,6 +127,11 @@ class ShardedClusterFixture(interface.Fixture):
         # Wait for each of the shards
         for shard in self.shards:
             shard.await_ready()
+
+        # Need to get the new config shard connection string generated from the auto-bootstrap procedure
+        if self.use_auto_bootstrap_procedure:
+            for mongos in self.mongos:
+                mongos.mongos_options["configdb"] = self.configsvr.get_internal_connection_string()
 
         # We call mongos.setup() in self.await_ready() function instead of self.setup()
         # because mongos routers have to connect to a running cluster.
@@ -349,7 +356,6 @@ class ShardedClusterFixture(interface.Fixture):
             del mongod_options["shardsvr"]
             mongod_options["configsvr"] = ""
             replset_config_options["configsvr"] = True
-            mongod_options["set_parameters"]["featureFlagTransitionToCatalogShard"] = "true"
             mongod_options["storageEngine"] = "wiredTiger"
 
             configsvr_options = self.configsvr_options.copy()
@@ -377,7 +383,8 @@ class ShardedClusterFixture(interface.Fixture):
             "mongod_options": mongod_options, "mongod_executable": self.mongod_executable,
             "auth_options": auth_options, "preserve_dbpath": preserve_dbpath,
             "replset_config_options": replset_config_options, "shard_logging_prefix":
-                shard_logging_prefix, "config_shard": self.config_shard, **shard_options
+                shard_logging_prefix, "config_shard": self.config_shard,
+            "use_auto_bootstrap_procedure": self.use_auto_bootstrap_procedure, **shard_options
         }
 
     def install_rs_shard(self, rs_shard):
@@ -409,9 +416,8 @@ class ShardedClusterFixture(interface.Fixture):
 
         See https://docs.mongodb.org/manual/reference/command/addShard for more details.
         """
-
         connection_string = shard.get_internal_connection_string()
-        if is_config_shard:
+        if is_config_shard and not self.use_auto_bootstrap_procedure:
             self.logger.info("Adding %s as config shard...", connection_string)
             client.admin.command({"transitionFromDedicatedConfigServer": 1})
         else:
@@ -424,14 +430,31 @@ class ExternalShardedClusterFixture(external.ExternalFixture, ShardedClusterFixt
 
     REGISTERED_NAME = "ExternalShardedClusterFixture"
 
-    def __init__(self, logger, job_num, fixturelib, shell_conn_string):
+    def __init__(self, logger, job_num, fixturelib, original_suite_name):
         """Initialize ExternalShardedClusterFixture."""
-        external.ExternalFixture.__init__(self, logger, job_num, fixturelib, shell_conn_string)
+        self.dummy_fixture = _builder.make_dummy_fixture(original_suite_name)
+        self.shell_conn_string = "mongodb://" + ",".join(
+            [f"mongos{i}:27017" for i in range(self.dummy_fixture.num_mongos)])
+
+        external.ExternalFixture.__init__(self, logger, job_num, fixturelib, self.shell_conn_string)
         ShardedClusterFixture.__init__(self, logger, job_num, fixturelib, mongod_options={})
 
     def setup(self):
-        """Use ExternalFixture method."""
-        return external.ExternalFixture.setup(self)
+        """Execute some setup before offically starting testing against this external cluster."""
+        client = pymongo.MongoClient(self.get_driver_connection_url())
+        for i in range(50):
+            if i == 49:
+                raise RuntimeError('Sharded Cluster setup has timed out.')
+            payload = client.admin.command({"listShards": 1})
+            if len(payload["shards"]) == self.dummy_fixture.num_shards:
+                print("Sharded Cluster available.")
+                break
+            if len(payload["shards"]) < self.dummy_fixture.num_shards:
+                print("Waiting for shards to be added to cluster.")
+                time.sleep(5)
+                continue
+            if len(payload["shards"]) > self.dummy_fixture.num_shards:
+                raise RuntimeError('More shards in cluster than expected.')
 
     def pids(self):
         """Use ExternalFixture method."""
@@ -517,6 +540,14 @@ class _MongoSFixture(interface.Fixture):
             raise self.fixturelib.ServerFailure(msg)
 
         self.mongos = mongos
+
+    def get_options(self):
+        """Return the mongos options of this fixture."""
+        launcher = MongosLauncher(self.fixturelib)
+        _, mongos_options = launcher.launch_mongos_program(self.logger, self.job_num,
+                                                           executable=self.mongos_executable,
+                                                           mongos_options=self.mongos_options)
+        return mongos_options
 
     def pids(self):
         """:return: pids owned by this fixture if any."""
@@ -678,4 +709,3 @@ def _add_testing_set_parameters(suite_set_parameters):
     suite_set_parameters.setdefault("testingDiagnosticsEnabled", True)
     suite_set_parameters.setdefault("enableTestCommands", True)
     suite_set_parameters.setdefault("disableTransitionFromLatestToLastContinuous", False)
-    suite_set_parameters.setdefault("requireConfirmInSetFcv", False)

@@ -662,7 +662,8 @@ TEST_F(BucketStateRegistryTest, AbortingBatchRemovesBucketState) {
     auto bucketId = bucket.bucketId;
 
     auto stats = internal::getOrInitializeExecutionStats(*this, info1.key.ns);
-    auto batch = std::make_shared<WriteBatch>(BucketHandle{bucketId, info1.stripe}, 0, stats);
+    auto batch = std::make_shared<WriteBatch>(
+        BucketHandle{bucketId, info1.stripe}, 0, stats, bucket.timeField);
 
     internal::abort(*this, stripes[info1.stripe], WithLock::withoutLock(), batch, Status::OK());
     ASSERT(getBucketState(bucketStateRegistry, bucketId) == boost::none);
@@ -678,7 +679,8 @@ TEST_F(BucketStateRegistryTest, ClosingBucketGoesThroughPendingCompressionState)
     ASSERT_TRUE(doesBucketStateMatch(bucketId, BucketState::kNormal));
 
     auto stats = internal::getOrInitializeExecutionStats(*this, info1.key.ns);
-    auto batch = std::make_shared<WriteBatch>(BucketHandle{bucketId, info1.stripe}, 0, stats);
+    auto batch = std::make_shared<WriteBatch>(
+        BucketHandle{bucketId, info1.stripe}, 0, stats, bucket.timeField);
     ASSERT(claimWriteBatchCommitRights(*batch));
     ASSERT_OK(prepareCommit(*this, batch));
     ASSERT_TRUE(doesBucketStateMatch(bucketId, BucketState::kPrepared));
@@ -774,6 +776,29 @@ TEST_F(BucketStateRegistryTest, ConflictingDirectWrites) {
 
     // Second one removes it.
     directWriteFinish(bucketStateRegistry, bucketId.ns, bucketId.oid);
+    ASSERT_TRUE(doesBucketStateMatch(bucketId, boost::none));
+}
+
+TEST_F(BucketStateRegistryTest, LargeNumberOfDirectWritesInTransaction) {
+    // If a single transaction contains many direct writes to the same bucket, we should handle
+    // it gracefully.
+    BucketId bucketId{ns1, OID()};
+    auto state = getBucketState(bucketStateRegistry, bucketId);
+    ASSERT_FALSE(state.has_value());
+
+    int numDirectWrites = 100'000;
+
+    for (int i = 0; i < numDirectWrites; ++i) {
+        directWriteStart(bucketStateRegistry, bucketId.ns, bucketId.oid);
+        ASSERT_TRUE(doesBucketHaveDirectWrite(bucketId));
+    }
+
+    for (int i = 0; i < numDirectWrites; ++i) {
+        ASSERT_TRUE(doesBucketHaveDirectWrite(bucketId));
+        directWriteFinish(bucketStateRegistry, bucketId.ns, bucketId.oid);
+    }
+
+    ASSERT_FALSE(doesBucketHaveDirectWrite(bucketId));
     ASSERT_TRUE(doesBucketStateMatch(bucketId, boost::none));
 }
 

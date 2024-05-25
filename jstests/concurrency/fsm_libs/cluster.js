@@ -1,12 +1,10 @@
-'use strict';
-
 /**
  * Represents a MongoDB cluster.
  */
-load('jstests/hooks/validate_collections.js');          // For validateCollections.
-load('jstests/concurrency/fsm_libs/shard_fixture.js');  // For FSMShardingTest.
+import {FSMShardingTest} from "jstests/concurrency/fsm_libs/shard_fixture.js";
+import {validateCollections} from "jstests/hooks/validate_collections.js";
 
-var Cluster = function(options) {
+export const Cluster = function(options) {
     if (!(this instanceof Cluster)) {
         return new Cluster(options);
     }
@@ -472,7 +470,6 @@ var Cluster = function(options) {
     this.validateAllCollections = function validateAllCollections(phase) {
         assert(initialized, 'cluster must be initialized first');
 
-        const isSteppingDownConfigServers = this.isSteppingDownConfigServers();
         var _validateCollections = function _validateCollections(db, isMongos = false) {
             // Validate all the collections on each node.
             var res = db.adminCommand({listDatabases: 1});
@@ -510,7 +507,6 @@ var Cluster = function(options) {
 
         replSets.forEach(rst => {
             var startTime = Date.now();
-            var res;
             var primary = rst.getPrimary();
 
             if (shouldCheckDBHashes) {
@@ -540,37 +536,6 @@ var Cluster = function(options) {
                 rst.awaitReplication();
             }
         });
-    };
-
-    this.recordConfigServerData = function recordConfigServerData(configServer) {
-        assert(initialized, 'cluster must be initialized first');
-        assert(this.isSharded(), 'cluster is not sharded');
-
-        var data = {};
-        var configDB = configServer.getDB('config');
-
-        // We record the contents of the 'lockpings' and 'locks' collections to make it easier to
-        // debug issues with distributed locks in the sharded cluster.
-        // TODO SERVER-68551: remove once 7.0 becomes last-lts
-        data.lockpings = configDB.lockpings.find({ping: {$gte: clusterStartTime}}).toArray();
-
-        // We suppress some fields from the result set to reduce the amount of data recorded.
-        // TODO SERVER-68551: remove once 7.0 becomes last-lts
-        data.locks =
-            configDB.locks.find({when: {$gte: clusterStartTime}}, {process: 0, ts: 0}).toArray();
-
-        return data;
-    };
-
-    this.recordAllConfigServerData = function recordAllConfigServerData() {
-        assert(initialized, 'cluster must be initialized first');
-        assert(this.isSharded(), 'cluster is not sharded');
-
-        var data = {};
-        st._configServers.forEach(config =>
-                                      (data[config.host] = this.recordConfigServerData(config)));
-
-        return data;
     };
 
     this.isRunningWiredTigerLSM = function isRunningWiredTigerLSM() {

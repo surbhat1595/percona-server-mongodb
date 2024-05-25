@@ -548,15 +548,27 @@ public:
         const TransactionOperations& transactionOperations,
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         size_t numberOfPrePostImagesToWrite,
-        Date_t wallClockTime) override {
+        Date_t wallClockTime,
+        OpStateAccumulator* opAccumulator = nullptr) override {
         ReservedTimes times{opCtx};
+        OpStateAccumulator opStateAccumulator;
         for (auto& observer : _observers) {
             observer->onTransactionPrepare(opCtx,
                                            reservedSlots,
                                            transactionOperations,
                                            applyOpsOperationAssignment,
                                            numberOfPrePostImagesToWrite,
-                                           wallClockTime);
+                                           wallClockTime,
+                                           &opStateAccumulator);
+        }
+    }
+
+    void postTransactionPrepare(OperationContext* opCtx,
+                                const std::vector<OplogSlot>& reservedSlots,
+                                const TransactionOperations& transactionOperations) override {
+        ReservedTimes times{opCtx};
+        for (auto& observer : _observers) {
+            observer->postTransactionPrepare(opCtx, reservedSlots, transactionOperations);
         }
     }
 

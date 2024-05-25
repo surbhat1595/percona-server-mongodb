@@ -81,11 +81,20 @@ public:
     using Accumulators = std::vector<boost::intrusive_ptr<AccumulatorState>>;
     using GroupsMap = ValueUnorderedMap<Accumulators>;
 
-    Value serialize(SerializationOptions opts = SerializationOptions()) const final override;
+    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final override;
     boost::intrusive_ptr<DocumentSource> optimize() final;
     DepsTracker::State getDependencies(DepsTracker* deps) const final;
     void addVariableRefs(std::set<Variables::Id>* refs) const final;
     GetModPathsReturn getModifiedPaths() const final;
+
+    /**
+     * Returns a map with the fieldPath and expression of the _id field for $group.
+     * If _id is a single expression, such as {_id: "$field"}, the function will return {_id:
+     * "$field"}.
+     * If _id is a nested expression, such as  {_id: {c: "$field"}}, the function will
+     * return {_id.c: "$field"}}.
+     * Both maps are the same length, even though the original '_id' fields are different.
+     */
     StringMap<boost::intrusive_ptr<Expression>> getIdFields() const;
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final;
@@ -152,7 +161,23 @@ public:
      * Returns maximum allowed memory footprint.
      */
     size_t getMaxMemoryUsageBytes() const {
-        return _groupProcessor.getMemoryTracker()._maxAllowedMemoryUsageBytes;
+        return _groupProcessor.getMemoryTracker().maxAllowedMemoryUsageBytes();
+    }
+
+    /**
+     * Returns a vector of the _id field names. If the id field is a single expression, this will
+     * return an empty vector.
+     */
+    const std::vector<std::string>& getIdFieldNames() const {
+        return _groupProcessor.getIdFieldNames();
+    }
+
+    /**
+     * Returns a vector of the expressions in the _id field. If the id field is a single expression,
+     * this will return a vector with one element.
+     */
+    const std::vector<boost::intrusive_ptr<Expression>>& getIdExpressions() const {
+        return _groupProcessor.getIdExpressions();
     }
 
     bool canRunInParallelBeforeWriteStage(
@@ -178,7 +203,7 @@ public:
 protected:
     DocumentSourceGroupBase(StringData stageName,
                             const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                            boost::optional<size_t> maxMemoryUsageBytes = boost::none);
+                            boost::optional<int64_t> maxMemoryUsageBytes = boost::none);
 
     virtual ~DocumentSourceGroupBase();
 
@@ -188,7 +213,7 @@ protected:
     void doDispose() final;
 
     virtual void serializeAdditionalFields(
-        MutableDocument& out, SerializationOptions opts = SerializationOptions()) const {};
+        MutableDocument& out, const SerializationOptions& opts = SerializationOptions{}) const {};
 
     GroupProcessor _groupProcessor;
 

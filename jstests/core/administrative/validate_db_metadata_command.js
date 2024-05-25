@@ -1,15 +1,13 @@
 /**
  * Tests the validateDBMetaData commands with various input parameters.
- * The test runs commands that are not allowed with security token: validateDBMetadata.
+ *
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: validateDBMetadata.
  *   not_allowed_with_security_token,
  *   no_selinux,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/fixture_helpers.js");  // For FixtureHelpers.
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const dbName = jsTestName();
 
@@ -135,4 +133,3 @@ assert.commandWorked(testDB.runCommand({drop: validatorCollName}));
 
 // Clean up all the data for next run.
 assert.commandWorked(testDB.dropDatabase());
-}());

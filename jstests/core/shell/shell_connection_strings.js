@@ -1,12 +1,11 @@
 // Test mongo shell connect strings.
-// The test runs commands that are not allowed with security token: eval.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: eval.
 //   not_allowed_with_security_token,
 //   uses_multiple_connections,
 //   docker_incompatible,
 // ]
-(function() {
-'use strict';
 
 const mongod = new MongoURI(db.getMongo().host).servers[0];
 const host = mongod.host;
@@ -35,4 +34,3 @@ testConnect(false, `${host}/test`, '--port', port);
 testConnect(false, `mongodb://${host}:${port}/test`, '--port', port);
 testConnect(false, `mongodb://${host}:${port}/test`, '--host', host);
 testConnect(false, `mongodb://${host}:${port}/test`, '--host', host, '--port', port);
-})();

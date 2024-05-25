@@ -156,10 +156,16 @@ std::unique_ptr<TransportLayer> TransportLayerManager::makeAndStartDefaultEgress
 }
 
 std::unique_ptr<TransportLayer> TransportLayerManager::createWithConfig(
-    const ServerGlobalParams* config, ServiceContext* ctx, boost::optional<int> loadBalancerPort) {
+    const ServerGlobalParams* config,
+    ServiceContext* ctx,
+    boost::optional<int> loadBalancerPort,
+    boost::optional<int> routerPort) {
     auto sep = ctx->getServiceEntryPoint();
 
-    transport::AsioTransportLayer::Options opts(config, loadBalancerPort);
+    transport::AsioTransportLayer::Options opts(config);
+    opts.loadBalancerPort = std::move(loadBalancerPort);
+    opts.routerPort = std::move(routerPort);
+
     std::vector<std::unique_ptr<TransportLayer>> retVector;
     retVector.push_back(std::make_unique<transport::AsioTransportLayer>(opts, sep));
     auto egress = retVector[0].get();
@@ -180,17 +186,7 @@ Status TransportLayerManager::rotateCertificates(std::shared_ptr<SSLManagerInter
 
 StatusWith<std::shared_ptr<const transport::SSLConnectionContext>>
 TransportLayerManager::createTransientSSLContext(const TransientSSLParams& transientSSLParams) {
-
-    Status firstError(ErrorCodes::InvalidSSLConfiguration,
-                      "Failure creating transient SSL context");
-    for (auto&& tl : _tls) {
-        auto statusOrContext = tl->createTransientSSLContext(transientSSLParams);
-        if (statusOrContext.isOK()) {
-            return std::move(statusOrContext.getValue());
-        }
-        firstError = statusOrContext.getStatus();
-    }
-    return firstError;
+    return _egressLayer->createTransientSSLContext(transientSSLParams);
 }
 
 #endif

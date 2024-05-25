@@ -61,7 +61,7 @@ SemiFuture<StatsCacheVal> StatsCacheLoaderImpl::getStats(OperationContext* opCtx
 
     std::string statsColl(kStatsPrefix + "." + statsPath.first.coll());
 
-    NamespaceString statsNss(statsPath.first.db(), statsColl);
+    const auto statsNss = NamespaceStringUtil::deserialize(statsPath.first.dbName(), statsColl);
     DBDirectClient client(opCtx);
 
 

@@ -7,9 +7,6 @@
  *   requires_non_retryable_commands,
  * ]
  */
-(function() {
-'use strict';
-
 const validateErrorResponse = function(
     res, db, collectionUUID, expectedCollection, actualCollection) {
     assert.eq(res.db, db);
@@ -31,7 +28,7 @@ const validateErrorResponse = function(
 };
 
 const testCommand = function(cmd, cmdObj) {
-    const testDB = db.getSiblingDB("coll_uuid_index_cmds");
+    const testDB = db.getSiblingDB(jsTestName());
     assert.commandWorked(testDB.dropDatabase());
     const coll = testDB['coll'];
     assert.commandWorked(coll.insert({x: 1, y: 2}));
@@ -104,4 +101,3 @@ const testCommand = function(cmd, cmdObj) {
 
 testCommand("createIndexes", {createIndexes: "", indexes: [{name: "x_1", key: {x: 1}}]});
 testCommand("dropIndexes", {dropIndexes: "", index: {y: 1}});
-})();

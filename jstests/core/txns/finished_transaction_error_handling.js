@@ -1,7 +1,8 @@
 // Test committed and aborted transactions cannot be changed but commitTransaction is retryable.
-// The test runs commands that are not allowed with security token: endSession.
+//
 // @tags: [
-//   not_allowed_with_security_token,
+//  # The test runs commands that are not allowed with security token: endSession.
+//  not_allowed_with_security_token,
 //  uses_transactions,
 //  uses_snapshot_read_concern,
 //  # Retrying an aborted transaction is allowed on shardsvrs.
@@ -9,12 +10,8 @@
 //  # attempt to retry an aborted transaction as mongods do when not running as a shardsvr.
 //  directly_against_shardsvrs_incompatible,
 //]
-(function() {
-"use strict";
-
 // TODO (SERVER-39704): Remove the following load after SERVER-397074 is completed
-// For retryOnceOnTransientOnMongos.
-load('jstests/libs/auto_retry_transaction_in_sharding.js');
+import {retryOnceOnTransientOnMongos} from "jstests/libs/auto_retry_transaction_in_sharding.js";
 
 const dbName = "test";
 const collName = "finished_transaction_error_handling";
@@ -162,4 +159,3 @@ assert.commandFailedWithCode(sessionDb.runCommand({
                              ErrorCodes.ConflictingOperationInProgress);
 
 session.endSession();
-}());

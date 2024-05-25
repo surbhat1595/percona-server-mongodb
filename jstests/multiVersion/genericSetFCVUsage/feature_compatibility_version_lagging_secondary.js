@@ -1,9 +1,6 @@
 // Tests that a primary with upgrade featureCompatibilityVersion cannot connect with a secondary
 // with a lower binary version.
-(function() {
-"use strict";
-
-load("jstests/libs/write_concern_util.js");
+import {restartServerReplication, stopServerReplication} from "jstests/libs/write_concern_util.js";
 
 const latest = "latest";
 
@@ -28,8 +25,8 @@ function runTest(downgradeVersion) {
 
     // Set the featureCompatibilityVersion to the downgrade version so that a downgrade node can
     // join the set.
-    assert.commandWorked(
-        primary.getDB("admin").runCommand({setFeatureCompatibilityVersion: downgradeFCV}));
+    assert.commandWorked(primary.getDB("admin").runCommand(
+        {setFeatureCompatibilityVersion: downgradeFCV, confirm: true}));
 
     // Add a downgrade node to the set.
     let downgradeSecondary = rst.add({binVersion: downgradeVersion, rsConfig: {priority: 0}});
@@ -46,7 +43,8 @@ function runTest(downgradeVersion) {
     // Set the featureCompatibilityVersion to the upgrade version. This will not replicate to
     // the downgrade secondary, but the downgrade secondary will no longer be able to
     // communicate with the rest of the set.
-    assert.commandWorked(primary.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        primary.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
 
     // Shut down the latest version secondary.
     rst.stop(latestSecondary);
@@ -60,4 +58,3 @@ function runTest(downgradeVersion) {
 
 runTest('last-continuous');
 runTest('last-lts');
-})();

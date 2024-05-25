@@ -120,7 +120,7 @@ public:
                     ShardingCatalogClient::kLocalWriteConcern));
             }
 
-            // Since we no write happened on this txnNumber, we need to make a dummy write so that
+            // Since no write happened on this txnNumber, we need to make a dummy write so that
             // secondaries can be aware of this txn.
             DBDirectClient client(opCtx);
             client.update(NamespaceString::kServerConfigurationNamespace,
@@ -171,7 +171,8 @@ public:
     bool supportsRetryableWrite() const final {
         return true;
     }
-} configsvrRemoveChunksCmd;
+};
+MONGO_REGISTER_COMMAND(ConfigsvrRemoveChunksCommand);
 
 }  // namespace
 }  // namespace mongo

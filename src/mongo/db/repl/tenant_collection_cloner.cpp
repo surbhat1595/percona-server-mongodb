@@ -140,7 +140,7 @@ TenantCollectionCloner::TenantCollectionCloner(const NamespaceString& sourceNss,
                                    << " tenant collection clone progress"),
       _tenantId(tenantId) {
     invariant(sourceNss.isValid());
-    invariant(ClonerUtils::isNamespaceForTenant(sourceNss, tenantId));
+    invariant(sourceNss.isNamespaceForTenant(tenantId));
     invariant(collectionOptions.uuid);
     _sourceDbAndUuid = NamespaceStringOrUUID(sourceNss.dbName(), *collectionOptions.uuid);
     _stats.ns = NamespaceStringUtil::serialize(sourceNss);
@@ -339,11 +339,11 @@ BaseCloner::AfterStageBehavior TenantCollectionCloner::createCollectionStage() {
         uassert(5342500,
                 str::stream() << "Collection uuid" << getSourceUuid()
                               << " already exists but does not belong to tenant",
-                ClonerUtils::isNamespaceForTenant(collection->ns(), _tenantId));
+                collection->ns().isNamespaceForTenant(_tenantId));
         uassert(5342501,
                 str::stream() << "Collection uuid" << getSourceUuid()
                               << " already exists but does not belong to the same database",
-                collection->ns().db() == _sourceNss.db());
+                collection->ns().isEqualDb(_sourceNss));
         uassert(ErrorCodes::NamespaceExists,
                 str::stream() << "Tenant '" << _tenantId << "': collection '"
                               << collection->ns().toStringForErrorMsg()

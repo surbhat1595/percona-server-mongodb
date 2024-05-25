@@ -1,9 +1,11 @@
 // Test transactions including find-and-modify
-// The test runs commands that are not allowed with security token: endSession.
+//
 // @tags: [
-//   not_allowed_with_security_token,assumes_unsharded_collection, uses_transactions]
-(function() {
-"use strict";
+//   # The test runs commands that are not allowed with security token: endSession.
+//   not_allowed_with_security_token,
+//   assumes_unsharded_collection,
+//   uses_transactions
+// ]
 
 const dbName = "test";
 const collName = "find_and_modify_in_transaction";
@@ -150,4 +152,3 @@ assert.sameMembers(docs, [newdoc]);
 // Commit the transaction.
 assert.commandWorked(session.commitTransaction_forTesting());
 session.endSession();
-}());

@@ -1,13 +1,14 @@
 // Test profiling for commands in multi-document transactions.
-// The test runs commands that are not allowed with security token: endSession, setProfilingLevel.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: endSession,
+//   # setProfilingLevel.
 //   not_allowed_with_security_token,
 //   uses_transactions,
 //   requires_profiling,
 // ]
-(function() {
-"use strict";
-load("jstests/libs/profiler.js");  // For getLatestProfilerEntry.
+
+import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 
 const dbName = "test";
 const collName = "transactions_profiling";
@@ -235,4 +236,3 @@ assert.eq(profileObj.errCode, ErrorCodes.WriteConflict, tojson(profileObj));
 assert.commandFailedWithCode(session.abortTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
 
 session.endSession();
-}());

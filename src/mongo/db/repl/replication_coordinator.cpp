@@ -73,7 +73,7 @@ void ReplicationCoordinator::set(ServiceContext* service,
 
 bool ReplicationCoordinator::isOplogDisabledFor(OperationContext* opCtx,
                                                 const NamespaceString& nss) const {
-    if (getReplicationMode() == ReplicationCoordinator::modeNone) {
+    if (!getSettings().isReplSet()) {
         return true;
     }
 
@@ -91,11 +91,7 @@ bool ReplicationCoordinator::isOplogDisabledFor(OperationContext* opCtx,
 }
 
 bool ReplicationCoordinator::isOplogDisabledForNS(const NamespaceString& nss) {
-    if (nss.isLocalDB()) {
-        return true;
-    }
-
-    if (nss.isSystemDotProfile()) {
+    if (!nss.isReplicated()) {
         return true;
     }
 

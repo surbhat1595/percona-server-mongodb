@@ -90,8 +90,8 @@ void FallbackOpObserver::onInserts(OperationContext* opCtx,
                     opCtx,
                     NamespaceStringUtil::deserialize(nss.dbName().tenantId(),
                                                      it->doc.getStringField("_id")),
-                    NamespaceStringUtil::parseNamespaceFromDoc(nss.dbName(),
-                                                               it->doc.getStringField("viewOn")),
+                    NamespaceStringUtil::deserialize(nss.dbName(),
+                                                     it->doc.getStringField("viewOn")),
                     BSONArray{it->doc.getObjectField("pipeline")},
                     view_catalog_helpers::validatePipeline,
                     it->doc.getObjectField("collation"),
@@ -184,7 +184,7 @@ void FallbackOpObserver::onDelete(OperationContext* opCtx,
 }
 
 void FallbackOpObserver::onDropDatabase(OperationContext* opCtx, const DatabaseName& dbName) {
-    if (dbName.db() == NamespaceString::kSessionTransactionsTableNamespace.db()) {
+    if (dbName == NamespaceString::kSessionTransactionsTableNamespace.dbName()) {
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
         mongoDSessionCatalog->invalidateAllSessions(opCtx);
     }

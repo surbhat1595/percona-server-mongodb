@@ -110,7 +110,7 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContextWithDefaultsForTarg
  */
 std::vector<AsyncRequestsSender::Response> gatherResponses(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     const ReadPreferenceSetting& readPref,
     Shard::RetryPolicy retryPolicy,
     const std::vector<AsyncRequestsSender::Request>& requests);
@@ -177,7 +177,28 @@ BSONObj applyReadWriteConcern(OperationContext* opCtx,
  */
 std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetAllShards(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
+    const BSONObj& cmdObj,
+    const ReadPreferenceSetting& readPref,
+    Shard::RetryPolicy retryPolicy);
+
+/**
+ * Utility for dispatching unversioned commands to a dedicated config server if it exists and all
+ * shards in a cluster.
+ *
+ * Returns a non-OK status if a failure occurs on *this* node during execution. Otherwise, returns
+ * success and a list of responses from the config server and shards (including errors from the
+ * config server or shards or errors reaching the config server or shards).
+ *
+ * Note, if this mongos has not refreshed its shard list since
+ * 1) a shard has been *added* through a different mongos, a request will not be sent to the added
+ *    shard
+ * 2) a shard has been *removed* through a different mongos, this function will return a
+ *    ShardNotFound error status.
+ */
+std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetConfigServerAndShards(
+    OperationContext* opCtx,
+    const DatabaseName& dbName,
     const BSONObj& cmdObj,
     const ReadPreferenceSetting& readPref,
     Shard::RetryPolicy retryPolicy);
@@ -194,7 +215,7 @@ std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetAllShar
  */
 [[nodiscard]] std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRoutingTable(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     const NamespaceString& nss,
     const CollectionRoutingInfo& cri,
     const BSONObj& cmdObj,
@@ -211,7 +232,7 @@ std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetAllShar
  */
 [[nodiscard]] std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRoutingTable(
     boost::intrusive_ptr<ExpressionContext> expCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     const NamespaceString& nss,
     const CollectionRoutingInfo& cri,
     const BSONObj& cmdObj,
@@ -232,7 +253,7 @@ std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetAllShar
 std::vector<AsyncRequestsSender::Response>
 scatterGatherVersionedTargetByRoutingTableNoThrowOnStaleShardVersionErrors(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     const NamespaceString& nss,
     const CollectionRoutingInfo& cri,
     const std::set<ShardId>& shardsToSkip,
@@ -250,7 +271,7 @@ scatterGatherVersionedTargetByRoutingTableNoThrowOnStaleShardVersionErrors(
  */
 AsyncRequestsSender::Response executeCommandAgainstDatabasePrimary(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     const CachedDatabaseInfo& dbInfo,
     const BSONObj& cmdObj,
     const ReadPreferenceSetting& readPref,
@@ -292,7 +313,8 @@ RawResponsesResult appendRawResponses(
     OperationContext* opCtx,
     std::string* errmsg,
     BSONObjBuilder* output,
-    const std::vector<AsyncRequestsSender::Response>& shardResponses);
+    const std::vector<AsyncRequestsSender::Response>& shardResponses,
+    bool appendWriteConcernError = true);
 
 /**
  * Extracts the query from a query-embedding command ('query' or 'q' fields). If the command does

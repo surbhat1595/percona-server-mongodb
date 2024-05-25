@@ -1,13 +1,13 @@
 /**
  * Control the config file expansion mock web server.
  */
+import {getPython3Binary} from "jstests/libs/python.js";
 
-class ConfigExpandRestServer {
+export class ConfigExpandRestServer {
     /**
      * Create a new webserver.
      */
     constructor() {
-        load('jstests/libs/python.js');
         this.python = getPython3Binary();
         print("Using python interpreter: " + this.python);
 
@@ -82,15 +82,9 @@ class ConfigExpandRestServer {
     }
 }
 
-function makeReflectionCmd(arg, opts = {}) {
+export function makeReflectionCmd(arg, opts = {}) {
     return function(arg, opts) {
-        'use strict';
-
-        load('jstests/libs/python.js');
         let cmd = getPython3Binary();
-        if (_isWindows()) {
-            cmd = '"' + cmd + '"';
-        }
         cmd += ' jstests/noPassthrough/libs/configExpand/reflect.py';
 
         if (opts.sleep && (opts.sleep > 0)) {
@@ -108,7 +102,7 @@ function makeReflectionCmd(arg, opts = {}) {
     }.call(this, arg, opts);
 }
 
-function jsToYaml(config, toplevel = true) {
+export function jsToYaml(config, toplevel = true) {
     if (typeof config === 'object') {
         if (Array.isArray(config)) {
             let delim = '';
@@ -139,7 +133,7 @@ function jsToYaml(config, toplevel = true) {
     }
 }
 
-function configExpandSuccess(config, test = null, opts = {}) {
+export function configExpandSuccess(config, test = null, opts = {}) {
     const configFile = MongoRunner.dataPath + '/configExpand.conf';
     writeFile(configFile, jsToYaml(config));
 
@@ -168,7 +162,7 @@ function configExpandSuccess(config, test = null, opts = {}) {
     MongoRunner.stopMongod(mongod);
 }
 
-function configExpandFailure(config, test = null, opts = {}) {
+export function configExpandFailure(config, test = null, opts = {}) {
     const configFile = MongoRunner.dataPath + '/configExpand.conf';
     writeFile(configFile, jsToYaml(config));
 

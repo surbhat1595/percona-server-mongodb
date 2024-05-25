@@ -112,11 +112,12 @@
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_request_helper.h"
-#include "mongo/db/query/query_stats.h"
-#include "mongo/db/query/query_stats_aggregate_key_generator.h"
-#include "mongo/db/query/query_stats_key_generator.h"
+#include "mongo/db/query/query_stats/aggregate_key_generator.h"
+#include "mongo/db/query/query_stats/key_generator.h"
+#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/read_concern.h"
 #include "mongo/db/read_write_concern_provenance.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -425,7 +426,7 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
         // If the involved namespace is not in the same database as the aggregation, it must be
         // from a $lookup/$graphLookup into a tenant migration donor's oplog view or from an
         // $out/$merge to a collection in a different database.
-        if (involvedNs.db() != request.getNamespace().db()) {
+        if (!involvedNs.isEqualDb(request.getNamespace())) {
             if (involvedNs == NamespaceString::kTenantMigrationOplogView) {
                 // For tenant migrations, we perform an aggregation on 'config.transactions' but
                 // require a lookup stage involving a view on the 'local' database.
@@ -442,8 +443,8 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
                 // collection name references a view on the aggregation request's database. Note
                 // that the inverse scenario (mistaking a view for a collection) is not an issue
                 // because $merge/$out cannot target a view.
-                auto nssToCheck = NamespaceStringUtil::parseNamespaceFromRequest(
-                    request.getNamespace().dbName(), involvedNs.coll());
+                auto nssToCheck = NamespaceStringUtil::deserialize(request.getNamespace().dbName(),
+                                                                   involvedNs.coll());
                 if (catalog->lookupView(opCtx, nssToCheck)) {
                     auto status = resolveViewDefinition(nssToCheck);
                     if (!status.isOK()) {
@@ -682,7 +683,7 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createLegacyEx
         execs.emplace_back(std::move(attachExecutorCallback.second));
     } else {
         getSearchHelpers(expCtx->opCtx->getServiceContext())
-            ->injectSearchShardFiltererIfNeeded(pipeline.get());
+            ->prepareSearchForTopLevelPipeline(pipeline.get());
         // Complete creation of the initial $cursor stage, if needed.
         PipelineD::attachInnerQueryExecutorToPipeline(collections,
                                                       attachExecutorCallback.first,
@@ -991,11 +992,12 @@ Status runAggregate(OperationContext* opCtx,
                     !request.getCollectionUUID());
 
             // If this is a collectionless agg with no foreign namespaces, don't acquire any locks.
-            statsTracker.emplace(opCtx,
-                                 nss,
-                                 Top::LockType::NotLocked,
-                                 AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-                                 0);
+            statsTracker.emplace(
+                opCtx,
+                nss,
+                Top::LockType::NotLocked,
+                AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nss.dbName()));
             auto [collator, match] = resolveCollator(
                 opCtx, request.getCollation().get_value_or(BSONObj()), CollectionPtr());
             collatorToUse.emplace(std::move(collator));
@@ -1051,6 +1053,14 @@ Status runAggregate(OperationContext* opCtx,
             return std::make_pair(expCtx, std::move(pipeline));
         };
 
+        auto collectionType =
+            ctx ? ctx->getCollectionType() : query_shape::CollectionType::kUnknown;
+        if (liteParsedPipeline.hasChangeStream()) {
+            collectionType = query_shape::CollectionType::kChangeStream;
+        } else if (nss.isCollectionlessAggregateNS()) {
+            collectionType = query_shape::CollectionType::kVirtual;
+        }
+
         // If this is a view, resolve it by finding the underlying collection and stitching view
         // pipelines and this request's pipeline together. We then release our locks before
         // recursively calling runAggregate(), which will re-acquire locks on the underlying
@@ -1081,7 +1091,7 @@ Status runAggregate(OperationContext* opCtx,
                         expCtx,
                         pipelineInvolvedNamespaces,
                         origNss,
-                        ctx->getCollectionType());
+                        collectionType);
                 });
             } catch (const DBException& ex) {
                 if (ex.code() == 6347902) {
@@ -1138,12 +1148,7 @@ Status runAggregate(OperationContext* opCtx,
               ctx->getCollection()->getCollectionOptions().encryptedFieldConfig)) {
             query_stats::registerRequest(opCtx, nss, [&]() {
                 return std::make_unique<query_stats::AggregateKeyGenerator>(
-                    request,
-                    *pipeline,
-                    expCtx,
-                    pipelineInvolvedNamespaces,
-                    nss,
-                    ctx ? ctx->getCollectionType() : query_shape::CollectionType::unknown);
+                    request, *pipeline, expCtx, pipelineInvolvedNamespaces, nss, collectionType);
             });
         }
 
@@ -1220,7 +1225,7 @@ Status runAggregate(OperationContext* opCtx,
             auto maybeExec = getSBEExecutorViaCascadesOptimizer(opCtx,
                                                                 expCtx,
                                                                 nss,
-                                                                collections.getMainCollection(),
+                                                                collections,
                                                                 std::move(queryHints),
                                                                 request.getHint(),
                                                                 pipeline.get());
@@ -1230,12 +1235,11 @@ Status runAggregate(OperationContext* opCtx,
             } else {
                 // If we had an optimization failure, only error if we're not in tryBonsai.
                 bonsaiExecSuccess = false;
-                const auto queryControl =
-                    ServerParameterSet::getNodeParameterSet()->get<QueryFrameworkControl>(
-                        "internalQueryFrameworkControl");
+                auto queryControl = QueryKnobConfiguration::decoration(opCtx)
+                                        .getInternalQueryFrameworkControlForOp();
                 tassert(7319401,
                         "Optimization failed either without tryBonsai set, or without a hint.",
-                        queryControl->_data.get() == QueryFrameworkControlEnum::kTryBonsai &&
+                        queryControl == QueryFrameworkControlEnum::kTryBonsai &&
                             request.getHint() && !request.getHint()->isEmpty() &&
                             !fastIndexNullHandling);
             }
@@ -1281,6 +1285,7 @@ Status runAggregate(OperationContext* opCtx,
         }
     });
     for (auto&& exec : execs) {
+        // TODO SERVER-79373: Do not create a cursor if results can fit in a single batch.
         ClientCursorParams cursorParams(
             std::move(exec),
             origNss,

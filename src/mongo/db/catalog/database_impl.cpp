@@ -168,7 +168,7 @@ static const BSONObj kColumnStoreSpec = BSON("name"
 }  // namespace
 
 Status DatabaseImpl::validateDBName(const DatabaseName& dbName) {
-    const auto dbname = DatabaseNameUtil::serializeForCatalog(dbName);
+    const auto dbname = dbName.serializeWithoutTenantPrefix_UNSAFE();
     if (dbname.size() <= 0)
         return Status(ErrorCodes::BadValue, "db name is empty");
 
@@ -690,7 +690,7 @@ Status DatabaseImpl::createView(OperationContext* opCtx,
 
     invariant(options.isView());
 
-    NamespaceString viewOnNss(viewName.db(), options.viewOn);
+    const auto viewOnNss = NamespaceStringUtil::deserialize(viewName.dbName(), options.viewOn);
     _checkCanCreateCollection(opCtx, viewName, options);
 
     BSONArray pipeline(options.pipeline);
@@ -766,8 +766,7 @@ Collection* DatabaseImpl::_createCollection(
 
     auto coordinator = repl::ReplicationCoordinator::get(opCtx);
     bool canAcceptWrites =
-        (coordinator->getReplicationMode() != repl::ReplicationCoordinator::modeReplSet) ||
-        coordinator->canAcceptWritesFor(opCtx, nss);
+        (!coordinator->getSettings().isReplSet()) || coordinator->canAcceptWritesFor(opCtx, nss);
 
     CollectionOptions optionsWithUUID = options;
     bool generatedUUID = false;

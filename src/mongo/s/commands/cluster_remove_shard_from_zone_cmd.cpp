@@ -135,14 +135,14 @@ public:
         auto cmdResponseStatus = uassertStatusOK(
             configShard->runCommandWithFixedRetryAttempts(opCtx,
                                                           kPrimaryOnlyReadPreference,
-                                                          "admin",
+                                                          DatabaseName::kAdmin,
                                                           cmdBuilder.obj(),
                                                           Shard::RetryPolicy::kIdempotent));
         uassertStatusOK(cmdResponseStatus.commandStatus);
         return true;
     }
-
-} removeShardFromZoneCmd;
+};
+MONGO_REGISTER_COMMAND(RemoveShardFromZoneCmd);
 
 }  // namespace
 }  // namespace mongo

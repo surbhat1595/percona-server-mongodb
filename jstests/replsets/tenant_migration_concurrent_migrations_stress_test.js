@@ -12,14 +12,14 @@
  *   # The currentOp output field 'lastDurableState' was changed from an enum to a string.
  *   requires_fcv_70,
  *   serverless,
+ *   requires_fcv_71,
  * ]
  */
 
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {makeTenantDB} from "jstests/replsets/libs/tenant_migration_util.js";
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/uuid_util.js");  // for 'extractUUIDFromObject'
-load("jstests/replsets/rslib.js");  // for 'setLogVerbosity'
+import {setLogVerbosity} from "jstests/replsets/rslib.js";
 
 const kMigrationsCount = 300;
 const kConcurrentMigrationsCount = 120;

@@ -1,14 +1,14 @@
 /**
  * Test that we can't call prepareTransaction if there isn't an active transaction on the session.
  *
- * The test runs commands that are not allowed with security token: endSession, prepareTransaction.
  * @tags: [
- *   not_allowed_with_security_token,uses_transactions, uses_prepare_transaction]
+ *   # The test runs commands that are not allowed with security token: endSession,
+ *   # prepareTransaction.
+ *   not_allowed_with_security_token,
+ *   uses_transactions,
+ *   uses_prepare_transaction
+ * ]
  */
-
-(function() {
-"use strict";
-load("jstests/core/txns/libs/prepare_helpers.js");
 
 const dbName = "test";
 const collName = "ensure_active_txn_for_prepare_transaction";
@@ -51,4 +51,3 @@ assert.commandFailedWithCode(
     ErrorCodes.TransactionCommitted);
 
 session.endSession();
-}());

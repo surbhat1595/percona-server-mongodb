@@ -4,13 +4,13 @@
  *   # This test depends on certain writes ending up in the same bucket. Stepdowns may result in
  *   # writes splitting between two primaries, and thus different buckets.
  *   does_not_support_stepdowns,
+ *   tenant_migration_incompatible,
  *   requires_collstats,
  *   # We need a timeseries collection.
  *   requires_timeseries,
  * ]
  */
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 TimeseriesTest.run((insert) => {
     const collNamePrefix = 'timeseries_bucket_limit_count_';
@@ -68,15 +68,9 @@ TimeseriesTest.run((insert) => {
         assert.eq(bucketMaxCount - 1,
                   bucketDocs[0].control.max.x,
                   'invalid control.max for x in first bucket: ' + tojson(bucketDocs));
-        if (FeatureFlagUtil.isPresentAndEnabled(db, "TimeseriesAlwaysUseCompressedBuckets")) {
-            assert.eq(1,
-                      bucketDocs[0].control.version,
-                      'unexpected control.version in first bucket: ' + tojson(bucketDocs));
-        } else {
-            assert.eq(2,
-                      bucketDocs[0].control.version,
-                      'unexpected control.version in first bucket: ' + tojson(bucketDocs));
-        }
+        assert.eq(TimeseriesTest.BucketVersion.kCompressed,
+                  bucketDocs[0].control.version,
+                  'unexpected control.version in first bucket: ' + tojson(bucketDocs));
         assert(!bucketDocs[0].control.hasOwnProperty("closed"),
                'unexpected control.closed in first bucket: ' + tojson(bucketDocs));
 
@@ -93,9 +87,15 @@ TimeseriesTest.run((insert) => {
         assert.eq(numDocs - 1,
                   bucketDocs[1].control.max.x,
                   'invalid control.max for x in second bucket: ' + tojson(bucketDocs));
-        assert.eq(1,
-                  bucketDocs[1].control.version,
-                  'unexpected control.version in second bucket: ' + tojson(bucketDocs));
+        if (TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(db)) {
+            assert.eq(TimeseriesTest.BucketVersion.kCompressed,
+                      bucketDocs[1].control.version,
+                      'unexpected control.version in second bucket: ' + tojson(bucketDocs));
+        } else {
+            assert.eq(TimeseriesTest.BucketVersion.kUncompressed,
+                      bucketDocs[1].control.version,
+                      'unexpected control.version in second bucket: ' + tojson(bucketDocs));
+        }
         assert(!bucketDocs[1].control.hasOwnProperty("closed"),
                'unexpected control.closed in second bucket: ' + tojson(bucketDocs));
     };

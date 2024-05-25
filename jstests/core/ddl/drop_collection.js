@@ -1,7 +1,8 @@
 /**
  * Basic test for the drop collection command
- * The test runs commands that are not allowed with security token: isbdgrid.
+ *
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: isbdgrid.
  *   not_allowed_with_security_token,
  *   # Cannot implicitly shard accessed collections because of collection
  *   # existing when none expected.
@@ -9,9 +10,6 @@
  *   no_selinux,
  * ]
  */
-
-(function() {
-"use strict";
 
 function assertCollectionDropped(ns) {
     const coll = db[ns];
@@ -59,4 +57,3 @@ jsTest.log("Drop collection with multiple indexes.");
     assert.commandWorked(db.runCommand({drop: coll.getName()}));
     assertCollectionDropped(coll.getFullName());
 }
-})();

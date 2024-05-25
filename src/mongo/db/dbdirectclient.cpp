@@ -122,7 +122,7 @@ int DBDirectClient::getMaxWireVersion() {
 
 bool DBDirectClient::isReplicaSetMember() const {
     auto const* replCoord = repl::ReplicationCoordinator::get(_opCtx);
-    return replCoord && replCoord->isReplEnabled();
+    return replCoord && replCoord->getSettings().isReplSet();
 }
 
 ConnectionString::ConnectionType DBDirectClient::type() const {
@@ -136,6 +136,7 @@ double DBDirectClient::getSoTimeout() const {
 namespace {
 DbResponse loopbackBuildResponse(OperationContext* const opCtx, Message& toSend) {
     DirectClientScope directClientScope(opCtx);
+    StashTransactionResourcesForDBDirect stashedTxnResources(opCtx);
 
     CurOp curOp;
     curOp.push(opCtx);

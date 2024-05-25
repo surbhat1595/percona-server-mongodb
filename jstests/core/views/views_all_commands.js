@@ -1,6 +1,6 @@
-// The test runs a lot of commands that are not allowed with security token: addShard,
-// addShardToZone, appendOplogNote, applyOps, and so on.
 // @tags: [
+//   # The test runs a lot of commands that are not allowed with security token: addShard,
+//   # addShardToZone, appendOplogNote, applyOps, and so on.
 //   not_allowed_with_security_token,
 //   assumes_unsharded_collection,
 //   assumes_superuser_permissions,
@@ -72,11 +72,12 @@
  *      If true, do not run this command on a standalone mongod.
  */
 
-(function() {
-"use strict";
-
-load('jstests/sharding/libs/last_lts_mongod_commands.js');
-load('jstests/sharding/libs/last_lts_mongos_commands.js');
+import {
+    commandsRemovedFromMongodSinceLastLTS
+} from "jstests/sharding/libs/last_lts_mongod_commands.js";
+import {
+    commandsRemovedFromMongosSinceLastLTS
+} from "jstests/sharding/libs/last_lts_mongos_commands.js";
 
 // Pre-written reasons for skipping a test.
 const isAnInternalCommand = "internal command";
@@ -107,6 +108,7 @@ let viewsCommandTests = {
     _configsvrCommitMergeAllChunksOnShard: {skip: isAnInternalCommand},
     _configsvrCommitMovePrimary:
         {skip: isAnInternalCommand},  // Can be removed once 6.0 is last LTS
+    _configsvrCommitRefineCollectionShardKey: {skip: isAnInternalCommand},
     _configsvrCommitReshardCollection: {skip: isAnInternalCommand},
     _configsvrConfigureCollectionBalancing: {skip: isAnInternalCommand},
     _configsvrCreateDatabase: {skip: isAnInternalCommand},
@@ -147,9 +149,6 @@ let viewsCommandTests = {
     _migrateClone: {skip: isAnInternalCommand},
     _mongotConnPoolStats: {skip: isAnInternalCommand},
     _movePrimary: {skip: isAnInternalCommand},
-    _movePrimaryRecipientAbortMigration: {skip: isAnInternalCommand},
-    _movePrimaryRecipientForgetMigration: {skip: isAnInternalCommand},
-    _movePrimaryRecipientSyncData: {skip: isAnInternalCommand},
     _recvChunkAbort: {skip: isAnInternalCommand},
     _recvChunkCommit: {skip: isAnInternalCommand},
     _recvChunkReleaseCritSec: {skip: isAnInternalCommand},
@@ -219,6 +218,7 @@ let viewsCommandTests = {
     streams_getMetrics: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
+    abortMoveCollection: {skip: isUnrelated},
     abortReshardCollection: {skip: isUnrelated},
     abortTransaction: {skip: isUnrelated},
     addShard: {skip: isUnrelated},
@@ -332,8 +332,8 @@ let viewsCommandTests = {
             assert.commandWorked(conn.runCommand({dropAllRolesFromDatabase: 1}));
         }
     },
-    createSearchIndex: {skip: "present in v6.3 but renamed to createSearchIndexes in v7.0"},
     createSearchIndexes: {skip: isUnrelated},
+    createUnsplittableCollection: {skip: isUnrelated},
     createUser: {
         command: {createUser: "testuser", pwd: "testpass", roles: []},
         setup: function(conn) {
@@ -425,7 +425,6 @@ let viewsCommandTests = {
     getCmdLineOpts: {skip: isUnrelated},
     getDefaultRWConcern: {skip: isUnrelated},
     getDiagnosticData: {skip: isUnrelated},
-    getFreeMonitoringStatus: {skip: isUnrelated},
     getLog: {skip: isUnrelated},
     getMore: {
         setup: function(conn) {
@@ -472,7 +471,6 @@ let viewsCommandTests = {
         isAdminCommand: true,
         skipSharded: true,  // mongos is tested in views/views_sharded.js
     },
-    getnonce: {skip: "removed in v6.3"},
     godinsert: {skip: isAnInternalCommand},
     grantPrivilegesToRole: {skip: "tested in auth/commands_user_defined_roles.js"},
     grantRolesToRole: {skip: isUnrelated},
@@ -557,6 +555,17 @@ let viewsCommandTests = {
         isAdminCommand: true,
         expectFailure: true,
         expectedErrorCode: ErrorCodes.NamespaceNotSharded,
+    },
+    moveCollection: {
+        // TODO(SERVER-80156): update test case to succeed on unsharded collections
+        command: {moveCollection: "test.view", toShard: "move_collection-rs"},
+        setup: function(conn) {
+            assert.commandWorked(conn.adminCommand({enableSharding: "test"}));
+        },
+        expectedErrorCode: ErrorCodes.NamespaceNotSharded,
+        skipStandalone: true,
+        expectFailure: true,
+        isAdminCommand: true,
     },
     movePrimary: {skip: "Tested in sharding/movePrimary1.js"},
     moveRange: {skip: isUnrelated},
@@ -672,7 +681,6 @@ let viewsCommandTests = {
     setCommittedSnapshot: {skip: isAnInternalCommand},
     setDefaultRWConcern: {skip: isUnrelated},
     setFeatureCompatibilityVersion: {skip: isUnrelated},
-    setFreeMonitoring: {skip: isUnrelated},
     setProfilingFilterGlobally: {skip: isUnrelated},
     setParameter: {skip: isUnrelated},
     setShardVersion: {skip: isUnrelated},
@@ -734,9 +742,20 @@ let viewsCommandTests = {
     testReshardCloneCollection: {skip: isAnInternalCommand},
     testVersion2: {skip: isAnInternalCommand},
     testVersions1And2: {skip: isAnInternalCommand},
+    timeseriesCatalogBucketParamsChanged: {skip: isAnInternalCommand},
     top: {skip: "tested in views/views_stats.js"},
     transitionFromDedicatedConfigServer: {skip: isUnrelated},
     transitionToDedicatedConfigServer: {skip: isUnrelated},
+    unshardCollection: {
+        command: {unshardCollection: "test.view", toShard: "unshard_collection-rs"},
+        setup: function(conn) {
+            assert.commandWorked(conn.adminCommand({enableSharding: "test"}));
+        },
+        expectedErrorCode: ErrorCodes.NamespaceNotSharded,
+        skipStandalone: true,
+        expectFailure: true,
+        isAdminCommand: true,
+    },
     update: {command: {update: "view", updates: [{q: {x: 1}, u: {x: 2}}]}, expectFailure: true},
     updateRole: {
         command: {
@@ -870,4 +889,3 @@ for (let command of commands) {
             subtest.teardown(dbHandle);
     }
 }
-}());

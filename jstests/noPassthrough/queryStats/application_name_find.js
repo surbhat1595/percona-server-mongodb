@@ -1,14 +1,10 @@
 /**
  * Test that applicationName and namespace appear in queryStats for the find command.
- * @tags: [featureFlagQueryStats]
+ * @tags: [requires_fcv_71]
  */
-load("jstests/libs/query_stats_utils.js");
-(function() {
-"use strict";
+import {getQueryStats, getQueryStatsFindCmd} from "jstests/libs/query_stats_utils.js";
 
 const kApplicationName = "MongoDB Shell";
-const kHashedCollName = "w6Ax20mVkbJu4wQWAMjL8Sl+DfXAr2Zqdc3kJRB7Oo0=";
-const kHashedFieldName = "lU7Z0mLRPRUL+RfAD5jhYPRRpXBsZBxS/20EzDwfOG4=";
 
 // Turn on the collecting of queryStats metrics.
 let options = {
@@ -36,4 +32,3 @@ assert.eq(1, queryStats.length, queryStats);
 assert.eq(kApplicationName, queryStats[0].key.client.application.name, queryStats);
 
 MongoRunner.stopMongod(conn);
-}());

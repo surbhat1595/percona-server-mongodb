@@ -1,5 +1,4 @@
-(function() {
-'use strict';
+import {getPython3Binary} from "jstests/libs/python.js";
 
 const rst = new ReplSetTest({nodes: 2});
 rst.startSet();
@@ -10,7 +9,7 @@ function start() {
     // because when we pass --taskId into resmoke it thinks that it is being ran in evergreen
     // and cannot normally find an evergreen task associated with
     // buildscripts/tests/resmoke_end2end/suites/resmoke_selftest_nested_timeout.yml
-    const resmokeCmd = 'python3 buildscripts/resmoke.py run ' +
+    const resmokeCmd = getPython3Binary() + ' buildscripts/resmoke.py run ' +
         '--storageEngineCacheSizeGB=1 --dbpathPrefix=/data/db/selftest_inner ' +
         '--internalParam=test_archival --taskId=123 ' +
         '--originSuite=resmoke_end2end_tests ' +
@@ -30,4 +29,3 @@ while (true) {
     print("looping");
     sleep(1000);
 }
-})();

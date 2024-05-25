@@ -1,11 +1,11 @@
-const kShellApplicationName = "MongoDB Shell";
-const kDefaultQueryStatsHmacKey = BinData(0, "MjM0NTY3ODkxMDExMTIxMzE0MTUxNjE3MTgxOTIwMjE=");
+export const kShellApplicationName = "MongoDB Shell";
+export const kDefaultQueryStatsHmacKey = BinData(8, "MjM0NTY3ODkxMDExMTIxMzE0MTUxNjE3MTgxOTIwMjE=");
 
 /**
  * Utility for checking that the aggregated queryStats metrics are logical (follows sum >= max >=
  * min, and sum = max = min if only one execution).
  */
-function verifyMetrics(batch) {
+export function verifyMetrics(batch) {
     batch.forEach(element => {
         if (element.metrics.execCount === 1) {
             for (const [metricName, summaryValues] of Object.entries(element.metrics)) {
@@ -48,7 +48,7 @@ function verifyMetrics(batch) {
  *  match - extraMatch - optional argument that can be used to filter the pipeline
  * }
  */
-function getQueryStats(conn, options = {
+export function getQueryStats(conn, options = {
     collName: ""
 }) {
     let match = {"key.client.application.name": kShellApplicationName, ...options.extraMatch};
@@ -77,7 +77,7 @@ function getQueryStats(conn, options = {
  *  {boolean} transformIdentifiers - whether to include transform identifiers
  * }
  */
-function getQueryStatsFindCmd(conn, options = {
+export function getQueryStatsFindCmd(conn, options = {
     collName: "",
     transformIdentifiers: false,
     hmacKey: kDefaultQueryStatsHmacKey
@@ -129,7 +129,7 @@ function getQueryStatsFindCmd(conn, options = {
  *  {boolean} transformIdentifiers - whether to include transform identifiers
  * }
  */
-function getQueryStatsAggCmd(conn, options = {
+export function getQueryStatsAggCmd(conn, options = {
     transformIdentifiers: false,
     hmacKey: kDefaultQueryStatsHmacKey
 }) {
@@ -177,7 +177,7 @@ function getQueryStatsAggCmd(conn, options = {
     return result.cursor.firstBatch;
 }
 
-function confirmAllExpectedFieldsPresent(expectedKey, resultingKey) {
+export function confirmAllExpectedFieldsPresent(expectedKey, resultingKey) {
     let fieldsCounter = 0;
     for (const field in resultingKey) {
         fieldsCounter++;
@@ -199,10 +199,73 @@ function confirmAllExpectedFieldsPresent(expectedKey, resultingKey) {
     assert.eq(fieldsCounter, Object.keys(expectedKey).length, resultingKey);
 }
 
-function asFieldPath(str) {
+export function assertExpectedResults(results,
+                                      expectedQueryStatsKey,
+                                      expectedExecCount,
+                                      expectedDocsReturnedSum,
+                                      expectedDocsReturnedMax,
+                                      expectedDocsReturnedMin,
+                                      expectedDocsReturnedSumOfSq,
+                                      getMores) {
+    const {key, metrics} = results;
+    confirmAllExpectedFieldsPresent(expectedQueryStatsKey, key);
+    assert.eq(expectedExecCount, metrics.execCount);
+    assert.docEq({
+        sum: NumberLong(expectedDocsReturnedSum),
+        max: NumberLong(expectedDocsReturnedMax),
+        min: NumberLong(expectedDocsReturnedMin),
+        sumOfSquares: NumberLong(expectedDocsReturnedSumOfSq)
+    },
+                 metrics.docsReturned);
+
+    const {
+        firstSeenTimestamp,
+        latestSeenTimestamp,
+        lastExecutionMicros,
+        totalExecMicros,
+        firstResponseExecMicros
+    } = metrics;
+
+    // The tests can't predict exact timings, so just assert these three fields have been set (are
+    // non-zero).
+    assert.neq(lastExecutionMicros, NumberLong(0));
+    assert.neq(firstSeenTimestamp.getTime(), 0);
+    assert.neq(latestSeenTimestamp.getTime(), 0);
+
+    const distributionFields = ['sum', 'max', 'min', 'sumOfSquares'];
+    for (const field of distributionFields) {
+        assert.neq(totalExecMicros[field], NumberLong(0));
+        assert.neq(firstResponseExecMicros[field], NumberLong(0));
+        if (getMores) {
+            // If there are getMore calls, totalExecMicros fields should be greater than or equal to
+            // firstResponseExecMicros.
+            if (field == 'min' || field == 'max') {
+                // In the case that we've executed multiple queries with the same shape, it is
+                // possible for the min or max to be equal.
+                assert.gte(totalExecMicros[field], firstResponseExecMicros[field]);
+            } else {
+                assert.gt(totalExecMicros[field], firstResponseExecMicros[field]);
+            }
+        } else {
+            // If there are no getMore calls, totalExecMicros fields should be equal to
+            // firstResponseExecMicros.
+            assert.eq(totalExecMicros[field], firstResponseExecMicros[field]);
+        }
+    }
+}
+
+export function asFieldPath(str) {
     return "$" + str;
 }
 
-function asVarRef(str) {
+export function asVarRef(str) {
     return "$$" + str;
+}
+
+export function resetQueryStatsStore(conn, queryStatsStoreSize) {
+    // Set the cache size to 0MB to clear the queryStats store, and then reset to
+    // queryStatsStoreSize.
+    assert.commandWorked(conn.adminCommand({setParameter: 1, internalQueryStatsCacheSize: "0MB"}));
+    assert.commandWorked(
+        conn.adminCommand({setParameter: 1, internalQueryStatsCacheSize: queryStatsStoreSize}));
 }

@@ -7,16 +7,16 @@
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   serverless,
+ *   requires_fcv_71,
  * ]
  */
 
+import {verifyGetDiagnosticData} from "jstests/libs/ftdc.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {
     makeX509OptionsForTest,
 } from "jstests/replsets/libs/tenant_migration_util.js";
-
-load("jstests/libs/ftdc.js");
-load("jstests/libs/uuid_util.js");
 
 // Verify that the server status response has the fields that we expect.
 function verifyServerStatus(conn) {

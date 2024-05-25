@@ -74,7 +74,6 @@ namespace mongo {
 namespace {
 
 StatusWith<BSONObj> analyzeCommandAsAggregationCommand(OperationContext* opCtx,
-                                                       StringData db,
                                                        StringData collection,
                                                        StringData keyPath,
                                                        boost::optional<double> sampleRate,
@@ -234,26 +233,23 @@ public:
                 // We need to perform this operation with internal permissions.
                 const bool wasInternalClient = isInternalClient(opCtx->getClient());
                 if (!wasInternalClient) {
-                    opCtx->getClient()->session()->setTags(transport::Session::kInternalClient);
+                    opCtx->getClient()->setIsInternalClient(true);
                 }
 
                 DBDirectClient client(opCtx);
 
                 // Run Aggregate
                 BSONObj analyzeResult;
-                client.runCommand(nss.dbName(),
-                                  analyzeCommandAsAggregationCommand(opCtx,
-                                                                     nss.db(),
-                                                                     nss.coll(),
-                                                                     key->toString(),
-                                                                     sampleRate,
-                                                                     cmd.getNumberBuckets())
-                                      .getValue(),
-                                  analyzeResult);
+                client.runCommand(
+                    nss.dbName(),
+                    analyzeCommandAsAggregationCommand(
+                        opCtx, nss.coll(), key->toString(), sampleRate, cmd.getNumberBuckets())
+                        .getValue(),
+                    analyzeResult);
 
                 // We must reset the internal flag.
                 if (!wasInternalClient) {
-                    opCtx->getClient()->session()->unsetTags(transport::Session::kInternalClient);
+                    opCtx->getClient()->setIsInternalClient(false);
                 }
 
                 uassertStatusOK(getStatusFromCommandResult(analyzeResult));
@@ -279,7 +275,8 @@ public:
                     authzSession->isAuthorizedForActionsOnNamespace(ns, ActionType::analyze));
         }
     };
-} cmdAnalyze;
+};
+MONGO_REGISTER_COMMAND(CmdAnalyze);
 
 }  // namespace
 }  // namespace mongo

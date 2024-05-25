@@ -1,5 +1,4 @@
-(function() {
-"use strict";
+import "jstests/libs/sbe_assert_error_override.js";
 
 const coll = db[jsTestName()];
 coll.drop();
@@ -260,4 +259,3 @@ for (const test of makeTests()) {
             test.expectedResult);
     }
 }
-})();

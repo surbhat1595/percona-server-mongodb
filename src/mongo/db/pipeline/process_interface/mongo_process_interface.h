@@ -395,8 +395,8 @@ public:
      * shard.
 
      * Performs no further optimization of the pipeline. NamespaceNotFound will be
-     * thrown if ExpressionContext has a UUID and that UUID doesn't exist anymore. That should be
-     * the only case where NamespaceNotFound is returned.
+     * thrown if ExpressionContext has a UUID and that UUID doesn't match the ExpressionContext's
+     * ns. That should be the only case where NamespaceNotFound is returned.
      *
      * This function takes ownership of the 'pipeline' argument as if it were a unique_ptr.
      * Changing it to a unique_ptr introduces a circular dependency on certain platforms where the
@@ -546,13 +546,6 @@ public:
         OperationContext* opCtx,
         const NamespaceString& nss,
         const boost::optional<DatabaseVersion>& dbVersion) = 0;
-
-    /**
-     * Checks if this process is on the primary shard for db specified by the given namespace.
-     * Throws an IllegalOperation exception otherwise. Assumes the operation context has a db
-     * version attached to it for db name specified by the namespace.
-     */
-    virtual void checkOnPrimaryShardForDb(OperationContext* opCtx, const NamespaceString& nss) = 0;
 
     virtual std::unique_ptr<ResourceYielder> getResourceYielder(StringData cmdName) const = 0;
 

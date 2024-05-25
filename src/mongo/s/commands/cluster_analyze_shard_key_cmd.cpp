@@ -163,7 +163,7 @@ public:
                 auto swResponse =
                     shard->runCommandWithFixedRetryAttempts(opCtx,
                                                             request().getReadPreference(),
-                                                            DatabaseName::kAdmin.toString(),
+                                                            DatabaseName::kAdmin,
                                                             versionedCmdObj,
                                                             Shard::RetryPolicy::kIdempotent);
                 auto status = Shard::CommandResponse::getEffectiveStatus(swResponse);
@@ -225,7 +225,8 @@ public:
     std::string help() const override {
         return "Returns metrics for evaluating a shard key for a collection.";
     }
-} analyzeShardKeyCmd;
+};
+MONGO_REGISTER_COMMAND(AnalyzeShardKeyCmd);
 
 }  // namespace
 

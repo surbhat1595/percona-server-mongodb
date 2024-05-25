@@ -289,7 +289,7 @@ public:
                           << " and { repair: true } is not supported.");
         }
         repl::ReplicationCoordinator* replCoord = repl::ReplicationCoordinator::get(opCtx);
-        if (repair && replCoord->isReplEnabled()) {
+        if (repair && replCoord->getSettings().isReplSet()) {
             uasserted(ErrorCodes::InvalidOptions,
                       str::stream()
                           << "Running the validate command with { repair: true } can only be"
@@ -373,7 +373,7 @@ public:
                 case CollectionValidation::ValidateMode::kForegroundFullIndexOnly:
                     // Foreground validation may not repair data while running as a replica set node
                     // because we do not have timestamps that are required to perform writes.
-                    if (replCoord->isReplEnabled()) {
+                    if (replCoord->getSettings().isReplSet()) {
                         return CollectionValidation::RepairMode::kNone;
                     }
                     if (repair) {
@@ -391,9 +391,19 @@ public:
                 PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
         }
 
+        CollectionValidation::AdditionalOptions additionalOptions;
+        additionalOptions.enforceTimeseriesBucketsAreAlwaysCompressed =
+            cmdObj["enforceTimeseriesBucketsAreAlwaysCompressed"].trueValue();
+
         ValidateResults validateResults;
-        Status status = CollectionValidation::validate(
-            opCtx, nss, mode, repairMode, &validateResults, &result, logDiagnostics);
+        Status status = CollectionValidation::validate(opCtx,
+                                                       nss,
+                                                       mode,
+                                                       repairMode,
+                                                       additionalOptions,
+                                                       &validateResults,
+                                                       &result,
+                                                       logDiagnostics);
         if (!status.isOK()) {
             return CommandHelpers::appendCommandStatusNoThrow(result, status);
         }
@@ -409,6 +419,6 @@ public:
 
         return true;
     }
-
-} validateCmd;
+};
+MONGO_REGISTER_COMMAND(ValidateCmd);
 }  // namespace mongo

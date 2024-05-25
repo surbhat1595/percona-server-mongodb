@@ -111,15 +111,20 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
     const auto shardKeyIdx = findShardKeyPrefixedIndex(
         opCtx, collection.getCollectionPtr(), keyPattern, /*requireSingleKey=*/false);
     if (!shardKeyIdx) {
-        LOGV2_ERROR(
-            23765, "Unable to find shard key index", "keyPattern"_attr = keyPattern, logAttrs(nss));
+        // Do not log that the shard key is missing for hashed shard key patterns.
+        if (!ShardKeyPattern::isHashedPatternEl(keyPattern.firstElement())) {
+            LOGV2_ERROR(23765,
+                        "Unable to find range shard key index",
+                        "keyPattern"_attr = keyPattern,
+                        logAttrs(nss));
 
-        // When a shard key index is not found, the range deleter gets stuck and indefinitely logs
-        // an error message. This sleep is aimed at avoiding logging too aggressively in order to
-        // prevent log files to increase too much in size.
-        opCtx->sleepFor(Seconds(5));
+            // When a shard key index is not found, the range deleter moves the task to the bottom
+            // of the range deletion queue. This sleep is aimed at avoiding logging too aggressively
+            // in order to prevent log files to increase too much in size.
+            opCtx->sleepFor(Seconds(5));
+        }
 
-        uasserted(ErrorCodes::IndexNotFound,
+        iasserted(ErrorCodes::IndexNotFound,
                   str::stream() << "Unable to find shard key index"
                                 << " for " << nss.toStringForErrorMsg() << " and key pattern `"
                                 << keyPattern.toString() << "'");
@@ -168,7 +173,8 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
         hangBeforeDoingDeletion.pauseWhileSet(opCtx);
     }
 
-    int numDeleted = 0;
+    long long bytesDeleted = 0;
+    int numDocsDeleted = 0;
     do {
         BSONObj deletedObj;
 
@@ -203,12 +209,14 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
             break;
         }
 
+        bytesDeleted += deletedObj.objsize();
         invariant(PlanExecutor::ADVANCED == state);
-        ShardingStatistics::get(opCtx).countDocsDeletedByRangeDeleter.addAndFetch(1);
+    } while (++numDocsDeleted < numDocsToRemovePerBatch);
 
-    } while (++numDeleted < numDocsToRemovePerBatch);
+    ShardingStatistics::get(opCtx).countDocsDeletedByRangeDeleter.addAndFetch(numDocsDeleted);
+    ShardingStatistics::get(opCtx).countBytesDeletedByRangeDeleter.addAndFetch(bytesDeleted);
 
-    return numDeleted;
+    return numDocsDeleted;
 }
 
 void ensureRangeDeletionTaskStillExists(OperationContext* opCtx,
@@ -314,8 +322,7 @@ Status deleteRangeInBatches(OperationContext* opCtx,
             int numDeleted;
             const auto nss = [&]() {
                 try {
-                    const auto nssOrUuid =
-                        NamespaceStringOrUUID{DatabaseNameUtil::serialize(dbName), collectionUuid};
+                    const auto nssOrUuid = NamespaceStringOrUUID{dbName, collectionUuid};
                     const auto collection =
                         acquireCollection(opCtx,
                                           {nssOrUuid,
@@ -375,6 +382,7 @@ Status deleteRangeInBatches(OperationContext* opCtx,
             if (errorCode ==
                     ErrorCodes::RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist ||
                 errorCode == ErrorCodes::RangeDeletionAbandonedBecauseTaskDocumentDoesNotExist ||
+                errorCode == ErrorCodes::IndexNotFound ||
                 errorCode == ErrorCodes::KeyPatternShorterThanBound ||
                 ErrorCodes::isShutdownError(errorCode) ||
                 ErrorCodes::isNotPrimaryError(errorCode) ||

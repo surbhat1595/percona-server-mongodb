@@ -253,8 +253,8 @@ void assertInitialSyncCanContinueDuringShardMerge(OperationContext* opCtx,
     // recovery. (see recoverShardMergeRecipientAccessBlockers() for the detailed comment about the
     // problematic scenario that can cause data loss.)
     if (nss == NamespaceString::kShardMergeRecipientsNamespace) {
-        if (auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-            replCoord && replCoord->isReplEnabled() && replCoord->getMemberState().startup2()) {
+        if (auto replCoord = repl::ReplicationCoordinator::get(opCtx); replCoord &&
+            replCoord->getSettings().isReplSet() && replCoord->getMemberState().startup2()) {
             BSONElement idField = op.getObject().getField("_id");
             // If the 'o' field does not have an _id, then 'o2' should have it.
             // Otherwise, the oplog entry is corrupted.
@@ -385,8 +385,7 @@ void writeToImageCollection(OperationContext* opCtx,
                             const Timestamp timestamp,
                             repl::RetryImageEnum imageKind,
                             const BSONObj& dataImage,
-                            const StringData& invalidatedReason,
-                            bool* upsertConfigImage) {
+                            const StringData& invalidatedReason) {
     // In practice, this lock acquisition on kConfigImagesNamespace cannot block. The only time a
     // stronger lock acquisition is taken on this namespace is during step up to create the
     // collection.
@@ -414,28 +413,18 @@ void writeToImageCollection(OperationContext* opCtx,
 
     UpdateRequest request;
     request.setNamespaceString(NamespaceString::kConfigImagesNamespace);
-    request.setQuery(
-        BSON("_id" << imageEntry.get_id().toBSON() << "ts" << BSON("$lte" << imageEntry.getTs())));
-    request.setUpsert(*upsertConfigImage);
+    request.setQuery(BSON("_id" << imageEntry.get_id().toBSON()));
+    request.setUpsert(true);
     request.setUpdateModification(
         write_ops::UpdateModification::parseFromClassicUpdate(imageEntry.toBSON()));
     request.setFromOplogApplication(true);
-    try {
-        // This code path can also be hit by things such as `applyOps` and tenant migrations.
-        ::mongo::update(opCtx, collection, request);
-    } catch (const ExceptionFor<ErrorCodes::DuplicateKey>&) {
-        // We can get a duplicate key when two upserts race on inserting a document.
-        *upsertConfigImage = false;
-        // This write conflict is always retried internally and never exposed to the user.
-        throwWriteConflictException(
-            "DuplicateKey error when inserting a document into the pre-images collection.");
-    }
+    // This code path can also be hit by things such as `applyOps` and tenant migrations.
+    ::mongo::update(opCtx, collection, request);
 }
 
 /* we write to local.oplog.rs:
-     { ts : ..., h: ..., v: ..., op: ..., etc }
+     { ts : ..., v: ..., op: ..., etc }
    ts: an OpTime timestamp
-   h: hash
    v: version
    op:
     "i" insert
@@ -457,8 +446,7 @@ void logOplogRecords(OperationContext* opCtx,
                      Date_t wallTime,
                      bool isAbortIndexBuild) {
     auto replCoord = ReplicationCoordinator::get(opCtx);
-    if (replCoord->getReplicationMode() == ReplicationCoordinator::modeReplSet &&
-        !replCoord->canAcceptWritesFor(opCtx, nss)) {
+    if (replCoord->getSettings().isReplSet() && !replCoord->canAcceptWritesFor(opCtx, nss)) {
         str::stream ss;
         ss << "logOp() but can't accept write to collection " << nss.toStringForErrorMsg();
         ss << ": entries: " << records->size() << ": [ ";
@@ -786,8 +774,7 @@ void createOplog(OperationContext* opCtx,
 }
 
 void createOplog(OperationContext* opCtx) {
-    const auto isReplSet = ReplicationCoordinator::get(opCtx)->getReplicationMode() ==
-        ReplicationCoordinator::modeReplSet;
+    const auto isReplSet = ReplicationCoordinator::get(opCtx)->getSettings().isReplSet();
     createOplog(opCtx, NamespaceString::kRsOplogNamespace, isReplSet);
 }
 
@@ -805,7 +792,7 @@ NamespaceString extractNs(DatabaseName dbName, const BSONObj& cmdObj) {
             first.canonicalType() == canonicalizeBSONType(mongo::String));
     StringData coll = first.valueStringData();
     uassert(28635, "no collection name specified", !coll.empty());
-    return NamespaceStringUtil::parseNamespaceFromDoc(dbName, coll);
+    return NamespaceStringUtil::deserialize(dbName, coll);
 }
 
 NamespaceString extractNsFromUUID(OperationContext* opCtx, const UUID& uuid) {
@@ -1375,8 +1362,7 @@ void OplogApplication::checkOnOplogFailureForRecovery(OperationContext* opCtx,
                                                       const mongo::BSONObj& oplogEntry,
                                                       const std::string& errorMsg) {
     const bool isReplicaSet =
-        repl::ReplicationCoordinator::get(opCtx->getServiceContext())->getReplicationMode() ==
-        repl::ReplicationCoordinator::modeReplSet;
+        repl::ReplicationCoordinator::get(opCtx->getServiceContext())->getSettings().isReplSet();
     // Relax the constraints of oplog application if the node is not a replica set member or the
     // node is in the middle of a backup and restore process.
     if (!isReplicaSet || storageGlobalParams.restore) {
@@ -1501,15 +1487,13 @@ Status applyOperation_inlock(OperationContext* opCtx,
                         OplogApplication::inRecovering(mode));
             writeConflictRetry(opCtx, "applyOps_imageInvalidation", op.getNss(), [&] {
                 WriteUnitOfWork wuow(opCtx);
-                bool upsertConfigImage = true;
                 writeToImageCollection(opCtx,
                                        op.getSessionId().value(),
                                        op.getTxnNumber().value(),
                                        op.getApplyOpsTimestamp().value_or(op.getTimestamp()),
                                        op.getNeedsRetryImage().value(),
                                        BSONObj(),
-                                       getInvalidatingReason(mode, isDataConsistent),
-                                       &upsertConfigImage);
+                                       getInvalidatingReason(mode, isDataConsistent));
                 wuow.commit();
             });
         }
@@ -1560,7 +1544,6 @@ Status applyOperation_inlock(OperationContext* opCtx,
     // Decide whether to timestamp the write with the 'ts' field found in the operation. In general,
     // we do this for secondary oplog application, but there are some exceptions.
     const bool assignOperationTimestamp = [opCtx, haveWrappingWriteUnitOfWork, mode] {
-        const auto replMode = ReplicationCoordinator::get(opCtx)->getReplicationMode();
         if (opCtx->writesAreReplicated()) {
             // We do not assign timestamps on replicated writes since they will get their oplog
             // timestamp once they are logged. The operation may contain a timestamp if it is part
@@ -1571,19 +1554,14 @@ Status applyOperation_inlock(OperationContext* opCtx,
             // WriteUnitOfWork, as they will get the timestamp on that WUOW. Use cases include:
             // Secondary oplog application of prepared transactions.
             return false;
+        } else if (ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()) {
+            // Secondary oplog application not in a WUOW uses the timestamp in the operation
+            // document.
+            return true;
         } else {
-            switch (replMode) {
-                case ReplicationCoordinator::modeReplSet: {
-                    // Secondary oplog application not in a WUOW uses the timestamp in the operation
-                    // document.
-                    return true;
-                }
-                case ReplicationCoordinator::modeNone: {
-                    // Only assign timestamps on standalones during replication recovery when
-                    // started with the 'recoverFromOplogAsStandalone' flag.
-                    return OplogApplication::inRecovering(mode);
-                }
-            }
+            // Only assign timestamps on standalones during replication recovery when
+            // started with the 'recoverFromOplogAsStandalone' flag.
+            return OplogApplication::inRecovering(mode);
         }
         MONGO_UNREACHABLE;
     }();
@@ -1893,19 +1871,17 @@ Status applyOperation_inlock(OperationContext* opCtx,
             // session. Thus updates to `config.image_collection` documents can be
             // concurrent. Secondaries already coalesce (read: intentionally ignore) some writes to
             // `config.transactions`, we may also omit some writes to `config.image_collection`, so
-            // long as the last write persists. To accomplish this we update
-            // `config.image_collection` entries with an upsert. The query predicate is `{_id:
-            // <lsid>, ts $lt <oplogEntry.ts>}`. This can result in a WriteConflictException when
-            // two writers are concurrently updating/inserting the same document.
+            // long as the last write persists.  We handle this in the oplog applier by allowing
+            // only one write (whether implicit update or explicit delete) to
+            // config.image_collection per applier batch.  This works in the case of rollback
+            // because we are only allowed to retry the latest find-and-modify operation on a
+            // session; any images lost to rollback would have had the wrong transaction ID and
+            // thus not been legal to use anyway
             //
-            // However, when an upsert turns into an insert, a writer can also observe a
-            // DuplicateKeyException as its `ts` clause can hide the document from being
-            // updated. Following up the failed update with an insert turns into a
-            // DuplicateKeyException. This is safe, but to break an infinite loop, we retry the
-            // operation with a regular update as opposed to an upsert. We're guaranteed to not need
-            // to insert a document. We only have to make sure we didn't race with an insert that
-            // won, but with an earlier `ts`.
-            bool upsertConfigImage = true;
+            // On the primary, we are assured the writes to this collection are ordered because
+            // the logical session ID being written is checked out when we do the write.
+            // We can still get a write conflict on the primary as a delete done as part of expired
+            // session cleanup can race with a use of the expired session.
             auto status = writeConflictRetry(opCtx, "applyOps_update", op.getNss(), [&] {
                 WriteUnitOfWork wuow(opCtx);
                 if (timestamp != Timestamp::min()) {
@@ -2007,8 +1983,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                                            // initial sync, the value passed in here is conveniently
                                            // the empty BSONObj.
                                            ur.requestedDocImage,
-                                           getInvalidatingReason(mode, isDataConsistent),
-                                           &upsertConfigImage);
+                                           getInvalidatingReason(mode, isDataConsistent));
                 }
 
                 if (recordChangeStreamPreImage) {
@@ -2065,7 +2040,6 @@ Status applyOperation_inlock(OperationContext* opCtx,
             // Determine if a change stream pre-image has to be recorded for the oplog entry.
             const bool recordChangeStreamPreImage = shouldRecordChangeStreamPreImage();
 
-            bool upsertConfigImage = true;
             writeConflictRetry(opCtx, "applyOps_delete", op.getNss(), [&] {
                 WriteUnitOfWork wuow(opCtx);
                 if (timestamp != Timestamp::min()) {
@@ -2102,8 +2076,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                                            op.getApplyOpsTimestamp().value_or(op.getTimestamp()),
                                            repl::RetryImageEnum::kPreImage,
                                            result.requestedPreImage.value_or(BSONObj()),
-                                           getInvalidatingReason(mode, isDataConsistent),
-                                           &upsertConfigImage);
+                                           getInvalidatingReason(mode, isDataConsistent));
                 }
 
                 if (recordChangeStreamPreImage) {
@@ -2129,9 +2102,15 @@ Status applyOperation_inlock(OperationContext* opCtx,
                 // enabled.
                 //
                 // TODO SERVER-70591: Remove feature flag requirement in comment above.
+                //
+                // It is also legal for a delete operation on the config.image_collection (used for
+                // find-and-modify retries) to delete zero documents.  Since we do not write updates
+                // to this collection which are in the same batch as later deletes, a rollback to
+                // the middle of a batch with both an update and a delete may result in a missing
+                // document, which may be later deleted.
                 if (result.nDeleted == 0 && mode == OplogApplication::Mode::kSecondary &&
                     !requestNss.isChangeStreamPreImagesCollection() &&
-                    !requestNss.isChangeCollection()) {
+                    !requestNss.isChangeCollection() && !requestNss.isConfigImagesCollection()) {
                     // In FCV 4.4, each node is responsible for deleting the excess documents in
                     // capped collections. This implies that capped deletes may not be synchronized
                     // between nodes at times. When upgraded to FCV 5.0, the primary will generate
@@ -2315,7 +2294,6 @@ Status applyCommand_inlock(OperationContext* opCtx,
     }
 
     const bool assignCommandTimestamp = [&] {
-        const auto replMode = ReplicationCoordinator::get(opCtx)->getReplicationMode();
         if (opCtx->writesAreReplicated()) {
             // We do not assign timestamps on replicated writes since they will get their oplog
             // timestamp once they are logged.
@@ -2329,17 +2307,14 @@ Status applyCommand_inlock(OperationContext* opCtx,
             op->getCommandType() == OplogEntry::CommandType::kAbortTransaction)
             return false;
 
-        switch (replMode) {
-            case ReplicationCoordinator::modeReplSet: {
-                // The timestamps in the command oplog entries are always real timestamps from this
-                // oplog and we should timestamp our writes with them.
-                return true;
-            }
-            case ReplicationCoordinator::modeNone: {
-                // Only assign timestamps on standalones during replication recovery when
-                // started with 'recoverFromOplogAsStandalone'.
-                return OplogApplication::inRecovering(mode);
-            }
+        if (ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()) {
+            // The timestamps in the command oplog entries are always real timestamps from this
+            // oplog and we should timestamp our writes with them.
+            return true;
+        } else {
+            // Only assign timestamps on standalones during replication recovery when
+            // started with 'recoverFromOplogAsStandalone'.
+            return OplogApplication::inRecovering(mode);
         }
         MONGO_UNREACHABLE;
     }();
@@ -2394,10 +2369,10 @@ Status applyCommand_inlock(OperationContext* opCtx,
                 break;
             }
             case ErrorCodes::BackgroundOperationInProgressForNamespace: {
-                Command* cmd = CommandHelpers::findCommand(o.firstElement().fieldName());
+                Command* cmd = CommandHelpers::findCommand(opCtx, o.firstElement().fieldName());
                 invariant(cmd);
 
-                auto ns = cmd->parse(opCtx, OpMsgRequest::fromDBAndBody(nss.db(), o))->ns();
+                auto ns = cmd->parse(opCtx, OpMsgRequest::fromDBAndBody(nss.dbName(), o))->ns();
 
                 if (mode == OplogApplication::Mode::kInitialSync) {
                     // Aborting an index build involves writing to the catalog. This write needs to

@@ -61,7 +61,6 @@
 #include "mongo/db/query/record_id_bound.h"
 #include "mongo/db/query/sbe_stage_builder.h"
 #include "mongo/db/query/sbe_stage_builder_coll_scan.h"
-#include "mongo/db/query/sbe_stage_builder_eval_frame.h"
 #include "mongo/db/query/sbe_stage_builder_filter.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/optime.h"
@@ -76,27 +75,15 @@
 namespace mongo::stage_builder {
 namespace {
 
-boost::optional<sbe::value::SlotId> registerOplogTs(PlanStageEnvironment& env,
-                                                    sbe::value::SlotIdGenerator* slotIdGenerator) {
-    boost::optional<sbe::value::SlotId> slotId = env->getSlotIfExists("oplogTs"_sd);
-    if (!slotId) {
-        return env->registerSlot(
-            "oplogTs"_sd, sbe::value::TypeTags::Nothing, 0, false, slotIdGenerator);
-    }
-    return slotId;
-}
-
 /**
  * If 'shouldTrackLatestOplogTimestamp' is true, then returns a vector holding the name of the oplog
  * 'ts' field along with another vector holding a SlotId to map this field to, as well as the
  * standalone value of the same SlotId (the latter is returned purely for convenience purposes).
  */
 std::tuple<std::vector<std::string>, sbe::value::SlotVector, boost::optional<sbe::value::SlotId>>
-makeOplogTimestampSlotIfNeeded(PlanStageEnvironment& env,
-                               sbe::value::SlotIdGenerator* slotIdGenerator,
-                               bool shouldTrackLatestOplogTimestamp) {
+makeOplogTimestampSlotIfNeeded(StageBuilderState& state, bool shouldTrackLatestOplogTimestamp) {
     if (shouldTrackLatestOplogTimestamp) {
-        boost::optional<sbe::value::SlotId> slotId = registerOplogTs(env, slotIdGenerator);
+        auto slotId = state.getOplogTsSlot();
         return {{repl::OpTime::kTimestampFieldName.toString()}, sbe::makeSV(*slotId), slotId};
     }
     return {};
@@ -375,7 +362,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> generateClusteredColl
     // filter, so ScanStage->getNext() must directly enforce the bounds. min's inclusivity matches
     // getNext()'s default behavior, but max's exclusivity does not and thus is enforced by the
     // excludeScanEndRecordId argument to the ScanStage constructor above.
-    EvalExpr filterExpr = generateFilter(state, csn->filter.get(), resultSlot, nullptr);
+    SbExpr filterExpr = generateFilter(state, csn->filter.get(), resultSlot, nullptr);
     if (!filterExpr.isNull()) {
         stage = sbe::makeS<sbe::FilterStage<false>>(
             std::move(stage), filterExpr.extractExpr(state), csn->nodeId());
@@ -440,8 +427,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> generateGenericCollSc
     }();
 
     // See if we need to project out an oplog latest timestamp.
-    auto&& [scanFields, scanFieldSlots, oplogTsSlot] = makeOplogTimestampSlotIfNeeded(
-        state.env, state.slotIdGenerator, csn->shouldTrackLatestOplogTimestamp);
+    auto&& [scanFields, scanFieldSlots, oplogTsSlot] =
+        makeOplogTimestampSlotIfNeeded(state, csn->shouldTrackLatestOplogTimestamp);
 
     scanFields.insert(scanFields.end(), fields.begin(), fields.end());
     scanFieldSlots.insert(scanFieldSlots.end(), fieldSlots.begin(), fieldSlots.end());

@@ -1,17 +1,15 @@
 // Test that commands other than retryable writes may not use txnNumber outside transactions.
-// The test runs commands that are not allowed with security token: applyOps,
-// coordinateCommitTransaction, endSession, killCursors, mapReduce, prepareTransaction.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: applyOps,
+//   # coordinateCommitTransaction, endSession, killCursors, mapReduce, prepareTransaction.
 //   not_allowed_with_security_token,
 //   uses_map_reduce_with_temp_collections,
 //   # Tenant migrations don't support applyOps.
 //   tenant_migration_incompatible,
 // ]
 
-(function() {
-"use strict";
-
-load("jstests/libs/fixture_helpers.js");
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const session = db.getMongo().startSession();
 const sessionDb = session.getDatabase("admin");
@@ -63,4 +61,3 @@ if (!FixtureHelpers.isMongos(db)) {
 }
 
 session.endSession();
-}());

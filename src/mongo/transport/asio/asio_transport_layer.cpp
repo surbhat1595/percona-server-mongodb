@@ -50,6 +50,8 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
+#include "mongo/transport/asio/asio_tcp_fast_open.h"
 #include "mongo/transport/asio/asio_utils.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/transport_options_gen.h"
@@ -97,28 +99,6 @@ using TcpUserTimeoutMillisOption = SocketOption<IPPROTO_TCP, TCP_USER_TIMEOUT, u
 #endif
 #endif  // __linux__
 
-#ifdef TCP_FASTOPEN
-using TcpFastOpenOption = SocketOption<IPPROTO_TCP, TCP_FASTOPEN>;
-#endif
-/**
- * On systems with TCP_FASTOPEN_CONNECT (linux >= 4.11),
- * we can get TFO "for free" by letting the kernel handle
- * postponing connect() until the first send() call.
- *
- * https://github.com/torvalds/linux/commit/19f6d3f3c8422d65b5e3d2162e30ef07c6e21ea2
- */
-#ifdef TCP_FASTOPEN_CONNECT
-using TcpFastOpenConnectOption = SocketOption<IPPROTO_TCP, TCP_FASTOPEN_CONNECT>;
-#endif
-
-/**
- * Set to `true` if any of the following set parameters were explicitly configured.
- * - tcpFastOpenServer
- * - tcpFastOpenClient
- * - tcpFastOpenQueueSize
- */
-bool tcpFastOpenIsConfigured = false;
-boost::optional<Status> maybeTcpFastOpenStatus;
 }  // namespace
 
 MONGO_FAIL_POINT_DEFINE(asioTransportLayerAsyncConnectTimesOut);
@@ -308,10 +288,8 @@ private:
 
 thread_local AsioReactor* AsioReactor::_reactorForThread = nullptr;
 
-AsioTransportLayer::Options::Options(const ServerGlobalParams* params,
-                                     boost::optional<int> loadBalancerPort)
+AsioTransportLayer::Options::Options(const ServerGlobalParams* params)
     : port(params->port),
-      loadBalancerPort(loadBalancerPort),
       ipList(params->bind_ips),
 #ifndef _WIN32
       useUnixSockets(!params->noUnixSocket),
@@ -708,20 +686,11 @@ StatusWith<std::shared_ptr<AsioSession>> AsioTransportLayer::_doSyncConnect(
     const auto protocol = endpoint->protocol();
     sock.open(protocol);
 
-#ifdef TCP_FASTOPEN_CONNECT
-    const auto family = protocol.family();
-    if ((family == AF_INET) || (family == AF_INET6)) {
-        setSocketOption(sock,
-                        TcpFastOpenConnectOption(gTCPFastOpenClient),
-                        "connect (sync) TCP fast open",
-                        logv2::LogSeverity::Info(),
-                        ec);
-        if (tcpFastOpenIsConfigured) {
+    if (auto af = protocol.family(); af == AF_INET || af == AF_INET6) {
+        if (auto ec = tfo::initOutgoingSocket(sock)) {
             return errorCodeToStatus(ec, "syncConnect tcpFastOpenIsConfigured");
         }
-        ec = std::error_code();
     }
-#endif
 
     sock.non_blocking(true);
 
@@ -898,17 +867,9 @@ Future<std::shared_ptr<Session>> AsioTransportLayer::asyncConnect(
                 return futurize(ex.code());
             }
 
-#ifdef TCP_FASTOPEN_CONNECT
-            std::error_code ec;
-            setSocketOption(connector->socket,
-                            TcpFastOpenConnectOption(gTCPFastOpenClient),
-                            "connect (async) TCP fast open",
-                            logv2::LogSeverity::Info(),
-                            ec);
-            if (tcpFastOpenIsConfigured) {
+            if (auto ec = tfo::initOutgoingSocket(connector->socket)) {
                 return futurize(ec);
             }
-#endif
             return connector->socket.async_connect(*connector->resolvedEndpoint, UseFuture{});
         })
         .then([this, connector, sslMode, transientSSLContext, connectionMetrics]() -> Future<void> {
@@ -982,150 +943,6 @@ Future<std::shared_ptr<Session>> AsioTransportLayer::asyncConnect(
     return mergedFuture;
 }
 
-namespace {
-#if defined(TCP_FASTOPEN) || defined(TCP_FASTOPEN_CONNECT)
-/**
- * Attempt to set an option on a dummy SOCK_STREAM/AF_INET socket
- * and report success/failure.
- */
-bool trySetSockOpt(int level, int opt, int val) {
-    auto sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock == -1) {
-        auto ec = lastSocketError();
-        LOGV2_WARNING(5128700, "socket() failed", "error"_attr = errorMessage(ec));
-        return false;
-    }
-
-#ifdef _WIN32
-    char* pval = reinterpret_cast<char*>(&val);
-#else
-    void* pval = &val;
-#endif
-
-    const auto ret = ::setsockopt(sock, level, opt, pval, sizeof(val));
-
-#ifdef _WIN32
-    closesocket(sock);
-#else
-    close(sock);
-#endif
-
-    return ret == 0;
-}
-#endif
-
-Status validateFastOpen() noexcept {
-    namespace moe = optionenvironment;
-    if (moe::startupOptionsParsed.count("setParameter")) {
-        const auto params =
-            moe::startupOptionsParsed["setParameter"].as<std::map<std::string, std::string>>();
-        tcpFastOpenIsConfigured = (params.find("tcpFastOpenServer") != params.end()) ||
-            (params.find("tcpFastOpenClient") != params.end()) ||
-            (params.find("tcpFastOpenQueueSize") != params.end());
-    }
-
-#ifndef TCP_FASTOPEN
-    if (tcpFastOpenIsConfigured && gTCPFastOpenServer) {
-        return {ErrorCodes::BadValue,
-                "TCP FastOpen server support unavailable in this build of MongoDB"};
-    }
-#else
-    networkCounter.setTFOServerSupport(trySetSockOpt(IPPROTO_TCP, TCP_FASTOPEN, 1));
-#endif
-
-#ifndef TCP_FASTOPEN_CONNECT
-    if (tcpFastOpenIsConfigured && gTCPFastOpenClient) {
-        return {ErrorCodes::BadValue,
-                "TCP FastOpen client support unavailable in this build of MongoDB"};
-    }
-#else
-    networkCounter.setTFOClientSupport(trySetSockOpt(IPPROTO_TCP, TCP_FASTOPEN_CONNECT, 1));
-#endif
-
-#if defined(TCP_FASTOPEN) && defined(__linux)
-    if (!gTCPFastOpenServer && !gTCPFastOpenClient) {
-        return Status::OK();
-    }
-
-    std::string procfile("/proc/sys/net/ipv4/tcp_fastopen");
-    boost::system::error_code ec;
-    if (!boost::filesystem::exists(procfile, ec)) {
-        return {ErrorCodes::BadValue,
-                str::stream() << "Unable to locate " << procfile << ": " << errorCodeToStatus(ec)};
-    }
-
-    std::fstream f(procfile, std::ifstream::in);
-    if (!f.is_open()) {
-        return {ErrorCodes::BadValue, str::stream() << "Unable to read " << procfile};
-    }
-
-    std::int64_t val;
-    f >> val;
-    networkCounter.setTFOKernelSetting(val);
-
-    constexpr std::int64_t kTFOClientBit = (1 << 0);
-    constexpr std::int64_t kTFOServerBit = (1 << 1);
-
-    // Future proof this setting by allowing extra bits to stay set in help output.
-    std::int64_t wantval = val;
-    if (gTCPFastOpenClient) {
-        wantval |= kTFOClientBit;
-    }
-    if (gTCPFastOpenServer) {
-        wantval |= kTFOServerBit;
-    }
-
-    if (val != wantval) {
-        return {ErrorCodes::BadValue,
-                str::stream() << "TCP FastOpen disabled in kernel. "
-                              << "Set " << procfile << " to " << std::to_string(wantval)};
-    }
-#endif
-
-    return Status::OK();
-}
-
-Status validateFastOpenOnce() noexcept {
-    if (!maybeTcpFastOpenStatus) {
-        // If we haven't validated the TCP FastOpen situation yet, do so.
-        maybeTcpFastOpenStatus = validateFastOpen();
-
-        if (!maybeTcpFastOpenStatus->isOK()) {
-            // This has to be a char[] because that's what logv2 understands
-            static constexpr char kPrefixString[] = "Unable to enable TCP FastOpen";
-
-            if (tcpFastOpenIsConfigured) {
-                // If the user asked for TCP FastOpen and we couldn't provide it, log a startup
-                // warning in addition to the hard failure.
-                LOGV2_WARNING_OPTIONS(23014,
-                                      {logv2::LogTag::kStartupWarnings},
-                                      kPrefixString,
-                                      "reason"_attr = maybeTcpFastOpenStatus->reason());
-            } else {
-                LOGV2(4648601,
-                      "Implicit TCP FastOpen unavailable. "
-                      "If TCP FastOpen is required, set tcpFastOpenServer, tcpFastOpenClient, "
-                      "and tcpFastOpenQueueSize.");
-            }
-
-            maybeTcpFastOpenStatus->addContext(kPrefixString);
-        } else {
-            if (!tcpFastOpenIsConfigured) {
-                LOGV2(4648602, "Implicit TCP FastOpen in use.");
-            }
-        }
-    }
-
-    if (!tcpFastOpenIsConfigured) {
-        // If nobody asked for TCP FastOpen, no one will miss it.
-        return Status::OK();
-    }
-
-    // TCP FastOpen was requested. It's either there or it's not.
-    return *maybeTcpFastOpenStatus;
-}
-}  // namespace
-
 Status AsioTransportLayer::setup() {
     std::vector<std::string> listenAddrs;
     if (_listenerOptions.ipList.empty() && _listenerOptions.isIngress()) {
@@ -1144,10 +961,14 @@ Status AsioTransportLayer::setup() {
         if (_listenerOptions.loadBalancerPort) {
             listenAddrs.push_back(makeUnixSockPath(*_listenerOptions.loadBalancerPort));
         }
+
+        if (auto port = _listenerOptions.routerPort) {
+            listenAddrs.push_back(makeUnixSockPath(*port));
+        }
     }
 #endif
 
-    if (auto foStatus = validateFastOpenOnce(); !foStatus.isOK()) {
+    if (auto foStatus = tfo::ensureInitialized(); !foStatus.isOK()) {
         return foStatus;
     }
 
@@ -1162,6 +983,9 @@ Status AsioTransportLayer::setup() {
     std::vector<int> ports = {_listenerPort};
     if (_listenerOptions.loadBalancerPort) {
         ports.push_back(*_listenerOptions.loadBalancerPort);
+    }
+    if (auto port = _listenerOptions.routerPort) {
+        ports.push_back(*port);
     }
 
     // Self-deduplicating list of unique endpoint addresses.
@@ -1214,17 +1038,17 @@ Status AsioTransportLayer::setup() {
         } catch (std::exception&) {
             // Allow the server to start when "ipv6: true" and "bindIpAll: true", but the platform
             // does not support ipv6 (e.g., ipv6 kernel module is not loaded in Linux).
-            auto bindAllFmt = [](auto p) {
-                return fmt::format(":::{}", p);
+            auto addrIsBindAll = [&] {
+                for (auto port : ports) {
+                    if (addr.toString() == fmt::format(":::{}", port)) {
+                        return true;
+                    }
+                }
+                return false;
             };
-            bool addrIsBindAll = addr.toString() == bindAllFmt(_listenerPort);
-
-            if (!addrIsBindAll && _listenerOptions.loadBalancerPort) {
-                addrIsBindAll = (addr.toString() == bindAllFmt(*_listenerOptions.loadBalancerPort));
-            }
 
             if (errno == EAFNOSUPPORT && _listenerOptions.enableIPv6 && addr.family() == AF_INET6 &&
-                addrIsBindAll) {
+                addrIsBindAll()) {
                 LOGV2_WARNING(4206501,
                               "Failed to bind to address as the platform does not support ipv6",
                               "Failed to bind to {address} as the platform does not support ipv6",
@@ -1240,19 +1064,11 @@ Status AsioTransportLayer::setup() {
                         logv2::LogSeverity::Info());
 
         std::error_code ec;
-#ifdef TCP_FASTOPEN
-        if (gTCPFastOpenServer && ((addr.family() == AF_INET) || (addr.family() == AF_INET6))) {
-            setSocketOption(acceptor,
-                            TcpFastOpenOption(gTCPFastOpenQueueSize),
-                            "acceptor TCP fast open",
-                            logv2::LogSeverity::Info(),
-                            ec);
-            if (tcpFastOpenIsConfigured) {
+
+        if (auto af = addr.family(); af == AF_INET || af == AF_INET6) {
+            if (auto ec = tfo::initAcceptorSocket(acceptor))
                 return errorCodeToStatus(ec, "setup tcpFastOpenIsConfigured");
-            }
-            ec = std::error_code();
         }
-#endif
         if (addr.family() == AF_INET6) {
             setSocketOption(
                 acceptor, asio::ip::v6_only(true), "acceptor v6 only", logv2::LogSeverity::Info());
@@ -1270,15 +1086,8 @@ Status AsioTransportLayer::setup() {
 
 #ifndef _WIN32
         if (addr.family() == AF_UNIX) {
-            if (::chmod(addr.toString().c_str(), serverGlobalParams.unixSocketPermissions) == -1) {
-                auto ec = lastPosixError();
-                LOGV2_ERROR(23026,
-                            "Failed to chmod socket file {path} {error}",
-                            "Failed to chmod socket file",
-                            "path"_attr = addr.toString().c_str(),
-                            "error"_attr = errorMessage(ec));
-                fassertFailedNoTrace(40487);
-            }
+            setUnixDomainSocketPermissions(addr.toString(),
+                                           serverGlobalParams.unixSocketPermissions);
         }
 #endif
         auto endpoint = acceptor.local_endpoint(ec);
@@ -1360,7 +1169,7 @@ void AsioTransportLayer::_runListener() noexcept {
         }
 
         _acceptConnection(acceptorRecord->acceptor);
-        LOGV2(23015, "Listening on", "address"_attr = acceptorRecord->address.getAddr());
+        LOGV2(23015, "Listening on", "address"_attr = acceptorRecord->address);
     }
 
     const char* ssl = "off";
@@ -1612,6 +1421,7 @@ AsioTransportLayer::_createSSLContext(std::shared_ptr<SSLManagerInterface>& mana
     const auto& sslParams = getSSLGlobalParams();
 
     if (sslMode != SSLParams::SSLMode_disabled && _listenerOptions.isIngress()) {
+        invariant(manager, "SSLManager must be set when SSL is not disabled");
         newSSLContext->ingress = std::make_unique<asio::ssl::context>(asio::ssl::context::sslv23);
 
         Status status = newSSLContext->manager->initSSLContext(

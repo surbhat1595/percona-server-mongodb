@@ -1,7 +1,7 @@
 // tests getlog as well as slow querying logging
 //
-// The test runs commands that are not allowed with security token: getLog.
 // @tags: [
+//   # The test runs commands that are not allowed with security token: getLog.
 //   not_allowed_with_security_token,
 //   # This test attempts to perform a find command and see that it ran using the getLog command.
 //   # The former operation may be routed to a secondary in the replica set, whereas the latter must
@@ -12,9 +12,6 @@
 //   # Uses $where operation.
 //   requires_scripting,
 // ]
-
-(function() {
-'use strict';
 
 // We turn off gossiping the mongo shell's clusterTime because it causes the slow command log
 // messages to get truncated since they'll exceed 512 characters. The truncated log messages
@@ -43,7 +40,7 @@ function stringContains(haystack, needle) {
 
 // test doesn't work when talking to mongos
 if (db.hello().msg === "isdbgrid") {
-    return;
+    quit();
 }
 
 // 1. Run a slow query
@@ -88,4 +85,3 @@ assert(contains(update.log, function(v) {
         stringContains(v, "keysExamined:") && stringContains(v, "docsExamined:") &&
         v.indexOf("SENTINEL") != -1;
 }));
-})();

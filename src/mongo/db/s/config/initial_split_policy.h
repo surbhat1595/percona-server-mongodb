@@ -67,6 +67,9 @@ public:
     /**
      * Returns the optimization strategy for building initial chunks based on the input parameters
      * and the collection state.
+     *
+     * If dataShard is specified, isUnsplittable must be true, because we can only select the shard
+     * that will hold the data for unsplittable collections.
      */
     static std::unique_ptr<InitialSplitPolicy> calculateOptimizationStrategy(
         OperationContext* opCtx,
@@ -75,7 +78,9 @@ public:
         bool presplitHashedZones,
         const std::vector<TagsType>& tags,
         size_t numShards,
-        bool collectionIsEmpty);
+        bool collectionIsEmpty,
+        bool isUnsplittable,
+        boost::optional<ShardId> dataShard);
 
     virtual ~InitialSplitPolicy() {}
 
@@ -92,14 +97,6 @@ public:
     virtual ShardCollectionConfig createFirstChunks(OperationContext* opCtx,
                                                     const ShardKeyPattern& shardKeyPattern,
                                                     const SplitPolicyParams& params) = 0;
-
-    /**
-     * Returns whether the chunk generation strategy being used is optimized or not. Since there is
-     * only a single unoptimized policy, we return true by default here.
-     */
-    virtual bool isOptimized() {
-        return true;
-    }
 
     /**
      * Returns split points to use for creating chunks in cases where the shard key contains a
@@ -147,6 +144,21 @@ public:
     ShardCollectionConfig createFirstChunks(OperationContext* opCtx,
                                             const ShardKeyPattern& shardKeyPattern,
                                             const SplitPolicyParams& params) override;
+};
+
+/**
+ * Create a single chunk on a specified shard.
+ */
+class SingleChunkOnShardSplitPolicy : public InitialSplitPolicy {
+public:
+    SingleChunkOnShardSplitPolicy(OperationContext* opCtx, ShardId dataShard);
+
+    ShardCollectionConfig createFirstChunks(OperationContext* opCtx,
+                                            const ShardKeyPattern& shardKeyPattern,
+                                            const SplitPolicyParams& params) override;
+
+private:
+    ShardId _dataShard;
 };
 
 /**

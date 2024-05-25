@@ -99,7 +99,7 @@ public:
 
         auto shardResponses = scatterGatherUnversionedTargetAllShards(
             opCtx,
-            DatabaseNameUtil::serialize(dbName),
+            dbName,
             applyReadWriteConcern(
                 opCtx, this, CommandHelpers::filterCommandRequestForPassthrough(cmdObj)),
             ReadPreferenceSetting::get(opCtx),
@@ -109,9 +109,6 @@ public:
         return appendRawResponses(opCtx, &errmsg, &result, shardResponses).responseOK;
     }
 };
-
-MONGO_INITIALIZER(RegisterAppendOpLogNoteCmd)(InitializerContext* context) {
-    new AppendOplogNoteCmd();
-}
+MONGO_REGISTER_COMMAND(AppendOplogNoteCmd);
 
 }  // namespace mongo

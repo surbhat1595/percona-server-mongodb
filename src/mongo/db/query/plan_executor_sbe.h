@@ -61,7 +61,7 @@
 #include "mongo/db/query/restore_context.h"
 #include "mongo/db/query/sbe_plan_ranker.h"
 #include "mongo/db/query/sbe_runtime_planner.h"
-#include "mongo/db/query/sbe_stage_builder.h"
+#include "mongo/db/query/sbe_stage_builder_plan_data.h"
 #include "mongo/db/record_id.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -187,6 +187,8 @@ public:
     void setReturnOwnedData(bool returnOwnedData) override final {
         _mustReturnOwnedBson = returnOwnedData;
     }
+
+    bool usesCollectionAcquisitions() const override final;
 
 private:
     template <typename ObjectType>

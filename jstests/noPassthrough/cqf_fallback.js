@@ -151,7 +151,7 @@ assertSupportedByBonsaiExperimentally({
     hint: {_id: 1}
 });
 
-// $natural hints are fully supported in Bonsai...
+// $natural hints are fully supported in Bonsai.
 assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: 1}});
 assertSupportedByBonsaiFully(
     {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: 1}});
@@ -159,15 +159,26 @@ assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural:
 assertSupportedByBonsaiFully(
     {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: -1}});
 
-// ... Except if the query relies on some experimental feature (e.g., predicate on _id).
-assertSupportedByBonsaiExperimentally(
-    {find: coll.getName(), filter: {_id: 1}, hint: {$natural: 1}});
-assertSupportedByBonsaiExperimentally(
+// $natural hints allow running a predicate on _id.
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {_id: 1}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully(
     {aggregate: coll.getName(), pipeline: [{$match: {_id: 1}}], cursor: {}, hint: {$natural: 1}});
-assertSupportedByBonsaiExperimentally(
-    {find: coll.getName(), filter: {_id: 1}, hint: {$natural: -1}});
-assertSupportedByBonsaiExperimentally(
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {_id: 1}, hint: {$natural: -1}});
+assertSupportedByBonsaiFully(
     {aggregate: coll.getName(), pipeline: [{$match: {_id: 1}}], cursor: {}, hint: {$natural: -1}});
+
+// The presence of a $natural hint does not allow an otherwise unsupported query to go through
+// Bonsai.
+assertNotSupportedByBonsai({find: coll.getName(), filter: {}, sort: {a: 1}, hint: {$natural: 1}},
+                           true);
+assertNotSupportedByBonsai(
+    {aggregate: coll.getName(), pipeline: [{$sort: {a: 1}}], cursor: {}, hint: {$natural: 1}},
+    true);
+assertNotSupportedByBonsai({find: coll.getName(), filter: {}, sort: {a: 1}, hint: {$natural: -1}},
+                           true);
+assertNotSupportedByBonsai(
+    {aggregate: coll.getName(), pipeline: [{$sort: {a: 1}}], cursor: {}, hint: {$natural: -1}},
+    true);
 
 // Unsupported projection expression.
 assertNotSupportedByBonsai(
@@ -322,15 +333,33 @@ assertNotSupportedByBonsai({find: collRS.getName(), filter: {}, term: NumberLong
 rst.stopSet();
 })();
 
-// Unsupported index type.
+// Unsupported index type (sparse).
 assert.commandWorked(coll.createIndex({a: 1}, {sparse: true}));
 assertNotSupportedByBonsai({find: coll.getName(), filter: {}});
 assertNotSupportedByBonsai({aggregate: coll.getName(), pipeline: [], cursor: {}});
+
+// Query with $natural on a collection with a sparse index (unsupported) is eligible for CQF.
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: -1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: -1}});
+
+// Unsupported index type (wildcard).
 coll.drop();
 assert.commandWorked(coll.insert({a: 1}));
 assert.commandWorked(coll.createIndex({"$**": 1}));
 assertNotSupportedByBonsai({find: coll.getName(), filter: {}});
 assertNotSupportedByBonsai({aggregate: coll.getName(), pipeline: [], cursor: {}});
+
+// Query with $natural on a collection with a wildcard index (unsupported) is eligible for CQF.
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: -1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: -1}});
 
 // TTL index is not supported.
 coll.drop();
@@ -338,17 +367,54 @@ assert.commandWorked(coll.createIndex({a: 1}, {expireAfterSeconds: 50}));
 assertNotSupportedByBonsai({find: coll.getName(), filter: {}});
 assertNotSupportedByBonsai({aggregate: coll.getName(), pipeline: [], cursor: {}});
 
+// Query with $natural on a collection with a TTL index (unsupported) is eligible for CQF.
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: -1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: -1}});
+
 // Unsupported index with non-simple collation.
 coll.drop();
 assert.commandWorked(coll.createIndex({a: 1}, {collation: {locale: "fr_CA"}}));
 assertNotSupportedByBonsai({find: coll.getName(), filter: {}});
 assertNotSupportedByBonsai({aggregate: coll.getName(), pipeline: [], cursor: {}});
 
+// Query with $natural on a collection with a non-simple collation index (unsupported) is eligible
+// for CQF.
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: -1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: -1}});
+
 // A simple collation on an index should only have experimental support in CQF.
 coll.drop();
 assert.commandWorked(coll.createIndex({a: 1}, {collation: {locale: "simple"}}));
 assertSupportedByBonsaiExperimentally({find: coll.getName(), filter: {}});
 assertSupportedByBonsaiExperimentally({aggregate: coll.getName(), pipeline: [], cursor: {}});
+
+// Query with $natural on a collection with a simple collation index (experimental) is eligible for
+// CQF.
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: -1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: -1}});
+
+// A query against a collection with a secondary index should be eligible in the presence of a
+// $natural hint.
+coll.drop();
+assert.commandWorked(coll.createIndex({a: 1}));
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: -1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: -1}});
 
 // A query against a collection with a hidden index should be eligible for CQF.
 coll.drop();
@@ -379,6 +445,29 @@ assert.commandWorked(coll.insert({a: 1}));
 assert.commandWorked(coll.createIndex({a: 1}, {partialFilterExpression: {a: {$gt: 0}}}));
 assertNotSupportedByBonsai({find: coll.getName(), filter: {}}, true);
 assertNotSupportedByBonsai({aggregate: coll.getName(), pipeline: [], cursor: {}}, true);
+
+// Query with $natural on a collection with a partial index (unsupported) is eligible for CQF.
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: -1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: -1}});
+
+// Queries on a collection with a hashed index are unsupported.
+coll.drop();
+assert.commandWorked(coll.createIndex({"_id": "hashed"}));
+assertNotSupportedByBonsai({find: coll.getName(), filter: {}}, false);
+assertNotSupportedByBonsai({aggregate: coll.getName(), pipeline: [], cursor: {}}, false);
+
+// Query with $natural on a collection with a hashed index on _id is only eligible for CQF with a
+// $natural hint.
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}, hint: {$natural: -1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: 1}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: -1}});
 
 // Unsupported collection types. Note that a query against the user-facing timeseries collection
 // will fail due to the unsupported $unpackBucket stage.

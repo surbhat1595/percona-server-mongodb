@@ -1,11 +1,16 @@
 /**
  * Tests to validate that an orphan bucket is not updatable after a chunk migration.
  *
- * @tags: [requires_fcv_51]
+ * @tags: [
+ *   # The validation hook in this suite enforces that all time-series buckets are compressed. This
+ *   # will not be the case in multiversion suites.
+ *   requires_fcv_71,
+ * ]
  */
 
-load("jstests/libs/fail_point_util.js");
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+
 Random.setRandomSeed();
 
 const dbName = "test";

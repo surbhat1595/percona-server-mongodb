@@ -133,11 +133,8 @@ public:
                      const BSONObj& update,
                      bool upsert,
                      bool multi,
-                     const StringData& returnField,
                      const boost::optional<std::vector<BSONObj>>& arrayFilters,
                      const boost::optional<BSONObj>& collation,
-                     const boost::optional<BSONObj>& sort,
-                     const boost::optional<BSONObj>& returnFields,
                      const boost::optional<BSONObj>& hint);
 
     void addPipelineUpdateOps(const NamespaceString& nss,
@@ -149,10 +146,7 @@ public:
     void addDeleteOp(const NamespaceString& nss,
                      const BSONObj& query,
                      bool multiDelete,
-                     bool returnField,
                      const boost::optional<BSONObj>& collation,
-                     const boost::optional<BSONObj>& sort,
-                     const boost::optional<BSONObj>& returnFields,
                      const boost::optional<BSONObj>& hint);
 
 private:

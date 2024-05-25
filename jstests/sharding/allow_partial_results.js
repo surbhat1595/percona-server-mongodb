@@ -1,8 +1,6 @@
 /**
  * Tests that the 'allowPartialResults' option to find is respected, and that aggregation does not
  * accept the 'allowPartialResults' option.
- * TODO SERVER-71169: Re-enable this test after shard filtering in CQF is implemented.
- * @tags: [cqf_incompatible]
  */
 
 // This test shuts down a shard.
@@ -10,8 +8,6 @@ TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 TestData.skipCheckShardFilteringMetadata = true;
 
-(function() {
-"use strict";
 const dbName = "test";
 const collName = "foo";
 const ns = dbName + "." + collName;
@@ -126,4 +122,3 @@ assert.commandFailedWithCode(coll.runCommand({
                              [ErrorCodes.FailedToParse, 40415]);
 
 st.stop();
-}());

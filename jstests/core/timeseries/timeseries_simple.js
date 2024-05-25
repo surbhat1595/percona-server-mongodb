@@ -48,11 +48,10 @@ TimeseriesTest.run((insert) => {
         }
     }
 
-    const controlVersion = 1;
     const numDocs = 100;
     const expectedBucketDoc = {
         control: {
-            version: controlVersion,
+            version: TimeseriesTest.BucketVersion.kUncompressed,
             min: {},
             max: {},
         },
@@ -101,6 +100,11 @@ TimeseriesTest.run((insert) => {
     const bucketDocs = bucketsColl.find().toArray();
     assert.eq(1, bucketDocs.length, bucketDocs);
     const bucketDoc = bucketDocs[0];
+
+    if (TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(db)) {
+        TimeseriesTest.decompressBucket(bucketDoc);
+    }
+
     jsTestLog('Bucket collection document: ' + tojson(bucketDoc));
     assert.docEq(expectedBucketDoc.control.min,
                  bucketDoc.control.min,

@@ -488,7 +488,7 @@ Status AsyncResultsMerger::_askForNextBatch(WithLock, size_t remoteIndex) {
     }
 
     executor::RemoteCommandRequest request(
-        remote.getTargetHost(), remote.cursorNss.db_forSharding().toString(), cmdObj, _opCtx);
+        remote.getTargetHost(), remote.cursorNss.dbName(), cmdObj, _opCtx);
 
     auto callbackStatus =
         _executor->scheduleRemoteCommand(request, [this, remoteIndex](auto const& cbData) {
@@ -881,7 +881,7 @@ void AsyncResultsMerger::_scheduleKillCursors(WithLock lk, OperationContext* opC
             executor::RemoteCommandRequest::Options options;
             options.fireAndForget = true;
             executor::RemoteCommandRequest request(remote.getTargetHost(),
-                                                   _params.getNss().db_forSharding().toString(),
+                                                   _params.getNss().dbName(),
                                                    cmdObj,
                                                    rpc::makeEmptyMetadata(),
                                                    opCtx,
@@ -900,7 +900,8 @@ void AsyncResultsMerger::_scheduleKillCursors(WithLock lk, OperationContext* opC
 
 bool AsyncResultsMerger::_shouldKillRemote(WithLock, const RemoteCursorData& remote) {
     return (remote.status.isOK() || remote.status == ErrorCodes::MaxTimeMSExpired ||
-            remote.status == ErrorCodes::Interrupted) &&
+            remote.status == ErrorCodes::Interrupted ||
+            ErrorCodes::isNotPrimaryError(remote.status.code())) &&
         remote.cursorId && !remote.exhausted();
 }
 

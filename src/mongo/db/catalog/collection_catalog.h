@@ -71,6 +71,9 @@
 
 namespace mongo {
 
+extern const SharedCollectionDecorations::Decoration<AtomicWord<bool>>
+    historicalIDTrackerAllowsMixedModeWrites;
+
 class CollectionCatalog {
     friend class iterator;
     using OrderedCollectionMap =
@@ -585,6 +588,10 @@ public:
         int userClustered = 0;
         // System collections or collections on internal databases
         int internal = 0;
+        // Client Side Field Level Encryption collections on non-internal databases
+        int csfle = 0;
+        // Queryable Encryption collections on non-internal databases
+        int queryableEncryption = 0;
     };
 
     /**

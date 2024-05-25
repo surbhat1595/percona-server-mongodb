@@ -62,7 +62,6 @@
 namespace mongo {
 namespace {
 
-constexpr auto kRawFieldName = "raw"_sd;
 class FsyncCommand : public ErrmsgCommandDeprecated {
 public:
     FsyncCommand() : ErrmsgCommandDeprecated("fsync") {}
@@ -95,44 +94,34 @@ public:
         return Status::OK();
     }
 
-    void unlockLockedShards(const std::set<ShardId> lockedShards,
-                            OperationContext* opCtx,
-                            const std::string& dbname) {
-        std::vector<AsyncRequestsSender::Request> requests;
+    void unlockLockedShards(OperationContext* opCtx, const DatabaseName& dbname) {
 
-        for (const ShardId& shardId : lockedShards) {
-            requests.emplace_back(shardId, BSON("fsyncUnlock" << 1));
-        }
-        auto responses = gatherResponses(opCtx,
-                                         dbname,
-                                         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                         Shard::RetryPolicy::kIdempotent,
-                                         requests);
-        std::string errmsg;
-        BSONObjBuilder rawResult;
-        const auto response = appendRawResponses(opCtx, &errmsg, &rawResult, responses);
-        if (!response.responseOK) {
-            LOGV2_WARNING(781491, "Unlocking of shards failed: {error}", "error"_attr = errmsg);
-        }
+        auto request = OpMsgRequest::fromDBAndBody(dbname, BSON("fsyncUnlock" << 1));
+        auto response = CommandHelpers::runCommandDirectly(opCtx, request);
     }
 
     bool errmsgRun(OperationContext* opCtx,
-                   const std::string& dbname,
+                   const DatabaseName& dbName,
                    const BSONObj& cmdObj,
                    std::string& errmsg,
                    BSONObjBuilder& result) override {
-
+        const auto dbname = DatabaseNameUtil::serialize(dbName);
+        BSONObj fsyncCmdObj = cmdObj;
         if (cmdObj["lock"].trueValue() &&
             !feature_flags::gClusterFsyncLock.isEnabled(serverGlobalParams.featureCompatibility)) {
             errmsg = "can't do lock through mongos";
             return false;
         }
+        if (cmdObj["lock"].trueValue()) {
+            auto forBackupField = BSON("forBackup" << true);
+            fsyncCmdObj = fsyncCmdObj.addFields(forBackupField);
+        }
 
-        auto shardResults = scatterGatherUnversionedTargetAllShards(
+        auto shardResults = scatterGatherUnversionedTargetConfigServerAndShards(
             opCtx,
-            dbname,
+            dbName,
             applyReadWriteConcern(
-                opCtx, this, CommandHelpers::filterCommandRequestForPassthrough(cmdObj)),
+                opCtx, this, CommandHelpers::filterCommandRequestForPassthrough(fsyncCmdObj)),
             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
             Shard::RetryPolicy::kIdempotent);
 
@@ -142,18 +131,18 @@ public:
         // This field has had dummy value since MMAP went away. It is undocumented.
         // Maintaining it so as not to cause unnecessary user pain across upgrades.
         result.append("numFiles", 1);
-        result.append("all", rawResult.obj()[kRawFieldName].Obj());
+        result.append("all", rawResult.obj());
         if (!response.responseOK) {
             if (cmdObj["lock"].trueValue()) {
-                unlockLockedShards(response.shardsWithSuccessResponses, opCtx, dbname);
+                unlockLockedShards(opCtx, dbName);
             }
             return false;
         }
 
         return true;
     }
-
-} clusterFsyncCmd;
+};
+MONGO_REGISTER_COMMAND(FsyncCommand);
 
 }  // namespace
 }  // namespace mongo

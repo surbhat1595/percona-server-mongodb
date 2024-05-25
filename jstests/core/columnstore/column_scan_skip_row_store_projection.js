@@ -21,12 +21,9 @@
  *   not_allowed_with_security_token,
  * ]
  */
-load('jstests/aggregation/extras/utils.js');  // For assertArrayEq.
-import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
-load(
-    "jstests/libs/clustered_collections/clustered_collection_util.js");  // For
-                                                                         // areAllCollectionsClustered.
+import {assertArrayEq} from "jstests/aggregation/extras/utils.js";
 import {setUpServerForColumnStoreIndexTest} from "jstests/libs/columnstore_util.js";
+import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
 const columnstoreEnabled =
     checkSBEEnabled(db, ["featureFlagColumnstoreIndexes"], true /* checkAllNodes */);
@@ -185,6 +182,14 @@ function runAllAggregations() {
     // $match with no group, and non-output filter that can be pushed down.
     test({
         agg: [{$match: {e: {$exists: true}}}, {$project: {_id: 1, b: 1}}],
+        requiresRowStoreExpr: true,
+        requiredRowstoreReads: 1
+    });
+
+    // $project inclusion followed by a $addFields which can be pushed into SBE should
+    // require a row store expression.
+    test({
+        agg: [{$project: {a: 1}}, {$addFields: {newField: 999}}],
         requiresRowStoreExpr: true,
         requiredRowstoreReads: 1
     });

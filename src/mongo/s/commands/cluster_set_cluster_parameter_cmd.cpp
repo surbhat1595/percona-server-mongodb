@@ -69,7 +69,7 @@ void setClusterParameterImpl(OperationContext* opCtx, const SetClusterParameter&
     const auto cmdResponse = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-        DatabaseName::kAdmin.toString(),
+        DatabaseName::kAdmin,
         configsvrSetClusterParameter.toBSON({}),
         Shard::RetryPolicy::kIdempotent));
 
@@ -118,7 +118,8 @@ public:
                             ActionType::setClusterParameter}));
         }
     };
-} setClusterParameterCmd;
+};
+MONGO_REGISTER_COMMAND(SetClusterParameterCmd);
 
 auto setClusterParameterRegistration =
     MONGO_WEAK_FUNCTION_REGISTRATION(setClusterParameter, setClusterParameterImpl);

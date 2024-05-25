@@ -1,12 +1,9 @@
 /**
  * Test that the queryStats metrics are aggregated properly by distinct query shape over getMore
- * calls.
+ * calls, for agg commands.
  * @tags: [featureFlagQueryStats]
  */
-load("jstests/libs/query_stats_utils.js");  // For verifyMetrics and getQueryStatsAggCmd.
-
-(function() {
-"use strict";
+import {getQueryStatsAggCmd, verifyMetrics} from "jstests/libs/query_stats_utils.js";
 
 // Turn on the collecting of queryStats metrics.
 let options = {
@@ -38,7 +35,6 @@ assert.commandWorked(bulk.execute());
     // Assert there is only one entry.
     assert.eq(queryStatsResults.length, 1, queryStatsResults);
     const queryStatsEntry = queryStatsResults[0];
-    jsTestLog(queryStatsEntry);
     assert.eq(queryStatsEntry.key.queryShape.cmdNs.db, "test");
     assert.eq(queryStatsEntry.key.queryShape.cmdNs.coll, jsTestName());
     assert.eq(queryStatsEntry.key.client.application.name, "MongoDB Shell");
@@ -171,4 +167,3 @@ const fooNeBatchSize = 3;
 }
 
 MongoRunner.stopMongod(conn);
-}());

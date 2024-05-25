@@ -233,6 +233,17 @@ public:
 
     void benchmarkPercentile(benchmark::State& state, int arraySize, const std::vector<double>& ps);
 
+    void benchmarkPowIntegers(benchmark::State& state);
+    void benchmarkPowDoubles(benchmark::State& state);
+    void benchmarkPowDecimals(benchmark::State& state);
+    void benchmarkPowNullAndMissing(benchmark::State& state);
+
+    void benchmarkStrLenBytes(benchmark::State& state);
+
+    void benchmarkTrim(benchmark::State& state, std::string chars = "");
+
+    void benchmarkTrunc(benchmark::State& state, int place);
+
 private:
     void testDateDiffExpression(long long startDate,
                                 long long endDate,
@@ -856,6 +867,37 @@ private:
     }                                                                                           \
     BENCHMARK_F(Fixture, Percentile_SingleMid_50000)(benchmark::State & state) {                \
         benchmarkPercentile(state, 50000, {0.5});                                               \
+    }                                                                                           \
+                                                                                                \
+    BENCHMARK_F(Fixture, PowIntegers)(benchmark::State & state) {                               \
+        benchmarkPowIntegers(state);                                                            \
+    }                                                                                           \
+    BENCHMARK_F(Fixture, PowDoubles)(benchmark::State & state) {                                \
+        benchmarkPowDoubles(state);                                                             \
+    }                                                                                           \
+    BENCHMARK_F(Fixture, PowDecimals)(benchmark::State & state) {                               \
+        benchmarkPowDecimals(state);                                                            \
+    }                                                                                           \
+    BENCHMARK_F(Fixture, PowNullAndMissing)(benchmark::State & state) {                         \
+        benchmarkPowNullAndMissing(state);                                                      \
+    }                                                                                           \
+                                                                                                \
+    BENCHMARK_F(Fixture, StrLenBytes)(benchmark::State & state) {                               \
+        benchmarkStrLenBytes(state);                                                            \
+    }                                                                                           \
+                                                                                                \
+    BENCHMARK_F(Fixture, Trim_Default)(benchmark::State & state) {                              \
+        benchmarkTrim(state);                                                                   \
+    }                                                                                           \
+    BENCHMARK_F(Fixture, Trim_NonDefault)(benchmark::State & state) {                           \
+        benchmarkTrim(state, " h");                                                             \
+    }                                                                                           \
+                                                                                                \
+    BENCHMARK_F(Fixture, Trunc_Positive)(benchmark::State & state) {                            \
+        benchmarkTrunc(state, 1);                                                               \
+    }                                                                                           \
+    BENCHMARK_F(Fixture, Trunc_Negative)(benchmark::State & state) {                            \
+        benchmarkTrunc(state, -1);                                                              \
     }
 
 

@@ -64,7 +64,6 @@ public:
     static constexpr auto kNModifiedFieldName = "nModified"_sd;
     static constexpr auto kOkFieldName = "ok"_sd;
     static constexpr auto kUpsertedFieldName = "upserted"_sd;
-    static constexpr auto kValueFieldName = "value"_sd;
 
     BulkWriteReplyItem();
     BulkWriteReplyItem(std::int32_t idx, Status status = Status::OK());
@@ -131,24 +130,22 @@ public:
     /**
      * Contains documents that have been upserted.
      */
-    const boost::optional<mongo::write_ops::Upserted>& getUpserted() const {
+    const boost::optional<IDLAnyTypeOwned>& getUpserted() const {
         return _upserted;
     }
 
-    void setUpserted(boost::optional<mongo::write_ops::Upserted> value) {
+    void setUpserted(boost::optional<IDLAnyTypeOwned> value) {
         _upserted = std::move(value);
     }
 
-    /**
-     * The document after the write, if the 'return' field of the request is 'post'.
-     * Otherwise, the document before the write.
-     */
-    const boost::optional<mongo::BSONObj>& getValue() const {
-        return _value;
-    }
-
-    void setValue(boost::optional<mongo::BSONObj> value) {
-        _value = std::move(value);
+    void setUpserted(boost::optional<mongo::write_ops::Upserted> value) {
+        if (!value) {
+            _upserted = boost::none;
+            return;
+        }
+        // BulkWrite needs only _id, not index.
+        BSONObj upserted = value->toBSON().removeField("index");
+        _upserted = IDLAnyTypeOwned(upserted.getField("_id"));
     }
 
     /**
@@ -176,8 +173,7 @@ private:
     std::int32_t _idx;
     boost::optional<std::int32_t> _n;
     boost::optional<std::int32_t> _nModified;
-    boost::optional<mongo::write_ops::Upserted> _upserted;
-    boost::optional<BSONObj> _value;
+    boost::optional<IDLAnyTypeOwned> _upserted;
     Status _status = Status::OK();
     bool _hasOk : 1;
     bool _hasIdx : 1;

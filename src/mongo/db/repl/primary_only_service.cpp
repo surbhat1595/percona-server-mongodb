@@ -218,7 +218,7 @@ void PrimaryOnlyServiceRegistry::onShutdown() {
 void PrimaryOnlyServiceRegistry::onStepUpComplete(OperationContext* opCtx, long long term) {
     auto replCoord = ReplicationCoordinator::get(opCtx);
 
-    if (!replCoord || !replCoord->isReplEnabled()) {
+    if (!replCoord || !replCoord->getSettings().isReplSet()) {
         // Unit tests may not have replication coordinator set up.
         return;
     }
@@ -859,6 +859,11 @@ StringData PrimaryOnlyService::_getStateString(WithLock) const {
         default:
             MONGO_UNREACHABLE;
     }
+}
+
+void PrimaryOnlyService::waitForStateNotRebuilding_forTest(OperationContext* opCtx) {
+    stdx::unique_lock lk(_mutex);
+    _waitForStateNotRebuilding(opCtx, lk);
 }
 
 void PrimaryOnlyService::_waitForStateNotRebuilding(OperationContext* opCtx,

@@ -286,9 +286,9 @@ TEST_F(DBRAIITestFixture,
 }
 
 TEST_F(DBRAIITestFixture, AutoGetCollectionForReadLastAppliedConflict) {
-    // This test simulates a situation where AutoGetCollectionForRead cant read at lastApplied
-    // because it is set to a point earlier than the catalog change. We expect to read without a
-    // timestamp and hold the PBWM lock.
+    // This test simulates a situation where we read from the last applied timestamp but that point
+    // in time is earlier than the catalog change. We expect to reconstruct the state from that
+    // point in time in order to read at last applied.
     auto replCoord = repl::ReplicationCoordinator::get(client1.second.get());
     CollectionOptions defaultCollectionOptions;
     ASSERT_OK(
@@ -341,8 +341,6 @@ TEST_F(DBRAIITestFixture, AutoGetCollectionForReadLastAppliedUnavailable) {
               RecoveryUnit::ReadSource::kLastApplied);
     ASSERT_FALSE(
         client1.second.get()->recoveryUnit()->getPointInTimeReadTimestamp(client1.second.get()));
-    ASSERT_FALSE(client1.second.get()->lockState()->isLockHeldForMode(
-        resourceIdParallelBatchWriterMode, MODE_IS));
 }
 
 TEST_F(DBRAIITestFixture, AutoGetCollectionForReadOplogOnSecondary) {
@@ -368,8 +366,6 @@ TEST_F(DBRAIITestFixture, AutoGetCollectionForReadOplogOnSecondary) {
 
     ASSERT_EQ(client1.second.get()->recoveryUnit()->getTimestampReadSource(),
               RecoveryUnit::ReadSource::kLastApplied);
-    ASSERT_FALSE(client1.second.get()->lockState()->isLockHeldForMode(
-        resourceIdParallelBatchWriterMode, MODE_IS));
 }
 
 TEST_F(DBRAIITestFixture, AutoGetCollectionForReadUsesLastAppliedOnSecondary) {
@@ -459,9 +455,9 @@ TEST_F(DBRAIITestFixture, AutoGetCollectionForReadSafe) {
     ASSERT_OK(
         repl::ReplicationCoordinator::get(opCtx)->setFollowerMode(repl::MemberState::RS_SECONDARY));
 
-    // Non-user read on a replicated collection should not fail because of the ShouldNotConflict
-    // block.
-    ShouldNotConflictWithSecondaryBatchApplicationBlock noConflict(opCtx->lockState());
+    // Non-user read on a replicated collection should not fail because of the last applied
+    // timestamp.
+    opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kLastApplied);
 
     AutoGetCollectionForRead autoColl(opCtx, nss);
 }

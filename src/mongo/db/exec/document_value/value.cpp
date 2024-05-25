@@ -76,61 +76,6 @@ using std::stringstream;
 using std::vector;
 using namespace std::string_literals;
 
-RCVector::~RCVector() = default;
-RCVector::RCVector() = default;
-RCVector::RCVector(std::vector<Value> v) : vec(std::move(v)) {}
-
-void ValueStorage::verifyRefCountingIfShould() const {
-    switch (type) {
-        case MinKey:
-        case MaxKey:
-        case jstOID:
-        case Date:
-        case bsonTimestamp:
-        case EOO:
-        case jstNULL:
-        case Undefined:
-        case Bool:
-        case NumberInt:
-        case NumberLong:
-        case NumberDouble:
-            // the above types never reference external data
-            MONGO_verify(!refCounter);
-            break;
-
-        case String:
-        case RegEx:
-        case Code:
-        case Symbol:
-            // If this is using the short-string optimization, it must not have a ref-counted
-            // pointer.
-            invariant(!shortStr || !refCounter);
-
-            // If this is _not_ using the short string optimization, it must be storing a
-            // ref-counted pointer. One exception: in the BSONElement constructor of Value, it is
-            // possible for this ValueStorage to get constructed as a type but never initialized;
-            // the ValueStorage gets left as a nullptr and not marked as ref-counted, which is ok
-            // (SERVER-43205).
-            invariant(shortStr || (refCounter || !genericRCPtr));
-            break;
-
-        case NumberDecimal:
-        case BinData:  // TODO this should probably support short-string optimization
-        case Array:    // TODO this should probably support empty-is-NULL optimization
-        case DBRef:
-        case CodeWScope:
-            // the above types always reference external data.
-            invariant(refCounter);
-            invariant(bool(genericRCPtr));
-            break;
-
-        case Object:
-            // Objects either hold a NULL ptr or should be ref-counting
-            invariant(refCounter == bool(genericRCPtr));
-            break;
-    }
-}
-
 void ValueStorage::putString(StringData s) {
     // Note: this also stores data portion of BinData
     const size_t sizeNoNUL = s.size();
@@ -156,7 +101,7 @@ void ValueStorage::putDocument(Document&& d) {
     putRefCountable(std::move(d._storage));
 }
 
-void ValueStorage::putVector(boost::intrusive_ptr<RCVector>&& vec) {
+void ValueStorage::putVector(boost::intrusive_ptr<RCVector<Value>>&& vec) {
     fassert(16485, bool(vec));
     putRefCountable(std::move(vec));
 }
@@ -219,7 +164,7 @@ Value::Value(const BSONElement& elem) : _storage(elem.type()) {
         }
 
         case Array: {
-            auto vec = make_intrusive<RCVector>();
+            auto vec = make_intrusive<RCVector<Value>>();
             BSONForEach(sub, elem.embeddedObject()) {
                 vec->vec.push_back(Value(sub));
             }
@@ -281,7 +226,7 @@ Value::Value(const BSONElement& elem) : _storage(elem.type()) {
 }
 
 Value::Value(const BSONArray& arr) : _storage(Array) {
-    auto vec = make_intrusive<RCVector>();
+    auto vec = make_intrusive<RCVector<Value>>();
     BSONForEach(sub, arr) {
         vec->vec.push_back(Value(sub));
     }
@@ -289,7 +234,7 @@ Value::Value(const BSONArray& arr) : _storage(Array) {
 }
 
 Value::Value(const vector<BSONObj>& vec) : _storage(Array) {
-    auto storageVec = make_intrusive<RCVector>();
+    auto storageVec = make_intrusive<RCVector<Value>>();
     storageVec->vec.reserve(vec.size());
     for (auto&& obj : vec) {
         storageVec->vec.push_back(Value(obj));
@@ -298,7 +243,7 @@ Value::Value(const vector<BSONObj>& vec) : _storage(Array) {
 }
 
 Value::Value(const vector<Document>& vec) : _storage(Array) {
-    auto storageVec = make_intrusive<RCVector>();
+    auto storageVec = make_intrusive<RCVector<Value>>();
     storageVec->vec.reserve(vec.size());
     for (auto&& obj : vec) {
         storageVec->vec.push_back(Value(obj));
@@ -1190,7 +1135,7 @@ size_t Value::getApproximateSize() const {
 
         case Array: {
             size_t size = sizeof(Value);
-            size += sizeof(RCVector);
+            size += sizeof(RCVector<Value>);
             const size_t n = getArray().size();
             for (size_t i = 0; i < n; ++i) {
                 size += getArray()[i].getApproximateSize();

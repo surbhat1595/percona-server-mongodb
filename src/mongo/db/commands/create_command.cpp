@@ -67,6 +67,7 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/views/view.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_component.h"
@@ -126,13 +127,13 @@ void checkCollectionOptions(OperationContext* opCtx,
                             const Status& originalStatus,
                             const NamespaceString& ns,
                             const CollectionOptions& options) {
-    auto collOrView = AutoGetCollectionForReadLockFree(
-        opCtx,
-        ns,
-        AutoGetCollection::Options{}.viewMode(auto_get_collection::ViewMode::kViewsPermitted));
+    AutoGetDb autoDb(opCtx, ns.dbName(), MODE_IS);
+    Lock::CollectionLock collLock(opCtx, ns, MODE_IS);
+
     auto collatorFactory = CollatorFactoryInterface::get(opCtx->getServiceContext());
 
-    auto& coll = collOrView.getCollection();
+    const auto catalog = CollectionCatalog::get(opCtx);
+    const auto coll = catalog->lookupCollectionByNamespace(opCtx, ns);
     if (coll) {
         auto actualOptions = coll->getCollectionOptions();
         uassert(ErrorCodes::NamespaceExists,
@@ -142,7 +143,8 @@ void checkCollectionOptions(OperationContext* opCtx,
                 options.matchesStorageOptions(actualOptions, collatorFactory));
         return;
     }
-    auto view = collOrView.getView();
+
+    const auto view = catalog->lookupView(opCtx, ns);
     if (!view) {
         // If the collection/view disappeared in between attempting to create it
         // and retrieving the options, just propagate the original error.
@@ -152,8 +154,7 @@ void checkCollectionOptions(OperationContext* opCtx,
         MONGO_UNREACHABLE;
     }
 
-    auto fullNewNamespace =
-        NamespaceStringUtil::parseNamespaceFromRequest(ns.dbName(), options.viewOn);
+    auto fullNewNamespace = NamespaceStringUtil::deserialize(ns.dbName(), options.viewOn);
     uassert(ErrorCodes::NamespaceExists,
             str::stream() << "namespace " << ns.toStringForErrorMsg()
                           << " already exists, but is a view on "
@@ -183,6 +184,58 @@ void checkCollectionOptions(OperationContext* opCtx,
                                 << " already exists, but with collation: "
                                 << defaultCollatorSpecBSON << " rather than " << options.collation);
     }
+}
+
+void checkTimeseriesBucketsCollectionOptions(OperationContext* opCtx,
+                                             const Status& error,
+                                             const NamespaceString& bucketsNs,
+                                             CollectionOptions& options) {
+    auto coll = acquireCollectionMaybeLockFree(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(
+            opCtx, bucketsNs, AcquisitionPrerequisites::OperationType::kRead));
+    uassert(error.code(), error.reason(), coll.exists());
+
+    auto existingOptions = coll.getCollectionPtr()->getCollectionOptions();
+    uassert(error.code(), error.reason(), existingOptions.timeseries);
+
+    uassertStatusOK(timeseries::validateAndSetBucketingParameters(*options.timeseries));
+
+    // When checking that the options for the buckets collection are the same, filter out the
+    // options that were internally generated upon time-series collection creation (i.e. were not
+    // specified by the user).
+    uassert(error.code(),
+            error.reason(),
+            options.matchesStorageOptions(
+                uassertStatusOK(CollectionOptions::parse(existingOptions.toBSON(
+                    false /* includeUUID */, timeseries::kAllowedCollectionCreationOptions))),
+                CollatorFactoryInterface::get(opCtx->getServiceContext())));
+}
+
+void checkTimeseriesViewOptions(OperationContext* opCtx,
+                                const Status& error,
+                                const NamespaceString& viewNs,
+                                const CollectionOptions& options) {
+    auto acquisition =
+        acquireCollectionOrViewMaybeLockFree(opCtx,
+                                             CollectionOrViewAcquisitionRequest::fromOpCtx(
+                                                 opCtx,
+                                                 viewNs,
+                                                 AcquisitionPrerequisites::OperationType::kRead,
+                                                 AcquisitionPrerequisites::ViewMode::kCanBeView));
+    uassert(error.code(), error.reason(), acquisition.isView());
+    const auto& view = acquisition.getView().getViewDefinition();
+
+    uassert(error.code(), error.reason(), view.viewOn() == viewNs.makeTimeseriesBucketsNamespace());
+    uassert(error.code(),
+            error.reason(),
+            CollatorInterface::collatorsMatch(
+                view.defaultCollator(),
+                !options.collation.isEmpty()
+                    ? uassertStatusOK(CollatorFactoryInterface::get(opCtx->getServiceContext())
+                                          ->makeFromBSON(options.collation))
+                          .get()
+                    : nullptr));
 }
 
 class CmdCreate final : public CreateCmdVersion1Gen<CmdCreate> {
@@ -289,8 +342,7 @@ public:
                 uassert(ErrorCodes::InvalidOptions,
                         str::stream() << "the 'temp' field is an invalid option",
                         opCtx->getClient()->isInDirectClient() ||
-                            (opCtx->getClient()->session()->getTags() &
-                             transport::Session::kInternalClient));
+                            (opCtx->getClient()->isInternalClient()));
             }
 
             if (cmd.getPipeline()) {
@@ -310,8 +362,7 @@ public:
 
                 uassert(6346402,
                         "Encrypted collections are not supported on standalone",
-                        repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() ==
-                            repl::ReplicationCoordinator::Mode::modeReplSet);
+                        repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet());
 
                 FLEUtil::checkEFCForECC(cmd.getEncryptedFields().get());
             }
@@ -451,10 +502,17 @@ public:
             // if a collection with identical options already exists.
             if (createStatus == ErrorCodes::NamespaceExists &&
                 !opCtx->inMultiDocumentTransaction()) {
-                checkCollectionOptions(opCtx,
-                                       createStatus,
-                                       cmd.getNamespace(),
-                                       CollectionOptions::fromCreateCommand(cmd));
+                auto options = CollectionOptions::fromCreateCommand(cmd);
+                if (options.timeseries) {
+                    checkTimeseriesBucketsCollectionOptions(
+                        opCtx,
+                        createStatus,
+                        cmd.getNamespace().makeTimeseriesBucketsNamespace(),
+                        options);
+                    checkTimeseriesViewOptions(opCtx, createStatus, cmd.getNamespace(), options);
+                } else {
+                    checkCollectionOptions(opCtx, createStatus, cmd.getNamespace(), options);
+                }
             } else {
                 uassertStatusOK(createStatus);
             }
@@ -462,7 +520,8 @@ public:
             return reply;
         }
     };
-} cmdCreate;
+};
+MONGO_REGISTER_COMMAND(CmdCreate);
 
 }  // namespace
 }  // namespace mongo

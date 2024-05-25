@@ -169,6 +169,9 @@ function runHangAnalyzer(pids) {
     print(`Running hang analyzer for pids [${pids}]`);
 
     const scriptPath = pathJoin('.', 'buildscripts', 'resmoke.py');
+    // We are using a raw "python" rather than selecting the approperate python here
+    // This is because as part of SERVER-79663 we noticed that servers.js is included in the legacy
+    // shell
     const args =
         ['python', scriptPath, 'hang-analyzer', '-k', '-o', 'file', '-o', 'stdout', '-d', pids];
 
@@ -723,16 +726,6 @@ MongoRunner.mongodOptions = function(opts = {}) {
         } else {
             opts.setParameter["disableTransitionFromLatestToLastContinuous"] = false;
         }
-
-        // TODO (SERVER-74398): Remove special handling of 'confirm: true' once we no longer run
-        // suites with v6.X. We disable this check by default now so that we can pass suites
-        // without individually handling each multiversion test running on old binaries.
-        if (jsTestOptions().setParameters && jsTestOptions().setParameters.requireConfirmInSetFcv) {
-            opts.setParameter["requireConfirmInSetFcv"] =
-                jsTestOptions().setParameters.requireConfirmInSetFcv;
-        } else {
-            opts.setParameter["requireConfirmInSetFcv"] = false;
-        }
     }
 
     _removeSetParameterIfBeforeVersion(opts, "writePeriodicNoops", "3.3.12");
@@ -750,7 +743,6 @@ MongoRunner.mongodOptions = function(opts = {}) {
         opts, "internalQueryDisableExclusionProjectionFastPath", "6.2.0");
     _removeSetParameterIfBeforeVersion(
         opts, "disableTransitionFromLatestToLastContinuous", "7.0.0");
-    _removeSetParameterIfBeforeVersion(opts, "requireConfirmInSetFcv", "7.0.0");
 
     if (!opts.logFile && opts.useLogFiles) {
         opts.logFile = opts.dbpath + "/mongod.log";
@@ -1136,7 +1128,7 @@ MongoRunner.EXIT_UNCAUGHT = 100;  // top level exception that wasn't caught
 MongoRunner.EXIT_TEST = 101;
 MongoRunner.EXIT_AUDIT_ROTATE_ERROR = 102;
 
-MongoRunner.validateCollectionsCallback = function(port) {};
+MongoRunner.validateCollectionsCallback = function(port, options) {};
 
 /**
  * Kills a mongod process.
@@ -1464,13 +1456,6 @@ function appendSetParameterArgs(argArray) {
                         'oplogApplicationEnforcesSteadyStateConstraints=')) {
                     argArray.push(...['--setParameter',
                                       'oplogApplicationEnforcesSteadyStateConstraints=true']);
-                }
-
-                if ((jsTest.options().setParameters === undefined ||
-                     jsTest.options().setParameters['minNumChunksForSessionsCollection'] ===
-                         undefined) &&
-                    !argArrayContainsSetParameterValue('minNumChunksForSessionsCollection=')) {
-                    argArray.push(...['--setParameter', "minNumChunksForSessionsCollection=1"]);
                 }
             }
 

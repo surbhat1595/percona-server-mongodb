@@ -1,11 +1,10 @@
-
 /**
  * When loading the view catalog, the server should not crash because it encountered a view with an
  * invalid name. This test is specifically for the case of a view with a dbname that contains an
  * embedded null character (SERVER-36859).
  *
- * The test runs commands that are not allowed with security token: applyOps.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: applyOps.
  *   not_allowed_with_security_token,
  *   assumes_unsharded_collection,
  *   # applyOps is not available on mongos.
@@ -16,9 +15,6 @@
  *   tenant_migration_incompatible,
  * ]
  */
-(function() {
-"use strict";
-
 const testDB = db.getSiblingDB("view_with_invalid_dbname");
 
 // Create a view whose dbname has an invalid embedded NULL character. That's not possible with
@@ -40,4 +36,3 @@ assert.commandWorked(testDB.adminCommand(
 // Don't let the bogus view stick around, or else it will cause an error in validation.
 assert.commandWorked(testDB.adminCommand(
     {applyOps: [{op: "d", ns: testDB.getName() + ".system.views", o: {_id: viewName}}]}));
-}());

@@ -1,10 +1,12 @@
 // Test transaction starting with read.
-// The test runs commands that are not allowed with security token: endSession.
+//
 // @tags: [
-//   not_allowed_with_security_token,uses_transactions]
-(function() {
-"use strict";
-load("jstests/libs/auto_retry_transaction_in_sharding.js");
+//   # The test runs commands that are not allowed with security token: endSession.
+//   not_allowed_with_security_token,
+//   uses_transactions
+// ]
+
+import {withTxnAndAutoRetryOnMongos} from "jstests/libs/auto_retry_transaction_in_sharding.js";
 
 const dbName = "test";
 const collName = "start_transaction_with_read";
@@ -54,4 +56,3 @@ assert.eq({_id: "insert-2"}, coll.findOne({_id: "insert-2"}));
 assert.eq(initialDoc, coll.findOne(initialDoc));
 
 session.endSession();
-}());

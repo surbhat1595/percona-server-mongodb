@@ -89,7 +89,7 @@ DocumentSourceGroupBase::~DocumentSourceGroupBase() {
         stats.spills, stats.spilledDataStorageSize, stats.spilledRecords);
 }
 
-Value DocumentSourceGroupBase::serialize(SerializationOptions opts) const {
+Value DocumentSourceGroupBase::serialize(const SerializationOptions& opts) const {
     MutableDocument insides;
 
     const auto& idFieldNames = _groupProcessor.getIdFieldNames();
@@ -274,9 +274,11 @@ std::vector<AccumulationStatement>& DocumentSourceGroupBase::getMutableAccumulat
 DocumentSourceGroupBase::DocumentSourceGroupBase(
     StringData stageName,
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    boost::optional<size_t> maxMemoryUsageBytes)
+    boost::optional<int64_t> maxMemoryUsageBytes)
     : DocumentSource(stageName, expCtx),
-      _groupProcessor(expCtx, maxMemoryUsageBytes),
+      _groupProcessor(expCtx,
+                      maxMemoryUsageBytes ? *maxMemoryUsageBytes
+                                          : internalDocumentSourceGroupMaxMemoryBytes.load()),
       _sbeCompatibility(SbeCompatibility::notCompatible) {}
 
 namespace {

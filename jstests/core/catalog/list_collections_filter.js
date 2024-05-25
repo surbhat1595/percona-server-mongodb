@@ -1,8 +1,8 @@
 /*
  * Test SERVER-18622 listCollections should special case filtering by name.
  *
- * The test runs commands that are not allowed with security token: applyOps.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: applyOps.
  *   not_allowed_with_security_token,
  *   requires_replication,
  *   # applyOps is not supported on mongos
@@ -14,8 +14,6 @@
  * ]
  */
 
-(function() {
-"use strict";
 var mydb = db.getSiblingDB("list_collections_filter");
 assert.commandWorked(mydb.dropDatabase());
 
@@ -122,4 +120,3 @@ assert.throws(function() {
 assert.throws(function() {
     mydb.getCollectionInfos({a: {$nearSphere: {$geometry: {type: "Point", coordinates: [0, 0]}}}});
 });
-}());

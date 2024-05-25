@@ -89,7 +89,7 @@ public:
 
     DocumentSource::GetModPathsReturn getModifiedPaths() const final;
 
-    Value serialize(SerializationOptions opts = SerializationOptions()) const final override;
+    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final override;
 
     StageConstraints constraints(Pipeline::SplitState pipeState) const final;
 
@@ -272,7 +272,7 @@ private:
         bool _needEndOfTransaction;
 
         // Set of affected namespaces. Only needed if we need endOfTransaction.
-        absl::flat_hash_set<std::string> _affectedNamespaces;
+        absl::flat_hash_set<NamespaceString> _affectedNamespaces;
 
         // Set to true after iterator have returned endOfTransaction
         bool _endOfTransactionReturned = false;

@@ -19,16 +19,16 @@
  *   # The currentOp output field 'dataSyncCompleted' was renamed to 'migrationCompleted'.
  *   requires_fcv_70,
  *   serverless,
+ *   requires_fcv_71,
  * ]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
+import {restartServerReplication, stopServerReplication} from "jstests/libs/write_concern_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {makeTenantDB, makeX509OptionsForTest} from "jstests/replsets/libs/tenant_migration_util.js";
-
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/uuid_util.js");
-load("jstests/libs/write_concern_util.js");
-load('jstests/replsets/rslib.js');
+import {awaitRSClientHosts} from "jstests/replsets/rslib.js";
 
 const donorRst = new ReplSetTest({
     name: `${jsTestName()}_donor`,

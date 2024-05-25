@@ -1,4 +1,4 @@
-load("jstests/concurrency/fsm_workload_helpers/server_types.js");  // For isMongos.
+import {isMongod} from "jstests/concurrency/fsm_workload_helpers/server_types.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 /**
@@ -19,7 +19,8 @@ export var EncryptedClient = class {
     constructor(conn, dbName, userName = undefined, adminPwd = undefined) {
         // Detect if jstests/libs/override_methods/implicitly_shard_accessed_collections.js is in
         // use
-        this.useImplicitSharding = !(typeof (ImplicitlyShardAccessCollSettings) === "undefined");
+        this.useImplicitSharding =
+            typeof globalThis.ImplicitlyShardAccessCollSettings !== "undefined";
 
         if (conn.isAutoEncryptionEnabled()) {
             this._keyVault = conn.getKeyVault();
@@ -403,10 +404,7 @@ export var EncryptedClient = class {
         assert.docEq(docs, onDiskDocs);
     }
 
-    assertStateCollectionsAfterCompact(collName,
-                                       ecocExists,
-                                       ecocTempExists = false,
-                                       escDeletesExists = false) {
+    assertStateCollectionsAfterCompact(collName, ecocExists, ecocTempExists = false) {
         const baseCollInfos = this._edb.getCollectionInfos({"name": collName});
         assert.eq(baseCollInfos.length, 1);
         const baseCollInfo = baseCollInfos[0];
@@ -418,8 +416,6 @@ export var EncryptedClient = class {
         checkMap[baseCollInfo.options.encryptedFields.escCollection] = true;
         checkMap[baseCollInfo.options.encryptedFields.ecocCollection] = ecocExists;
         checkMap[baseCollInfo.options.encryptedFields.ecocCollection + ".compact"] = ecocTempExists;
-        checkMap[baseCollInfo.options.encryptedFields.escCollection + ".deletes"] =
-            escDeletesExists;
 
         const edb = this._edb;
         Object.keys(checkMap).forEach(function(coll) {

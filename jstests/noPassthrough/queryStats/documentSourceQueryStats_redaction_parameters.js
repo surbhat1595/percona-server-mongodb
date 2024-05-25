@@ -1,13 +1,10 @@
 /**
  * Test the $queryStats hmac properties.
- * @tags: [featureFlagQueryStats]
+ * @tags: [requires_fcv_71]
  */
 
-load("jstests/aggregation/extras/utils.js");  // For assertAdminDBErrCodeAndErrMsgContains.
-load("jstests/libs/query_stats_utils.js");
-
-(function() {
-"use strict";
+import {assertAdminDBErrCodeAndErrMsgContains} from "jstests/aggregation/extras/utils.js";
+import {getQueryStatsFindCmd} from "jstests/libs/query_stats_utils.js";
 
 // Assert the expected queryStats key with no hmac.
 function assertQueryStatsKeyWithoutHmac(queryStatsKey) {
@@ -18,7 +15,7 @@ function assertQueryStatsKeyWithoutHmac(queryStatsKey) {
 
 function runTest(conn) {
     const testDB = conn.getDB('test');
-    var coll = testDB[jsTestName()];
+    const coll = testDB[jsTestName()];
     coll.drop();
 
     coll.insert({foo: 1});
@@ -36,7 +33,7 @@ function runTest(conn) {
 
     // Turning hmac back off should preserve field names on all entries, even previously cached
     // ones.
-    const queryStats = getQueryStats(conn)[1]["key"];
+    const queryStats = getQueryStatsFindCmd(conn)[0]["key"];
     assertQueryStatsKeyWithoutHmac(queryStats.queryShape);
 
     // Explicitly set transformIdentifiers to false.
@@ -84,6 +81,14 @@ function runTest(conn) {
         40414,
         "BSON field '$queryStats.transformIdentifiers.algorithm' is missing but a required field");
 
+    // TransformIdentifiers with algorithm but missing hmacKey throws error.
+    pipeline = [{$queryStats: {transformIdentifiers: {algorithm: "hmac-sha-256"}}}];
+    assertAdminDBErrCodeAndErrMsgContains(
+        coll,
+        pipeline,
+        ErrorCodes.FailedToParse,
+        "The 'hmacKey' parameter of the $queryStats stage must be specified when applying the hmac-sha-256 algorithm");
+
     // Parameter object with unrecognized key throws error.
     pipeline =
         [{$queryStats: {transformIdentifiers: {algorithm: "hmac-sha-256", hmacStrategy: "on"}}}];
@@ -117,4 +122,3 @@ const st = new ShardingTest({
 });
 runTest(st.s);
 st.stop();
-}());

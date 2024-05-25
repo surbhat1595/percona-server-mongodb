@@ -47,7 +47,7 @@
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/pipeline/change_stream_helpers_legacy.h"
+#include "mongo/db/pipeline/change_stream_helpers.h"
 #include "mongo/db/pipeline/change_stream_rewrite_helpers.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/document_source_change_stream_gen.h"
@@ -251,6 +251,8 @@ std::unique_ptr<MatchExpression> buildTransactionFilter(
     const boost::intrusive_ptr<ExpressionContext>& expCtx, const MatchExpression* userMatch) {
     BSONObjBuilder applyOpsBuilder;
 
+    auto nsRegex = DocumentSourceChangeStream::getNsRegexForChangeStream(expCtx);
+
     // "o.applyOps" stores the list of operations, so it must be an array.
     applyOpsBuilder.append("op", "c");
     applyOpsBuilder.append("o.applyOps",
@@ -264,7 +266,6 @@ std::unique_ptr<MatchExpression> buildTransactionFilter(
         BSONArrayBuilder orBuilder(applyOpsBuilder.subarrayStart("$or"));
         {
             // Regexes for full-namespace, collection, and command-namespace matching.
-            auto nsRegex = DocumentSourceChangeStream::getNsRegexForChangeStream(expCtx);
             auto collRegex = DocumentSourceChangeStream::getCollRegexForChangeStream(expCtx);
             auto cmdNsRegex = DocumentSourceChangeStream::getCmdNsRegexForChangeStream(expCtx);
 
@@ -287,13 +288,15 @@ std::unique_ptr<MatchExpression> buildTransactionFilter(
         }
     }
     auto applyOpsFilter = applyOpsBuilder.obj();
+    auto endOfTransactionFilter = BSON("op"
+                                       << "n"
+                                       << "o2.endOfTransaction" << BSONRegEx(nsRegex));
+    auto commitTransactionFilter = BSON("op"
+                                        << "c"
+                                        << "o.commitTransaction" << 1);
 
-    auto transactionFilter =
-        MatchExpressionParser::parseAndNormalize(BSON(OR(applyOpsFilter,
-                                                         BSON("op"
-                                                              << "c"
-                                                              << "o.commitTransaction" << 1))),
-                                                 expCtx);
+    auto transactionFilter = MatchExpressionParser::parseAndNormalize(
+        BSON(OR(applyOpsFilter, endOfTransactionFilter, commitTransactionFilter)), expCtx);
 
     // All events in a transaction share the same clusterTime, lsid, and txNumber values. If the
     // user wishes to filter out events based on these values, it is possible to rewrite these
@@ -338,9 +341,6 @@ std::unique_ptr<MatchExpression> buildInternalOpFilter(
         internalOpTypeOrBuilder.append(BSON("o2." + eventName << BSON("$exists" << true)));
     }
 
-    // TODO SERVER-66138: This filter can be removed after 7.0 release.
-    change_stream_legacy::populateInternalOperationFilter(expCtx, &internalOpTypeOrBuilder);
-
     // Finalize the array of $or filter predicates.
     internalOpTypeOrBuilder.done();
 
@@ -354,7 +354,7 @@ std::unique_ptr<MatchExpression> buildInternalOpFilter(
 
 BSONObj getMatchFilterForClassicOperationTypes() {
     return BSON(DocumentSourceChangeStream::kOperationTypeField
-                << BSON("$in" << change_stream_legacy::kClassicOperationTypes));
+                << BSON("$in" << change_stream::kClassicOperationTypes));
 }
 
 }  // namespace change_stream_filter

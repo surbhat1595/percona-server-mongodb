@@ -43,6 +43,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/ttl_collection_cache.h"
 #include "mongo/util/duration.h"
 
 namespace mongo {
@@ -61,66 +62,60 @@ namespace index_key_validate {
 constexpr auto kExpireAfterSecondsForInactiveTTLIndex =
     Seconds(std::numeric_limits<int32_t>::max());
 
-static std::set<StringData> allowedFieldNames = {
-    IndexDescriptor::k2dIndexBitsFieldName,
-    IndexDescriptor::k2dIndexMaxFieldName,
-    IndexDescriptor::k2dIndexMinFieldName,
-    IndexDescriptor::k2dsphereCoarsestIndexedLevel,
-    IndexDescriptor::k2dsphereFinestIndexedLevel,
-    IndexDescriptor::k2dsphereVersionFieldName,
-    IndexDescriptor::kBackgroundFieldName,
-    IndexDescriptor::kCollationFieldName,
-    IndexDescriptor::kDefaultLanguageFieldName,
-    IndexDescriptor::kDropDuplicatesFieldName,
-    IndexDescriptor::kExpireAfterSecondsFieldName,
-    IndexDescriptor::kHiddenFieldName,
-    IndexDescriptor::kIndexNameFieldName,
-    IndexDescriptor::kIndexVersionFieldName,
-    IndexDescriptor::kKeyPatternFieldName,
-    IndexDescriptor::kLanguageOverrideFieldName,
-    IndexDescriptor::kNamespaceFieldName,
-    IndexDescriptor::kPartialFilterExprFieldName,
-    IndexDescriptor::kWildcardProjectionFieldName,
-    IndexDescriptor::kColumnStoreProjectionFieldName,
-    IndexDescriptor::kSparseFieldName,
-    IndexDescriptor::kStorageEngineFieldName,
-    IndexDescriptor::kTextVersionFieldName,
-    IndexDescriptor::kUniqueFieldName,
-    IndexDescriptor::kWeightsFieldName,
-    IndexDescriptor::kOriginalSpecFieldName,
-    IndexDescriptor::kPrepareUniqueFieldName,
-    IndexDescriptor::kColumnStoreCompressorFieldName,
+/**
+ * Describe which field names are considered valid options when creating an index. If the set
+ * associated with the field name is empty, the option is always valid, otherwise it will be allowed
+ * only when creating the set of index types listed in the set.
+ */
+static std::map<StringData, std::set<IndexType>> allowedFieldNames = {
+    {IndexDescriptor::k2dIndexBitsFieldName, {IndexType::INDEX_2D}},
+    {IndexDescriptor::k2dIndexMaxFieldName, {IndexType::INDEX_2D}},
+    {IndexDescriptor::k2dIndexMinFieldName, {IndexType::INDEX_2D}},
+    {IndexDescriptor::k2dsphereCoarsestIndexedLevel, {IndexType::INDEX_2DSPHERE}},
+    {IndexDescriptor::k2dsphereFinestIndexedLevel, {IndexType::INDEX_2DSPHERE}},
+    {IndexDescriptor::k2dsphereVersionFieldName,
+     {IndexType::INDEX_2DSPHERE, IndexType::INDEX_2DSPHERE_BUCKET}},
+    {IndexDescriptor::kBackgroundFieldName, {}},
+    {IndexDescriptor::kCollationFieldName, {}},
+    {IndexDescriptor::kDefaultLanguageFieldName, {}},
+    {IndexDescriptor::kDropDuplicatesFieldName, {}},
+    {IndexDescriptor::kExpireAfterSecondsFieldName, {}},
+    {IndexDescriptor::kHiddenFieldName, {}},
+    {IndexDescriptor::kIndexNameFieldName, {}},
+    {IndexDescriptor::kIndexVersionFieldName, {}},
+    {IndexDescriptor::kKeyPatternFieldName, {}},
+    {IndexDescriptor::kLanguageOverrideFieldName, {}},
+    {IndexDescriptor::kNamespaceFieldName, {}},
+    {IndexDescriptor::kPartialFilterExprFieldName, {}},
+    {IndexDescriptor::kWildcardProjectionFieldName, {IndexType::INDEX_WILDCARD}},
+    {IndexDescriptor::kColumnStoreProjectionFieldName, {IndexType::INDEX_COLUMN}},
+    {IndexDescriptor::kSparseFieldName, {}},
+    {IndexDescriptor::kStorageEngineFieldName, {}},
+    {IndexDescriptor::kTextVersionFieldName, {IndexType::INDEX_TEXT}},
+    {IndexDescriptor::kUniqueFieldName, {}},
+    {IndexDescriptor::kWeightsFieldName, {IndexType::INDEX_TEXT}},
+    {IndexDescriptor::kOriginalSpecFieldName, {}},
+    {IndexDescriptor::kPrepareUniqueFieldName, {}},
+    {IndexDescriptor::kColumnStoreCompressorFieldName, {IndexType::INDEX_COLUMN}},
     // Index creation under legacy writeMode can result in an index spec with an _id field.
-    "_id",
+    {"_id", {}},
     // TODO SERVER-76108: Field names are not validated to match index type. This was used for the
     // removed 'geoHaystack' index type, but users could have set it for other index types as well.
     // We need to keep allowing it until FCV upgrade is implemented to clean this up.
-    "bucketSize"_sd,
-};
+    {"bucketSize"_sd, {}}};
 
 /**
  * Checks if the key is valid for building an index according to the validation rules for the given
- * index version. If 'checkFCV' is true we will check FCV for compound wildcard indexes validation.
- *
- * TODO SERVER-68303: Consider removing 'checkFCV' flag when 'CompoundWildcardIndexes'
- * feature flag is removed.
+ * index version.
  */
-Status validateKeyPattern(const BSONObj& key,
-                          IndexDescriptor::IndexVersion indexVersion,
-                          bool checkFCV = false);
+Status validateKeyPattern(const BSONObj& key, IndexDescriptor::IndexVersion indexVersion);
 
 /**
  * Validates the index specification 'indexSpec' and returns an equivalent index specification that
  * has any missing attributes filled in. If the index specification is malformed, then an error
- * status is returned. If 'checkFCV' is true we will check FCV for compound wildcard indexes
- * validation.
- *
- * TODO SERVER-68303: Consider removing 'checkFCV' flag when 'CompoundWildcardIndexes'
- * feature flag is removed.
+ * status is returned.
  */
-StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx,
-                                      const BSONObj& indexSpec,
-                                      bool checkFCV = false);
+StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& indexSpec);
 
 /**
  * Returns a new index spec with any unknown field names removed from 'indexSpec'.
@@ -128,12 +123,12 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx,
 BSONObj removeUnknownFields(const NamespaceString& ns, const BSONObj& indexSpec);
 
 /**
- * Returns a new index spec with boolean values in correct types and unkown field names removed.
+ * Returns a new index spec with boolean values in correct types and unknown field names removed.
  */
-BSONObj repairIndexSpec(
-    const NamespaceString& ns,
-    const BSONObj& indexSpec,
-    const std::set<StringData>& allowedFieldNames = index_key_validate::allowedFieldNames);
+BSONObj repairIndexSpec(const NamespaceString& ns,
+                        const BSONObj& indexSpec,
+                        const std::map<StringData, std::set<IndexType>>& allowedFieldNames =
+                            index_key_validate::allowedFieldNames);
 
 /**
  * Performs additional validation for _id index specifications. This should be called after
@@ -166,8 +161,17 @@ enum class ValidateExpireAfterSecondsMode {
 Status validateExpireAfterSeconds(std::int64_t expireAfterSeconds,
                                   ValidateExpireAfterSecondsMode mode);
 
-Status validateExpireAfterSeconds(BSONElement expireAfterSeconds,
-                                  ValidateExpireAfterSecondsMode mode);
+StatusWith<TTLCollectionCache::Info::ExpireAfterSecondsType> validateExpireAfterSeconds(
+    BSONElement expireAfterSeconds, ValidateExpireAfterSecondsMode mode);
+
+/**
+ * Convenience method to extract the 'ExpireAfterSecondsType' from the
+ * `StatusWith<ExpireAfterSecondsType>` result of a 'validateExpireAfterSeconds' call, converting a
+ * non-OK status to `kInvalid`.
+ */
+TTLCollectionCache::Info::ExpireAfterSecondsType extractExpireAfterSecondsType(
+    const StatusWith<TTLCollectionCache::Info::ExpireAfterSecondsType>& swType);
+
 /**
  * Returns true if 'indexSpec' refers to a TTL index.
  */
@@ -187,19 +191,15 @@ bool isIndexAllowedInAPIVersion1(const IndexDescriptor& indexDesc);
 /**
  * Parses the index specifications from 'indexSpecObj', validates them, and returns equivalent index
  * specifications that have any missing attributes filled in. If any index specification is
- * malformed, then an error status is returned. If 'checkFCV' is true we should validate the index
- * spec taking into account the FCV value. Some certain type of index cannot be created with
- * downgraded FCV but can be continuously used if it's already created before FCV downgrade.
+ * malformed, then an error status is returned.
  */
-BSONObj parseAndValidateIndexSpecs(OperationContext* opCtx,
-                                   const BSONObj& indexSpecObj,
-                                   bool checkFCV);
+BSONObj parseAndValidateIndexSpecs(OperationContext* opCtx, const BSONObj& indexSpecObj);
 
 /**
  * Optional filtering function to adjust allowed index field names at startup.
  * Set it in a MONGO_INITIALIZER with 'FilterAllowedIndexFieldNames' as a dependant.
  */
-extern std::function<void(std::set<StringData>& allowedIndexFieldNames)>
+extern std::function<void(std::map<StringData, std::set<IndexType>>& allowedIndexFieldNames)>
     filterAllowedIndexFieldNames;
 
 }  // namespace index_key_validate

@@ -23,10 +23,10 @@ a notice will be included in
 | ---------------------------| ----------------- | ------------------| :------------------: | :-----------------------------: |
 | [abseil-cpp]               | Apache-2.0        | 20211102.0       |                      |                ✗                |
 | [Aladdin MD5]              | Zlib              | Unknown           |          ✗           |                ✗                |
-| [ASIO]                     | BSL-1.0           | b0926b61b0        |                      |                ✗                |
+| [ASIO]                     | BSL-1.0           | 22afb86087        |                      |                ✗                |
 | [benchmark]                | Apache-2.0        | 1.5.2             |                      |                                 |
-| [Boost]                    | BSL-1.0           | 1.76.0            |                      |                ✗                |
-| [c-ares]                   | MIT               | 1.17.2            |                      |                ✗                |
+| [Boost]                    | BSL-1.0           | 1.79.0            |                      |                ✗                |
+| [c-ares]                   | MIT               | 1.19.1            |                      |                ✗                |
 | [fmt]                      | BSD-2-Clause      | 7.1.3             |                      |                ✗                |
 | [GPerfTools]               | BSD-3-Clause      | 2.9.1             |                      |                ✗                |
 | [gRPC]                     | Apache-2.0        | 1.46.6            |                      |                ✗                |
@@ -36,7 +36,9 @@ a notice will be included in
 | [JSON-Schema-Test-Suite]   | MIT               | 728066f9c5        |                      |                                 |
 | [libstemmer]               | BSD-3-Clause      | Unknown           |          ✗           |                ✗                |
 | [librdkafka]               | BSD-2-Clause      | 2.0.2             |                      |                                 |
+| [libmongocrypt]            | Apache-2.0        | e656245b7e        |          ✗           |                ✗                |
 | [linenoise]                | BSD-3-Clause      | Unknown + changes |                      |                ✗                |
+| [mongo-c-driver]           | Apache-2.0        | 1.23.0            |          ✗           |                ✗                |
 | [MozJS]                    | MPL-2.0           | ESR 91.3.0        |                      |                ✗                |
 | [MurmurHash3]              | Public Domain     | Unknown + changes |          ✗           |                ✗                |
 | [ocspbuilder]              | MIT               | 0.10.2            |                      |                                 |
@@ -55,8 +57,8 @@ a notice will be included in
 | [libunwind]                | MIT               | 1.6.2 + changes   |                      |                ✗                |
 | [Valgrind]                 | BSD-3-Clause<sup>\[<a href="#note_vg" id="ref_vg">1</a>]</sup> | 3.17.0 | |             ✗                |
 | [wiredtiger]               |                   | <sup>\[<a href="#note_wt" id="ref_wt">2</a>]</sup> | ✗ |  ✗                |
-| [yaml-cpp]                 | MIT               | 0.6.2             |                      |                ✗                |
-| [Zlib]                     | Zlib              | 1.2.13            |          ✗           |                ✗                |
+| [yaml-cpp]                 | MIT               | 0.6.3             |                      |                ✗                |
+| [Zlib]                     | Zlib              | 1.3               |          ✗           |                ✗                |
 | [Zstandard]                | BSD-3-Clause      | 1.5.5             |          ✗           |                ✗                |
 
 [abseil-cpp]: https://github.com/abseil/abseil-cpp
@@ -71,7 +73,9 @@ a notice will be included in
 [JSON-Schema-Test-Suite]: https://github.com/json-schema-org/JSON-Schema-Test-Suite
 [libstemmer]: https://github.com/snowballstem/snowball
 [librdkafka]: https://github.com/confluentinc/librdkafka
+[libmongocrypt]: https://github.com/mongodb/libmongocrypt
 [linenoise]: https://github.com/antirez/linenoise
+[mongo-c-driver]: https://github.com/mongodb/mongo-c-driver
 [MozJS]: https://www.mozilla.org/en-US/security/known-vulnerabilities/firefox-esr
 [MurmurHash3]: https://github.com/aappleby/smhasher/blob/master/src/MurmurHash3.cpp
 [ocspbuilder]: https://github.com/wbond/ocspbuilder

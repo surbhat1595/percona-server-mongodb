@@ -80,7 +80,7 @@ public:
             auto cmdResponse = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
                 opCtx,
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                DatabaseName::kAdmin.toString(),
+                DatabaseName::kAdmin,
                 configsvrRequest.toBSON({}),
                 Shard::RetryPolicy::kIdempotent));
 
@@ -122,8 +122,8 @@ public:
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
-
-} configureCollectionBalancingCmd;
+};
+MONGO_REGISTER_COMMAND(ConfigCollectionBalancingCmd);
 
 }  // namespace
 }  // namespace mongo

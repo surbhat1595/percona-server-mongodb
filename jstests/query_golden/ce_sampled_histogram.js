@@ -11,10 +11,9 @@ import {
     runHistogramsTest,
     summarizeExplainForCE
 } from "jstests/libs/ce_stats_utils.js";
+import {loadJSONDataset} from "jstests/libs/load_ce_test_data.js";
 import {forceCE, round2} from "jstests/libs/optimizer_utils.js";
 import {computeStrategyErrors} from "jstests/query_golden/libs/compute_errors.js";
-
-load("jstests/libs/load_ce_test_data.js");  // For 'loadJSONDataset'.
 
 /**
  * Returns a 2-element array containing the number of documents returned by the 'predicate' and
@@ -63,15 +62,15 @@ const collData = 'ce_accuracy_test';
 const dataDir = 'jstests/query_golden/libs/data/';
 const sampleRate = 0.2;
 
-load(`${dataDir}${collData}.schema`);  // For 'dbMetadata'.
-load(`${dataDir}${collData}.data`);    // For 'chunkNames'.
+const {dbMetadata} = await import(`${dataDir}${collData}.schema`);
+const {chunkNames} = await import(`${dataDir}${collData}.data`);
 
 /**
  * Main testing function. Initializes histograms and sample collection, and then executes a series
  * of queries against the 'base' collection, whose histograms include all values, and the 'sampled'
  * collection, whose histograms include only 10% of values.
  */
-runHistogramsTest(function testSampleHistogram() {
+await runHistogramsTest(async function testSampleHistogram() {
     const sampleDB = db.getSiblingDB("ce_sampled_histogram");
     const baseDB = db.getSiblingDB("ce_base_histogram");
 
@@ -91,7 +90,7 @@ runHistogramsTest(function testSampleHistogram() {
     ];
 
     // Initialize base collection.
-    loadJSONDataset(baseDB, chunkNames, dataDir, dbMetadata);
+    await loadJSONDataset(baseDB, chunkNames, dataDir, dbMetadata);
     const collSize = baseColl.count();
 
     // Select approximately 'sampleRate'*collSize documents from the base collection to insert

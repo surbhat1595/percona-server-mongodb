@@ -6,10 +6,7 @@
  *   requires_persistence
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/multiVersion/libs/multi_cluster.js");  // For ShardingTest.waitUntilStable.
+import "jstests/multiVersion/libs/multi_cluster.js";
 
 const st = new ShardingTest({shards: 1, mongos: 2, rs: {nodes: 1}});
 const shard0 = st.rs0;
@@ -180,4 +177,3 @@ const newStaleConfigErrorCount = assert.commandWorked(primaryDB.runCommand({serv
 assert.gt(
     newStaleConfigErrorCount, prevStaleConfigErrorCount, "StaleConfig errors must have happened");
 st.stop();
-}());

@@ -4,8 +4,9 @@
  * Transactions should not operate on temporary collections because they are for internal use only
  * and are deleted on both repl stepup and server startup.
  *
- * The test runs commands that are not allowed with security token: applyOps, prepareTransaction.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: applyOps,
+ *   # prepareTransaction.
  *   not_allowed_with_security_token,
  *   uses_transactions,
  *   uses_prepare_transaction,
@@ -15,9 +16,6 @@
  *   tenant_migration_incompatible,
  * ]
  */
-
-(function() {
-"use strict";
 
 const dbName = "test";
 const tempCollName = "prepare_transaction_fails_on_temp_collections";
@@ -43,4 +41,3 @@ jsTest.log("Calling prepareTransaction for a transaction with operations against
            "temporary collection should now fail.");
 assert.commandFailedWithCode(sessionDB.adminCommand({prepareTransaction: 1}),
                              ErrorCodes.OperationNotSupportedInTransaction);
-})();

@@ -56,6 +56,7 @@
 #include "mongo/db/fts/fts_query.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_algo.h"
+#include "mongo/db/matcher/expression_hasher.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
@@ -116,13 +117,22 @@ Status filterMatches(const BSONObj& testFilter,
         root = MatchExpression::optimize(std::move(root));
     }
     MatchExpression::sortTree(root.get());
-    if (trueFilterClone->equivalent(root.get())) {
-        return Status::OK();
+    if (!trueFilterClone->equivalent(root.get())) {
+        return {ErrorCodes::Error{5619211},
+                str::stream()
+                    << "Provided filter did not match filter on query solution node. Expected: "
+                    << root->toString() << ". Found: " << trueFilter->toString()};
     }
-    return {
-        ErrorCodes::Error{5619211},
-        str::stream() << "Provided filter did not match filter on query solution node. Expected: "
-                      << root->toString() << ". Found: " << trueFilter->toString()};
+
+    const MatchExpressionHasher hash{};
+    if (hash(trueFilterClone.get()) != hash(root.get())) {
+        return {ErrorCodes::Error{7901821},
+                str::stream() << "Provided filter's hash did not match filter's hash on query "
+                                 "solution node. Expected: "
+                              << root->toString() << ". Found: " << trueFilter->toString()};
+    }
+
+    return Status::OK();
 }
 
 Status nodeHasMatchingFilter(const BSONObj& testFilter,
@@ -992,7 +1002,7 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
                     "corresponding 'proj' object in the provided JSON"};
         }
         BSONObj projObj = el.Obj();
-        invariant(bsonObjFieldsAreInSet(projObj, {"type", "spec", "node"}));
+        invariant(bsonObjFieldsAreInSet(projObj, {"type", "spec", "node", "isAddition"}));
 
         BSONElement projType = projObj["type"];
         if (!projType.eoo()) {
@@ -1038,14 +1048,23 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
                 "JSON"};
         }
 
+        // Extra flag which can be used to indicate whether the projection is an "addition" (adding
+        // fields) or not (excluding/including fields);
+        BSONElement isAdditionElt = projObj["isAddition"];
+        const bool isAddition = isAdditionElt.trueValue();
+
         // Create an empty/dummy expression context without access to the operation context and
         // collator. This should be sufficient to parse a projection.
         auto expCtx = make_intrusive<ExpressionContext>(
             nullptr, nullptr, NamespaceString::createNamespaceString_forTest("test.dummy"));
         auto projection = projection_ast::parseAndAnalyze(
-            expCtx, spec.Obj(), ProjectionPolicies::findProjectionPolicies());
+            expCtx,
+            spec.Obj(),
+            isAddition ? ProjectionPolicies::addFieldsProjectionPolicies()
+                       : ProjectionPolicies::findProjectionPolicies());
         auto specProjObj = projection_ast::astToDebugBSON(projection.root());
         auto solnProjObj = projection_ast::astToDebugBSON(pn->proj.root());
+
         if (!SimpleBSONObjComparator::kInstance.evaluate(specProjObj == solnProjObj)) {
             return {ErrorCodes::Error{5619278},
                     str::stream() << "found a projection stage in the solution with "
@@ -1280,7 +1299,10 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
         }
 
         BSONObjBuilder bob;
-        actualGroupNode->groupByExpression->serialize(true).addToBsonObj(&bob, "_id");
+        actualGroupNode->groupByExpression
+            ->serialize(SerializationOptions{
+                .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)})
+            .addToBsonObj(&bob, "_id");
         auto actualGroupByObj = bob.done();
         if (!SimpleBSONObjComparator::kInstance.evaluate(actualGroupByObj ==
                                                          expectedGroupByElem.Obj())) {
@@ -1293,7 +1315,10 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
         BSONArrayBuilder actualAccs;
         for (auto& acc : actualGroupNode->accumulators) {
             BSONObjBuilder bob;
-            acc.expr.argument->serialize(true).addToBsonObj(&bob, acc.expr.name);
+            acc.expr.argument
+                ->serialize(SerializationOptions{
+                    .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)})
+                .addToBsonObj(&bob, acc.expr.name);
             actualAccs.append(BSON(acc.fieldName << bob.done()));
         }
         auto expectedAccsObj = expectedGroupObj["accs"].Obj();
@@ -1360,6 +1385,16 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
                                     "mismatching output fields within 'column_scan'");
                 !outputStatus.isOK()) {
                 return outputStatus;
+            }
+        }
+
+        if (auto extraFieldsPermittedElt = obj["extraFieldsPermitted"]) {
+            const bool extraFieldsPermitted = extraFieldsPermittedElt.trueValue();
+            if (actualColumnIxScanNode->extraFieldsPermitted != extraFieldsPermitted) {
+                return {ErrorCodes::Error{5842499},
+                        str::stream() << "Found mismatched extraFieldsPermitted. Expected "
+                                      << extraFieldsPermitted << " Found: "
+                                      << actualColumnIxScanNode->extraFieldsPermitted};
             }
         }
 

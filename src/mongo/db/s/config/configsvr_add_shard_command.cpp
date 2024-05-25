@@ -109,7 +109,7 @@ Status notifyShardsOfSecondShardIfNeeded(OperationContext* opCtx) {
     const auto cmdResponse = shardRegistry->getConfigShard()->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-        DatabaseName::kAdmin.toString(),
+        DatabaseName::kAdmin,
         configsvrSetClusterParameter.toBSON({}),
         Shard::RetryPolicy::kIdempotent);
 
@@ -210,6 +210,7 @@ public:
 
         return true;
     }
-} configsvrAddShardCmd;
+};
+MONGO_REGISTER_COMMAND(ConfigSvrAddShardCommand);
 
 }  // namespace mongo

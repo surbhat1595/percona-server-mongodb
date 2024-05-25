@@ -2,11 +2,11 @@
 // because it does more than a simple sum for the reduce function and also needs to use a finalize
 // function to do the final division to compute the average from the sum and totals.
 //
-// Cannot implicitly shard accessed collections because mapReduce cannot replace a sharded
-// collection as output.
-// The test runs commands that are not allowed with security token: mapReduce.
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapReduce.
 //   not_allowed_with_security_token,
+//   # Cannot implicitly shard accessed collections because mapReduce cannot replace a sharded
+//   # collection as output.
 //   assumes_unsharded_collection,
 //   # mapReduce does not support afterClusterTime.
 //   does_not_support_causal_consistency,
@@ -14,9 +14,6 @@
 //   uses_map_reduce_with_temp_collections,
 //   requires_scripting,
 // ]
-(function() {
-"use strict";
-
 const coll = db.mr_blog_posts;
 coll.drop();
 
@@ -93,4 +90,3 @@ assert.eq(9, resultAsSingleObj.a.avg, () => tojson(resultAsSingleObj));
 assert.eq(16, resultAsSingleObj.b.avg, () => tojson(resultAsSingleObj));
 assert.eq(18, resultAsSingleObj.c.avg, () => tojson(resultAsSingleObj));
 assert(!("result" in res), () => `Expected inline output with 'results': ${tojson(res)}`);
-}());

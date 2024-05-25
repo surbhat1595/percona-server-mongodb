@@ -152,10 +152,6 @@ assert = (function() {
         doassert(_buildAssertionMessage(msg, "assert failed"));
     };
 
-    assert.automsg = function(b) {
-        assert(eval(b), b);
-    };
-
     assert._debug = false;
 
     function _isEq(a, b) {
@@ -260,10 +256,6 @@ assert = (function() {
                 failAssertion();
             }
         }
-    };
-
-    assert.eq.automsg = function(a, b) {
-        assert.eq(eval(a), eval(b), "[" + a + "] != [" + b + "]");
     };
 
     assert.neq = function(a, b, msg) {
@@ -397,7 +389,7 @@ assert = (function() {
      * throwing an exception or more than 'timeout' milliseconds have elapsed. Throws an exception
      * with message 'msg' after timing out.
      */
-    assert.soonNoExcept = function(func, msg, timeout, interval) {
+    assert.soonNoExcept = function(func, msg, timeout, interval, {runHangAnalyzer = true} = {}) {
         var safeFunc =
             _convertExceptionToReturnStatus(func, "assert.soonNoExcept caught exception");
         var getFunc = () => {
@@ -421,7 +413,7 @@ assert = (function() {
             };
         };
 
-        assert.soon(getFunc(), msg, timeout, interval);
+        assert.soon(getFunc(), msg, timeout, interval, {runHangAnalyzer});
     };
 
     /*
@@ -496,13 +488,15 @@ assert = (function() {
 
         var start = new Date();
         timeout = timeout || 30000;
+
+        let res;
         if (typeof (f) == "string") {
             res = eval(f);
         } else {
             res = f();
         }
 
-        diff = (new Date()).getTime() - start.getTime();
+        const diff = (new Date()).getTime() - start.getTime();
         if (diff > timeout) {
             const msgPrefix =
                 "assert.time failed timeout " + timeout + "ms took " + diff + "ms : " + f + ", msg";
@@ -639,18 +633,6 @@ assert = (function() {
                 throw e;
             }
         }
-    };
-
-    assert.throws.automsg = function(func, params) {
-        if (arguments.length === 1)
-            params = [];
-        assert.throws(func, params, func.toString());
-    };
-
-    assert.doesNotThrow.automsg = function(func, params) {
-        if (arguments.length === 1)
-            params = [];
-        assert.doesNotThrow(func, params, func.toString());
     };
 
     function _rawReplyOkAndNoWriteErrors(raw, {ignoreWriteErrors, ignoreWriteConcernErrors} = {}) {

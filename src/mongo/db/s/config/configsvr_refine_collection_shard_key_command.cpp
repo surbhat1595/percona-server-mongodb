@@ -179,7 +179,7 @@ public:
                         try {
                             sharding_util::sendCommandToShardsWithVersion(
                                 opCtx,
-                                nss.db_forSharding(),
+                                nss.dbName(),
                                 validateRequest.toBSON({}),
                                 shardsIdsVec,
                                 Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),
@@ -209,7 +209,7 @@ public:
                   "CMD: refineCollectionShardKey",
                   "request"_attr = request().toBSON({}));
 
-            ShardingCatalogManager::get(opCtx)->refineCollectionShardKey(
+            ShardingCatalogManager::get(opCtx)->refineCollectionShardKeyDEPRECATED(
                 opCtx, nss, newShardKeyPattern);
         }
 
@@ -249,8 +249,8 @@ public:
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
-
-} configsvrRefineCollectionShardKeyCmd;
+};
+MONGO_REGISTER_COMMAND(ConfigsvrRefineCollectionShardKeyCommand);
 
 }  // namespace
 }  // namespace mongo

@@ -47,7 +47,6 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/change_stream_document_diff_parser.h"
 #include "mongo/db/pipeline/change_stream_helpers.h"
-#include "mongo/db/pipeline/change_stream_helpers_legacy.h"
 #include "mongo/db/pipeline/change_stream_preimage_gen.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/resume_token.h"
@@ -287,8 +286,7 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
                 operationType = DocumentSourceChangeStream::kDropCollectionOpType;
 
                 // The "o.drop" field will contain the actual collection name.
-                nss = NamespaceStringUtil::parseNamespaceFromDoc(nss.dbName(),
-                                                                 nssField.getStringData());
+                nss = NamespaceStringUtil::deserialize(nss.dbName(), nssField.getStringData());
             } else if (auto nssField = oField.getField("renameCollection"); !nssField.missing()) {
                 operationType = DocumentSourceChangeStream::kRenameCollectionOpType;
 
@@ -318,34 +316,29 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
                 nss = NamespaceString(nss.dbName());
             } else if (auto nssField = oField.getField("create"); !nssField.missing()) {
                 operationType = DocumentSourceChangeStream::kCreateOpType;
-                nss = NamespaceStringUtil::parseNamespaceFromDoc(nss.dbName(),
-                                                                 nssField.getStringData());
+                nss = NamespaceStringUtil::deserialize(nss.dbName(), nssField.getStringData());
                 operationDescription = Value(copyDocExceptFields(oField, {"create"_sd}));
             } else if (auto nssField = oField.getField("createIndexes"); !nssField.missing()) {
                 operationType = DocumentSourceChangeStream::kCreateIndexesOpType;
-                nss = NamespaceStringUtil::parseNamespaceFromDoc(nss.dbName(),
-                                                                 nssField.getStringData());
+                nss = NamespaceStringUtil::deserialize(nss.dbName(), nssField.getStringData());
                 // Wrap the index spec in an "indexes" array for consistency with commitIndexBuild.
                 auto indexSpec = Value(copyDocExceptFields(oField, {"createIndexes"_sd}));
                 operationDescription = Value(Document{{"indexes", std::vector<Value>{indexSpec}}});
             } else if (auto nssField = oField.getField("commitIndexBuild"); !nssField.missing()) {
                 operationType = DocumentSourceChangeStream::kCreateIndexesOpType;
-                nss = NamespaceStringUtil::parseNamespaceFromDoc(nss.dbName(),
-                                                                 nssField.getStringData());
+                nss = NamespaceStringUtil::deserialize(nss.dbName(), nssField.getStringData());
                 operationDescription = Value(Document{{"indexes", oField.getField("indexes")}});
             } else if (auto nssField = oField.getField("dropIndexes"); !nssField.missing()) {
                 const auto o2Field = input[repl::OplogEntry::kObject2FieldName].getDocument();
                 operationType = DocumentSourceChangeStream::kDropIndexesOpType;
-                nss = NamespaceStringUtil::parseNamespaceFromDoc(nss.dbName(),
-                                                                 nssField.getStringData());
+                nss = NamespaceStringUtil::deserialize(nss.dbName(), nssField.getStringData());
                 // Wrap the index spec in an "indexes" array for consistency with createIndexes
                 // and commitIndexBuild.
                 auto indexSpec = Value(copyDocExceptFields(o2Field, {"dropIndexes"_sd}));
                 operationDescription = Value(Document{{"indexes", std::vector<Value>{indexSpec}}});
             } else if (auto nssField = oField.getField("collMod"); !nssField.missing()) {
                 operationType = DocumentSourceChangeStream::kModifyOpType;
-                nss = NamespaceStringUtil::parseNamespaceFromDoc(nss.dbName(),
-                                                                 nssField.getStringData());
+                nss = NamespaceStringUtil::deserialize(nss.dbName(), nssField.getStringData());
                 operationDescription = Value(copyDocExceptFields(oField, {"collMod"_sd}));
 
                 const auto o2Field = input[repl::OplogEntry::kObject2FieldName].getDocument();
@@ -362,11 +355,7 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
             break;
         }
         case repl::OpTypeEnum::kNoop: {
-            // TODO SERVER-66138: The legacy oplog format for some no-op operations can include
-            // 'type' field, which was removed post 6.0. We can remove all the logic related to the
-            // 'type' field once 7.0 is release.
-            const auto o2Field = change_stream_legacy::convertFromLegacyOplogFormat(
-                input[repl::OplogEntry::kObject2FieldName].getDocument(), nss);
+            const auto o2Field = input[repl::OplogEntry::kObject2FieldName].getDocument();
 
             // Check whether this is a shardCollection oplog entry.
             if (!o2Field["shardCollection"].missing()) {

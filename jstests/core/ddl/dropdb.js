@@ -2,13 +2,11 @@
  * Test that a db does not exist after it is dropped.
  *
  * @tags: [
- *   # listDatabases with explicit filter on db names doesn't work on tenant migrations suites
- *   tenant_migration_incompatible,
- *   ]
+ *   # listDatabases with explicit filter on db names doesn't work with the simulate_atlas_proxy
+ *   # override.
+ *   simulate_atlas_proxy_incompatible,
+ * ]
  */
-
-(function() {
-"use strict";
 
 function listDatabases(options) {
     return assert
@@ -41,4 +39,3 @@ for (var i = 0; i < 3; i++) {
 
 assert.commandWorked(ddb.dropDatabase());
 assertDatabaseDoesNotExist(dbName);
-})();

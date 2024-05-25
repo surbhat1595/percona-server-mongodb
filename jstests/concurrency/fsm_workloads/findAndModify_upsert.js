@@ -6,6 +6,8 @@
  * created) based on the 'query' specification, and updated using the
  * $push operator.
  */
+import {assertAlways, assertWhenOwnColl} from "jstests/concurrency/fsm_libs/assert.js";
+
 export const $config = (function() {
     var data = {sort: false, shardKey: {tid: 1}};
 
@@ -49,7 +51,7 @@ export const $config = (function() {
             }
 
             var res = db.runCommand(cmdObj);
-            assertAlways.commandWorked(res);
+            assertAlways.commandWorkedOrFailedWithCode(res, ErrorCodes.StaleConfig);
 
             var doc = res.value;
             assertAlways(doc !== null, 'a document should have been inserted');
@@ -79,7 +81,7 @@ export const $config = (function() {
             }
 
             var res = db.runCommand(cmdObj);
-            assertAlways.commandWorked(res);
+            assertAlways.commandWorkedOrFailedWithCode(res, ErrorCodes.StaleConfig);
 
             var doc = res.value;
             assertWhenOwnColl(doc !== null, 'query spec should have matched a document');

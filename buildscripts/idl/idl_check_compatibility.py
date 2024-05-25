@@ -173,7 +173,7 @@ ALLOW_ANY_TYPE_LIST: List[str] = [
 # Do not add user visible fields already released in earlier versions.
 # We generally don't allow changing a field from stable to unstable, but we permit it in special cases,
 # such as when we want to avoid making internal fields part of the stable API.
-# Additions to this list must be approved by the Stable API PM and code reviewed by the Replication
+# Additions to this list must be approved by the Stable API PM and code reviewed by the Query Optimization
 # team.
 IGNORE_STABLE_TO_UNSTABLE_LIST: List[str] = [
     # This list is only used in unit-tests.
@@ -195,48 +195,6 @@ IGNORE_STABLE_TO_UNSTABLE_LIST: List[str] = [
     'newReplyFieldTypeStructIgnoreList-reply-unstableNewFieldIgnoreList',
 
     # Real use cases for changing a field from 'stable' to 'unstable'.
-
-    # The 'originalSpec' field was introduced in v5.1 behind a disabled feature flag and is not user
-    # visible. This is part of the listIndexes output when executed against system.bucket.*
-    # collections, which users should avoid doing.
-    'listIndexes-reply-originalSpec',
-    # The 'vars' field was introduced to facilitate communication between mongot and mongod and is
-    # not user visible.
-    'find-reply-vars',
-    'aggregate-reply-vars',
-    # The 'cursor' field is now optional in a reply, as inter-node communication in aggregation
-    # can return one or more cursors. Multiple cursors are covered under the 'cursors' field.
-    'find-reply-cursor',
-    'aggregate-reply-cursor',
-    # The 'ignoreUnknownIndexOptions' field is for internal use only and is not documented to users.
-    'createIndexes-param-ignoreUnknownIndexOptions',
-    # The 'runtimeConstants' field is a legacy field for internal use only and is not documented to
-    # users.
-    'delete-param-runtimeConstants',
-    # The 'isTimeseriesNamespace' field is sent from mongos to shards for internal use.
-    'collMod-param-isTimeseriesNamespace',
-    'createIndexes-param-isTimeseriesNamespace',
-    'dropIndexes-param-isTimeseriesNamespace',
-    'listIndexes-param-isTimeseriesNamespace',
-    'insert-param-isTimeseriesNamespace',
-    'update-param-isTimeseriesNamespace',
-    'delete-param-isTimeseriesNamespace',
-    'findAndModify-param-isTimeseriesNamespace',
-    # The 'needsMerge' and 'fromMongos' fields of aggregation are sent from mongos to shards for internal use.
-    'aggregate-param-needsMerge',
-    'aggregate-param-fromMongos',
-    # Bulk fixes for fields that are strictly internal all along and should thus be marked unstable.
-    'endSessions-param-txnNumber',
-    'endSessions-param-txnUUID',
-    'findAndModify-param-stmtId',
-    'hello-reply-cwwc',
-    'hello-reply-isImplicitDefaultMajorityWC',
-    'hello-param-loadBalanced',
-    'hello-reply-serviceId',
-    'refreshSessions-param-txnNumber',
-    'refreshSessions-param-txnUUID',
-    # upsertSupplied is an internal implementation detail of $merge
-    'update-param-upsertSupplied',
 ]
 
 # Once a field is part of the stable API, either by direct addition or by changing it from unstable
@@ -244,7 +202,7 @@ IGNORE_STABLE_TO_UNSTABLE_LIST: List[str] = [
 # want to make sure such changes are always intentional. Therefore, the checker will throw errors
 # unless the field is also added to this list below, with which the author ackhowledges they are
 # aware of the above implications.
-# Additions to this list must be approved by the Stable API PM and code reviewed by the Replication
+# Additions to this list must be approved by the Stable API PM and code reviewed by the Query Optimization
 # team.
 ALLOWED_STABLE_FIELDS_LIST: List[str] = [
     # This list is only used in unit-tests. These cases modify fields from unstable to stable.
@@ -422,7 +380,7 @@ def get_new_commands(
             with open(new_idl_file_path) as new_file:
                 new_idl_file = parser.parse(
                     new_file, new_idl_file_path,
-                    CompilerImportResolver(import_directories + [new_idl_dir]))
+                    CompilerImportResolver(import_directories + [new_idl_dir]), False)
                 if new_idl_file.errors:
                     new_idl_file.errors.dump_errors()
                     raise ValueError(f"Cannot parse {new_idl_file_path}")
@@ -1069,19 +1027,22 @@ def check_param_or_type_validator(ctxt: IDLCompatibilityContext, old_field: synt
     # SERVER-71601.
     #
     # Do not add additional parameters to this list.
-    ignore_validator_check_list = [
-        "create-param-bucketMaxSpanSeconds", "create-param-bucketRoundingSeconds"
-    ]
+    ignore_validator_check_list: List[str] = []
 
     if new_field.validator:
         if old_field.validator:
-            allow_name: str = cmd_name + "-param-" + old_field.name
-            if new_field.validator != old_field.validator and allow_name not in ignore_validator_check_list:
+            old_field_name: str = cmd_name + "-param-" + old_field.name
+            if new_field.validator != old_field.validator and old_field_name not in ignore_validator_check_list:
                 ctxt.add_command_or_param_type_validators_not_equal_error(
                     cmd_name, new_field.name, new_idl_file_path, type_name, is_command_parameter)
         else:
-            ctxt.add_command_or_param_type_contains_validator_error(
-                cmd_name, new_field.name, new_idl_file_path, type_name, is_command_parameter)
+            new_field_name: str = cmd_name + "-param-" + new_field.name
+            # In SERVER-77382 we fixed the error handling of creating time-series collections by
+            # adding a new validator to two 'stable' fields, but it didn't break any stable API
+            # guarantees.
+            if new_field_name not in ["create-param-timeField", "create-param-metaField"]:
+                ctxt.add_command_or_param_type_contains_validator_error(
+                    cmd_name, new_field.name, new_idl_file_path, type_name, is_command_parameter)
 
 
 def get_all_struct_fields(struct: syntax.Struct, idl_file: syntax.IDLParsedSpec,
@@ -1139,9 +1100,6 @@ def check_command_params_or_type_struct_fields(
     # We allow collMod isTimeseriesNamespace parameter to be removed because it's implicitly
     # added from mongos and not documented in the API.
     allow_list += ["collMod-param-isTimeseriesNamespace"]
-    # We allow collMod "recordPreImages" parameter to be removed because it was incorrectly marked as stable
-    # in 5.0.x versions.
-    allow_list += ["collMod-param-recordPreImages"]
 
     for old_field in old_struct_fields or []:
         new_field_exists = False
@@ -1308,9 +1266,11 @@ def check_error_reply(old_basic_types_path: str, new_basic_types_path: str,
     ctxt = IDLCompatibilityContext(old_idl_dir, new_idl_dir, IDLCompatibilityErrorCollection())
     with open(old_basic_types_path) as old_file:
         old_idl_file = parser.parse(old_file, old_basic_types_path,
-                                    CompilerImportResolver(old_import_directories))
+                                    CompilerImportResolver(old_import_directories), False)
         if old_idl_file.errors:
             old_idl_file.errors.dump_errors()
+            # If parsing old IDL files fails, it might be because the parser has been recently
+            # updated to require something that isn't present in older IDL files.
             raise ValueError(f"Cannot parse {old_basic_types_path}")
 
         old_error_reply_struct = old_idl_file.spec.symbols.get_struct("ErrorReply")
@@ -1320,7 +1280,7 @@ def check_error_reply(old_basic_types_path: str, new_basic_types_path: str,
         else:
             with open(new_basic_types_path) as new_file:
                 new_idl_file = parser.parse(new_file, new_basic_types_path,
-                                            CompilerImportResolver(new_import_directories))
+                                            CompilerImportResolver(new_import_directories), False)
                 if new_idl_file.errors:
                     new_idl_file.errors.dump_errors()
                     raise ValueError(f"Cannot parse {new_basic_types_path}")
@@ -1488,9 +1448,11 @@ def check_compatibility(old_idl_dir: str, new_idl_dir: str, old_import_directori
             with open(old_idl_file_path) as old_file:
                 old_idl_file = parser.parse(
                     old_file, old_idl_file_path,
-                    CompilerImportResolver(old_import_directories + [old_idl_dir]))
+                    CompilerImportResolver(old_import_directories + [old_idl_dir]), False)
                 if old_idl_file.errors:
                     old_idl_file.errors.dump_errors()
+                    # If parsing old IDL files fails, it might be because the parser has been
+                    # recently updated to require something that isn't present in older IDL files.
                     raise ValueError(f"Cannot parse {old_idl_file_path}")
 
                 for old_cmd in old_idl_file.spec.symbols.commands:
@@ -1557,7 +1519,7 @@ def get_generic_arguments(gen_args_file_path: str, includes: str) -> Tuple[Set[s
 
     with open(gen_args_file_path) as gen_args_file:
         parsed_idl_file = parser.parse(gen_args_file, gen_args_file_path,
-                                       CompilerImportResolver(includes))
+                                       CompilerImportResolver(includes), False)
         if parsed_idl_file.errors:
             parsed_idl_file.errors.dump_errors()
             raise ValueError(f"Cannot parse {gen_args_file_path}")

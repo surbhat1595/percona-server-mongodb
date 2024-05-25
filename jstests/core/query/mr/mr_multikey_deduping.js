@@ -1,6 +1,7 @@
 // Tests that the presence of an index does not impact the results of a mapReduce
-// The test runs commands that are not allowed with security token: mapReduce.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapReduce.
 //   not_allowed_with_security_token,
 //   # MR commands may not see previous inserts because MR does not support causal consistency so we
 //   # add this tag to exclude transactional passthroughs which commit versions in an ascynchronos
@@ -13,9 +14,7 @@
 //   requires_scripting,
 // ]
 
-load("jstests/aggregation/extras/utils.js");  // For resultsEq
-(function() {
-"use strict";
+import {resultsEq} from "jstests/aggregation/extras/utils.js";
 
 const coll = db.mr_multikey_deduping;
 coll.drop();
@@ -124,5 +123,4 @@ outColl.drop();
     assert(resultsEq(resultsNoIndexNoQuery, resultsIndexedNoQuery));
     assert(resultsEq(resultsNoIndexEqualityOnName, resultsIndexedEqualityOnName));
     assert(resultsEq(resultsNoIndexRangeOnName, resultsIndexedRangeOnName));
-}());
 }());

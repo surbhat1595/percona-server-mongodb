@@ -29,10 +29,15 @@
 
 #include "mongo/db/exec/sbe/stages/ts_bucket_to_cell_block.h"
 
+#include <cstddef>
+#include <string>
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/bson.h"
-#include "mongo/db/exec/sbe/values/empty_cell_block.h"
+#include "mongo/db/exec/sbe/values/scalar_mono_cell_block.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/ts_block.h"
 #include "mongo/db/exec/sbe/values/value.h"
@@ -41,35 +46,31 @@
 #include "mongo/util/str.h"
 
 namespace mongo::sbe {
-TsBucketToCellBlockStage::TsBucketToCellBlockStage(std::unique_ptr<PlanStage> input,
-                                                   value::SlotId bucketSlot,
-                                                   std::vector<std::string> topLevelPaths,
-                                                   value::SlotVector blocksOut,
-                                                   boost::optional<value::SlotId> metaOut,
-                                                   bool hasMetaField,
-                                                   const std::string& timeField,
-                                                   PlanNodeId nodeId,
-                                                   bool participateInTrialRunTracking)
+TsBucketToCellBlockStage::TsBucketToCellBlockStage(
+    std::unique_ptr<PlanStage> input,
+    value::SlotId bucketSlot,
+    std::vector<value::CellBlock::PathRequest> pathReqs,
+    value::SlotVector blocksOut,
+    boost::optional<value::SlotId> metaOut,
+    const std::string& timeField,
+    PlanNodeId nodeId,
+    bool participateInTrialRunTracking)
     : PlanStage("ts_bucket_to_cellblock"_sd, nodeId, participateInTrialRunTracking),
       _bucketSlotId(bucketSlot),
-      _topLevelPaths(std::move(topLevelPaths)),
+      _pathReqs(pathReqs),
       _blocksOutSlotId(std::move(blocksOut)),
       _metaOutSlotId(metaOut),
-      _hasMetaField(hasMetaField),
-      _timeField(timeField) {
-    tassert(7796402,
-            "Meta slot is requested but no 'meta' field in timeseries collection options",
-            !_metaOutSlotId || _hasMetaField);
+      _timeField(timeField),
+      _pathExtractor(pathReqs, _timeField) {
     _children.emplace_back(std::move(input));
 }
 
 std::unique_ptr<PlanStage> TsBucketToCellBlockStage::clone() const {
     return std::make_unique<TsBucketToCellBlockStage>(_children[0]->clone(),
                                                       _bucketSlotId,
-                                                      _topLevelPaths,
+                                                      _pathReqs,
                                                       _blocksOutSlotId,
                                                       _metaOutSlotId,
-                                                      _hasMetaField,
                                                       _timeField,
                                                       _commonStats.nodeId,
                                                       _participateInTrialRunTracking);
@@ -81,8 +82,7 @@ void TsBucketToCellBlockStage::prepare(CompileCtx& ctx) {
     // Gets the incoming accessor for buckets.
     _bucketAccessor = _children[0]->getAccessor(ctx, _bucketSlotId);
 
-    _tsCellBlocks.resize(_topLevelPaths.size());
-    _blocksOutAccessor.resize(_topLevelPaths.size());
+    _blocksOutAccessor.resize(_pathReqs.size());
 }
 
 value::SlotAccessor* TsBucketToCellBlockStage::getAccessor(CompileCtx& ctx, value::SlotId slot) {
@@ -90,7 +90,7 @@ value::SlotAccessor* TsBucketToCellBlockStage::getAccessor(CompileCtx& ctx, valu
         return &_metaOutAccessor;
     }
 
-    for (size_t i = 0; i < _topLevelPaths.size(); ++i) {
+    for (size_t i = 0; i < _pathReqs.size(); ++i) {
         if (slot == _blocksOutSlotId[i]) {
             return &_blocksOutAccessor[i];
         }
@@ -104,10 +104,17 @@ void TsBucketToCellBlockStage::open(bool reOpen) {
 
     _commonStats.opens++;
     _children[0]->open(reOpen);
+
+    // Until we have valid data, we disable access to slots.
+    disableSlotAccess();
 }
 
 PlanState TsBucketToCellBlockStage::getNext() {
     auto optTimer(getOptTimer(_opCtx));
+
+    // We are about to call getNext() on our child so do not bother saving our internal state in
+    // case it yields as the state will be completely overwritten after the getNext() call.
+    disableSlotAccess();
 
     for (auto& acc : _blocksOutAccessor) {
         acc.reset();
@@ -117,60 +124,11 @@ PlanState TsBucketToCellBlockStage::getNext() {
     if (state == PlanState::IS_EOF) {
         return trackPlanState(state);
     }
+    state = trackPlanState(state);
 
-    auto [bucketTag, bucketVal] = _bucketAccessor->getViewOfValue();
-    invariant(bucketTag == value::TypeTags::bsonObject);
+    initCellBlocks();
 
-    BSONObj bucketObj(value::getRawPointerView(bucketVal));
-
-    if (_metaOutSlotId && _hasMetaField) {
-        auto metaElt = bucketObj[timeseries::kBucketMetaFieldName];
-        auto [metaTag, metaVal] = bson::convertFrom<true>(metaElt);
-        _metaOutAccessor.reset(false, metaTag, metaVal);
-    }
-
-    BSONElement bucketControl = bucketObj[timeseries::kBucketControlFieldName];
-    invariant(!bucketControl.eoo());
-    BSONElement data = bucketObj[timeseries::kBucketDataFieldName];
-    invariant(!data.eoo());
-    invariant(data.type() == BSONType::Object);
-
-    for (auto elt : data.embeddedObject()) {
-        for (size_t i = 0; i < _topLevelPaths.size(); ++i) {
-            if (elt.fieldName() == _topLevelPaths[i]) {
-                {
-                    auto [blockTag, blockVal] = bson::convertFrom<true>(elt);
-                    tassert(7796400,
-                            "Unsupported type for timeseries bucket data",
-                            blockTag == value::TypeTags::bsonObject ||
-                                blockTag == value::TypeTags::bsonBinData);
-
-                    // Up to this point, the storage engine owns the underlying storage buffer for
-                    // the block and so the CellBlock must not own it.
-                    _tsCellBlocks[i].emplace(/*owned*/ false, blockTag, blockVal);
-                }
-
-                _blocksOutAccessor[i].reset(
-                    false,
-                    value::TypeTags::cellBlock,
-                    value::bitcastFrom<value::CellBlock*>(&_tsCellBlocks[i].get()));
-            }
-        }
-    }
-
-    // Any block slots that are still Nothing get filled with an EmptyBlock. This way later stages
-    // do not have to deal with block slots being Nothing.
-    for (size_t i = 0; i < _blocksOutAccessor.size(); ++i) {
-        if (_blocksOutAccessor[i].getViewOfValue().first == value::TypeTags::Nothing) {
-            auto emptyBlock = std::make_unique<value::EmptyCellBlock>();
-            _blocksOutAccessor[i].reset(
-                true,
-                value::TypeTags::cellBlock,
-                value::bitcastFrom<value::CellBlock*>(emptyBlock.release()));
-        }
-    }
-
-    return trackPlanState(state);
+    return state;
 }
 
 void TsBucketToCellBlockStage::close() {
@@ -196,21 +154,21 @@ std::vector<DebugPrinter::Block> TsBucketToCellBlockStage::debugPrint() const {
 
     DebugPrinter::addIdentifier(ret, _bucketSlotId);
 
-    ret.emplace_back(DebugPrinter::Block("paths[`"));
-    for (size_t idx = 0; idx < _topLevelPaths.size(); ++idx) {
+    ret.emplace_back(DebugPrinter::Block("pathReqs[`"));
+    for (size_t idx = 0; idx < _pathReqs.size(); ++idx) {
         if (idx) {
             ret.emplace_back(DebugPrinter::Block("`,"));
         }
         DebugPrinter::addIdentifier(ret, _blocksOutSlotId[idx]);
-        ret.emplace_back(" = ");
+        ret.emplace_back("=");
 
-        ret.emplace_back(_topLevelPaths[idx]);
+        ret.emplace_back(_pathReqs[idx].toString());
     }
     ret.emplace_back(DebugPrinter::Block("`]"));
 
     if (_metaOutSlotId) {
-        ret.emplace_back("meta = ");
         DebugPrinter::addIdentifier(ret, *_metaOutSlotId);
+        ret.emplace_back("= meta");
     }
 
     DebugPrinter::addNewLine(ret);
@@ -223,5 +181,35 @@ size_t TsBucketToCellBlockStage::estimateCompileTimeSize() const {
     size_t size = sizeof(*this);
     size += size_estimator::estimate(_children);
     return size;
+}
+
+void TsBucketToCellBlockStage::doRestoreState(bool) {
+    if (!slotsAccessible()) {
+        return;
+    }
+
+    initCellBlocks();
+}
+
+// The underlying storage buffer for the bucket has been updated after getNext() on the child or
+// yielding, so we need to restore states from the updated bucket.
+void TsBucketToCellBlockStage::initCellBlocks() {
+    auto [bucketTag, bucketVal] = _bucketAccessor->getViewOfValue();
+    invariant(bucketTag == value::TypeTags::bsonObject);
+
+    BSONObj bucketObj(value::getRawPointerView(bucketVal));
+    if (_metaOutSlotId) {
+        auto metaElt = bucketObj[timeseries::kBucketMetaFieldName];
+        auto [metaTag, metaVal] = bson::convertFrom<true>(metaElt);
+        _metaOutAccessor.reset(false, metaTag, metaVal);
+    }
+
+    auto cellBlocks = _pathExtractor.extractCellBlocks(bucketObj);
+    invariant(cellBlocks.size() == _blocksOutAccessor.size());
+    for (size_t i = 0; i < cellBlocks.size(); ++i) {
+        _blocksOutAccessor[i].reset(true,
+                                    value::TypeTags::cellBlock,
+                                    value::bitcastFrom<value::CellBlock*>(cellBlocks[i].release()));
+    }
 }
 }  // namespace mongo::sbe

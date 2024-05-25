@@ -1,14 +1,11 @@
 /**
- * The test runs commands that are not allowed with security token: benchRun.
  * @tags: [
- *   not_allowed_with_security_token,
  *   uses_multiple_connections,
  *   uses_parallel_shell,
+ *   # benchRun does not use runCommand which is required by the `simulate_atlas_proxy` override.
+ *   simulate_atlas_proxy_incompatible,
  * ]
  */
-(function() {
-"use strict";
-
 const t = db.bench_test2;
 t.drop();
 
@@ -59,4 +56,3 @@ print("Avg: " + avg);
 print("Std: " + std);
 print("Min: " + min);
 print("Max: " + max);
-})();

@@ -71,8 +71,10 @@
 #include "mongo/db/mongod_options_replication_gen.h"
 #include "mongo/db/mongod_options_sharding_gen.h"
 #include "mongo/db/mongod_options_storage_gen.h"
+#include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/repl_set_config_params_gen.h"
 #include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_options_base.h"
 #include "mongo/db/server_options_nongeneral_gen.h"
@@ -84,6 +86,7 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_proxy.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/options_parser/startup_options.h"
 #include "mongo/util/str.h"
@@ -171,6 +174,11 @@ StatusWith<repl::ReplSettings> populateReplSettings(const moe::Environment& para
         // "replSetName" is previously removed if "replSet" and "replSetName" are both found to be
         // set by the user. Therefore, we only need to check for it if "replSet" in not found.
         replSettings.setReplSetString(params["replication.replSetName"].as<std::string>().c_str());
+    } else if (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup() &&
+               serverGlobalParams.maintenanceMode != ServerGlobalParams::StandaloneMode) {
+        replSettings.setShouldAutoInitiate();
+        // When autobootstrapping, we generate a UUID for the replica set name.
+        replSettings.setReplSetString(UUID::gen().toString());
     }
 
     if (params.count("replication.oplogSizeMB")) {
@@ -276,15 +284,21 @@ Status validateMongodOptions(const moe::Environment& params) {
         setShardRole = setShardRole || clusterRole == "shardsvr";
     }
 
-    bool setRouterRole = params.count("router");
-    if (params.count("sharding.routerEnabled")) {
-        setRouterRole = setRouterRole || params["sharding.routerEnabled"].as<bool>();
-    }
+    bool setRouterPort = params.count("routerPort") || params.count("net.routerPort");
 
     // TODO (SERVER-79008): Make `--configdb` mandatory when the embedded router is enabled.
-    if (setRouterRole && !setConfigRole && !setShardRole) {
+    if (setRouterPort && !setConfigRole && !setShardRole) {
         return Status(ErrorCodes::BadValue,
                       "The embedded router requires the node to act as a shard or config server");
+    }
+
+    if (params.count("maintenanceMode")) {
+        auto maintenanceMode = params["maintenanceMode"].as<std::string>();
+        if (maintenanceMode == "standalone" &&
+            (params.count("replSet") || params.count("replication.replSetName"))) {
+            return Status(ErrorCodes::BadValue,
+                          "Cannot specify both standalone maintenance mode and replica set name");
+        }
     }
 
     if (params.count("storage.queryableBackupMode")) {
@@ -365,15 +379,14 @@ Status canonicalizeMongodOptions(moe::Environment* params) {
         }
     }
 
-    // "sharding.routerEnabled" comes from the config file, so override it if "router" is set since
-    // those come from the command line.
-    if (params->count("router")) {
-        Status ret =
-            params->set("sharding.routerEnabled", moe::Value((*params)["router"].as<bool>()));
+    // If the "--routerPort" option is passed from the command line, override "net.routerPort"
+    // (config file option) as it will be used later.
+    if (params->count("routerPort")) {
+        Status ret = params->set("net.routerPort", moe::Value((*params)["routerPort"].as<int>()));
         if (!ret.isOK()) {
             return ret;
         }
-        ret = params->remove("router");
+        ret = params->remove("routerPort");
         if (!ret.isOK()) {
             return ret;
         }
@@ -688,12 +701,23 @@ Status storeMongodOptions(const moe::Environment& params) {
         storageGlobalParams.magicRestore = 1;
     }
 
+    if (params.count("maintenanceMode") &&
+        gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+        // Setting maintenanceMode will disable sharding by setting 'clusterRole' to
+        // 'ClusterRole::None'. If maintenanceMode is set to 'standalone', replication will be
+        // disabled as well.
+        std::string value = params["maintenanceMode"].as<std::string>();
+        serverGlobalParams.maintenanceMode = (value == "replicaSet")
+            ? ServerGlobalParams::ReplicaSetMode
+            : ServerGlobalParams::StandaloneMode;
+    }
+
     const auto replSettingsWithStatus = populateReplSettings(params);
     if (!replSettingsWithStatus.isOK())
         return replSettingsWithStatus.getStatus();
     const repl::ReplSettings& replSettings(replSettingsWithStatus.getValue());
 
-    if (replSettings.usingReplSets()) {
+    if (replSettings.isReplSet()) {
         if ((params.count("security.authorization") &&
              params["security.authorization"].as<std::string>() == "enabled") &&
             !serverGlobalParams.startupClusterAuthMode.x509Only() &&
@@ -756,27 +780,12 @@ Status storeMongodOptions(const moe::Environment& params) {
         }
         return Status(ErrorCodes::BadValue, "--cacheSize option not currently supported");
     }
-    if (!params.count("net.port")) {
-        if (params.count("sharding.clusterRole")) {
-            std::string clusterRole = params["sharding.clusterRole"].as<std::string>();
-            if (clusterRole == "configsvr") {
-                serverGlobalParams.port = ServerGlobalParams::ConfigServerPort;
-            } else if (clusterRole == "shardsvr") {
-                serverGlobalParams.port = ServerGlobalParams::ShardServerPort;
-            } else {
-                StringBuilder sb;
-                sb << "Bad value for sharding.clusterRole: " << clusterRole
-                   << ".  Supported modes are: (configsvr|shardsvr)";
-                return Status(ErrorCodes::BadValue, sb.str());
-            }
-        }
-    }
     if (params.count("sharding.clusterRole")) {
         auto clusterRoleParam = params["sharding.clusterRole"].as<std::string>();
         // Force to set up the node as a replica set, unless we're a shard and we're using queryable
         // backup mode.
         if ((clusterRoleParam == "configsvr" || !params.count("storage.queryableBackupMode")) &&
-            !replSettings.usingReplSets()) {
+            !replSettings.isReplSet()) {
             return Status(ErrorCodes::BadValue,
                           str::stream() << "Cannot start a " << clusterRoleParam
                                         << " as a standalone server. Please use the option "
@@ -795,10 +804,29 @@ Status storeMongodOptions(const moe::Environment& params) {
             }
         } else if (clusterRoleParam == "shardsvr") {
             serverGlobalParams.clusterRole = ClusterRole::ShardServer;
+        } else {
+            return Status(ErrorCodes::BadValue,
+                          fmt::format("Bad value for sharding.clusterRole: {}. Supported modes "
+                                      "are: (configsvr|shardsvr)",
+                                      clusterRoleParam));
         }
 
-        if (params.count("sharding.routerEnabled") && params["sharding.routerEnabled"].as<bool>()) {
-            serverGlobalParams.clusterRole += ClusterRole::RouterServer;
+        if (params.count("net.routerPort")) {
+            if (feature_flags::gEmbeddedRouter.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+                serverGlobalParams.routerPort = params["net.routerPort"].as<int>();
+                serverGlobalParams.clusterRole += ClusterRole::RouterServer;
+            }
+        }
+    } else if (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup() &&
+               serverGlobalParams.maintenanceMode == ServerGlobalParams::MaintenanceMode::None) {
+        serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
+    }
+
+    if (!params.count("net.port")) {
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+            serverGlobalParams.port = ServerGlobalParams::ConfigServerPort;
+        } else if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
+            serverGlobalParams.port = ServerGlobalParams::ShardServerPort;
         }
     }
 

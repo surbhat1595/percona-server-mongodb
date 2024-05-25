@@ -3,12 +3,11 @@
 // @tags: [
 //  requires_replication,
 //  requires_sharding,
+//  multiversion_incompatible,
 // ]
-(function() {
-"use strict";
-
-// For ChangeStreamMultitenantReplicaSetTest.
-load("jstests/serverless/libs/change_collection_util.js");
+import {
+    ChangeStreamMultitenantReplicaSetTest
+} from "jstests/serverless/libs/change_collection_util.js";
 
 const testDBName = jsTestName();
 
@@ -72,12 +71,16 @@ function testChangeStreamOptionsWithAdminDB(conn) {
     const standalone = MongoRunner.runMongod();
     const adminDB = standalone.getDB("admin");
 
-    // Verify that the set command cannot be issued on a standalone server.
-    assert.commandFailedWithCode(adminDB.runCommand({
+    // Verify that the set command can be issued on a standalone server.
+    assert.commandWorked(adminDB.runCommand({
         setClusterParameter:
             {changeStreamOptions: {preAndPostImages: {expireAfterSeconds: NumberLong(10)}}}
-    }),
-                                 ErrorCodes.IllegalOperation);
+    }));
+    const response2 =
+        assert.commandWorked(adminDB.runCommand({getClusterParameter: "changeStreamOptions"}));
+    assert.eq(response2.clusterParameters[0].preAndPostImages,
+              {expireAfterSeconds: NumberLong(10)},
+              response2);
 
     MongoRunner.stopMongod(standalone);
 })();
@@ -197,4 +200,3 @@ function testChangeStreamOptionsWithAdminDB(conn) {
 
     replSetTest.stopSet();
 })();
-}());

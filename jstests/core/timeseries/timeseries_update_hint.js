@@ -17,10 +17,12 @@
  *   requires_timeseries,
  *   # Test uses parallel shell to wait on fail point.
  *   uses_parallel_shell,
+ *   # TODO(SERVER-80252): Uses namespace strings which are too long for Serverless
+ *   simulate_atlas_proxy_incompatible,
  * ]
  */
-load("jstests/libs/curop_helpers.js");
-load('jstests/libs/parallel_shell_helpers.js');
+import {waitForCurOpByFailPoint} from "jstests/libs/curop_helpers.js";
+import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
 
 const timeFieldName = "time";
 const metaFieldName = "tag";

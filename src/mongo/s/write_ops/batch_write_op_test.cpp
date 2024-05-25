@@ -57,6 +57,7 @@
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/catalog_cache_test_fixture.h"
 #include "mongo/s/chunk_version.h"
+#include "mongo/s/collection_routing_info_targeter.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/index_version.h"
 #include "mongo/s/mock_ns_targeter.h"
@@ -1182,9 +1183,7 @@ TEST_F(BatchWriteOpTest, MultiOpPartialSingleShardErrorOrdered) {
 // Tests of edge-case functionality, lifecycle is assumed to be behaving normally
 //
 
-// Multi-op (unordered) error and write concern error test. We never report the write concern error
-// for single-doc batches, since the error means there's no write concern applied. Don't suppress
-// the error if ordered : false.
+// Multi-op (unordered) error and write concern error test.
 TEST_F(BatchWriteOpTest, MultiOpErrorAndWriteConcernErrorUnordered) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpoint(ShardId("shard"),
@@ -1228,8 +1227,7 @@ TEST_F(BatchWriteOpTest, MultiOpErrorAndWriteConcernErrorUnordered) {
     ASSERT(clientResponse.isWriteConcernErrorSet());
 }
 
-// Single-op (ordered) error and write concern error test. Suppress the write concern error if
-// ordered and we also have an error
+// Single-op (ordered) error and write concern error test.
 TEST_F(BatchWriteOpTest, SingleOpErrorAndWriteConcernErrorOrdered) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpointA(ShardId("shardA"),
@@ -1278,14 +1276,14 @@ TEST_F(BatchWriteOpTest, SingleOpErrorAndWriteConcernErrorOrdered) {
     ASSERT(batchOp.isFinished());
     ASSERT(++targetedIt == targeted.end());
 
-    // Ordered doesn't report write concern error
+    // Ordered reports write concern error.
     BatchedCommandResponse clientResponse;
     batchOp.buildClientResponse(&clientResponse);
     ASSERT(clientResponse.getOk());
     ASSERT_EQUALS(clientResponse.getN(), 1);
     ASSERT(clientResponse.isErrDetailsSet());
     ASSERT_EQUALS(clientResponse.sizeErrDetails(), 1u);
-    ASSERT(!clientResponse.isWriteConcernErrorSet());
+    ASSERT(clientResponse.isWriteConcernErrorSet());
 }
 
 // Targeting failure on second op in batch op (ordered)
@@ -1910,38 +1908,31 @@ TEST_F(BatchWriteOpTransactionTest, ThrowTargetingErrorsInTransaction_Update) {
 }
 
 const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
-const int splitPoint = 50;
+const int splitPoint = 0;
 
 class WriteWithoutShardKeyFixture : public CatalogCacheTestFixture {
 public:
     void setUp() override {
         CatalogCacheTestFixture::setUp();
-        const ShardKeyPattern shardKeyPattern(BSON("a" << 1));
-        _cm = makeCollectionRoutingInfo(
-                  kNss, shardKeyPattern, nullptr, false, {BSON("a" << splitPoint)}, {})
-                  .cm;
-    }
-
-    ChunkManager getChunkManager() const {
-        return *_cm;
+        const ShardKeyPattern shardKeyPattern(BSON("x" << 1));
+        makeCollectionRoutingInfo(
+            kNss, shardKeyPattern, nullptr, false, {BSON("x" << splitPoint)}, {});
+        _criTargeter = CollectionRoutingInfoTargeter(operationContext(), kNss);
     }
 
     OperationContext* getOpCtx() {
         return operationContext();
     }
+    CollectionRoutingInfoTargeter getCollectionRoutingInfoTargeter() const {
+        return *_criTargeter;
+    }
+
 
 private:
-    boost::optional<ChunkManager> _cm;
+    boost::optional<CollectionRoutingInfoTargeter> _criTargeter;
 };
 
 TEST_F(WriteWithoutShardKeyFixture, SingleUpdateWithoutShardKey) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithoutShardKey", true);
-    ShardEndpoint endpoint(ShardId("shard"),
-                           ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                           boost::none);
-    auto targeter = initTargeterFullRange(kNss, endpoint);
-
     // Do single-target, single doc batch write op
     BatchedCommandRequest request([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
@@ -1952,22 +1943,14 @@ TEST_F(WriteWithoutShardKeyFixture, SingleUpdateWithoutShardKey) {
     BatchWriteOp batchOp(getOpCtx(), request);
 
     std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
-    auto status = batchOp.targetBatch(targeter, false, &targeted);
-    ASSERT_OK(status);
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
+    ASSERT_OK(status.getStatus());
     ASSERT_EQUALS(status.getValue(), WriteType::WithoutShardKeyOrId);
     ASSERT(!batchOp.isFinished());
-    ASSERT_EQUALS(targeted.size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
+    ASSERT_EQUALS(targeted.size(), 2u);
 }
 
 TEST_F(WriteWithoutShardKeyFixture, MultipleOrderedUpdateWithoutShardKey) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithoutShardKey", true);
-    ShardEndpoint endpoint(ShardId("shard"),
-                           ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                           boost::none);
-    auto targeter = initTargeterFullRange(kNss, endpoint);
-
     // Do single-target, multi doc batch write op
     BatchedCommandRequest request([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
@@ -1984,43 +1967,38 @@ TEST_F(WriteWithoutShardKeyFixture, MultipleOrderedUpdateWithoutShardKey) {
     BatchWriteOp batchOp(getOpCtx(), request);
 
     std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
-    auto status = batchOp.targetBatch(targeter, false, &targeted);
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status);
     ASSERT_EQUALS(status.getValue(), WriteType::WithoutShardKeyOrId);
     ASSERT(!batchOp.isFinished());
-    ASSERT_EQUALS(targeted.size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
+    ASSERT_EQUALS(targeted.size(), 2u);
 
     BatchedCommandResponse response;
     buildResponse(1, &response);
 
     // Respond to first targeted batch
-    batchOp.noteBatchResponse(*targeted.begin()->second, response, nullptr);
+    for (const auto& e : targeted) {
+        batchOp.noteBatchResponse(*(e.second), response, nullptr);
+    }
+
     ASSERT(!batchOp.isFinished());
 
     targeted.clear();
 
-    auto status2 = batchOp.targetBatch(targeter, false, &targeted);
+    auto status2 = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status2);
     ASSERT_EQUALS(status2.getValue(), WriteType::WithoutShardKeyOrId);
     ASSERT(!batchOp.isFinished());
-    ASSERT_EQUALS(targeted.size(), 1u);
-    ASSERT_EQUALS(targeted.begin()->second->getWrites().size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
+    ASSERT_EQUALS(targeted.size(), 2u);
 
     // Respond to second targeted batch
-    batchOp.noteBatchResponse(*targeted.begin()->second, response, nullptr);
+    for (const auto& e : targeted) {
+        batchOp.noteBatchResponse(*(e.second), response, nullptr);
+    }
     ASSERT(batchOp.isFinished());
 }
 
 TEST_F(WriteWithoutShardKeyFixture, MultipleUnorderedUpdateWithoutShardKey) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithoutShardKey", true);
-    ShardEndpoint endpoint(ShardId("shard"),
-                           ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                           boost::none);
-    auto targeter = initTargeterFullRange(kNss, endpoint);
-
     // Do single-target, multi doc batch write op
     BatchedCommandRequest request([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
@@ -2037,43 +2015,38 @@ TEST_F(WriteWithoutShardKeyFixture, MultipleUnorderedUpdateWithoutShardKey) {
     BatchWriteOp batchOp(getOpCtx(), request);
 
     std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
-    auto status = batchOp.targetBatch(targeter, false, &targeted);
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status);
     ASSERT_EQUALS(status.getValue(), WriteType::WithoutShardKeyOrId);
     ASSERT(!batchOp.isFinished());
-    ASSERT_EQUALS(targeted.size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
+    ASSERT_EQUALS(targeted.size(), 2u);
 
     BatchedCommandResponse response;
     buildResponse(1, &response);
 
     // Respond to first targeted batch
-    batchOp.noteBatchResponse(*targeted.begin()->second, response, nullptr);
+    for (const auto& e : targeted) {
+        batchOp.noteBatchResponse(*(e.second), response, nullptr);
+    }
     ASSERT(!batchOp.isFinished());
 
     targeted.clear();
 
-    auto status2 = batchOp.targetBatch(targeter, false, &targeted);
+    auto status2 = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status2);
     ASSERT_EQUALS(status2.getValue(), WriteType::WithoutShardKeyOrId);
     ASSERT(!batchOp.isFinished());
-    ASSERT_EQUALS(targeted.size(), 1u);
+    ASSERT_EQUALS(targeted.size(), 2u);
     ASSERT_EQUALS(targeted.begin()->second->getWrites().size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
 
     // Respond to second targeted batch
-    batchOp.noteBatchResponse(*targeted.begin()->second, response, nullptr);
+    for (const auto& e : targeted) {
+        batchOp.noteBatchResponse(*(e.second), response, nullptr);
+    }
     ASSERT(batchOp.isFinished());
 }
 
 TEST_F(WriteWithoutShardKeyFixture, SingleDeleteWithoutShardKey) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithoutShardKey", true);
-    ShardEndpoint endpoint(ShardId("shard"),
-                           ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                           boost::none);
-    auto targeter = initTargeterFullRange(kNss, endpoint);
-
     // Do single-target, single doc batch write op
     BatchedCommandRequest request([&] {
         write_ops::DeleteCommandRequest deleteOp(kNss);
@@ -2084,23 +2057,15 @@ TEST_F(WriteWithoutShardKeyFixture, SingleDeleteWithoutShardKey) {
     BatchWriteOp batchOp(getOpCtx(), request);
 
     std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
-    auto status = batchOp.targetBatch(targeter, false, &targeted);
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status);
     ASSERT_EQUALS(status.getValue(), WriteType::WithoutShardKeyOrId);
     ASSERT(!batchOp.isFinished());
-    ASSERT_EQUALS(targeted.size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
+    ASSERT_EQUALS(targeted.size(), 2u);
 }
 
 
 TEST_F(WriteWithoutShardKeyFixture, MultipleOrderedDeletesWithoutShardKey) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithoutShardKey", true);
-    ShardEndpoint endpoint(ShardId("shard"),
-                           ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                           boost::none);
-    auto targeter = initTargeterFullRange(kNss, endpoint);
-
     // Do single-target, multi doc batch write op
     BatchedCommandRequest request([&] {
         write_ops::DeleteCommandRequest deleteOp(kNss);
@@ -2117,43 +2082,37 @@ TEST_F(WriteWithoutShardKeyFixture, MultipleOrderedDeletesWithoutShardKey) {
     BatchWriteOp batchOp(getOpCtx(), request);
 
     std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
-    auto status = batchOp.targetBatch(targeter, false, &targeted);
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status);
     ASSERT_EQUALS(status.getValue(), WriteType::WithoutShardKeyOrId);
     ASSERT(!batchOp.isFinished());
-    ASSERT_EQUALS(targeted.size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
+    ASSERT_EQUALS(targeted.size(), 2u);
 
     BatchedCommandResponse response;
     buildResponse(1, &response);
 
     // Respond to first targeted batch
-    batchOp.noteBatchResponse(*targeted.begin()->second, response, nullptr);
+    for (const auto& e : targeted) {
+        batchOp.noteBatchResponse(*(e.second), response, nullptr);
+    }
     ASSERT(!batchOp.isFinished());
 
     targeted.clear();
 
-    auto status2 = batchOp.targetBatch(targeter, false, &targeted);
+    auto status2 = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status2);
     ASSERT_EQUALS(status2.getValue(), WriteType::WithoutShardKeyOrId);
     ASSERT(!batchOp.isFinished());
-    ASSERT_EQUALS(targeted.size(), 1u);
-    ASSERT_EQUALS(targeted.begin()->second->getWrites().size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
+    ASSERT_EQUALS(targeted.size(), 2u);
 
     // Respond to second targeted batch
-    batchOp.noteBatchResponse(*targeted.begin()->second, response, nullptr);
+    for (const auto& e : targeted) {
+        batchOp.noteBatchResponse(*(e.second), response, nullptr);
+    }
     ASSERT(batchOp.isFinished());
 }
 
 TEST_F(WriteWithoutShardKeyFixture, MultipleUnorderedDeletesWithoutShardKey) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithoutShardKey", true);
-    ShardEndpoint endpoint(ShardId("shard"),
-                           ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                           boost::none);
-    auto targeter = initTargeterFullRange(kNss, endpoint);
-
     // Do single-target, multi doc batch write op
     BatchedCommandRequest request([&] {
         write_ops::DeleteCommandRequest deleteOp(kNss);
@@ -2170,33 +2129,34 @@ TEST_F(WriteWithoutShardKeyFixture, MultipleUnorderedDeletesWithoutShardKey) {
     BatchWriteOp batchOp(getOpCtx(), request);
 
     std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
-    auto status = batchOp.targetBatch(targeter, false, &targeted);
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status);
     ASSERT_EQUALS(status.getValue(), WriteType::WithoutShardKeyOrId);
     ASSERT(!batchOp.isFinished());
-    ASSERT_EQUALS(targeted.size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
+    ASSERT_EQUALS(targeted.size(), 2u);
 
     BatchedCommandResponse response;
     buildResponse(1, &response);
 
     // Respond to first targeted batch
     batchOp.noteBatchResponse(*targeted.begin()->second, response, nullptr);
-    ASSERT(!batchOp.isFinished());
+    for (const auto& e : targeted) {
+        batchOp.noteBatchResponse(*(e.second), response, nullptr);
+    }
 
     targeted.clear();
 
-    auto status2 = batchOp.targetBatch(targeter, false, &targeted);
+    auto status2 = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status2);
     ASSERT_EQUALS(status2.getValue(), WriteType::WithoutShardKeyOrId);
     ASSERT(!batchOp.isFinished());
-    ASSERT_EQUALS(targeted.size(), 1u);
-    ASSERT_EQUALS(targeted.begin()->second->getWrites().size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
+    ASSERT_EQUALS(targeted.size(), 2u);
 
     // Respond to second targeted batch
     batchOp.noteBatchResponse(*targeted.begin()->second, response, nullptr);
-    ASSERT(batchOp.isFinished());
+    for (const auto& e : targeted) {
+        batchOp.noteBatchResponse(*(e.second), response, nullptr);
+    }
 }
 
 //
@@ -2207,32 +2167,27 @@ public:
     void setUp() override {
         CatalogCacheTestFixture::setUp();
         const ShardKeyPattern shardKeyPattern(BSON("a" << 1));
-        _cm = makeCollectionRoutingInfo(
-                  kNss, shardKeyPattern, nullptr, false, {BSON("a" << splitPoint)}, {})
-                  .cm;
-    }
-
-    ChunkManager getChunkManager() const {
-        return *_cm;
+        makeCollectionRoutingInfo(
+            kNss, shardKeyPattern, nullptr, false, {BSON("a" << splitPoint)}, {});
+        _criTargeter = CollectionRoutingInfoTargeter(operationContext(), kNss);
     }
 
     OperationContext* getOpCtx() {
         return operationContext();
     }
 
+    CollectionRoutingInfoTargeter getCollectionRoutingInfoTargeter() const {
+        return *_criTargeter;
+    }
+
     const TxnNumber kTxnNumber = 5;
 
 private:
-    boost::optional<ChunkManager> _cm;
+    FailPointEnableBlock fp{"isShardedTimeSeriesBucketsNamespaceAlwaysTrue"};
+    boost::optional<CollectionRoutingInfoTargeter> _criTargeter;
 };
 
 TEST_F(TimeseriesRetryableUpdateFixture, SingleUpdateWithShardKey) {
-    ShardEndpoint endpoint(ShardId("shard"),
-                           ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                           boost::none);
-    auto targeter = initTargeterFullRange(kNss, endpoint);
-    targeter.setIsShardedTimeSeriesBucketsNamespace(true);
-
     // Sets up for retryable writes.
     getOpCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
     getOpCtx()->setTxnNumber(kTxnNumber);
@@ -2247,21 +2202,14 @@ TEST_F(TimeseriesRetryableUpdateFixture, SingleUpdateWithShardKey) {
     BatchWriteOp batchOp(getOpCtx(), request);
 
     std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
-    auto status = batchOp.targetBatch(targeter, false, &targeted);
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status);
     ASSERT_EQUALS(status.getValue(), WriteType::TimeseriesRetryableUpdate);
     ASSERT(!batchOp.isFinished());
     ASSERT_EQUALS(targeted.size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
 }
 
 TEST_F(TimeseriesRetryableUpdateFixture, SingleUpdateWithoutShardKey) {
-    ShardEndpoint endpoint(ShardId("shard"),
-                           ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                           boost::none);
-    auto targeter = initTargeterFullRange(kNss, endpoint);
-    targeter.setIsShardedTimeSeriesBucketsNamespace(true);
-
     // Sets up for retryable writes.
     getOpCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
     getOpCtx()->setTxnNumber(kTxnNumber);
@@ -2276,21 +2224,14 @@ TEST_F(TimeseriesRetryableUpdateFixture, SingleUpdateWithoutShardKey) {
     BatchWriteOp batchOp(getOpCtx(), request);
 
     std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
-    auto status = batchOp.targetBatch(targeter, false, &targeted);
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status);
     ASSERT_EQUALS(status.getValue(), WriteType::WithoutShardKeyOrId);
     ASSERT(!batchOp.isFinished());
-    ASSERT_EQUALS(targeted.size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
+    ASSERT_EQUALS(targeted.size(), 2u);
 }
 
 TEST_F(TimeseriesRetryableUpdateFixture, MultipleOrderedUpdateWithShardKey) {
-    ShardEndpoint endpoint(ShardId("shard"),
-                           ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                           boost::none);
-    auto targeter = initTargeterFullRange(kNss, endpoint);
-    targeter.setIsShardedTimeSeriesBucketsNamespace(true);
-
     // Sets up for retryable writes.
     getOpCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
     getOpCtx()->setTxnNumber(kTxnNumber);
@@ -2311,12 +2252,11 @@ TEST_F(TimeseriesRetryableUpdateFixture, MultipleOrderedUpdateWithShardKey) {
     BatchWriteOp batchOp(getOpCtx(), request);
 
     std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
-    auto status = batchOp.targetBatch(targeter, false, &targeted);
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status);
     ASSERT_EQUALS(status.getValue(), WriteType::TimeseriesRetryableUpdate);
     ASSERT(!batchOp.isFinished());
     ASSERT_EQUALS(targeted.size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
 
     BatchedCommandResponse response;
     buildResponse(1, &response);
@@ -2327,13 +2267,12 @@ TEST_F(TimeseriesRetryableUpdateFixture, MultipleOrderedUpdateWithShardKey) {
 
     targeted.clear();
 
-    auto status2 = batchOp.targetBatch(targeter, false, &targeted);
+    auto status2 = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status2);
     ASSERT_EQUALS(status2.getValue(), WriteType::TimeseriesRetryableUpdate);
     ASSERT(!batchOp.isFinished());
     ASSERT_EQUALS(targeted.size(), 1u);
     ASSERT_EQUALS(targeted.begin()->second->getWrites().size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
 
     // Respond to second targeted batch.
     batchOp.noteBatchResponse(*targeted.begin()->second, response, nullptr);
@@ -2341,12 +2280,6 @@ TEST_F(TimeseriesRetryableUpdateFixture, MultipleOrderedUpdateWithShardKey) {
 }
 
 TEST_F(TimeseriesRetryableUpdateFixture, MultipleUnorderedUpdateWithShardKey) {
-    ShardEndpoint endpoint(ShardId("shard"),
-                           ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                           boost::none);
-    auto targeter = initTargeterFullRange(kNss, endpoint);
-    targeter.setIsShardedTimeSeriesBucketsNamespace(true);
-
     // Sets up for retryable writes.
     getOpCtx()->setLogicalSessionId(makeLogicalSessionIdForTest());
     getOpCtx()->setTxnNumber(kTxnNumber);
@@ -2367,12 +2300,11 @@ TEST_F(TimeseriesRetryableUpdateFixture, MultipleUnorderedUpdateWithShardKey) {
     BatchWriteOp batchOp(getOpCtx(), request);
 
     std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
-    auto status = batchOp.targetBatch(targeter, false, &targeted);
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status);
     ASSERT_EQUALS(status.getValue(), WriteType::TimeseriesRetryableUpdate);
     ASSERT(!batchOp.isFinished());
     ASSERT_EQUALS(targeted.size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
 
     BatchedCommandResponse response;
     buildResponse(1, &response);
@@ -2383,13 +2315,12 @@ TEST_F(TimeseriesRetryableUpdateFixture, MultipleUnorderedUpdateWithShardKey) {
 
     targeted.clear();
 
-    auto status2 = batchOp.targetBatch(targeter, false, &targeted);
+    auto status2 = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
     ASSERT_OK(status2);
     ASSERT_EQUALS(status2.getValue(), WriteType::TimeseriesRetryableUpdate);
     ASSERT(!batchOp.isFinished());
     ASSERT_EQUALS(targeted.size(), 1u);
     ASSERT_EQUALS(targeted.begin()->second->getWrites().size(), 1u);
-    assertEndpointsEqual(getFirstTargetedWriteEndpoint(targeted.begin()->second), endpoint);
 
     // Respond to second targeted batch.
     batchOp.noteBatchResponse(*targeted.begin()->second, response, nullptr);

@@ -5,11 +5,8 @@
  *     requires_replication,
  * ]
  */
-(function() {
-'use strict';
-
-load("jstests/libs/fail_point_util.js");
-load('jstests/noPassthrough/libs/index_build.js');
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
 
 function test(expireAfterSecondsVal) {
     jsTestLog("Testing expireAfterSeconds = " + expireAfterSecondsVal);
@@ -36,8 +33,7 @@ function test(expireAfterSecondsVal) {
     // invalid values of expireAfterSeconds, so we use a failpoint to disable that checking to
     // simulate a value leftover from very old MongoDB versions.
     const fp = configureFailPoint(primary, 'skipTTLIndexValidationOnCreateIndex');
-    const fp2 = configureFailPoint(primary,
-                                   'skipTTLIndexInvalidExpireAfterSecondsValidationForCreateIndex');
+    const fp2 = configureFailPoint(primary, 'skipTTLIndexExpireAfterSecondsValidation');
     try {
         assert.commandWorked(coll.createIndex({t: 1}, {expireAfterSeconds: expireAfterSecondsVal}));
     } finally {
@@ -132,4 +128,3 @@ test(NaN);
 const maxDouble = 1.7976931348623157e+308;
 test(maxDouble);
 test(-maxDouble);
-})();

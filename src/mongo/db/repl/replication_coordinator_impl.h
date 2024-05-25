@@ -171,8 +171,6 @@ public:
 
     virtual const ReplSettings& getSettings() const override;
 
-    virtual Mode getReplicationMode() const override;
-
     virtual MemberState getMemberState() const override;
 
     virtual std::vector<MemberData> getMemberData() const override;
@@ -369,8 +367,6 @@ public:
 
     virtual Status checkReplEnabledForCommand(BSONObjBuilder* result) override;
 
-    virtual bool isReplEnabled() const override;
-
     virtual HostAndPort chooseNewSyncSource(const OpTime& lastOpTimeFetched) override;
 
     virtual void denylistSyncSource(const HostAndPort& host, Date_t until) override;
@@ -475,7 +471,7 @@ public:
     void cancelCbkHandle(executor::TaskExecutor::CallbackHandle activeHandle) override;
 
     BSONObj runCmdOnPrimaryAndAwaitResponse(OperationContext* opCtx,
-                                            const std::string& dbName,
+                                            const DatabaseName& dbName,
                                             const BSONObj& cmdObj,
                                             OnRemoteCmdScheduledFn onRemoteCmdScheduled,
                                             OnRemoteCmdCompleteFn onRemoteCmdComplete) override;
@@ -1730,6 +1726,17 @@ private:
      */
     void _validateDefaultWriteConcernOnShardStartup(WithLock lk) const;
 
+    /**
+     * Checks whether the node can currently accept replicated writes. This method is unsafe and
+     * is for internal use only as its result is only accurate while holding the RSTL.
+     */
+    bool _canAcceptReplicatedWrites_UNSAFE(OperationContext* opCtx);
+
+    /**
+     * Checks whether the collection indicated by nsOrUUID is replicated.
+     */
+    bool _isCollectionReplicated(OperationContext* opCtx, const NamespaceStringOrUUID& nsOrUUID);
+
     //
     // All member variables are labeled with one of the following codes indicating the
     // synchronization rules for accessing them.
@@ -1758,9 +1765,6 @@ private:
 
     // Parsed command line arguments related to replication.
     const ReplSettings _settings;  // (R)
-
-    // Mode of replication specified by _settings.
-    const Mode _replMode;  // (R)
 
     // Pointer to the TopologyCoordinator owned by this ReplicationCoordinator.
     std::unique_ptr<TopologyCoordinator> _topCoord;  // (M)

@@ -87,8 +87,8 @@ public:
     }
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
-        return NamespaceStringUtil::parseNamespaceFromRequest(
-            dbName.tenantId(), CommandHelpers::parseNsFullyQualified(cmdObj));
+        return NamespaceStringUtil::deserialize(dbName.tenantId(),
+                                                CommandHelpers::parseNsFullyQualified(cmdObj));
     }
 
     Status checkAuthForOperation(OperationContext* opCtx,
@@ -129,8 +129,8 @@ public:
 
         return true;
     }
-
-} configSvrRepairShardedCollectionChunksHistoryCommand;
+};
+MONGO_REGISTER_COMMAND(ConfigSvrRepairShardedCollectionChunksHistoryCommand);
 
 }  // namespace
 }  // namespace mongo

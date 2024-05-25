@@ -5,11 +5,11 @@
  * @tags: [uses_transactions, uses_prepare_transaction, uses_multi_shard_transaction]
  */
 
-(function() {
-'use strict';
-
-load("jstests/libs/fail_point_util.js");
-load('jstests/sharding/libs/sharded_transactions_helpers.js');
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {
+    checkDecisionIs,
+    checkDocumentDeleted
+} from 'jstests/sharding/libs/txn_two_phase_commit_util.js';
 
 const dbName = "test";
 const collName = "foo";
@@ -34,26 +34,6 @@ const checkParticipantListMatches = function(
                        .findOne({"_id.lsid.id": lsid.id, "_id.txnNumber": txnNumber});
     assert.neq(null, coordDoc);
     assert.sameMembers(coordDoc.participants, expectedParticipantList);
-};
-
-const checkDecisionIs = function(coordinatorConn, lsid, txnNumber, expectedDecision) {
-    let coordDoc = coordinatorConn.getDB("config")
-                       .getCollection("transaction_coordinators")
-                       .findOne({"_id.lsid.id": lsid.id, "_id.txnNumber": txnNumber});
-    assert.neq(null, coordDoc);
-    assert.eq(expectedDecision, coordDoc.decision.decision);
-    if (expectedDecision === "commit") {
-        assert.neq(null, coordDoc.decision.commitTimestamp);
-    } else {
-        assert.eq(null, coordDoc.decision.commitTimestamp);
-    }
-};
-
-const checkDocumentDeleted = function(coordinatorConn, lsid, txnNumber) {
-    let coordDoc = coordinatorConn.getDB("config")
-                       .getCollection("transaction_coordinators")
-                       .findOne({"_id.lsid.id": lsid.id, "_id.txnNumber": txnNumber});
-    return null === coordDoc;
 };
 
 const runCommitThroughMongosInParallelShellExpectSuccess = function() {
@@ -244,4 +224,3 @@ testCommitProtocol(false /* test abort */, true /* with network failures */);
 testCommitProtocol(true /* test commit */, true /* with network failures */);
 
 st.stop();
-})();

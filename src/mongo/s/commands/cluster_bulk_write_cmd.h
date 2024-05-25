@@ -56,6 +56,7 @@
 #include "mongo/db/commands/bulk_write_parser.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/initialize_operation_session_info.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/operation_context.h"
@@ -84,7 +85,7 @@ namespace mongo {
 template <typename Impl>
 class ClusterBulkWriteCmd : public Command {
 public:
-    ClusterBulkWriteCmd(StringData name) : Command(name) {}
+    ClusterBulkWriteCmd() : Command(Impl::kName) {}
 
     bool adminOnly() const final {
         return true;
@@ -98,6 +99,7 @@ public:
                                              const OpMsgRequest& request) final {
         auto parsedRequest =
             BulkWriteCommandRequest::parse(IDLParserContext{"clusterBulkWriteParse"}, request);
+        bulk_write_exec::addIdsForInserts(parsedRequest);
         return std::make_unique<Invocation>(this, request, std::move(parsedRequest));
     }
 
@@ -136,7 +138,14 @@ public:
                    BulkWriteCommandRequest bulkRequest)
             : CommandInvocation(command),
               _opMsgRequest{&request},
-              _request{std::move(bulkRequest)} {}
+              _request{std::move(bulkRequest)} {
+            uassert(
+                ErrorCodes::CommandNotSupported,
+                "BulkWrite may not be run without featureFlagBulkWriteCommand enabled",
+                gFeatureFlagBulkWriteCommand.isEnabled(serverGlobalParams.featureCompatibility));
+
+            bulk_write_common::validateRequest(_request);
+        }
 
         const BulkWriteCommandRequest& getBulkRequest() const {
             return _request;
@@ -180,7 +189,7 @@ public:
             OperationContext* opCtx,
             BulkWriteCommandRequest& bulkRequest,
             const OpMsgRequest& unparsedRequest,
-            std::vector<BulkWriteReplyItem> replyItems) const {
+            bulk_write_exec::BulkWriteReplyInfo replyInfo) const {
             const auto& req = bulkRequest;
             auto reqObj = unparsedRequest.body;
 
@@ -210,6 +219,7 @@ public:
             params.originatingPrivileges = bulk_write_common::getPrivileges(req);
 
             auto queuedDataStage = std::make_unique<RouterStageQueuedData>(opCtx);
+            auto& [replyItems, numErrors] = replyInfo;
             for (auto& replyItem : replyItems) {
                 queuedDataStage->queueResult(replyItem.toBSON());
             }
@@ -240,7 +250,7 @@ public:
                 return BulkWriteCommandReply(
                     BulkWriteCommandResponseCursor(
                         0, std::vector<BulkWriteReplyItem>(std::move(replyItems))),
-                    0 /* TODO SERVER-76267: correctly populate numErrors */);
+                    numErrors);
             }
 
             ccc->detachFromOperationContext();
@@ -263,7 +273,7 @@ public:
             return BulkWriteCommandReply(
                 BulkWriteCommandResponseCursor(
                     cursorId, std::vector<BulkWriteReplyItem>(std::move(replyItems))),
-                0 /* TODO SERVER-76267: correctly populate numErrors */);
+                numErrors);
         }
 
         bool runImpl(OperationContext* opCtx,
@@ -272,15 +282,8 @@ public:
                      BSONObjBuilder& result) const {
             BulkWriteCommandReply response;
 
-            uassert(
-                ErrorCodes::CommandNotSupported,
-                "BulkWrite may not be run without featureFlagBulkWriteCommand enabled",
-                gFeatureFlagBulkWriteCommand.isEnabled(serverGlobalParams.featureCompatibility));
-
-            bulk_write_common::validateRequest(bulkRequest, opCtx->isRetryableWrite());
-
-            auto replyItems = cluster::bulkWrite(opCtx, bulkRequest);
-            response = _populateCursorReply(opCtx, bulkRequest, request, std::move(replyItems));
+            auto bulkWriteReply = cluster::bulkWrite(opCtx, bulkRequest);
+            response = _populateCursorReply(opCtx, bulkRequest, request, std::move(bulkWriteReply));
             result.appendElements(response.toBSON());
             return true;
         }

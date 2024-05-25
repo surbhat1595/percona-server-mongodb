@@ -2,8 +2,9 @@
  * Tests various update scenarios on capped collections:
  *  -- SERVER-58865: Allow modifications that change capped document sizes.
  *  -- SERVER-11983: Don't create _id field on capped updates
- * The test runs commands that are not allowed with security token: godinsert.
+ *
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: godinsert.
  *   not_allowed_with_security_token,
  *   requires_capped,
  *   uses_testing_only_commands,
@@ -14,9 +15,6 @@
  *   no_selinux,
  * ]
  */
-
-(function() {
-'use strict';
 
 const localDB = db.getSiblingDB("local");
 const t = localDB.capped_update;
@@ -43,4 +41,3 @@ assert(!doc.hasOwnProperty("_id"), "now has _id after godinsert: " + tojson(doc)
 assert.commandWorked(t.update({a: 2}, {$inc: {a: 1}}));
 doc = t.findOne({a: 3});
 assert(!doc.hasOwnProperty("_id"), "now has _id after update: " + tojson(doc));
-})();

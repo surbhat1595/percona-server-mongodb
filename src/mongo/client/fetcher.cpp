@@ -122,7 +122,9 @@ Status parseCursorResponse(const BSONObj& obj,
                       str::stream() << "'" << kCursorFieldName << "." << kNamespaceFieldName
                                     << "' field must be a string: " << obj);
     }
-    const NamespaceString tempNss(namespaceElement.valueStringData());
+    // Since this is client code we are passing boost::none as the tenantId.
+    const NamespaceString tempNss =
+        NamespaceStringUtil::deserialize(boost::none, namespaceElement.valueStringData());
     if (!tempNss.isValid()) {
         return Status(ErrorCodes::BadValue,
                       str::stream() << "'" << kCursorFieldName << "." << kNamespaceFieldName
@@ -176,7 +178,7 @@ Status parseCursorResponse(const BSONObj& obj,
 
 Fetcher::Fetcher(executor::TaskExecutor* executor,
                  const HostAndPort& source,
-                 StringData dbname,
+                 const DatabaseName& dbname,
                  const BSONObj& findCmdObj,
                  CallbackFn work,
                  const BSONObj& metadata,
@@ -231,7 +233,7 @@ std::string Fetcher::getDiagnosticString() const {
     str::stream output;
     output << "Fetcher";
     output << " source: " << _source.toString();
-    output << " database: " << _dbname;
+    output << " database: " << toStringForLogging(_dbname);
     output << " query: " << _cmdObj;
     output << " query metadata: " << _metadata;
     output << " active: " << _isActive_inlock();

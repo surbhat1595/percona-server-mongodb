@@ -303,7 +303,8 @@ public:
 private:
     // Update related command execution metrics.
     static UpdateMetrics _updateMetrics;
-} cmdFindAndModify;
+};
+MONGO_REGISTER_COMMAND(CmdFindAndModify);
 
 UpdateMetrics CmdFindAndModify::_updateMetrics{"findAndModify"};
 
@@ -529,8 +530,14 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                 deleteRequest.setStmtId(stmtId);
             }
             boost::optional<BSONObj> docFound;
-            write_ops_exec::writeConflictRetryRemove(
-                opCtx, nsString, deleteRequest, curOp, opDebug, inTransaction, docFound);
+            write_ops_exec::performDelete(opCtx,
+                                          nsString,
+                                          deleteRequest,
+                                          curOp,
+                                          opDebug,
+                                          inTransaction,
+                                          boost::none,
+                                          docFound);
             recordStatsForTopCommand(opCtx);
             return buildResponse(boost::none, true /* isRemove */, docFound);
         } else {
@@ -561,15 +568,16 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                 try {
                     boost::optional<BSONObj> docFound;
                     auto updateResult =
-                        write_ops_exec::writeConflictRetryUpsert(opCtx,
-                                                                 nsString,
-                                                                 curOp,
-                                                                 opDebug,
-                                                                 inTransaction,
-                                                                 req.getRemove().value_or(false),
-                                                                 req.getUpsert().value_or(false),
-                                                                 docFound,
-                                                                 updateRequest);
+                        write_ops_exec::performUpdate(opCtx,
+                                                      nsString,
+                                                      curOp,
+                                                      opDebug,
+                                                      inTransaction,
+                                                      req.getRemove().value_or(false),
+                                                      req.getUpsert().value_or(false),
+                                                      boost::none,
+                                                      docFound,
+                                                      updateRequest);
                     recordStatsForTopCommand(opCtx);
                     return buildResponse(updateResult, req.getRemove().value_or(false), docFound);
 
@@ -628,6 +636,10 @@ void CmdFindAndModify::Invocation::appendMirrorableRequest(BSONObjBuilder* bob) 
     if (req.getCollation()) {
         bob->append(write_ops::FindAndModifyCommandRequest::kCollationFieldName,
                     *req.getCollation());
+    }
+    if (req.getEncryptionInformation()) {
+        bob->append(write_ops::FindAndModifyCommandRequest::kEncryptionInformationFieldName,
+                    req.getEncryptionInformation()->toBSON());
     }
 
     const auto& rawCmd = unparsedRequest().body;

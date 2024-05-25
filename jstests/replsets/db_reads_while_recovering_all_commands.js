@@ -6,11 +6,8 @@
  * @tags: [multiversion_incompatible]
  */
 
-(function() {
-"use strict";
-
 // This will verify the completeness of our map and run all tests.
-load("jstests/libs/all_commands_test.js");
+import {AllCommandsTest} from "jstests/libs/all_commands_test.js";
 
 const name = jsTestName();
 const dbName = "alltestsdb";
@@ -45,6 +42,7 @@ const allCommands = {
     _configsvrCommitIndex: {skip: isPrimaryOnly},
     _configsvrCommitMergeAllChunksOnShard: {skip: isPrimaryOnly},
     _configsvrCommitMovePrimary: {skip: isPrimaryOnly},
+    _configsvrCommitRefineCollectionShardKey: {skip: isPrimaryOnly},
     _configsvrCommitReshardCollection: {skip: isPrimaryOnly},
     _configsvrConfigureCollectionBalancing: {skip: isPrimaryOnly},
     _configsvrCreateDatabase: {skip: isPrimaryOnly},
@@ -82,9 +80,6 @@ const allCommands = {
     _mergeAuthzCollections: {skip: isPrimaryOnly},
     _migrateClone: {skip: isPrimaryOnly},
     _mongotConnPoolStats: {skip: isAnInternalCommand},
-    _movePrimaryRecipientAbortMigration: {skip: isAnInternalCommand},
-    _movePrimaryRecipientForgetMigration: {skip: isAnInternalCommand},
-    _movePrimaryRecipientSyncData: {skip: isAnInternalCommand},
     _recvChunkAbort: {skip: isPrimaryOnly},
     _recvChunkCommit: {skip: isPrimaryOnly},
     _recvChunkReleaseCritSec: {skip: isPrimaryOnly},
@@ -148,6 +143,7 @@ const allCommands = {
     streams_getMetrics: {skip: isAnInternalCommand},
     _transferMods: {skip: isPrimaryOnly},
     _vectorClockPersist: {skip: isPrimaryOnly},
+    abortMoveCollection: {skip: isPrimaryOnly},
     abortReshardCollection: {skip: isPrimaryOnly},
     abortTransaction: {skip: isPrimaryOnly},
     aggregate: {
@@ -216,6 +212,7 @@ const allCommands = {
     createIndexes: {skip: isPrimaryOnly},
     createRole: {skip: isPrimaryOnly},
     createSearchIndexes: {skip: isNotAUserDataRead},
+    createUnsplittableCollection: {skip: isPrimaryOnly},
     createUser: {skip: isPrimaryOnly},
     currentOp: {skip: isNotAUserDataRead},
     dataSize: {
@@ -280,7 +277,6 @@ const allCommands = {
     getDatabaseVersion: {skip: isNotAUserDataRead},
     getDefaultRWConcern: {skip: isNotAUserDataRead},
     getDiagnosticData: {skip: isNotAUserDataRead},
-    getFreeMonitoringStatus: {skip: isNotAUserDataRead},
     getLog: {skip: isNotAUserDataRead},
     getMore: {
         command: {getMore: NumberLong(123), collection: collName},
@@ -291,7 +287,6 @@ const allCommands = {
     getParameter: {skip: isNotAUserDataRead},
     getShardMap: {skip: isNotAUserDataRead},
     getShardVersion: {skip: isPrimaryOnly},
-    getnonce: {skip: "removed in v6.3"},
     godinsert: {skip: isAnInternalCommand},
     grantPrivilegesToRole: {skip: isPrimaryOnly},
     grantRolesToRole: {skip: isPrimaryOnly},
@@ -334,7 +329,7 @@ const allCommands = {
         expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary
     },
     listSearchIndexes: {skip: isNotAUserDataRead},
-    lockInfo: {skip: isPrimaryOnly},
+    lockInfo: {skip: isAnInternalCommand},
     logApplicationMessage: {skip: isNotAUserDataRead},
     logMessage: {skip: isNotAUserDataRead},
     logRotate: {skip: isNotAUserDataRead},
@@ -404,7 +399,6 @@ const allCommands = {
     setDefaultRWConcern: {skip: isPrimaryOnly},
     setIndexCommitQuorum: {skip: isPrimaryOnly},
     setFeatureCompatibilityVersion: {skip: isPrimaryOnly},
-    setFreeMonitoring: {skip: isPrimaryOnly},
     setProfilingFilterGlobally: {skip: isNotAUserDataRead},
     setParameter: {skip: isNotAUserDataRead},
     setShardVersion: {skip: isNotAUserDataRead},
@@ -429,6 +423,7 @@ const allCommands = {
     testReshardCloneCollection: {skip: isNotAUserDataRead},
     testVersions1And2: {skip: isNotAUserDataRead},
     testVersion2: {skip: isNotAUserDataRead},
+    timeseriesCatalogBucketParamsChanged: {skip: isAnInternalCommand},
     top: {skip: isNotAUserDataRead},
     update: {skip: isPrimaryOnly},
     updateRole: {skip: isPrimaryOnly},
@@ -502,4 +497,3 @@ AllCommandsTest.testAllCommands(secondary, allCommands, function(test) {
 // Turn off maintenance mode and stop the test.
 assert.commandWorked(secondary.adminCommand({replSetMaintenance: 0}));
 rst.stopSet();
-})();

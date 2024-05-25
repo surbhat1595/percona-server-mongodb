@@ -1,11 +1,11 @@
 /*
  * Basic functional tests for the listCollections command.
  *
- * The test runs commands that are not allowed with security token: applyOps.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: applyOps.
  *   not_allowed_with_security_token,
- *   # Cannot implicitly shard accessed collections
- *   # because of collection existing when none expected.
+ *   # Cannot implicitly shard accessed collections because of collection existing when none
+ *   # expected.
  *   assumes_no_implicit_collection_creation_after_drop,
  *   # applyOps is not supported on mongos
  *   assumes_against_mongod_not_mongos,
@@ -22,9 +22,6 @@
  * listCollections output, but rather tests for existence or absence of particular collections in
  * listCollections output.
  */
-
-(function() {
-"use strict";
 
 var mydb = db.getSiblingDB("list_collections1");
 var cursor;
@@ -352,4 +349,3 @@ assert.commandFailedWithCode(
     mydb.runCommand("listCollections",
                     {includePendingDrops: false, apiVersion: "1", apiStrict: true}),
     ErrorCodes.APIStrictError);
-}());

@@ -7,9 +7,14 @@
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   serverless,
+ *   requires_fcv_71,
  * ]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {Thread} from "jstests/libs/parallelTester.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
+import {restartServerReplication, stopServerReplication} from "jstests/libs/write_concern_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {
     isShardMergeEnabled,
@@ -17,17 +22,12 @@ import {
     runMigrationAsync,
     tryAbortMigrationAsync
 } from "jstests/replsets/libs/tenant_migration_util.js";
-
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/parallelTester.js");
-load("jstests/libs/uuid_util.js");
-load("jstests/libs/write_concern_util.js");
-load("jstests/replsets/rslib.js");  // 'createRstArgs'
+import {createRstArgs} from "jstests/replsets/rslib.js";
 
 const kTenantId = ObjectId().str;
 const kDelayMS =
     500000;  // Using some arbitrarily large delay time in to make sure that the donor is not
-             // waiting this long when it receives a donorAbortMigration command.
+// waiting this long when it receives a donorAbortMigration command.
 
 const migrationX509Options = makeX509OptionsForTest();
 

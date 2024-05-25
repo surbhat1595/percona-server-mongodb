@@ -1,14 +1,16 @@
 // Test to guarantee read repeatability, meaning that while in a transaction, we should repeatedly
 // read the same data even if it was modified outside of the transaction.
-// The test runs commands that are not allowed with security token: endSession.
+//
 // @tags: [
-//   not_allowed_with_security_token,uses_transactions, uses_snapshot_read_concern]
-(function() {
-"use strict";
-
+//   # The test runs commands that are not allowed with security token: endSession.
+//   not_allowed_with_security_token,
+//   uses_transactions,
+//   uses_snapshot_read_concern
+// ]
 // TODO (SERVER-39704): Remove the following load after SERVER-397074 is completed
-// For retryOnceOnTransientAndRestartTxnOnMongos.
-load('jstests/libs/auto_retry_transaction_in_sharding.js');
+import {
+    retryOnceOnTransientAndRestartTxnOnMongos
+} from "jstests/libs/auto_retry_transaction_in_sharding.js";
 
 const dbName = "test";
 const collName = "repeatable_reads_in_transaction";
@@ -82,4 +84,3 @@ assert.sameMembers([{_id: 0}, {_id: 1, a: 1}, {_id: 3}, {_id: 4}], sessionColl.f
 
 session.endSession();
 session2.endSession();
-}());

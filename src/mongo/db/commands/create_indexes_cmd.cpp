@@ -162,8 +162,7 @@ std::vector<BSONObj> parseAndValidateIndexSpecs(OperationContext* opCtx,
             parsedIndexSpec = index_key_validate::removeUnknownFields(ns, parsedIndexSpec);
         }
 
-        parsedIndexSpec = index_key_validate::parseAndValidateIndexSpecs(
-            opCtx, parsedIndexSpec, true /* checkFCV */);
+        parsedIndexSpec = index_key_validate::parseAndValidateIndexSpecs(opCtx, parsedIndexSpec);
         uassert(ErrorCodes::BadValue,
                 "Can't hide index on system collection",
                 !(ns.isSystem() && !ns.isTimeseriesBucketsCollection()) ||
@@ -298,7 +297,7 @@ boost::optional<CommitQuorumOptions> parseAndGetCommitQuorum(OperationContext* o
     if (commitQuorum) {
         uassert(ErrorCodes::BadValue,
                 str::stream() << "Standalones can't specify commitQuorum",
-                replCoord->isReplEnabled());
+                replCoord->getSettings().isReplSet());
         uassert(ErrorCodes::BadValue,
                 str::stream() << "commitQuorum is supported only for two phase index builds with "
                                  "commit quorum support enabled ",
@@ -308,7 +307,7 @@ boost::optional<CommitQuorumOptions> parseAndGetCommitQuorum(OperationContext* o
 
     if (IndexBuildProtocol::kTwoPhase == protocol) {
         // Setting CommitQuorum to 0 will make the index build to opt out of voting proces.
-        return (replCoord->isReplEnabled() && commitQuorumEnabled)
+        return (replCoord->getSettings().isReplSet() && commitQuorumEnabled)
             ? CommitQuorumOptions(CommitQuorumOptions::kVotingMembers)
             : CommitQuorumOptions(CommitQuorumOptions::kDisabled);
     }
@@ -361,7 +360,9 @@ void assertNoMovePrimaryInProgress(OperationContext* opCtx, const NamespaceStrin
         auto scopedCss = CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss);
 
         auto collDesc = scopedCss->getCollectionDescription(opCtx);
-        if (!collDesc.isSharded()) {
+        // Only collections that are not registered in the sharding catalog are affected by
+        // movePrimary
+        if (!collDesc.hasRoutingTable()) {
             if (scopedDss->isMovePrimaryInProgress()) {
                 LOGV2(4909200, "assertNoMovePrimaryInProgress", logAttrs(nss));
 
@@ -851,8 +852,8 @@ public:
     bool allowedInTransactions() const final {
         return true;
     }
-
-} cmdCreateIndex;
+};
+MONGO_REGISTER_COMMAND(CmdCreateIndexes);
 
 }  // namespace
 }  // namespace mongo

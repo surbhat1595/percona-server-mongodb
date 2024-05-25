@@ -148,7 +148,7 @@ public:
         hangInAppendOplogNote.pauseWhileSet();
 
         auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-        if (!replCoord->isReplEnabled()) {
+        if (!replCoord->getSettings().isReplSet()) {
             uasserted(ErrorCodes::NoReplicationEnabled,
                       "Must have replication set up to run \"appendOplogNote\"");
         }
@@ -182,9 +182,6 @@ public:
         return true;
     }
 };
-
-MONGO_INITIALIZER(RegisterAppendOpLogNoteCmd)(InitializerContext* context) {
-    new AppendOplogNoteCmd();
-}
+MONGO_REGISTER_COMMAND(AppendOplogNoteCmd);
 
 }  // namespace mongo

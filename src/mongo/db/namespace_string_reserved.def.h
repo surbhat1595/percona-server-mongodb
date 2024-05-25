@@ -129,6 +129,11 @@ NSS_CONSTANT(kRecipientReshardingOperationsNamespace,
              DatabaseName::kConfig,
              "localReshardingOperations.recipient"_sd)
 
+// Namespace for the recipient shard's local resharding operation resume data.
+NSS_CONSTANT(kRecipientReshardingResumeDataNamespace,
+             DatabaseName::kConfig,
+             "localReshardingResumeData.recipient"_sd)
+
 // Namespace for persisting sharding DDL coordinators state documents
 NSS_CONSTANT(kShardingDDLCoordinatorsNamespace,
              DatabaseName::kConfig,
@@ -207,12 +212,6 @@ NSS_CONSTANT(kShardCollectionCatalogNamespace, DatabaseName::kConfig, "shard.col
 // Namespace used for storing NamespacePlacementType docs on the CSRS.
 NSS_CONSTANT(kConfigsvrPlacementHistoryNamespace, DatabaseName::kConfig, "placementHistory"_sd)
 
-// TODO SERVER-68551: remove once 7.0 becomes last-lts
-NSS_CONSTANT(kLockpingsNamespace, DatabaseName::kConfig, "lockpings"_sd)
-
-// TODO SERVER-68551: remove once 7.0 becomes last-lts
-NSS_CONSTANT(kDistLocksNamepsace, DatabaseName::kConfig, "locks"_sd)
-
 // Namespace used to store the state document of 'SetChangeStreamStateCoordinator'.
 NSS_CONSTANT(kSetChangeStreamStateCoordinatorNamespace,
              DatabaseName::kConfig,
@@ -255,10 +254,6 @@ NSS_CONSTANT(kLocalClusterManagerNamespace, DatabaseName::kLocal, "clustermanage
 
 // Namespace used for startup log.
 NSS_CONSTANT(kStartupLogNamespace, DatabaseName::kLocal, "startup_log"_sd)
-
-// TODO SERVER-75080 delete unused `config.migrations` namespace
-// Deptecated: namespace for storing the persisted state of migrations on the config server.
-NSS_CONSTANT(kMigrationsNamespace, DatabaseName::kConfig, "migrations"_sd)
 
 // Namespace for changelog on CSRS.
 NSS_CONSTANT(kConfigChangelogNamespace, DatabaseName::kConfig, "changelog"_sd)

@@ -233,7 +233,7 @@ std::vector<AsyncRequestsSender::Request> buildVersionedRequestsForTargetedShard
 
 std::vector<AsyncRequestsSender::Response> gatherResponsesImpl(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     const ReadPreferenceSetting& readPref,
     Shard::RetryPolicy retryPolicy,
     const std::vector<AsyncRequestsSender::Request>& requests,
@@ -243,7 +243,7 @@ std::vector<AsyncRequestsSender::Response> gatherResponsesImpl(
     MultiStatementTransactionRequestsSender ars(
         opCtx,
         Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
-        DatabaseNameUtil::deserialize(boost::none, dbName),
+        dbName,
         requests,
         readPref,
         retryPolicy);
@@ -306,7 +306,7 @@ std::vector<AsyncRequestsSender::Response> gatherResponsesImpl(
 
 std::vector<AsyncRequestsSender::Response> gatherResponses(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     const ReadPreferenceSetting& readPref,
     Shard::RetryPolicy retryPolicy,
     const std::vector<AsyncRequestsSender::Request>& requests) {
@@ -316,7 +316,7 @@ std::vector<AsyncRequestsSender::Response> gatherResponses(
 
 std::vector<AsyncRequestsSender::Response> gatherResponsesNoThrowOnStaleShardVersionErrors(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     const ReadPreferenceSetting& readPref,
     Shard::RetryPolicy retryPolicy,
     const std::vector<AsyncRequestsSender::Request>& requests) {
@@ -430,7 +430,7 @@ BSONObj applyReadWriteConcern(OperationContext* opCtx,
 
 std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetAllShards(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     const BSONObj& cmdObj,
     const ReadPreferenceSetting& readPref,
     Shard::RetryPolicy retryPolicy) {
@@ -441,9 +441,27 @@ std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetAllShar
     return gatherResponses(opCtx, dbName, readPref, retryPolicy, requests);
 }
 
+std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetConfigServerAndShards(
+    OperationContext* opCtx,
+    const DatabaseName& dbName,
+    const BSONObj& cmdObj,
+    const ReadPreferenceSetting& readPref,
+    Shard::RetryPolicy retryPolicy) {
+    auto allShardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
+    stdx::unordered_set<ShardId> shardIds(allShardIds.begin(), allShardIds.end());
+    auto configShardId = Grid::get(opCtx)->shardRegistry()->getConfigShard()->getId();
+    shardIds.insert(configShardId);
+
+    std::vector<AsyncRequestsSender::Request> requests;
+    for (auto&& shardId : shardIds)
+        requests.emplace_back(std::move(shardId), cmdObj);
+
+    return gatherResponses(opCtx, dbName, readPref, retryPolicy, requests);
+}
+
 std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRoutingTable(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     const NamespaceString& nss,
     const CollectionRoutingInfo& cri,
     const BSONObj& cmdObj,
@@ -470,7 +488,7 @@ std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRouting
 
 [[nodiscard]] std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRoutingTable(
     boost::intrusive_ptr<ExpressionContext> expCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     const NamespaceString& nss,
     const CollectionRoutingInfo& cri,
     const BSONObj& cmdObj,
@@ -487,7 +505,7 @@ std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRouting
 std::vector<AsyncRequestsSender::Response>
 scatterGatherVersionedTargetByRoutingTableNoThrowOnStaleShardVersionErrors(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     const NamespaceString& nss,
     const CollectionRoutingInfo& cri,
     const std::set<ShardId>& shardsToSkip,
@@ -509,7 +527,7 @@ scatterGatherVersionedTargetByRoutingTableNoThrowOnStaleShardVersionErrors(
 
 AsyncRequestsSender::Response executeCommandAgainstDatabasePrimary(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     const CachedDatabaseInfo& dbInfo,
     const BSONObj& cmdObj,
     const ReadPreferenceSetting& readPref,
@@ -548,7 +566,7 @@ AsyncRequestsSender::Response executeCommandAgainstShardWithMinKeyChunk(
 
     auto responses = gatherResponses(
         opCtx,
-        nss.db_forSharding(),
+        nss.dbName(),
         readPref,
         retryPolicy,
         buildVersionedRequestsForTargetedShards(
@@ -561,7 +579,8 @@ RawResponsesResult appendRawResponses(
     OperationContext* opCtx,
     std::string* errmsg,
     BSONObjBuilder* output,
-    const std::vector<AsyncRequestsSender::Response>& shardResponses) {
+    const std::vector<AsyncRequestsSender::Response>& shardResponses,
+    bool appendWriteConcernError) {
     std::vector<AsyncRequestsSender::Response> successARSResponses;
     std::vector<std::pair<ShardId, BSONObj>> successResponsesReceived;
     std::vector<std::pair<ShardId, Status>> shardNotFoundErrorsReceived;
@@ -657,7 +676,7 @@ RawResponsesResult appendRawResponses(
 
     // If there were no errors, report success (possibly with a writeConcern error).
     if (genericErrorsReceived.empty()) {
-        if (firstWriteConcernErrorReceived) {
+        if (firstWriteConcernErrorReceived && appendWriteConcernError) {
             appendWriteConcernErrorToCmdResponse(firstWriteConcernErrorReceived->first,
                                                  firstWriteConcernErrorReceived->second,
                                                  *output);
@@ -815,9 +834,8 @@ StatusWith<Shard::QueryResponse> loadIndexesFromAuthoritativeShard(OperationCont
     return indexShard->runExhaustiveCursorCommand(
         opCtx,
         ReadPreferenceSetting::get(opCtx),
-        nss.db_forSharding().toString(),
+        nss.dbName(),
         listIndexesCmd,
         opCtx->hasDeadline() ? opCtx->getRemainingMaxTimeMillis() : Milliseconds(-1));
 }
-
 }  // namespace mongo

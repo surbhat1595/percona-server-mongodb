@@ -72,7 +72,7 @@ Status validateNamespace(const NamespaceString& nss) {
 }
 
 StatusWith<UUID> validateCollectionOptions(OperationContext* opCtx, const NamespaceString& nss) {
-    AutoGetCollectionForReadMaybeLockFree collection(
+    AutoGetCollectionForReadCommandMaybeLockFree collection(
         opCtx,
         nss,
         AutoGetCollection::Options{}.viewMode(auto_get_collection::ViewMode::kViewsPermitted));
@@ -129,8 +129,7 @@ double calculatePercentage(double part, double whole) {
 }
 
 bool isInternalClient(OperationContext* opCtx) {
-    return !opCtx->getClient()->session() ||
-        (opCtx->getClient()->session()->getTags() & transport::Session::kInternalClient);
+    return (!opCtx->getClient()->session() || opCtx->getClient()->isInternalClient());
 }
 
 }  // namespace analyze_shard_key

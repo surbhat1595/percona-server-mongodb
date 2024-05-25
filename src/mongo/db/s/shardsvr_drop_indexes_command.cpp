@@ -165,8 +165,8 @@ public:
                             ActionType::internal));
         }
     };
-
-} shardsvrDropIndexesCommand;
+};
+MONGO_REGISTER_COMMAND(ShardsvrDropIndexesCommand);
 
 ShardsvrDropIndexesCommand::Invocation::Response ShardsvrDropIndexesCommand::Invocation::typedRun(
     OperationContext* opCtx) {
@@ -181,23 +181,10 @@ ShardsvrDropIndexesCommand::Invocation::Response ShardsvrDropIndexesCommand::Inv
     DropIndexes dropIdxCmd(ns());
     dropIdxCmd.setDropIndexesRequest(request().getDropIndexesRequest());
 
-    const auto lockTimeout = [&]() -> Milliseconds {
-        if (auto sfp = globalFailPointRegistry().find("overrideDDLLockTimeout")->scoped();
-            MONGO_unlikely(sfp.isActive())) {
-            if (auto timeoutElem = sfp.getData()["timeoutMillisecs"]; timeoutElem.ok()) {
-                const auto timeoutMillisecs = Milliseconds(timeoutElem.safeNumberLong());
-                LOGV2(649100, "Overriding DDL lock timeout", "timeout"_attr = timeoutMillisecs);
-                return timeoutMillisecs;
-            }
-        }
-        return DDLLockManager::kDefaultLockTimeout;
-    }();
-
     // Acquire the DDL lock to serialize with other DDL operations. It also makes sure that we are
     // targeting the primary shard for this database.
     static constexpr StringData lockReason{"dropIndexes"_sd};
-    const DDLLockManager::ScopedCollectionDDLLock collDDLLock{
-        opCtx, ns(), lockReason, MODE_X, lockTimeout};
+    const DDLLockManager::ScopedCollectionDDLLock collDDLLock{opCtx, ns(), lockReason, MODE_X};
 
     auto resolvedNs = ns();
     auto dropIdxBSON = dropIdxCmd.toBSON({});
@@ -215,7 +202,7 @@ ShardsvrDropIndexesCommand::Invocation::Response ShardsvrDropIndexesCommand::Inv
 
         // If it is a timeseries collection, we actually need to acquire the bucket namespace DDL
         // lock
-        timeseriesCollDDLLock.emplace(opCtx, resolvedNs, lockReason, MODE_X, lockTimeout);
+        timeseriesCollDDLLock.emplace(opCtx, resolvedNs, lockReason, MODE_X);
     }
 
     StaleConfigRetryState retryState;
@@ -232,7 +219,7 @@ ShardsvrDropIndexesCommand::Invocation::Response ShardsvrDropIndexesCommand::Inv
             auto shardResponses =
                 scatterGatherVersionedTargetByRoutingTableNoThrowOnStaleShardVersionErrors(
                     opCtx,
-                    resolvedNs.db_forSharding(),
+                    resolvedNs.dbName(),
                     resolvedNs,
                     cri,
                     retryState.shardsWithSuccessResponses,
@@ -254,9 +241,10 @@ ShardsvrDropIndexesCommand::Invocation::Response ShardsvrDropIndexesCommand::Inv
                                   retryState.shardSuccessResponses.end());
 
             std::string errmsg;
-            BSONObjBuilder output;
-            const auto aggregateResponse =
-                appendRawResponses(opCtx, &errmsg, &output, std::move(shardResponses));
+            BSONObjBuilder output, rawResBuilder;
+            bool isShardedCollection = cri.cm.isSharded();
+            const auto aggregateResponse = appendRawResponses(
+                opCtx, &errmsg, &rawResBuilder, shardResponses, isShardedCollection);
 
             // If we have a stale config error, update the success shards for the upcoming retry.
             if (!aggregateResponse.responseOK && aggregateResponse.firstStaleConfigError) {
@@ -264,6 +252,12 @@ ShardsvrDropIndexesCommand::Invocation::Response ShardsvrDropIndexesCommand::Inv
                 uassertStatusOK(*aggregateResponse.firstStaleConfigError);
             }
 
+            if (!isShardedCollection && aggregateResponse.responseOK) {
+                CommandHelpers::filterCommandReplyForPassthrough(
+                    shardResponses[0].swResponse.getValue().data, &output);
+            }
+
+            output.appendElements(rawResBuilder.obj());
             CommandHelpers::appendSimpleCommandStatus(output, aggregateResponse.responseOK, errmsg);
             return Response(output.obj());
         });

@@ -2,17 +2,21 @@
  * Tests simple cases of creating indexes inside a multi-document transaction, both
  * committing and aborting.
  *
- * The test runs commands that are not allowed with security token: endSession.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: endSession.
  *   not_allowed_with_security_token,
  *   uses_transactions,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/auto_retry_transaction_in_sharding.js");
-load("jstests/libs/create_index_txn_helpers.js");
+import {
+    retryOnceOnTransientAndRestartTxnOnMongos,
+    withTxnAndAutoRetryOnMongos
+} from "jstests/libs/auto_retry_transaction_in_sharding.js";
+import {
+    conflictingIndexSpecs,
+    createIndexAndCRUDInTxn,
+    indexSpecs
+} from "jstests/libs/create_index_txn_helpers.js";
 
 let doCreateIndexesTest = function(explicitCollectionCreate, multikeyIndex) {
     const session = db.getMongo().startSession();
@@ -109,4 +113,3 @@ doCreateIndexesTest(false /*explicitCollectionCreate*/, false /*multikeyIndex*/)
 doCreateIndexesTest(true /*explicitCollectionCreate*/, false /*multikeyIndex*/);
 doCreateIndexesTest(false /*explicitCollectionCreate*/, true /*multikeyIndex*/);
 doCreateIndexesTest(true /*explicitCollectionCreate*/, true /*multikeyIndex*/);
-}());

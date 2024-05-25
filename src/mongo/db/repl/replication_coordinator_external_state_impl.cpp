@@ -53,7 +53,6 @@
 #include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/catalog_raii.h"
-#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/client.h"
@@ -67,7 +66,6 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/free_mon/free_mon_mongod.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/logical_time_validator.h"
@@ -99,9 +97,11 @@
 #include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 #include "mongo/db/s/sharding_initialization_mongod.h"
+#include "mongo/db/s/sharding_ready.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/sharding_util.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/session_catalog_mongod.h"
@@ -570,8 +570,6 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
 
     IndexBuildsCoordinator::get(opCtx)->onStepUp(opCtx);
 
-    notifyFreeMonitoringOnTransitionToPrimary();
-
     // It is only necessary to check the system indexes on the first transition to primary.
     // On subsequent transitions to primary the indexes will have already been created.
     static std::once_flag verifySystemIndexesOnce;
@@ -765,11 +763,6 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalLastVoteDocument(
 
         Status status = writeConflictRetry(
             opCtx, "save replica set lastVote", NamespaceString::kLastVoteNamespace, [&] {
-                // Writes to non-replicated collections do not need concurrency control with the
-                // OplogApplier that never accesses them. Skip taking the PBWM.
-                ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
-                    opCtx->lockState());
-
                 auto coll =
                     acquireCollection(opCtx,
                                       CollectionAcquisitionRequest(
@@ -942,10 +935,6 @@ void ReplicationCoordinatorExternalStateImpl::_stopAsyncUpdatesOfAndClearOplogTr
     // above, if writing is imminent, so we must make sure that the code completes fully.
     JournalFlusher::get(_service)->waitForJournalFlush();
 
-    // Writes to non-replicated collections do not need concurrency control with the
-    // OplogApplier that never accesses them. Skip taking the PBWM.
-    ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(opCtx->lockState());
-
     // We can clear the oplogTruncateAfterPoint because we know there are no user writes during
     // stepdown and therefore presently no oplog holes.
     _replicationProcess->getConsistencyMarkers()->setOplogTruncateAfterPoint(opCtx, Timestamp());
@@ -1108,6 +1097,9 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
         // TransactionCoordinatorService, and they would fail if the onStepUp logic attempted the
         // same transition.
         ShardingCatalogManager::get(opCtx)->installConfigShardIdentityDocument(opCtx);
+        if (gFeatureFlagAllMongodsAreSharded.isEnabled(serverGlobalParams.featureCompatibility)) {
+            ShardingReady::get(opCtx)->scheduleTransitionToConfigShard(opCtx);
+        }
     }
 }
 
@@ -1331,7 +1323,7 @@ bool ReplicationCoordinatorExternalStateImpl::isCWWCSetOnConfigShard(
         Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-            DatabaseName::kAdmin.toString(),
+            DatabaseName::kAdmin,
             configsvrRequest.toBSON({}),
             Shard::RetryPolicy::kIdempotent));
 

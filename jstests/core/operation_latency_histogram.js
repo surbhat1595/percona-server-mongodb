@@ -5,9 +5,9 @@
 // may be routed to a secondary. This is incompatible with embedded right now since the command
 // compact does not exist on such storage engines.
 //
-// The test runs commands that are not allowed with security token: compact, dataSize,reIndex,
-// whatsmyuri.
 // @tags: [
+//   # The test runs commands that are not allowed with security token: compact, dataSize,reIndex,
+//   # whatsmyuri.
 //   not_allowed_with_security_token,
 //   assumes_read_preference_unchanged,
 //   does_not_support_repeated_reads,
@@ -24,11 +24,9 @@
 // ]
 //
 
-(function() {
-"use strict";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {assertHistogramDiffEq, getHistogramStats} from "jstests/libs/stats.js";
 
-load("jstests/libs/fixture_helpers.js");
-load("jstests/libs/stats.js");
 var name = "operationalLatencyHistogramTest";
 
 var testDB = db.getSiblingDB(name);
@@ -195,4 +193,3 @@ lastHistogram = assertHistogramDiffEq(testColl, lastHistogram, 0, 0, 0);
 // Test non-command.
 assert.commandFailed(testColl.runCommand("IHopeNobodyEverMakesThisACommand"));
 lastHistogram = assertHistogramDiffEq(testColl, lastHistogram, 0, 0, 0);
-}());

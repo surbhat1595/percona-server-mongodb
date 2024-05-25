@@ -46,6 +46,14 @@ bool sortPatternHasPartsWithCommonPrefix(const SortPattern& sortPattern);
 bool isIdHackEligibleQuery(const CollectionPtr& collection, const CanonicalQuery& query);
 
 /**
+ * Returns 'true' if 'query' on the given 'collection' can be answered using a special IDHACK plan,
+ * without taking into account the collators.
+ */
+bool isIdHackEligibleQueryWithoutCollator(const FindCommandRequest& query);
+
+bool isSortSbeCompatible(const SortPattern& sortPattern);
+
+/**
  * Checks if the given query can be executed with the SBE engine based on the canonical query.
  *
  * This method determines whether the query may be compatible with SBE based only on high-level

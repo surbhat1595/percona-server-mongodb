@@ -107,8 +107,8 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/collection_uuid_mismatch_info',
         '$BUILD_DIR/mongo/db/internal_transactions_feature_flag',
         '$BUILD_DIR/mongo/db/mongohasher',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/query/query_planner',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         '$BUILD_DIR/mongo/db/session/sessions_collection',
     ],
 )
@@ -184,6 +184,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/pipeline/runtime_constants_idl',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
+        '$BUILD_DIR/mongo/db/repl/repl_settings',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
     ],
@@ -288,7 +289,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/commands/set_user_write_block_mode_idl',
         '$BUILD_DIR/mongo/db/common',
         '$BUILD_DIR/mongo/db/index_commands_idl',
-        '$BUILD_DIR/mongo/db/serialization_options',
+        '$BUILD_DIR/mongo/db/query_shape_common',
         '$BUILD_DIR/mongo/executor/async_rpc_error_info',
         '$BUILD_DIR/mongo/rpc/message',
         '$BUILD_DIR/mongo/util/caching',
@@ -429,6 +430,7 @@ env.Library(
         'sharding_uptime_reporter.cpp',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/curop_metrics',
         '$BUILD_DIR/mongo/db/not_primary_error_tracker',
         '$BUILD_DIR/mongo/db/read_write_concern_defaults',
         '$BUILD_DIR/mongo/db/session/session_catalog',
@@ -463,7 +465,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/logical_time_metadata_hook',
         '$BUILD_DIR/mongo/db/pipeline/process_interface/mongos_process_interface_factory',
         '$BUILD_DIR/mongo/db/process_health/fault_manager',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         '$BUILD_DIR/mongo/db/read_write_concern_defaults',
         '$BUILD_DIR/mongo/db/server_options',
         '$BUILD_DIR/mongo/db/server_options_base',

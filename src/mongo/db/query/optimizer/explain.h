@@ -54,11 +54,14 @@ enum class ExplainVersion { V1, V2, V2Compact, V3, Vmax };
  */
 class ABTPrinter : public AbstractABTPrinter {
 public:
-    ABTPrinter(PlanAndProps planAndProps, ExplainVersion explainVersion);
+    ABTPrinter(Metadata metadata, PlanAndProps planAndProps, ExplainVersion explainVersion);
 
     BSONObj explainBSON() const override final;
+    std::string getPlanSummary() const override final;
 
 private:
+    // Metadata field used to populate index information for index scans in the planSummary field.
+    Metadata _metadata;
     PlanAndProps _planAndProps;
     ExplainVersion _explainVersion;
 };
@@ -117,17 +120,18 @@ public:
 
     static BSONObj explainMemoBSONObj(const cascades::MemoExplainInterface& memoInterface);
 
-    static std::string explainPartialSchemaReqMap(const PartialSchemaRequirements& reqMap);
+    static std::string explainPartialSchemaReqExpr(const PSRExpr::Node& reqs);
 
     static std::string explainResidualRequirements(const ResidualRequirements::Node& resReqs);
 
     static std::string explainInterval(const IntervalRequirement& interval);
 
-    static std::string explainInterval(const CompoundIntervalRequirement& interval);
+    static std::string explainCompoundInterval(const CompoundIntervalRequirement& interval);
 
     static std::string explainIntervalExpr(const IntervalReqExpr::Node& intervalExpr);
 
-    static std::string explainIntervalExpr(const CompoundIntervalReqExpr::Node& intervalExpr);
+    static std::string explainCompoundIntervalExpr(
+        const CompoundIntervalReqExpr::Node& intervalExpr);
 
     static std::string explainCandidateIndex(const CandidateIndexEntry& indexEntry);
 };

@@ -67,6 +67,7 @@
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/audit.h"
+#include "mongo/db/audit_interface.h"
 #include "mongo/db/audit/audit_flusher.h"
 #include "mongo/db/audit/audit_options.h"
 #include "mongo/db/auth/auth_op_observer.h"
@@ -82,7 +83,6 @@
 #include "mongo/db/catalog/health_log.h"
 #include "mongo/db/catalog/health_log_interface.h"
 #include "mongo/db/catalog_raii.h"
-#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/change_collection_expired_documents_remover.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/change_stream_options_manager.h"
@@ -111,7 +111,6 @@
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/fle_crud.h"
-#include "mongo/db/free_mon/free_mon_mongod.h"
 #include "mongo/db/ftdc/ftdc_mongod.h"
 #include "mongo/db/ftdc/util.h"
 #include "mongo/db/global_settings.h"
@@ -132,6 +131,7 @@
 #include "mongo/db/op_observer/change_stream_pre_images_op_observer.h"
 #include "mongo/db/op_observer/fallback_op_observer.h"
 #include "mongo/db/op_observer/fcv_op_observer.h"
+#include "mongo/db/op_observer/find_and_modify_images_op_observer.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
@@ -322,6 +322,25 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeShutdown);
 const ntservice::NtServiceDefaultStrings defaultServiceStrings = {
     L"MongoDB", L"MongoDB", L"MongoDB Server"};
 #endif
+
+auto makeTransportLayer(ServiceContext* svcCtx) {
+    boost::optional<int> routerPort;
+    boost::optional<int> loadBalancerPort;
+
+    if (serverGlobalParams.routerPort) {
+        routerPort = serverGlobalParams.routerPort;
+        if (*routerPort == serverGlobalParams.port) {
+            LOGV2_ERROR(7791701,
+                        "The router port must be different from the public listening port.",
+                        "port"_attr = serverGlobalParams.port);
+            quickExit(ExitCode::badOptions);
+        }
+        // TODO SERVER-78730: add support for load-balanced connections.
+    }
+
+    return transport::TransportLayerManager::createWithConfig(
+        &serverGlobalParams, svcCtx, std::move(loadBalancerPort), std::move(routerPort));
+}
 
 void logStartup(OperationContext* opCtx) {
     BSONObjBuilder toLog;
@@ -532,10 +551,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 #endif
 
     if (!storageGlobalParams.repair) {
-        auto tl =
-            transport::TransportLayerManager::createWithConfig(&serverGlobalParams, serviceContext);
-        auto res = tl->setup();
-        if (!res.isOK()) {
+        auto tl = makeTransportLayer(serviceContext);
+        if (auto res = tl->setup(); !res.isOK()) {
             LOGV2_ERROR(20568,
                         "Error setting up listener: {error}",
                         "Error setting up listener",
@@ -614,7 +631,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         exitCleanly(ExitCode::badOptions);
     }
 
-    if (storageGlobalParams.repair && replSettings.usingReplSets()) {
+    if (storageGlobalParams.repair && replSettings.isReplSet()) {
         LOGV2_ERROR(5019200,
                     "Cannot specify both repair and replSet at the same time (remove --replSet to "
                     "be able to --repair)");
@@ -652,7 +669,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     // a concern as the cluster parameter initializer runs automatically.
     auto replCoord = repl::ReplicationCoordinator::get(startupOpCtx.get());
     invariant(replCoord);
-    if (!replCoord->isReplEnabled()) {
+    if (!replCoord->getSettings().isReplSet()) {
         ClusterServerParameterInitializer::synchronizeAllParametersFromDisk(startupOpCtx.get());
     }
 
@@ -790,7 +807,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     try {
         if ((serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) ||
              serverGlobalParams.clusterRole.has(ClusterRole::None)) &&
-            replSettings.usingReplSets()) {
+            replSettings.isReplSet()) {
             ReadWriteConcernDefaults::get(startupOpCtx.get()->getServiceContext())
                 .refreshIfNecessary(startupOpCtx.get());
         }
@@ -819,7 +836,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 
         uassert(ErrorCodes::BadValue,
                 str::stream() << "Cannot use queryableBackupMode in a replica set",
-                !replCoord->isReplEnabled());
+                !replCoord->getSettings().isReplSet());
         replCoord->startup(startupOpCtx.get(), lastShutdownState);
     }
 
@@ -831,8 +848,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             logStartup(startupOpCtx.get());
         }
 
-        startFreeMonitoring(serviceContext);
-
         if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
             initializeGlobalShardingStateForConfigServerIfNeeded(startupOpCtx.get());
 
@@ -840,7 +855,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             initializeShardingAwarenessIfNeededAndLoadGlobalSettings(startupOpCtx.get());
         }
 
-        if (replSettings.usingReplSets() &&
+        if (replSettings.isReplSet() &&
             (serverGlobalParams.clusterRole.has(ClusterRole::None) ||
              !Grid::get(startupOpCtx.get())->isShardingInitialized())) {
             // If this is a mongod in a standalone replica set or a shardsvr replica set that has
@@ -864,7 +879,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
                                       std::make_unique<LogicalTimeValidator>(keyManager));
         }
 
-        if (replSettings.usingReplSets() && serverGlobalParams.clusterRole.has(ClusterRole::None)) {
+        if (replSettings.isReplSet() && serverGlobalParams.clusterRole.has(ClusterRole::None)) {
             ReplicaSetNodeProcessInterface::getReplicaSetNodeExecutor(serviceContext)->startup();
         }
 
@@ -875,7 +890,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         // prepare a transaction at timestamp earlier than the stableTimestamp. This will result in
         // a WiredTiger invariant. Register the callback after the call to 'startup' to ensure we've
         // finished applying prepared transactions.
-        if (replCoord->isReplEnabled()) {
+        if (replCoord->getSettings().isReplSet()) {
             storageEngine->setOldestActiveTransactionTimestampCallback(
                 TransactionParticipant::getOldestActiveTimestamp);
         }
@@ -905,11 +920,11 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             startTTLMonitor(serviceContext);
         }
 
-        if (replSettings.usingReplSets() || !gInternalValidateFeaturesAsPrimary) {
+        if (replSettings.isReplSet() || !gInternalValidateFeaturesAsPrimary) {
             serverGlobalParams.validateFeaturesAsPrimary.store(false);
         }
 
-        if (replSettings.usingReplSets()) {
+        if (replSettings.isReplSet()) {
             Lock::GlobalWrite lk(startupOpCtx.get());
             OldClientContext ctx(startupOpCtx.get(), NamespaceString::kRsOplogNamespace);
             tenant_migration_util::createOplogViewForTenantMigrations(startupOpCtx.get(), ctx.db());
@@ -961,8 +976,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
 
     const auto isStandalone =
-        repl::ReplicationCoordinator::get(serviceContext)->getReplicationMode() ==
-        repl::ReplicationCoordinator::modeNone;
+        !repl::ReplicationCoordinator::get(serviceContext)->getSettings().isReplSet();
 
     // Change stream collections can exist, even on a standalone, provided the standalone used to be
     // part of a replica set. Ensure the change stream collections on startup contain consistent
@@ -1009,7 +1023,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         kind = LogicalSessionCacheServer::kConfigServer;
     } else if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         kind = LogicalSessionCacheServer::kSharded;
-    } else if (replSettings.usingReplSets()) {
+    } else if (replSettings.isReplSet()) {
         kind = LogicalSessionCacheServer::kReplicaSet;
     }
 
@@ -1327,7 +1341,8 @@ void setUpReplication(ServiceContext* serviceContext) {
         SecureRandom().nextInt64());
     // Only create a ReplicaSetNodeExecutor if sharding is disabled and replication is enabled.
     // Note that sharding sets up its own executors for scheduling work to remote nodes.
-    if (serverGlobalParams.clusterRole.has(ClusterRole::None) && replCoord->isReplEnabled()) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::None) &&
+        replCoord->getSettings().isReplSet()) {
         ReplicaSetNodeProcessInterface::setReplicaSetNodeExecutor(
             serviceContext, makeReplicaSetNodeExecutor(serviceContext));
 
@@ -1358,6 +1373,7 @@ void setUpObservers(ServiceContext* serviceContext) {
             ->registerPin(std::make_unique<ReshardingHistoryHook>());
         opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>(
             std::make_unique<OplogWriterTransactionProxy>(std::make_unique<OplogWriterImpl>())));
+        opObserverRegistry->addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<MigrationChunkClonerSourceOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ShardServerOpObserver>());
@@ -1390,6 +1406,7 @@ void setUpObservers(ServiceContext* serviceContext) {
     if (serverGlobalParams.clusterRole.has(ClusterRole::None)) {
         opObserverRegistry->addObserver(
             std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+        opObserverRegistry->addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<UserWriteBlockModeOpObserver>());
         if (getGlobalReplSettings().isServerless()) {
@@ -1403,7 +1420,7 @@ void setUpObservers(ServiceContext* serviceContext) {
         }
 
         auto replCoord = repl::ReplicationCoordinator::get(serviceContext);
-        if (!gMultitenancySupport && replCoord && replCoord->isReplEnabled()) {
+        if (!gMultitenancySupport && replCoord && replCoord->getSettings().isReplSet()) {
             opObserverRegistry->addObserver(
                 std::make_unique<analyze_shard_key::QueryAnalysisOpObserverRS>());
         }
@@ -1416,8 +1433,6 @@ void setUpObservers(ServiceContext* serviceContext) {
         std::make_unique<repl::PrimaryOnlyServiceOpObserver>(serviceContext));
     opObserverRegistry->addObserver(std::make_unique<FcvOpObserver>());
     opObserverRegistry->addObserver(std::make_unique<ClusterServerParameterOpObserver>());
-
-    setupFreeMonitoringOpObserver(opObserverRegistry.get());
 
     if (audit::opObserverRegistrar) {
         audit::opObserverRegistrar(opObserverRegistry.get());
@@ -1712,9 +1727,6 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         }
     }
 
-    LOGV2(4784925, "Shutting down free monitoring");
-    stopFreeMonitoring();
-
     if (auto* healthLog = HealthLogInterface::get(serviceContext)) {
         LOGV2(4784927, "Shutting down the HealthLog");
         healthLog->shutdown();
@@ -1821,6 +1833,10 @@ int mongod_main(int argc, char* argv[]) {
             quickExit(ExitCode::fail);
         }
     }();
+
+    if (audit::setAuditInterface) {
+        audit::setAuditInterface(service);
+    }
 
     {
         // Create the durable history registry prior to calling the `setUp*` methods. They may

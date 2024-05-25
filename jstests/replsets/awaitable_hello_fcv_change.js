@@ -5,10 +5,8 @@
  * @tags: [multiversion_incompatible]
  */
 
-(function() {
-"use strict";
-load("jstests/libs/parallel_shell_helpers.js");
-load("jstests/libs/fail_point_util.js");
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
 
 function runAwaitableHelloBeforeFCVChange(
     topologyVersionField, targetFCV, isPrimary, prevMinWireVersion, serverMaxWireVersion) {
@@ -133,7 +131,8 @@ function runTest(downgradeFCV) {
     assert.eq(1, numAwaitingTopologyChangeOnSecondary);
 
     // Setting the FCV to the same version will not trigger an hello response.
-    assert.commandWorked(primaryAdminDB.runCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        primaryAdminDB.runCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
     checkFCV(primaryAdminDB, latestFCV);
     checkFCV(secondaryAdminDB, latestFCV);
 
@@ -148,7 +147,8 @@ function runTest(downgradeFCV) {
     jsTestLog("Downgrade the featureCompatibilityVersion.");
     // Downgrading the FCV will cause the hello requests to respond on both primary and
     // secondary.
-    assert.commandWorked(primaryAdminDB.runCommand({setFeatureCompatibilityVersion: downgradeFCV}));
+    assert.commandWorked(
+        primaryAdminDB.runCommand({setFeatureCompatibilityVersion: downgradeFCV, confirm: true}));
     awaitHelloBeforeDowngradeFCVOnPrimary();
     awaitHelloBeforeDowngradeFCVOnSecondary();
     // Ensure the featureCompatibilityVersion document update has been replicated.
@@ -215,8 +215,11 @@ function runTest(downgradeFCV) {
         assert.eq(1, numAwaitingTopologyChangeOnSecondary);
 
         // Upgrade the FCV to last-continuous.
-        assert.commandWorked(primaryAdminDB.runCommand(
-            {setFeatureCompatibilityVersion: lastContinuousFCV, fromConfigServer: true}));
+        assert.commandWorked(primaryAdminDB.runCommand({
+            setFeatureCompatibilityVersion: lastContinuousFCV,
+            fromConfigServer: true,
+            confirm: true
+        }));
         awaitHelloBeforeUpgradeOnPrimary();
         awaitHelloBeforeUpgradeOnSecondary();
 
@@ -237,9 +240,9 @@ function runTest(downgradeFCV) {
         // We must upgrade to latestFCV first since downgrading from last-continuous to last-stable
         // is forbidden.
         assert.commandWorked(
-            primaryAdminDB.runCommand({setFeatureCompatibilityVersion: latestFCV}));
+            primaryAdminDB.runCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
         assert.commandWorked(
-            primaryAdminDB.runCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
+            primaryAdminDB.runCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
         rst.awaitReplication();
         checkFCV(primaryAdminDB, lastLTSFCV);
         checkFCV(secondaryAdminDB, lastLTSFCV);
@@ -291,7 +294,8 @@ function runTest(downgradeFCV) {
     assert.eq(1, numAwaitingTopologyChangeOnSecondary);
 
     // Setting the FCV to the same version will not trigger an hello response.
-    assert.commandWorked(primaryAdminDB.runCommand({setFeatureCompatibilityVersion: downgradeFCV}));
+    assert.commandWorked(
+        primaryAdminDB.runCommand({setFeatureCompatibilityVersion: downgradeFCV, confirm: true}));
     checkFCV(primaryAdminDB, downgradeFCV);
     checkFCV(secondaryAdminDB, downgradeFCV);
 
@@ -305,7 +309,8 @@ function runTest(downgradeFCV) {
 
     jsTestLog("Upgrade the featureCompatibilityVersion.");
     // Upgrading the FCV will cause the hello requests to respond on both primary and secondary.
-    assert.commandWorked(primaryAdminDB.runCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        primaryAdminDB.runCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
     awaitHelloBeforeUpgradeFCVOnPrimary();
     awaitHelloBeforeUpgradeFCVOnSecondary();
     // Ensure the featureCompatibilityVersion document update has been replicated.
@@ -325,4 +330,3 @@ function runTest(downgradeFCV) {
 
 runTest(lastLTSFCV);
 runTest(lastContinuousFCV);
-})();

@@ -4,12 +4,8 @@
  *
  * @tags: [
  *   requires_fcv_70,
- *   featureFlagTransitionToCatalogShard,
  * ]
  */
-(function() {
-"use strict";
-
 const st = new ShardingTest({shards: 2, configShard: true});
 const rs = new ReplSetTest({name: "new-shard-rs", nodes: 1, nodeOptions: {shardsvr: ""}});
 
@@ -56,4 +52,3 @@ assert.eq(
 // TODO SERVER-74570: Enable parallel shutdown
 st.stop({parallelSupported: false});
 rs.stopSet();
-}());

@@ -212,8 +212,8 @@ public:
             // Need to retrieve a list of databases which this shard is primary for and run the
             // command on each of them.
             for (const auto& db : getDatabasesThisShardIsPrimaryFor(opCtx)) {
-                const auto dbNss = NamespaceStringUtil::parseNamespaceFromRequest(
-                    boost::none, db.getName(), nss.coll());
+                const auto dbNss =
+                    NamespaceStringUtil::deserialize(boost::none, db.getName(), nss.coll());
                 ScopedSetShardRole scopedSetShardRole(opCtx,
                                                       dbNss,
                                                       boost::none /* shardVersion */,
@@ -274,11 +274,7 @@ public:
 
             // Take a DDL lock on the database
             const DDLLockManager::ScopedDatabaseDDLLock dbDDLLock{
-                opCtx,
-                nss.dbName(),
-                "checkMetadataConsistency",
-                MODE_S,
-                DDLLockManager::kDefaultLockTimeout};
+                opCtx, nss.dbName(), "checkMetadataConsistency", MODE_S};
 
             return establishCursors(opCtx,
                                     Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),
@@ -359,8 +355,8 @@ public:
                             ActionType::internal));
         }
     };
-
-} shardsvrCheckMetadataConsistencyCommand;
+};
+MONGO_REGISTER_COMMAND(ShardsvrCheckMetadataConsistencyCommand);
 
 }  // namespace
 }  // namespace mongo

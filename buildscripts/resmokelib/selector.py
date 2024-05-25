@@ -216,7 +216,12 @@ class _TestList(object):
                     self._filtered.discard(expanded_path)
             else:
                 path = os.path.normpath(path)
-                if path not in self._roots:
+                path_missing_from_roots = path not in self._roots
+                # TODO(SERVER-80441): Remove the "enterprise" custom logic.
+                # `src/...` path is hard-coded since we are quite certain that's the enterprise module path
+                path_is_not_in_enterprise_module = not path.startswith(
+                    'src/mongo/db/modules/enterprise')
+                if path_missing_from_roots and path_is_not_in_enterprise_module:
                     raise ValueError(
                         ("Excluded test file {} does not exist, perhaps it was renamed or removed"
                          " , and should be modified in, or removed from, the exclude_files list.".
@@ -775,6 +780,7 @@ _SELECTOR_REGISTRY = {
     "gennylib_test": (_GennylibTestCaseSelectorConfig, _GennylibTestCaseSelector),
     "cpp_libfuzzer_test": (_CppTestSelectorConfig, _CppTestSelector),
     "tla_plus_test": (_FileBasedSelectorConfig, _Selector),
+    "bulk_write_cluster_js_test": (_JSTestSelectorConfig, _JSTestSelector),
 }
 
 

@@ -9,14 +9,14 @@
  *   # The currentOp output field 'lastDurableState' was changed from an enum to a string.
  *   requires_fcv_70,
  *   serverless,
+ *   requires_fcv_71,
  * ]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {isShardMergeEnabled} from "jstests/replsets/libs/tenant_migration_util.js";
-
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/uuid_util.js");
 
 const kTenantId = ObjectId().str;
 const kReadPreference = {

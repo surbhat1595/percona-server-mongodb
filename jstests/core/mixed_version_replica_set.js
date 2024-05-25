@@ -1,13 +1,12 @@
 /**
  * Tests initializing a mixed version replica set through resmoke.
  *
- * The test runs commands that are not allowed with security token: replSetGetStatus.
  * @tags: [
- *   not_allowed_with_security_token,multiversion_sanity_check]
+ *   # The test runs commands that are not allowed with security token: replSetGetStatus.
+ *   not_allowed_with_security_token,
+ *   multiversion_sanity_check
+ * ]
  */
-
-(function() {
-"use strict";
 
 const latestBinVersion = MongoRunner.getBinVersionFor("latest");
 
@@ -34,4 +33,3 @@ if (testingReplication && TestData && TestData.mixedBinVersions) {
         "This tests initializing a mixed version replica set through resmoke. Skipping test run" +
         " because testingReplication and TestData.mixedBinVersion are not set.");
 }
-})();

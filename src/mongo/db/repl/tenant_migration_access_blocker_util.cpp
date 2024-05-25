@@ -231,7 +231,7 @@ bool recoverTenantMigrationDonorAccessBlockers(OperationContext* opCtx,
 bool recoverShardMergeRecipientAccessBlockers(OperationContext* opCtx,
                                               const ShardMergeRecipientDocument& doc) {
     auto replCoord = repl::ReplicationCoordinator::get(getGlobalServiceContext());
-    invariant(replCoord && replCoord->isReplEnabled());
+    invariant(replCoord && replCoord->getSettings().isReplSet());
 
     // If the initial syncing node (both FCBIS and logical initial sync) syncs from a sync source
     // that's in the middle of file copy/import phase of shard merge, it can cause the initial
@@ -712,7 +712,7 @@ void performNoopWrite(OperationContext* opCtx, StringData msg) {
 
 bool inRecoveryMode(OperationContext* opCtx) {
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    if (!replCoord->isReplEnabled()) {
+    if (!replCoord->getSettings().isReplSet()) {
         return false;
     }
 
@@ -723,8 +723,15 @@ bool inRecoveryMode(OperationContext* opCtx) {
 
 bool shouldExclude(OperationContext* opCtx) {
     return repl::tenantMigrationInfo(opCtx) || opCtx->getClient()->isInDirectClient() ||
-        (opCtx->getClient()->session() &&
-         (opCtx->getClient()->session()->getTags() & transport::Session::kInternalClient));
+        (opCtx->getClient()->session() && opCtx->getClient()->isInternalClient());
+}
+
+std::string getTenantPrefix(StringData prefixedDb) {
+    const auto pos = prefixedDb.find('_');
+    if (pos == std::string::npos || pos == 0) {
+        return "";
+    }
+    return prefixedDb.substr(0, pos).toString();
 }
 
 boost::optional<TenantId> parseTenantIdFromDatabaseName(const DatabaseName& dbName) {
@@ -732,18 +739,17 @@ boost::optional<TenantId> parseTenantIdFromDatabaseName(const DatabaseName& dbNa
         return dbName.tenantId();
     }
 
-    const auto pos = dbName.db().find('_');
-    if (pos == std::string::npos || pos == 0) {
+    const auto tenantStr = getTenantPrefix(DatabaseNameUtil::serialize(dbName));
+    if (tenantStr.empty()) {
         // Not a tenant database.
         return boost::none;
     }
 
-    const auto statusWith = OID::parse(dbName.db().substr(0, pos));
-    if (!statusWith.isOK()) {
+    const auto statusWithOID = OID::parse(tenantStr);
+    if (!statusWithOID.isOK()) {
         return boost::none;
     }
-
-    return TenantId(statusWith.getValue());
+    return TenantId(statusWithOID.getValue());
 }
 
 boost::optional<std::string> extractTenantFromDatabaseName(const DatabaseName& dbName) {
@@ -755,13 +761,12 @@ boost::optional<std::string> extractTenantFromDatabaseName(const DatabaseName& d
         }
     }
 
-    const auto pos = dbName.db().find('_');
-    if (pos == std::string::npos || pos == 0) {
+    const auto tenantStr = getTenantPrefix(DatabaseNameUtil::serialize(dbName));
+    if (tenantStr.empty()) {
         // Not a tenant database.
         return boost::none;
     }
-
-    return dbName.db().substr(0, pos).toString();
+    return tenantStr;
 }
 
 }  // namespace tenant_migration_access_blocker

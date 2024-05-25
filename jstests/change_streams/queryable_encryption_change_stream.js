@@ -4,12 +4,11 @@
 // @tags: [
 // change_stream_does_not_expect_txns,
 // assumes_unsharded_collection,
-// featureFlagFLE2CleanupCommand
+// requires_fcv_71
 // ]
 //
-load("jstests/libs/change_stream_util.js");  // For ChangeStreamTest and
-                                             // assert[Valid|Invalid]ChangeStreamNss.
 import {EncryptedClient} from "jstests/fle2/libs/encrypted_client_util.js";
+import {canonicalizeEventForTesting, ChangeStreamTest} from "jstests/libs/change_stream_util.js";
 
 if (!buildInfo().modules.includes("enterprise")) {
     jsTestLog("Skipping test as it requires the enterprise module");
@@ -23,8 +22,6 @@ const testDb = db.getSiblingDB(dbName);
 const placeholderBinData0 = BinData(0, "WMdGo/tcDkE4UL6bgGYTN6oKFitgLXvhyhB9sbKxprk=");
 const placeholderBinData6 = BinData(6, "WMdGo/tcDkE4UL6bgGYTN6oKFitgLXvhyhB9sbKxprk=");
 const placeholderOID = ObjectId();
-
-const origCanonicalizeEventForTesting = canonicalizeEventForTesting;
 
 function replaceRandomDataWithPlaceholders(event) {
     for (let field in event) {
@@ -44,11 +41,11 @@ function replaceRandomDataWithPlaceholders(event) {
         }
     }
 }
-canonicalizeEventForTesting = function(event, expected) {
+const eventModifier = function(event, expected) {
     if (event.hasOwnProperty("fullDocument") || event.hasOwnProperty("documentKey")) {
         replaceRandomDataWithPlaceholders(event);
     }
-    return origCanonicalizeEventForTesting(event, expected);
+    return canonicalizeEventForTesting(event, expected);
 };
 
 testDb.dropDatabase();
@@ -67,7 +64,7 @@ assert.commandWorked(encryptedClient.createEncryptionCollection(collName, {
     }
 }));
 
-const cst = new ChangeStreamTest(testDb);
+const cst = new ChangeStreamTest(testDb, {eventModifier});
 const ecoll = encryptedClient.getDB()[collName];
 const [escName, ecocName] = (() => {
     let names = encryptedClient.getStateCollectionNamespaces(collName);
@@ -300,10 +297,6 @@ const escDeleteChange = {
     ns: {db: dbName, coll: escName},
     documentKey: {_id: placeholderBinData0},
 };
-const escDeletesDropChange = {
-    operationType: "drop",
-    ns: {db: dbName, coll: escName + ".deletes"},
-};
 const ecocCompactDropChange = {
     operationType: "drop",
     ns: {db: dbName, coll: ecocName + ".compact"},
@@ -374,32 +367,20 @@ jsTestLog("Testing cleanup");
 
     cst.assertNoChange(cursor);
 
-    const escDeletesInsertChange = {
-        documentKey: {_id: placeholderBinData0},
-        fullDocument: {_id: placeholderBinData0},
-        ns: {db: dbName, coll: escName + ".deletes"},
-        operationType: "insert",
-    };
-
     // temp ecoc rename
     cst.assertNextChangesEqual({cursor: cursordb, expectedChanges: [ecocRenameChange]});
-    // each null anchor insert is followed by a single insert to esc.deletes
+    // null anchor inserts
     escInsertChange.fullDocument.value = placeholderBinData0;
     for (let i = 0; i < anchorCount; i++) {
-        cst.assertNextChangesEqual(
-            {cursor: cursordb, expectedChanges: [escInsertChange, escDeletesInsertChange]});
+        cst.assertNextChangesEqual({cursor: cursordb, expectedChanges: [escInsertChange]});
     }
     // non-anchors and regular anchors are deleted from ESC
     for (let i = 0; i < deleteCount; i++) {
         cst.assertNextChangesEqual({cursor: cursordb, expectedChanges: [escDeleteChange]});
     }
-    // temp esc.deletes drop
-    cst.assertNextChangesEqual({cursor: cursordb, expectedChanges: [escDeletesDropChange]});
     // temp ecoc.compact drop
     cst.assertNextChangesEqual({cursor: cursordb, expectedChanges: [ecocCompactDropChange]});
     cst.assertNoChange(cursordb);
 }
 
 cst.cleanUp();
-
-canonicalizeEventForTesting = origCanonicalizeEventForTesting;

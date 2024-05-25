@@ -241,7 +241,7 @@ public:
     void setTimeseriesBucketsMayHaveMixedSchemaData(OperationContext* opCtx,
                                                     boost::optional<bool> setting) final;
 
-    bool timeseriesBucketingParametersMayHaveChanged() const final;
+    boost::optional<bool> timeseriesBucketingParametersHaveChanged() const final;
 
     void setTimeseriesBucketingParametersChanged(OperationContext* opCtx,
                                                  boost::optional<bool> value) final;
@@ -250,6 +250,8 @@ public:
 
     bool getRequiresTimeseriesExtendedRangeSupport() const final;
     void setRequiresTimeseriesExtendedRangeSupport(OperationContext* opCtx) const final;
+
+    bool areTimeseriesBucketsFixed() const final;
 
     /**
      * isClustered() relies on the object returned from getClusteredInfo(). If

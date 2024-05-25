@@ -1,5 +1,5 @@
-// The test runs commands that are not allowed with security token: mapReduce.
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapReduce.
 //   not_allowed_with_security_token,
 //   does_not_support_stepdowns,
 //   requires_fastcount,
@@ -11,9 +11,7 @@
 //   requires_scripting,
 // ]
 
-load("jstests/aggregation/extras/utils.js");  // For resultsEq
-(function() {
-"use strict";
+import {resultsEq} from "jstests/aggregation/extras/utils.js";
 
 const coll = db.or4;
 coll.drop();
@@ -94,4 +92,3 @@ assert.eq(1, coll.find({$or: [{a: 1}, {a: 2}]}).toArray().length);
 assert.eq(1, coll.count({$or: [{a: 1}, {a: 2}]}));
 assert.eq(1, coll.find({$or: [{a: 2}, {a: 1}]}).toArray().length);
 assert.eq(1, coll.count({$or: [{a: 2}, {a: 1}]}));
-})();

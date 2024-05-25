@@ -1,8 +1,8 @@
 /**
  * SERVER-25942 Test that views are not validated in the case that only collections are queried.
  *
- * The test runs commands that are not allowed with security token: applyOps.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: applyOps.
  *   not_allowed_with_security_token,
  *   assumes_against_mongod_not_mongos,
  *   assumes_superuser_permissions,
@@ -12,8 +12,6 @@
  *   tenant_migration_incompatible,
  * ]
  */
-(function() {
-'use strict';
 let mydb = db.getSiblingDB('list_collections_no_views');
 
 assert.commandWorked(mydb.createCollection('foo'));
@@ -146,4 +144,3 @@ assert.commandFailed(mydb.runCommand({listCollections: 1, filter: {type: 'view'}
 
 // Fix database state for end of test validation and burn-in tests
 mydb.dropDatabase();
-})();

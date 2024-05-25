@@ -11,12 +11,13 @@
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   serverless,
+ *   requires_fcv_71,
  * ]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/uuid_util.js");
 
 (() => {
     jsTest.log("Test case where the TTL monitor deletes the state doc first");

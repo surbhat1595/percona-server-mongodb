@@ -56,7 +56,6 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/tenant_migration_donor_service.h"
-#include "mongo/db/repl/tenant_migration_pem_payload_gen.h"
 #include "mongo/db/repl/tenant_migration_state_machine_gen.h"
 #include "mongo/db/repl/tenant_migration_util.h"
 #include "mongo/db/server_options.h"
@@ -91,11 +90,6 @@ public:
     using Request = DonorStartMigration;
     using Response = DonorStartMigrationResponse;
 
-    std::set<StringData> sensitiveFieldNames() const final {
-        return {Request::kDonorCertificateForRecipientFieldName,
-                Request::kRecipientCertificateForDonorFieldName};
-    }
-
     class Invocation : public InvocationBase {
 
     public:
@@ -116,6 +110,10 @@ public:
                     "tenant migrations are only available if --serverless is enabled",
                     repl::ReplicationCoordinator::get(opCtx)->getSettings().isServerless());
 
+            uassert(ErrorCodes::IllegalOperation,
+                    "Cannot run tenant migration with x509 authentication",
+                    repl::tenantMigrationDisableX509Auth);
+
             const auto& cmd = request();
             const auto migrationProtocol = cmd.getProtocol().value_or(kDefaultMigrationProtocol);
             const auto& tenantId = cmd.getTenantId();
@@ -135,20 +133,6 @@ public:
                                                   cmd.getReadPreference(),
                                                   tenantId.value_or("").toString());
             stateDoc.setTenantIds(tenantIds);
-
-            if (!repl::tenantMigrationDisableX509Auth) {
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream() << "'" << Request::kDonorCertificateForRecipientFieldName
-                                      << "' is a required field",
-                        cmd.getDonorCertificateForRecipient());
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream() << "'" << Request::kRecipientCertificateForDonorFieldName
-                                      << "' is a required field",
-                        cmd.getRecipientCertificateForDonor());
-                stateDoc.setDonorCertificateForRecipient(cmd.getDonorCertificateForRecipient());
-                stateDoc.setRecipientCertificateForDonor(cmd.getRecipientCertificateForDonor());
-            }
-
             stateDoc.setProtocol(migrationProtocol);
 
             const auto stateDocBson = stateDoc.toBSON();
@@ -172,10 +156,22 @@ public:
             auto durableState = donor->getDurableState();
 
             auto response = Response(durableState->state);
-            if (durableState->abortReason) {
-                BSONObjBuilder bob;
-                durableState->abortReason->serializeErrorToBSON(&bob);
-                response.setAbortReason(bob.obj());
+            switch (durableState->state) {
+                case TenantMigrationDonorStateEnum::kUninitialized:
+                case TenantMigrationDonorStateEnum::kAbortingIndexBuilds:
+                case TenantMigrationDonorStateEnum::kDataSync:
+                    break;
+                case TenantMigrationDonorStateEnum::kBlocking:
+                case TenantMigrationDonorStateEnum::kCommitted: {
+                    invariant(durableState->blockTimestamp);
+                    response.setBlockTimestamp(durableState->blockTimestamp);
+                } break;
+                case TenantMigrationDonorStateEnum::kAborted: {
+                    invariant(durableState->abortReason);
+                    response.setAbortReason(durableState->abortReason);
+                } break;
+                default:
+                    MONGO_UNREACHABLE;
             }
 
             return response;
@@ -210,8 +206,8 @@ public:
     BasicCommand::AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return BasicCommand::AllowedOnSecondary::kNever;
     }
-
-} donorStartMigrationCmd;
+};
+MONGO_REGISTER_COMMAND(DonorStartMigrationCmd);
 
 class DonorForgetMigrationCmd : public TypedCommand<DonorForgetMigrationCmd> {
 public:
@@ -290,7 +286,8 @@ public:
     BasicCommand::AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return BasicCommand::AllowedOnSecondary::kNever;
     }
-} donorForgetMigrationCmd;
+};
+MONGO_REGISTER_COMMAND(DonorForgetMigrationCmd);
 
 class DonorAbortMigrationCmd : public TypedCommand<DonorAbortMigrationCmd> {
 public:
@@ -379,7 +376,8 @@ public:
     BasicCommand::AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return BasicCommand::AllowedOnSecondary::kNever;
     }
-} donorAbortMigrationCmd;
+};
+MONGO_REGISTER_COMMAND(DonorAbortMigrationCmd);
 
 }  // namespace
 }  // namespace mongo

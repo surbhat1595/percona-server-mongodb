@@ -101,8 +101,8 @@ public:
     }
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
-        return NamespaceStringUtil::parseNamespaceFromRequest(
-            dbName.tenantId(), CommandHelpers::parseNsFullyQualified(cmdObj));
+        return NamespaceStringUtil::deserialize(dbName.tenantId(),
+                                                CommandHelpers::parseNsFullyQualified(cmdObj));
     }
 
     bool run(OperationContext* opCtx,
@@ -120,7 +120,7 @@ public:
         auto cmdResponse = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-            "admin",
+            DatabaseName::kAdmin,
             CommandHelpers::appendMajorityWriteConcern(cmdBuilder.obj(), opCtx->getWriteConcern()),
             Shard::RetryPolicy::kIdempotent));
         uassertStatusOK(cmdResponse.commandStatus);
@@ -130,8 +130,8 @@ public:
 
         return true;
     }
-
-} repairShardedCollectionChunksHistoryCommand;
+};
+MONGO_REGISTER_COMMAND(RepairShardedCollectionChunksHistoryCommand);
 
 }  // namespace
 }  // namespace mongo

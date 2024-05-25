@@ -1,6 +1,7 @@
 // Basic correctness tests for the mapReduce command.
-// The test runs commands that are not allowed with security token: mapReduce.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapReduce.
 //   not_allowed_with_security_token,
 //   # mapReduce does not support afterClusterTime.
 //   does_not_support_causal_consistency,
@@ -10,10 +11,6 @@
 //   uses_map_reduce_with_temp_collections,
 //   requires_scripting,
 // ]
-(function() {
-"use strict";
-load("jstests/libs/fixture_helpers.js");  // For "FixtureHelpers".
-
 const coll = db.mr_correctness;
 coll.drop();
 
@@ -184,4 +181,3 @@ function reduceNumbers(key, values) {
 
 coll.drop();
 outColl.drop();
-}());

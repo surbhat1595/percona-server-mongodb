@@ -49,6 +49,7 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/curop_metrics.h"
 #include "mongo/db/cursor_id.h"
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/namespace_string.h"
@@ -81,17 +82,6 @@
 
 
 namespace mongo {
-
-namespace {
-
-BSONObj buildErrReply(const DBException& ex) {
-    BSONObjBuilder errB;
-    errB.append("$err", ex.what());
-    errB.append("code", ex.code());
-    return errB.obj();
-}
-
-}  // namespace
 
 // Allows for decomposing `handleRequest` into parts and simplifies composing the future-chain.
 struct HandleRequest : public std::enable_shared_from_this<HandleRequest> {
@@ -197,6 +187,8 @@ void HandleRequest::onSuccess(const DbResponse& dbResponse) {
             .filter,
         dbResponse.response.size(),
         slowMsOverride);
+
+    recordCurOpMetrics(opCtx);
 
     // Update the source of stats shown in the db.serverStatus().opLatencies section.
     Top::get(opCtx->getServiceContext())

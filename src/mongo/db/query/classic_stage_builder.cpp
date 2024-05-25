@@ -441,6 +441,7 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
         case STAGE_EQ_LOOKUP:
         case STAGE_GROUP:
         case STAGE_IDHACK:
+        case STAGE_MATCH:
         case STAGE_MOCK:
         case STAGE_MULTI_ITERATOR:
         case STAGE_MULTI_PLAN:
@@ -450,13 +451,15 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
         case STAGE_SUBPLAN:
         case STAGE_TRIAL:
         case STAGE_UNKNOWN:
-        case STAGE_UNPACK_TIMESERIES_BUCKET:
+        case STAGE_UNPACK_SAMPLED_TS_BUCKET:
+        case STAGE_UNPACK_TS_BUCKET:
         case STAGE_TIMESERIES_MODIFY:
         case STAGE_SPOOL:
         case STAGE_SENTINEL:
         case STAGE_COLUMN_SCAN:
         case STAGE_UPDATE:
-        case STAGE_SEARCH: {
+        case STAGE_SEARCH:
+        case STAGE_WINDOW: {
             LOGV2_WARNING(4615604, "Can't build exec tree for node", "node"_attr = *root);
         }
     }

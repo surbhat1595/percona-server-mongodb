@@ -139,6 +139,7 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(shardingCatalogManagerWithTransactionFailWCAfterCommit);
 MONGO_FAIL_POINT_DEFINE(shardingCatalogManagerSkipNotifyClusterOnNewDatabases);
+MONGO_FAIL_POINT_DEFINE(initializePlacementHistoryHangAfterSettingSnapshotReadConcern);
 
 const WriteConcernOptions kNoWaitWriteConcern(1, WriteConcernOptions::SyncMode::UNSET, Seconds(0));
 
@@ -147,7 +148,7 @@ const auto getShardingCatalogManager =
     ServiceContext::declareDecoration<boost::optional<ShardingCatalogManager>>();
 
 OpMsg runCommandInLocalTxn(OperationContext* opCtx,
-                           StringData db,
+                           const DatabaseName& db,
                            bool startTransaction,
                            TxnNumber txnNumber,
                            BSONObj cmdObj) {
@@ -165,8 +166,7 @@ OpMsg runCommandInLocalTxn(OperationContext* opCtx,
     return OpMsg::parseOwned(
         opCtx->getServiceContext()
             ->getServiceEntryPoint()
-            ->handleRequest(opCtx,
-                            OpMsgRequest::fromDBAndBody(db.toString(), bob.obj()).serialize())
+            ->handleRequest(opCtx, OpMsgRequest::fromDBAndBody(db, bob.obj()).serialize())
             .get()
             .response);
 }
@@ -193,7 +193,7 @@ void startTransactionWithNoopFind(OperationContext* opCtx,
     findCommand.setSingleBatch(true);
 
     auto res = runCommandInLocalTxn(opCtx,
-                                    nss.db_forSharding(),
+                                    nss.dbName(),
                                     true /*startTransaction*/,
                                     txnNumber,
                                     findCommand.toBSON(BSONObj()))
@@ -235,9 +235,8 @@ BSONObj commitOrAbortTransaction(OperationContext* opCtx,
     const auto replyOpMsg = OpMsg::parseOwned(
         newOpCtx->getServiceContext()
             ->getServiceEntryPoint()
-            ->handleRequest(
-                newOpCtx.get(),
-                OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin.toString(), cmdObj).serialize())
+            ->handleRequest(newOpCtx.get(),
+                            OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin, cmdObj).serialize())
             .get()
             .response);
     return replyOpMsg.body;
@@ -767,11 +766,6 @@ Status ShardingCatalogManager::_initConfigVersion(OperationContext* opCtx) {
     VersionType newVersion;
     newVersion.setClusterId(OID::gen());
 
-    if (!feature_flags::gStopUsingConfigVersion.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
-        newVersion.setCurrentVersion(VersionType::CURRENT_CONFIG_VERSION);
-        newVersion.setMinCompatibleVersion(VersionType::MIN_COMPATIBLE_CONFIG_VERSION);
-    }
     auto insertStatus = _localCatalogClient->insertConfigDocument(
         opCtx, VersionType::ConfigNS, newVersion.toBSON(), kNoWaitWriteConcern);
     return insertStatus;
@@ -931,7 +925,7 @@ Status ShardingCatalogManager::setFeatureCompatibilityVersionOnShards(OperationC
         auto response = shard->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-            "admin",
+            DatabaseName::kAdmin,
             cmdObj,
             Shard::RetryPolicy::kIdempotent);
         if (!response.isOK()) {
@@ -1035,7 +1029,7 @@ Status ShardingCatalogManager::_notifyClusterOnNewDatabases(
         // send cmd
         auto executor = Grid::get(altOpCtx)->getExecutorPool()->getFixedExecutor();
         auto responses = sharding_util::sendCommandToShards(altOpCtx,
-                                                            DatabaseName::kAdmin.db(),
+                                                            DatabaseName::kAdmin,
                                                             bob.obj(),
                                                             recipients,
                                                             executor,
@@ -1108,7 +1102,7 @@ BSONObj ShardingCatalogManager::writeToConfigDocumentInTxn(OperationContext* opC
     invariant(nss.dbName() == DatabaseName::kConfig);
     auto response =
         runCommandInLocalTxn(
-            opCtx, nss.db_forSharding(), false /* startTransaction */, txnNumber, request.toBSON())
+            opCtx, nss.dbName(), false /* startTransaction */, txnNumber, request.toBSON())
             .body;
 
     uassertStatusOK(getStatusFromWriteCommandReply(response));
@@ -1159,7 +1153,7 @@ boost::optional<BSONObj> ShardingCatalogManager::findOneConfigDocumentInTxn(
     findCommand.setLimit(1);
 
     auto res = runCommandInLocalTxn(opCtx,
-                                    nss.db_forSharding(),
+                                    nss.dbName(),
                                     false /*startTransaction*/,
                                     txnNumber,
                                     findCommand.toBSON(BSONObj()))
@@ -1352,7 +1346,7 @@ void ShardingCatalogManager::initializePlacementHistory(OperationContext* opCtx)
         uassertStatusOK(_localConfigShard->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-            NamespaceString::kConfigsvrPlacementHistoryNamespace.db().toString(),
+            NamespaceString::kConfigsvrPlacementHistoryNamespace.dbName(),
             deleteOp.toBSON(BSON(WriteConcernOptions::kWriteConcernField
                                  << ShardingCatalogClient::kLocalWriteConcern.toBSON())),
             Shard::RetryPolicy::kNotIdempotent));
@@ -1423,6 +1417,10 @@ void ShardingCatalogManager::initializePlacementHistory(OperationContext* opCtx)
                                const boost::optional<BSONObj>& postBatchResumeToken) {
             return true;
         };
+
+        // Failpoint to hang the operation after setting the snapshot read concern and before
+        // running the aggregation.
+        initializePlacementHistoryHangAfterSettingSnapshotReadConcern.pauseWhileSet();
 
         Status status = _localConfigShard->runAggregation(altOpCtx.get(), aggRequest, noopCallback);
         uassertStatusOK(status);
@@ -1535,11 +1533,30 @@ void ShardingCatalogManager::cleanUpPlacementHistory(OperationContext* opCtx,
     uassertStatusOK(_localConfigShard->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        NamespaceString::kConfigsvrPlacementHistoryNamespace.db().toString(),
+        NamespaceString::kConfigsvrPlacementHistoryNamespace.dbName(),
         deleteRequest.toBSON({}),
         Shard::RetryPolicy::kIdempotent));
 
     LOGV2_DEBUG(7068808, 2, "Cleaning up placement history - done deleting entries");
+}
+
+int ShardingCatalogManager::deleteMaxSizeMbFromShardEntries(OperationContext* opCtx) {
+    auto unsetMaxSizeMbReq = BSON("$unset" << BSON("maxSize"
+                                                   << ""));
+    DBDirectClient client(opCtx);
+    write_ops::UpdateCommandRequest updateOp(NamespaceString::kConfigsvrShardsNamespace);
+    updateOp.setUpdates({[&] {
+        write_ops::UpdateOpEntry entry;
+        entry.setU(unsetMaxSizeMbReq);
+        entry.setQ({});
+        entry.setMulti(true);
+        entry.setUpsert(false);
+        return entry;
+    }()});
+    updateOp.getWriteCommandRequestBase().setOrdered(false);
+    auto updateReply = client.update(updateOp);
+    write_ops::checkWriteErrors(updateReply);
+    return updateReply.getN();
 }
 
 }  // namespace mongo

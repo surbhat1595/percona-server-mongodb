@@ -136,7 +136,7 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
         '$BUILD_DIR/mongo/db/query/query_knobs',
-        '$BUILD_DIR/mongo/db/query/stats/query_stats',
+        '$BUILD_DIR/mongo/db/query/stats/stats',
         '$BUILD_DIR/mongo/db/query_expressions',
         '$BUILD_DIR/mongo/scripting/scripting_common',
         '$BUILD_DIR/mongo/util/summation',
@@ -176,16 +176,13 @@ env.Library(
 )
 
 env.Library(
-    target='sharded_agg_helpers',
-    source=[
+    target='sharded_agg_helpers', source=[
         'sharded_agg_helpers.cpp',
-    ],
-    LIBDEPS=[
+    ], LIBDEPS=[
         '$BUILD_DIR/mongo/s/async_requests_sender',
         '$BUILD_DIR/mongo/s/query/cluster_query',
         'aggregation',
-    ],
-)
+    ], LIBDEPS_PRIVATE=['$BUILD_DIR/mongo/db/shard_role_api'])
 
 env.Library(
     target='lite_parsed_document_source',
@@ -303,7 +300,6 @@ pipelineEnv.Library(
         'document_source_graph_lookup.cpp',
         'document_source_group.cpp',
         'document_source_group_base.cpp',
-        'group_processor.cpp',
         'document_source_index_stats.cpp',
         'document_source_internal_all_collection_stats.cpp',
         'document_source_internal_compute_geo_near_distance.cpp',
@@ -327,6 +323,7 @@ pipelineEnv.Library(
         'document_source_out.cpp',
         'document_source_plan_cache_stats.cpp',
         'document_source_project.cpp',
+        'document_source_query_settings.cpp',
         'document_source_query_stats.cpp',
         'document_source_queue.cpp',
         'document_source_redact.cpp',
@@ -346,7 +343,10 @@ pipelineEnv.Library(
         'document_source_union_with.cpp',
         'document_source_unwind.cpp',
         'group_from_first_document_transformation.cpp',
+        'group_processor.cpp',
+        'group_processor_base.cpp',
         'match_processor.cpp',
+        'merge_processor.cpp',
         'pipeline.cpp',
         'redact_processor.cpp',
         'search_helper.cpp',
@@ -364,6 +364,8 @@ pipelineEnv.Library(
         'window_function/window_function_exec_linear_fill.cpp',
         'window_function/window_function_exec_removable_document.cpp',
         'window_function/window_function_exec_removable_range.cpp',
+        'window_function/window_function_statement.cpp',
+        'writer_util.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
@@ -379,6 +381,7 @@ pipelineEnv.Library(
         '$BUILD_DIR/mongo/db/index/index_access_method',
         '$BUILD_DIR/mongo/db/pipeline/change_stream_error_extra_info',
         '$BUILD_DIR/mongo/db/pipeline/lite_parsed_document_source',
+        '$BUILD_DIR/mongo/db/query/bucket_predicate_generator',
         '$BUILD_DIR/mongo/db/query/collation/collator_factory_interface',
         '$BUILD_DIR/mongo/db/query/collation/collator_interface',
         '$BUILD_DIR/mongo/db/query/cursor_response_idl',
@@ -421,6 +424,7 @@ pipelineEnv.Library(
         '$BUILD_DIR/mongo/db/mongohasher',
         '$BUILD_DIR/mongo/db/query/optimizer/optimizer',
         '$BUILD_DIR/mongo/db/query/projection_ast',
+        '$BUILD_DIR/mongo/db/query/query_settings_manager',
         '$BUILD_DIR/mongo/db/repl/image_collection_entry',
         '$BUILD_DIR/mongo/db/sorter/sorter_idl',
         '$BUILD_DIR/mongo/db/sorter/sorter_stats',
@@ -428,6 +432,20 @@ pipelineEnv.Library(
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/rpc/command_status',
         '$BUILD_DIR/mongo/s/analyze_shard_key_util',
+    ],
+)
+
+env.Benchmark(
+    target='document_source_group_bm',
+    source=[
+        'document_source_group_bm.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/query/query_test_service_context',
+        '$BUILD_DIR/mongo/db/service_context_non_d',
+        '$BUILD_DIR/mongo/db/service_context_test_fixture',
+        'document_source_mock',
+        'pipeline',
     ],
 )
 
@@ -452,7 +470,6 @@ env.Library(
         'change_stream_document_diff_parser.cpp',
         'change_stream_event_transform.cpp',
         'change_stream_filter_helpers.cpp',
-        'change_stream_helpers_legacy.cpp',
         'change_stream_rewrite_helpers.cpp',
         'change_stream_split_event_helpers.cpp',
         'document_source_change_stream.cpp',
@@ -509,6 +526,7 @@ env.Library(
         'document_source_merge_spec.cpp',
         'document_source_out.idl',
         'document_source_parsing_validators.cpp',
+        'document_source_query_settings.idl',
         'document_source_query_stats.idl',
         'document_source_query_stats_validators.cpp',
         'document_source_replace_root.idl',
@@ -522,8 +540,8 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
-        '$BUILD_DIR/mongo/db/query/query_stats_parse',
-        '$BUILD_DIR/mongo/db/serialization_options',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats_parse',
+        '$BUILD_DIR/mongo/db/query_shape_common',
         '$BUILD_DIR/mongo/db/storage/key_string',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/idl/idl_parser',
@@ -564,7 +582,7 @@ env.Library(
     LIBDEPS=[
         "document_sources_idl",
     ],
-    LIBDEPS_PRIVATE=[],
+    LIBDEPS_PRIVATE=["$BUILD_DIR/mongo/db/repl/oplog_entry"],
 )
 
 env.Library(
@@ -595,6 +613,7 @@ env.Benchmark(
         '$BUILD_DIR/mongo/db/query/query_test_service_context',
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/query_expressions',
+        '$BUILD_DIR/mongo/db/service_context_non_d',
         '$BUILD_DIR/mongo/unittest/unittest',
         '$BUILD_DIR/mongo/util/processinfo',
     ],
@@ -671,6 +690,7 @@ env.CppUnitTest(
         'document_source_internal_unpack_bucket_test/limit_reorder_test.cpp',
         'document_source_internal_unpack_bucket_test/split_match_on_meta_and_rename_test.cpp',
         'document_source_internal_unpack_bucket_test/unpack_bucket_exec_test.cpp',
+        'document_source_internal_unpack_bucket_test/match_fixed_buckets_reorder_test.cpp',
         'document_source_unwind_test.cpp',
         'expression_and_test.cpp',
         'expression_compare_test.cpp',
@@ -680,6 +700,7 @@ env.CppUnitTest(
         'expression_field_path_test.cpp',
         'expression_find_internal_test.cpp',
         'expression_function_test.cpp',
+        'expression_hasher_test.cpp',
         'expression_javascript_test.cpp' if get_option('js-engine') != 'none' else [],
         'expression_let_test.cpp',
         'expression_nary_test.cpp',

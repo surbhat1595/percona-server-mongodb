@@ -1,13 +1,11 @@
 // Test invocations of {rolesInfo: ...} command
-// The test runs commands that are not allowed with security token: createRole, dropRole.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: createRole, dropRole.
 //   not_allowed_with_security_token,
 //   requires_multi_updates,
 //   requires_non_retryable_commands,
 // ]
-
-(function() {
-'use strict';
 
 // Setup some sample roles.
 const dbname = db.getName();
@@ -108,4 +106,3 @@ checkForBuiltinRole(multiRoles, fqReadRoleName);
 checkForBuiltinRole(multiRoles, {db: dbname, role: 'readWrite'});
 
 assert.commandWorked(db.runCommand({dropRole: 'testRoleJSCoreRolesInfo'}));
-})();

@@ -104,7 +104,8 @@ public:
     std::set<StringData> sensitiveFieldNames() const final {
         return {CleanupStructuredEncryptionData::kCleanupTokensFieldName};
     }
-} clusterCleanupStructuredEncryptionDataCmd;
+};
+MONGO_REGISTER_COMMAND(ClusterCleanupStructuredEncryptionDataCmd);
 
 using Cmd = ClusterCleanupStructuredEncryptionDataCmd;
 Cmd::Reply Cmd::Invocation::typedRun(OperationContext* opCtx) {
@@ -112,7 +113,7 @@ Cmd::Reply Cmd::Invocation::typedRun(OperationContext* opCtx) {
 
     auto nss = request().getNamespace();
     const auto dbInfo =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nss.db_forSharding()));
+        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nss.dbName()));
 
     // Rewrite command verb to _shardSvrCleanupStructuredEnccryptionData.
     auto cmd = request().toBSON({});
@@ -128,7 +129,7 @@ Cmd::Reply Cmd::Invocation::typedRun(OperationContext* opCtx) {
     auto response = uassertStatusOK(
         executeCommandAgainstDatabasePrimary(
             opCtx,
-            nss.db_forSharding(),
+            nss.dbName(),
             dbInfo,
             CommandHelpers::appendMajorityWriteConcern(req.obj(), opCtx->getWriteConcern()),
             ReadPreferenceSetting(ReadPreference::PrimaryOnly),

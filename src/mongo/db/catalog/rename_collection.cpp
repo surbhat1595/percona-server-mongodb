@@ -338,7 +338,7 @@ Status renameCollectionWithinDB(OperationContext* opCtx,
                                 const NamespaceString& source,
                                 const NamespaceString& target,
                                 RenameCollectionOptions options) {
-    invariant(source.db() == target.db());
+    invariant(source.isEqualDb(target));
     DisableDocumentValidation validationDisabler(opCtx);
 
     AutoGetDb autoDb(opCtx, source.dbName(), MODE_IX);
@@ -392,7 +392,7 @@ Status renameCollectionWithinDBForApplyOps(OperationContext* opCtx,
                                            const boost::optional<UUID>& uuidToDrop,
                                            repl::OpTime renameOpTimeFromApplyOps,
                                            const RenameCollectionOptions& options) {
-    invariant(source.db() == target.db());
+    invariant(source.isEqualDb(target));
     DisableDocumentValidation validationDisabler(opCtx);
 
     AutoGetDb autoDb(opCtx, source.dbName(), MODE_X);
@@ -457,7 +457,7 @@ Status renameCollectionWithinDBForApplyOps(OperationContext* opCtx,
             invariant(options.dropTarget);
             auto collToDropBasedOnUUID = getNamespaceFromUUID(opCtx, uuidToDrop.value());
             if (collToDropBasedOnUUID && !collToDropBasedOnUUID->isDropPendingNamespace()) {
-                invariant(collToDropBasedOnUUID->db() == target.db());
+                invariant(collToDropBasedOnUUID->isEqualDb(target));
                 targetColl = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
                     opCtx, *collToDropBasedOnUUID);
             }
@@ -495,7 +495,7 @@ Status renameCollectionAcrossDatabases(OperationContext* opCtx,
                                        const NamespaceString& target,
                                        const RenameCollectionOptions& options) {
     invariant(
-        source.db() != target.db(),
+        !source.isEqualDb(target),
         str::stream()
             << "cannot rename within same database (use renameCollectionWithinDB instead): source: "
             << source.toStringForErrorMsg() << "; target: " << target.toStringForErrorMsg());
@@ -786,7 +786,7 @@ Status renameCollectionAcrossDatabases(OperationContext* opCtx,
 
     // Getting here means we successfully built the target copy. We now do the final
     // in-place rename and remove the source collection.
-    invariant(tmpName.db() == target.db());
+    invariant(tmpName.isEqualDb(target));
     RenameCollectionOptions tempOptions(options);
     Status status = renameCollectionWithinDB(opCtx, tmpName, target, tempOptions);
     if (!status.isOK())
@@ -854,8 +854,7 @@ void validateNamespacesForRenameCollection(OperationContext* opCtx,
             str::stream() << "Invalid target namespace: " << target.toStringForErrorMsg(),
             target.isValid());
 
-    if ((repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
-         repl::ReplicationCoordinator::modeNone)) {
+    if (repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()) {
         uassert(ErrorCodes::IllegalOperation,
                 "can't rename live oplog while replicating",
                 !source.isOplog());
@@ -963,7 +962,7 @@ Status renameCollection(OperationContext* opCtx,
           "targetNamespace"_attr = target,
           "dropTarget"_attr = dropTargetMsg);
 
-    if (source.db() == target.db())
+    if (source.isEqualDb(target))
         return renameCollectionWithinDB(opCtx, source, target, options);
     else {
         return renameCollectionAcrossDatabases(opCtx, source, target, options);
@@ -1017,18 +1016,18 @@ Status renameCollectionForApplyOps(OperationContext* opCtx,
                       str::stream() << "error with target namespace: " << targetStatus.reason());
     }
 
-    if ((repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() ==
-         repl::ReplicationCoordinator::modeNone) &&
+    if (!repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() &&
         targetNss.isOplog()) {
         return Status(ErrorCodes::IllegalOperation,
                       str::stream() << "Cannot rename collection to the oplog");
     }
 
-    // Take global IX lock explicitly to avoid upgrading from IS later
-    Lock::GlobalLock globalLock(opCtx, MODE_IX);
-    AutoGetCollectionForRead sourceColl(
+    // Take strong database and collection locks in order to avoid upgrading later.
+    AutoGetDb sourceDb(opCtx, sourceNss.dbName(), MODE_X);
+    AutoGetCollection sourceColl(
         opCtx,
         sourceNss,
+        MODE_X,
         AutoGetCollection::Options{}.viewMode(auto_get_collection::ViewMode::kViewsPermitted));
 
     if (sourceNss.isDropPendingNamespace() || !sourceColl) {
@@ -1067,7 +1066,7 @@ Status renameCollectionForApplyOps(OperationContext* opCtx,
           "targetNamespace"_attr = targetNss,
           "uuidToDrop"_attr = uuidToDropString);
 
-    if (sourceNss.db() == targetNss.db()) {
+    if (sourceNss.isEqualDb(targetNss)) {
         return renameCollectionWithinDBForApplyOps(
             opCtx, sourceNss, targetNss, uuidToDrop, renameOpTime, options);
     } else {
@@ -1081,7 +1080,7 @@ Status renameCollectionForRollback(OperationContext* opCtx,
     // If the UUID we're targeting already exists, rename from there no matter what.
     auto source = getNamespaceFromUUID(opCtx, uuid);
     invariant(source);
-    invariant(source->db() == target.db(),
+    invariant(source->isEqualDb(target),
               str::stream() << "renameCollectionForRollback: source and target namespaces must "
                                "have the same database. source: "
                             << (*source).toStringForErrorMsg()

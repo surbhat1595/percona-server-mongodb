@@ -111,7 +111,7 @@ void generateSystemIndexForExistingCollection(OperationContext* opCtx,
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     uassert(ErrorCodes::NotWritablePrimary,
             "Not primary while creating authorization index",
-            replCoord->getReplicationMode() != repl::ReplicationCoordinator::modeReplSet ||
+            !replCoord->getSettings().isReplSet() ||
                 replCoord->canAcceptWritesForDatabase(opCtx, ns.dbName()));
 
     invariant(!opCtx->lockState()->inAWriteUnitOfWork());
@@ -228,6 +228,9 @@ void createSystemIndexes(OperationContext* opCtx, CollectionWriter& collection, 
         } catch (const StorageUnavailableException&) {
             throw;
         } catch (const DBException& ex) {
+            if (!opCtx->checkForInterruptNoAssert().isOK()) {
+                throw;
+            }
             fassertFailedWithStatus(40456, ex.toStatus());
         }
     }

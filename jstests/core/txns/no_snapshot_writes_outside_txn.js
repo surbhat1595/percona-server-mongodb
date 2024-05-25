@@ -1,13 +1,14 @@
 /**
  * Verify that readConcern: snapshot is not permitted for writes outside transactions.
  *
- * The test runs commands that are not allowed with security token: endSession.
  * @tags: [
- *   not_allowed_with_security_token,requires_persistence, uses_transactions]
+ *   # The test runs commands that are not allowed with security token: endSession.
+ *   not_allowed_with_security_token,
+ *   requires_persistence,
+ *   uses_transactions
+ * ]
  */
 
-(function() {
-"use strict";
 const dbName = "test";
 const collName = "no_read_concern_snapshot_outside_txn";
 const testDB = db.getSiblingDB(dbName);
@@ -64,4 +65,3 @@ tryCommands({testDB: sessionDb, message: "in session."});
 tryCommands({testDB: testDB, message: "outside session."});
 
 session.endSession();
-}());

@@ -76,7 +76,7 @@ public:
             auto cmdResponse = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
                 opCtx,
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                "admin",
+                DatabaseName::kAdmin,
                 configsvrRequest.toBSON({}),
                 Shard::RetryPolicy::kIdempotent));
 
@@ -117,8 +117,8 @@ public:
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
-
-} balancerCollectionStatusCmd;
+};
+MONGO_REGISTER_COMMAND(BalancerCollectionStatusCmd);
 
 }  // namespace
 }  // namespace mongo

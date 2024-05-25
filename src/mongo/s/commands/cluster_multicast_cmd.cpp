@@ -130,7 +130,7 @@ public:
         auto results =
             executor::AsyncMulticaster(executor, options)
                 .multicast(servers,
-                           args.getDb().toString(),
+                           args.getDb(),
                            args.getMulticast(),
                            opCtx,
                            (args.getTimeout() ? Milliseconds(*args.getTimeout())
@@ -166,7 +166,7 @@ public:
     }
 };
 
-MONGO_REGISTER_TEST_COMMAND(ClusterMulticastCmd);
+MONGO_REGISTER_COMMAND(ClusterMulticastCmd).testOnly();
 
 }  // namespace
 }  // namespace mongo

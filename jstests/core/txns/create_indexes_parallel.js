@@ -1,14 +1,20 @@
 /**
  * Tests parallel transactions with createIndexes.
  *
- * The test runs commands that are not allowed with security token: endSession.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: endSession.
  *   not_allowed_with_security_token,
  *   uses_transactions,
  * ]
  */
-load("jstests/libs/auto_retry_transaction_in_sharding.js");
-load("jstests/libs/create_index_txn_helpers.js");
+import {
+    retryOnceOnTransientAndRestartTxnOnMongos
+} from "jstests/libs/auto_retry_transaction_in_sharding.js";
+import {
+    conflictingIndexSpecs,
+    createIndexAndCRUDInTxn,
+    indexSpecs
+} from "jstests/libs/create_index_txn_helpers.js";
 
 let doParallelCreateIndexesTest = function(explicitCollectionCreate, multikeyIndex) {
     const dbName = 'test_txns_create_indexes_parallel';

@@ -63,6 +63,7 @@
 #include "mongo/db/query/optimizer/utils/physical_plan_builder.h"
 #include "mongo/db/query/optimizer/utils/reftracker_utils.h"
 #include "mongo/db/query/optimizer/utils/strong_alias.h"
+#include "mongo/db/query/optimizer/utils/utils.h"
 #include "mongo/util/assert_util.h"
 
 
@@ -151,11 +152,6 @@ public:
             // TODO: consider rid?
             return;
         }
-        if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
-            // Cannot satisfy remove orphans. The enforcer for a group representing a scan will
-            // produce an alternative which performs shard filtering.
-            return;
-        }
 
         const auto& indexReq = getPropertyConst<IndexingRequirement>(_physProps);
         const IndexReqTarget indexReqTarget = indexReq.getIndexReqTarget();
@@ -189,7 +185,7 @@ public:
                 _metadata._scanDefs.at(node.getScanDefName()).getDistributionAndPaths(),
                 node.getProjectionName(),
                 _logicalProps,
-                {},
+                psr::makeNoOp(),
                 canUseParallelScan)) {
             return;
         }
@@ -211,26 +207,56 @@ public:
             }
         }
 
+        // If shard filtering is necessary, do up-front prep to push top-level fields down into the
+        // scan.
+        const bool mustRemoveOrphans =
+            getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove();
+        if (mustRemoveOrphans) {
+            const auto& topLevelFieldNames = _metadata._scanDefs.at(node.getScanDefName())
+                                                 .shardingMetadata()
+                                                 .topLevelShardKeyFieldNames();
+            for (auto& fieldName : topLevelFieldNames) {
+                if (!fieldProjectionMap._fieldProjections.contains(fieldName)) {
+                    auto projName = _prefixId.getNextId("shardKey");
+                    fieldProjectionMap._fieldProjections.insert({fieldName, projName});
+                }
+            }
+        }
+        PhysPlanBuilder builder;
+        // Construct the Seek or Scan Node
         if (indexReqTarget == IndexReqTarget::Seek) {
-            PhysPlanBuilder builder;
             // If optimizing a Seek, override CE to 1.0.
             builder.make<SeekNode>(
-                CEType{1.0}, ridProjName, std::move(fieldProjectionMap), node.getScanDefName());
+                CEType{1.0}, ridProjName, fieldProjectionMap, node.getScanDefName());
             builder.make<LimitSkipNode>(
                 CEType{1.0}, LimitSkipRequirement{1, 0}, std::move(builder._node));
-
-            optimizeChildrenNoAssert(_queue,
-                                     kDefaultPriority,
-                                     PhysicalRewriteType::Seek,
-                                     std::move(builder._node),
-                                     {},
-                                     std::move(builder._nodeCEMap));
         } else {
-            ABT physicalScan = make<PhysicalScanNode>(
-                std::move(fieldProjectionMap), node.getScanDefName(), canUseParallelScan);
-            optimizeChild<PhysicalScanNode, PhysicalRewriteType::PhysicalScan>(
-                _queue, kDefaultPriority, std::move(physicalScan));
+            builder.make<PhysicalScanNode>(
+                getPropertyConst<CardinalityEstimate>(_logicalProps).getEstimate(),
+                fieldProjectionMap,
+                node.getScanDefName(),
+                canUseParallelScan);
         }
+        // If needed, add EvaluationNodes to collect the shard key from dotted paths.
+        if (mustRemoveOrphans) {
+            handleScanNodeRemoveOrphansRequirement(
+                _metadata._scanDefs.at(node.getScanDefName()).shardingMetadata().shardKey(),
+                builder,
+                fieldProjectionMap,
+                indexReqTarget,
+                getPropertyConst<CardinalityEstimate>(_logicalProps).getEstimate(),
+                _prefixId);
+        }
+
+        // Optimize the plan
+        optimizeChildrenNoAssert(_queue,
+                                 kDefaultPriority,
+                                 indexReqTarget == IndexReqTarget::Seek
+                                     ? PhysicalRewriteType::Seek
+                                     : PhysicalRewriteType::PhysicalScan,
+                                 std::move(builder._node),
+                                 {} /*childProps*/,
+                                 std::move(builder._nodeCEMap));
     }
 
     void operator()(const ABT& n, const ValueScanNode& node) {
@@ -440,10 +466,6 @@ public:
             // Cannot satisfy limit-skip.
             return;
         }
-        if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
-            // TODO SERVER-78507: Implement this implementer.
-            return;
-        }
 
         const IndexingAvailability& indexingAvailability =
             getPropertyConst<IndexingAvailability>(_logicalProps);
@@ -463,20 +485,24 @@ public:
         const IndexingRequirement& requirements = getPropertyConst<IndexingRequirement>(_physProps);
         const CandidateIndexes& candidateIndexes = node.getCandidateIndexes();
         const IndexReqTarget indexReqTarget = requirements.getIndexReqTarget();
-        const PartialSchemaRequirements& reqMap = node.getReqMap();
+        const PSRExpr::Node& reqMap = node.getReqMap();
 
         switch (indexReqTarget) {
             case IndexReqTarget::Complete:
                 if (_hints._disableScan) {
                     return;
                 }
-                if (_hints._forceIndexScanForPredicates && hasProperIntervals(reqMap.getRoot())) {
+                if (_hints._forceIndexScanForPredicates && hasProperIntervals(reqMap)) {
                     return;
                 }
                 break;
 
             case IndexReqTarget::Index:
                 if (candidateIndexes.empty()) {
+                    return;
+                }
+
+                if (node.getTarget() == IndexReqTarget::Seek) {
                     return;
                 }
                 [[fallthrough]];
@@ -501,7 +527,7 @@ public:
         const ProjectionName& scanProjectionName = indexingAvailability.getScanProjection();
 
         // We can only satisfy partial schema requirements using our root projection.
-        if (PSRExpr::any(reqMap.getRoot(), [&](const PartialSchemaEntry& e) {
+        if (PSRExpr::any(reqMap, [&](const PartialSchemaEntry& e) {
                 return e.first._projectionName != scanProjectionName;
             })) {
             return;
@@ -521,7 +547,7 @@ public:
                 requiresRootProjection = projectionsLeftToSatisfy.erase(scanProjectionName);
             }
 
-            for (const auto& [key, boundProjName] : getBoundProjections(reqMap)) {
+            for (const auto& [key, boundProjName] : psr::getBoundProjections(reqMap)) {
                 projectionsLeftToSatisfy.erase(boundProjName);
             }
             if (!projectionsLeftToSatisfy.getVector().empty()) {
@@ -540,6 +566,10 @@ public:
         const PartialSchemaKeyCE& partialSchemaKeyCE = ceProperty.getPartialSchemaKeyCE();
 
         if (indexReqTarget == IndexReqTarget::Index) {
+            if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
+                // TODO SERVER-79608: Implement this implementer for index target.
+                return;
+            }
             ProjectionCollationSpec requiredCollation;
             if (hasProperty<CollationRequirement>(_physProps)) {
                 requiredCollation =
@@ -557,7 +587,7 @@ public:
                 const auto& indexDefName = candidateIndexEntry._indexDefName;
                 const auto& indexDef = scanDef.getIndexDefs().at(indexDefName);
 
-                if (!indexDef.getPartialReqMap().isNoop() &&
+                if (!psr::isNoop(indexDef.getPartialReqMap()) &&
                     (_hints._disableIndexes == DisableIndexOptions::DisablePartialOnly ||
                      satisfiedPartialIndexes.count(indexDefName) == 0)) {
                     // Consider only indexes for which we satisfy partial requirements.
@@ -613,7 +643,7 @@ public:
                         std::vector<SelectivityType> atomSels;
                         std::vector<SelectivityType> conjuctionSels;
                         PSRExpr::visitDisjuncts(
-                            reqMap.getRoot(),
+                            reqMap,
                             [&](const PSRExpr::Node& child, const PSRExpr::VisitorContext&) {
                                 atomSels.clear();
 
@@ -763,6 +793,20 @@ public:
                 fieldProjectionMap._rootProjection = scanProjectionName;
             }
 
+            // TODO SERVER-79854: Omit shard filtering if there equality on the shard key.
+            if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
+                // Add top level fields of the shard key to the fieldProjectionMap used to create
+                // the PhysicalScan.
+                const auto& topLevelFieldNames =
+                    scanDef.shardingMetadata().topLevelShardKeyFieldNames();
+                for (auto&& fieldName : topLevelFieldNames) {
+                    if (!fieldProjectionMap._fieldProjections.contains(fieldName)) {
+                        fieldProjectionMap._fieldProjections.insert(
+                            {fieldName, _prefixId.getNextId("evalTemp")});
+                    }
+                }
+            }
+
             PhysPlanBuilder builder;
             CEType baseCE{0.0};
 
@@ -772,14 +816,13 @@ public:
 
                 // Return a physical scan with field map.
                 builder.make<PhysicalScanNode>(
-                    baseCE, std::move(fieldProjectionMap), scanDefName, canUseParallelScan);
+                    baseCE, fieldProjectionMap, scanDefName, canUseParallelScan);
                 rule = PhysicalRewriteType::SargableToPhysicalScan;
             } else {
                 baseCE = {1.0};
 
                 // Try Seek with Limit 1.
-                builder.make<SeekNode>(
-                    baseCE, ridProjName, std::move(fieldProjectionMap), scanDefName);
+                builder.make<SeekNode>(baseCE, ridProjName, fieldProjectionMap, scanDefName);
 
                 builder.make<LimitSkipNode>(
                     baseCE, LimitSkipRequirement{1, 0}, std::move(builder._node));
@@ -796,6 +839,17 @@ public:
                                                builder);
             }
 
+            // Insert evaluation nodes to project the fields of the shard key if we couldn't push
+            // them down to the PhysicalScan and insert a FilterNode which performs shard filtering.
+            if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
+                handleScanNodeRemoveOrphansRequirement(scanDef.shardingMetadata().shardKey(),
+                                                       builder,
+                                                       fieldProjectionMap,
+                                                       indexReqTarget,
+                                                       currentGroupCE,
+                                                       _prefixId);
+            }
+
             optimizeChildrenNoAssert(_queue,
                                      kDefaultPriority,
                                      rule,
@@ -806,10 +860,6 @@ public:
     }
 
     void operator()(const ABT& /*n*/, const RIDIntersectNode& node) {
-        if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
-            // TODO SERVER-78508: Implement this implementer.
-            return;
-        }
 
         const auto& indexingAvailability = getPropertyConst<IndexingAvailability>(_logicalProps);
         const std::string& scanDefName = indexingAvailability.getScanDefName();
@@ -842,6 +892,22 @@ public:
 
         const LogicalProps& leftLogicalProps = _memo.getLogicalProps(leftGroupId);
         const LogicalProps& rightLogicalProps = _memo.getLogicalProps(rightGroupId);
+
+        const bool hasScanChild = rightGroupId == indexingAvailability.getScanGroupId();
+
+        if (hasScanChild && !isIndex) {
+            // This is a special RIDIntersectNode that has the Scan as its right child and has all
+            // predicates in its left child. We should optimize only the left child to support
+            // covering queries.
+            PhysProps newProps = _physProps;
+            setPropertyOverwrite<IndexingRequirement>(
+                newProps,
+                {IndexReqTarget::Index,
+                 dedupRID,
+                 requirements.getSatisfiedPartialIndexesGroupId()});
+            optimizeUnderNewProperties<PhysicalRewriteType::AttemptCoveringQuery>(
+                _queue, kDefaultPriority, node.getLeftChild(), std::move(newProps));
+        }
 
         const bool hasProperIntervalLeft =
             getPropertyConst<IndexingAvailability>(leftLogicalProps).hasProperInterval();
@@ -975,6 +1041,7 @@ public:
                                  intersectedCE,
                                  leftCE,
                                  rightCE,
+                                 _physProps,
                                  leftPhysProps,
                                  rightPhysProps,
                                  node.getLeftChild(),
@@ -1667,7 +1734,7 @@ private:
                                  const DistributionAndPaths& distributionAndPaths,
                                  const ProjectionName& scanProjection,
                                  const LogicalProps& scanLogicalProps,
-                                 const PartialSchemaRequirements& reqMap,
+                                 const PSRExpr::Node& reqMap,
                                  bool& canUseParallelScan) {
         const DistributionRequirement& required =
             getPropertyConst<DistributionRequirement>(_physProps);
@@ -1718,8 +1785,8 @@ private:
                     distribAndProjections._projectionNames;
 
                 for (const ABT& partitioningPath : distributionAndPaths._paths) {
-                    if (auto proj = reqMap.findProjection(
-                            PartialSchemaKey{scanProjection, partitioningPath});
+                    if (auto proj = psr::findProjection(
+                            reqMap, PartialSchemaKey{scanProjection, partitioningPath});
                         proj && *proj == requiredProjections.at(distributionPartitionIndex)) {
                         distributionPartitionIndex++;
                     } else {
@@ -1753,36 +1820,37 @@ private:
         }
     }
 
-    void optimizeRIDIntersect(const bool isIndex,
-                              const bool dedupRID,
-                              const bool useMergeJoin,
-                              const ProjectionName& ridProjectionName,
-                              const CollationSplitResult& collationLeftRightSplit,
-                              const CollationSplitResult& collationRightLeftSplit,
-                              const CEType intersectedCE,
-                              const CEType leftCE,
-                              const CEType rightCE,
-                              const PhysProps& leftPhysProps,
-                              const PhysProps& rightPhysProps,
-                              const ABT& leftChild,
-                              const ABT& rightChild) {
+
+    void optimizeRIDIntersectHelper(const bool isIndex,
+                                    const bool dedupRID,
+                                    const bool useMergeJoin,
+                                    const ProjectionName& ridProjectionName,
+                                    const CollationSplitResult& collationLeftRightSplit,
+                                    const CollationSplitResult& collationRightLeftSplit,
+                                    const CEType intersectedCE,
+                                    const CEType leftCE,
+                                    const CEType rightCE,
+                                    const PhysProps& leftPhysProps,
+                                    const PhysProps& rightPhysProps,
+                                    const ABT& leftChild,
+                                    const ABT& rightChild) {
         if (isIndex && collationRightLeftSplit._validSplit &&
             (!collationLeftRightSplit._validSplit || leftCE > rightCE)) {
             // Need to reverse the left and right side as the left collation split is not valid, or
             // to use the larger CE as the other side.
-            optimizeRIDIntersect(true /*isIndex*/,
-                                 dedupRID,
-                                 useMergeJoin,
-                                 ridProjectionName,
-                                 collationRightLeftSplit,
-                                 {},
-                                 intersectedCE,
-                                 rightCE,
-                                 leftCE,
-                                 rightPhysProps,
-                                 leftPhysProps,
-                                 rightChild,
-                                 leftChild);
+            optimizeRIDIntersectHelper(true /*isIndex*/,
+                                       dedupRID,
+                                       useMergeJoin,
+                                       ridProjectionName,
+                                       collationRightLeftSplit,
+                                       {},
+                                       intersectedCE,
+                                       rightCE,
+                                       leftCE,
+                                       rightPhysProps,
+                                       leftPhysProps,
+                                       rightChild,
+                                       leftChild);
             return;
         }
         if (!collationLeftRightSplit._validSplit) {
@@ -1921,6 +1989,81 @@ private:
                 std::move(leftPhysPropsLocal),
                 std::move(rightPhysPropsLocal));
         }
+    }
+
+    /**
+     * Optimize the RIDIntersect node. If RemoveOrphansRequirement is set to 'true,' this function
+     * will try an optimization in which the requirement is set on only one child at a time. If the
+     * requirement is 'false', the function simply optimizes the children as normal.
+     */
+    void optimizeRIDIntersect(const bool isIndex,
+                              const bool dedupRID,
+                              const bool useMergeJoin,
+                              const ProjectionName& ridProjectionName,
+                              const CollationSplitResult& collationLeftRightSplit,
+                              const CollationSplitResult& collationRightLeftSplit,
+                              const CEType intersectedCE,
+                              const CEType leftCE,
+                              const CEType rightCE,
+                              const PhysProps& parentPhysProps,
+                              const PhysProps& leftPhysProps,
+                              const PhysProps& rightPhysProps,
+                              const ABT& leftChild,
+                              const ABT& rightChild) {
+        // If RemoveOrphansRequirement is already 'false', do not try any other variations.
+        tassert(7850801,
+                "RIDIntersect props does not have the RemoveOrphansRequirement property",
+                hasProperty<RemoveOrphansRequirement>(parentPhysProps));
+        if (!getPropertyConst<RemoveOrphansRequirement>(parentPhysProps).mustRemove()) {
+            optimizeRIDIntersectHelper(isIndex,
+                                       dedupRID,
+                                       useMergeJoin,
+                                       ridProjectionName,
+                                       collationLeftRightSplit,
+                                       collationRightLeftSplit,
+                                       intersectedCE,
+                                       leftCE,
+                                       rightCE,
+                                       leftPhysProps,
+                                       rightPhysProps,
+                                       leftChild,
+                                       rightChild);
+            return;
+        }
+        // Perform copies so we can modify the props.
+        PhysProps leftPhysPropsLocal = leftPhysProps;
+        PhysProps rightPhysPropsLocal = rightPhysProps;
+        setPropertyOverwrite<RemoveOrphansRequirement>(leftPhysPropsLocal, {true});
+        setPropertyOverwrite<RemoveOrphansRequirement>(rightPhysPropsLocal, {false});
+        optimizeRIDIntersectHelper(isIndex,
+                                   dedupRID,
+                                   useMergeJoin,
+                                   ridProjectionName,
+                                   collationLeftRightSplit,
+                                   collationRightLeftSplit,
+                                   intersectedCE,
+                                   leftCE,
+                                   rightCE,
+                                   leftPhysPropsLocal,
+                                   rightPhysPropsLocal,
+                                   leftChild,
+                                   rightChild);
+
+        setPropertyOverwrite<RemoveOrphansRequirement>(leftPhysPropsLocal, {false});
+        setPropertyOverwrite<RemoveOrphansRequirement>(rightPhysPropsLocal, {true});
+        optimizeRIDIntersectHelper(isIndex,
+                                   dedupRID,
+                                   useMergeJoin,
+                                   ridProjectionName,
+                                   collationLeftRightSplit,
+                                   collationRightLeftSplit,
+                                   intersectedCE,
+                                   leftCE,
+                                   rightCE,
+                                   leftPhysPropsLocal,
+                                   rightPhysPropsLocal,
+                                   leftChild,
+                                   rightChild);
     }
 
     // We don't own any of those:

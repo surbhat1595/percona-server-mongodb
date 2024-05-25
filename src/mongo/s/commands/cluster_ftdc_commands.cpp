@@ -96,7 +96,7 @@ public:
     }
 
     bool errmsgRun(OperationContext* opCtx,
-                   const std::string& db,
+                   const DatabaseName& dbName,
                    const BSONObj& cmdObj,
                    std::string& errmsg,
                    BSONObjBuilder& result) override {
@@ -108,12 +108,7 @@ public:
         return true;
     }
 };
-
-Command* ftdcCommand;
-
-MONGO_INITIALIZER(CreateDiagnosticDataCommand)(InitializerContext* context) {
-    ftdcCommand = new GetDiagnosticDataCommand();
-}
+MONGO_REGISTER_COMMAND(GetDiagnosticDataCommand);
 
 }  // namespace
 }  // namespace mongo

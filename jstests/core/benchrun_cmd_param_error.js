@@ -4,12 +4,12 @@
  * - No readCmd param or readCmd: false is specified for read ops
  * - No writeCmd param or writeCmd: false is specified for write ops
  * - Exhaust query is requested
- * The test runs commands that are not allowed with security token: benchRun.
- * @tags: [not_allowed_with_security_token]
+ *
+ * @tags: [
+ *   # benchRun does not use runCommand which is required by the `simulate_atlas_proxy` override.
+ *   simulate_atlas_proxy_incompatible,
+ * ]
  */
-(function() {
-"use strict";
-
 const testDB = db.getSiblingDB(jsTestName());
 testDB.dropDatabase();
 const coll = testDB.coll;
@@ -113,4 +113,3 @@ opsAndErrors.forEach(opAndError => {
 
     assert.throwsWithCode(() => benchRun(benchArgs), opAndError.error);
 });
-})();

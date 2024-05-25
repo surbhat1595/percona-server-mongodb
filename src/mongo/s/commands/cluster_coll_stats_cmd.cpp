@@ -275,7 +275,7 @@ public:
         // statistics.
         auto unscaledShardResults = scatterGatherVersionedTargetByRoutingTable(
             opCtx,
-            nss.db_forSharding(),
+            nss.dbName(),
             targeter.getNS(),
             cri,
             applyReadWriteConcern(
@@ -423,8 +423,8 @@ public:
 
         return true;
     }
-
-} collectionStatsCmd;
+};
+MONGO_REGISTER_COMMAND(CollectionStats);
 
 }  // namespace
 }  // namespace mongo

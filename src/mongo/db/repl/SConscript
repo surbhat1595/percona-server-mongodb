@@ -47,6 +47,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/db/dbhelpers',
+        '$BUILD_DIR/mongo/db/pipeline/change_stream_helpers',
         'oplog',
         'oplog_entry',
     ],
@@ -631,7 +632,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/auth/authorization_manager_global',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/stats/timer_stats',
         '$BUILD_DIR/mongo/db/storage/storage_options',
@@ -829,6 +830,9 @@ env.Library(
         'optime',
         'replication_process',
         'split_prepare_session_manager',
+    ],
+    LIBDEPS_PRIVATE=[
+        'repl_settings',
     ],
 )
 
@@ -1366,7 +1370,6 @@ env.Library(
 env.Library(
     target='tenant_migration_state_machine_idl',
     source=[
-        'tenant_migration_pem_payload.idl',
         'tenant_migration_state_machine.idl',
     ],
     LIBDEPS=[
@@ -1578,10 +1581,9 @@ env.Library(
         '$BUILD_DIR/mongo/db/change_stream_serverless_helpers',
         '$BUILD_DIR/mongo/db/cloner',
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
-        '$BUILD_DIR/mongo/db/free_mon/free_mon_mongod',
         '$BUILD_DIR/mongo/db/not_primary_error_tracker',
         '$BUILD_DIR/mongo/db/op_observer/op_observer',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/service_context',
@@ -2173,5 +2175,17 @@ env.Benchmark(
         'replication_recovery',
         'replmocks',
         'storage_interface_impl',
+    ],
+)
+
+env.Benchmark(
+    target='oplog_applier_utils_bm',
+    source=[
+        'oplog_applier_utils_bm.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/query/stats/stats_test_utils',
+        'oplog_application',
     ],
 )

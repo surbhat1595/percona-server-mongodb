@@ -156,7 +156,7 @@ public:
             auto status = Grid::get(opCtx)->catalogClient()->runUserManagementWriteCommand(
                 opCtx,
                 Request::kCommandName,
-                DatabaseNameUtil::serialize(cmd.getDbName()),
+                cmd.getDbName(),
                 applyReadWriteConcern(
                     opCtx,
                     this,
@@ -191,8 +191,7 @@ public:
         NamespaceString ns() const override {
             const auto& cmd = request();
             if constexpr (hasGetCmdParamStringData<RequestT>) {
-                return NamespaceStringUtil::parseNamespaceFromRequest(cmd.getDbName(),
-                                                                      cmd.getCommandParameter());
+                return NamespaceStringUtil::deserialize(cmd.getDbName(), cmd.getCommandParameter());
             } else {
                 return NamespaceString(cmd.getDbName());
             }
@@ -210,7 +209,8 @@ public:
     std::set<StringData> sensitiveFieldNames() const final {
         return {kPwdField};
     }
-} cmdCreateUser;
+};
+MONGO_REGISTER_COMMAND(CmdCreateUser);
 
 class CmdUpdateUser : public CmdUMCPassthrough<UpdateUserCommand, UserCacheInvalidatorUser> {
 public:
@@ -218,23 +218,21 @@ public:
     std::set<StringData> sensitiveFieldNames() const final {
         return {kPwdField};
     }
-} cmdUpdateUser;
+};
+MONGO_REGISTER_COMMAND(CmdUpdateUser);
 
-CmdUMCPassthrough<DropUserCommand, UserCacheInvalidatorUser> cmdDropUser;
-CmdUMCPassthrough<DropAllUsersFromDatabaseCommand, UserCacheInvalidatorDB>
-    cmdDropAllUsersFromDatabase;
-CmdUMCPassthrough<GrantRolesToUserCommand, UserCacheInvalidatorUser> cmdGrantRolesToUser;
-CmdUMCPassthrough<RevokeRolesFromUserCommand, UserCacheInvalidatorUser> cmdRevokeRolesFromUser;
-CmdUMCPassthrough<CreateRoleCommand, UserCacheInvalidatorNOOP> cmdCreateRole;
-CmdUMCPassthrough<UpdateRoleCommand, UserCacheInvalidatorAll> cmdUpdateRole;
-CmdUMCPassthrough<GrantPrivilegesToRoleCommand, UserCacheInvalidatorAll> cmdGrantPrivilegesToRole;
-CmdUMCPassthrough<RevokePrivilegesFromRoleCommand, UserCacheInvalidatorAll>
-    cmdRevokePrivilegesFromRole;
-CmdUMCPassthrough<GrantRolesToRoleCommand, UserCacheInvalidatorAll> cmdGrantRolesToRole;
-CmdUMCPassthrough<RevokeRolesFromRoleCommand, UserCacheInvalidatorAll> cmdRevokeRolesFromRole;
-CmdUMCPassthrough<DropRoleCommand, UserCacheInvalidatorAll> cmdDropRole;
-CmdUMCPassthrough<DropAllRolesFromDatabaseCommand, UserCacheInvalidatorAll>
-    cmdDropAllRolesFromDatabase;
+MONGO_REGISTER_COMMAND(CmdUMCPassthrough<DropUserCommand, UserCacheInvalidatorUser>);
+MONGO_REGISTER_COMMAND(CmdUMCPassthrough<DropAllUsersFromDatabaseCommand, UserCacheInvalidatorDB>);
+MONGO_REGISTER_COMMAND(CmdUMCPassthrough<GrantRolesToUserCommand, UserCacheInvalidatorUser>);
+MONGO_REGISTER_COMMAND(CmdUMCPassthrough<RevokeRolesFromUserCommand, UserCacheInvalidatorUser>);
+MONGO_REGISTER_COMMAND(CmdUMCPassthrough<CreateRoleCommand, UserCacheInvalidatorNOOP>);
+MONGO_REGISTER_COMMAND(CmdUMCPassthrough<UpdateRoleCommand, UserCacheInvalidatorAll>);
+MONGO_REGISTER_COMMAND(CmdUMCPassthrough<GrantPrivilegesToRoleCommand, UserCacheInvalidatorAll>);
+MONGO_REGISTER_COMMAND(CmdUMCPassthrough<RevokePrivilegesFromRoleCommand, UserCacheInvalidatorAll>);
+MONGO_REGISTER_COMMAND(CmdUMCPassthrough<GrantRolesToRoleCommand, UserCacheInvalidatorAll>);
+MONGO_REGISTER_COMMAND(CmdUMCPassthrough<RevokeRolesFromRoleCommand, UserCacheInvalidatorAll>);
+MONGO_REGISTER_COMMAND(CmdUMCPassthrough<DropRoleCommand, UserCacheInvalidatorAll>);
+MONGO_REGISTER_COMMAND(CmdUMCPassthrough<DropAllRolesFromDatabaseCommand, UserCacheInvalidatorAll>);
 
 /**
  * usersInfo and rolesInfo are simpler read-only passthrough commands.
@@ -257,7 +255,7 @@ public:
             BSONObjBuilder builder;
             const bool ok = Grid::get(opCtx)->catalogClient()->runUserManagementReadCommand(
                 opCtx,
-                DatabaseNameUtil::serialize(cmd.getDbName()),
+                cmd.getDbName(),
                 applyReadWriteConcern(
                     opCtx,
                     this,
@@ -291,8 +289,8 @@ public:
     }
 };
 
-CmdUMCInfo<UsersInfoCommand> cmdUsersInfo;
-CmdUMCInfo<RolesInfoCommand> cmdRolesInfo;
+MONGO_REGISTER_COMMAND(CmdUMCInfo<UsersInfoCommand>);
+MONGO_REGISTER_COMMAND(CmdUMCInfo<RolesInfoCommand>);
 
 class CmdInvalidateUserCache : public TypedCommand<CmdInvalidateUserCache> {
 public:
@@ -328,7 +326,8 @@ public:
     bool adminOnly() const final {
         return true;
     }
-} cmdInvalidateUserCache;
+};
+MONGO_REGISTER_COMMAND(CmdInvalidateUserCache);
 
 class CmdMergeAuthzCollections
     : public CmdUMCPassthrough<MergeAuthzCollectionsCommand, UserCacheInvalidatorNOOP> {
@@ -336,7 +335,8 @@ public:
     bool adminOnly() const final {
         return true;
     }
-} cmdMergeAuthzCollections;
+};
+MONGO_REGISTER_COMMAND(CmdMergeAuthzCollections);
 
 }  // namespace
 }  // namespace mongo

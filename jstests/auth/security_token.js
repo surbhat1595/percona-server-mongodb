@@ -1,13 +1,9 @@
 // Test passing security token with op messages.
 // @tags: [requires_replication, requires_sharding]
 
-(function() {
-'use strict';
-
 const tenantID = ObjectId();
 const kLogLevelForToken = 5;
 const kAcceptedSecurityTokenID = 5838100;
-const kLogMessageID = 5060500;
 const kLogoutMessageID = 6161506;
 const kStaleAuthenticationMessageID = 6161507;
 const isSecurityTokenEnabled = TestData.setParameters.featureFlagSecurityToken;
@@ -36,8 +32,9 @@ function makeTokenAndExpect(user, db) {
 function runTest(conn, multitenancyEnabled, rst = undefined) {
     const admin = conn.getDB('admin');
 
-    // Must be authenticated as a user with ActionType::useTenant in order to use $tenant
-    assert.commandWorked(admin.runCommand({createUser: 'admin', pwd: 'pwd', roles: ['root']}));
+    // Must be authenticated as a user with read/write privileges on non-normal collections, since
+    // we are accessing system.users for another tenant.
+    assert.commandWorked(admin.runCommand({createUser: 'admin', pwd: 'pwd', roles: ['__system']}));
     assert(admin.auth('admin', 'pwd'));
 
     // Create a tenant-local user.
@@ -161,4 +158,3 @@ function runTests(enabled) {
 
 runTests(true);
 runTests(false);
-})();

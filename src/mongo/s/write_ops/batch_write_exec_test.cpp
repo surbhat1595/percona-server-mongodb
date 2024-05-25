@@ -106,7 +106,7 @@ const int kMaxRoundsWithoutProgress = 5;
 BSONObj expectInsertsReturnStaleVersionErrorsBase(const NamespaceString& nss,
                                                   const std::vector<BSONObj>& expected,
                                                   const executor::RemoteCommandRequest& request) {
-    ASSERT_EQUALS(nss.db_forTest(), request.dbname);
+    ASSERT_EQUALS(nss.dbName(), request.dbname);
 
     const auto opMsgRequest(OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
     const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));
@@ -151,7 +151,7 @@ BSONObj expectInsertsReturnStaleVersionErrorsBase(const NamespaceString& nss,
 BSONObj expectInsertsReturnStaleDbVersionErrorsBase(const NamespaceString& nss,
                                                     const std::vector<BSONObj>& expected,
                                                     const executor::RemoteCommandRequest& request) {
-    ASSERT_EQUALS(nss.db_forTest(), request.dbname);
+    ASSERT_EQUALS(nss.dbName(), request.dbname);
 
     const auto opMsgRequest(OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
     const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));
@@ -203,7 +203,7 @@ BSONObj expectInsertsReturnTenantMigrationAbortedErrorsBase(
     const std::vector<BSONObj>& expected,
     const executor::RemoteCommandRequest& request,
     int numberOfFailedOps) {
-    ASSERT_EQUALS(nss.db_forTest(), request.dbname);
+    ASSERT_EQUALS(nss.dbName(), request.dbname);
 
     const auto opMsgRequest(OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
     const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));
@@ -299,7 +299,7 @@ public:
     void expectInsertsReturnSuccess(std::vector<BSONObj>::const_iterator expectedFrom,
                                     std::vector<BSONObj>::const_iterator expectedTo) {
         onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
-            ASSERT_EQUALS(nss.db_forTest(), request.dbname);
+            ASSERT_EQUALS(nss.dbName(), request.dbname);
 
             const auto opMsgRequest(OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
             const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));
@@ -348,7 +348,7 @@ public:
                                   const BatchedCommandResponse& errResponse) {
         onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
             try {
-                ASSERT_EQUALS(nss.db_forTest(), request.dbname);
+                ASSERT_EQUALS(nss.dbName(), request.dbname);
 
                 const auto opMsgRequest(
                     OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
@@ -459,6 +459,7 @@ TEST_F(BatchWriteExecTest, SingleUpdateTargetsShardWithLet) {
         std::vector<ShardEndpoint> targetUpdate(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
             std::set<ChunkRange>* chunkRange = nullptr) const override {
             invariant(chunkRange == nullptr);
             return std::vector{ShardEndpoint(
@@ -557,6 +558,7 @@ TEST_F(BatchWriteExecTest, SingleDeleteTargetsShardWithLet) {
         std::vector<ShardEndpoint> targetDelete(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
             std::set<ChunkRange>* chunkRange = nullptr) const override {
             invariant(chunkRange == nullptr);
             return std::vector{ShardEndpoint(
@@ -761,6 +763,7 @@ TEST_F(BatchWriteExecTest, StaleShardVersionReturnedFromBatchWithSingleMultiWrit
         std::vector<ShardEndpoint> targetUpdate(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
             std::set<ChunkRange>* chunkRange = nullptr) const override {
             invariant(chunkRange == nullptr);
             return std::vector{ShardEndpoint(kShardName1,
@@ -878,6 +881,7 @@ TEST_F(BatchWriteExecTest,
         std::vector<ShardEndpoint> targetUpdate(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
             std::set<ChunkRange>* chunkRange = nullptr) const override {
             invariant(chunkRange == nullptr);
             return std::vector{ShardEndpoint(kShardName1,
@@ -1004,6 +1008,7 @@ TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromMultiWriteWithShard1Firs) {
         std::vector<ShardEndpoint> targetUpdate(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
             std::set<ChunkRange>* chunkRange = nullptr) const override {
             invariant(chunkRange == nullptr);
             return std::vector{ShardEndpoint(kShardName1,
@@ -1140,6 +1145,7 @@ TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromMultiWriteWithShard1FirstOK
         std::vector<ShardEndpoint> targetUpdate(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
             std::set<ChunkRange>* chunkRange = nullptr) const override {
             invariant(chunkRange == nullptr);
             return std::vector{ShardEndpoint(kShardName1,
@@ -1271,6 +1277,7 @@ TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromWriteWithShard1SSVShard2OK)
         std::vector<ShardEndpoint> targetUpdate(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
             std::set<ChunkRange>* chunkRange = nullptr) const override {
             invariant(chunkRange == nullptr);
             if (targetAll) {
@@ -2061,6 +2068,7 @@ TEST_F(BatchWriteExecTargeterErrorTest, TargetedFailedAndErrorResponse) {
         std::vector<ShardEndpoint> targetUpdate(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
             std::set<ChunkRange>* chunkRanges = nullptr) const override {
             return std::vector{ShardEndpoint(kShardName1,
                                              ShardVersionFactory::make(
@@ -2212,6 +2220,7 @@ TEST_F(BatchWriteExecTransactionTargeterErrorTest, TargetedFailedAndErrorRespons
         std::vector<ShardEndpoint> targetUpdate(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
             std::set<ChunkRange>* chunkRange = nullptr) const override {
             invariant(chunkRange == nullptr);
             return std::vector{ShardEndpoint(kShardName1,
@@ -2372,6 +2381,7 @@ TEST_F(BatchWriteExecTransactionMultiShardTest, TargetedSucceededAndErrorRespons
         std::vector<ShardEndpoint> targetUpdate(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
             std::set<ChunkRange>* chunkRange = nullptr) const override {
             invariant(chunkRange == nullptr);
             return std::vector{ShardEndpoint(kShardName1,
@@ -2504,7 +2514,7 @@ public:
 
     void expectInsertsReturnTransientTxnErrors(const std::vector<BSONObj>& expected) {
         onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
-            ASSERT_EQUALS(nss.db_forTest(), request.dbname);
+            ASSERT_EQUALS(nss.dbName(), request.dbname);
 
             const auto opMsgRequest(OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
             const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));

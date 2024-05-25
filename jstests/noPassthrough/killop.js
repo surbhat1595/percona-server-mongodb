@@ -2,12 +2,7 @@
 // @tags: [
 //   requires_replication,
 //   requires_sharding,
-//   # TODO SERVER-64007: Implement yielding for CQF.
-//   cqf_incompatible,
 // ]
-
-(function() {
-"use strict";
 
 const dbName = "killop";
 const collName = "test";
@@ -81,4 +76,3 @@ runTest(shardConn, shardConn);
 runTest(st.s, shardConn);
 
 st.stop();
-})();

@@ -46,7 +46,6 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
-#include "mongo/db/exec/sbe/makeobj_enums.h"
 #include "mongo/db/exec/sbe/makeobj_spec.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/projection_ast.h"
@@ -54,635 +53,501 @@
 #include "mongo/db/query/sbe_stage_builder.h"
 #include "mongo/db/query/sbe_stage_builder_expression.h"
 #include "mongo/db/query/sbe_stage_builder_projection.h"
+#include "mongo/db/query/sbe_stage_builder_sbexpr_helpers.h"
 #include "mongo/db/query/tree_walker.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 
 namespace mongo::stage_builder {
 namespace {
-using ExpressionType = std::unique_ptr<sbe::EExpression>;
-
-// Enum desribing mode in which projection for the field must be evaluated.
+/**
+ * Enum desribing mode in which projection for the field must be evaluated.
+ */
 enum class EvalMode {
-    // Field should be included in the resulting object with no modification.
-    KeepField,
-    // Field should be excluded from the resulting object.
-    RestrictField,
-    // We do not need to do anything with the field (neither exclude nor include).
-    IgnoreField,
-    // Set field value with an EvalExpr.
-    EvaluateField,
+    // Include field in output object with no modification.
+    kKeep,
+    // Exclude field from output object.
+    kDrop,
+    // Set field value with an SbExpr.
+    kValueArg,
+    // Invoke a lambda passing in the field, then set field to the lambda's return value.
+    kLambdaArg,
+    // Call makeBsonObj() passing in the field, then set field to makeBsonObj()'s return value.
+    kMakeObj,
 };
 
 /**
- * Stores context across calls to visit() in the projection traversal visitors.
+ * A 'ProjectEval' contains an EvalMode ('mode') and an SbExpr ('expr'). If 'mode' is equal
+ * to 'EvalMode::EvaluateField' then 'expr' will be non-null, otherwise 'expr' will be null.
  */
-struct ProjectionTraversalVisitorContext {
-    // Represents current projection level. Created each time visitor encounters path projection.
+struct ProjectEval {
+    ProjectEval(EvalMode mode,
+                std::unique_ptr<sbe::MakeObjSpec> spec = {},
+                std::vector<SbExpr> exprs = {},
+                bool returnsNothingOnMissingInput = true)
+        : mode(mode),
+          spec(std::move(spec)),
+          exprs(std::move(exprs)),
+          returnsNothingOnMissingInput(returnsNothingOnMissingInput) {}
+
+    EvalMode mode;
+    std::unique_ptr<sbe::MakeObjSpec> spec;
+    std::vector<SbExpr> exprs;
+    bool returnsNothingOnMissingInput = true;
+};
+
+/**
+ * Stores the necessary context needed while visiting each node in the projection tree.
+ */
+struct ProjectionVisitorContext {
+    /**
+     * Represents current projection level. Created each time visitor encounters path projection.
+     */
     struct NestedLevel {
-        NestedLevel(StageBuilderState& state,
-                    EvalExpr inputExpr,
-                    std::list<std::string> fields,
-                    boost::optional<sbe::FrameId> lambdaFrame)
-            : state(state),
-              inputExpr(std::move(inputExpr)),
-              fields(std::move(fields)),
-              lambdaFrame(std::move(lambdaFrame)) {}
+        NestedLevel() = default;
 
-        EvalExpr getInputEvalExpr() const {
-            return inputExpr.clone();
-        }
-        std::unique_ptr<sbe::EExpression> getInputExpr() const {
-            return inputExpr.getExpr(state.slotVarMap, *state.env);
-        }
+        // Vector containing operations for the current level. There are 5 types of operations
+        // (see EvalMode enum for details).
+        std::vector<ProjectEval> evals;
 
-        EvalExpr extractInputEvalExpr() {
-            return std::move(inputExpr);
-        }
-        std::unique_ptr<sbe::EExpression> extractInputExpr() {
-            auto evalExpr = extractInputEvalExpr();
-            return evalExpr.extractExpr(state);
-        }
-
-        StageBuilderState& state;
-        // The input expression for the current level. This is the parent sub-document for each of
-        // the projected fields at the current level. 'inputExpr' can be a slot or a local variable.
-        EvalExpr inputExpr;
-        // The fields names at the current projection level.
-        std::list<std::string> fields;
-        // The lambda frame associated with the current level.
-        boost::optional<sbe::FrameId> lambdaFrame;
-        // Vector containing operations for the current level. There are four types of operations
-        // (see EvalMode enum for details). The second component of the pair (EvalExpr) is only
-        // used for the kEvaluateField operation. For operations other than kEvaluateField, the
-        // second component of the pair will be null.
-        std::vector<std::pair<EvalMode, EvalExpr>> evals;
         // Whether or not any subtree of this level has a computed field.
-        bool subtreeContainsComputedField = false;
+        bool hasValueArgs = false;
     };
 
-    ProjectionTraversalVisitorContext(StageBuilderState& state,
-                                      projection_ast::ProjectType projectType,
-                                      EvalExpr rootExpr,
-                                      const PlanStageSlots* slots)
-        : state(state), projectType(projectType), slots(slots) {
-        levels.push({state, std::move(rootExpr), {}, boost::none});
-    }
-
-    const std::string& topFrontField() const {
-        invariant(!levels.empty());
-        invariant(!levels.top().fields.empty());
-        return levels.top().fields.front();
-    }
-
-    void popFrontField() {
-        invariant(!levels.empty());
-        // An empty field name occurs for {$addFields: {}}, which is treated as a no-op.
-        if (MONGO_likely(!levels.top().fields.empty())) {
-            levels.top().fields.pop_front();
-        }
-    }
+    ProjectionVisitorContext(StageBuilderState& state,
+                             projection_ast::ProjectType projectType,
+                             SbExpr inputExpr,
+                             const PlanStageSlots* slots)
+        : state(state), projectType(projectType), inputExpr(std::move(inputExpr)), slots(slots) {}
 
     size_t numLevels() const {
         return levels.size();
     }
 
-    bool isLastLevel() const {
-        return numLevels() == 1;
+    bool levelsEmpty() const {
+        return levels.empty();
     }
 
     auto& topLevel() {
-        invariant(!levels.empty());
+        tassert(7580707, "Expected 'levels' to not be empty", !levels.empty());
         return levels.top();
     }
 
-    auto& topLevelEvals() {
+    bool getHasValueArgs() {
+        return !levels.empty() ? topLevel().hasValueArgs : hasValueArgs;
+    }
+
+    void setHasValueArgs(bool val) {
+        if (!levels.empty()) {
+            topLevel().hasValueArgs = val;
+        } else {
+            hasValueArgs = val;
+        }
+    }
+
+    auto& evals() {
         return topLevel().evals;
     }
 
-    void pushKeep() {
-        topLevelEvals().emplace_back(EvalMode::KeepField, EvalExpr{});
+    void pushKeepOrDrop(bool keep) {
+        evals().emplace_back(keep ? EvalMode::kKeep : EvalMode::kDrop);
     }
-    void pushRestrict() {
-        topLevelEvals().emplace_back(EvalMode::RestrictField, EvalExpr{});
+    void pushValueArg(SbExpr expr) {
+        std::vector<SbExpr> exprs;
+        exprs.emplace_back(std::move(expr));
+        evals().emplace_back(ProjectEval(EvalMode::kValueArg, {}, std::move(exprs)));
     }
-    void pushIgnore() {
-        topLevelEvals().emplace_back(EvalMode::IgnoreField, EvalExpr{});
+    void pushLambdaArg(SbExpr lambdaExpr, bool returnsNothingOnMissingInput = true) {
+        std::vector<SbExpr> exprs;
+        exprs.emplace_back(std::move(lambdaExpr));
+        evals().emplace_back(
+            ProjectEval(EvalMode::kLambdaArg, {}, std::move(exprs), returnsNothingOnMissingInput));
     }
-    void pushEvaluate(EvalExpr expr) {
-        topLevelEvals().emplace_back(EvalMode::EvaluateField, std::move(expr));
+    void pushMakeObj(std::unique_ptr<sbe::MakeObjSpec> spec, std::vector<SbExpr> args) {
+        evals().emplace_back(ProjectEval(EvalMode::kMakeObj, std::move(spec), std::move(args)));
     }
 
+    void setResult(SbExpr expr) {
+        resultExpr = std::move(expr);
+    }
+
+    void pushLevel() {
+        levels.push({});
+    }
     void popLevel() {
-        invariant(!levels.empty());
-        invariant(levels.top().fields.empty());
+        tassert(7580708, "Expected 'levels' to not be empty", !levels.empty());
         levels.pop();
     }
 
-    void pushLevel(std::list<std::string> fields,
-                   EvalExpr expr,
-                   boost::optional<sbe::FrameId> lambdaFrame = boost::none) {
-        levels.push({state, std::move(expr), std::move(fields), lambdaFrame});
-    }
+    SbExpr done() {
+        tassert(7580709, "Expected 'levels' to be empty", levels.empty());
 
-    EvalExpr done() {
-        invariant(levels.size() == 1);
-        invariant(topLevelEvals().size() == 1);
-        auto mode = topLevelEvals().back().first;
-        auto& expr = topLevelEvals().back().second;
-
-        invariant(mode == EvalMode::EvaluateField);
-
-        return std::move(expr);
+        if (resultExpr) {
+            return std::move(resultExpr);
+        } else {
+            return std::move(inputExpr);
+        }
     }
 
     StageBuilderState& state;
+    projection_ast::ProjectType projectType{};
+    SbExpr inputExpr;
+    SbExpr resultExpr;
+    const PlanStageSlots* slots;
+    bool hasValueArgs{false};
 
-    projection_ast::ProjectType projectType;
+    size_t nextArgIdx{0};
 
     std::stack<NestedLevel> levels;
-
-    const PlanStageSlots* slots;
-
-    // Flag indicating if $slice operator is used in the projection.
-    bool hasSliceProjection = false;
-
-    // Vector containing field names for current field path.
-    std::vector<std::string> currentFieldPath;
 };
 
 /**
- * A projection traversal pre-visitor used for maintaining nested levels while traversing a
- * projection AST.
+ * This function takes a flag indicating if we're dealing with an inclusion or exclusion projection
+ * ('isInclusion') and two parallel vectors: a vector of field names ('fieldNames') and a vector of
+ * ProjectEvals ('evals').
+ *
+ * This function processes its inputs and returns a tuple containing a vector field names, a vector
+ * of FieldInfos, and a vector of SbExprs.
+ *
+ * The output tuple is intended for to be used with MakeObjSpec and the makeBsonObj() VM function.
  */
-class ProjectionTraversalPreVisitor final : public projection_ast::ProjectionASTConstVisitor {
-public:
-    ProjectionTraversalPreVisitor(ProjectionTraversalVisitorContext* context) : _context{context} {
-        invariant(_context);
-    }
-
-    void visit(const projection_ast::ProjectionPathASTNode* node) final {
-        auto lambdaFrame = boost::make_optional(_context->state.frameId());
-
-        auto expr = EvalExpr{makeVariable(*lambdaFrame, 0)};
-
-        _context->pushLevel(
-            {node->fieldNames().begin(), node->fieldNames().end()}, std::move(expr), lambdaFrame);
-
-        if (node->children().size() > 0) {
-            // There is no need to update the field path when it has no child nodes to evaluate.
-            _context->currentFieldPath.push_back(_context->topFrontField());
-        }
-    }
-
-    void visit(const projection_ast::ProjectionPositionalASTNode* node) final {}
-
-    void visit(const projection_ast::ProjectionSliceASTNode* node) final {}
-
-    void visit(const projection_ast::ProjectionElemMatchASTNode* node) final {}
-
-    void visit(const projection_ast::ExpressionASTNode* node) final {
-        _context->topLevel().subtreeContainsComputedField = true;
-    }
-
-    void visit(const projection_ast::MatchExpressionASTNode* node) final {}
-
-    void visit(const projection_ast::BooleanConstantASTNode* node) final {}
-
-private:
-    ProjectionTraversalVisitorContext* _context;
-};
-
-/**
- * A projection traversal in-visitor used for maintaining nested levels while traversing a
- * projection AST.
- */
-class ProjectionTraversalInVisitor final : public projection_ast::ProjectionASTConstVisitor {
-public:
-    ProjectionTraversalInVisitor(ProjectionTraversalVisitorContext* context) : _context{context} {
-        invariant(_context);
-    }
-
-    void visit(const projection_ast::ProjectionPathASTNode* node) final {
-        _context->popFrontField();
-        _context->currentFieldPath.pop_back();
-        _context->currentFieldPath.push_back(_context->topFrontField());
-    }
-
-    void visit(const projection_ast::ProjectionPositionalASTNode* node) final {}
-
-    void visit(const projection_ast::ProjectionSliceASTNode* node) final {}
-
-    void visit(const projection_ast::ProjectionElemMatchASTNode* node) final {}
-
-    void visit(const projection_ast::ExpressionASTNode* node) final {}
-
-    void visit(const projection_ast::MatchExpressionASTNode* node) final {}
-
-    void visit(const projection_ast::BooleanConstantASTNode* node) final {}
-
-private:
-    ProjectionTraversalVisitorContext* _context;
-};
-
-namespace {
-using FieldVector = std::vector<std::string>;
-
-std::tuple<FieldVector, FieldVector, FieldVector, std::vector<EvalExpr>> prepareFieldEvals(
-    const FieldVector& fieldNames, std::vector<std::pair<EvalMode, EvalExpr>>& evals) {
+auto prepareFieldEvals(const std::vector<std::string>& fieldNames,
+                       std::vector<ProjectEval>& evals,
+                       bool isInclusion,
+                       size_t* nextArgIdx) {
     // Ensure that there is eval for each of the field names.
-    invariant(evals.size() == fieldNames.size());
+    tassert(7580712,
+            "Expected 'evals' and 'fieldNames' to be the same size",
+            evals.size() == fieldNames.size());
 
-    FieldVector keepFields;
-    FieldVector restrictFields;
-    FieldVector projectFields;
-    std::vector<EvalExpr> projectExprs;
+    std::vector<std::string> fields;
+    std::vector<sbe::MakeObjSpec::FieldInfo> fieldInfos;
+    std::vector<SbExpr> valueAndLambdaArgs;
+    std::vector<SbExpr> args;
 
-    // Walk through all the fields at the current nested level and,
-    //    * For exclusion projections, populate the 'restrictFields' array to be passed to the
-    //      mkobj stage, which constructs an output document for the current nested level.
-    //    * For inclusion projections, populate the 'keepFields' array to be passed to the
-    //      mkobj stage, and also populate the 'projectFields' and 'projectExprs' vectors with
-    //      the field names and the projection values (represented as EvalExprs).
     for (size_t i = 0; i < fieldNames.size(); i++) {
         auto& fieldName = fieldNames[i];
-        auto mode = evals[i].first;
-        auto& expr = evals[i].second;
+        auto mode = evals[i].mode;
+        auto& exprs = evals[i].exprs;
+        auto& spec = evals[i].spec;
+        bool returnsNothingOnMissingInput = evals[i].returnsNothingOnMissingInput;
 
         switch (mode) {
-            case EvalMode::KeepField:
-                keepFields.push_back(fieldName);
+            case EvalMode::kKeep:
+                if (isInclusion) {
+                    fields.emplace_back(fieldName);
+                    fieldInfos.emplace_back();
+                }
                 break;
-            case EvalMode::RestrictField:
-                restrictFields.push_back(fieldName);
+            case EvalMode::kDrop:
+                if (!isInclusion) {
+                    fields.emplace_back(fieldName);
+                    fieldInfos.emplace_back();
+                }
                 break;
-            case EvalMode::IgnoreField:
+            case EvalMode::kValueArg:
+                fields.emplace_back(fieldName);
+                fieldInfos.emplace_back(*nextArgIdx);
+                valueAndLambdaArgs.emplace_back(std::move(exprs[0]));
+                ++(*nextArgIdx);
                 break;
-            case EvalMode::EvaluateField: {
-                projectFields.push_back(fieldName);
-                projectExprs.emplace_back(std::move(expr));
+            case EvalMode::kLambdaArg:
+                fields.emplace_back(fieldName);
+                fieldInfos.emplace_back(
+                    sbe::MakeObjSpec::LambdaArg{*nextArgIdx, returnsNothingOnMissingInput});
+                valueAndLambdaArgs.emplace_back(std::move(exprs[0]));
+                ++(*nextArgIdx);
                 break;
-            }
+            case EvalMode::kMakeObj:
+                fields.emplace_back(fieldName);
+                fieldInfos.emplace_back(std::move(spec));
+                if (!exprs.empty()) {
+                    std::move(exprs.begin(), exprs.end(), std::back_inserter(args));
+                }
+                break;
         }
     }
 
-    return {std::move(keepFields),
-            std::move(restrictFields),
-            std::move(projectFields),
-            std::move(projectExprs)};
+    std::move(valueAndLambdaArgs.begin(), valueAndLambdaArgs.end(), std::back_inserter(args));
+
+    return std::make_tuple(std::move(fields), std::move(fieldInfos), std::move(args));
 }
 
-}  // namespace
+void preVisitCommon(PathTreeNode<boost::optional<ProjectionNode>>* node,
+                    ProjectionVisitorContext& ctx) {
+    if (node->value) {
+        if (node->value->isExpr() || node->value->isSbExpr()) {
+            ctx.setHasValueArgs(true);
+        }
+        return;
+    }
+
+    ctx.pushLevel();
+}
 
 /**
- * A projection traversal post-visitor used for maintaining nested levels while traversing a
- * projection AST and producing an SBE traversal sub-tree for each nested level.
+ * If a subtree of the projection contains 1 or more value args (i.e. computed fields), then
+ * the projection should always be applied even if the values aren't objects. Example:
+ *   projection: {a: {b: "x"}}
+ *   document: {a: [1,2,3]}
+ *   result: {a: [{b: "x"}, {b: "x"}, {b: "x"}]}
+ *
+ * If this subtree doesn't contain any value args and we're performing an inclusion projection,
+ * then anything that's not an object should get filtered out. Example:
+ *   projection: {a: {b: 1}}
+ *   document: {a: [1, {b: 2}, 3]}
+ *   result: {a: [{b: 2}]}
+ *
+ * If this subtree doesn't contain any value args and we're performing an exclusion projection,
+ * then anything that's not an object should be preserved as-is.
  */
-class ProjectionTraversalPostVisitor final : public projection_ast::ProjectionASTConstVisitor {
-public:
-    // Root slot is passed separately from generic context because this class is the only visitor
-    // that requires root to be a slot.
-    ProjectionTraversalPostVisitor(ProjectionTraversalVisitorContext* context,
-                                   sbe::value::SlotId rootSlot)
-        : _context{context}, _rootSlot{rootSlot} {}
+sbe::MakeObjSpec::NonObjInputBehavior getNonObjInputBehavior(bool hasValueArgs, bool isInclusion) {
+    using NonObjInputBehavior = sbe::MakeObjSpec::NonObjInputBehavior;
 
-    void visit(const projection_ast::BooleanConstantASTNode* node) final {
-        using namespace std::literals;
+    return hasValueArgs
+        ? NonObjInputBehavior::kNewObj
+        : (isInclusion ? NonObjInputBehavior::kReturnNothing : NonObjInputBehavior::kReturnInput);
+}
 
-        if (node->value()) {
-            _context->pushKeep();
-        } else {
-            _context->pushRestrict();
-        }
+void postVisitCommon(PathTreeNode<boost::optional<ProjectionNode>>* node,
+                     ProjectionVisitorContext& ctx,
+                     boost::optional<int32_t> traversalDepth = boost::none) {
+    using FieldBehavior = sbe::MakeObjSpec::FieldBehavior;
+
+    if (node->value) {
+        return;
     }
 
-    void visit(const projection_ast::ExpressionASTNode* node) final {
-        // Generate an expression to evaluate a projection expression and push it on top of the
-        // 'evals' stack. If the expression is translated into a sub-tree, stack it with the
-        // existing sub-tree.
-        auto expression = node->expression();
-        auto expr =
-            generateExpression(_context->state, expression.get(), _rootSlot, _context->slots);
-
-        _context->pushEvaluate(std::move(expr));
+    std::vector<std::string> childNames;
+    for (auto&& child : node->children) {
+        childNames.emplace_back(child->name);
     }
 
-    void visit(const projection_ast::ProjectionPathASTNode* node) final {
-        using namespace std::literals;
+    const bool isInclusion = ctx.projectType == projection_ast::ProjectType::kInclusion;
 
-        if (node->children().size() > 0) {
-            // Remove the last field name from context and ensure that there are no more left.
-            _context->popFrontField();
-            _context->currentFieldPath.pop_back();
+    auto [fields, fieldInfos, args] =
+        prepareFieldEvals(childNames, ctx.evals(), isInclusion, &ctx.nextArgIdx);
+
+    const bool hasValueArgs = ctx.getHasValueArgs();
+
+    // We've finished extracting what we need from the child level, so pop if off the stack.
+    ctx.popLevel();
+
+    // If the child's 'hasValueArgs' flag was set, then propagate it to the parent level.
+    ctx.setHasValueArgs(ctx.getHasValueArgs() || hasValueArgs);
+
+    // If the current sub-tree does not contain any work that needs to be done, then there is
+    // no need to change the object. Push 'EvalMode::KeepField' for this sub-tree (if levels
+    // is non-empty) and then return.
+    if (!isInclusion && fields.empty()) {
+        if (!ctx.levelsEmpty()) {
+            ctx.pushKeepOrDrop(true);
         }
-        invariant(_context->topLevel().fields.empty());
+        return;
+    }
 
-        auto [keepFields, dropFields, projectFields, projectExprs] =
-            prepareFieldEvals(node->fieldNames(), _context->topLevelEvals());
+    auto fieldBehavior = isInclusion ? FieldBehavior::kClosed : FieldBehavior::kOpen;
+    auto noiBehavior = getNonObjInputBehavior(hasValueArgs, isInclusion);
 
-        // Generate a document for the current nested level.
-        const bool isInclusion = _context->projectType == projection_ast::ProjectType::kInclusion;
-        const bool isInclusionOrAddFields =
-            _context->projectType != projection_ast::ProjectType::kExclusion;
+    // Generate a MakeObjSpec for the current nested level.
+    auto spec = std::make_unique<sbe::MakeObjSpec>(
+        fieldBehavior, std::move(fields), std::move(fieldInfos), noiBehavior, traversalDepth);
 
-        auto [fieldBehavior, fieldVector] = isInclusion
-            ? std::make_pair(sbe::MakeObjSpec::FieldBehavior::keep, std::move(keepFields))
-            : std::make_pair(sbe::MakeObjSpec::FieldBehavior::drop, std::move(dropFields));
+    if (ctx.levelsEmpty()) {
+        SbExprBuilder b(ctx.state);
 
-        auto lambdaFrame = _context->topLevel().lambdaFrame;
-        tassert(6897005, "Expected lambda frame to be set", lambdaFrame);
+        // For the last level, create a 'makeBsonObj(..)' expression to generate the output object.
+        auto specExpr = b.makeConstant(sbe::value::TypeTags::makeObjSpec,
+                                       sbe::value::bitcastFrom<sbe::MakeObjSpec*>(spec.release()));
 
-        auto childInputExpr = _context->topLevel().extractInputExpr();
+        auto funcArgs = SbExpr::makeSeq(std::move(specExpr), std::move(ctx.inputExpr));
+        std::move(args.begin(), args.end(), std::back_inserter(funcArgs));
 
-        const bool containsComputedField = _context->topLevel().subtreeContainsComputedField;
+        auto makeObjFn = "makeBsonObj"_sd;
+        ctx.setResult(b.makeFunction(makeObjFn, std::move(funcArgs)));
+    } else {
+        ctx.pushMakeObj(std::move(spec), std::move(args));
+    }
+}
 
-        // We've finished extracting what we need from the child level, so pop if off the stack.
-        _context->popLevel();
+SbExpr evaluateProjection(StageBuilderState& state,
+                          projection_ast::ProjectType type,
+                          std::vector<std::string> paths,
+                          std::vector<ProjectionNode> nodes,
+                          SbExpr inputExpr,
+                          boost::optional<sbe::value::SlotId> rootSlot,
+                          const PlanStageSlots* slots) {
+    using Node = PathTreeNode<boost::optional<ProjectionNode>>;
 
-        // If the child's 'subtreeContainsComputedField' flag was set, then propagate it to the
-        // parent level.
-        _context->topLevel().subtreeContainsComputedField =
-            _context->topLevel().subtreeContainsComputedField || containsComputedField;
+    auto tree = buildPathTree<boost::optional<ProjectionNode>>(
+        std::move(paths), std::move(nodes), BuildPathTreeMode::AssertNoConflictingPaths);
 
-        // Create a makeBsonObj() expression to generate the document for the current nested level.
-        auto makeObjSpecExpr =
-            makeConstant(sbe::value::TypeTags::makeObjSpec,
-                         sbe::value::bitcastFrom<sbe::MakeObjSpec*>(new sbe::MakeObjSpec(
-                             fieldBehavior, std::move(fieldVector), std::move(projectFields))));
+    ProjectionVisitorContext context{state, type, std::move(inputExpr), slots};
 
-        auto args = sbe::makeEs(std::move(makeObjSpecExpr), childInputExpr->clone());
-        for (auto& expr : projectExprs) {
-            args.push_back(expr.extractExpr(_context->state));
-        }
+    auto preVisit = [&](Node* node) {
+        preVisitCommon(node, context);
+    };
 
-        auto innerExpr = sbe::makeE<sbe::EFunction>("makeBsonObj", std::move(args));
-
-        if (!isInclusionOrAddFields || !containsComputedField) {
-            // If this is an inclusion projection and with no computed fields, then anything that's
-            // not an object should get filtered out. Example:
-            // projection: {a: {b: 1}}
-            // document: {a: [1, {b: 2}, 3]}
-            // result: {a: [{b: 2}]}
-            //
-            // If this is an inclusion projection with 1 or more computed fields, then projections
-            // of computed fields should always be applied even if the values aren't objects.
-            // Example:
-            // projection: {a: {b: "x"}}
-            // document: {a: [1,2,3]}
-            // result: {a: [{b: "x"}, {b: "x"}, {b: "x"}, {b: "x"}]}
-            //
-            // If this is an exclusion projection, then anything that is not an object should be
-            // preserved as-is.
-            innerExpr = sbe::makeE<sbe::EIf>(makeFunction("isObject", childInputExpr->clone()),
-                                             std::move(innerExpr),
-                                             isInclusionOrAddFields && !containsComputedField
-                                                 ? makeConstant(sbe::value::TypeTags::Nothing, 0)
-                                                 : childInputExpr->clone());
-        }
-
-        auto fromExpr = [&]() {
-            if (_context->isLastLevel()) {
-                return _context->topLevel().getInputExpr();
+    auto postVisit = [&](Node* node) {
+        if (node->value) {
+            if (node->value->isBool()) {
+                context.pushKeepOrDrop(node->value->getBool());
+            } else if (node->value->isExpr()) {
+                context.pushValueArg(
+                    generateExpression(state, node->value->getExpr(), rootSlot, context.slots));
+            } else if (node->value->isSbExpr()) {
+                context.pushValueArg(node->value->extractSbExpr());
+            } else if (node->value->isSlice()) {
+                // We should not encounter 'Slice' here. If the original projection contained
+                // one or more $slice ops, the caller should have detected this and replaced
+                // each 'Slice' node with a 'Keep' node before calling this function.
+                tasserted(7580714, "Encountered unexpected node type 'kSlice'");
+            } else {
+                MONGO_UNREACHABLE_TASSERT(7103504);
             }
-            if (_context->numLevels() == 2 && _context->slots) {
-                auto name =
-                    std::make_pair(PlanStageSlots::kField, StringData(_context->topFrontField()));
-                if (auto slot = _context->slots->getIfExists(name); slot) {
-                    return makeVariable(*slot);
-                }
+        }
+
+        postVisitCommon(node, context);
+    };
+
+    const bool invokeCallbacksForRootNode = true;
+    visitPathTreeNodes(tree.get(), preVisit, postVisit, invokeCallbacksForRootNode);
+
+    return context.done();
+}
+
+// When a projection contains $slice ops, this function is called after evaluateProjection()
+// to deal with evaluating the $slice ops.
+SbExpr evaluateSliceOps(StageBuilderState& state,
+                        std::vector<std::string> paths,
+                        std::vector<ProjectionNode> nodes,
+                        SbExpr inputExpr,
+                        const PlanStageSlots* slots) {
+    using Node = PathTreeNode<boost::optional<ProjectionNode>>;
+
+    auto tree = buildPathTree<boost::optional<ProjectionNode>>(
+        std::move(paths), std::move(nodes), BuildPathTreeMode::AssertNoConflictingPaths);
+
+    // We want to keep the entire input document as-is except for applying the $slice ops, so
+    // we use the 'kExclusion' projection type.
+    ProjectionVisitorContext context{
+        state, projection_ast::ProjectType::kExclusion, std::move(inputExpr), slots};
+
+    auto preVisit = [&](Node* node) {
+        preVisitCommon(node, context);
+    };
+
+    auto postVisit = [&](Node* node) {
+        if (node->value) {
+            SbExprBuilder b(state);
+
+            // 'nodes' should only contain $slice operators.
+            tassert(7103505, "Expected node type to be 'kSlice'", node->value->isSlice());
+
+            auto [limit, skip] = node->value->getSlice();
+            auto lambdaFrameId = state.frameId();
+            auto lambdaParam = b.makeVariable(lambdaFrameId, 0);
+
+            auto args = SbExpr::makeSeq(lambdaParam.clone(), b.makeInt32Constant(limit));
+            if (skip) {
+                args.emplace_back(b.makeInt32Constant(*skip));
             }
-            return makeFunction("getField"_sd,
-                                _context->topLevel().getInputExpr(),
-                                makeConstant(_context->topFrontField()));
-        }();
 
-        auto traversePExpr =
-            makeFunction("traverseP",
-                         std::move(fromExpr),
-                         sbe::makeE<sbe::ELocalLambda>(*lambdaFrame, std::move(innerExpr)),
-                         makeConstant(sbe::value::TypeTags::Nothing, 0));
+            auto extractSubArrayExpr = b.makeIf(b.makeFunction("isArray"_sd, lambdaParam.clone()),
+                                                b.makeFunction("extractSubArray", std::move(args)),
+                                                lambdaParam.clone());
 
-        _context->pushEvaluate(std::move(traversePExpr));
-    }
-
-    void visit(const projection_ast::ProjectionPositionalASTNode* node) final {
-        tasserted(6929402, "Positional projection is not supported in SBE");
-    }
-
-    void visit(const projection_ast::ProjectionSliceASTNode* node) final {
-        // NOTE: $slice projection operator has it's own path traversal semantics implemented in
-        // 'SliceProjectionTraversalPostVisitor'. But before these semantics are applied, path is
-        // extracted from the input object according to path traversal semantics of
-        // 'BooleanConstantASTNode'. This is why we add 'KeepField' and 'IgnoreField' to evals in
-        // this visitor.
-        using namespace std::literals;
-
-        if (_context->projectType == projection_ast::ProjectType::kInclusion) {
-            _context->pushKeep();
-        } else {
-            // For exclusion projection we do need to project current field manually, it will be
-            // included in the input document anyway.
-            _context->pushIgnore();
+            context.pushLambdaArg(b.makeLocalLambda(lambdaFrameId, std::move(extractSubArrayExpr)));
         }
 
-        _context->hasSliceProjection = true;
-    }
+        // When handling $slice, we only go 1 level in depth (unlike other projection operators
+        // which have unlimited depth for the traversal).
+        const int32_t traversalDepth = 1;
+        postVisitCommon(node, context, traversalDepth);
+    };
 
-    void visit(const projection_ast::ProjectionElemMatchASTNode* node) final {
-        tasserted(6929403, "ElemMatch projection is not supported in SBE");
-    }
+    const bool invokeCallbacksForRootNode = true;
+    visitPathTreeNodes(tree.get(), preVisit, postVisit, invokeCallbacksForRootNode);
 
-    void visit(const projection_ast::MatchExpressionASTNode* node) final {}
-
-private:
-    ProjectionTraversalVisitorContext* _context;
-    sbe::value::SlotId _rootSlot;
-};
-
-/**
- * A projection traversal post-visitor used to create separate sub-tree for $slice projectional
- * operator.
- */
-class SliceProjectionTraversalPostVisitor final : public projection_ast::ProjectionASTConstVisitor {
-public:
-    SliceProjectionTraversalPostVisitor(ProjectionTraversalVisitorContext* context)
-        : _context{context} {}
-
-    void visit(const projection_ast::ProjectionPathASTNode* node) final {
-        using namespace std::literals;
-
-        // Remove the last field name from context and ensure that there are no more left.
-        _context->popFrontField();
-        _context->currentFieldPath.pop_back();
-        invariant(_context->topLevel().fields.empty());
-
-        // All field paths without $slice operator are marked using 'EvalMode::IgnoreField' (see
-        // other methods of this visitor). This causes the prepareFieldEvals() function to populate
-        // 'projectFields' and 'projectExprs' only with evals for $slice operators if there are
-        // any. We do not remove any fields in the plan generated by this visitor, so the
-        // 'dropFields' and 'keepFields' return values are not used.
-        auto [keepFields, dropFields, projectFields, projectExprs] =
-            prepareFieldEvals(node->fieldNames(), _context->topLevelEvals());
-
-        tassert(6929404, "Expected 'keepFields' to be empty", keepFields.empty());
-        tassert(6929405, "Expected 'dropFields' to be empty", dropFields.empty());
-
-        if (projectExprs.empty()) {
-            // Current sub-tree does not contain any $slice operators, so there is no need to change
-            // the object. We push an empty eval to match the size of 'evals' vector on the current
-            // level with the count of fields.
-            _context->popLevel();
-            _context->pushIgnore();
-            return;
-        }
-
-        auto lambdaFrame = _context->topLevel().lambdaFrame;
-        tassert(6929406, "Expected lambda frame to be set", lambdaFrame);
-
-        auto childInputExpr = _context->topLevel().extractInputExpr();
-
-        // We've finished extracting what we need from the child level, so pop if off the stack.
-        _context->popLevel();
-
-        // Create a makeBsonObj() expression to generate the document for the current nested level.
-        // Note that 'dropFields' is empty, so this call to makeBsonObj() will drop no fields and
-        // append the computed 'projectFields'.
-        auto fieldBehavior = sbe::MakeObjSpec::FieldBehavior::drop;
-        auto makeObjSpecExpr =
-            makeConstant(sbe::value::TypeTags::makeObjSpec,
-                         sbe::value::bitcastFrom<sbe::MakeObjSpec*>(new sbe::MakeObjSpec(
-                             fieldBehavior, std::move(dropFields), std::move(projectFields))));
-
-        auto args = sbe::makeEs(std::move(makeObjSpecExpr), childInputExpr->clone());
-        for (auto& expr : projectExprs) {
-            args.push_back(expr.extractExpr(_context->state));
-        }
-
-        auto innerExpr = sbe::makeE<sbe::EFunction>("makeBsonObj", std::move(args));
-
-        // Anything that is not an object should be preserved as-is.
-        innerExpr = sbe::makeE<sbe::EIf>(makeFunction("isObject", childInputExpr->clone()),
-                                         std::move(innerExpr),
-                                         childInputExpr->clone());
-
-        auto fromExpr = [&]() {
-            if (_context->isLastLevel()) {
-                return _context->topLevel().getInputExpr();
-            }
-            if (_context->numLevels() == 2 && _context->slots) {
-                auto name =
-                    std::make_pair(PlanStageSlots::kField, StringData(_context->topFrontField()));
-                if (auto slot = _context->slots->getIfExists(name); slot) {
-                    return makeVariable(*slot);
-                }
-            }
-            return makeFunction("getField"_sd,
-                                _context->topLevel().getInputExpr(),
-                                makeConstant(_context->topFrontField()));
-        }();
-
-        // Create the call to traverseP(), going only 1 level in depth (unlike other projection
-        // operators which have unlimited depth for the traversal).
-        auto traversePExpr =
-            makeFunction("traverseP",
-                         std::move(fromExpr),
-                         sbe::makeE<sbe::ELocalLambda>(*lambdaFrame, std::move(innerExpr)),
-                         makeConstant(sbe::value::TypeTags::NumberInt32, 1));
-
-        _context->pushEvaluate(std::move(traversePExpr));
-    }
-
-    void visit(const projection_ast::ProjectionPositionalASTNode* node) final {}
-
-    void visit(const projection_ast::ProjectionSliceASTNode* node) final {
-        using namespace std::literals;
-
-        auto arrayFromField = makeFunction("getField"_sd,
-                                           _context->topLevel().getInputExpr(),
-                                           makeConstant(_context->topFrontField()));
-        auto binds = sbe::makeEs(std::move(arrayFromField));
-        auto frameId = _context->state.frameId();
-        sbe::EVariable arrayVariable{frameId, 0};
-
-        auto arguments = sbe::makeEs(
-            arrayVariable.clone(), makeConstant(sbe::value::TypeTags::NumberInt32, node->limit()));
-        if (node->skip()) {
-            invariant(node->limit() >= 0);
-            arguments.push_back(makeConstant(sbe::value::TypeTags::NumberInt32, *node->skip()));
-        }
-
-        auto extractSubArrayExpr = sbe::makeE<sbe::EIf>(
-            makeFunction("isArray"_sd, arrayVariable.clone()),
-            sbe::makeE<sbe::EFunction>("extractSubArray", std::move(arguments)),
-            arrayVariable.clone());
-
-        auto sliceExpr =
-            sbe::makeE<sbe::ELocalBind>(frameId, std::move(binds), std::move(extractSubArrayExpr));
-
-        _context->pushEvaluate(std::move(sliceExpr));
-    }
-
-    void visit(const projection_ast::ProjectionElemMatchASTNode* node) final {}
-
-    void visit(const projection_ast::ExpressionASTNode* node) final {
-        // This expression is already built in the 'ProjectionTraversalPostVisitor'. We push an
-        // empty eval to match the size of 'evals' vector on the current level with the count of
-        // fields.
-        _context->pushIgnore();
-    }
-
-    void visit(const projection_ast::MatchExpressionASTNode* node) final {}
-
-    void visit(const projection_ast::BooleanConstantASTNode* node) final {
-        // This expression is already built in the 'ProjectionTraversalPostVisitor'. We push an
-        // empty eval to match the size of 'evals' vector on the current level with the count of
-        // fields.
-        _context->pushIgnore();
-    }
-
-private:
-    ProjectionTraversalVisitorContext* _context;
-};
+    return context.done();
+}
 }  // namespace
 
-EvalExpr generateProjection(StageBuilderState& state,
-                            const projection_ast::Projection* projection,
-                            sbe::value::SlotId inputSlot,
-                            const PlanStageSlots* slots) {
-    auto type = projection->type();
-    ProjectionTraversalVisitorContext context{state, type, inputSlot, slots};
-    ProjectionTraversalPreVisitor preVisitor{&context};
-    ProjectionTraversalInVisitor inVisitor{&context};
-    ProjectionTraversalPostVisitor postVisitor{&context, inputSlot};
-    projection_ast::ProjectionASTConstWalker walker{&preVisitor, &inVisitor, &postVisitor};
-    tree_walker::walk<true, projection_ast::ASTNode>(projection->root(), &walker);
+SbExpr generateProjection(StageBuilderState& state,
+                          const projection_ast::Projection* projection,
+                          SbExpr inputExpr,
+                          boost::optional<sbe::value::SlotId> rootSlot,
+                          const PlanStageSlots* slots) {
+    const auto projType = projection->type();
 
-    auto resultExpr = context.done();
+    // Do a DFS on the projection AST and populate 'paths' and 'nodes'.
+    auto [paths, nodes] = getProjectionNodes(*projection);
 
-    if (!context.hasSliceProjection) {
-        return resultExpr;
+    return generateProjection(
+        state, projType, std::move(paths), std::move(nodes), std::move(inputExpr), rootSlot, slots);
+}
+
+SbExpr generateProjection(StageBuilderState& state,
+                          projection_ast::ProjectType projType,
+                          std::vector<std::string> paths,
+                          std::vector<ProjectionNode> nodes,
+                          SbExpr inputExpr,
+                          boost::optional<sbe::value::SlotId> rootSlot,
+                          const PlanStageSlots* slots) {
+    const bool isInclusion = projType == projection_ast::ProjectType::kInclusion;
+
+    // Check for 'Slice' operators. If 'nodes' doesn't have any $slice operators, we just
+    // return the expression generated by evaluateProjection(). If 'tree' contains one or
+    // more $slice operators, then after evaluateProjection() returns we need to apply a
+    // "post-projection transform" to evaluate the $slice ops. (This mirrors the classic
+    // engine's implementation of $slice, see the 'ExpressionInternalFindSlice' class for
+    // details.)
+    std::vector<std::string> slicePaths;
+    std::vector<ProjectionNode> sliceNodes;
+
+    if (std::any_of(nodes.begin(), nodes.end(), [&](auto&& n) { return n.isSlice(); })) {
+        std::vector<std::string> newPaths;
+        std::vector<ProjectionNode> newNodes;
+
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            auto& path = paths[i];
+            auto& node = nodes[i];
+            if (!node.isSlice()) {
+                // If 'node' is not a Slice, move it to the 'newNodes' vector.
+                newPaths.emplace_back(std::move(path));
+                newNodes.emplace_back(std::move(node));
+            } else {
+                // If 'node' is a Slice, move it to the 'sliceNodes' vector. If this is an
+                // inclusion projection, then we also need to add a 'Keep' node to 'newNodes' so
+                // that the first pass doesn't drop 'path'.
+                if (isInclusion) {
+                    newPaths.emplace_back(path);
+                    newNodes.emplace_back(ProjectionNode::Keep{});
+                }
+                slicePaths.emplace_back(std::move(path));
+                sliceNodes.emplace_back(std::move(node));
+            }
+        }
+
+        paths = std::move(newPaths);
+        nodes = std::move(newNodes);
     }
 
-    auto frameId = state.frameId();
-    auto binds = sbe::makeEs(resultExpr.extractExpr(state));
-    sbe::EVariable resultRef{frameId, 0};
+    auto expr = std::move(inputExpr);
 
-    // $slice projectional operator has different path traversal semantics compared to other
-    // operators. It goes only 1 level in depth when traversing arrays. To keep this semantics
-    // we first build a tree to execute all other operators and then build a second tree on top
-    // of it for $slice operator. This second tree modifies resulting objects from from other
-    // operators to include fields with $slice operator.
-    ProjectionTraversalVisitorContext sliceContext{state, type, resultRef.clone(), slots};
-    ProjectionTraversalPreVisitor slicePreVisitor{&sliceContext};
-    ProjectionTraversalInVisitor sliceInVisitor{&sliceContext};
-    SliceProjectionTraversalPostVisitor slicePostVisitor{&sliceContext};
-    projection_ast::ProjectionASTConstWalker sliceWalker{
-        &slicePreVisitor, &sliceInVisitor, &slicePostVisitor};
-    tree_walker::walk<true, projection_ast::ASTNode>(projection->root(), &sliceWalker);
+    // If this is an inclusion projection or if 'nodes' is not empty, call evaluateProjection().
+    if (isInclusion || !nodes.empty()) {
+        expr = evaluateProjection(
+            state, projType, std::move(paths), std::move(nodes), std::move(expr), rootSlot, slots);
+    }
 
-    auto sliceResultExpr = sliceContext.done();
+    // If 'sliceNodes' is not empty, then we need to call evaluateSliceOps() to evaluate the
+    // $slice ops.
+    if (!sliceNodes.empty()) {
+        expr = evaluateSliceOps(
+            state, std::move(slicePaths), std::move(sliceNodes), std::move(expr), slots);
+    }
 
-    return sbe::makeE<sbe::ELocalBind>(
-        frameId, std::move(binds), sliceResultExpr.extractExpr(state));
+    return expr;
 }
 }  // namespace mongo::stage_builder

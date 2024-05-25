@@ -175,10 +175,6 @@ public:
             return true;
         } else if (cmdObj.hasElement("getLastStableRecoveryTimestamp")) {
             try {
-                // Retrieving last stable recovery timestamp should not be blocked by oplog
-                // application.
-                ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
-                    opCtx->lockState());
                 opCtx->lockState()->setAdmissionPriority(AdmissionContext::Priority::kImmediate);
                 // We need to hold the lock so that we don't run when storage is being shutdown.
                 Lock::GlobalLock lk(opCtx,
@@ -221,7 +217,7 @@ public:
     }
 };
 
-MONGO_REGISTER_TEST_COMMAND(CmdReplSetTest);
+MONGO_REGISTER_COMMAND(CmdReplSetTest).testOnly();
 
 /** get rollback id.  used to check if a rollback happened during some interval of time.
     as consumed, the rollback id is not in any particular order, it simply changes on each rollback.
@@ -240,7 +236,8 @@ public:
         result.append("rbid", ReplicationProcess::get(opCtx)->getRollbackID());
         return true;
     }
-} cmdReplSetRBID;
+};
+MONGO_REGISTER_COMMAND(CmdReplSetGetRBID);
 
 class CmdReplSetGetConfig : public ReplSetCommand {
 public:
@@ -282,7 +279,8 @@ private:
     ActionSet getAuthActionSet() const override {
         return ActionSet{ActionType::replSetGetConfig};
     }
-} cmdReplSetGetConfig;
+};
+MONGO_REGISTER_COMMAND(CmdReplSetGetConfig);
 
 namespace {
 HostAndPort someHostAndPortForMe() {
@@ -392,7 +390,7 @@ public:
         }
 
         const auto& settings = ReplicationCoordinator::get(opCtx)->getSettings();
-        if (!settings.usingReplSets()) {
+        if (!settings.isReplSet()) {
             uasserted(ErrorCodes::NoReplicationEnabled,
                       "This node was not started with replication enabled.");
         }
@@ -465,7 +463,8 @@ private:
     ActionSet getAuthActionSet() const override {
         return ActionSet{ActionType::replSetConfigure};
     }
-} cmdReplSetInitiate;
+};
+MONGO_REGISTER_COMMAND(CmdReplSetInitiate);
 
 class CmdReplSetReconfig : public ReplSetCommand {
 public:
@@ -532,7 +531,8 @@ private:
     ActionSet getAuthActionSet() const override {
         return ActionSet{ActionType::replSetConfigure};
     }
-} cmdReplSetReconfig;
+};
+MONGO_REGISTER_COMMAND(CmdReplSetReconfig);
 
 class CmdReplSetFreeze : public ReplSetCommand {
 public:
@@ -563,7 +563,8 @@ private:
     ActionSet getAuthActionSet() const override {
         return ActionSet{ActionType::replSetStateChange};
     }
-} cmdReplSetFreeze;
+};
+MONGO_REGISTER_COMMAND(CmdReplSetFreeze);
 
 class CmdReplSetStepDown : public ReplSetCommand {
 public:
@@ -653,7 +654,8 @@ private:
     ActionSet getAuthActionSet() const override {
         return ActionSet{ActionType::replSetStateChange};
     }
-} cmdReplSetStepDown;
+};
+MONGO_REGISTER_COMMAND(CmdReplSetStepDown);
 
 class CmdReplSetMaintenance : public ReplSetCommand {
 public:
@@ -678,7 +680,8 @@ private:
     ActionSet getAuthActionSet() const override {
         return ActionSet{ActionType::replSetStateChange};
     }
-} cmdReplSetMaintenance;
+};
+MONGO_REGISTER_COMMAND(CmdReplSetMaintenance);
 
 class CmdReplSetSyncFrom : public ReplSetCommand {
 public:
@@ -708,7 +711,8 @@ private:
     ActionSet getAuthActionSet() const override {
         return ActionSet{ActionType::replSetStateChange};
     }
-} cmdReplSetSyncFrom;
+};
+MONGO_REGISTER_COMMAND(CmdReplSetSyncFrom);
 
 class CmdReplSetUpdatePosition : public ReplSetCommand {
 public:
@@ -755,7 +759,8 @@ public:
         }
         return true;
     }
-} cmdReplSetUpdatePosition;
+};
+MONGO_REGISTER_COMMAND(CmdReplSetUpdatePosition);
 
 namespace {
 /**
@@ -807,7 +812,7 @@ public:
         Status status = Status(ErrorCodes::InternalError, "status not set in heartbeat code");
         /* we don't call ReplSetCommand::check() here because heartbeat
            checks many things that are pre-initialization. */
-        if (!ReplicationCoordinator::get(opCtx)->isReplEnabled()) {
+        if (!ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()) {
             status = Status(ErrorCodes::NoReplicationEnabled, "not running using replication");
             uassertStatusOK(status);
         }
@@ -835,7 +840,8 @@ public:
         uassertStatusOK(status);
         return true;
     }
-} cmdReplSetHeartbeat;
+};
+MONGO_REGISTER_COMMAND(CmdReplSetHeartbeat);
 
 class CmdReplSetStepUp : public ReplSetCommand {
 public:
@@ -868,7 +874,8 @@ private:
     ActionSet getAuthActionSet() const override {
         return ActionSet{ActionType::replSetStateChange};
     }
-} cmdReplSetStepUp;
+};
+MONGO_REGISTER_COMMAND(CmdReplSetStepUp);
 
 class CmdReplSetAbortPrimaryCatchUp : public ReplSetCommand {
 public:
@@ -905,7 +912,8 @@ private:
     ActionSet getAuthActionSet() const override {
         return ActionSet{ActionType::replSetStateChange};
     }
-} cmdReplSetAbortPrimaryCatchUp;
+};
+MONGO_REGISTER_COMMAND(CmdReplSetAbortPrimaryCatchUp);
 
 }  // namespace repl
 }  // namespace mongo

@@ -117,7 +117,8 @@ public:
     HandshakeRole handshakeRole() const final {
         return HandshakeRole::kAuth;
     }
-} cmdSaslStart;
+};
+MONGO_REGISTER_COMMAND(CmdSaslStart);
 
 class CmdSaslContinue : public SaslContinueCmdVersion1Gen<CmdSaslContinue> {
 public:
@@ -155,7 +156,8 @@ public:
     HandshakeRole handshakeRole() const final {
         return HandshakeRole::kAuth;
     }
-} cmdSaslContinue;
+};
+MONGO_REGISTER_COMMAND(CmdSaslContinue);
 
 SaslReply doSaslStep(OperationContext* opCtx,
                      const SaslPayload& payload,
@@ -249,7 +251,8 @@ SaslReply runSaslStart(OperationContext* opCtx,
     opCtx->markKillOnClientDisconnect();
 
     // Note that while updateDatabase can throw, it should not be able to for saslStart.
-    session->updateDatabase(DatabaseNameUtil::serializeForAuth(request.getDbName()));
+    session->updateDatabase(
+        DatabaseNameUtil::serialize(request.getDbName(), request.getSerializationContext()));
     session->setMechanismName(request.getMechanism());
 
     return doSaslStart(opCtx, session, request);

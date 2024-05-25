@@ -80,7 +80,9 @@ public:
                                                  const BSONElement& specElem) {
             uassert(ErrorCodes::IllegalOperation,
                     str::stream() << kStageName << " is not supported on a standalone mongod",
-                    repl::ReplicationCoordinator::get(getGlobalServiceContext())->isReplEnabled());
+                    repl::ReplicationCoordinator::get(getGlobalServiceContext())
+                        ->getSettings()
+                        .isReplSet());
             uassert(ErrorCodes::IllegalOperation,
                     str::stream() << kStageName << " is not supported on a multitenant replica set",
                     !gMultitenancySupport);
@@ -152,7 +154,7 @@ public:
         return kStageName.rawData();
     }
 
-    Value serialize(SerializationOptions opts = SerializationOptions()) const final override;
+    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final override;
 
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 

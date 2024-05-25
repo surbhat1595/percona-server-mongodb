@@ -48,7 +48,7 @@ namespace bulk_write_common {
 /**
  * Validates the given bulkWrite command request and throws if the request is malformed.
  */
-void validateRequest(const BulkWriteCommandRequest& req, bool isRetryableWrite);
+void validateRequest(const BulkWriteCommandRequest& req);
 
 /**
  * Get the privileges needed to perform the given bulkWrite command.
@@ -67,5 +67,28 @@ int32_t getStatementId(const BulkWriteCommandRequest& req, size_t currentOpIdx);
  */
 NamespaceInfoEntry getFLENamespaceInfoEntry(const BSONObj& bulkWrite);
 
+/**
+ * Helper for FLE support. Build a InsertCommandRequest from a BulkWriteCommandRequest.
+ */
+write_ops::InsertCommandRequest makeInsertCommandRequestForFLE(
+    const std::vector<mongo::BSONObj>& documents,
+    const BulkWriteCommandRequest& req,
+    const mongo::NamespaceInfoEntry& nsInfoEntry);
+
+/**
+ * Helper function to build an UpdateCommandRequest based off the update operation in the bulkWrite
+ * request at index currentOpIdx.
+ */
+write_ops::UpdateCommandRequest makeUpdateCommandRequestFromUpdateOp(
+    const BulkWriteUpdateOp* op, const BulkWriteCommandRequest& req, size_t currentOpIdx);
+
+/**
+ * Helper for FLE support. Build a DeleteCommandRequest from a BulkWriteDeleteOp.
+ */
+write_ops::DeleteCommandRequest makeDeleteCommandRequestForFLE(
+    OperationContext* opCtx,
+    const BulkWriteDeleteOp* op,
+    const BulkWriteCommandRequest& req,
+    const mongo::NamespaceInfoEntry& nsInfoEntry);
 }  // namespace bulk_write_common
 }  // namespace mongo

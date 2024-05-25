@@ -1,19 +1,17 @@
 /**
  * Tests bulk write cursor response for correct responses.
  *
- * The test runs commands that are not allowed with security token: bulkWrite.
  * @tags: [
- *   assumes_against_mongod_not_mongos,
+ *   # The test runs commands that are not allowed with security token: bulkWrite.
  *   not_allowed_with_security_token,
  *   command_not_supported_in_serverless,
  *   # TODO SERVER-52419 Remove this tag.
  *   featureFlagBulkWriteCommand,
+ *   # TODO SERVER-79506 Remove this tag.
+ *   assumes_unsharded_collection,
  * ]
  */
-load("jstests/libs/bulk_write_utils.js");  // For cursorEntryValidator.
-
-(function() {
-"use strict";
+import {cursorEntryValidator} from "jstests/libs/bulk_write_utils.js";
 
 var coll = db.getCollection("coll");
 var coll1 = db.getCollection("coll1");
@@ -54,4 +52,3 @@ assert(!res.cursor.firstBatch[2]);
 assert.eq(coll.find().itcount(), 2);
 assert.eq(coll1.find().itcount(), 0);
 coll.drop();
-})();

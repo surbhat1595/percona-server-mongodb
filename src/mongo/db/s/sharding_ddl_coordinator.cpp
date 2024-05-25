@@ -86,7 +86,7 @@
 namespace mongo {
 
 MONGO_FAIL_POINT_DEFINE(hangBeforeRunningCoordinatorInstance);
-MONGO_FAIL_POINT_DEFINE(overrideDDLLockTimeout);
+MONGO_FAIL_POINT_DEFINE(hangBeforeRemovingCoordinatorDocument);
 
 namespace {
 
@@ -106,25 +106,11 @@ ExecutorFuture<void> ShardingDDLCoordinator::_acquireLockAsync(
 
                const auto coorName = DDLCoordinatorType_serializer(_coordId.getOperationType());
 
-               const auto lockTimeOut = [&]() -> Milliseconds {
-                   if (auto sfp = overrideDDLLockTimeout.scoped(); MONGO_unlikely(sfp.isActive())) {
-                       if (auto timeoutElem = sfp.getData()["timeoutMillisecs"]; timeoutElem.ok()) {
-                           const auto timeoutMillisecs = Milliseconds(timeoutElem.safeNumberLong());
-                           LOGV2(6320700,
-                                 "Overriding DDL lock timeout",
-                                 "timeout"_attr = timeoutMillisecs);
-                           return timeoutMillisecs;
-                       }
-                   }
-                   return DDLLockManager::kDefaultLockTimeout;
-               }();
-
                _scopedLocks.emplace(DDLLockManager::ScopedBaseDDLLock{opCtx,
                                                                       _locker.get(),
                                                                       resource,
                                                                       coorName,
                                                                       lockMode,
-                                                                      Date_t::now() + lockTimeOut,
                                                                       false /* waitForRecovery */});
            })
         .until([this, resource, lockMode](Status status) {
@@ -492,6 +478,8 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                                     "coordinatorId"_attr = _coordId,
                                     "reason"_attr = redact(completionStatus));
                     }
+
+                    hangBeforeRemovingCoordinatorDocument.pauseWhileSet();
 
                     LOGV2(5565601,
                           "Releasing sharding DDL coordinator",

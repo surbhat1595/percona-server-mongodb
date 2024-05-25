@@ -4,12 +4,11 @@
 //   uses_multi_shard_transaction,
 //   uses_transactions,
 // ]
-(function() {
-"use strict";
-
-load("jstests/libs/curop_helpers.js");   // For waitForCurOpByFailPoint().
-load("jstests/libs/parallelTester.js");  // for Thread.
-load("jstests/sharding/libs/sharded_transactions_helpers.js");
+import {waitForCurOpByFailPointNoNS} from "jstests/libs/curop_helpers.js";
+import {Thread} from "jstests/libs/parallelTester.js";
+import {
+    flushRoutersAndRefreshShardMetadata
+} from "jstests/sharding/libs/sharded_transactions_helpers.js";
 
 // Verifies the transaction server status response has the fields that we expect.
 function verifyServerStatusFields(res) {
@@ -229,6 +228,10 @@ assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {skey: 1}}));
 assert.commandWorked(st.s.adminCommand({split: ns, middle: {skey: 0}}));
 assert.commandWorked(st.s.adminCommand({moveChunk: ns, find: {skey: 1}, to: st.shard1.shardName}));
 flushRoutersAndRefreshShardMetadata(st, {ns});
+
+// Force the other mongos to talk to the shards to get the latest cluster time and to avoid
+// getting the MigrationConflict error.
+st.s1.getDB(dbName).getCollection(collName).find().itcount();
 
 let expectedStats = new ExpectedTransactionServerStatus();
 
@@ -734,4 +737,3 @@ jsTest.log("Change shard key with retryable write - batch write command.");
 
 session.endSession();
 st.stop();
-}());

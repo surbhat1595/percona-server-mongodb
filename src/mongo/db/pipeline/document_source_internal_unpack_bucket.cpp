@@ -85,6 +85,7 @@
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_options.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
@@ -284,16 +285,290 @@ void optimizePrefix(Pipeline::SourceContainer::iterator itr, Pipeline::SourceCon
     container->splice(itr, prefix);
 }
 
+boost::intrusive_ptr<Expression> handleDateTruncRewrite(
+    boost::intrusive_ptr<ExpressionContext> pExpCtx,
+    boost::intrusive_ptr<Expression> expr,
+    const std::string& timeField,
+    int bucketMaxSpanSeconds) {
+    if (bucketMaxSpanSeconds > 86400 /* seconds in 1 day */) {
+        return {};
+    }
+    ExpressionDateTrunc* dateExpr = dynamic_cast<ExpressionDateTrunc*>(expr.get());
+    if (!dateExpr) {
+        return {};
+    }
+    const auto dateExprChildren = dateExpr->getChildren();
+    auto datePathExpr = dynamic_cast<ExpressionFieldPath*>(dateExprChildren[0].get());
+    if (!datePathExpr) {
+        return {};
+    }
+
+    // The path must be at the timeField for this re-write to be correct (and the zero
+    // component is always CURRENT).
+    const auto& datePath = datePathExpr->getFieldPath();
+    if (datePath.getPathLength() != 2 || datePath.getFieldName(1) != timeField) {
+        return {};
+    }
+
+    // Validate the bucket boundaries align with the date produced by $dateTrunc. We don't
+    // have access to any documents, so 'unit' and  'binSize' must be constants or can be
+    // optimized to a constant. The smallest possible value for 'bucketMaxSpanSeconds' is 1 second,
+    // and therefore if the 'unit' is a millisecond, the rewrite does not apply.
+    boost::optional<TimeUnit> unit = dateExpr->getOptimizedUnit();
+    if (!unit || unit == TimeUnit::millisecond) {
+        return {};
+    }
+    long long dateTruncUnitInSeconds = timeUnitValueInSeconds(*unit);
+    if (dateExpr->isBinSizeSpecified()) {
+        auto optBin = dateExpr->getOptimizedBinSize();
+        if (!optBin) {
+            return {};
+        }
+        dateTruncUnitInSeconds = dateTruncUnitInSeconds * optBin.value();
+    }
+
+    // Confirm that the 'binSize' and 'unit' provided is a multiple of 'bucketMaxSpanSeconds',
+    // to ensure the predicate aligns with the bucket boundaries.
+    if (dateTruncUnitInSeconds % bucketMaxSpanSeconds) {
+        return {};
+    }
+
+    if (dateExpr->isTimezoneSpecified()) {
+        boost::optional<TimeZone> timezone = dateExpr->getOptimizedTimeZone();
+        if (!timezone) {
+            return {};
+        }
+
+        // The rewrite will result in incorrect results, if the timezone doesn't align with
+        // the bucket boundaries. If the bucket's boundary is greater than one hour, measurements in
+        // the same bucket might be considered in different groups for different timezones. For
+        // example, two measurements might be on the same day for one timezone but on different days
+        // in another timezones. So, this rewrite is restricted to buckets spanning an hour or less
+        // if the timezone is specified.
+        if (bucketMaxSpanSeconds > 3600 /* seconds in 1 hour */ ||
+            timezone->utcOffset(Date_t::now()).count() % bucketMaxSpanSeconds) {
+            return {};
+        }
+    }
+
+    // If the bucket boundaries align, we should rewrite $dateTrunc to use the minimum
+    // timeField stored in the control field.
+    auto date = ExpressionFieldPath::createPathFromString(pExpCtx.get(),
+                                                          timeseries::kControlMinFieldNamePrefix +
+                                                              timeField,
+                                                          pExpCtx->variablesParseState);
+    return make_intrusive<ExpressionDateTrunc>(pExpCtx.get(),
+                                               date,
+                                               dateExprChildren[1 /*_kUnit */].get(),
+                                               dateExprChildren[2 /* _kBinSize */].get(),
+                                               dateExprChildren[3 /* _kTimeZone */].get(),
+                                               dateExprChildren[4 /* _kStartOfWeek */].get());
+}
+
+boost::intrusive_ptr<Expression> rewriteGroupByElement(
+    boost::intrusive_ptr<ExpressionContext> pExpCtx,
+    boost::intrusive_ptr<Expression> expr,
+    const boost::optional<std::string>& metaField,
+    const std::string& timeField,
+    int bucketMaxSpanSeconds,
+    bool fixedBuckets,
+    bool usesExtendedRange) {
+    // We allow the $group stage to be rewritten if the _id field only consists of these 3 options:
+    // 1. If the _id field is constant.
+    // 2. If the _id field is a fieldPath on the meta field.
+    // 3. For fixed buckets collection, if the _id field is a $dateTrunc expressions on the
+    // timeField.
+    if (ExpressionConstant::isConstant(expr)) {
+        return expr;
+    }
+
+    // Option 2: The only field path supported is at or under the metaField.
+    const auto* exprIdPath = dynamic_cast<const ExpressionFieldPath*>(expr.get());
+    if (exprIdPath) {
+        // {The path must be at or under the metaField for this re-write to be correct (and
+        // the zero component is always CURRENT).}
+        const auto& idPath = exprIdPath->getFieldPath();
+        if (!metaField || idPath.getPathLength() < 2 ||
+            idPath.getFieldName(1) != metaField.value()) {
+            return {};
+        }
+
+        std::ostringstream os;
+        os << timeseries::kBucketMetaFieldName;
+        for (size_t index = 2; index < idPath.getPathLength(); index++) {
+            os << "." << idPath.getFieldName(index);
+        }
+        return ExpressionFieldPath::createPathFromString(
+            pExpCtx.get(), os.str(), pExpCtx->variablesParseState);
+    }
+
+    // Option 3: The only expression currently allowed is $dateTrunc on the timeField if the buckets
+    // are fixed and do not use an extended range.
+    if (fixedBuckets && !usesExtendedRange) {
+        return handleDateTruncRewrite(pExpCtx, expr, timeField, bucketMaxSpanSeconds);
+    }
+    return {};
+}
+
+std::unique_ptr<AccumulationExpression> rewriteCountGroupAccm(
+    ExpressionContext* pExpCtx,
+    const mongo::AccumulationStatement& stmt,
+    const std::string& timeField) {
+    // We rewrite {$sum: 1} to use the bucket level field names and account for
+    // compressed/uncompressed buckets. The resulting MQL will look like:
+    //$sum : {
+    //  $cond: [
+    //    {$gte : [ "$control.version", 2 ]},
+    //    "$control.count",
+    //    {$size : {$objectToArray : "$data.t"}}]}}
+    // We expect most buckets to be compressed, and should just reference $control.count.
+    auto exprArg = dynamic_cast<ExpressionConstant*>(stmt.expr.argument.get());
+    if (!exprArg || ValueComparator::kInstance.evaluate(exprArg->getValue() != Value(1))) {
+        return {};
+    }
+
+    std::string controlCountField = timeseries::kControlFieldNamePrefix.toString() +
+        timeseries::kBucketControlCountFieldName.toString();
+
+    auto ifExpr = ExpressionCompare::create(
+        pExpCtx,
+        ExpressionCompare::CmpOp::GTE,
+        ExpressionFieldPath::createPathFromString(
+            pExpCtx,
+            timeseries::kControlFieldNamePrefix.toString() +
+                timeseries::kBucketControlVersionFieldName.toString(),
+            pExpCtx->variablesParseState),
+        ExpressionConstant::create(pExpCtx,
+                                   Value(timeseries::kTimeseriesControlCompressedVersion)));
+
+    auto thenExpr = ExpressionFieldPath::createPathFromString(
+        pExpCtx, controlCountField, pExpCtx->variablesParseState);
+
+    auto elseExpr = BSON("$size" << BSON("$objectToArray"
+                                         << "$" + timeseries::kDataFieldNamePrefix + timeField));
+    auto argument = ExpressionCond::create(
+        pExpCtx,
+        std::move(ifExpr),
+        std::move(thenExpr),
+        ExpressionSize::parse(pExpCtx, elseExpr.firstElement(), pExpCtx->variablesParseState));
+
+    auto initializer = ExpressionConstant::create(pExpCtx, Value(BSONNULL));
+    return std::make_unique<AccumulationExpression>(
+        initializer,
+        argument,
+        [pExpCtx]() { return AccumulatorSum::create(pExpCtx); },
+        AccumulatorSum::kName);
+}
+
+std::unique_ptr<AccumulationExpression> rewriteMinMaxGroupAccm(
+    boost::intrusive_ptr<ExpressionContext> pExpCtx,
+    const mongo::AccumulationStatement& stmt,
+    const boost::optional<std::string>& metaField,
+    const std::string& timeField) {
+    const auto* exprArgPath = dynamic_cast<const ExpressionFieldPath*>(stmt.expr.argument.get());
+
+    // This is either a const or a compound expression. While some such expressions (e.g: {$min:
+    // {$add: ['$a', 2]}}) could be re-written in terms of the min/max on the control fields, in
+    // general we cannot do it (e.g. {$min: {$add: ['$a', '$b']}}), so we block the re-write.
+    if (!exprArgPath) {
+        return {};
+    }
+
+    // Path can have a single component if it's using $$CURRENT or a similar variable. We don't
+    // support these.
+    const auto& path = exprArgPath->getFieldPath();
+    if (path.getPathLength() <= 1) {
+        return {};
+    }
+    const auto& accFieldName = path.getFieldName(1);
+
+    // Build the paths for the bucket-level fields.
+    std::ostringstream os;
+    if (metaField && accFieldName == metaField.value()) {
+        // Update aggregates to reference the meta field.
+        os << timeseries::kBucketMetaFieldName;
+
+        for (size_t index = 2; index < path.getPathLength(); index++) {
+            os << "." << path.getFieldName(index);
+        }
+    } else {
+        // Update aggregates to reference the control field.
+        const auto op = stmt.expr.name;
+        if (op == "$min") {
+            // Rewrite not valid for the timeField because control.min.time contains a rounded-down
+            // time and not the actual min time of events in the bucket.
+            if (accFieldName == timeField) {
+                return {};
+            }
+            os << timeseries::kControlMinFieldNamePrefix;
+        } else if (op == "$max") {
+            os << timeseries::kControlMaxFieldNamePrefix;
+        } else {
+            MONGO_UNREACHABLE;
+        }
+
+        for (size_t index = 1; index < path.getPathLength(); index++) {
+            if (index > 1) {
+                os << ".";
+            }
+            os << path.getFieldName(index);
+        }
+    }
+
+    // Re-create the accumulator using the bucket-level paths.
+    const auto& newExpr = ExpressionFieldPath::createPathFromString(
+        pExpCtx.get(), os.str(), pExpCtx->variablesParseState);
+    AccumulationExpression accExpr = stmt.expr;
+    accExpr.argument = newExpr;
+    return std::make_unique<AccumulationExpression>(std::move(accExpr));
+}
+
+boost::intrusive_ptr<Expression> rewriteGroupByField(
+    boost::intrusive_ptr<ExpressionContext> pExpCtx,
+    const std::vector<boost::intrusive_ptr<Expression>>& idFieldExpressions,
+    const std::vector<std::string>& idFieldNames,
+    const boost::optional<std::string>& metaField,
+    const std::string& timeField,
+    int bucketMaxSpanSeconds,
+    bool fixedBuckets,
+    bool usesExtendedRange) {
+    tassert(7823400,
+            "idFieldNames must be empty or the same size as idFieldExpressions",
+            (idFieldNames.empty() && idFieldExpressions.size() == 1) ||
+                idFieldNames.size() == idFieldExpressions.size());
+
+    std::vector<std::pair<std::string, boost::intrusive_ptr<Expression>>> fieldsAndExprs;
+    const bool isIdFieldAnExpr = idFieldNames.empty();
+    for (std::size_t i = 0; i < idFieldExpressions.size(); ++i) {
+        auto expr = rewriteGroupByElement(pExpCtx,
+                                          idFieldExpressions[i],
+                                          metaField,
+                                          timeField,
+                                          bucketMaxSpanSeconds,
+                                          fixedBuckets,
+                                          usesExtendedRange);
+        if (!expr) {
+            return {};
+        }
+        if (isIdFieldAnExpr) {
+            return expr;
+        }
+        fieldsAndExprs.emplace_back(idFieldNames[i], expr);
+    }
+    return ExpressionObject::create(pExpCtx.get(), std::move(fieldsAndExprs));
+}
+
 }  // namespace
 
 DocumentSourceInternalUnpackBucket::DocumentSourceInternalUnpackBucket(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     BucketUnpacker bucketUnpacker,
     int bucketMaxSpanSeconds,
-    bool assumeNoMixedSchemaData)
+    bool assumeNoMixedSchemaData,
+    bool fixedBuckets)
     : DocumentSource(kStageNameInternal, expCtx),
       _assumeNoMixedSchemaData(assumeNoMixedSchemaData),
-
+      _fixedBuckets(fixedBuckets),
       _bucketUnpacker(std::move(bucketUnpacker)),
       _bucketMaxSpanSeconds{bucketMaxSpanSeconds} {}
 
@@ -303,9 +578,13 @@ DocumentSourceInternalUnpackBucket::DocumentSourceInternalUnpackBucket(
     int bucketMaxSpanSeconds,
     const boost::optional<BSONObj>& eventFilterBson,
     const boost::optional<BSONObj>& wholeBucketFilterBson,
-    bool assumeNoMixedSchemaData)
-    : DocumentSourceInternalUnpackBucket(
-          expCtx, std::move(bucketUnpacker), bucketMaxSpanSeconds, assumeNoMixedSchemaData) {
+    bool assumeNoMixedSchemaData,
+    bool fixedBuckets)
+    : DocumentSourceInternalUnpackBucket(expCtx,
+                                         std::move(bucketUnpacker),
+                                         bucketMaxSpanSeconds,
+                                         assumeNoMixedSchemaData,
+                                         fixedBuckets) {
     if (eventFilterBson) {
         _eventFilterBson = eventFilterBson->getOwned();
         _eventFilter =
@@ -346,6 +625,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalUnpackBucket::createF
     auto hasBucketMaxSpanSeconds = false;
     auto bucketMaxSpanSeconds = 0;
     auto assumeClean = false;
+    bool fixedBuckets = false;
     std::vector<std::string> computedMetaProjFields;
     boost::optional<BSONObj> eventFilterBson;
     boost::optional<BSONObj> wholeBucketFilterBson;
@@ -454,6 +734,11 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalUnpackBucket::createF
                                   << " field must be an object, got: " << elem.type(),
                     elem.type() == BSONType::Object);
             wholeBucketFilterBson = elem.Obj();
+        } else if (fieldName == kFixedBuckets) {
+            uassert(7823300,
+                    str::stream() << kFixedBuckets << " field must be a bool, got: " << elem.type(),
+                    elem.type() == BSONType::Bool);
+            fixedBuckets = elem.boolean();
         } else {
             uasserted(5346506,
                       str::stream()
@@ -473,7 +758,8 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalUnpackBucket::createF
                                                               bucketMaxSpanSeconds,
                                                               eventFilterBson,
                                                               wholeBucketFilterBson,
-                                                              assumeClean);
+                                                              assumeClean,
+                                                              fixedBuckets);
 }
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceInternalUnpackBucket::createFromBsonExternal(
@@ -523,11 +809,12 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalUnpackBucket::createF
         BucketUnpacker{std::move(bucketSpec)},
         // Using the bucket span associated with the default granularity seconds.
         timeseries::getMaxSpanSecondsFromGranularity(BucketGranularityEnum::Seconds),
-        assumeClean);
+        assumeClean,
+        false /* fixedBuckets */);
 }
 
 void DocumentSourceInternalUnpackBucket::serializeToArray(std::vector<Value>& array,
-                                                          SerializationOptions opts) const {
+                                                          const SerializationOptions& opts) const {
     auto explain = opts.verbosity;
 
     MutableDocument out;
@@ -594,6 +881,10 @@ void DocumentSourceInternalUnpackBucket::serializeToArray(std::vector<Value>& ar
     }
     if (_eventFilter) {
         out.addField(kEventFilter, Value{_eventFilter->serialize(opts)});
+    }
+
+    if (_fixedBuckets) {
+        out.addField(kFixedBuckets, opts.serializeLiteral(Value(_fixedBuckets)));
     }
 
     if (!explain) {
@@ -775,7 +1066,8 @@ BucketSpec::BucketPredicate DocumentSourceInternalUnpackBucket::createPredicates
         haveComputedMetaField(),
         _bucketUnpacker.includeMetaField(),
         _assumeNoMixedSchemaData,
-        BucketSpec::IneligiblePredicatePolicy::kIgnore);
+        BucketSpec::IneligiblePredicatePolicy::kIgnore,
+        _fixedBuckets);
 }
 
 std::pair<BSONObj, bool> DocumentSourceInternalUnpackBucket::extractProjectForPushDown(
@@ -791,8 +1083,8 @@ std::pair<BSONObj, bool> DocumentSourceInternalUnpackBucket::extractProjectForPu
 }
 
 std::pair<bool, Pipeline::SourceContainer::iterator>
-DocumentSourceInternalUnpackBucket::rewriteGroupByMinMax(Pipeline::SourceContainer::iterator itr,
-                                                         Pipeline::SourceContainer* container) {
+DocumentSourceInternalUnpackBucket::rewriteGroupStage(Pipeline::SourceContainer::iterator itr,
+                                                      Pipeline::SourceContainer* container) {
     // The computed min/max for each bucket uses the default collation. If the collation of the
     // query doesn't match the default we cannot rely on the computed values as they might differ
     // (e.g. numeric and lexicographic collations compare "5" and "10" in opposite order).
@@ -807,105 +1099,62 @@ DocumentSourceInternalUnpackBucket::rewriteGroupByMinMax(Pipeline::SourceContain
         return {};
     }
 
-    if (!_bucketUnpacker.bucketSpec().metaField()) {
-        return {};
-    }
-    const auto& metaField = *_bucketUnpacker.bucketSpec().metaField();
+    const auto& metaField = _bucketUnpacker.bucketSpec().metaField();
+    const auto& timeField = _bucketUnpacker.bucketSpec().timeField();
 
-    const auto& idFields = groupPtr->getIdFields();
-    if (idFields.size() != 1) {
-        return {};
-    }
-
-    const auto& exprId = idFields.cbegin()->second;
-    // TODO: SERVER-68811. Allow rewrites if expression is constant.
-    const auto* exprIdPath = dynamic_cast<const ExpressionFieldPath*>(exprId.get());
-    if (exprIdPath == nullptr) {
-        return {};
-    }
-
-    const auto& idPath = exprIdPath->getFieldPath();
-    if (idPath.getPathLength() < 2 || idPath.getFieldName(1) != metaField) {
+    const auto& idFieldExpressions = groupPtr->getIdExpressions();
+    const auto& idFieldNames = groupPtr->getIdFieldNames();
+    auto rewrittenIdExpression = rewriteGroupByField(pExpCtx,
+                                                     idFieldExpressions,
+                                                     idFieldNames,
+                                                     metaField,
+                                                     timeField,
+                                                     _bucketMaxSpanSeconds,
+                                                     _fixedBuckets,
+                                                     _usesExtendedRange);
+    if (!rewrittenIdExpression) {
         return {};
     }
 
-    std::vector<AccumulationStatement> accumulationStatements;
+    std::vector<AccumulationStatement> accumulationStatementsBucket;
     for (const AccumulationStatement& stmt : groupPtr->getAccumulationStatements()) {
-        const auto* exprArg = stmt.expr.argument.get();
-        if (const auto* exprArgPath = dynamic_cast<const ExpressionFieldPath*>(exprArg)) {
-            const auto& path = exprArgPath->getFieldPath();
-            if (path.getPathLength() <= 1) {
+        const auto& op = stmt.expr.name;
+        // If _any_ of the accumulators aren't $min/$max/$count we won't perform the re-write (some
+        // other accs might be re-writable in terms of the bucket controls, we just haven't invested
+        // into implementing them). $count is desugared to {$sum: 1}.
+        std::unique_ptr<AccumulationExpression> accExpr;
+        if (op == "$min" || op == "$max") {
+            accExpr = rewriteMinMaxGroupAccm(pExpCtx, stmt, metaField, timeField);
+            if (!accExpr) {
                 return {};
             }
-
-            const auto& rootFieldName = path.getFieldName(1);
-            if (rootFieldName == _bucketUnpacker.bucketSpec().timeField()) {
-                // Rewrite not valid for time field. We want to eliminate the bucket
-                // unpack stage here.
+        } else if (op == "$sum") {
+            accExpr = rewriteCountGroupAccm(pExpCtx.get(), stmt, timeField);
+            if (!accExpr) {
                 return {};
             }
-
-            std::ostringstream os;
-            if (rootFieldName == metaField) {
-                // Update aggregates to reference the meta field.
-                os << timeseries::kBucketMetaFieldName;
-
-                for (size_t index = 2; index < path.getPathLength(); index++) {
-                    os << "." << path.getFieldName(index);
-                }
-            } else {
-                // Update aggregates to reference the control field.
-                const auto op = stmt.expr.name;
-                if (op == "$min") {
-                    os << timeseries::kControlMinFieldNamePrefix;
-                } else if (op == "$max") {
-                    os << timeseries::kControlMaxFieldNamePrefix;
-                } else {
-                    // Rewrite is valid only for min and max aggregates.
-                    return {};
-                }
-
-                for (size_t index = 1; index < path.getPathLength(); index++) {
-                    if (index > 1) {
-                        os << ".";
-                    }
-                    os << path.getFieldName(index);
-                }
-            }
-
-            const auto& newExpr = ExpressionFieldPath::createPathFromString(
-                pExpCtx.get(), os.str(), pExpCtx->variablesParseState);
-
-            AccumulationExpression accExpr = stmt.expr;
-            accExpr.argument = newExpr;
-            accumulationStatements.emplace_back(stmt.fieldName, std::move(accExpr));
         } else {
             return {};
         }
+        accumulationStatementsBucket.emplace_back(stmt.fieldName, std::move(*accExpr));
     }
 
-    std::ostringstream os;
-    os << timeseries::kBucketMetaFieldName;
-    for (size_t index = 2; index < idPath.getPathLength(); index++) {
-        os << "." << idPath.getFieldName(index);
-    }
-    auto exprId1 = ExpressionFieldPath::createPathFromString(
-        pExpCtx.get(), os.str(), pExpCtx->variablesParseState);
+    boost::intrusive_ptr<mongo::DocumentSourceGroup> newGroup =
+        DocumentSourceGroup::create(pExpCtx,
+                                    std::move(rewrittenIdExpression),
+                                    std::move(accumulationStatementsBucket),
+                                    groupPtr->getMaxMemoryUsageBytes());
 
-    auto newGroup = DocumentSourceGroup::create(pExpCtx,
-                                                std::move(exprId1),
-                                                std::move(accumulationStatements),
-                                                groupPtr->getMaxMemoryUsageBytes());
-
-    // Erase current stage and following group stage, and replace with updated group.
+    // Replace the current stage (DocumentSourceInternalUnpackBucket) and the following group stage
+    // with the new group.
     container->erase(std::next(itr));
     *itr = std::move(newGroup);
 
     if (itr == container->begin()) {
-        // Optimize group stage.
+        // Optimize the new group stage.
         return {true, itr};
     } else {
-        // Give chance of the previous stage to optimize against group stage.
+        // Give chance to the previous stage to optimize against the new group stage.
         return {true, std::prev(itr)};
     }
 }
@@ -1373,9 +1622,9 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
         }
     }
 
-    {
-        // Check if we can avoid unpacking if we have a group stage with min/max aggregates.
-        auto [success, result] = rewriteGroupByMinMax(itr, container);
+    if (!_eventFilter) {
+        // Check if we can avoid unpacking if we have a group stage with min/max/count aggregates.
+        auto [success, result] = rewriteGroupStage(itr, container);
         if (success) {
             return result;
         }
@@ -1413,7 +1662,6 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
 
     // Attempt to map predicates on bucketed fields to the predicates on the control field.
     if (auto nextMatch = dynamic_cast<DocumentSourceMatch*>(std::next(itr)->get())) {
-
         // Merge multiple following $match stages.
         auto itrToMatch = std::next(itr);
         while (std::next(itrToMatch) != container->end() &&
@@ -1424,7 +1672,8 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
         auto predicates = createPredicatesOnBucketLevelField(nextMatch->getMatchExpression());
 
         // Try to create a tight bucket predicate to perform bucket level matching.
-        if (predicates.tightPredicate) {
+        // If we removed the _eventFilter with fixed buckets, we do not need a wholeBucketFilter.
+        if (predicates.tightPredicate && !predicates.rewriteProvidesExactMatchPredicate) {
             _wholeBucketFilterBson = predicates.tightPredicate->serialize();
             _wholeBucketFilter =
                 uassertStatusOK(MatchExpressionParser::parse(_wholeBucketFilterBson,
@@ -1434,18 +1683,20 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
             _wholeBucketFilter = MatchExpression::optimize(std::move(_wholeBucketFilter));
         }
 
-        // Push the original event predicate into the unpacking stage.
-        _eventFilterBson = nextMatch->getQuery().getOwned();
-        _eventFilter =
-            uassertStatusOK(MatchExpressionParser::parse(_eventFilterBson,
-                                                         pExpCtx,
-                                                         ExtensionsCallbackNoop(),
-                                                         Pipeline::kAllowedMatcherFeatures));
-        _eventFilter = MatchExpression::optimize(std::move(_eventFilter));
-        _eventFilterDeps = {};
-        match_expression::addDependencies(_eventFilter.get(), &_eventFilterDeps);
-        container->erase(std::next(itr));
+        if (!predicates.rewriteProvidesExactMatchPredicate) {
+            // Push the original event predicate into the unpacking stage.
+            _eventFilterBson = nextMatch->getQuery().getOwned();
+            _eventFilter =
+                uassertStatusOK(MatchExpressionParser::parse(_eventFilterBson,
+                                                             pExpCtx,
+                                                             ExtensionsCallbackNoop(),
+                                                             Pipeline::kAllowedMatcherFeatures));
+            _eventFilter = MatchExpression::optimize(std::move(_eventFilter));
+            _eventFilterDeps = {};
+            match_expression::addDependencies(_eventFilter.get(), &_eventFilterDeps);
+        }
 
+        container->erase(std::next(itr));
         // If the $match is not followed by other stages referencing fields (e.g. $count), we can
         // unpack directly to BSON so that data doesn't need to be materialized to Document.
         auto deps = getRestPipelineDependencies(itr, container, false /* includeEventFilter */);
@@ -1509,6 +1760,70 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
     enableStreamingGroupIfPossible(itr, container);
 
     return container->end();
+}
+
+bool DocumentSourceInternalUnpackBucket::isSbeCompatible() {
+    // Caches the SBE compatibility status when this function is called for the first time. This is
+    // called before trying to push down stages to SBE.
+    if (!_isSbeCompatible) {
+        _isSbeCompatible.emplace([&] {
+            // Just in case that the event filter or the whole bucket filter is incompatible with
+            // SBE. Here's what may happen:
+            //
+            // While optimizing pipeline, we may end up with pushing SBE-incompatible filters down
+            // to the '$_internalUnpackBucket' stage. But before trying to pushing down stages to
+            // SBE, we set the expCtx->sbeCompatibility to 'fullyCompatible' and we forget the the
+            // whole SBE compatibility status for pipeline. And we examine each stage one by one
+            // while pushding down them. So, we need to remember the SBE compatibility at this
+            // point.
+            //
+            // This is overly conservative but we don't have a way to check which stage or
+            // expression is individually incompatible with SBE.
+            if (pExpCtx->sbeCompatibility < SbeCompatibility::fullyCompatible) {
+                return false;
+            }
+
+            // Currently we only support in SBE unpacking with a statically known set of fields.
+            if (_bucketUnpacker.bucketSpec().behavior() != BucketSpec::Behavior::kInclude) {
+                return false;
+            }
+
+            auto fieldSet = _bucketUnpacker.bucketSpec().fieldSet();
+            tassert(7969801,
+                    "All fields must be top-level ones",
+                    std::all_of(fieldSet.begin(), fieldSet.end(), [](auto&& field) {
+                        return FieldPath(field).getPathLength() == 1;
+                    }));
+            // If any top-level field of the 'eventFilter' is not in the bucketSpec's fieldSet, then
+            // it's a discarded field and we cannot push down the stage because the SBE filter
+            // generator cannot refer to slot(s) for the discarded field(s) which are not returned
+            // from 'block_to_row' stage.
+            //
+            // TODO SERVER-80324: Remove this restriction.
+            for (auto&& eventFilterPath : _eventFilterDeps.fields) {
+                if (!fieldSet.contains(FieldPath(eventFilterPath).front().toString())) {
+                    return false;
+                }
+            }
+
+            for (auto&& computedMeta : _bucketUnpacker.bucketSpec().computedMetaProjFields()) {
+                fieldSet.erase(computedMeta);
+            }
+            if (fieldSet.empty()) {
+                // If the bucket spec has no measurement fields, then the stage cannot be pushed
+                // down because if the 'block_to_row' / 'ts_bucket_to_cell_block' stages in the SBE
+                // do not have any fields to unpack, then they can't know how many rows to produce
+                // according to the current implementation.
+                //
+                // TODO SERVER-80323: Remove this restriction.
+                return false;
+            }
+
+            return true;
+        }());
+    }
+
+    return *_isSbeCompatible;
 }
 
 DocumentSource::GetModPathsReturn DocumentSourceInternalUnpackBucket::getModifiedPaths() const {

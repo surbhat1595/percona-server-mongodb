@@ -81,7 +81,7 @@ bool nonShardedCollectionCommandPassthrough(OperationContext* opCtx,
             !cri.cm.isSharded());
 
     auto responses = scatterGatherVersionedTargetByRoutingTable(opCtx,
-                                                                DatabaseNameUtil::serialize(dbName),
+                                                                dbName,
                                                                 nss,
                                                                 cri,
                                                                 cmdObj,
@@ -155,8 +155,8 @@ public:
             Shard::RetryPolicy::kIdempotent,
             &result);
     }
-
-} convertToCappedCmd;
+};
+MONGO_REGISTER_COMMAND(ConvertToCappedCmd);
 
 }  // namespace
 }  // namespace mongo

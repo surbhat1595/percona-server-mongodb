@@ -702,8 +702,8 @@ void processFieldsForInsertV2(FLEQueryInterface* queryImpl,
         return;
     }
 
-    const NamespaceString nssEsc = NamespaceStringUtil::parseNamespaceFromRequest(
-        edcNss.dbName(), efc.getEscCollection().value());
+    const NamespaceString nssEsc =
+        NamespaceStringUtil::deserialize(edcNss.dbName(), efc.getEscCollection().value());
 
     uint32_t totalTokens = 0;
 
@@ -765,8 +765,8 @@ void processFieldsForInsertV2(FLEQueryInterface* queryImpl,
         uassertStatusOK(queryImpl->insertDocuments(nssEsc, escDocuments, pStmtId, true));
     checkWriteErrors(escInsertReply);
 
-    NamespaceString nssEcoc = NamespaceStringUtil::parseNamespaceFromRequest(
-        edcNss.dbName(), efc.getEcocCollection().value());
+    NamespaceString nssEcoc =
+        NamespaceStringUtil::deserialize(edcNss.dbName(), efc.getEcocCollection().value());
     std::vector<BSONObj> ecocDocuments;
     ecocDocuments.reserve(totalTokens);
 
@@ -1890,11 +1890,19 @@ std::vector<std::vector<FLEEdgeCountInfo>> FLETagNoTXNQuery::getTags(
     auto as = AuthorizationSession::get(cc());
     as->grantInternalAuthorization(opCtx.get());
 
-    GetQueryableEncryptionCountInfo getCountsCmd(nss);
+    const auto setDollarTenant = nss.tenantId() && gMultitenancySupport;
+    auto sc = SerializationContext::stateCommandRequest();
 
-    const auto tenantId = nss.tenantId();
-    if (tenantId && gMultitenancySupport) {
-        getCountsCmd.setDollarTenant(tenantId);
+    // We need to instruct the request object (via serialization context passed in when constructing
+    // getCountsCmd) that we do not ALSO prefix the $db field when serialize() is later called since
+    // we will already be setting the $tenant field below.  Providing both a tenant prefix and a
+    // $tenant field is unsupported and can lead to namespace errors.
+    sc.setTenantIdSource(setDollarTenant);
+
+    GetQueryableEncryptionCountInfo getCountsCmd(nss, sc);
+
+    if (setDollarTenant) {
+        getCountsCmd.setDollarTenant(nss.tenantId());
     }
 
     getCountsCmd.setTokens(toTagSets(tokensSets));

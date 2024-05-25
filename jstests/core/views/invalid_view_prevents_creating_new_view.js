@@ -2,8 +2,8 @@
  * Test that, when an existing view in system.views is invalid because of a $out in the
  * pipeline, the database errors on creation of a new view.
  *
- * The test runs commands that are not allowed with security token: applyOps.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: applyOps.
  *   not_allowed_with_security_token,
  *   # applyOps is not available on mongos.
  *   assumes_against_mongod_not_mongos,
@@ -14,12 +14,6 @@
  *   tenant_migration_incompatible,
  * ]
  */
-(function() {
-"use strict";
-
-// For arrayEq.
-load("jstests/aggregation/extras/utils.js");
-
 const viewsDBName = jsTestName();
 
 let viewsDB = db.getSiblingDB(viewsDBName);
@@ -46,4 +40,3 @@ assert.commandFailedWithCode(
 assert.commandWorked(viewsDB.adminCommand({
     applyOps: [{op: "d", ns: viewsDBName + ".system.views", o: {_id: viewsDBName + ".invalidView"}}]
 }));
-}());

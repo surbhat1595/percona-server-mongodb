@@ -7,10 +7,11 @@
  *   does_not_support_stepdowns,
  *   # We need a timeseries collection.
  *   requires_timeseries,
+ *   # This test calls "find" with a filter on "_id" whose value is a namespace string. We cannot
+ *   # test it as the override does not inject tenant prefix to this special namespace.
+ *   simulate_atlas_proxy_incompatible,
  * ]
  */
-
-(function() {
 
 function verifyViewPipeline(coll) {
     const cProps =
@@ -234,5 +235,4 @@ function verifyViewPipeline(coll) {
     // Decreasing hours -> seconds shouldn't work either.
     assert.commandFailed(
         db.runCommand({collMod: coll.getName(), timeseries: {granularity: 'seconds'}}));
-})();
 })();

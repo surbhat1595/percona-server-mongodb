@@ -7,11 +7,8 @@
 // stepdowns.
 TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 
-(function() {
-"use strict";
-
-load("jstests/multiVersion/libs/multi_rs.js");       // Used by upgradeSet.
-load("jstests/multiVersion/libs/multi_cluster.js");  // For upgradeCluster.
+await import("jstests/multiVersion/libs/multi_rs.js");
+await import("jstests/multiVersion/libs/multi_cluster.js");
 
 const dbName = "test";
 const collName = "change_streams_multi_version_sortkey";
@@ -110,7 +107,8 @@ function runTest(downgradeVersion) {
     // Set the FCV to the "latest" version, and then open and read a change stream on the completely
     // upgraded cluster.
     //
-    assert.commandWorked(mongosConn.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        mongosConn.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
     checkFCV(st.configRS.getPrimary().getDB("admin"), latestFCV);
     checkFCV(st.rs0.getPrimary().getDB("admin"), latestFCV);
     checkFCV(st.rs1.getPrimary().getDB("admin"), latestFCV);
@@ -125,4 +123,3 @@ function runTest(downgradeVersion) {
 
 runTest("last-continuous");
 runTest("last-lts");
-}());

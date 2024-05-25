@@ -1,5 +1,5 @@
-// The test runs commands that are not allowed with security token: mapReduce.
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapReduce.
 //   not_allowed_with_security_token,
 //   assumes_unsharded_collection,
 //   # mapReduce does not support afterClusterTime.
@@ -8,9 +8,6 @@
 //   uses_map_reduce_with_temp_collections,
 //   requires_scripting,
 // ]
-//
-(function() {
-"use strict";
 
 const coll = db.mr_replace;
 coll.drop();
@@ -46,4 +43,3 @@ assert.commandWorked(outColl.insert({_id: 5, value: 1}));
 assert.commandWorked(coll.mapReduce(mapFn, reduceFn, {out: {replace: outCollStr, db: outDbStr}}));
 actual = outColl.find().sort({_id: 1}).toArray();
 assert.eq(expected, actual);
-}());

@@ -90,15 +90,16 @@ class AsioTransportLayer final : public TransportLayer {
     AsioTransportLayer& operator=(const AsioTransportLayer&) = delete;
 
 public:
+    using GenericAcceptor = asio::basic_socket_acceptor<asio::generic::stream_protocol>;
+
     constexpr static auto kSlowOperationThreshold = Seconds(1);
 
     struct Options {
         constexpr static auto kIngress = 0x1;
         constexpr static auto kEgress = 0x10;
 
-        explicit Options(const ServerGlobalParams* params) : Options(params, {}) {}
-        Options(const ServerGlobalParams* params, boost::optional<int> loadBalancerPort);
         Options() = default;
+        explicit Options(const ServerGlobalParams* params);
 
         int mode = kIngress | kEgress;
 
@@ -112,6 +113,7 @@ public:
 
         int port = ServerGlobalParams::DefaultDBPort;  // port to bind to
         boost::optional<int> loadBalancerPort;         // accepts load balancer connections
+        boost::optional<int> routerPort;               // an optional port for accepting connections
         std::vector<std::string> ipList;               // addresses to bind to
 #ifndef _WIN32
         bool useUnixSockets = true;  // whether to allow UNIX sockets in ipList
@@ -219,6 +221,14 @@ public:
         return _listenerOptions.loadBalancerPort;
     }
 
+    /**
+     * Returns the router listening port, if set. This is set and used to separate router from
+     * shard-server traffic when a server acts as both a router and a shard-server.
+     */
+    boost::optional<int> routerPort() const {
+        return _listenerOptions.routerPort;
+    }
+
     std::vector<std::pair<SockAddr, int>> getListenerSocketBacklogQueueDepths() const;
 
 #ifdef __linux__
@@ -246,8 +256,6 @@ public:
 #endif
 
 private:
-    using GenericAcceptor = asio::basic_socket_acceptor<asio::generic::stream_protocol>;
-
     void _acceptConnection(GenericAcceptor& acceptor);
 
     template <typename Endpoint>

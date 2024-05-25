@@ -3,8 +3,8 @@
  * entry matching the server's response from the "getCmdLineOpts" command. The former operation may
  * be routed to a secondary in the replica set, whereas the latter must be routed to the primary.
  *
- * The test runs commands that are not allowed with security token: getCmdLineOpts.
  * @tags: [
+ *  # The test runs commands that are not allowed with security token: getCmdLineOpts.
  *  not_allowed_with_security_token,
  *  assumes_read_preference_unchanged,
  *  requires_collstats,
@@ -12,10 +12,7 @@
  * ]
  */
 
-load('jstests/aggregation/extras/utils.js');
-
-(function() {
-'use strict';
+import {arrayEq} from "jstests/aggregation/extras/utils.js";
 
 // Check that smallArray is entirely contained by largeArray
 // returns false if a member of smallArray is not in largeArray
@@ -71,7 +68,7 @@ delete buildinfo.ok;                   // Delete extra meta info not in startup_
 delete buildinfo.operationTime;        // Delete extra meta info not in startup_log
 delete buildinfo.$clusterTime;         // Delete extra meta info not in startup_log
 delete buildinfo.lastCommittedOpTime;  // Delete extra meta info not in startup_log (only returned
-                                       // by shardsvrs)
+// by shardsvrs)
 var hello = db._adminCommand("hello");
 
 // Test buildinfo has the expected keys
@@ -114,4 +111,3 @@ assert((jsEngine == "none") || jsEngine.startsWith("mozjs"));
 assert.eq(hello.maxBsonObjectSize,
           latestStartUpLog.buildinfo.maxBsonObjectSize,
           "maxBsonObjectSize doesn't match one from hello");
-})();

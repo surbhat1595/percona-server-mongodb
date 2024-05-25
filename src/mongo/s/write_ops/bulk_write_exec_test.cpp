@@ -1166,10 +1166,7 @@ BulkOp makeTestUpdateOp(BSONObj filter,
                         mongo::BSONObj hint,
                         boost::optional<std::vector<mongo::BSONObj>> arrayFilters,
                         boost::optional<mongo::BSONObj> constants,
-                        boost::optional<mongo::BSONObj> collation,
-                        boost::optional<mongo::BSONObj> sort,
-                        boost::optional<StringData> returnValue,
-                        boost::optional<mongo::BSONObj> returnFields) {
+                        boost::optional<mongo::BSONObj> collation) {
     BulkWriteUpdateOp op;
     op.setUpdate(0);
     op.setFilter(filter);
@@ -1182,26 +1179,17 @@ BulkOp makeTestUpdateOp(BSONObj filter,
     op.setHint(hint);
     op.setConstants(constants);
     op.setCollation(collation);
-    op.setSort(sort);
-    op.setReturn(returnValue);
-    op.setReturnFields(returnFields);
     return op;
 }
 
 BulkOp makeTestDeleteOp(BSONObj filter,
                         mongo::BSONObj hint,
-                        boost::optional<mongo::BSONObj> collation,
-                        boost::optional<mongo::BSONObj> sort,
-                        mongo::OptionalBool returnValue,
-                        boost::optional<mongo::BSONObj> returnFields) {
+                        boost::optional<mongo::BSONObj> collation) {
     BulkWriteDeleteOp op;
     op.setDeleteCommand(0);
     op.setFilter(filter);
     op.setHint(hint);
     op.setCollation(collation);
-    op.setSort(sort);
-    op.setReturn(returnValue);
-    op.setReturnFields(returnFields);
     return op;
 }
 
@@ -1236,9 +1224,6 @@ TEST_F(BulkWriteOpTest, TestBulkWriteUpdateSizeEstimation) {
                                         BSONObj() /* hint */,
                                         boost::none,
                                         boost::none,
-                                        boost::none,
-                                        boost::none,
-                                        boost::none,
                                         boost::none);
     ASSERT_EQ(getSizeEstimate(basicUpdate), getActualSize(basicUpdate));
 
@@ -1249,10 +1234,7 @@ TEST_F(BulkWriteOpTest, TestBulkWriteUpdateSizeEstimation) {
                          fromjson("{a: 1}") /* hint */,
                          boost::none,
                          fromjson("{z: 1}") /* constants */,
-                         fromjson("{locale: 'simple'}") /* collation */,
-                         fromjson("{p: 1}") /* sort */,
-                         StringData("pre") /* returnValue */,
-                         fromjson("{abc: 1, def: 1}") /* returnFields */);
+                         fromjson("{locale: 'simple'}") /* collation */);
     ASSERT_EQ(getSizeEstimate(updateAllFieldsSetBesidesArrayFilters),
               getActualSize(updateAllFieldsSetBesidesArrayFilters));
 
@@ -1264,10 +1246,7 @@ TEST_F(BulkWriteOpTest, TestBulkWriteUpdateSizeEstimation) {
                          fromjson("{a: 1}") /* hint */,
                          arrayFilters,
                          fromjson("{z: 1}") /* constants */,
-                         fromjson("{locale: 'simple'}") /* collation */,
-                         fromjson("{p: 1}") /* sort */,
-                         StringData("pre") /* returnValue */,
-                         fromjson("{abc: 1, def: 1}") /* returnFields */);
+                         fromjson("{locale: 'simple'}") /* collation */);
     // We can't make an exact assertion when arrayFilters is set, because the way we estimate BSON
     // array index size overcounts for simplicity.
     ASSERT(getSizeEstimate(updateAllFieldsSet) > getActualSize(updateAllFieldsSet));
@@ -1279,9 +1258,6 @@ TEST_F(BulkWriteOpTest, TestBulkWriteUpdateSizeEstimation) {
                                                BSONObj() /* hint */,
                                                boost::none,
                                                boost::none,
-                                               boost::none,
-                                               boost::none,
-                                               boost::none,
                                                boost::none);
     // We can't make an exact assertion when an update pipeline is used, because the way we estimate
     // BSON array index size overcounts for simplicity.
@@ -1290,20 +1266,12 @@ TEST_F(BulkWriteOpTest, TestBulkWriteUpdateSizeEstimation) {
 
 // Test that we calculate accurate estimates for bulkWrite delete ops.
 TEST_F(BulkWriteOpTest, TestBulkWriteDeleteSizeEstimation) {
-    auto basicDelete = makeTestDeleteOp(fromjson("{x: 1}"),
-                                        BSONObj() /* hint */,
-                                        boost::none,
-                                        boost::none,
-                                        OptionalBool() /* returnValue */,
-                                        boost::none);
+    auto basicDelete = makeTestDeleteOp(fromjson("{x: 1}"), BSONObj() /* hint */, boost::none);
     ASSERT_EQ(getSizeEstimate(basicDelete), getActualSize(basicDelete));
 
     auto deleteAllFieldsSet = makeTestDeleteOp(fromjson("{x: 1}") /* filter */,
                                                fromjson("{y: 1}") /* hint */,
-                                               fromjson("{locale: 'simple'}") /* collation */,
-                                               fromjson("{z: -1}") /* sort */,
-                                               OptionalBool(true) /* returnValue */,
-                                               fromjson("{a: 1, b: 1}") /* returnFields */);
+                                               fromjson("{locale: 'simple'}") /* collation */);
     ASSERT_EQ(getSizeEstimate(deleteAllFieldsSet), getActualSize(deleteAllFieldsSet));
 }
 
@@ -1443,12 +1411,14 @@ TEST_F(BulkWriteExecTest, RefreshTargetersOnTargetErrors) {
         // succeed without errors. But bulk_write_exec::execute would retry on targeting errors and
         // try to refresh the targeters upon targeting errors.
         request.setOrdered(false);
-        auto replyItems = bulk_write_exec::execute(operationContext(), targeters, request);
+        auto [replyItems, numErrors] =
+            bulk_write_exec::execute(operationContext(), targeters, request);
         ASSERT_EQUALS(replyItems.size(), 2u);
         ASSERT_NOT_OK(replyItems[0].getStatus());
         ASSERT_OK(replyItems[1].getStatus());
         ASSERT_EQUALS(targeter0->getNumRefreshes(), 1);
         ASSERT_EQUALS(targeter1->getNumRefreshes(), 1);
+        ASSERT_EQUALS(numErrors, 1);
     });
 
     // Mock a bulkWrite response to respond to the second op, which is valid.
@@ -1472,12 +1442,14 @@ TEST_F(BulkWriteExecTest, RefreshTargetersOnTargetErrors) {
         // Test ordered operations. This is mostly the same as the test case above except that we
         // should only return the first error for ordered operations.
         request.setOrdered(true);
-        auto replyItems = bulk_write_exec::execute(operationContext(), targeters, request);
+        auto [replyItems, numErrors] =
+            bulk_write_exec::execute(operationContext(), targeters, request);
         ASSERT_EQUALS(replyItems.size(), 1u);
         ASSERT_NOT_OK(replyItems[0].getStatus());
         // We should have another refresh attempt.
         ASSERT_EQUALS(targeter0->getNumRefreshes(), 2);
         ASSERT_EQUALS(targeter1->getNumRefreshes(), 2);
+        ASSERT_EQUALS(numErrors, 1);
     });
 
     future.default_timed_get();
@@ -1513,10 +1485,11 @@ TEST_F(BulkWriteExecTest, CollectionDroppedBeforeRefreshingTargeters) {
 
     // After the targeting error from the first op, targeter refresh will throw a StaleEpoch
     // exception which should abort the entire bulkWrite.
-    auto replyItems = bulk_write_exec::execute(operationContext(), targeters, request);
+    auto [replyItems, numErrors] = bulk_write_exec::execute(operationContext(), targeters, request);
     ASSERT_EQUALS(replyItems.size(), 2u);
     ASSERT_EQUALS(replyItems[0].getStatus().code(), ErrorCodes::StaleEpoch);
     ASSERT_EQUALS(replyItems[1].getStatus().code(), ErrorCodes::StaleEpoch);
+    ASSERT_EQUALS(numErrors, 2);
 }
 
 // TODO(SERVER-72790): Test refreshing targeters on stale config errors, including the case where

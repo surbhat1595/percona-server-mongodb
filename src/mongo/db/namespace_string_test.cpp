@@ -169,10 +169,6 @@ TEST_F(NamespaceStringTest, DatabaseValidNames) {
                             "WhileThisDatabaseNameExceedsTheMaximumLengthForDatabaseNamesof63"),
         AssertionException,
         ErrorCodes::InvalidNamespace);
-
-    const TenantId tenantId(OID::gen());
-    ASSERT(!NamespaceString::validDBName(DatabaseName::createDatabaseName_forTest(
-        tenantId, "ATenantDBNameWithValidLength38ButHasA$")));
 }
 
 TEST_F(NamespaceStringTest, ListCollectionsCursorNS) {
@@ -386,6 +382,7 @@ TEST_F(NamespaceStringTest, makeListCollectionsNSIsCorrect) {
     ASSERT_EQUALS("DB", ns.db_forTest());
     ASSERT_EQUALS("$cmd.listCollections", ns.coll());
     ASSERT(ns.isValid());
+    ASSERT(NamespaceString::isValid(ns.ns_forTest()));
     ASSERT(ns.isListCollectionsCursorNS());
 }
 

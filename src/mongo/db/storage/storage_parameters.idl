@@ -33,13 +33,6 @@ global:
         - "mongo/db/storage/storage_options.h"
 
 server_parameters:
-    notablescan:
-        # NOT recommended for production use.
-        description: >-
-            Whether all queries must use indexes.
-            If true, MongoDB will not execute queries that require a table scan and will return an error.
-        set_at: [ startup, runtime ]
-        cpp_varname: 'storageGlobalParams.noTableScan'
     # This is an alias for the 'storage.syncPeriodSecs' config, and the default is defined in the
     # StorageGlobalParams struct to resolve a conflict between config parameter and set parameter evaluation.
     syncdelay:
@@ -177,22 +170,19 @@ server_parameters:
         cpp_vartype: bool
         default: true
 
+    skipDroppingHashedShardKeyIndex:
+        description: >-
+            Skips dropping hashed shard key supporting indexes when calling dropIndexes with the '*' parameter. Used for testing purposes.
+        set_at: [ startup, runtime ]
+        cpp_vartype: bool
+        cpp_varname: skipDroppingHashedShardKeyIndex
+        default: false
+
+
 feature_flags:
-    featureFlagTimeseriesMetricIndexes:
-        description: "When enabled, support secondary indexes on time-series measurements"
-        cpp_varname: feature_flags::gTimeseriesMetricIndexes
-        default: true
-        version: 6.0
-        shouldBeFCVGated: true
     featureFlagCollModIndexUnique:
         description: "When enabled, collMod supports making an index unique"
         cpp_varname: feature_flags::gCollModIndexUnique
-        default: true
-        version: 6.0
-        shouldBeFCVGated: true
-    featureFlagSelectiveBackup:
-        description: "When enabled, support selective backups and restores on collections"
-        cpp_varname: feature_flags::gSelectiveBackup
         default: true
         version: 6.0
         shouldBeFCVGated: true
@@ -253,3 +243,9 @@ feature_flags:
         cpp_varname: feature_flags::gTimeseriesAlwaysUseCompressedBuckets
         default: false
         shouldBeFCVGated: false
+    featureFlagTSBucketingParametersUnchanged:
+        description: "Enable storing the 'timeseriesBucketingParametersHaveChanged' parameter on disk"
+        cpp_varname: feature_flags::gTSBucketingParametersUnchanged
+        default: true
+        version: 7.1
+        shouldBeFCVGated: true

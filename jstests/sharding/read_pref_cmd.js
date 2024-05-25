@@ -5,11 +5,8 @@
  *   resource_intensive,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/fail_point_util.js");
-load("jstests/replsets/rslib.js");
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {awaitRSClientHosts, reconnect} from "jstests/replsets/rslib.js";
 
 const nodeCount = 3;
 const kDbName = "read_pref_cmd";
@@ -161,8 +158,6 @@ let testConnReadPreference = function(conn, isMongos, rst, {readPref, expectedNo
     jsTest.log(`Testing ${isMongos ? "mongos" : "mongod"} connection with readPreference mode: ${
         readPref.mode}, tag sets: ${tojson(readPref.tagSets)}, hedge ${tojson(readPref.hedge)}`);
 
-    const hedgingEnabled = readPref.hedge && readPref.hedge.enabled;
-
     let testDB = conn.getDB(kDbName);
     let shardedColl = conn.getCollection(kShardedNs);
     conn.setSecondaryOk(false);  // purely rely on readPref
@@ -213,7 +208,7 @@ let testConnReadPreference = function(conn, isMongos, rst, {readPref, expectedNo
     // Make sure the unsharded collection is propagated to secondaries before proceeding.
     rst.awaitReplication();
 
-    var mapFunc = function(doc) {};
+    var mapFunc = function() {};
     var reduceFunc = function(key, values) {
         return values;
     };
@@ -347,6 +342,18 @@ let testConnReadPreference = function(conn, isMongos, rst, {readPref, expectedNo
         },
                 allowedOnSecondary.kAlways,
                 false,
+                formatProfileQuery(undefined, {comment: curOpComment}),
+                "admin");
+    }
+
+    const isMultiversion = jsTest.options().shardMixedBinVersions ||
+        jsTest.options().useRandomBinVersionsWithinReplicaSet;
+
+    if (!isMultiversion) {
+        let curOpComment = 'lockInfo_' + ObjectId();
+        cmdTest({lockInfo: 1, comment: curOpComment},
+                allowedOnSecondary.kAlways,
+                true,
                 formatProfileQuery(undefined, {comment: curOpComment}),
                 "admin");
     }
@@ -630,4 +637,3 @@ testAllModes(st.s, st.rs0, true);
 failPoint.off();
 
 st.stop();
-})();

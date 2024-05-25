@@ -97,7 +97,7 @@ public:
         // Replication connections, if we have any
         {
             auto const replCoord = repl::ReplicationCoordinator::get(opCtx);
-            if (replCoord && replCoord->isReplEnabled()) {
+            if (replCoord && replCoord->getSettings().isReplSet()) {
                 replCoord->appendConnectionStats(&stats);
             }
         }
@@ -125,8 +125,8 @@ public:
 
         return true;
     }
-
-} poolStatsCmd;
+};
+MONGO_REGISTER_COMMAND(PoolStats);
 
 }  // namespace
 }  // namespace mongo

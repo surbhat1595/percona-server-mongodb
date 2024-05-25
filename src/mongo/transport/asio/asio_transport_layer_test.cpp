@@ -27,6 +27,9 @@
  *    it in the license file.
  */
 
+#include "mongo/transport/asio/asio_transport_layer.h"
+
+#include <exception>
 #include <fstream>
 #include <queue>
 #include <system_error>
@@ -38,8 +41,10 @@
 
 #include "mongo/client/dbclient_connection.h"
 #include "mongo/config.h"
+#include "mongo/db/cluster_role.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/atomic_word.h"
@@ -47,10 +52,13 @@
 #include "mongo/rpc/op_msg.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/asio/asio_session.h"
-#include "mongo/transport/asio/asio_transport_layer.h"
+#include "mongo/transport/asio/asio_tcp_fast_open.h"
 #include "mongo/transport/baton.h"
 #include "mongo/transport/service_entry_point.h"
+#include "mongo/transport/test_fixtures.h"
+#include "mongo/transport/transport_layer.h"
 #include "mongo/transport/transport_options_gen.h"
+#include "mongo/unittest/assert.h"
 #include "mongo/unittest/assert_that.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
@@ -65,7 +73,7 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
-namespace mongo {
+namespace mongo::transport {
 namespace {
 
 using namespace fmt::literals;
@@ -75,6 +83,29 @@ using SetsockoptPtr = char*;
 #else
 using SetsockoptPtr = void*;
 #endif
+
+std::string testHostName() {
+    return "127.0.0.1";
+}
+
+asio::ip::address testHostAddr() {
+    return asio::ip::make_address(testHostName());
+}
+
+template <typename T>
+struct ScopedValueGuard {
+public:
+    ScopedValueGuard(T& target, T value)
+        : _target{target}, _saved{std::exchange(_target, std::move(value))} {}
+
+    ~ScopedValueGuard() {
+        _target = std::move(_saved);
+    }
+
+private:
+    T& _target;
+    T _saved;
+};
 
 std::string loadFile(std::string filename) try {
     std::ifstream f;
@@ -86,39 +117,6 @@ std::string loadFile(std::string filename) try {
     FAIL("Failed to load file: \"{}\": {}: {}"_format(filename, ex.what(), errorMessage(ec)));
     MONGO_UNREACHABLE;
 }
-
-class JoinThread : public stdx::thread {
-public:
-    using stdx::thread::thread;
-    ~JoinThread() {
-        if (joinable())
-            join();
-    }
-};
-
-template <typename T>
-class BlockingQueue {
-public:
-    void push(T t) {
-        stdx::unique_lock lk(_mu);
-        _q.push(std::move(t));
-        lk.unlock();
-        _cv.notify_one();
-    }
-
-    T pop() {
-        stdx::unique_lock lk(_mu);
-        _cv.wait(lk, [&] { return !_q.empty(); });
-        T r = std::move(_q.front());
-        _q.pop();
-        return r;
-    }
-
-private:
-    mutable Mutex _mu;
-    mutable stdx::condition_variable _cv;
-    std::queue<T> _q;
-};
 
 class ConnectionThread {
 public:
@@ -144,34 +142,45 @@ public:
     }
 
     void wait() {
+        LOGV2(7079402, "connection: wait()");
         _ready.get();
+        if (_exception) {
+            LOGV2(7079403, "connection: wait() rethrowing");
+            std::rethrow_exception(_exception);
+        }
     }
 
 private:
-    void _run() {
-        _s.connect(SockAddr::create("localhost", _port, AF_INET));
+    void _run() try {
+        ASSERT_TRUE(_s.connect(SockAddr::create(testHostName(), _port, AF_INET)));
         LOGV2(6109502, "connected", "port"_attr = _port);
         if (_onConnect)
             _onConnect(*this);
         _ready.set();
+        LOGV2(7079404, "connection: await stop request");
         _stopRequest.get();
         LOGV2(6109503, "connection: Rx stop request");
+    } catch (...) {
+        LOGV2(7079405, "connection: catching exception");
+        _exception = std::current_exception();
+        _ready.set();
     }
 
     int _port;
     std::function<void(ConnectionThread&)> _onConnect;
+    std::exception_ptr _exception;
     Notification<void> _ready;
     Notification<bool> _stopRequest;
     Socket _s;
-    JoinThread _thread;  // Appears after the members _run uses.
+    test::JoinThread _thread;  // Appears after the members _run uses.
 };
 
 class SyncClient {
 public:
     explicit SyncClient(int port) {
         std::error_code ec;
-        _sock.connect(asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), port), ec);
-        ASSERT_EQ(ec, std::error_code());
+        _sock.connect(asio::ip::tcp::endpoint(testHostAddr(), port), ec);
+        ASSERT_FALSE(ec) << errorMessage(ec);
         LOGV2(6109504, "sync client connected");
     }
 
@@ -186,134 +195,37 @@ private:
     asio::ip::tcp::socket _sock{_ctx};
 };
 
-void ping(SyncClient& client) {
+template <typename AsioWriter>
+void ping(AsioWriter& client) {
     OpMsgBuilder builder;
     builder.setBody(BSON("ping" << 1));
     Message msg = builder.finish();
     msg.header().setResponseToMsgId(0);
     msg.header().setId(0);
     OpMsg::appendChecksum(&msg);
-    ASSERT_EQ(client.write(msg.buf(), msg.size()), std::error_code{});
+    auto ec = client.write(msg.buf(), msg.size());
+    ASSERT_FALSE(ec) << errorMessage(ec);
 }
 
-struct SessionThread {
-    struct StopException {};
+AsioTransportLayer::Options defaultTLAOptions() {
+    ServerGlobalParams params;
+    params.noUnixSocket = true;
+    params.bind_ips = {testHostName()};
+    AsioTransportLayer::Options opts(&params);
+    opts.port = 0;
+    return opts;
+}
 
-    explicit SessionThread(std::shared_ptr<transport::Session> s)
-        : _session{std::move(s)}, _thread{[this] {
-              _run();
-          }} {}
-
-    ~SessionThread() {
-        if (!_thread.joinable())
-            return;
-        schedule([](auto&&) { throw StopException{}; });
-    }
-
-    void schedule(std::function<void(transport::Session&)> task) {
-        _tasks.push(std::move(task));
-    }
-
-    transport::Session& session() const {
-        return *_session;
-    }
-
-private:
-    void _run() {
-        while (true) {
-            try {
-                LOGV2(6109508, "SessionThread: pop and execute a task");
-                _tasks.pop()(*_session);
-            } catch (const StopException&) {
-                LOGV2(6109509, "SessionThread: stopping");
-                return;
-            }
-        }
-    }
-
-    std::shared_ptr<transport::Session> _session;
-    BlockingQueue<std::function<void(transport::Session&)>> _tasks;
-    JoinThread _thread;  // Appears after the members _run uses.
-};
-
-class MockSEP : public ServiceEntryPoint {
-public:
-    MockSEP() = default;
-    explicit MockSEP(std::function<void(SessionThread&)> onStartSession)
-        : _onStartSession(std::move(onStartSession)) {}
-
-    ~MockSEP() override {
-        _join();
-    }
-
-    Status start() override {
-        return Status::OK();
-    }
-
-    void appendStats(BSONObjBuilder*) const override {}
-
-    Future<DbResponse> handleRequest(OperationContext* opCtx,
-                                     const Message& request) noexcept override {
-        MONGO_UNREACHABLE;
-    }
-
-    void startSession(std::shared_ptr<transport::Session> session) override {
-        LOGV2(6109510, "Accepted connection", "remote"_attr = session->remote());
-        auto& newSession = [&]() -> SessionThread& {
-            auto vec = *_sessions;
-            vec->push_back(std::make_unique<SessionThread>(std::move(session)));
-            return *vec->back();
-        }();
-        if (_onStartSession)
-            _onStartSession(newSession);
-        LOGV2(6109511, "started session");
-    }
-
-    void endAllSessions(transport::Session::TagMask tags) override {
-        _join();
-    }
-
-    bool shutdown(Milliseconds timeout) override {
-        _join();
-        return true;
-    }
-
-    size_t numOpenSessions() const override {
-        return _sessions->size();
-    }
-
-    logv2::LogSeverity slowSessionWorkflowLogSeverity() override {
-        MONGO_UNIMPLEMENTED;
-    }
-
-    void setOnStartSession(std::function<void(SessionThread&)> cb) {
-        _onStartSession = std::move(cb);
-    }
-
-private:
-    void _join() {
-        LOGV2(6109513, "Joining all session threads");
-        _sessions->clear();
-    }
-
-    std::function<void(SessionThread&)> _onStartSession;
-    synchronized_value<std::vector<std::unique_ptr<SessionThread>>> _sessions;
-};
-
-std::unique_ptr<transport::AsioTransportLayer> makeTLA(ServiceEntryPoint* sep) {
-    auto options = [] {
-        ServerGlobalParams params;
-        params.noUnixSocket = true;
-        transport::AsioTransportLayer::Options opts(&params);
-        // TODO SERVER-30312 should clean this up and assign a port from the supplied port range
-        // provided by resmoke.
-        opts.port = 0;
-        return opts;
-    }();
-    auto tla = std::make_unique<transport::AsioTransportLayer>(options, sep);
+std::unique_ptr<AsioTransportLayer> makeTLA(ServiceEntryPoint* sep,
+                                            const AsioTransportLayer::Options& options) {
+    auto tla = std::make_unique<AsioTransportLayer>(options, sep);
     ASSERT_OK(tla->setup());
     ASSERT_OK(tla->start());
     return tla;
+}
+
+std::unique_ptr<AsioTransportLayer> makeTLA(ServiceEntryPoint* sep) {
+    return makeTLA(sep, defaultTLAOptions());
 }
 
 /**
@@ -324,16 +236,19 @@ class TestFixture {
 public:
     TestFixture() : _tla{makeTLA(&_sep)} {}
 
+    explicit TestFixture(const AsioTransportLayer::Options& options)
+        : _tla{makeTLA(&_sep, options)} {}
+
     ~TestFixture() {
         _sep.endAllSessions({});
         _tla->shutdown();
     }
 
-    MockSEP& sep() {
+    test::MockSEP& sep() {
         return _sep;
     }
 
-    transport::AsioTransportLayer& tla() {
+    AsioTransportLayer& tla() {
         return *_tla;
     }
 
@@ -360,11 +275,11 @@ public:
     }
 
 private:
-    std::unique_ptr<transport::AsioTransportLayer> _tla;
-    MockSEP _sep;
+    std::unique_ptr<AsioTransportLayer> _tla;
+    test::MockSEP _sep;
 
-    FailPoint& _hangBeforeAccept = transport::asioTransportLayerHangBeforeAcceptCallback;
-    FailPoint& _hangDuringAccept = transport::asioTransportLayerHangDuringAcceptCallback;
+    FailPoint& _hangBeforeAccept = asioTransportLayerHangBeforeAcceptCallback;
+    FailPoint& _hangDuringAccept = asioTransportLayerHangDuringAcceptCallback;
 
     FailPoint::EntryCountT _hangBeforeAcceptTimesEntered{0};
     FailPoint::EntryCountT _hangDuringAcceptTimesEntered{0};
@@ -407,7 +322,7 @@ TEST(AsioTransportLayer, TCPResetAfterConnectionIsSilentlySwallowed) {
     tf.sep().setOnStartSession([&](auto&&) { sessionsCreated.fetchAndAdd(1); });
 
     LOGV2(6109515, "connecting");
-    auto& fp = transport::asioTransportLayerHangDuringAcceptCallback;
+    auto& fp = asioTransportLayerHangDuringAcceptCallback;
     auto timesEntered = fp.setMode(FailPoint::alwaysOn);
     ConnectionThread connectThread(tf.tla().listenerPort(), &setNoLinger);
     fp.waitForTimesEntered(timesEntered + 1);
@@ -429,8 +344,10 @@ TEST(AsioTransportLayer, TCPResetAfterConnectionIsSilentlySwallowed) {
  */
 TEST(AsioTransportLayer, TCPCheckQueueDepth) {
     // Set the listenBacklog to a parameter greater than the number of connection threads we intend
-    // to create.
-    serverGlobalParams.listenBacklog = 10;
+    // to create (temporarily).
+    ScopeGuard sg = [v = std::exchange(serverGlobalParams.listenBacklog, 10)] {
+        serverGlobalParams.listenBacklog = v;
+    };
     TestFixture tf;
 
     LOGV2(6400501, "Starting and hanging three connection threads");
@@ -477,8 +394,8 @@ TEST(AsioTransportLayer, TCPCheckQueueDepth) {
 
 TEST(AsioTransportLayer, ThrowOnNetworkErrorInEnsureSync) {
     TestFixture tf;
-    Notification<SessionThread*> mockSessionCreated;
-    tf.sep().setOnStartSession([&](SessionThread& st) { mockSessionCreated.set(&st); });
+    Notification<test::SessionThread*> mockSessionCreated;
+    tf.sep().setOnStartSession([&](test::SessionThread& st) { mockSessionCreated.set(&st); });
 
     ConnectionThread connectThread(tf.tla().listenerPort(), &setNoLinger);
 
@@ -504,7 +421,7 @@ TEST(AsioTransportLayer, ThrowOnNetworkErrorInEnsureSync) {
 TEST(AsioTransportLayer, SourceSyncTimeoutTimesOut) {
     TestFixture tf;
     Notification<StatusWith<Message>> received;
-    tf.sep().setOnStartSession([&](SessionThread& st) {
+    tf.sep().setOnStartSession([&](test::SessionThread& st) {
         st.session().setTimeout(Milliseconds{500});
         st.schedule([&](auto& session) { received.set(session.sourceMessage()); });
     });
@@ -516,7 +433,7 @@ TEST(AsioTransportLayer, SourceSyncTimeoutTimesOut) {
 TEST(AsioTransportLayer, SourceSyncTimeoutSucceeds) {
     TestFixture tf;
     Notification<StatusWith<Message>> received;
-    tf.sep().setOnStartSession([&](SessionThread& st) {
+    tf.sep().setOnStartSession([&](test::SessionThread& st) {
         st.session().setTimeout(Milliseconds{500});
         st.schedule([&](auto& session) { received.set(session.sourceMessage()); });
     });
@@ -528,8 +445,8 @@ TEST(AsioTransportLayer, SourceSyncTimeoutSucceeds) {
 /** Switching from timeouts to no timeouts must reset the timeout to unlimited. */
 TEST(AsioTransportLayer, SwitchTimeoutModes) {
     TestFixture tf;
-    Notification<SessionThread*> mockSessionCreated;
-    tf.sep().setOnStartSession([&](SessionThread& st) { mockSessionCreated.set(&st); });
+    Notification<test::SessionThread*> mockSessionCreated;
+    tf.sep().setOnStartSession([&](test::SessionThread& st) { mockSessionCreated.set(&st); });
 
     SyncClient conn(tf.tla().listenerPort());
     auto& st = *mockSessionCreated.get();
@@ -573,7 +490,7 @@ public:
     };
 
     explicit Acceptor(asio::io_context& ioCtx) : _ioCtx(ioCtx) {
-        asio::ip::tcp::endpoint endpoint(asio::ip::address_v4::loopback(), 0);
+        asio::ip::tcp::endpoint endpoint(testHostAddr(), 0);
         _acceptor.open(endpoint.protocol());
         _acceptor.set_option(asio::ip::tcp::acceptor::reuse_address(true));
         _acceptor.bind(endpoint);
@@ -597,7 +514,7 @@ private:
         LOGV2(6101603, "Acceptor: await connection");
         _acceptor.async_accept(conn->socket, [this, conn](const asio::error_code& ec) {
             if (ec != asio::error_code{}) {
-                LOGV2(6101605, "Accept", "error"_attr = transport::errorCodeToStatus(ec));
+                LOGV2(6101605, "Accept", "error"_attr = errorCodeToStatus(ec));
             } else {
                 if (_onAccept)
                     _onAccept(conn);
@@ -612,6 +529,98 @@ private:
 };
 
 /**
+ * Create a connection and configure it with transport::tfo routines.
+ */
+class TfoClient {
+public:
+    explicit TfoClient(int port) {
+        std::error_code ec;
+        auto ep = asio::ip::tcp::endpoint(testHostAddr(), port);
+
+        _sock.open(ep.protocol(), ec);
+        ASSERT_FALSE(ec) << errorMessage(ec);
+
+        ec = tfo::initOutgoingSocket(_sock);
+        ASSERT_FALSE(ec) << errorMessage(ec);
+
+        _sock.non_blocking(true);
+        _sock.connect(ep, ec);
+        ASSERT_FALSE(ec) << errorMessage(ec);
+        LOGV2(7097407, "TFO client connected");
+        _sock.non_blocking(false);
+    }
+
+    std::error_code write(const char* buf, size_t bufSize) {
+        std::error_code ec;
+        asio::write(_sock, asio::buffer(buf, bufSize), ec);
+        return ec;
+    }
+
+private:
+    asio::io_context _ctx{};
+    AsioSession::GenericSocket _sock{_ctx};
+};
+
+void runTfoScenario(bool serverOn, bool clientOn, bool expectTfo) {
+    if (auto err = tfo::ensureInitialized(true); !err.isOK()) {
+        LOGV2(7097410, "Skipping: No TcpFastOpen", "error"_attr = err);
+        return;
+    }
+    // Simulate a TFO system for which the initialization had produced the
+    // specified configuration:
+    auto passive = false;           // The TFO options were explicitly given
+    auto initError = Status::OK();  // Initialization succeeded
+    auto qSz = 20;                  // Queue depth
+    auto config = tfo::setConfigForTest(passive, clientOn, serverOn, qSz, initError);
+
+    auto extractTfoAccepted = [] {
+        BSONObjBuilder bob;
+        networkCounter.append(bob);
+        return bob.done()["tcpFastOpen"]["accepted"].numberInt();
+    };
+
+    TestFixture tf;
+    test::BlockingQueue<StatusWith<Message>> received;
+
+    auto connectOnce = [&] {
+        TfoClient conn(tf.tla().listenerPort());
+        ping(conn);
+        ASSERT_OK(received.pop().getStatus());
+    };
+
+    // Minimal test service. Consumes one `Message` from an incoming connection,
+    // pushing it to the `received` queue.
+    tf.sep().setOnStartSession([&](test::SessionThread& st) {
+        st.schedule([&](auto& session) { received.push(session.sourceMessage()); });
+    });
+
+    // Make one throwaway connection just to allow establishment of a TFO cookie.
+    connectOnce();
+
+    int tfos = extractTfoAccepted();
+    connectOnce();
+    int newTfos = extractTfoAccepted();
+
+    ASSERT_EQ(newTfos, tfos + expectTfo);
+}
+
+TEST(AsioTransportLayer, TcpFastOpenWithServerOffClientOff) {
+    runTfoScenario(false, false, false);
+}
+
+TEST(AsioTransportLayer, TcpFastOpenWithServerOffClientOn) {
+    runTfoScenario(false, true, false);
+}
+
+TEST(AsioTransportLayer, TcpFastOpenWithServerOnClientOn) {
+    runTfoScenario(true, true, true);
+}
+
+TEST(AsioTransportLayer, TcpFastOpenWithServerOnClientOff) {
+    runTfoScenario(true, false, false);
+}
+
+/**
  * Have `AsioTransportLayer` make a egress connection and observe behavior when
  * that connection is immediately reset by the peer. Test that if this happens
  * during the `AsioSession` constructor, that the thrown `asio::system_error`
@@ -621,10 +630,8 @@ TEST(AsioTransportLayer, EgressConnectionResetByPeerDuringSessionCtor) {
     // Under TFO, no SYN is sent until the client has data to send.  For this
     // test, we need the server to respond when the client hits the failpoint
     // in the AsioSession ctor. So we have to disable TFO.
-    auto savedTFOClient = std::exchange(transport::gTCPFastOpenClient, false);
-    ScopeGuard savedTFOClientRestore = [&] {
-        transport::gTCPFastOpenClient = savedTFOClient;
-    };
+    auto tfoConfig = tfo::setConfigForTest(0, 0, 0, 1024, Status::OK());
+
     // The `server` accepts connections, only to immediately reset them.
     TestFixture tf;
     asio::io_context ioContext;
@@ -643,7 +650,7 @@ TEST(AsioTransportLayer, EgressConnectionResetByPeerDuringSessionCtor) {
         conn->socket.close();
         fp.reset();
     });
-    JoinThread ioThread{[&] {
+    test::JoinThread ioThread{[&] {
         ioContext.run();
     }};
     ScopeGuard ioContextStop = [&] {
@@ -656,13 +663,11 @@ TEST(AsioTransportLayer, EgressConnectionResetByPeerDuringSessionCtor) {
     // `EINVAL`. On Linux and Windows, the `setsockopt` completes successfully.
     // Either is okay, but the `AsioSession` ctor caller is expected to handle
     // `asio::system_error` and convert it to `SocketException`.
-    ASSERT_THAT(tf.tla()
-                    .connect({"localhost", server.port()},
-                             transport::ConnectSSLMode::kDisableSSL,
-                             Seconds{10},
-                             {})
-                    .getStatus(),
-                StatusIs(AnyOf(Eq(ErrorCodes::SocketException), Eq(ErrorCodes::OK)), Any()));
+    ASSERT_THAT(
+        tf.tla()
+            .connect({testHostName(), server.port()}, ConnectSSLMode::kDisableSSL, Seconds{10}, {})
+            .getStatus(),
+        StatusIs(AnyOf(Eq(ErrorCodes::SocketException), Eq(ErrorCodes::OK)), Any()));
 }
 
 /**
@@ -685,15 +690,15 @@ TEST(AsioTransportLayer, ConfirmSocketSetOptionOnResetConnections) {
         sleepFor(Seconds{1});
         accepted.set(true);
     });
-    JoinThread ioThread{[&] {
+    test::JoinThread ioThread{[&] {
         ioContext.run();
     }};
     ScopeGuard ioContextStop = [&] {
         ioContext.stop();
     };
-    JoinThread client{[&] {
+    test::JoinThread client{[&] {
         asio::ip::tcp::socket client{ioContext};
-        client.connect(asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), server.port()));
+        client.connect(asio::ip::tcp::endpoint(testHostAddr(), server.port()));
         connected.set(true);
         accepted.get();
         // Just set any option and see what happens.
@@ -759,7 +764,7 @@ public:
     };
 
     void setUp() override {
-        auto sep = std::make_unique<MockSEP>();
+        auto sep = std::make_unique<test::MockSEP>();
         auto tl = makeTLA(sep.get());
         getServiceContext()->setServiceEntryPoint(std::move(sep));
         getServiceContext()->setTransportLayer(std::move(tl));
@@ -769,21 +774,21 @@ public:
         getServiceContext()->getTransportLayer()->shutdown();
     }
 
-    transport::AsioTransportLayer& tla() {
+    AsioTransportLayer& tla() {
         auto tl = getServiceContext()->getTransportLayer();
-        return *checked_cast<transport::AsioTransportLayer*>(tl);
+        return *checked_cast<AsioTransportLayer*>(tl);
     }
 };
 
 TEST_F(AsioTransportLayerWithServiceContextTest, TimerServiceDoesNotSpawnThreadsBeforeStart) {
     ThreadCounter counter;
-    { transport::AsioTransportLayer::TimerService service{{counter.makeSpawnFunc()}}; }
+    { AsioTransportLayer::TimerService service{{counter.makeSpawnFunc()}}; }
     ASSERT_EQ(counter.created(), 0);
 }
 
 TEST_F(AsioTransportLayerWithServiceContextTest, TimerServiceOneShotStart) {
     ThreadCounter counter;
-    transport::AsioTransportLayer::TimerService service{{counter.makeSpawnFunc()}};
+    AsioTransportLayer::TimerService service{{counter.makeSpawnFunc()}};
     service.start();
     LOGV2(5490004, "Awaiting timer thread start", "threads"_attr = counter.started());
     counter.waitForStarted([](auto n) { return n > 0; });
@@ -797,7 +802,7 @@ TEST_F(AsioTransportLayerWithServiceContextTest, TimerServiceOneShotStart) {
 
 TEST_F(AsioTransportLayerWithServiceContextTest, TimerServiceDoesNotStartAfterStop) {
     ThreadCounter counter;
-    transport::AsioTransportLayer::TimerService service{{counter.makeSpawnFunc()}};
+    AsioTransportLayer::TimerService service{{counter.makeSpawnFunc()}};
     service.stop();
     service.start();
     ASSERT_EQ(counter.created(), 0) << "Stop then start should not spawn";
@@ -806,13 +811,13 @@ TEST_F(AsioTransportLayerWithServiceContextTest, TimerServiceDoesNotStartAfterSt
 TEST_F(AsioTransportLayerWithServiceContextTest, TimerServiceCanStopMoreThanOnce) {
     // Verifying that it is safe to have multiple calls to `stop()`.
     {
-        transport::AsioTransportLayer::TimerService service;
+        AsioTransportLayer::TimerService service;
         service.start();
         service.stop();
         service.stop();
     }
     {
-        transport::AsioTransportLayer::TimerService service;
+        AsioTransportLayer::TimerService service;
         service.stop();
         service.stop();
     }
@@ -820,7 +825,7 @@ TEST_F(AsioTransportLayerWithServiceContextTest, TimerServiceCanStopMoreThanOnce
 
 TEST_F(AsioTransportLayerWithServiceContextTest, TransportStartAfterShutDown) {
     tla().shutdown();
-    ASSERT_EQ(tla().start(), transport::TransportLayer::ShutdownStatus);
+    ASSERT_EQ(tla().start(), TransportLayer::ShutdownStatus);
 }
 
 #ifdef MONGO_CONFIG_SSL
@@ -845,11 +850,73 @@ TEST_F(AsioTransportLayerWithServiceContextTest, ShutdownDuringSSLHandshake) {
     params.sslClusterPEMPayload = loadFile("jstests/libs/client.pem");
     params.targetedClusterConnectionString = ConnectionString::forLocal();
 
-    auto status = conn.connectSocketOnly({"localhost", port}, std::move(params));
+    auto status = conn.connectSocketOnly({testHostName(), port}, std::move(params));
     ASSERT_EQ(status, ErrorCodes::HostUnreachable);
 }
 #endif  // _WIN32
 #endif  // MONGO_CONFIG_SSL
+
+class AsioTransportLayerWithRouterPortTest : public unittest::Test {
+public:
+    // We opted to use static ports for simplicity. If this results in test failures due to busy
+    // ports, we may change the fixture, as well as the underlying transport layer, to dynamically
+    // choose the listening ports.
+    static constexpr auto kMainPort = 22000;
+    static constexpr auto kRouterPort = 22001;
+
+    void setUp() override {
+        auto options = defaultTLAOptions();
+        options.port = kMainPort;
+        options.routerPort = kRouterPort;
+        _fixture = std::make_unique<TestFixture>(options);
+    }
+
+    void tearDown() override {
+        _fixture.reset();
+    }
+
+    test::MockSEP& sep() {
+        return _fixture->sep();
+    }
+
+    StatusWith<std::shared_ptr<Session>> connect(HostAndPort remote) {
+        return _fixture->tla().connect(remote, ConnectSSLMode::kDisableSSL, Seconds{10}, {});
+    }
+
+    void doDifferentiatesConnectionsCase(bool useRouterPort) {
+        auto isFromRouterPort = std::make_shared<Notification<bool>>();
+        sep().setOnStartSession([isFromRouterPort](test::SessionThread& st) {
+            isFromRouterPort->set(st.session().isFromRouterPort());
+        });
+        HostAndPort target{testHostName(), useRouterPort ? kRouterPort : kMainPort};
+        auto conn = connect(target);
+        ASSERT_OK(conn) << " target={}"_format(target);
+        ASSERT_FALSE(conn.getValue()->isFromRouterPort());
+        ASSERT_EQ(isFromRouterPort->get(), useRouterPort);
+    }
+
+private:
+    RAIIServerParameterControllerForTest _scopedFeature{"featureFlagEmbeddedRouter", true};
+    ScopedValueGuard<ClusterRole> _changeClusterRole{serverGlobalParams.clusterRole,
+                                                     ClusterRole::RouterServer};
+    std::shared_ptr<void> _disableTfo = tfo::setConfigForTest(0, 0, 0, 1024, Status::OK());
+    std::unique_ptr<TestFixture> _fixture;
+};
+
+TEST_F(AsioTransportLayerWithRouterPortTest, ListensOnBothPorts) {
+    for (auto port : {kRouterPort, kMainPort}) {
+        HostAndPort remote(testHostName(), port);
+        ASSERT_OK(connect(remote).getStatus()) << "Unable to connect to " << remote;
+    }
+}
+
+TEST_F(AsioTransportLayerWithRouterPortTest, DifferentiatesConnectionsMainPort) {
+    doDifferentiatesConnectionsCase(false);
+}
+
+TEST_F(AsioTransportLayerWithRouterPortTest, DifferentiatesConnectionsRouterPort) {
+    doDifferentiatesConnectionsCase(true);
+}
 
 #ifdef __linux__
 
@@ -867,7 +934,7 @@ public:
      */
     class FirstSessionSEP : public ServiceEntryPoint {
     public:
-        explicit FirstSessionSEP(Promise<std::shared_ptr<transport::Session>> promise)
+        explicit FirstSessionSEP(Promise<std::shared_ptr<Session>> promise)
             : _promise(std::move(promise)) {}
 
         ~FirstSessionSEP() override {
@@ -884,7 +951,7 @@ public:
             MONGO_UNREACHABLE;
         }
 
-        void startSession(std::shared_ptr<transport::Session> session) override {
+        void startSession(std::shared_ptr<Session> session) override {
             stdx::lock_guard lk{_mutex};
             _sessions.push_back(session);
             if (_promise) {
@@ -895,7 +962,7 @@ public:
             invariant(_allowMultipleSessions, "Unexpected multiple ingress sessions");
         }
 
-        void endAllSessions(transport::Session::TagMask) override {
+        void endAllSessions(Session::TagMask) override {
             _join();
         }
 
@@ -925,13 +992,13 @@ public:
 
         bool _allowMultipleSessions = false;
         mutable Mutex _mutex;
-        std::vector<std::shared_ptr<transport::Session>> _sessions;
-        boost::optional<Promise<std::shared_ptr<transport::Session>>> _promise;
+        std::vector<std::shared_ptr<Session>> _sessions;
+        boost::optional<Promise<std::shared_ptr<Session>>> _promise;
     };
 
     // Used for setting and canceling timers on the networking baton. Does not offer any timer
     // functionality, and is only used for its unique id.
-    class DummyTimer final : public transport::ReactorTimer {
+    class DummyTimer final : public ReactorTimer {
     public:
         void cancel(const BatonHandle& baton = nullptr) override {
             MONGO_UNREACHABLE;
@@ -945,7 +1012,7 @@ public:
     virtual void configureSep(FirstSessionSEP& sep) {}
 
     void setUp() override {
-        auto pf = makePromiseFuture<std::shared_ptr<transport::Session>>();
+        auto pf = makePromiseFuture<std::shared_ptr<Session>>();
         auto servCtx = getServiceContext();
         auto sep = std::make_unique<FirstSessionSEP>(std::move(pf.promise));
         configureSep(*sep);
@@ -972,7 +1039,7 @@ public:
         return *_connThread;
     }
 
-    std::unique_ptr<transport::ReactorTimer> makeDummyTimer() const {
+    std::unique_ptr<ReactorTimer> makeDummyTimer() const {
         return std::make_unique<DummyTimer>();
     }
 
@@ -1000,7 +1067,7 @@ public:
 
 private:
     Notification<void> _isReady;
-    JoinThread _thread;
+    test::JoinThread _thread;
 };
 
 void waitForTimesEntered(const FailPointEnableBlock& fp, FailPoint::EntryCountT times) {
@@ -1071,7 +1138,7 @@ TEST_F(IngressAsioNetworkingBatonTest, AddAndRemoveSession) {
     auto baton = opCtx->getBaton()->networking();
 
     auto session = client().session();
-    auto future = baton->addSession(*session, transport::NetworkingBaton::Type::In);
+    auto future = baton->addSession(*session, NetworkingBaton::Type::In);
     ASSERT_TRUE(baton->cancelSession(*session));
     ASSERT_THROWS_CODE(future.get(), DBException, ErrorCodes::CallbackCanceled);
 }
@@ -1094,7 +1161,7 @@ TEST_F(IngressAsioNetworkingBatonTest, AddAndRemoveSessionWhileInPoll) {
 
         // This thread is an external observer to the baton, so the expected behavior is for
         // `cancelSession` to happen after `addSession`, and thus it must return `true`.
-        baton->addSession(*session, transport::NetworkingBaton::Type::In).getAsync([](Status) {});
+        baton->addSession(*session, NetworkingBaton::Type::In).getAsync([](Status) {});
         cancelSessionResult.set(baton->cancelSession(*session));
     });
 
@@ -1237,15 +1304,15 @@ DEATH_TEST_F(IngressAsioNetworkingBatonTest, AddAnAlreadyAddedSession, "invarian
     auto baton = opCtx->getBaton()->networking();
     auto session = client().session();
 
-    baton->addSession(*session, transport::NetworkingBaton::Type::In).getAsync([](Status) {});
-    baton->addSession(*session, transport::NetworkingBaton::Type::In).getAsync([](Status) {});
+    baton->addSession(*session, NetworkingBaton::Type::In).getAsync([](Status) {});
+    baton->addSession(*session, NetworkingBaton::Type::In).getAsync([](Status) {});
 }
 
 class EgressSessionWithScopedReactor {
 public:
     EgressSessionWithScopedReactor(ServiceContext* sc)
         : _sc(sc),
-          _reactor(sc->getTransportLayer()->getReactor(transport::TransportLayer::kNewReactor)),
+          _reactor(sc->getTransportLayer()->getReactor(TransportLayer::kNewReactor)),
           _reactorThread([&] { _reactor->run(); }),
           _session(_makeEgressSession()) {}
 
@@ -1254,19 +1321,19 @@ public:
         _reactorThread.join();
     }
 
-    std::shared_ptr<transport::Session>& session() {
+    std::shared_ptr<Session>& session() {
         return _session;
     }
 
 private:
-    std::shared_ptr<transport::Session> _makeEgressSession() {
-        auto tla = checked_cast<transport::AsioTransportLayer*>(_sc->getTransportLayer());
+    std::shared_ptr<Session> _makeEgressSession() {
+        auto tla = checked_cast<AsioTransportLayer*>(_sc->getTransportLayer());
 
-        HostAndPort localTarget("localhost", tla->listenerPort());
+        HostAndPort localTarget(testHostName(), tla->listenerPort());
 
         return _sc->getTransportLayer()
             ->asyncConnect(localTarget,
-                           transport::ConnectSSLMode::kGlobalSSLMode,
+                           ConnectSSLMode::kGlobalSSLMode,
                            _reactor,
                            Milliseconds{500},
                            std::make_shared<ConnectionMetrics>(_sc->getFastClockSource()),
@@ -1275,9 +1342,9 @@ private:
     }
 
     ServiceContext* _sc;
-    transport::ReactorHandle _reactor;
+    ReactorHandle _reactor;
     stdx::thread _reactorThread;
-    std::shared_ptr<transport::Session> _session;
+    std::shared_ptr<Session> _session;
 };
 
 // This could be considered a test for either `AsioSession` or `AsioNetworkingBaton`, as it's
@@ -1309,7 +1376,7 @@ TEST_F(EgressAsioNetworkingBatonTest, AsyncOpsMakeProgressWhenSessionAddedToDeta
     Notification<void> ready;
     auto opCtx = client().makeOperationContext();
 
-    JoinThread thread([&] {
+    test::JoinThread thread([&] {
         auto baton = opCtx->getBaton();
         ready.get();
         es.session()->asyncSourceMessage(baton).ignoreValue().getAsync(
@@ -1333,4 +1400,4 @@ TEST_F(EgressAsioNetworkingBatonTest, AsyncOpsMakeProgressWhenSessionAddedToDeta
 #endif  // __linux__
 
 }  // namespace
-}  // namespace mongo
+}  // namespace mongo::transport

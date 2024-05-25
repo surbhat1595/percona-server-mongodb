@@ -48,6 +48,8 @@
 namespace mongo {
 namespace repl {
 
+MONGO_FAIL_POINT_DEFINE(primaryOnlyServiceTestStepUpWaitForRebuildComplete);
+
 void PrimaryOnlyServiceMongoDTest::setUp() {
     ServiceContextMongoDTest::setUp();
 
@@ -82,20 +84,10 @@ void PrimaryOnlyServiceMongoDTest::setUp() {
         _registry->registerService(std::move(service));
         _service = _registry->lookupServiceByName(serviceName);
 
+        primaryOnlyServiceTestStepUpWaitForRebuildComplete.setMode(FailPoint::nTimes, 1);
         startup(opCtx.get());
         stepUp(opCtx.get());
     }
-}
-
-void PrimaryOnlyServiceMongoDTest::tearDown() {
-    // Ensure that even on test failures all failpoint state gets reset.
-    globalFailPointRegistry().disableAllFailpoints();
-
-    WaitForMajorityService::get(getServiceContext()).shutDown();
-
-    shutdown();
-
-    ServiceContextMongoDTest::tearDown();
 }
 
 void PrimaryOnlyServiceMongoDTest::startup(OperationContext* opCtx) {
@@ -108,6 +100,9 @@ void PrimaryOnlyServiceMongoDTest::shutdown() {
 
 void PrimaryOnlyServiceMongoDTest::stepUp(OperationContext* opCtx) {
     repl::stepUp(opCtx, getServiceContext(), _registry, _term);
+    if (primaryOnlyServiceTestStepUpWaitForRebuildComplete.shouldFail()) {
+        _service->waitForStateNotRebuilding_forTest(opCtx);
+    }
 }
 
 void PrimaryOnlyServiceMongoDTest::stepDown() {
@@ -117,6 +112,21 @@ void PrimaryOnlyServiceMongoDTest::stepDown() {
 std::unique_ptr<repl::ReplicationCoordinator>
 PrimaryOnlyServiceMongoDTest::makeReplicationCoordinator() {
     return std::make_unique<repl::ReplicationCoordinatorMock>(getServiceContext());
+}
+
+void PrimaryOnlyServiceMongoDTest::tearDown() {
+    // Ensure that even on test failures all failpoint state gets reset.
+    globalFailPointRegistry().disableAllFailpoints();
+
+    WaitForMajorityService::get(getServiceContext()).shutDown();
+
+    shutdownHook();
+
+    ServiceContextMongoDTest::tearDown();
+}
+
+void PrimaryOnlyServiceMongoDTest::shutdownHook() {
+    shutdown();
 }
 
 void stepUp(OperationContext* opCtx,

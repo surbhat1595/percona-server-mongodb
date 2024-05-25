@@ -3,9 +3,9 @@
  *
  * https://docs.mongodb.com/v3.0/tutorial/configure-replica-set-tag-sets/
  */
-var TagsTest = function(options) {
-    'use strict';
+import {reconfig} from "jstests/replsets/rslib.js";
 
+export var TagsTest = function(options) {
     // Skip db hash check since this test leaves replset partitioned.
     TestData.skipCheckDBHashes = true;
 
@@ -23,9 +23,6 @@ var TagsTest = function(options) {
      */
     this.run = function() {
         var options = this.options;
-
-        load('jstests/replsets/rslib.js');
-
         let nodes = options.nodes;
         var host = getHostName();
         var name = 'tags';
@@ -39,8 +36,10 @@ var TagsTest = function(options) {
         // upgrading some of our nodes to the latest version while performing write operations under
         // different network partition scenarios.
         if (options.setFeatureCompatibilityVersion) {
-            assert.commandWorked(replTest.getPrimary().adminCommand(
-                {setFeatureCompatibilityVersion: options.setFeatureCompatibilityVersion}));
+            assert.commandWorked(replTest.getPrimary().adminCommand({
+                setFeatureCompatibilityVersion: options.setFeatureCompatibilityVersion,
+                confirm: true
+            }));
         }
 
         for (let i = 1; i < nodes.length; ++i) {

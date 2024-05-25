@@ -103,7 +103,7 @@ public:
             auto swResponse = shard->runCommandWithFixedRetryAttempts(
                 opCtx,
                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                DatabaseName::kAdmin.toString(),
+                DatabaseName::kAdmin,
                 versionedCmdObj,
                 Shard::RetryPolicy::kIdempotent);
             uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(swResponse));
@@ -143,7 +143,8 @@ public:
         return "Starts or stops collecting metrics about read and write queries against "
                "collection.";
     }
-} configureQueryAnalyzerCmd;
+};
+MONGO_REGISTER_COMMAND(ConfigureQueryAnalyzerCmd);
 
 }  // namespace
 

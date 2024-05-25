@@ -1,17 +1,15 @@
 /**
  * Tests that currentOp reports debug information for operations that are blocked on transactions.
  *
- * The test runs commands that are not allowed with security token: prepareTransaction.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: prepareTransaction.
  *   not_allowed_with_security_token,
  *   uses_transactions,
  *   uses_prepare_transaction,
  *   uses_parallel_shell
  * ]
  */
-(function() {
-"use strict";
-load("jstests/core/txns/libs/prepare_helpers.js");
+import {PrepareHelpers} from "jstests/core/txns/libs/prepare_helpers.js";
 
 const dbName = "test";
 const collName = "currentop_blocked_operations";
@@ -85,4 +83,3 @@ waitForBlockedOp({ns: testColl.getFullName(), op: "update"}, function(op) {
 assert.commandWorked(session.abortTransaction_forTesting());
 awaitUpdate();
 assert.eq(1, testColl.find({_id: 2222, x: 999}).itcount());
-})();

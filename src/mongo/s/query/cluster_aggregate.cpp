@@ -55,7 +55,6 @@
 #include "mongo/db/basic_types.h"
 #include "mongo/db/basic_types_gen.h"
 #include "mongo/db/catalog/collection_uuid_mismatch_info.h"
-#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/feature_flag.h"
@@ -72,9 +71,9 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/explain_common.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/query_stats.h"
-#include "mongo/db/query/query_stats_aggregate_key_generator.h"
-#include "mongo/db/query/query_stats_key_generator.h"
+#include "mongo/db/query/query_stats/aggregate_key_generator.h"
+#include "mongo/db/query/query_stats/key_generator.h"
+#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/tailable_mode_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/shard_id.h"
@@ -515,7 +514,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
 
     if (request.getExplain()) {
         explain_common::generateServerInfo(result);
-        explain_common::generateServerParameters(result);
+        explain_common::generateServerParameters(opCtx, result);
     }
 
     auto status = [&]() {
@@ -540,10 +539,11 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                 // If this is an explain write the explain output and return.
                 auto expCtx = targeter.pipeline->getContext();
                 if (expCtx->explain) {
+                    auto opts = SerializationOptions{.verbosity = boost::make_optional(
+                                                         ExplainOptions::Verbosity::kQueryPlanner)};
                     *result << "splitPipeline" << BSONNULL << "mongos"
                             << Document{{"host", getHostNameCachedAndPort()},
-                                        {"stages",
-                                         targeter.pipeline->writeExplainOps(*expCtx->explain)}};
+                                        {"stages", targeter.pipeline->writeExplainOps(opts)}};
                     return Status::OK();
                 }
 

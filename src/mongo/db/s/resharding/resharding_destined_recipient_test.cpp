@@ -141,33 +141,16 @@ void runInTransaction(OperationContext* opCtx, Callable&& func) {
     txnParticipant.stashTransactionResources(opCtx);
 }
 
-class DestinedRecipientTest : public ShardServerTestFixture {
+class DestinedRecipientTest : public ShardServerTestFixtureWithCatalogCacheLoaderMock {
 public:
     const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("test.foo");
     const std::string kShardKey = "x";
     const HostAndPort kConfigHostAndPort{"DummyConfig", 12345};
-    const std::vector<ShardType> kShardList = {ShardType("shard0", "Host0:12345"),
+    const std::vector<ShardType> kShardList = {ShardType(_myShardName.toString(), "Host0:12345"),
                                                ShardType("shard1", "Host1:12345")};
 
     void setUp() override {
-        // Don't call ShardServerTestFixture::setUp so we can install a mock catalog cache loader.
-        ShardingMongodTestFixture::setUp();
-
-        replicationCoordinator()->alwaysAllowWrites(true);
-        serverGlobalParams.clusterRole = ClusterRole::ShardServer;
-
-        _clusterId = OID::gen();
-        ShardingState::get(getServiceContext())
-            ->setInitialized(kShardList[0].getName(), _clusterId);
-
-        auto mockLoader = std::make_unique<CatalogCacheLoaderMock>();
-        _mockCatalogCacheLoader = mockLoader.get();
-        CatalogCacheLoader::set(getServiceContext(), std::move(mockLoader));
-
-        uassertStatusOK(
-            initializeGlobalShardingStateForMongodForTest(ConnectionString(kConfigHostAndPort)));
-
-        configTargeterMock()->setFindHostReturnValue(kConfigHostAndPort);
+        ShardServerTestFixtureWithCatalogCacheLoaderMock::setUp();
 
         WaitForMajorityService::get(getServiceContext()).startup(getServiceContext());
 
@@ -184,7 +167,7 @@ public:
     void tearDown() override {
         WaitForMajorityService::get(getServiceContext()).shutDown();
 
-        ShardServerTestFixture::tearDown();
+        ShardServerTestFixtureWithCatalogCacheLoaderMock::tearDown();
     }
 
     class StaticCatalogClient final : public ShardingCatalogClientMock {
@@ -294,9 +277,9 @@ protected:
                             BSON(kShardKey << 1));
         coll.setAllowMigrations(false);
 
-        _mockCatalogCacheLoader->setDatabaseRefreshReturnValue(
+        getCatalogCacheLoaderMock()->setDatabaseRefreshReturnValue(
             DatabaseType(kNss.db_forTest().toString(), kShardList[0].getName(), env.dbVersion));
-        _mockCatalogCacheLoader->setCollectionRefreshValues(
+        getCatalogCacheLoaderMock()->setCollectionRefreshValues(
             kNss,
             coll,
             createChunks(env.version.placementVersion().epoch(),
@@ -304,7 +287,7 @@ protected:
                          env.version.placementVersion().getTimestamp(),
                          kShardKey),
             reshardingFields);
-        _mockCatalogCacheLoader->setCollectionRefreshValues(
+        getCatalogCacheLoaderMock()->setCollectionRefreshValues(
             env.tempNss,
             coll,
             createChunks(env.version.placementVersion().epoch(),
@@ -313,7 +296,7 @@ protected:
                          "y"),
             boost::none);
 
-        ASSERT_OK(onDbVersionMismatchNoExcept(opCtx, kNss.db_forTest(), boost::none));
+        ASSERT_OK(onDbVersionMismatchNoExcept(opCtx, kNss.dbName(), boost::none));
         forceShardFilteringMetadataRefresh(opCtx, kNss);
 
         if (refreshTempNss)
@@ -366,9 +349,6 @@ protected:
         const auto& doc = unittest::assertGet(oplogIter->next()).first;
         return unittest::assertGet(repl::OplogEntry::parse(doc));
     }
-
-protected:
-    CatalogCacheLoaderMock* _mockCatalogCacheLoader;
 };
 
 TEST_F(DestinedRecipientTest, TestGetDestinedRecipient) {
@@ -389,22 +369,18 @@ TEST_F(DestinedRecipientTest, TestGetDestinedRecipientThrowsOnBlockedRefresh) {
     auto opCtx = operationContext();
     auto env = setupReshardingEnv(opCtx, false);
 
-    {
-        AutoGetCollection coll(opCtx, kNss, MODE_IX);
-        OperationShardingState::setShardRole(opCtx, kNss, env.version, env.dbVersion);
+    AutoGetCollection coll(opCtx, kNss, MODE_IX);
+    OperationShardingState::setShardRole(opCtx, kNss, env.version, env.dbVersion);
 
-        FailPointEnableBlock failPoint("blockCollectionCacheLookup");
-        ASSERT_THROWS_WITH_CHECK(ShardingWriteRouter(opCtx, kNss),
-                                 ShardCannotRefreshDueToLocksHeldException,
-                                 [&](const ShardCannotRefreshDueToLocksHeldException& ex) {
-                                     const auto refreshInfo =
-                                         ex.extraInfo<ShardCannotRefreshDueToLocksHeldInfo>();
-                                     ASSERT(refreshInfo);
-                                     ASSERT_EQ(refreshInfo->getNss(), env.tempNss);
-                                 });
-    }
-
-    auto sw = catalogCache()->getCollectionRoutingInfoWithRefresh(opCtx, env.tempNss);
+    FailPointEnableBlock failPoint("blockCollectionCacheLookup");
+    ASSERT_THROWS_WITH_CHECK(ShardingWriteRouter(opCtx, kNss),
+                             ShardCannotRefreshDueToLocksHeldException,
+                             [&](const ShardCannotRefreshDueToLocksHeldException& ex) {
+                                 const auto refreshInfo =
+                                     ex.extraInfo<ShardCannotRefreshDueToLocksHeldInfo>();
+                                 ASSERT(refreshInfo);
+                                 ASSERT_EQ(refreshInfo->getNss(), env.tempNss);
+                             });
 }
 
 TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnInserts) {

@@ -62,6 +62,7 @@ namespace mongo::logv2 {
     X(kNetwork,                , "network"               , "NETWORK" , kDefault) \
     X(kProcessHealth,          , "processHealth"         , "HEALTH"  , kDefault) \
     X(kQuery,                  , "query"                 , "QUERY"   , kDefault) \
+    X(kQueryStats,             , "queryStats"            , "QRYSTATS", kDefault) \
     X(kReplication,            , "replication"           , "REPL"    , kDefault) \
     X(kReplicationElection,    , "election"              , "ELECTION", kReplication) \
     X(kReplicationHeartbeats,  , "heartbeats"            , "REPL_HB" , kReplication) \
@@ -100,6 +101,7 @@ namespace mongo::logv2 {
     X(kConnectionPool,         , "connectionPool"        , "CONNPOOL", kNetwork) \
     X(kTest,                   , "test"                  , "TEST"    , kDefault) \
     X(kResourceConsumption,    , "resourceConsumption"   , "RES_CONS", kDefault) \
+    X(kStreams,                , "streams"               , "STREAMS" , kDefault) \
     X(kNumLogComponents,       , "total"                 , "TOTAL"   , kNumLogComponents) \
     /**/
 // clang-format on

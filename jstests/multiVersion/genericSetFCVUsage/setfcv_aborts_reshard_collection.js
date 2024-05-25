@@ -1,12 +1,12 @@
 /**
  * Tests that setFeatureCompatibilityVersion command aborts an ongoing reshardCollection command
  */
+import {DiscoverTopology} from "jstests/libs/discover_topology.js";
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-load("jstests/libs/parallel_shell_helpers.js");
-load("jstests/sharding/libs/resharding_test_fixture.js");
-load('jstests/libs/discover_topology.js');
-load('jstests/libs/fail_point_util.js');
-load('jstests/sharding/libs/sharded_transactions_helpers.js');
+import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
+import {ReshardingTest} from "jstests/sharding/libs/resharding_test_fixture.js";
+import {waitForFailpoint} from "jstests/sharding/libs/sharded_transactions_helpers.js";
 
 // Global variable is used to avoid spinning up a set of servers just to see if the
 // feature flag is enabled.
@@ -90,7 +90,7 @@ function runTest({forcePooledConnectionsDropped, withUUID}) {
 
             let codeToRunInParallelShell =
                 `{
-                assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
+                assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
             }`;
 
             awaitShell = startParallelShell(codeToRunInParallelShell, mongos.port);
@@ -142,10 +142,11 @@ function runTest({forcePooledConnectionsDropped, withUUID}) {
             assert.soon(() => {
                 return mongos.getDB('config').reshardingOperations.findOne() != null;
             }, "timed out waiting for coordinator doc to be written", 30 * 1000);
-            awaitShell = startParallelShell(funWithArgs(function(latestFCV) {
-                                                assert.commandWorked(db.adminCommand(
-                                                    {setFeatureCompatibilityVersion: latestFCV}));
-                                            }, latestFCV), mongos.port);
+            awaitShell = startParallelShell(
+                funWithArgs(function(latestFCV) {
+                    assert.commandWorked(db.adminCommand(
+                        {setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+                }, latestFCV), mongos.port);
             checkCoordinatorDoc();
         },
         {

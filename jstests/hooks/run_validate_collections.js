@@ -1,10 +1,7 @@
 // Runner for validateCollections that runs full validation on all collections when loaded into
 // the mongo shell.
-'use strict';
-
-(function() {
-load('jstests/libs/discover_topology.js');      // For Topology and DiscoverTopology.
-load('jstests/hooks/validate_collections.js');  // For CollectionValidator.
+import {CollectionValidator} from "jstests/hooks/validate_collections.js";
+import {DiscoverTopology, Topology} from "jstests/libs/discover_topology.js";
 
 assert.eq(typeof db, 'object', 'Invalid `db` object, is the shell connected to a mongod?');
 const topology = DiscoverTopology.findConnectedNodes(db.getMongo());
@@ -61,7 +58,7 @@ if (requiredFCV) {
     originalFCV = adminDB.system.version.findOne({_id: 'featureCompatibilityVersion'});
 
     if (originalFCV.targetVersion) {
-        let cmd = {setFeatureCompatibilityVersion: originalFCV.targetVersion};
+        let cmd = {setFeatureCompatibilityVersion: originalFCV.targetVersion, confirm: true};
         if (originalFCV.version === lastLTSFCV && originalFCV.targetVersion === lastContinuousFCV) {
             // We are only able to call 'setFeatureCompatibilityVersion' to transition from last-lts
             // to last-continuous with 'fromConfigServer: true'.
@@ -76,13 +73,15 @@ if (requiredFCV) {
 
     // Now that we are certain that an upgrade or downgrade of the FCV is not in progress, ensure
     // the 'requiredFCV' is set.
-    assert.commandWorked(adminDB.runCommand({setFeatureCompatibilityVersion: requiredFCV}));
+    assert.commandWorked(
+        adminDB.runCommand({setFeatureCompatibilityVersion: requiredFCV, confirm: true}));
 }
 
 new CollectionValidator().validateNodes(hostList);
 
 if (originalFCV && originalFCV.version !== requiredFCV) {
-    assert.commandWorked(adminDB.runCommand({setFeatureCompatibilityVersion: originalFCV.version}));
+    assert.commandWorked(
+        adminDB.runCommand({setFeatureCompatibilityVersion: originalFCV.version, confirm: true}));
 }
 
 if (originalTransactionLifetimeLimitSeconds) {
@@ -91,4 +90,3 @@ if (originalTransactionLifetimeLimitSeconds) {
             conn.adminCommand({setParameter: 1, transactionLifetimeLimitSeconds: originalValue}));
     }
 }
-})();

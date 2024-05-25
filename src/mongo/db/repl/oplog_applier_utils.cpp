@@ -160,18 +160,7 @@ uint32_t getWriterId(OperationContext* opCtx,
                      CachedCollectionProperties* collPropertiesCache,
                      uint32_t numWriters,
                      boost::optional<uint32_t> forceWriterId = boost::none) {
-    boost::optional<size_t> idHash;
-    NamespaceString nss = op->isGlobalIndexCrudOpType()
-        ? NamespaceString::makeGlobalIndexNSS(op->getUuid().value())
-        : op->getNss();
-
-    if (op->isCrudOpType()) {
-        auto collProperties = collPropertiesCache->getCollectionProperties(opCtx, nss);
-        processCrudOp(opCtx, op, collProperties, idHash);
-    }
-
-    auto hash = idHash ? absl::HashOf(nss, *idHash) : absl::HashOf(nss);
-
+    auto hash = OplogApplierUtils::getOplogEntryHash(opCtx, op, collPropertiesCache);
     return (forceWriterId ? *forceWriterId : hash) % numWriters;
 }
 
@@ -235,6 +224,22 @@ void addTopLevelCommitOrAbort(OperationContext* opCtx,
                           ApplicationInstruction::applyTopLevelPreparedTxnOp);
 }
 }  // namespace
+
+uint32_t OplogApplierUtils::getOplogEntryHash(OperationContext* opCtx,
+                                              OplogEntry* op,
+                                              CachedCollectionProperties* collPropertiesCache) {
+    boost::optional<size_t> idHash;
+    NamespaceString nss = op->isGlobalIndexCrudOpType()
+        ? NamespaceString::makeGlobalIndexNSS(op->getUuid().value())
+        : op->getNss();
+
+    if (op->isCrudOpType()) {
+        auto collProperties = collPropertiesCache->getCollectionProperties(opCtx, nss);
+        processCrudOp(opCtx, op, collProperties, idHash);
+    }
+
+    return idHash ? absl::HashOf(nss, *idHash) : absl::HashOf(nss);
+}
 
 uint32_t OplogApplierUtils::addToWriterVector(
     OperationContext* opCtx,
@@ -543,6 +548,16 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
                 ex.addContext(str::stream() << "Failed to apply operation: "
                                             << redact(entryOrGroupedInserts.toBSON()));
                 throw;
+            } catch (ExceptionFor<ErrorCodes::CommandNotSupportedOnView>&) {
+                // This can happen in initial sync or unstable recovery mode when a time-series
+                // collection is created in place of a dropped regular collection and oplog entries
+                // are being applied that were originally performed on the regular collection.
+                if (oplogApplicationMode == OplogApplication::Mode::kInitialSync ||
+                    oplogApplicationMode == OplogApplication::Mode::kUnstableRecovering) {
+                    return Status::OK();
+                }
+
+                throw;
             }
         });
         return status;
@@ -561,7 +576,7 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
                     LOGV2(5863600,
                           "Hanging due to 'hangAfterApplyingCollectionDropOplogEntry' failpoint.");
                 },
-                [&](const BSONObj& data) { return (nss.db() == data["dbName"].str()); });
+                [&](const BSONObj& data) { return (nss.db_deprecated() == data["dbName"].str()); });
         }
         return status;
     }

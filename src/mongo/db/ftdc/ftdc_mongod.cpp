@@ -64,7 +64,7 @@ Status validateCollectionStatsNamespaces(const std::vector<std::string> value,
                                          const boost::optional<TenantId>& tenantId) {
     try {
         for (const auto& nsStr : value) {
-            NamespaceString ns(nsStr);
+            const auto ns = NamespaceStringUtil::deserialize(tenantId, nsStr);
 
             if (!ns.isValid()) {
                 return Status(ErrorCodes::BadValue,
@@ -92,11 +92,13 @@ public:
         for (const auto& nsStr : namespaces) {
 
             try {
-                NamespaceString ns(nsStr);
+                // TODO SERVER-74464 tenantId needs to be passed.
+                const auto ns =
+                    NamespaceStringUtil::parseFromStringExpectTenantIdInMultitenancyMode(nsStr);
                 auto result = CommandHelpers::runCommandDirectly(
                     opCtx,
                     OpMsgRequest::fromDBAndBody(
-                        ns.db(),
+                        ns.dbName(),
                         BSON("aggregate" << ns.coll() << "cursor" << BSONObj{} << "pipeline"
                                          << BSON_ARRAY(BSON("$collStats" << BSON(
                                                                 "storageStats" << BSON(
@@ -118,20 +120,19 @@ public:
 
 void registerMongoDCollectors(FTDCController* controller) {
     // These metrics are only collected if replication is enabled
-    if (repl::ReplicationCoordinator::get(getGlobalServiceContext())->getReplicationMode() !=
-        repl::ReplicationCoordinator::modeNone) {
+    if (repl::ReplicationCoordinator::get(getGlobalServiceContext())->getSettings().isReplSet()) {
         // CmdReplSetGetStatus
         controller->addPeriodicCollector(std::make_unique<FTDCSimpleInternalCommandCollector>(
             "replSetGetStatus",
             "replSetGetStatus",
-            "",
+            DatabaseName::kEmpty,
             BSON("replSetGetStatus" << 1 << "initialSync" << 0)));
 
         // CollectionStats
         controller->addPeriodicCollector(std::make_unique<FTDCSimpleInternalCommandCollector>(
             "aggregate",
             "local.oplog.rs.stats",
-            "local",
+            DatabaseName::kLocal,
             BSON("aggregate"
                  << "oplog.rs"
                  << "cursor" << BSONObj{} << "pipeline"
@@ -143,7 +144,7 @@ void registerMongoDCollectors(FTDCController* controller) {
             controller->addOnRotateCollector(std::make_unique<FTDCSimpleInternalCommandCollector>(
                 "getDefaultRWConcern",
                 "getDefaultRWConcern",
-                "",
+                DatabaseName::kEmpty,
                 BSON("getDefaultRWConcern" << 1 << "inMemory" << true)));
         }
     }

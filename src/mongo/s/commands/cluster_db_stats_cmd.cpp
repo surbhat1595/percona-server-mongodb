@@ -169,7 +169,7 @@ public:
 
         auto shardResponses = scatterGatherUnversionedTargetAllShards(
             opCtx,
-            DatabaseNameUtil::serialize(dbName),
+            dbName,
             applyReadWriteConcern(
                 opCtx, this, CommandHelpers::filterCommandRequestForPassthrough(cmdObj)),
             ReadPreferenceSetting::get(opCtx),
@@ -187,7 +187,8 @@ public:
     void validateResult(const BSONObj& resultObj) final {
         DBStats::parse(IDLParserContext{"dbstats.reply"}, resultObj);
     }
-} clusterDBStatsCmd;
+};
+MONGO_REGISTER_COMMAND(CmdDBStats);
 
 }  // namespace
 }  // namespace mongo

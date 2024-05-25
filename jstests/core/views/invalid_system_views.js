@@ -2,8 +2,8 @@
  * Tests that invalid view definitions in system.views do not impact valid commands on existing
  * collections.
  *
- * The test runs commands that are not allowed with security token: applyOps, compact, reIndex.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: applyOps, compact, reIndex.
  *   not_allowed_with_security_token,
  *   assumes_unsharded_collection,
  *   # applyOps is not available on mongos.
@@ -17,12 +17,12 @@
  *   tenant_migration_incompatible,
  *   uses_compact,
  *   references_foreign_collection,
+ *   # TODO SERVER-78025 reenable query stats coverage on this test
+ *   skip_for_query_stats
  * ]
  */
-load("jstests/libs/fixture_helpers.js");
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
-(function() {
-"use strict";
 const runningOnMongos = FixtureHelpers.isMongos(db);
 const isStandalone = !runningOnMongos && !db.runCommand({hello: 1}).hasOwnProperty("setName");
 
@@ -152,4 +152,3 @@ runTest({_id: 7, viewOn: "collection", pipeline: []});
 runTest({_id: "invalid_system_views.embedded\0null", viewOn: "collection", pipeline: []});
 runTest({_id: "invalidNotFullyQualifiedNs", viewOn: "collection", pipeline: []});
 runTest({_id: "invalid_system_views.missingViewOnField", pipeline: []});
-}());

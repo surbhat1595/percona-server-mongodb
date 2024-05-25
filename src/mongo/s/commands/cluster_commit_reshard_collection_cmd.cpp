@@ -72,7 +72,7 @@ public:
             auto response = uassertStatusOK(cfg->runCommandWithFixedRetryAttempts(
                 opCtx,
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                "admin",
+                DatabaseName::kAdmin,
                 CommandHelpers::appendMajorityWriteConcern(cmd.toBSON({}),
                                                            opCtx->getWriteConcern()),
                 Shard::RetryPolicy::kIdempotent));
@@ -111,7 +111,8 @@ public:
                "as possible. This may mean a longer critical interval "
                "during which writes are blocked.";
     }
-} commitReshardCollectionCmd;
+};
+MONGO_REGISTER_COMMAND(CommitReshardCollectionCmd);
 
 }  // namespace
 }  // namespace mongo

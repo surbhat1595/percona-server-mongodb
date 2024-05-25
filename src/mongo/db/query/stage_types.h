@@ -88,7 +88,7 @@ enum StageType {
 
     STAGE_IXSCAN,
     STAGE_LIMIT,
-
+    STAGE_MATCH,
     STAGE_MOCK,
 
     // Implements iterating over one or more RecordStore::Cursor.
@@ -131,7 +131,9 @@ enum StageType {
 
     STAGE_UNKNOWN,
 
-    STAGE_UNPACK_TIMESERIES_BUCKET,
+    // Stage for 'UnpackTimeseriesBucket' which is only used for $sample on a time-series bucket
+    // collection.
+    STAGE_UNPACK_SAMPLED_TS_BUCKET,
 
     STAGE_UPDATE,
 
@@ -139,7 +141,10 @@ enum StageType {
     STAGE_GROUP,
     STAGE_EQ_LOOKUP,
     STAGE_SEARCH,
+    STAGE_WINDOW,
     STAGE_SENTINEL,
+    // Stage for the DocumentSource to unpack timeseries buckets.
+    STAGE_UNPACK_TS_BUCKET,
 };
 
 inline bool isProjectionStageType(StageType stageType) {

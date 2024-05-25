@@ -192,7 +192,6 @@ enum ResourceType {
  * IDs for usages of RESOURCE_GLOBAL.
  */
 enum class ResourceGlobalId : uint8_t {
-    kParallelBatchWriterMode,
     kFeatureCompatibilityVersion,
     kReplicationStateTransitionLock,
     kGlobal,
@@ -218,7 +217,6 @@ static const char* ResourceTypeNames[] = {"Invalid",
  * Maps the global resource id to a human-readable string.
  */
 static const char* ResourceGlobalIdNames[] = {
-    "ParallelBatchWriterMode",
     "FeatureCompatibilityVersion",
     "ReplicationStateTransition",
     "Global",
@@ -331,7 +329,7 @@ private:
     }
 
     static uint64_t hashStringData(StringData str) {
-        return murmur3<sizeof(uint64_t)>(str, 0 /*seed*/);
+        return absl::hash_internal::CityHash64(str.rawData(), str.size());
     }
 };
 
@@ -357,20 +355,14 @@ extern const ResourceId resourceIdAdminDB;
 // once. See comments in the header file (begin/endTransaction) for more information.
 extern const ResourceId resourceIdGlobal;
 
-// Hardcoded resource id for ParallelBatchWriterMode (PBWM). The lock will never be contended unless
-// the parallel batch writers must stop all other accesses globally. This resource must be locked
-// before all other resources (including resourceIdGlobal). Replication applier threads don't take
-// this lock.
-extern const ResourceId resourceIdParallelBatchWriterMode;
-
 // Hardcoded resource id for a full FCV transition from start -> upgrading -> upgraded (or
 // equivalent for downgrading). This lock is used as a barrier to prevent writes from spanning an
-// FCV change. This lock is acquired after the PBWM but before the RSTL and resourceIdGlobal.
+// FCV change. This lock is acquired before the RSTL and resourceIdGlobal.
 extern const ResourceId resourceIdFeatureCompatibilityVersion;
 
 // Hardcoded resource id for the ReplicationStateTransitionLock (RSTL). This lock is acquired in
 // mode X for any replication state transition and is acquired by all other reads and writes in mode
-// IX. This lock is acquired after the PBWM and FCV locks but before the resourceIdGlobal.
+// IX. This lock is acquired after the FCV lock but before the resourceIdGlobal.
 extern const ResourceId resourceIdReplicationStateTransitionLock;
 
 /**

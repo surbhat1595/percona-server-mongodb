@@ -4,8 +4,9 @@
  * @tags: [requires_fcv_63, serverless]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {Thread} from "jstests/libs/parallelTester.js";
 import {ShardSplitTest} from "jstests/serverless/libs/shard_split_test.js";
-load("jstests/libs/fail_point_util.js");
 
 // Shard split commands are gated by a feature flag, which will not be supported when we
 // downgrade versions. Eventually, we will run this test when we have two consecutive versions
@@ -29,7 +30,8 @@ const downgradeFCV = lastContinuousFCV;
 const hangWhileDowngradingFp = configureFailPoint(donorPrimary, "hangWhileDowngrading");
 const downgradeThread = new Thread((host, downgradeFCV) => {
     const db = new Mongo(host);
-    assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: downgradeFCV}));
+    assert.commandWorked(
+        db.adminCommand({setFeatureCompatibilityVersion: downgradeFCV, confirm: true}));
 }, donorPrimary.host, downgradeFCV);
 
 downgradeThread.start();
@@ -44,7 +46,8 @@ jsTestLog("Assert shard splits are aborted when upgrading.");
 const hangWhileUpgradingFp = configureFailPoint(donorPrimary, "hangWhileUpgrading");
 const upgradeThread = new Thread((host) => {
     const db = new Mongo(host);
-    assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        db.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
 }, donorPrimary.host);
 
 upgradeThread.start();

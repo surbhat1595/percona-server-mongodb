@@ -1,9 +1,11 @@
 // Tests that the killCursors command is allowed in transactions.
-// The test runs commands that are not allowed with security token: endSession, killCursors.
+//
 // @tags: [
-//   not_allowed_with_security_token,uses_transactions, uses_parallel_shell]
-(function() {
-"use strict";
+//   # The test runs commands that are not allowed with security token: endSession, killCursors.
+//   not_allowed_with_security_token,
+//   uses_transactions,
+//   uses_parallel_shell
+// ]
 
 const dbName = "test";
 const collName = "kill_cursors_in_transaction";
@@ -60,14 +62,7 @@ assert.soon(
                        {
                            $match: {
                                $or: [
-                                   {
-                                       $or: [
-                                           {'command.drop': collName},
-                                           // TODO SERVER-73627: Remove once 7.0 becomes last LTS.
-                                           {'command._shardsvrDropCollectionParticipant': collName}
-                                       ],
-                                       waitingForLock: true
-                                   },
+                                   {'command.drop': collName, waitingForLock: true},
                                    {'command._shardsvrParticipantBlock': collName},
                                ]
                            }
@@ -89,4 +84,3 @@ assert.commandWorked(session.commitTransaction_forTesting());
 awaitDrop();
 
 session.endSession();
-}());

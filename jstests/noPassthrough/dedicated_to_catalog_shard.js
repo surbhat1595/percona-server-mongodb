@@ -3,12 +3,8 @@
  *
  * @tags: [
  *   requires_fcv_70,
- *   featureFlagTransitionToCatalogShard,
  * ]
  */
-
-(function() {
-"use strict";
 
 const dbName = "foo";
 const collName = "bar";
@@ -71,4 +67,3 @@ let shardList = st.getDB('config').shards.find().toArray();
 assert.eq(1, shardList.length, tojson(shardList));
 
 st.stop();
-}());

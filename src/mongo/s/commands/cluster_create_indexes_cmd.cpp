@@ -127,8 +127,7 @@ public:
                     logAttrs(nss),
                     "command"_attr = redact(cmdObj));
 
-        // TODO SERVER-67798 Change cluster::createDatabase to use DatabaseName
-        cluster::createDatabase(opCtx, DatabaseNameUtil::serialize(dbName));
+        cluster::createDatabase(opCtx, dbName);
 
         auto targeter = CollectionRoutingInfoTargeter(opCtx, nss);
         auto routingInfo = targeter.getRoutingInfo();
@@ -140,7 +139,7 @@ public:
 
         auto shardResponses = scatterGatherVersionedTargetByRoutingTable(
             opCtx,
-            nss.db_forSharding(),
+            nss.dbName(),
             targeter.getNS(),
             routingInfo,
             CommandHelpers::filterCommandRequestForPassthrough(
@@ -152,9 +151,19 @@ public:
             boost::none /*letParameters*/,
             boost::none /*runtimeConstants*/);
 
+        BSONObjBuilder rawResBuilder;
         std::string errmsg;
+        bool isShardedCollection = routingInfo.cm.isSharded();
         const bool ok =
-            appendRawResponses(opCtx, &errmsg, &output, std::move(shardResponses)).responseOK;
+            appendRawResponses(opCtx, &errmsg, &rawResBuilder, shardResponses, isShardedCollection)
+                .responseOK;
+
+        if (!isShardedCollection && ok) {
+            CommandHelpers::filterCommandReplyForPassthrough(
+                shardResponses[0].swResponse.getValue().data, &output);
+        }
+
+        output.appendElements(rawResBuilder.obj());
         CommandHelpers::appendSimpleCommandStatus(output, ok, errmsg);
 
         if (ok) {
@@ -206,7 +215,8 @@ public:
     const AuthorizationContract* getAuthorizationContract() const final {
         return &::mongo::CreateIndexesCommand::kAuthorizationContract;
     }
-} createIndexesCmd;
+};
+MONGO_REGISTER_COMMAND(CreateIndexesCmd);
 
 }  // namespace
 }  // namespace mongo

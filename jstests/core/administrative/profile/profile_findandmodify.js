@@ -1,6 +1,7 @@
 // Confirms that profiled findAndModify execution contains all expected metrics with proper values.
-// The test runs commands that are not allowed with security token: setProfilingLevel.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: setProfilingLevel.
 //   not_allowed_with_security_token,
 //   # Asserts on the number of index keys modified.
 //   assumes_no_implicit_index_creation,
@@ -8,12 +9,11 @@
 //   requires_profiling,
 // ]
 
-(function() {
-"use strict";
-
-load("jstests/libs/clustered_collections/clustered_collection_util.js");
-load("jstests/libs/os_helpers.js");  // For isLinux().
-load("jstests/libs/profiler.js");    // For getLatestProfilerEntry.
+import {
+    ClusteredCollectionUtil
+} from "jstests/libs/clustered_collections/clustered_collection_util.js";
+import {isLinux} from "jstests/libs/os_helpers.js";
+import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 
 var testDB = db.getSiblingDB("profile_findandmodify");
 assert.commandWorked(testDB.dropDatabase());
@@ -204,4 +204,3 @@ coll.findAndModify({query: {a: 3, b: 3}, update: {$set: {c: 1}}});
 profileObj = getLatestProfilerEntry(testDB);
 
 assert.eq(profileObj.fromMultiPlanner, true, tojson(profileObj));
-})();

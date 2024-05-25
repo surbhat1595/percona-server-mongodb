@@ -661,7 +661,7 @@ __wt_btree_tree_open(WT_SESSION_IMPL *session, const uint8_t *addr, size_t addr_
      * Build the in-memory version of the page. Clear our local reference to the allocated copy of
      * the disk image on return, the in-memory object steals it.
      */
-    WT_ERR(__wt_page_inmem(session, NULL, dsk.data, dsk.size,
+    WT_ERR(__wt_page_inmem(session, NULL, dsk.data,
       WT_DATA_IN_ITEM(&dsk) ? WT_PAGE_DISK_ALLOC : WT_PAGE_DISK_MAPPED, &page, NULL));
     dsk.mem = NULL;
 
@@ -951,9 +951,11 @@ __btree_page_sizes(WT_SESSION_IMPL *session)
      */
     WT_RET(__wt_config_gets(session, cfg, "memory_page_max", &cval));
     btree->maxmempage = (uint64_t)cval.val;
+
+#define WT_MIN_PAGES 10
     if (!F_ISSET(conn, WT_CONN_CACHE_POOL) && (cache_size = conn->cache_size) > 0)
-        btree->maxmempage = (uint64_t)WT_MIN(
-          btree->maxmempage, (conn->cache->eviction_dirty_trigger * cache_size) / WT_THOUSAND);
+        btree->maxmempage = (uint64_t)WT_MIN(btree->maxmempage,
+          ((conn->cache->eviction_dirty_trigger * cache_size) / 100) / WT_MIN_PAGES);
 
     /* Enforce a lower bound of a single disk leaf page */
     btree->maxmempage = WT_MAX(btree->maxmempage, btree->maxleafpage);

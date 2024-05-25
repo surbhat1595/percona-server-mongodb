@@ -1,7 +1,7 @@
 /**
  * Utilities for testing the analyzeShardKey command.
  */
-var AnalyzeShardKeyUtil = (function() {
+export var AnalyzeShardKeyUtil = (function() {
     /**
      * Returns true if the given key pattern contains a hashed key.
      */
@@ -183,7 +183,6 @@ var AnalyzeShardKeyUtil = (function() {
         assert.gte(metrics.numDocsTotal, metrics.numDocsSampled, metrics);
         if (metrics.hasOwnProperty("numOrphanDocs")) {
             assert.gte(metrics.numOrphanDocs, 0, metrics);
-            assert.gte(metrics.numDocsTotal, metrics.numOrphanDocs);
         }
         if (metrics.isUnique) {
             assert.eq(metrics.numDocsSampled, metrics.numDistinctValues, metrics);

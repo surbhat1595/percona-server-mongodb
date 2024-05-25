@@ -129,7 +129,9 @@ void assertNoMovePrimaryInProgress(OperationContext* opCtx, NamespaceString cons
         auto collDesc = scopedCss->getCollectionDescription(opCtx);
         collDesc.throwIfReshardingInProgress(nss);
 
-        if (!collDesc.isSharded()) {
+        // Only collections that are not registered in the sharding catalog are affected by
+        // movePrimary
+        if (!collDesc.hasRoutingTable()) {
             if (scopedDss->isMovePrimaryInProgress()) {
                 LOGV2(4945200, "assertNoMovePrimaryInProgress", logAttrs(nss));
 
@@ -431,7 +433,7 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(
             // to drop the shard key index, so it could be possible to hide it.
             if (!cmrIndex->idx->hidden() && *cmdIndex.getHidden()) {
                 if (shardKeyPattern) {
-                    if (isLastNonHiddenShardKeyIndex(
+                    if (isLastNonHiddenRangedShardKeyIndex(
                             opCtx, coll, cmrIndex->idx->indexName(), shardKeyPattern->toBSON())) {
                         return {ErrorCodes::InvalidOptions,
                                 "Can't hide the only compatible index for this collection's "
@@ -913,7 +915,7 @@ Status _collModInternal(OperationContext* opCtx,
                 view->setPipeline(*cmd.getPipeline());
 
             if (!viewOn.empty())
-                view->setViewOn(NamespaceStringUtil::parseNamespaceFromRequest(dbName, viewOn));
+                view->setViewOn(NamespaceStringUtil::deserialize(dbName, viewOn));
 
             BSONArrayBuilder pipeline;
             for (auto& item : view->pipeline()) {
@@ -988,9 +990,25 @@ Status _collModInternal(OperationContext* opCtx,
             auto [newOptions, changed] = res.getValue();
             if (changed) {
                 coll.getWritableCollection(opCtx)->setTimeseriesOptions(opCtx, newOptions);
-                coll.getWritableCollection(opCtx)->setTimeseriesBucketingParametersChanged(opCtx,
-                                                                                           true);
+                if (feature_flags::gTSBucketingParametersUnchanged.isEnabled(
+                        serverGlobalParams.featureCompatibility)) {
+                    coll.getWritableCollection(opCtx)->setTimeseriesBucketingParametersChanged(
+                        opCtx, true);
+                };
             }
+        }
+
+        // We involve an empty collMod command during a setFCV downgrade to clean timeseries
+        // bucketing parameters in the catalog. So if the FCV is in downgrading or downgraded stage,
+        // remove time-series bucketing parameters flag, as nodes older than 7.1 cannot understand
+        // this flag.
+        // (Generic FCV reference): This FCV check should exist across LTS binary versions.
+        // TODO SERVER-80003 remove special version handling when LTS becomes 8.0.
+        if (cmrNew.numModifications == 0 && coll->timeseriesBucketingParametersHaveChanged() &&
+            serverGlobalParams.featureCompatibility.getVersion() ==
+                multiversion::GenericFCV::kDowngradingFromLatestToLastLTS) {
+            coll.getWritableCollection(opCtx)->setTimeseriesBucketingParametersChanged(opCtx,
+                                                                                       boost::none);
         }
 
         // Fix any invalid index options for indexes belonging to this collection.

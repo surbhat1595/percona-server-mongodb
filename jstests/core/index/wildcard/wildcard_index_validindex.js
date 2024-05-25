@@ -7,18 +7,14 @@
  *   does_not_support_transactions,
  * ]
  */
-load("jstests/libs/index_catalog_helpers.js");     // For "IndexCatalogHelpers."
-load("jstests/libs/collection_drop_recreate.js");  // For "assertDropCollection."
+import {assertDropCollection} from "jstests/libs/collection_drop_recreate.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+import {IndexCatalogHelpers} from "jstests/libs/index_catalog_helpers.js";
 
 const kCollectionName = "wildcard_validindex";
 const coll = db.getCollection(kCollectionName);
 
 const kIndexName = "wildcard_validindex";
-
-// TODO SERVER-68303: Remove the feature flag and update corresponding tests.
-const allowCompoundWildcardIndexes =
-    FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "CompoundWildcardIndexes");
 
 // Can create a valid wildcard index.
 IndexCatalogHelpers.createIndexAndVerifyWithDrop(coll, {"$**": 1}, {name: kIndexName});
@@ -50,12 +46,7 @@ IndexCatalogHelpers.createIndexAndVerifyWithDrop(
 // Cannot create a wildcard index with a non-positive numeric key value.
 coll.dropIndexes();
 assert.commandFailedWithCode(coll.createIndex({"$**": 0}), ErrorCodes.CannotCreateIndex);
-if (!allowCompoundWildcardIndexes) {
-    // TODO SERVER-68303: Update the tests. Following createIndex commands should be valid.
-    // Negative value is allowed if compound wildcard indexes feature flag is set.
-    assert.commandFailedWithCode(coll.createIndex({"$**": -1}), ErrorCodes.CannotCreateIndex);
-    assert.commandFailedWithCode(coll.createIndex({"$**": -2}), ErrorCodes.CannotCreateIndex);
-}
+assert.commandWorked(coll.createIndex({"$**": -1}));
 
 // Cannot create a wildcard index with sparse option.
 assert.commandFailedWithCode(coll.createIndex({"$**": 1}, {sparse: true}),
@@ -87,14 +78,6 @@ assert.commandFailedWithCode(coll.createIndex({"a.$**": "text"}), ErrorCodes.Can
 assert.commandFailedWithCode(coll.createIndex({"a": "wildcard"}),
                              [ErrorCodes.CannotCreateIndex, 7246202]);
 assert.commandFailedWithCode(coll.createIndex({"$**": "wildcard"}), ErrorCodes.CannotCreateIndex);
-
-// Cannot create a compound wildcard index.
-if (!allowCompoundWildcardIndexes) {
-    assert.commandFailedWithCode(coll.createIndex({"$**": 1, "a": 1}),
-                                 ErrorCodes.CannotCreateIndex);
-    assert.commandFailedWithCode(coll.createIndex({"a": 1, "$**": 1}),
-                                 ErrorCodes.CannotCreateIndex);
-}
 
 // Cannot create an wildcard index with an invalid spec.
 assert.commandFailedWithCode(coll.createIndex({"a.$**.$**": 1}), ErrorCodes.CannotCreateIndex);

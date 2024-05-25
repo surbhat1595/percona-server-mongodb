@@ -2,16 +2,13 @@
  * Test that the collection created with the "convertToCapped" command inherits the default
  * collation of the corresponding collection.
  *
- * The test runs commands that are not allowed with security token: convertToCapped.
  * @tags: [
- *  not_allowed_with_security_token,
- *  requires_non_retryable_commands,
- *  requires_capped,
+ *   # The test runs commands that are not allowed with security token: convertToCapped.
+ *   not_allowed_with_security_token,
+ *   requires_non_retryable_commands,
+ *   requires_capped,
  * ]
  */
-
-(function() {
-"use strict";
 
 let testDb = db.getSiblingDB("collation_convert_to_capped");
 let coll = testDb.coll;
@@ -34,4 +31,3 @@ const cappedCollectionInfos = testDb.getCollectionInfos({name: coll.getName()});
 assert.eq(cappedCollectionInfos.length, 1, tojson(cappedCollectionInfos));
 assert.eq(originalCollectionInfos[0].options.collation, cappedCollectionInfos[0].options.collation);
 assert.eq([{_id: "FOO"}], coll.find({_id: "foo"}).toArray());
-})();

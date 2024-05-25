@@ -4,19 +4,18 @@
  * the ongoing resharding instance.
  *
  * Use _configsvrReshardCollection instead of reshardCollection to exercise the behavior of the
- * config server in the absence of the distributed lock taken by _shardsvrReshardCollection on the
+ * config server in the absence of the DDL lock taken by _shardsvrReshardCollection on the
  * primary shard for the database.
  *
  * @tags: [
  *   uses_atclustertime,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/discover_topology.js");
-load("jstests/libs/parallelTester.js");
-load("jstests/sharding/libs/resharding_test_fixture.js");
+import {DiscoverTopology} from "jstests/libs/discover_topology.js";
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {Thread} from "jstests/libs/parallelTester.js";
+import {getUUIDFromConfigCollections, getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
+import {ReshardingTest} from "jstests/sharding/libs/resharding_test_fixture.js";
 
 // Generates a new thread to run _configsvrReshardCollection.
 const makeConfigsvrReshardCollectionThread = (configsvrConnString, ns) => {
@@ -91,4 +90,3 @@ const finalSourceCollectionUUID =
 assert.eq(expectedUUIDAfterReshardingCompletes, finalSourceCollectionUUID);
 
 reshardingTest.teardown();
-})();

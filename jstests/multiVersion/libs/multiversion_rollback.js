@@ -5,19 +5,16 @@
  * exercise rollback via refetch in the case that refetch is necessary.
  */
 
-'use strict';
+import {restartServerReplication} from "jstests/libs/write_concern_util.js";
+import {RollbackTest} from "jstests/replsets/libs/rollback_test.js";
+import {reconfig, waitForState} from "jstests/replsets/rslib.js";
 
-load("jstests/replsets/libs/rollback_test.js");
-load("jstests/libs/collection_drop_recreate.js");
-load('jstests/libs/parallel_shell_helpers.js');
-load("jstests/libs/fail_point_util.js");
-
-function printFCVDoc(nodeAdminDB, logMessage) {
+export function printFCVDoc(nodeAdminDB, logMessage) {
     const fcvDoc = nodeAdminDB.system.version.findOne({_id: 'featureCompatibilityVersion'});
     jsTestLog(logMessage + ` ${tojson(fcvDoc)}`);
 }
 
-function CommonOps(dbName, node) {
+export function CommonOps(dbName, node) {
     // Insert four documents on both nodes.
     assert.commandWorked(node.getDB(dbName)["bothNodesKeep"].insert({a: 1}));
     assert.commandWorked(node.getDB(dbName)["rollbackNodeDeletes"].insert({b: 1}));
@@ -25,7 +22,7 @@ function CommonOps(dbName, node) {
     assert.commandWorked(node.getDB(dbName)["bothNodesUpdate"].insert({d: 1}));
 }
 
-function RollbackOps(dbName, node) {
+export function RollbackOps(dbName, node) {
     // Perform operations only on the rollback node:
     //   1. Delete a document.
     //   2. Update a document only on this node.
@@ -36,7 +33,7 @@ function RollbackOps(dbName, node) {
     assert.commandWorked(node.getDB(dbName)["bothNodesUpdate"].update({d: 1}, {d: 0}));
 }
 
-function SyncSourceOps(dbName, node) {
+export function SyncSourceOps(dbName, node) {
     // Perform operations only on the sync source:
     //   1. Make a conflicting write on one of the documents the rollback node updates.
     //   2. Insert a new document.
@@ -52,7 +49,7 @@ function SyncSourceOps(dbName, node) {
  * @param {string} syncSourceVersion the desired version for the sync source
  *
  */
-function testMultiversionRollback(testName, rollbackNodeVersion, syncSourceVersion) {
+export function testMultiversionRollback(testName, rollbackNodeVersion, syncSourceVersion) {
     jsTestLog("Started multiversion rollback test for versions: {rollbackNode: " +
               rollbackNodeVersion + ", syncSource: " + syncSourceVersion + "}.");
 
@@ -82,7 +79,7 @@ function testMultiversionRollback(testName, rollbackNodeVersion, syncSourceVersi
 }
 
 // Test rollback between latest rollback node and downgrading sync node.
-function testMultiversionRollbackLatestFromDowngrading(testName, upgradeImmediately) {
+export function testMultiversionRollbackLatestFromDowngrading(testName, upgradeImmediately) {
     const dbName = testName;
     const replSet = new ReplSetTest(
         {name: testName, nodes: 3, useBridge: true, settings: {chainingAllowed: false}});
@@ -139,7 +136,8 @@ function testMultiversionRollbackLatestFromDowngrading(testName, upgradeImmediat
     assert.commandWorked(
         syncSource.adminCommand({configureFailPoint: "failDowngrading", mode: "alwaysOn"}));
 
-    assert.commandFailed(syncSource.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
+    assert.commandFailed(
+        syncSource.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
 
     // Sync source's FCV should be in downgrading to lastLTS while the rollback node's FCV should be
     // in latest.
@@ -165,7 +163,8 @@ function testMultiversionRollbackLatestFromDowngrading(testName, upgradeImmediat
 
     if (upgradeImmediately) {
         // We can upgrade immediately.
-        assert.commandWorked(newPrimary.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+        assert.commandWorked(
+            newPrimary.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
 
         printFCVDoc(newPrimaryAdminDB, "New primary's FCV after completing upgrade: ");
         checkFCV(newPrimaryAdminDB, latestFCV);
@@ -173,7 +172,8 @@ function testMultiversionRollbackLatestFromDowngrading(testName, upgradeImmediat
         // We can finish downgrading.
         assert.commandWorked(
             newPrimary.adminCommand({configureFailPoint: "failDowngrading", mode: "off"}));
-        assert.commandWorked(newPrimary.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
+        assert.commandWorked(
+            newPrimary.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
 
         printFCVDoc(newPrimaryAdminDB, "New primary's FCV after completing downgrade: ");
         checkFCV(newPrimaryAdminDB, lastLTSFCV);
@@ -183,7 +183,7 @@ function testMultiversionRollbackLatestFromDowngrading(testName, upgradeImmediat
 }
 
 // Test rollback between downgrading rollback node and lastLTS sync node.
-function testMultiversionRollbackDowngradingFromLastLTS(testName) {
+export function testMultiversionRollbackDowngradingFromLastLTS(testName) {
     const dbName = testName;
     const replSet = new ReplSetTest(
         {name: testName, nodes: 3, useBridge: true, settings: {chainingAllowed: false}});
@@ -213,7 +213,8 @@ function testMultiversionRollbackDowngradingFromLastLTS(testName) {
     // Set the failpoint so that downgrading will fail.
     assert.commandWorked(
         primary.adminCommand({configureFailPoint: "failDowngrading", mode: "alwaysOn"}));
-    assert.commandFailed(primary.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
+    assert.commandFailed(
+        primary.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
 
     printFCVDoc(primaryAdminDB, "Primary's FCV before RollbackOps: ");
     checkFCV(primaryAdminDB, lastLTSFCV, lastLTSFCV);
@@ -241,7 +242,8 @@ function testMultiversionRollbackDowngradingFromLastLTS(testName) {
     jsTestLog("Starting SyncSourceOps");
     SyncSourceOps(dbName, syncSource);
     jsTestLog("Setting sync source FCV to lastLTS");
-    assert.commandWorked(syncSource.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
+    assert.commandWorked(
+        syncSource.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
 
     // Sync source's FCV should be in lastLTS while the rollback node's FCV should be in downgrading
     // to lastLTS.
@@ -285,7 +287,7 @@ function testMultiversionRollbackDowngradingFromLastLTS(testName) {
  * @param {string} rollbackNodeVersion the desired version for the rollback node
  * @param {string} syncSourceVersion the desired version for the sync source
  */
-function setupReplicaSet(testName, rollbackNodeVersion, syncSourceVersion) {
+export function setupReplicaSet(testName, rollbackNodeVersion, syncSourceVersion) {
     jsTestLog(
         `[${testName}] Beginning cluster setup with versions: {rollbackNode: ${rollbackNodeVersion},
             syncSource: ${syncSourceVersion}}.`);
@@ -317,7 +319,7 @@ function setupReplicaSet(testName, rollbackNodeVersion, syncSourceVersion) {
     jsTestLog(
         `[${testName} - ${initialPrimary.host}] Setting FCV to ${lowerVersion} on the primary.`);
     assert.commandWorked(
-        initialPrimary.adminCommand({setFeatureCompatibilityVersion: lowerVersion}));
+        initialPrimary.adminCommand({setFeatureCompatibilityVersion: lowerVersion, confirm: true}));
 
     jsTestLog(`[${testName}] Bringing up third node with version ${lowerVersion}`);
     rst.add({binVersion: lowerVersion});

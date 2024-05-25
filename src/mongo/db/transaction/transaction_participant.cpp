@@ -283,6 +283,15 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
             std::exchange(repl::ReadConcernArgs::get(opCtx), repl::ReadConcernArgs());
         ON_BLOCK_EXIT([&] { repl::ReadConcernArgs::get(opCtx) = std::move(originalReadConcern); });
 
+        // It's possible that this no-timestamp read may occur as the node is in the process of
+        // transitioning to secondary. This is safe as no writes based on this read will be able to
+        // occur. Thus, skip enforcing constraints in order to satisfy the assertion about
+        // performing reads on a secondary with no timestamp.
+        ON_BLOCK_EXIT([opCtx, enforceConstraints = opCtx->isEnforcingConstraints()] {
+            opCtx->setEnforceConstraints(enforceConstraints);
+        });
+        opCtx->setEnforceConstraints(false);
+
         AutoGetCollectionForRead autoRead(opCtx,
                                           NamespaceString::kSessionTransactionsTableNamespace);
 
@@ -649,12 +658,6 @@ TransactionParticipant::getOldestActiveTimestamp(Timestamp stableTimestamp) {
     // this thread to terminate.
     auto client = getGlobalServiceContext()->makeClient("OldestActiveTxnTimestamp");
 
-    // TODO(SERVER-74656): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(*client.get());
-        client.get()->setSystemOperationUnkillableByStepdown(lk);
-    }
-
     AlternativeClientRegion acr(client);
 
     try {
@@ -662,8 +665,6 @@ TransactionParticipant::getOldestActiveTimestamp(Timestamp stableTimestamp) {
         auto nss = NamespaceString::kSessionTransactionsTableNamespace;
         auto deadline = Date_t::now() + Milliseconds(100);
 
-        ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
-            opCtx->lockState());
         Lock::DBLock dbLock(opCtx.get(), nss.dbName(), MODE_IS, deadline);
         Lock::CollectionLock collLock(opCtx.get(), nss, MODE_IS, deadline);
 
@@ -1279,9 +1280,6 @@ TransactionParticipant::TxnResources::TxnResources(WithLock wl,
     opCtx->setWriteUnitOfWork(nullptr);
 
     _locker = opCtx->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()), wl);
-    // Inherit the locking setting from the original one.
-    opCtx->lockState()->setShouldConflictWithSecondaryBatchApplication(
-        _locker->shouldConflictWithSecondaryBatchApplication());
     _locker->releaseTicket();
     _locker->unsetThreadId();
     if (opCtx->getLogicalSessionId()) {
@@ -1666,9 +1664,6 @@ void TransactionParticipant::Participant::refreshLocksForPreparedTransaction(
 
     _releaseTransactionResourcesToOpCtx(opCtx, MaxLockTimeout::kNotAllowed, AcquireTicket::kSkip);
 
-    // Snapshot transactions don't conflict with PBWM lock on both primary and secondary.
-    invariant(!opCtx->lockState()->shouldConflictWithSecondaryBatchApplication());
-
     // Transfer the txn resource back from the operation context to the stash.
     auto stashStyle =
         yieldLocks ? TxnResources::StashStyle::kSecondary : TxnResources::StashStyle::kPrimary;
@@ -1792,12 +1787,26 @@ TransactionParticipant::Participant::prepareTransaction(
     opCtx->getWriteUnitOfWork()->prepare();
     p().needToWriteAbortEntry = true;
 
-    opObserver->onTransactionPrepare(opCtx,
-                                     reservedSlots,
-                                     *completedTransactionOperations,
-                                     applyOpsOplogSlotAndOperationAssignment,
-                                     p().transactionOperations.getNumberOfPrePostImagesToWrite(),
-                                     wallClockTime);
+    // Don't write oplog entry on secondaries.
+    if (opCtx->writesAreReplicated()) {
+        // We write the oplog entry in a side transaction so that we do not commit the now-prepared
+        // transaction. See SERVER-34824.
+        TransactionParticipant::SideTransactionBlock sideTxn(opCtx);
+
+        writeConflictRetry(opCtx, "onTransactionPrepare", NamespaceString::kRsOplogNamespace, [&] {
+            WriteUnitOfWork wuow(opCtx);
+            opObserver->onTransactionPrepare(
+                opCtx,
+                reservedSlots,
+                *completedTransactionOperations,
+                applyOpsOplogSlotAndOperationAssignment,
+                p().transactionOperations.getNumberOfPrePostImagesToWrite(),
+                wallClockTime);
+            wuow.commit();
+        });
+    }
+
+    opObserver->postTransactionPrepare(opCtx, reservedSlots, *completedTransactionOperations);
 
     abortGuard.dismiss();
 
@@ -1956,8 +1965,7 @@ void TransactionParticipant::Participant::commitPreparedTransaction(
     }
 
     // Re-acquire the RSTL to prevent state transitions while committing the transaction. When the
-    // transaction was prepared, we dropped the RSTL. We do not need to reacquire the PBWM because
-    // if we're not the primary we will uassert anyways.
+    // transaction was prepared, we dropped the RSTL.
     repl::ReplicationStateTransitionLockGuard rstl(opCtx, MODE_IX);
 
     // Prepared transactions cannot hold the RSTL, or else they will deadlock with state
@@ -2124,12 +2132,6 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
         auto splitClientOwned = userOpCtx->getServiceContext()->makeClient("tempSplitClient");
         auto splitOpCtx = splitClientOwned->makeOperationContext();
 
-        // TODO(SERVER-74656): Please revisit if this thread could be made killable.
-        {
-            stdx::lock_guard<Client> lk(*splitClientOwned.get());
-            splitClientOwned.get()->setSystemOperationUnkillableByStepdown(lk);
-        }
-
         AlternativeClientRegion acr(splitClientOwned);
         std::unique_ptr<MongoDSessionCatalog::Session> checkedOutSession;
 
@@ -2145,6 +2147,15 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
             TransactionParticipant::get(splitOpCtx.get());
         newTxnParticipant.beginOrContinueTransactionUnconditionally(
             splitOpCtx.get(), {*(splitOpCtx->getTxnNumber())});
+
+        // This function is called while userOpCtx's lockState is under an UninterruptibleLockGuard,
+        // because once entering "committing with prepare" we cannot throw an exception, and
+        // therefore our lock acquisitions cannot be interruptible. We need to set an
+        // UninterruptibleLockGuard on newTxnParticipant's locker (this will be swapped into
+        // splitOpCtx's locker in unstashTransactionResources) in order to prevent the split
+        // transaction's lock acquisitions from being interruptible.
+        UninterruptibleLockGuard noInterrupt(                   // NOLINT
+            newTxnParticipant.o().txnResourceStash->locker());  // NOLINT
         newTxnParticipant.unstashTransactionResources(splitOpCtx.get(), "commitTransaction");
 
         splitOpCtx->recoveryUnit()->setCommitTimestamp(commitTimestamp);
@@ -2243,8 +2254,7 @@ void TransactionParticipant::Participant::_abortActivePreparedTransaction(Operat
     AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
 
     // Re-acquire the RSTL to prevent state transitions while aborting the transaction. Since the
-    // transaction was prepared, we dropped it on preparing the transaction. We do not need to
-    // reacquire the PBWM because if we're not the primary we will uassert anyways.
+    // transaction was prepared, we dropped it on preparing the transaction.
     repl::ReplicationStateTransitionLockGuard rstl(opCtx, MODE_IX);
 
     // Prepared transactions cannot hold the RSTL, or else they will deadlock with state
@@ -2351,12 +2361,6 @@ void TransactionParticipant::Participant::_abortSplitPreparedTxnOnPrimary(
 
         auto splitClientOwned = userOpCtx->getServiceContext()->makeClient("tempSplitClient");
         auto splitOpCtx = splitClientOwned->makeOperationContext();
-
-        // TODO(SERVER-74656): Please revisit if this thread could be made killable.
-        {
-            stdx::lock_guard<Client> lk(*splitClientOwned.get());
-            splitClientOwned.get()->setSystemOperationUnkillableByStepdown(lk);
-        }
 
         AlternativeClientRegion acr(splitClientOwned);
         std::unique_ptr<MongoDSessionCatalog::Session> checkedOutSession;

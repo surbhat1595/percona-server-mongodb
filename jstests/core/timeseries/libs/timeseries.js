@@ -1,9 +1,8 @@
 // Helper functions for testing time-series collections.
-// The test runs commands that are not allowed with security token: movechunk, split.
-// @tags: [not_allowed_with_security_token]
 
+import {documentEq} from "jstests/aggregation/extras/utils.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-load("jstests/aggregation/extras/utils.js");
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 export var TimeseriesTest = class {
     static getBucketMaxSpanSecondsFromGranularity(granularity) {
@@ -40,9 +39,17 @@ export var TimeseriesTest = class {
         return FeatureFlagUtil.isPresentAndEnabled(conn, "TimeseriesScalabilityImprovements");
     }
 
-    // TODO SERVER-65082 remove this helper.
-    static timeseriesMetricIndexesEnabled(conn) {
-        return FeatureFlagUtil.isPresentAndEnabled(conn, "TimeseriesMetricIndexes");
+    /**
+     * Returns whether time-series always use compressed buckets are enabled.
+     * TODO SERVER-70605 remove this helper.
+     */
+    static timeseriesAlwaysUseCompressedBucketsEnabled(conn) {
+        // TODO SERVER-79460: Clean this up so the ignoreFCV option does not need to be explicitly
+        // specified.
+        return FeatureFlagUtil.isPresentAndEnabled(conn,
+                                                   "TimeseriesAlwaysUseCompressedBuckets",
+                                                   /*user=*/ undefined,
+                                                   /*ignoreFCV=*/ true);
     }
 
     // TODO SERVER-68058 remove this helper.
@@ -60,6 +67,28 @@ export var TimeseriesTest = class {
             fields[field] = Math.max(fields[field], 0);
             fields[field] = Math.min(fields[field], 100);
         }
+    }
+
+    /**
+     * Decompresses a compressed bucket document. Replaces the compressed data in-place.
+     */
+    static decompressBucket(compressedBucket) {
+        assert.hasFields(
+            compressedBucket,
+            ["control"],
+            "TimeseriesTest.decompressBucket() should only be called on a bucket document");
+        assert.eq(
+            TimeseriesTest.BucketVersion.kCompressed,
+            compressedBucket.control.version,
+            "TimeseriesTest.decompressBucket() should only be called on a compressed bucket document");
+
+        for (const column in compressedBucket.data) {
+            compressedBucket.data[column] = decompressBSONColumn(compressedBucket.data[column]);
+        }
+
+        // The control object should reflect that the data is uncompressed.
+        compressedBucket.control.version = TimeseriesTest.BucketVersion.kUncompressed;
+        delete compressedBucket.control.count;
     }
 
     /**
@@ -245,4 +274,9 @@ export var TimeseriesTest = class {
     static getBucketsCollName(collName) {
         return `system.buckets.${collName}`;
     }
+};
+
+TimeseriesTest.BucketVersion = {
+    kUncompressed: 1,
+    kCompressed: 2,
 };

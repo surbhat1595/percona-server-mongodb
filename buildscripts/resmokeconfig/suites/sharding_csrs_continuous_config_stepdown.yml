@@ -245,6 +245,9 @@ selector:
   # Test runs commands on a config shard and does not expect config shard failover.
   - jstests/sharding/clone_catalog_data.js
 
+  # Test runs command on a config shard and does not shutdown safely upon transitioning to a dedicated config server.
+  - jstests/sharding/fsync_lock_unlock.js
+
   exclude_with_any_tags:
   - does_not_support_stepdowns
 
@@ -256,5 +259,5 @@ executor:
           # TODO: SERVER-45994 remove
           skipCheckingCatalogCacheConsistencyWithShardingCatalog: true
           skipCheckOrphans: true
-      eval: "load('jstests/libs/override_methods/sharding_csrs_continuous_config_stepdown.js');"
+      eval: await import("jstests/libs/override_methods/sharding_csrs_continuous_config_stepdown.js");
       nodb: ''

@@ -1,9 +1,9 @@
 /**
  * SERVER-32125 Check that applyOps commands with collMod without UUID don't strip it
  *
- * The test runs commands that are not allowed with security token: applyOps.
  * @tags: [
- *   not_allowed_with_security_token,
+ *  # The test runs commands that are not allowed with security token: applyOps.
+ *  not_allowed_with_security_token,
  *  requires_non_retryable_commands,
  *  # applyOps is not supported on mongos
  *  assumes_against_mongod_not_mongos,
@@ -14,8 +14,6 @@
  * ]
  */
 
-(function() {
-"use strict";
 const collName = "collmod_without_uuid";
 
 function checkUUIDs() {
@@ -31,4 +29,3 @@ let cmd = {applyOps: [{ns: "test.$cmd", op: "c", o: {collMod: collName}}]};
 let res = db.runCommand(cmd);
 assert.commandWorked(res, tojson(cmd));
 checkUUIDs();
-})();

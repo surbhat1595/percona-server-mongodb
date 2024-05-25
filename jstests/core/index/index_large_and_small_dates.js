@@ -1,10 +1,8 @@
 // @tags: [
-//   # The tenant migration override cannot deep copy very large or small dates.
-//   tenant_migration_incompatible,
+//   # The `simulate_atlas_proxy` override cannot deep copy very large or small dates.
+//   simulate_atlas_proxy_incompatible,
 // ]
 
-(function() {
-"use strict";
 const coll = db.index_dates;
 coll.drop();
 
@@ -32,4 +30,3 @@ assert.commandWorked(coll.dropIndex({d: 1}));
 // Testing index version 2.
 assert.commandWorked(coll.createIndex({d: 1}));
 test();
-})();

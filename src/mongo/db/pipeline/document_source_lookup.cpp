@@ -49,7 +49,6 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -143,15 +142,15 @@ NamespaceString parseLookupFromAndResolveNamespace(const BSONElement& elem,
             elem.type() == BSONType::String || elem.type() == BSONType::Object);
 
     if (elem.type() == BSONType::String) {
-        return NamespaceStringUtil::parseNamespaceFromRequest(defaultDb, elem.valueStringData());
+        return NamespaceStringUtil::deserialize(defaultDb, elem.valueStringData());
     }
 
     // Valdate the db and coll names.
     auto spec = NamespaceSpec::parse(
         IDLParserContext{elem.fieldNameStringData(), false /* apiStrict */, defaultDb.tenantId()},
         elem.embeddedObject());
-    auto nss = NamespaceStringUtil::parseNamespaceFromRequest(spec.getDb().value_or(DatabaseName()),
-                                                              spec.getColl().value_or(""));
+    auto nss = NamespaceStringUtil::deserialize(spec.getDb().value_or(DatabaseName()),
+                                                spec.getColl().value_or(""));
     uassert(
         ErrorCodes::FailedToParse,
         str::stream() << "$lookup with syntax {from: {db:<>, coll:<>},..} is not supported for db: "
@@ -1051,11 +1050,11 @@ void DocumentSourceLookUp::appendSpecificExecStats(MutableDocument& doc) const {
 }
 
 void DocumentSourceLookUp::serializeToArray(std::vector<Value>& array,
-                                            SerializationOptions opts) const {
+                                            const SerializationOptions& opts) const {
     // Support alternative $lookup from config.cache.chunks* namespaces.
     //
     // Do not include the tenantId in serialized 'from' namespace.
-    auto fromValue = (pExpCtx->ns.db() == _fromNs.db())
+    auto fromValue = pExpCtx->ns.isEqualDb(_fromNs)
         ? Value(opts.serializeIdentifier(_fromNs.coll()))
         : Value(Document{
               {"db",

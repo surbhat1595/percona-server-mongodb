@@ -47,7 +47,6 @@ DocumentSourceSequentialDocumentCache::DocumentSourceSequentialDocumentCache(
     const boost::intrusive_ptr<ExpressionContext>& expCtx, SequentialDocumentCache* cache)
     : DocumentSource(kStageName, expCtx), _cache(cache) {
     invariant(_cache);
-    invariant(!_cache->isAbandoned());
 
     if (_cache->isServing()) {
         _cache->restartIteration();
@@ -161,7 +160,7 @@ Pipeline::SourceContainer::iterator DocumentSourceSequentialDocumentCache::doOpt
     return container->end();
 }
 
-Value DocumentSourceSequentialDocumentCache::serialize(SerializationOptions opts) const {
+Value DocumentSourceSequentialDocumentCache::serialize(const SerializationOptions& opts) const {
     if (opts.verbosity) {
         return Value(Document{
             {kStageName,

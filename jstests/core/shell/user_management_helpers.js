@@ -1,6 +1,9 @@
-// The test runs commands that are not allowed with security token: createUser, dropUser,
-// grantRolesToUser, logout, revokeRolesFromUser, updateUser.
+// This test is a basic sanity check of the shell helpers for manipulating user objects
+// It is not a comprehensive test of the functionality of the user manipulation commands
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: createUser, dropUser,
+//   # grantRolesToUser, logout, revokeRolesFromUser, updateUser.
 //   not_allowed_with_security_token,
 //   assumes_superuser_permissions,
 //   assumes_write_concern_unchanged,
@@ -8,15 +11,10 @@
 //   requires_auth,
 //   requires_non_retryable_commands,
 //   # This test uses db._authOrThrow which does not use runCommand (required by the
-//   # inject_tenant_prefix.js override).
+//   # simulate_atlas_proxy.js override).
 //   tenant_migration_incompatible,
 // ]
 
-(function() {
-'use strict';
-
-// This test is a basic sanity check of the shell helpers for manipulating user objects
-// It is not a comprehensive test of the functionality of the user manipulation commands
 function assertHasRole(rolesArray, roleName, roleDB) {
     for (let i in rolesArray) {
         const curRole = rolesArray[i];
@@ -149,4 +147,3 @@ try {
     db.getSiblingDB('admin').system.users.find().forEach(printjson);
     throw x;
 }
-})();

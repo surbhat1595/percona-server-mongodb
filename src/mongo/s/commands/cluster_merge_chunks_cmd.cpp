@@ -95,8 +95,8 @@ public:
     }
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
-        return NamespaceStringUtil::parseNamespaceFromRequest(
-            dbName.tenantId(), CommandHelpers::parseNsFullyQualified(cmdObj));
+        return NamespaceStringUtil::deserialize(dbName.tenantId(),
+                                                CommandHelpers::parseNsFullyQualified(cmdObj));
     }
 
     bool adminOnly() const override {
@@ -121,12 +121,11 @@ public:
 
 
     bool errmsgRun(OperationContext* opCtx,
-                   const std::string& dbname,
+                   const DatabaseName& dbName,
                    const BSONObj& cmdObj,
                    std::string& errmsg,
                    BSONObjBuilder& result) override {
-        const NamespaceString nss(
-            parseNs(DatabaseNameUtil::deserialize(boost::none, dbname), cmdObj));
+        const NamespaceString nss(parseNs(dbName, cmdObj));
 
         std::vector<BSONObj> bounds;
         if (!FieldParser::extract(cmdObj, boundsField, &bounds, &errmsg)) {
@@ -195,7 +194,7 @@ public:
         auto response = uassertStatusOK(shard->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-            "admin",
+            DatabaseName::kAdmin,
             remoteCmdObjB.obj(),
             Shard::RetryPolicy::kNotIdempotent));
         uassertStatusOK(response.commandStatus);
@@ -208,8 +207,8 @@ public:
         CommandHelpers::filterCommandReplyForPassthrough(response.response, &result);
         return true;
     }
-
-} clusterMergeChunksCommand;
+};
+MONGO_REGISTER_COMMAND(ClusterMergeChunksCommand);
 
 BSONField<std::string> ClusterMergeChunksCommand::nsField("mergeChunks");
 BSONField<std::vector<BSONObj>> ClusterMergeChunksCommand::boundsField("bounds");

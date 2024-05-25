@@ -1,8 +1,7 @@
 /**
  * Test the behavior of $derivative.
  */
-(function() {
-"use strict";
+import "jstests/libs/sbe_assert_error_override.js";
 
 const coll = db.setWindowFields_derivative;
 
@@ -391,4 +390,3 @@ assert.docEq(
         {time: ISODate("2020-01-01T00:00:20.00Z"), y: 30, dy: (30 - 12) / (20 - 10)},
     ],
     result);
-})();

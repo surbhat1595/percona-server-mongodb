@@ -58,6 +58,7 @@
 #include "mongo/db/s/collection_metadata.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/shard_key_index_util.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -99,8 +100,16 @@ void _checkShardKeyIndexInconsistencies(OperationContext* opCtx,
     const auto performChecks = [&](const CollectionPtr& localColl,
                                    std::vector<MetadataInconsistencyItem>& inconsistencies) {
         // Check that the collection has an index that supports the shard key. If so, check that
-        // exists an index that supports the shard key and is not multikey.
-        if (!findShardKeyPrefixedIndex(opCtx, localColl, shardKey, false /*requireSingleKey*/)) {
+        // exists an index that supports the shard key and is not multikey. We allow users to drop
+        // hashed shard key indexes, and therefore we don't require hashed shard keys to have a
+        // supporting index. (Ignore FCV check) Note that the feature flag ignores FCV. If this node
+        // is the primary of the replica set shard, it will handle the missing hashed shard key
+        // index regardless of FCV, so we skip reporting it as an inconsistency.
+        const bool skipHashedShardKeyCheck =
+            gFeatureFlagShardKeyIndexOptionalHashedSharding.isEnabledAndIgnoreFCVUnsafe() &&
+            ShardKeyPattern(shardKey).isHashedPattern();
+        if (!skipHashedShardKeyCheck &&
+            !findShardKeyPrefixedIndex(opCtx, localColl, shardKey, false /*requireSingleKey*/)) {
             inconsistencies.emplace_back(metadata_consistency_util::makeInconsistency(
                 MetadataInconsistencyTypeEnum::kMissingShardKeyIndex,
                 MissingShardKeyIndexDetails{localColl->ns(), shardId, shardKey}));
@@ -325,9 +334,9 @@ std::vector<MetadataInconsistencyItem> checkCollectionMetadataInconsistencies(
             // Case where we have found a local collection that is not in the catalog client.
             const auto& nss = localNss;
 
-            // TODO SERVER-59957 use function introduced in this ticket to decide if a namesapce
-            // should be ignored and stop using isNamepsaceAlwaysUnsharded().
-            if (!nss.isNamespaceAlwaysUnsharded() && shardId != primaryShardId) {
+            // TODO SERVER-59957 use function introduced in this ticket to decide if a namespace
+            // should be ignored and stop using isNamepsaceAlwaysUntracked().
+            if (!nss.isNamespaceAlwaysUntracked() && shardId != primaryShardId) {
                 inconsistencies.emplace_back(
                     makeInconsistency(MetadataInconsistencyTypeEnum::kMisplacedCollection,
                                       MisplacedCollectionDetails{localNss, shardId, localUUID}));
@@ -341,9 +350,9 @@ std::vector<MetadataInconsistencyItem> checkCollectionMetadataInconsistencies(
         // hidden unsharded collection inconsistency if we are not the db primary shard.
         while (itLocalCollections != localCollections.end()) {
             const auto localColl = itLocalCollections->get();
-            // TODO SERVER-59957 use function introduced in this ticket to decide if a namesapce
-            // should be ignored and stop using isNamepsaceAlwaysUnsharded().
-            if (!localColl->ns().isNamespaceAlwaysUnsharded()) {
+            // TODO SERVER-59957 use function introduced in this ticket to decide if a namespace
+            // should be ignored and stop using isNamepsaceAlwaysUntracked().
+            if (!localColl->ns().isNamespaceAlwaysUntracked()) {
                 inconsistencies.emplace_back(makeInconsistency(
                     MetadataInconsistencyTypeEnum::kMisplacedCollection,
                     MisplacedCollectionDetails{localColl->ns(), shardId, localColl->uuid()}));

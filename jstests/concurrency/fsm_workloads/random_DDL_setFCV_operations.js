@@ -11,7 +11,11 @@
  *  ]
  */
 
+import {assertAlways} from "jstests/concurrency/fsm_libs/assert.js";
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
+import {
+    uniformDistTransitions
+} from "jstests/concurrency/fsm_workload_helpers/state_transition_utils.js";
 import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/random_DDL_operations.js";
 
 export const $config = extendWorkload($baseConfig, function($config, $super) {
@@ -21,7 +25,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         jsTestLog('Executing FCV state, setting to:' + targetFCV);
         try {
             assertAlways.commandWorked(
-                db.adminCommand({setFeatureCompatibilityVersion: targetFCV}));
+                db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}));
         } catch (e) {
             if (e.code === 5147403) {
                 // Invalid fcv transition (e.g lastContinuous -> lastLTS)
@@ -37,23 +41,25 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
                     of cleaning up internal server metadata');
                 return;
             }
+            if (e.code === 12587) {
+                // Cannot downgrade FCV that requires a collMod command when index builds are
+                // concurrently taking place.
+                jsTestLog(
+                    'setFCV: Cannot downgrade the FCV that requires a collMod command when index \
+                    builds are concurrently running');
+                return;
+            }
             throw e;
         }
 
         jsTestLog('setFCV state finished');
     };
 
-    // TODO (SERVER-73875): Include `movePrimary` state once 7.0 becomes last LTS.
-    $config.transitions = {
-        create: {create: 0.225, drop: 0.225, rename: 0.225, collMod: 0.225, setFCV: 0.10},
-        drop: {create: 0.225, drop: 0.225, rename: 0.225, collMod: 0.225, setFCV: 0.10},
-        rename: {create: 0.225, drop: 0.225, rename: 0.225, collMod: 0.225, setFCV: 0.10},
-        collMod: {create: 0.225, drop: 0.225, rename: 0.225, collMod: 0.225, setFCV: 0.10},
-        setFCV: {create: 0.225, drop: 0.225, rename: 0.225, collMod: 0.225, setFCV: 0.10}
-    };
+    $config.transitions = uniformDistTransitions($config.states);
 
     $config.teardown = function(db, collName, cluster) {
-        assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+        assert.commandWorked(
+            db.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
     };
 
     return $config;

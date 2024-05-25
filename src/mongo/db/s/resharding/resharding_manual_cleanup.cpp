@@ -251,7 +251,7 @@ void ReshardingCoordinatorCleaner::_cleanOnParticipantShards(
     AsyncRequestsSender ars(
         opCtx,
         Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),
-        DatabaseName::kAdmin.db(),
+        DatabaseName::kAdmin,
         createShardCleanupRequests(_originalCollectionNss, _reshardingUUID, doc),
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
         Shard::RetryPolicy::kIdempotent,
@@ -284,11 +284,11 @@ void ReshardingCoordinatorCleaner::_dropTemporaryReshardingCollection(
     dropCollectionCommand.setDbName(tempReshardingNss.dbName());
 
     const auto dbInfo = uassertStatusOK(
-        Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, tempReshardingNss.db_forSharding()));
+        Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, tempReshardingNss.dbName()));
 
     auto cmdResponse = executeCommandAgainstDatabasePrimary(
         opCtx,
-        tempReshardingNss.db_forSharding(),
+        tempReshardingNss.dbName(),
         dbInfo,
         CommandHelpers::appendMajorityWriteConcern(dropCollectionCommand.toBSON({}),
                                                    opCtx->getWriteConcern()),

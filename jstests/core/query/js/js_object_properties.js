@@ -1,17 +1,15 @@
 // Tests that the properties available on the 'this' object during js execution are only those found
 // in the database's BSON object.
-// The test runs commands that are not allowed with security token: mapReduce.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapReduce.
 //   not_allowed_with_security_token,
 //   # mapReduce does not support afterClusterTime.
 //   does_not_support_causal_consistency,
 //   # Uses mapReduce command.
 //   requires_scripting,
 // ]
-(function() {
-"use strict";
-
-load("jstests/aggregation/extras/utils.js");  // For 'resultsEq'.
+import {resultsEq} from "jstests/aggregation/extras/utils.js";
 
 const testDB = db.getSiblingDB("js_object_properties");
 const coll = testDB.test;
@@ -133,4 +131,3 @@ assert.eq([{field: "_id"}, {field: "a"}, {field: "b"}],
                   {$sort: {field: 1}},
               ])
               .toArray());
-}());

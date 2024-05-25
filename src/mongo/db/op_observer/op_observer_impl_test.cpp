@@ -68,6 +68,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/batched_write_context.h"
 #include "mongo/db/op_observer/change_stream_pre_images_op_observer.h"
+#include "mongo/db/op_observer/find_and_modify_images_op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/op_observer/op_observer_util.h"
@@ -1225,18 +1226,18 @@ DEATH_TEST_REGEX_F(OpObserverTest,
 
 class OpObserverTxnParticipantTest : public OpObserverTest {
 public:
-    void setUp() override {
-        _opCtx = cc().makeOperationContext();
-        _opObserver.emplace(std::make_unique<OplogWriterImpl>());
-        _times.emplace(opCtx());
-    }
-
     void tearDown() override {
         _sessionCheckout.reset();
         _times.reset();
         _opCtx.reset();
 
         OpObserverTest::tearDown();
+    }
+
+    void setUpObserverContext() {
+        _opCtx = cc().makeOperationContext();
+        _opObserver.emplace(std::make_unique<OplogWriterImpl>());
+        _times.emplace(opCtx());
     }
 
     void setUpRetryableWrite() {
@@ -1287,12 +1288,26 @@ protected:
                                     /*prepare=*/true);
         opObserver().preTransactionPrepare(opCtx(), *txnOps, applyOpsAssignment, currentTime);
         opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
-        opObserver().onTransactionPrepare(opCtx(),
-                                          reservedSlots,
-                                          *txnOps,
-                                          applyOpsAssignment,
-                                          numberOfPrePostImagesToWrite,
-                                          currentTime);
+
+        // Don't write oplog entry on secondaries.
+        if (opCtx()->writesAreReplicated()) {
+            auto opCtxForPrepare = opCtx();
+            TransactionParticipant::SideTransactionBlock sideTxn(opCtxForPrepare);
+
+            writeConflictRetry(
+                opCtxForPrepare, "onTransactionPrepare", NamespaceString::kRsOplogNamespace, [&] {
+                    WriteUnitOfWork wuow(opCtxForPrepare);
+                    opObserver().onTransactionPrepare(opCtxForPrepare,
+                                                      reservedSlots,
+                                                      *txnOps,
+                                                      applyOpsAssignment,
+                                                      numberOfPrePostImagesToWrite,
+                                                      currentTime);
+                    wuow.commit();
+                });
+        }
+
+        opObserver().postTransactionPrepare(opCtx(), reservedSlots, *txnOps);
     }
 
 private:
@@ -1318,8 +1333,8 @@ private:
 class OpObserverTransactionTest : public OpObserverTxnParticipantTest {
 protected:
     void setUp() override {
-        OpObserverTest::setUp();
         OpObserverTxnParticipantTest::setUp();
+        setUpObserverContext();
         OpObserverTxnParticipantTest::setUpNonRetryableTransaction();
     }
 
@@ -2360,8 +2375,8 @@ class OpObserverRetryableFindAndModifyOutsideTransactionTest
 public:
     void setUp() override {
         OpObserverRetryableFindAndModifyTest::setUp();
-        OpObserverTxnParticipantTest::setUp();
-        OpObserverTxnParticipantTest::setUpRetryableWrite();
+        setUpObserverContext();
+        setUpRetryableWrite();
     }
 
 protected:
@@ -2395,8 +2410,8 @@ class OpObserverRetryableFindAndModifyInsideUnpreparedRetryableInternalTransacti
 public:
     void setUp() override {
         OpObserverRetryableFindAndModifyTest::setUp();
-        OpObserverTxnParticipantTest::setUp();
-        OpObserverTxnParticipantTest::setUpRetryableInternalTransaction();
+        setUpObserverContext();
+        setUpRetryableInternalTransaction();
     }
 
 protected:
@@ -2432,8 +2447,8 @@ class OpObserverRetryableFindAndModifyInsidePreparedRetryableInternalTransaction
 public:
     void setUp() override {
         OpObserverRetryableFindAndModifyTest::setUp();
-        OpObserverTxnParticipantTest::setUp();
-        OpObserverTxnParticipantTest::setUpRetryableInternalTransaction();
+        setUpObserverContext();
+        setUpRetryableInternalTransaction();
     }
 
 protected:
@@ -2672,13 +2687,15 @@ protected:
 };
 
 TEST_F(OnUpdateOutputsTest, TestNonTransactionFundamentalOnUpdateOutputs) {
-    // Create a registry that registers the OpObserverImpl and ChangeStreamPreImagesOpObserver.
-    // Both OpObservers work together to ensure that pre-images for change streams are written
-    // to the side collection. It falls into cases where `ReservedTimes` is expected to be
-    // instantiated. Due to strong encapsulation, we use the registry that managers the
-    // `ReservedTimes` on our behalf.
+    // Create a registry that registers the OpObserverImpl, FindAndModifyImagesOpObserver, and
+    // ChangeStreamPreImagesOpObserver.
+    // These OpObservers work together to ensure that images for retryable findAndModify and
+    // change streams are written correctly to the respective side collections.
+    // It falls into cases where `ReservedTimes` is expected to be instantiated. Due to strong
+    // encapsulation, we use the registry that managers the `ReservedTimes` on our behalf.
     OpObserverRegistry opObserver;
     opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+    opObserver.addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
     opObserver.addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
 
     for (std::size_t testIdx = 0; testIdx < _cases.size(); ++testIdx) {
@@ -2718,13 +2735,15 @@ TEST_F(OnUpdateOutputsTest, TestNonTransactionFundamentalOnUpdateOutputs) {
 }
 
 TEST_F(OnUpdateOutputsTest, TestFundamentalTransactionOnUpdateOutputs) {
-    // Create a registry that registers the OpObserverImpl and ChangeStreamPreImagesOpObserver.
-    // Both OpObservers work together to ensure that pre-images for change streams are written
-    // to the side collection. It falls into cases where `ReservedTimes` is expected to be
-    // instantiated. Due to strong encapsulation, we use the registry that managers the
-    // `ReservedTimes` on our behalf.
+    // Create a registry that registers the OpObserverImpl, FindAndModifyImagesOpObserver, and
+    // ChangeStreamPreImagesOpObserver.
+    // These OpObservers work together to ensure that images for retryable findAndModify and
+    // change streams are written correctly to the respective side collections.
+    // It falls into cases where `ReservedTimes` is expected to be instantiated. Due to strong
+    // encapsulation, we use the registry that managers the `ReservedTimes` on our behalf.
     OpObserverRegistry opObserver;
     opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+    opObserver.addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
     opObserver.addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
 
     for (std::size_t testIdx = 0; testIdx < _cases.size(); ++testIdx) {
@@ -3388,13 +3407,15 @@ protected:
 };
 
 TEST_F(OnDeleteOutputsTest, TestNonTransactionFundamentalOnDeleteOutputs) {
-    // Create a registry that registers the OpObserverImpl and ChangeStreamPreImagesOpObserver.
-    // Both OpObservers work together to ensure that pre-images for change streams are written
-    // to the side collection. It falls into cases where `ReservedTimes` is expected to be
-    // instantiated. Due to strong encapsulation, we use the registry that managers the
-    // `ReservedTimes` on our behalf.
+    // Create a registry that registers the OpObserverImpl, FindAndModifyImagesOpObserver, and
+    // ChangeStreamPreImagesOpObserver.
+    // These OpObservers work together to ensure that images for retryable findAndModify and
+    // change streams are written correctly to the respective side collections.
+    // It falls into cases where `ReservedTimes` is expected to be instantiated. Due to strong
+    // encapsulation, we use the registry that managers the `ReservedTimes` on our behalf.
     OpObserverRegistry opObserver;
     opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+    opObserver.addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
     opObserver.addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
 
     for (std::size_t testIdx = 0; testIdx < _cases.size(); ++testIdx) {
@@ -3437,13 +3458,15 @@ TEST_F(OnDeleteOutputsTest, TestNonTransactionFundamentalOnDeleteOutputs) {
 }
 
 TEST_F(OnDeleteOutputsTest, TestTransactionFundamentalOnDeleteOutputs) {
-    // Create a registry that registers the OpObserverImpl and ChangeStreamPreImagesOpObserver.
-    // Both OpObservers work together to ensure that pre-images for change streams are written
-    // to the side collection. It falls into cases where `ReservedTimes` is expected to be
-    // instantiated. Due to strong encapsulation, we use the registry that managers the
-    // `ReservedTimes` on our behalf.
+    // Create a registry that registers the OpObserverImpl, FindAndModifyImagesOpObserver, and
+    // ChangeStreamPreImagesOpObserver.
+    // These OpObservers work together to ensure that images for retryable findAndModify and
+    // change streams are written correctly to the respective side collections.
+    // It falls into cases where `ReservedTimes` is expected to be instantiated. Due to strong
+    // encapsulation, we use the registry that managers the `ReservedTimes` on our behalf.
     OpObserverRegistry opObserver;
     opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+    opObserver.addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
     opObserver.addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
 
     for (std::size_t testIdx = 0; testIdx < _cases.size(); ++testIdx) {

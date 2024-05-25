@@ -55,6 +55,7 @@
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/restore_context.h"
+#include "mongo/db/query/serialization_options.h"
 #include "mongo/db/record_id.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -71,9 +72,11 @@ public:
      * Determines the type of resumable scan being run by the PlanExecutorPipeline.
      */
     enum class ResumableScanType {
-        kNone,          // No resuming. This is the default.
-        kChangeStream,  // For change stream pipelines.
-        kOplogScan      // For non-changestream resumable oplog scans.
+        kNone,              // No resuming. This is the default.
+        kChangeStream,      // For change stream pipelines.
+        kNaturalOrderScan,  // For pipelines requesting a record ID resume token from a natural
+                            // order non-oplog scan.
+        kOplogScan          // For non-changestream resumable oplog scans.
     };
 
     PlanExecutorPipeline(boost::intrusive_ptr<ExpressionContext> expCtx,
@@ -185,7 +188,8 @@ public:
      * providing the level of detail specified by 'verbosity'.
      */
     std::vector<Value> writeExplainOps(ExplainOptions::Verbosity verbosity) const {
-        return _pipeline->writeExplainOps(verbosity);
+        auto opts = SerializationOptions{.verbosity = verbosity};
+        return _pipeline->writeExplainOps(opts);
     }
 
     void enableSaveRecoveryUnitAcrossCommandsIfSupported() override {}
@@ -199,6 +203,11 @@ public:
     }
 
     PlanExecutor::QueryFramework getQueryFramework() const override final;
+
+    bool usesCollectionAcquisitions() const override final {
+        // TODO SERVER-78724: Replace this whenever aggregations use shard role acquisitions.
+        return false;
+    }
 
 private:
     /**
@@ -240,6 +249,12 @@ private:
      * postBatchResumeToken value from the underlying pipeline.
      */
     void _performResumableOplogScanAccounting();
+
+    /**
+     * For a resumable natural order non-oplog scan, updates the postBatchResumeToken value from the
+     * underlying pipeline.
+     */
+    void _performResumableNaturalOrderScanAccounting();
 
     /**
      * Set the speculative majority read timestamp if we have scanned up to a certain oplog

@@ -4,9 +4,6 @@
  * 'ShardingTest' requires replication.
  * @tags: [requires_replication]
  */
-(function() {
-"use strict";
-
 const docs = [{a: 1}, {a: 2}, {a: 3}, {a: 4}, {a: 5}, {a: 6}, {a: 7}, {a: 8}];
 const kBatchSize = 3;
 const kNoOfDocs = docs.length;
@@ -42,9 +39,19 @@ const kNoOfDocs = docs.length;
      },
      "tearDown": (env) => env.stop(),
      "verifyThis": (cursor, docIdx, doc) => {
-         // Mongos does not support exhaust queries, not by returning an error but by sending reply
-         // without moreToCome bit set. So, _hasMoreToCome() is always false.
-         assert(!cursor._hasMoreToCome(), `${docIdx} doc: ${doc}`);
+         // Because the first batch is returned from a find command without exhaustAllowed bit,
+         // moreToCome bit is not set in reply message.
+         const isFirstBatch = docIdx < kBatchSize;
+
+         // The last batch which does not contain the full batch size is returned without moreToCome
+         // bit set.
+         const isLastBatch = docIdx >= kNoOfDocs - (kNoOfDocs % kBatchSize);
+
+         if (isFirstBatch || isLastBatch) {
+             assert(!cursor._hasMoreToCome(), `${docIdx} doc: ${doc}`);
+         } else {
+             assert(cursor._hasMoreToCome(), `${docIdx} doc: ${doc}`);
+         }
      }
  }].forEach(({setUp, tearDown, verifyThis}) => {
     const {env, db} = setUp();
@@ -62,4 +69,3 @@ const kNoOfDocs = docs.length;
 
     tearDown(env);
 });
-}());

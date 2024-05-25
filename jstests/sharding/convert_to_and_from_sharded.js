@@ -3,9 +3,7 @@
  * a shardsvr and back to non shardsvr.
  * @tags: [requires_persistence]
  */
-(function() {
-"use strict";
-load('jstests/sharding/libs/remove_shard_util.js');
+import {removeShard} from "jstests/sharding/libs/remove_shard_util.js";
 
 // TODO SERVER-50144 Remove this and allow orphan checking.
 // This test calls removeShard which can leave docs in config.rangeDeletions in state "pending",
@@ -50,7 +48,8 @@ var priConn = replShard.getPrimary();
 // In order to work around this, in the mixed version suite, be pessimistic and always set this
 // node to the 'last-lts' FCV
 if (jsTestOptions().shardMixedBinVersions) {
-    assert.commandWorked(priConn.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
+    assert.commandWorked(
+        priConn.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
     replShard.awaitReplication();
 }
 
@@ -123,4 +122,3 @@ priConn = replShard.getPrimary();
 checkBasicCRUD(priConn.getDB('test').unsharded);
 checkBasicCRUD(priConn.getDB('test').sharded);
 replShard.stopSet();
-})();

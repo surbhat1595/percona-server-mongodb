@@ -105,7 +105,8 @@ MONGO_FAIL_POINT_DEFINE(pauseTimestampMonitor);
 MONGO_FAIL_POINT_DEFINE(setMinVisibleForAllCollectionsToOldestOnStartup);
 
 namespace {
-const std::string kCatalogInfo = "_mdb_catalog";
+const std::string kCatalogInfo = DatabaseName::kMdbCatalog.db().toString();
+const NamespaceString kCatalogInfoNamespace = NamespaceString(DatabaseName::kMdbCatalog);
 const auto kCatalogLogLevel = logv2::LogSeverity::Debug(2);
 }  // namespace
 
@@ -196,7 +197,7 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
         WriteUnitOfWork uow(opCtx);
 
         auto status = _engine->createRecordStore(
-            opCtx, NamespaceString(kCatalogInfo), kCatalogInfo, CollectionOptions());
+            opCtx, kCatalogInfoNamespace, kCatalogInfo, CollectionOptions());
 
         // BadValue is usually caused by invalid configuration string.
         // We still fassert() but without a stack trace.
@@ -207,8 +208,8 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
         uow.commit();
     }
 
-    _catalogRecordStore = _engine->getRecordStore(
-        opCtx, NamespaceString(kCatalogInfo), kCatalogInfo, CollectionOptions());
+    _catalogRecordStore =
+        _engine->getRecordStore(opCtx, kCatalogInfoNamespace, kCatalogInfo, CollectionOptions());
     if (shouldLog(::mongo::logv2::LogComponent::kStorageRecovery, kCatalogLogLevel)) {
         LOGV2_FOR_RECOVERY(4615631, kCatalogLogLevel.toInt(), "loadCatalog:");
         _dumpCatalog(opCtx);
@@ -836,7 +837,7 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
                 // oplog application so we should never see an index with {ready: false} in this
                 // case.
                 invariant(!indexMetaData.isBackgroundSecondaryBuild);
-                invariant(!getGlobalReplSettings().usingReplSets());
+                invariant(!getGlobalReplSettings().isReplSet());
 
                 LOGV2(22256,
                       "Dropping unfinished index",
@@ -894,7 +895,7 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
 }
 
 std::string StorageEngineImpl::getFilesystemPathForDb(const DatabaseName& dbName) const {
-    return _catalog->getFilesystemPathForDb(DatabaseNameUtil::serializeForCatalog(dbName));
+    return _catalog->getFilesystemPathForDb(dbName);
 }
 
 void StorageEngineImpl::cleanShutdown(ServiceContext* svcCtx) {
@@ -1342,8 +1343,6 @@ void StorageEngineImpl::TimestampMonitor::_startup() {
                 {
                     // Take a global lock in MODE_IS while fetching timestamps to guarantee that
                     // rollback-to-stable isn't running concurrently.
-                    ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
-                        opCtx->lockState());
                     Lock::GlobalLock lock(opCtx, MODE_IS);
 
                     // The checkpoint timestamp is not cached in mongod and needs to be fetched with

@@ -127,10 +127,12 @@ boost::optional<Timestamp> _calculatePin(OperationContext* opCtx) {
     //
     // If there are concurrent transactions updating different keys in the donor collection, there
     // can be write skew resulting in the wrong pin, including leaking a resource. We enforce the
-    // collection is held in exclusive mode to prevent this.
+    // collection is held in exclusive mode to prevent this. However an exception to this is oplog
+    // application, which already serializes these writes.
 
-    invariant(opCtx->lockState()->isCollectionLockedForMode(
-        NamespaceString::kDonorReshardingOperationsNamespace, LockMode::MODE_X));
+    invariant(!opCtx->isEnforcingConstraints() ||
+              opCtx->lockState()->isCollectionLockedForMode(
+                  NamespaceString::kDonorReshardingOperationsNamespace, LockMode::MODE_X));
 
     // If the RecoveryUnit already had an open snapshot, keep the snapshot open. Otherwise abandon
     // the snapshot when exitting the function.
@@ -172,7 +174,7 @@ void _doPin(OperationContext* opCtx) {
     StatusWith<Timestamp> res = storageEngine->pinOldestTimestamp(
         opCtx, ReshardingHistoryHook::kName.toString(), pin.value(), false);
     if (!res.isOK()) {
-        if (replCoord->getReplicationMode() != repl::ReplicationCoordinator::Mode::modeReplSet) {
+        if (!replCoord->getSettings().isReplSet()) {
             // The pin has failed, but we're in standalone mode. Ignore the error.
             return;
         }
@@ -230,7 +232,7 @@ void ReshardingOpObserver::onInserts(OperationContext* opCtx,
     }
 
     // This is a no-op if either replication is not enabled or this node is a secondary
-    if (!repl::ReplicationCoordinator::get(opCtx)->isReplEnabled() ||
+    if (!repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() ||
         !opCtx->writesAreReplicated()) {
         return;
     }
@@ -250,7 +252,7 @@ void ReshardingOpObserver::onUpdate(OperationContext* opCtx,
     }
 
     // This is a no-op if either replication is not enabled or this node is a secondary
-    if (!repl::ReplicationCoordinator::get(opCtx)->isReplEnabled() ||
+    if (!repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() ||
         !opCtx->writesAreReplicated()) {
         return;
     }

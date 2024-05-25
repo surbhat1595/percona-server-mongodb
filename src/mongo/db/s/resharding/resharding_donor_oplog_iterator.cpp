@@ -177,12 +177,11 @@ ExecutorFuture<std::vector<repl::OplogEntry>> ReshardingDonorOplogIterator::getN
         // A primary which steps down may briefly continue running the ReshardingDonorOplogIterator
         // as a secondary. AutoGetCollectionForReadBase forbids reads on a secondary from using the
         // default RecoveryUnit::ReadSource of kNoTimestamp when the operation expects to conflict
-        // with secondary oplog application. We opt out of acquiring the PBWM lock to avoid
+        // with secondary oplog application. We opt out of enforcing this constraint to avoid
         // triggering an fassert() when briefly running as a secondary. This is acceptable because
-        // the PBWM lock isn't needed as a primary and any inconsistent reads as a secondary won't
-        // have a real effect because the node won't be able to perform more writes.
-        ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
-            opCtx->lockState());
+        // any inconsistent reads as a secondary won't have a real effect because the node won't be
+        // able to perform more writes.
+        opCtx->setEnforceConstraints(false);
 
         Timer fetchTimer;
         if (_pipeline) {

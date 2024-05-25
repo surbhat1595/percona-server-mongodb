@@ -103,7 +103,7 @@ public:
 
             auto shardResults = scatterGatherVersionedTargetByRoutingTable(
                 opCtx,
-                nss.db_forSharding(),
+                nss.dbName(),
                 nss,
                 cri,
                 applyReadWriteConcern(
@@ -149,8 +149,8 @@ public:
     bool adminOnly() const final {
         return false;
     }
-
-} dataSizeCmd;
+};
+MONGO_REGISTER_COMMAND(DataSizeCmd);
 
 }  // namespace
 }  // namespace mongo

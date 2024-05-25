@@ -43,7 +43,7 @@
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/query/query_stats_key_generator.h"
+#include "mongo/db/query/query_stats/key_generator.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
@@ -135,6 +135,8 @@ public:
 
     boost::optional<uint32_t> getQueryHash() const final;
 
+    boost::optional<std::size_t> getQueryStatsStoreKeyHash() const final;
+
     bool shouldOmitDiagnosticInformation() const final;
 
     std::unique_ptr<query_stats::KeyGenerator> getKeyGenerator() final;
@@ -203,8 +205,8 @@ private:
 
     // If boost::none, telemetry should not be collected for this cursor.
     boost::optional<std::size_t> _queryStatsStoreKeyHash;
-    // The KeyGenerator used by query stats to generate the query stats store key.
 
+    // The KeyGenerator used by query stats to generate the query stats store key.
     std::unique_ptr<query_stats::KeyGenerator> _queryStatsKeyGenerator;
 
     // Tracks if kill() has been called on the cursor. Multiple calls to kill() is an error.

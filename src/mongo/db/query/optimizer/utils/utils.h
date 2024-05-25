@@ -248,14 +248,14 @@ CollationSplitResult splitCollationSpec(const boost::optional<ProjectionName>& r
                                         const ProjectionNameSet& rightProjections);
 
 struct PartialSchemaReqConversion {
-    PartialSchemaReqConversion(PartialSchemaRequirements reqMap);
+    PartialSchemaReqConversion(PSRExpr::Node reqMap);
     PartialSchemaReqConversion(ABT bound);
 
     // If set, contains a Constant or Variable bound of an (yet unknown) interval.
     boost::optional<ABT> _bound;
 
     // Requirements we have built so far. May be trivially true.
-    PartialSchemaRequirements _reqMap;
+    PSRExpr::Node _reqMap;
 
     // Have we added a PathComposeM.
     bool _hasIntersected;
@@ -294,9 +294,10 @@ boost::optional<PartialSchemaReqConversion> convertExprToPartialSchemaReq(
 [[nodiscard]] bool simplifyPartialSchemaReqPaths(
     const boost::optional<ProjectionName>& scanProjName,
     const MultikeynessTrie& multikeynessTrie,
-    PartialSchemaRequirements& reqMap,
+    PSRExpr::Node& reqMap,
     ProjectionRenames& projectionRenames,
-    const ConstFoldFn& constFold);
+    const ConstFoldFn& constFold,
+    const PathToIntervalFn& pathToInterval);
 
 /**
  * Try to check whether the predicate 'lhs' is a subset of 'rhs'.
@@ -308,8 +309,7 @@ boost::optional<PartialSchemaReqConversion> convertExprToPartialSchemaReq(
  * - Not a subset: there is a counterexample.
  * - Not sure: this function was unable to determine one way or the other.
  */
-bool isSubsetOfPartialSchemaReq(const PartialSchemaRequirements& lhs,
-                                const PartialSchemaRequirements& rhs);
+bool isSubsetOfPartialSchemaReq(const PSRExpr::Node& lhs, const PSRExpr::Node& rhs);
 
 /**
  * Computes the intersection of two PartialSchemeRequirements objects.
@@ -329,11 +329,9 @@ bool isSubsetOfPartialSchemaReq(const PartialSchemaRequirements& lhs,
  * - The resulting predicate is always false.
  * - 'source' reads from a projection bound by 'target'.
  */
-bool intersectPartialSchemaReq(PartialSchemaRequirements& target,
-                               const PartialSchemaRequirements& source);
+bool intersectPartialSchemaReq(PSRExpr::Node& target, const PSRExpr::Node& source);
 
-PartialSchemaRequirements unionPartialSchemaReq(PartialSchemaRequirements&& left,
-                                                PartialSchemaRequirements&& right);
+PSRExpr::Node unionPartialSchemaReq(PSRExpr::Node&& left, PSRExpr::Node&& right);
 
 
 /**
@@ -353,7 +351,7 @@ size_t decodeIndexKeyName(const std::string& fieldName);
  */
 CandidateIndexes computeCandidateIndexes(PrefixId& prefixId,
                                          const ProjectionName& scanProjectionName,
-                                         const PartialSchemaRequirements& reqMap,
+                                         const PSRExpr::Node& reqMap,
                                          const ScanDefinition& scanDef,
                                          const QueryHints& hints,
                                          const ConstFoldFn& constFold,
@@ -363,7 +361,7 @@ CandidateIndexes computeCandidateIndexes(PrefixId& prefixId,
  * Computes a set of residual predicates which will be applied on top of a Scan.
  */
 boost::optional<ScanParams> computeScanParams(PrefixId& prefixId,
-                                              const PartialSchemaRequirements& reqMap,
+                                              const PSRExpr::Node& reqMap,
                                               const ProjectionName& rootProj);
 
 /**
@@ -490,4 +488,16 @@ PhysPlanBuilder lowerEqPrefixes(PrefixId& prefixId,
                                 bool useSortedMerge);
 
 bool hasProperIntervals(const PSRExpr::Node& reqs);
+
+/**
+ * Builds the evaluation nodes necessary to retrieve all non-top-level fields from each shard key
+ * path, and the filter node needed to perform shard filtering. Determines the CE of the nodes
+ * according to the indexReqTarget.
+ */
+void handleScanNodeRemoveOrphansRequirement(const IndexCollationSpec& shardKey,
+                                            PhysPlanBuilder& builder,
+                                            FieldProjectionMap& fieldProjectionMap,
+                                            IndexReqTarget indexReqTarget,
+                                            CEType groupCE,
+                                            PrefixId& prefixId);
 }  // namespace mongo::optimizer

@@ -105,7 +105,7 @@ public:
                 Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
             auto shardResponses = scatterGatherVersionedTargetByRoutingTable(
                 opCtx,
-                nss.db_forSharding(),
+                nss.dbName(),
                 nss,
                 cri,
                 applyReadWriteConcern(
@@ -139,7 +139,8 @@ public:
                     authzSession->isAuthorizedForActionsOnNamespace(ns, ActionType::analyze));
         }
     };
-} clusterAnalyzeCmd;
+};
+MONGO_REGISTER_COMMAND(ClusterAnalyzeCmd);
 
 }  // namespace
 }  // namespace mongo

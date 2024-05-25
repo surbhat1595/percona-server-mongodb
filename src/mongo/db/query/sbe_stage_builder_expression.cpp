@@ -56,6 +56,7 @@
 #include "mongo/db/exec/sbe/abt/abt_lower_defs.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
+#include "mongo/db/exec/sbe/util/pcre.h"
 #include "mongo/db/exec/sbe/values/arith_common.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/datetime.h"
@@ -88,8 +89,12 @@
 
 namespace mongo::stage_builder {
 namespace {
-
 size_t kArgumentCountForBinaryTree = 100;
+
+inline optimizer::ProjectionName makeLocalVariableName(sbe::FrameId frameId,
+                                                       sbe::value::SlotId slotId) {
+    return getABTLocalVariableName(frameId, slotId);
+}
 
 struct ExpressionVisitorContext {
     struct VarsFrame {
@@ -98,14 +103,14 @@ struct ExpressionVisitorContext {
             : currentBindingIndex(0) {
             bindings.reserve(variableIds.size());
             for (const auto& variableId : variableIds) {
-                bindings.push_back({variableId, frameIdGenerator->generate(), EvalExpr{}});
+                bindings.push_back({variableId, frameIdGenerator->generate(), SbExpr{}});
             }
         }
 
         struct Binding {
             Variables::Id variableId;
             sbe::FrameId frameId;
-            EvalExpr expr;
+            SbExpr expr;
         };
 
         std::vector<Binding> bindings;
@@ -129,35 +134,29 @@ struct ExpressionVisitorContext {
     }
 
     optimizer::ABT popABTExpr() {
-        tassert(6987504, "tried to pop from empty EvalExpr stack", !exprStack.empty());
+        tassert(6987504, "tried to pop from empty SbExpr stack", !exprStack.empty());
 
         auto expr = std::move(exprStack.back());
         exprStack.pop_back();
-        return abt::unwrap(expr.extractABT(state.slotVarMap));
+        return abt::unwrap(expr.extractABT());
     }
 
-    EvalExpr popEvalExpr() {
-        tassert(7261700, "tried to pop from empty EvalExpr stack", !exprStack.empty());
+    SbExpr popExpr() {
+        tassert(7261700, "tried to pop from empty SbExpr stack", !exprStack.empty());
 
         auto expr = std::move(exprStack.back());
         exprStack.pop_back();
         return expr;
     }
 
-    EvalExpr done() {
-        tassert(6987501, "expected exactly one EvalExpr on the stack", exprStack.size() == 1);
-        return popEvalExpr();
-    }
-
-    optimizer::ProjectionName registerVariable(sbe::value::SlotId slotId) {
-        auto varName = stage_builder::makeVariableName(slotId);
-        state.slotVarMap.emplace(varName, slotId);
-        return varName;
+    SbExpr done() {
+        tassert(6987501, "expected exactly one SbExpr on the stack", exprStack.size() == 1);
+        return popExpr();
     }
 
     StageBuilderState& state;
 
-    std::vector<EvalExpr> exprStack;
+    std::vector<SbExpr> exprStack;
 
     boost::optional<sbe::value::SlotId> rootSlot;
 
@@ -192,7 +191,7 @@ optimizer::ABT generateTraverseHelper(
     // Generate an expression to read a sub-field at the current nested level.
     auto fieldName = makeABTConstant(fp.getFieldName(level));
     auto fieldExpr = topLevelFieldSlot
-        ? makeVariable(context->registerVariable(*topLevelFieldSlot))
+        ? makeABTVariable(*topLevelFieldSlot)
         : makeABTFunction("getField"_sd, std::move(*inputExpr), std::move(fieldName));
 
     if (level == fp.getPathLength() - 1) {
@@ -293,13 +292,12 @@ void generateStringCaseConversionExpression(ExpressionVisitorContext* _context,
  */
 std::unique_ptr<sbe::EExpression> generateRegexNullResponse(StringData exprName) {
     if (exprName.toString().compare(std::string("regexMatch")) == 0) {
-        return sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Boolean,
-                                          sbe::value::bitcastFrom<bool>(false));
+        return makeBoolConstant(false);
     } else if (exprName.toString().compare("regexFindAll") == 0) {
         auto [arrTag, arrVal] = sbe::value::makeNewArray();
-        return sbe::makeE<sbe::EConstant>(arrTag, arrVal);
+        return makeConstant(arrTag, arrVal);
     }
-    return sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Null, 0);
+    return makeNullConstant();
 }
 
 class ExpressionPreVisitor final : public ExpressionConstVisitor {
@@ -517,7 +515,7 @@ public:
         invariant(currentBindingIndex < currentFrame.bindings.size());
 
         auto& currentBinding = currentFrame.bindings[currentBindingIndex++];
-        currentBinding.expr = _context->popEvalExpr();
+        currentBinding.expr = _context->popExpr();
 
         // Second, we bind this variables AST-level name (with type Variable::Id) to the frame that
         // will be used for compilation and execution. Once this "stage builder" finishes, these
@@ -1207,9 +1205,8 @@ public:
         auto endDateExpression = _context->popABTExpr();
         auto startDateExpression = _context->popABTExpr();
 
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
-        auto timeZoneDBName = _context->registerVariable(timeZoneDBSlot);
-        auto timeZoneDBVar = makeVariable(timeZoneDBName);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
+        auto timeZoneDBVar = makeABTVariable(timeZoneDBSlot);
 
         //  Set parameters for an invocation of built-in "dateDiff" function.
         optimizer::ABTVector arguments;
@@ -1346,8 +1343,8 @@ public:
         auto dateStringExpression = _context->popABTExpr();
         auto dateStringName = makeLocalVariableName(_context->state.frameId(), 0);
 
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
-        auto timeZoneDBName = _context->registerVariable(timeZoneDBSlot);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
+        auto timeZoneDBName = getABTVariableName(timeZoneDBSlot);
 
         // Set parameters for an invocation of built-in "dateFromString" function.
         optimizer::ABTVector arguments;
@@ -1740,10 +1737,9 @@ public:
         // for datetime computation. This global object is registered as an unowned value in the
         // runtime environment so we pass the corresponding slot to the datePartsWeekYear and
         // dateParts functions as a variable.
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
-        auto timeZoneDBName = _context->registerVariable(timeZoneDBSlot);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
         auto computeDate = makeABTFunction(eIsoWeekYear ? "datePartsWeekYear" : "dateParts",
-                                           makeVariable(timeZoneDBName),
+                                           makeABTVariable(timeZoneDBSlot),
                                            yearVar,
                                            monthVar,
                                            dayVar,
@@ -1822,9 +1818,8 @@ public:
         }
         auto date = _context->popABTExpr();
 
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
-        auto timeZoneDBName = _context->registerVariable(timeZoneDBSlot);
-        auto timeZoneDBVar = makeVariable(timeZoneDBName);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
+        auto timeZoneDBVar = makeABTVariable(timeZoneDBSlot);
 
         auto isoTypeMask = getBSONTypeMask(sbe::value::TypeTags::Boolean);
 
@@ -1887,9 +1882,8 @@ public:
             ? _context->popABTExpr()
             : optimizer::Constant::str(kIsoFormatStringZ);  // assumes UTC until disproven
 
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
-        auto timeZoneDBName = _context->registerVariable(timeZoneDBSlot);
-        auto timeZoneDBVar = makeVariable(timeZoneDBName);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
+        auto timeZoneDBVar = makeABTVariable(timeZoneDBSlot);
         auto [timezoneDBTag, timezoneDBVal] =
             _context->state.env->getAccessor(timeZoneDBSlot)->getViewOfValue();
         uassert(4997900,
@@ -2011,9 +2005,8 @@ public:
         auto unitExpression = _context->popABTExpr();
         auto dateExpression = _context->popABTExpr();
 
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
-        auto timeZoneDBName = _context->registerVariable(timeZoneDBSlot);
-        auto timeZoneDBVar = makeVariable(timeZoneDBName);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
+        auto timeZoneDBVar = makeABTVariable(timeZoneDBSlot);
         auto [timezoneDBTag, timezoneDBVal] =
             _context->state.env->getAccessor(timeZoneDBSlot)->getViewOfValue();
         tassert(7157927,
@@ -2240,7 +2233,7 @@ public:
             std::move(inputName), _context->popABTExpr(), std::move(expExpr)));
     }
     void visit(const ExpressionFieldPath* expr) final {
-        EvalExpr inputExpr;
+        SbExpr inputExpr;
         boost::optional<sbe::value::SlotId> topLevelFieldSlot;
         bool expectsDocumentInputOnly = false;
         auto fp = (expr->getFieldPath().getPathLength() > 1)
@@ -2251,7 +2244,7 @@ public:
             const auto* slots = _context->slots;
             if (expr->getVariableId() == Variables::kRootId) {
                 // Set inputExpr to refer to the root document.
-                inputExpr = _context->rootSlot ? EvalExpr{*_context->rootSlot} : EvalExpr{};
+                inputExpr = _context->rootSlot ? SbExpr{*_context->rootSlot} : SbExpr{};
                 expectsDocumentInputOnly = true;
 
                 if (slots && fp) {
@@ -2274,15 +2267,11 @@ public:
                 pushABT(optimizer::Constant::nothing());
                 return;
             } else {
-                auto it = Variables::kIdToBuiltinVarName.find(expr->getVariableId());
-                tassert(5611300,
-                        "Encountered unexpected system variable ID",
-                        it != Variables::kIdToBuiltinVarName.end());
-
-                auto slot = _context->state.env->getSlotIfExists(it->second);
+                auto builtinVarId = expr->getVariableId();
+                auto slot = _context->state.getBuiltinVarSlot(builtinVarId);
                 uassert(5611301,
                         str::stream()
-                            << "Builtin variable '$$" << it->second << "' is not available",
+                            << "Builtin variable '$$" << builtinVarId << "' is not available",
                         slot.has_value());
 
                 inputExpr = *slot;
@@ -2301,7 +2290,7 @@ public:
 
             // A solo variable reference (e.g.: "$$ROOT" or "$$myvar") that doesn't need any
             // traversal.
-            _context->pushExpr(inputExpr.extractABT(_context->state.slotVarMap));
+            _context->pushExpr(inputExpr.extractABT());
             return;
         }
 
@@ -2310,14 +2299,13 @@ public:
                 !inputExpr.isNull() || topLevelFieldSlot.has_value());
 
         // Dereference a dotted path, which may contain arrays requiring implicit traversal.
-        auto resultExpr = generateTraverse(
-            _context,
-            inputExpr.isNull() ? boost::optional<optimizer::ABT>{}
-                               : abt::unwrap(inputExpr.extractABT(_context->state.slotVarMap)),
-            expectsDocumentInputOnly,
-            *fp,
-            _context->state.frameIdGenerator,
-            topLevelFieldSlot);
+        auto resultExpr = generateTraverse(_context,
+                                           inputExpr.isNull() ? boost::optional<optimizer::ABT>{}
+                                                              : abt::unwrap(inputExpr.extractABT()),
+                                           expectsDocumentInputOnly,
+                                           *fp,
+                                           _context->state.frameIdGenerator,
+                                           topLevelFieldSlot);
         pushABT(std::move(resultExpr));
     }
     void visit(const ExpressionFilter* expr) final {
@@ -2389,10 +2377,9 @@ public:
 
         auto resultExpr = _context->popABTExpr();
         for (auto& binding : currentFrame.bindings) {
-            resultExpr = optimizer::make<optimizer::Let>(
-                makeLocalVariableName(binding.frameId, 0),
-                abt::unwrap(binding.expr.extractABT(_context->state.slotVarMap)),
-                std::move(resultExpr));
+            resultExpr = optimizer::make<optimizer::Let>(makeLocalVariableName(binding.frameId, 0),
+                                                         abt::unwrap(binding.expr.extractABT()),
+                                                         std::move(resultExpr));
         }
 
         pushABT(std::move(resultExpr));
@@ -2655,7 +2642,58 @@ public:
         visitMultiBranchLogicExpression(expr, optimizer::Operations::Or);
     }
     void visit(const ExpressionPow* expr) final {
-        unsupportedExpression("$pow");
+        _context->ensureArity(2);
+        auto rhs = _context->popABTExpr();
+        auto lhs = _context->popABTExpr();
+
+        auto lhsName = makeLocalVariableName(_context->state.frameId(), 0);
+        auto rhsName = makeLocalVariableName(_context->state.frameId(), 0);
+
+        auto checkIsNotNumber =
+            optimizer::make<optimizer::BinaryOp>(optimizer::Operations::Or,
+                                                 generateABTNonNumericCheck(lhsName),
+                                                 generateABTNonNumericCheck(rhsName));
+
+        auto checkBaseIsZero = optimizer::make<optimizer::BinaryOp>(
+            optimizer::Operations::Eq, makeVariable(lhsName), optimizer::Constant::int32(0));
+
+        auto checkIsZeroAndNegative = optimizer::make<optimizer::BinaryOp>(
+            optimizer::Operations::And, checkBaseIsZero, generateABTNegativeCheck(rhsName));
+
+        auto checkIsNullOrMissing =
+            optimizer::make<optimizer::BinaryOp>(optimizer::Operations::Or,
+                                                 generateABTNullOrMissing(lhsName),
+                                                 generateABTNullOrMissing(rhsName));
+
+        // Create an expression to invoke built-in "pow" function
+        auto powFunctionCall = makeABTFunction("pow", makeVariable(lhsName), makeVariable(rhsName));
+        // Local bind to hold the result of the built-in "pow" function
+        auto powResName = makeLocalVariableName(_context->state.frameId(), 0);
+        auto powResVariable = makeVariable(powResName);
+
+        // Return the result or check for issues if result is empty (Nothing)
+        auto checkPowRes = optimizer::make<optimizer::BinaryOp>(
+            optimizer::Operations::FillEmpty,
+            powResVariable,
+            buildABTMultiBranchConditional(
+                ABTCaseValuePair{std::move(checkIsNullOrMissing), optimizer::Constant::null()},
+                ABTCaseValuePair{
+                    std::move(checkIsNotNumber),
+                    makeABTFail(ErrorCodes::Error{5154200}, "$pow only supports numeric types")},
+                ABTCaseValuePair{std::move(checkIsZeroAndNegative),
+                                 makeABTFail(ErrorCodes::Error{5154201},
+                                             "$pow cannot raise 0 to a negative exponent")},
+                optimizer::Constant::nothing()));
+
+
+        pushABT(optimizer::make<optimizer::Let>(
+            std::move(lhsName),
+            std::move(lhs),
+            optimizer::make<optimizer::Let>(
+                std::move(rhsName),
+                std::move(rhs),
+                optimizer::make<optimizer::Let>(
+                    std::move(powResName), std::move(powFunctionCall), checkPowRes))));
     }
     void visit(const ExpressionRange* expr) final {
         auto startName = makeLocalVariableName(_context->state.frameIdGenerator->generate(), 0);
@@ -2895,15 +2933,13 @@ public:
         auto [specTag, specVal] = makeValue(expr->getSortPattern());
         auto specConstant = makeABTConstant(specTag, specVal);
 
-        auto collatorSlot = _context->state.env->getSlotIfExists("collator"_sd);
-        auto collatorVar = collatorSlot.map(
-            [&](auto slotId) { return _context->registerVariable(*collatorSlot); });
-
         auto argumentIsNotArray = makeNot(makeABTFunction("isArray", var));
 
         optimizer::ABTVector functionArgs{std::move(var), std::move(specConstant)};
-        if (collatorVar) {
-            functionArgs.emplace_back(makeVariable(std::move(*collatorVar)));
+
+        auto collatorSlot = _context->state.getCollatorSlot();
+        if (collatorSlot) {
+            functionArgs.emplace_back(makeABTVariable(*collatorSlot));
         }
 
         auto exprSortArr = buildABTMultiBranchConditional(
@@ -3513,7 +3549,7 @@ private:
         auto dateName = makeLocalVariableName(_context->state.frameId(), 0);
         auto dateVar = makeVariable(dateName);
 
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
 
         // Set parameters for an invocation of the built-in function.
         optimizer::ABTVector arguments;
@@ -3547,8 +3583,7 @@ private:
                 optimizer::make<optimizer::Constant>(timezoneObjTag, timezoneObjVal);
             arguments.push_back(std::move(timezoneConst));
         } else {
-            auto timeZoneDBName = _context->registerVariable(timeZoneDBSlot);
-            auto timeZoneDBVar = makeVariable(timeZoneDBName);
+            auto timeZoneDBVar = makeABTVariable(timeZoneDBSlot);
             inputValidationCases.emplace_back(
                 generateABTNonStringCheck(timezoneExpression),
                 makeABTFail(ErrorCodes::Error{5157902},
@@ -3601,10 +3636,7 @@ private:
                                                           StringData expressionName,
                                                           StringData parameterName) {
         return {
-            makeNot(makeFunction("typeMatch",
-                                 dateRef.clone(),
-                                 makeConstant(sbe::value::TypeTags::NumberInt64,
-                                              sbe::value::bitcastFrom<int64_t>(dateTypeMask())))),
+            makeNot(makeFunction("typeMatch", dateRef.clone(), makeInt32Constant(dateTypeMask()))),
             sbe::makeE<sbe::EFail>(errorCode,
                                    str::stream()
                                        << expressionName << " parameter '" << parameterName
@@ -3627,7 +3659,7 @@ private:
      * 'variable' is null or missing.
      */
     static CaseValuePair generateReturnNullIfNullOrMissing(const sbe::EVariable& variable) {
-        return {generateNullOrMissing(variable), makeConstant(sbe::value::TypeTags::Null, 0)};
+        return {generateNullOrMissing(variable), makeNullConstant()};
     }
 
     static ABTCaseValuePair generateABTReturnNullIfNullOrMissing(const optimizer::ABT& name) {
@@ -3635,8 +3667,7 @@ private:
     }
 
     static CaseValuePair generateReturnNullIfNullOrMissing(std::unique_ptr<sbe::EExpression> expr) {
-        return {generateNullOrMissing(std::move(expr)),
-                makeConstant(sbe::value::TypeTags::Null, 0)};
+        return {generateNullOrMissing(std::move(expr)), makeNullConstant()};
     }
 
     /**
@@ -3644,10 +3675,11 @@ private:
      */
     static std::unique_ptr<sbe::EExpression> generateIsEqualToStringCheck(
         const sbe::EExpression& expr, StringData string) {
-        return sbe::makeE<sbe::EPrimBinary>(
-            sbe::EPrimBinary::logicAnd,
-            makeFunction("isString", expr.clone()),
-            sbe::makeE<sbe::EPrimBinary>(sbe::EPrimBinary::eq, expr.clone(), makeConstant(string)));
+        return sbe::makeE<sbe::EPrimBinary>(sbe::EPrimBinary::logicAnd,
+                                            makeFunction("isString", expr.clone()),
+                                            sbe::makeE<sbe::EPrimBinary>(sbe::EPrimBinary::eq,
+                                                                         expr.clone(),
+                                                                         makeStrConstant(string)));
     }
 
     static optimizer::ABT generateABTIsEqualToStringCheck(const optimizer::ABT& expr,
@@ -3901,7 +3933,7 @@ private:
         optimizer::ABTVector checkNulls;
         optimizer::ABTVector checkNotArrays;
 
-        auto collatorSlot = _context->state.env->getSlotIfExists("collator"_sd);
+        auto collatorSlot = _context->state.getCollatorSlot();
 
         args.reserve(arity);
         argNames.reserve(arity);
@@ -3912,7 +3944,7 @@ private:
         auto [operatorName, setFunctionName] =
             getSetOperatorAndFunctionNames(setOp, collatorSlot.has_value());
         if (collatorSlot) {
-            variables.push_back(makeVariable(_context->registerVariable(*collatorSlot)));
+            variables.push_back(makeABTVariable(*collatorSlot));
         }
 
         for (size_t idx = 0; idx < arity; ++idx) {
@@ -4021,7 +4053,7 @@ private:
                 }
 
                 // Create the compiled Regex from constant pattern and options.
-                auto [regexTag, regexVal] = sbe::value::makeNewPcreRegex(*pattern, options);
+                auto [regexTag, regexVal] = sbe::makeNewPcreRegex(*pattern, options);
                 auto compiledRegex = makeABTConstant(regexTag, regexVal);
                 return makeRegexFunctionCall(std::move(compiledRegex));
             }
@@ -4210,8 +4242,8 @@ private:
             }
         }();
 
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
-        auto timeZoneDBVar = makeVariable(_context->registerVariable(timeZoneDBSlot));
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
+        auto timeZoneDBVar = makeABTVariable(timeZoneDBSlot);
 
         optimizer::ABTVector checkNullArg;
         checkNullArg.push_back(generateABTNullOrMissing(startDateName));
@@ -4293,10 +4325,10 @@ private:
 };
 }  // namespace
 
-EvalExpr generateExpression(StageBuilderState& state,
-                            const Expression* expr,
-                            boost::optional<sbe::value::SlotId> rootSlot,
-                            const PlanStageSlots* slots) {
+SbExpr generateExpression(StageBuilderState& state,
+                          const Expression* expr,
+                          boost::optional<sbe::value::SlotId> rootSlot,
+                          const PlanStageSlots* slots) {
     ExpressionVisitorContext context(state, std::move(rootSlot), slots);
 
     ExpressionPreVisitor preVisitor{&context};

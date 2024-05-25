@@ -1,10 +1,6 @@
 /**
  * Test that `movePrimary` works for databases created under a different FCV
  */
-(function() {
-
-"use strict";
-
 let st = new ShardingTest({shards: 2, mongos: 1, rs: {nodes: 1}});
 
 const mongos = st.s;
@@ -47,7 +43,8 @@ function testMovePrimary(db) {
 
 for (var i = 0; i < fcvValues.length; i++) {
     // Latest FCV
-    assert.commandWorked(mongos.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        mongos.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
 
     // Create database `createdBeforeDowngrading` under latest FCV
     assert.commandWorked(
@@ -55,19 +52,22 @@ for (var i = 0; i < fcvValues.length; i++) {
     assert.commandWorked(createdBeforeDowngradingDB.coll.insert({_id: 'foo'}));
 
     // Downgrade FCV
-    assert.commandWorked(mongos.adminCommand({setFeatureCompatibilityVersion: fcvValues[i]}));
+    assert.commandWorked(
+        mongos.adminCommand({setFeatureCompatibilityVersion: fcvValues[i], confirm: true}));
 
     // Make sure movePrimary works for `createdBeforeDowngrading`
     testMovePrimary(createdBeforeDowngradingDB);
 
     // Create database `createdBeforeUpgrading` under downgraded FCV
-    assert.commandWorked(mongos.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        mongos.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
     assert.commandWorked(
         mongos.adminCommand({enableSharding: kBeforeUpgradingDbName, primaryShard: shard0}));
     assert.commandWorked(createdBeforeUpgradingDB.coll.insert({_id: 'foo'}));
 
     // Upgrade FCV
-    assert.commandWorked(mongos.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        mongos.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
 
     // Make sure movePrimary works (again) for `createdBeforeDowngrading`
     testMovePrimary(createdBeforeDowngradingDB);
@@ -81,4 +81,3 @@ for (var i = 0; i < fcvValues.length; i++) {
 }
 
 st.stop();
-})();

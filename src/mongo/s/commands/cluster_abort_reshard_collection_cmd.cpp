@@ -75,7 +75,7 @@ public:
             auto cmdResponse = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
                 opCtx,
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                "admin",
+                DatabaseName::kAdmin,
                 CommandHelpers::appendMajorityWriteConcern(
                     configsvrAbortReshardCollection.toBSON({}), opCtx->getWriteConcern()),
                 Shard::RetryPolicy::kIdempotent));
@@ -112,7 +112,8 @@ public:
     std::string help() const override {
         return "Abort any in-progress resharding operations for this collection.";
     }
-} abortReshardCollectionCmd;
+};
+MONGO_REGISTER_COMMAND(AbortReshardCollectionCommand);
 
 }  // namespace
 }  // namespace mongo

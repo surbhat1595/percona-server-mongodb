@@ -1,18 +1,13 @@
 // Perform the upgrade/downgrade procedure by first setting the featureCompatibilityVersion and
 // then switching the binary.
-(function() {
-"use strict";
-
-load("jstests/replsets/rslib.js");
-load("jstests/libs/index_catalog_helpers.js");
-load("jstests/libs/check_uuids.js");
-load("jstests/libs/check_unique_indexes.js");
+import {checkUniqueIndexFormatVersion} from "jstests/libs/check_unique_indexes.js";
+import {checkCollectionUUIDs} from "jstests/libs/check_uuids.js";
 
 const latestBinary = "latest";
 
 let setFCV = function(adminDB, version) {
-    assert.commandWorked(
-        adminDB.runCommand({setFeatureCompatibilityVersion: version, writeConcern: {w: 1}}));
+    assert.commandWorked(adminDB.runCommand(
+        {setFeatureCompatibilityVersion: version, confirm: true, writeConcern: {w: 1}}));
     checkFCV(adminDB, version);
 };
 
@@ -171,6 +166,7 @@ let standaloneTest = function(nodeOptions, downgradeVersion) {
         // setFeatureCompatibilityVersion is called with fromConfigServer: true.
         assert.commandWorked(adminDB.runCommand({
             setFeatureCompatibilityVersion: downgradeFCV,
+            confirm: true,
             fromConfigServer: true,
             writeConcern: {w: 1}
         }));
@@ -271,6 +267,7 @@ let replicaSetTest = function(nodeOptions, downgradeVersion, numNodes = 3) {
         // setFeatureCompatibilityVersion is called with fromConfigServer: true.
         assert.commandWorked(primaryAdminDB.runCommand({
             setFeatureCompatibilityVersion: downgradeFCV,
+            confirm: true,
             fromConfigServer: true,
             writeConcern: {w: 1}
         }));
@@ -368,4 +365,3 @@ replicaSetTest({shardsvr: ""}, 'last-lts');
 // Do tests for replica sets started with --configsvr.
 replicaSetTest({configsvr: ""}, 'last-continuous');
 replicaSetTest({configsvr: ""}, 'last-lts');
-})();

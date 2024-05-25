@@ -1,9 +1,10 @@
 // checks that db.serverStatus will not throw errors when metrics tree is not present.
-// The test runs commands that are not allowed with security token: mapreduce.
-// @tags: [not_allowed_with_security_token]
+//
+// @tags: [
+//   # The test runs commands that are not allowed with security token: mapreduce.
+//   not_allowed_with_security_token
+// ]
 
-(function() {
-"use strict";
 // Test the getActiveCommands function
 // Should remove the listCollections section but keep the rest
 var testInput = {
@@ -32,4 +33,3 @@ assert.neq(0, result.metrics.commands.serverStatus.total, tojson(result));
 // Test that the command returns successfully when no metrics tree is present
 var result = db.serverStatus({"metrics": 0});
 assert.eq(undefined, result.metrics, tojson(result));
-}());

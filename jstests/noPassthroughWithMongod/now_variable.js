@@ -1,8 +1,8 @@
 /**
  * Tests for the $$NOW and $$CLUSTER_TIME system variable.
  */
+import "jstests/libs/sbe_assert_error_override.js";
 import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
-load("jstests/libs/sbe_assert_error_override.js");  // Override error-code-checking APIs.
 
 const coll = db[jsTest.name()];
 const otherColl = db[coll.getName() + "_other"];
@@ -169,9 +169,14 @@ if (checkSBEEnabled(db)) {
     // Query with $$NOW will be cached.
     verifyPlanCacheSize(projWithNow);
     verifyPlanCacheSize(aggWithNow);
+
     // $$NOW is not in SBE query.
     verifyPlanCacheSize(fromViewWithNow);
-    verifyPlanCacheSize(withExprNow);
+    // TODO SERVER-78817 remove checkSBEEnabled() call once caching of $match pushdown is enabled.
+    if (!checkSBEEnabled(db, ["featureFlagSbeFull"])) {
+        verifyPlanCacheSize(withExprNow);
+    }
+
     // $$NOW could not be pushed down into SBE.
     verifyPlanCacheSize(baseCollectionNowAgg);
     verifyPlanCacheSize(aggWithNowNotPushedDown);

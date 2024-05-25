@@ -66,7 +66,7 @@ CETester::CETester(std::string collName,
     : _optPhases(optPhases),
       _prefixId(PrefixId::createForTests()),
       _hints(),
-      _metadata({}),
+      _metadata(),
       _collName(collName) {
     addCollection(collName, collCard);
 }
@@ -104,7 +104,6 @@ CEType CETester::getCE(ABT& abt, std::function<bool(const ABT&)> nodePredicate) 
                                  makeCostEstimator(),
                                  defaultConvertPathToInterval,
                                  ConstEval::constFold,
-                                 true /*supportExplain*/,
                                  DebugInfo::kDefaultForTests,
                                  _hints};
     optimize(phaseManager, abt);

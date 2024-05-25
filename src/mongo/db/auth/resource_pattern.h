@@ -61,9 +61,6 @@ class ResourcePattern {
     friend class AuthorizationContract;
 
 public:
-    // TODO (SERVER-76195) Remove legacy non-tenant aware APIs from ResourcePattern
-    // databaseToMatch() - Remove in favor of dbNameToMatch.
-
     /**
      * Returns a pattern that matches absolutely any resource.
      */
@@ -147,7 +144,8 @@ public:
      */
     static ResourcePattern forExactSystemBucketsCollection(const NamespaceString& nss) {
         uassert(ErrorCodes::InvalidNamespace,
-                "Invalid namespace '{}.system.buckets.{}'"_format(nss.db(), nss.coll()),
+                "Invalid namespace '{}.system.buckets.{}'"_format(
+                    nss.dbName().toStringForErrorMsg(), nss.coll()),
                 !nss.coll().startsWith("system.buckets."));
         return ResourcePattern(MatchTypeEnum::kMatchExactSystemBucketResource, nss);
     }
@@ -253,10 +251,6 @@ public:
         return _ns.dbName();
     }
 
-    StringData databaseToMatch() const {
-        return _ns.db();
-    }
-
     /**
      * Returns the collection that this pattern matches.
      *
@@ -269,6 +263,8 @@ public:
 
     std::string toString() const;
 
+    std::string serialize(const SerializationContext& context = SerializationContext()) const;
+
     bool operator==(const ResourcePattern& other) const {
         return (_matchType == other._matchType) && (_ns == other._ns);
     }
@@ -278,16 +274,6 @@ public:
             return true;
         }
         return (_matchType == other._matchType) && (_ns < other._ns);
-    }
-
-    /**
-     * Perform an equality comparison ignoring the TenantID component of NamespaceString.
-     * This is necessary during migration of ResourcePattern to be tenant aware.
-     * TODO (SERVER-76195) Remove legacy non-tenant aware APIs from ResourcePattern
-     */
-    bool matchesIgnoringTenant(const ResourcePattern& other) const {
-        return (_matchType == other._matchType) && (_ns.db() == other._ns.db()) &&
-            (_ns.coll() == other._ns.coll());
     }
 
     template <typename H>

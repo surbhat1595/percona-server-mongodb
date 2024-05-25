@@ -160,6 +160,15 @@ DEFAULTS = {
 
     # Limit the number of tests to execute
     "max_test_queue_size": None,
+
+    # Sanity check
+    "sanity_check": False,
+
+    # otel info
+    "otel_trace_id": None,
+    "otel_parent_id": None,
+    "otel_collector_endpoint": None,
+    "otel_collector_file": None,
 }
 
 _SuiteOptions = collections.namedtuple("_SuiteOptions", [
@@ -529,6 +538,12 @@ TEST_FILES = None
 # If set, then mongod/mongos's started by resmoke.py will use the specified transport layer.
 TRANSPORT_LAYER = None
 
+# Metrics for open telemetry
+OTEL_TRACE_ID = None
+OTEL_PARENT_ID = None
+OTEL_COLLECTOR_ENDPOINT = None
+OTEL_COLLECTOR_FILE = None
+
 # If set, then all mongod's started by resmoke.py and by the mongo shell will use the specified
 # WiredTiger collection configuration settings.
 WT_COLL_CONFIG = None
@@ -611,3 +626,6 @@ EXPANSIONS_FILE = "../expansions.yml" if 'CI' in os.environ else None
 # Symbolizer secrets
 SYMBOLIZER_CLIENT_SECRET = None
 SYMBOLIZER_CLIENT_ID = None
+
+# Sanity check
+SANITY_CHECK = False

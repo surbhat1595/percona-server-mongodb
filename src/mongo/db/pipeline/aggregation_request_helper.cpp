@@ -121,7 +121,7 @@ AggregateCommandRequest parseFromBSON(OperationContext* opCtx,
     auto cmdObjBob = BSONObjBuilder{BSON(AggregateCommandRequest::kCommandName << nss.coll())};
     if (!cmdObj.hasField(AggregateCommandRequest::kCommandName) ||
         !cmdObj.hasField(AggregateCommandRequest::kDbNameFieldName)) {
-        cmdObjBob.append("$db", nss.db());
+        cmdObjBob.append("$db", nss.db_deprecated());
         cmdObjBob.appendElementsUnique(cmdObj);
         cmdObjChanged = true;
     }
@@ -162,7 +162,7 @@ NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) {
                 firstElement.type() == BSONType::String);
 
         NamespaceString nss(
-            NamespaceStringUtil::parseNamespaceFromRequest(dbName, firstElement.valueStringData()));
+            NamespaceStringUtil::deserialize(dbName, firstElement.valueStringData()));
 
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "Invalid namespace specified '" << nss.toStringForErrorMsg()
@@ -260,9 +260,7 @@ void validateRequestForAPIVersion(const OperationContext* opCtx,
     // An internal client could be one of the following :
     //     - Does not have any transport session
     //     - The transport session tag is internal
-    bool isInternalClient =
-        !client->session() || (client->session()->getTags() & transport::Session::kInternalClient);
-
+    bool isInternalThreadOrClient = !client->session() || client->isInternalClient();
     // Checks that the 'exchange' or 'fromMongos' option can only be specified by the internal
     // client.
     if ((request.getExchange() || request.getFromMongos()) && apiStrict && apiVersion == "1") {
@@ -270,7 +268,7 @@ void validateRequestForAPIVersion(const OperationContext* opCtx,
                 str::stream() << "'exchange' and 'fromMongos' option cannot be specified with "
                                  "'apiStrict: true' in API Version "
                               << apiVersion,
-                isInternalClient);
+                isInternalThreadOrClient);
     }
 }
 
@@ -294,6 +292,9 @@ PlanExecutorPipeline::ResumableScanType getResumableScanType(const AggregateComm
     }
     if (request.getRequestReshardingResumeToken()) {
         return PlanExecutorPipeline::ResumableScanType::kOplogScan;
+    }
+    if (request.getRequestResumeToken()) {
+        return PlanExecutorPipeline::ResumableScanType::kNaturalOrderScan;
     }
     return PlanExecutorPipeline::ResumableScanType::kNone;
 }

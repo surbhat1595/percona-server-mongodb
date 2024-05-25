@@ -1,16 +1,14 @@
 /**
  * Tests that long-running operations show up in currentOp and report the locks they are holding.
  *
- * The test runs commands that are not allowed with security token: fsyncUnlock.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: fsyncUnlock.
  *   not_allowed_with_security_token,
  *   assumes_superuser_permissions,
  *   uses_parallel_shell,
  * ]
  */
 
-(function() {
-"use strict";
 const coll = db.jstests_currentop;
 coll.drop();
 
@@ -48,4 +46,3 @@ assert.soon(
 const fsyncResponse = assert.commandWorked(db.fsyncUnlock());
 assert.eq(fsyncResponse.lockCount, 0);
 awaitInsertShell();
-}());

@@ -1,21 +1,16 @@
-// The test runs commands that are not allowed with security token: setProfilingLevel.
+// Confirms that profiled getMore execution contains all expected metrics with proper values.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: setProfilingLevel.
 //   not_allowed_with_security_token,
 //   does_not_support_stepdowns,
 //   requires_getmore,
 //   requires_fcv_70,
 //   requires_profiling,
-//   # TODO: SERVER-70142 populate planSummary.
-//   cqf_experimental_incompatible,
 // ]
 
-// Confirms that profiled getMore execution contains all expected metrics with proper values.
-
-(function() {
-"use strict";
-
-load("jstests/libs/os_helpers.js");  // For isLinux().
-load("jstests/libs/profiler.js");    // For getLatestProfilerEntry.
+import {isLinux} from "jstests/libs/os_helpers.js";
+import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 
 const testDB = db.getSiblingDB("profile_getmore");
 assert.commandWorked(testDB.dropDatabase());
@@ -157,4 +152,3 @@ assert.eq(cursor.itcount(), 4);  // Consume result set and trigger getMore.
 profileObj = getLatestProfilerEntry(testDB, {op: "getmore"});
 assert.eq((typeof profileObj.originatingCommand.$truncated), "string", profileObj);
 assert.eq(profileObj.originatingCommand.comment, "profile_getmore", profileObj);
-})();

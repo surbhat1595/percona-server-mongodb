@@ -56,16 +56,16 @@ feature_flags:
       shouldBeFCVGated: true
 
     featureFlagQueryStats:
-      description: "Feature flag for enabling the queryStats store."
+      description: "Feature flag for enabling full queryStats collection."
       cpp_varname: gFeatureFlagQueryStats
       default: false
       shouldBeFCVGated: true
 
-    featureFlagCompoundWildcardIndexes:
-      description: "Feature flag to enable compound wildcard indexes."
-      cpp_varname: gFeatureFlagCompoundWildcardIndexes
+    featureFlagQueryStatsFindCommand:
+      description: "Feature flag for enabling queryStats collection for the find command."
+      cpp_varname: gFeatureFlagQueryStatsFindCommand
       default: true
-      version: 7.0
+      version: 7.1
       shouldBeFCVGated: true
 
     featureFlagSearchBatchSizeLimit:
@@ -91,7 +91,8 @@ feature_flags:
     featureFlagVectorSearchPublicPreview:
       description: "Feature flag to enable vector search for public preview."
       cpp_varname: gFeatureFlagVectorSearchPublicPreview
-      default: false
+      default: true
+      version: 7.1
       # TODO SERVER-78294 Toggle this once we've backported the feature.
       shouldBeFCVGated: true
 

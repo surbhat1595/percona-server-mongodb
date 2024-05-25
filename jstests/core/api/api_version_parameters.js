@@ -1,16 +1,13 @@
 /**
  * Checks that the server properly parses "API Version" parameters
  *
- * The test runs commands that are not allowed with security token: testDeprecation.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: testDeprecation.
  *   not_allowed_with_security_token,
  *   uses_api_parameters,
  *   no_selinux,
  * ]
  */
-
-(function() {
-"use strict";
 
 const testDb = db.getSiblingDB(jsTestName());
 
@@ -152,4 +149,3 @@ assert.commandFailedWithCode(
 // Test reading from system.js succeeds.
 assert.commandWorked(testDb.runCommand(
     {find: "system.js", filter: {_id: "shouldExist"}, apiVersion: "1", apiStrict: true}));
-})();

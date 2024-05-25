@@ -64,7 +64,6 @@
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/query_settings_decoration.h"
-#include "mongo/db/query/sbe_stage_builder.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -396,7 +395,7 @@ void Explain::explainPipeline(PlanExecutor* exec,
     *out << "stages" << Value(pipelineExec->writeExplainOps(verbosity));
 
     explain_common::generateServerInfo(out);
-    explain_common::generateServerParameters(out);
+    explain_common::generateServerParameters(exec->getOpCtx(), out);
 
     explain_common::appendIfRoom(command, "command", out);
 }
@@ -441,11 +440,27 @@ void Explain::explainStages(PlanExecutor* exec,
                   out);
 
     explain_common::generateServerInfo(out);
-    explain_common::generateServerParameters(out);
+    explain_common::generateServerParameters(exec->getOpCtx(), out);
 }
 
 void Explain::explainStages(PlanExecutor* exec,
                             const CollectionPtr& collection,
+                            ExplainOptions::Verbosity verbosity,
+                            BSONObj extraInfo,
+                            const SerializationContext& serializationContext,
+                            const BSONObj& command,
+                            BSONObjBuilder* out) {
+    explainStages(exec,
+                  MultipleCollectionAccessor(collection),
+                  verbosity,
+                  extraInfo,
+                  serializationContext,
+                  command,
+                  out);
+}
+
+void Explain::explainStages(PlanExecutor* exec,
+                            const CollectionAcquisition& collection,
                             ExplainOptions::Verbosity verbosity,
                             BSONObj extraInfo,
                             const SerializationContext& serializationContext,

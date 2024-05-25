@@ -47,6 +47,8 @@
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/hasher.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
@@ -57,18 +59,22 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/s/metrics/sharding_data_transform_instance_metrics.h"
 #include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/resharding/recipient_resume_document_gen.h"
 #include "mongo/db/s/resharding/resharding_collection_cloner.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/storage/record_store.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog_cache_mock.h"
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/resharding/common_types_gen.h"
+#include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
 #include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/unittest/assert.h"
@@ -135,6 +141,7 @@ protected:
 
         _cloner = std::make_unique<ReshardingCollectionCloner>(
             _metrics.get(),
+            _reshardingUUID,
             ShardKeyPattern(newShardKeyPattern.toBSON()),
             _sourceNss,
             _sourceUUID,
@@ -165,6 +172,20 @@ protected:
             operationContext());
         uassertStatusOK(createCollection(
             operationContext(), tempNss.dbName(), BSON("create" << tempNss.coll())));
+        if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
+                serverGlobalParams.featureCompatibility)) {
+            uassertStatusOK(createCollection(
+                operationContext(),
+                NamespaceString::kRecipientReshardingResumeDataNamespace.dbName(),
+                BSON("create" << NamespaceString::kRecipientReshardingResumeDataNamespace.coll())));
+            uassertStatusOK(createCollection(
+                operationContext(),
+                NamespaceString::kSessionTransactionsTableNamespace.dbName(),
+                BSON("create" << NamespaceString::kSessionTransactionsTableNamespace.coll())));
+            DBDirectClient client(operationContext());
+            client.createIndexes(NamespaceString::kSessionTransactionsTableNamespace,
+                                 {MongoDSessionCatalog::getConfigTxnPartialIndexSpec()});
+        }
     }
 
     void tearDown() override {
@@ -190,6 +211,7 @@ protected:
         auto rt = RoutingTableHistory::makeNew(_sourceNss,
                                                _sourceUUID,
                                                shardKeyPattern.getKeyPattern(),
+                                               false, /*unsplittable*/
                                                nullptr,
                                                false,
                                                epoch,
@@ -214,11 +236,16 @@ protected:
         std::function<void(std::unique_ptr<SeekableRecordCursor>)> verifyFunction) {
         initializePipelineTest(shardKey, recipientShard, collectionData, configData);
         auto opCtx = operationContext();
-        AutoGetCollection tempColl{opCtx, tempNss, MODE_IX};
-        while (_cloner->doOneBatch(operationContext(), *_pipeline)) {
+        if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
+                serverGlobalParams.featureCompatibility))
+            opCtx->setLogicalSessionId(makeLogicalSessionId(opCtx));
+        TxnNumber txnNum(0);
+        while (_cloner->doOneBatch(operationContext(), *_pipeline, txnNum)) {
+            AutoGetCollection tempColl{opCtx, tempNss, MODE_IX};
             ASSERT_EQ(tempColl->numRecords(opCtx), _metrics->getDocumentsProcessedCount());
             ASSERT_EQ(tempColl->dataSize(opCtx), _metrics->getBytesWrittenCount());
         }
+        AutoGetCollection tempColl{opCtx, tempNss, MODE_IX};
         ASSERT_EQ(tempColl->numRecords(operationContext()), expectedDocumentsCount);
         ASSERT_EQ(_metrics->getDocumentsProcessedCount(), expectedDocumentsCount);
         ASSERT_GT(tempColl->dataSize(opCtx), 0);
@@ -231,6 +258,7 @@ protected:
         NamespaceString::createNamespaceString_forTest("test"_sd, "collection_being_resharded"_sd);
     const NamespaceString tempNss =
         resharding::constructTemporaryReshardingNss(_sourceNss.db_forTest(), _sourceUUID);
+    const UUID _reshardingUUID = UUID::gen();
     const UUID _sourceUUID = UUID::gen();
     const ReshardingSourceId _sourceId{UUID::gen(), _myShardName};
     const DatabaseVersion _sourceDbVersion{UUID::gen(), Timestamp(1, 1)};
@@ -288,8 +316,7 @@ TEST_F(ReshardingCollectionClonerTest, MaxKeyChunk) {
         Doc(fromjson("{_id: {x: {$minKey: 1}}, max: {x: 0.0}, shard: 'myShardName'}")),
         Doc(fromjson("{_id: {x: 0.0}, max: {x: {$maxKey: 1}}, shard: 'shard2' }")),
     };
-    // TODO SERVER-67529: Change expected documents to 4.
-    constexpr auto kExpectedCopiedCount = 3;
+    constexpr auto kExpectedCopiedCount = 4;
     const auto verify = [](auto cursor) {
         auto next = cursor->next();
         ASSERT(next);
@@ -306,12 +333,10 @@ TEST_F(ReshardingCollectionClonerTest, MaxKeyChunk) {
         ASSERT_BSONOBJ_BINARY_EQ(BSON("_id" << 5 << "x" << 0.001 << "$sortKey" << BSON_ARRAY(5)),
                                  next->data.toBson());
 
-        // TODO SERVER-67529: Enable after ChunkManager can handle documents with $maxKey.
-        // next = cursor->next();
-        // ASSERT(next);
-        // ASSERT_BSONOBJ_BINARY_EQ(
-        //     BSON("_id" << 6 << "x" << MAXKEY << "$sortKey" << BSON_ARRAY(6)),
-        //     next->data.toBson());
+        next = cursor->next();
+        ASSERT(next);
+        ASSERT_BSONOBJ_BINARY_EQ(BSON("_id" << 6 << "x" << MAXKEY << "$sortKey" << BSON_ARRAY(6)),
+                                 next->data.toBson());
 
         ASSERT_FALSE(cursor->next());
     };
@@ -425,6 +450,5 @@ TEST_F(ReshardingCollectionClonerTest, CompoundHashedShardKey) {
                     kExpectedCopiedCount,
                     verify);
 }
-
 }  // namespace
 }  // namespace mongo

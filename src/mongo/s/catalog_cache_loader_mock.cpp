@@ -83,7 +83,8 @@ void CatalogCacheLoaderMock::waitForCollectionFlush(OperationContext* opCtx,
     MONGO_UNREACHABLE;
 }
 
-void CatalogCacheLoaderMock::waitForDatabaseFlush(OperationContext* opCtx, StringData dbName) {
+void CatalogCacheLoaderMock::waitForDatabaseFlush(OperationContext* opCtx,
+                                                  const DatabaseName& dbName) {
     MONGO_UNREACHABLE;
 }
 
@@ -103,6 +104,7 @@ CollectionAndChangedChunks getCollectionRefresh(
     return CollectionAndChangedChunks{swCollectionReturnValue.getValue().getEpoch(),
                                       swCollectionReturnValue.getValue().getTimestamp(),
                                       swCollectionReturnValue.getValue().getUuid(),
+                                      swCollectionReturnValue.getValue().getUnsplittable(),
                                       swCollectionReturnValue.getValue().getKeyPattern().toBSON(),
                                       swCollectionReturnValue.getValue().getDefaultCollation(),
                                       swCollectionReturnValue.getValue().getUnique(),

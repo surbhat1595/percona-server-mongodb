@@ -1,5 +1,5 @@
-// The test runs commands that are not allowed with security token: setParameter.
 // @tags: [
+//   # The test runs commands that are not allowed with security token: setParameter.
 //   not_allowed_with_security_token,
 //   assumes_superuser_permissions,
 //   does_not_support_stepdowns,
@@ -7,8 +7,6 @@
 
 // Tests that using setParameter to update the parameter 'automationServiceDescriptor' causes a
 // field with that name to be echoed back in hello. See SERVER-18399 for more details.
-
-(function() {
 
 // Run hello, and if it contains an automation service descriptor, save it, so we can restore
 // it later. If it wasn't set, original will just be undefined.
@@ -55,4 +53,3 @@ if (!original)
     original = "";
 assert.commandWorked(db.adminCommand({setParameter: 1, automationServiceDescriptor: original}));
 db.getMongo().promptPrefix = originalPrompt;
-}());

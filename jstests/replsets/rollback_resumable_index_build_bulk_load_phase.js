@@ -10,10 +10,10 @@
  *   incompatible_with_gcov,
  * ]
  */
-(function() {
-"use strict";
-
-load('jstests/replsets/libs/rollback_resumable_index_build.js');
+import {
+    RollbackResumableIndexBuildTest
+} from "jstests/replsets/libs/rollback_resumable_index_build.js";
+import {RollbackTest} from "jstests/replsets/libs/rollback_test.js";
 
 const dbName = "test";
 
@@ -66,4 +66,3 @@ runRollbackTo(
 runRollbackTo({name: "hangIndexBuildDuringBulkLoadPhaseSecond", logIdWithIndexName: 4924400});
 
 rollbackTest.stop();
-})();

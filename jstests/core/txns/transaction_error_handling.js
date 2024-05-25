@@ -1,9 +1,10 @@
 // Test basic transaction error handling.
-// The test runs commands that are not allowed with security token: endSession.
+//
 // @tags: [
-//   not_allowed_with_security_token,uses_transactions]
-(function() {
-"use strict";
+//   # The test runs commands that are not allowed with security token: endSession.
+//   not_allowed_with_security_token,
+//   uses_transactions
+// ]
 
 const dbName = "test";
 const collName = "transaction_error_handling";
@@ -123,4 +124,3 @@ try {
 }
 
 session.endSession();
-}());

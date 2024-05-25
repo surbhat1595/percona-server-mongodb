@@ -1,13 +1,14 @@
 /**
  * Test error cases for committing prepared transactions.
  *
- * The test runs commands that are not allowed with security token: prepareTransaction.
  * @tags: [
- *   not_allowed_with_security_token,uses_transactions, uses_prepare_transaction]
+ *   # The test runs commands that are not allowed with security token: prepareTransaction.
+ *   not_allowed_with_security_token,
+ *   uses_transactions,
+ *   uses_prepare_transaction
+ * ]
  */
-(function() {
-"use strict";
-load("jstests/core/txns/libs/prepare_helpers.js");
+import {PrepareHelpers} from "jstests/core/txns/libs/prepare_helpers.js";
 
 const dbName = "test";
 const collName = "commit_prepared_transaction_errors";
@@ -71,4 +72,3 @@ jsTestLog("Test committing an unprepared transaction with an invalid 'commitTime
 session.startTransaction();
 assert.commandWorked(sessionColl.insert(doc));
 assert.commandFailedWithCode(PrepareHelpers.commitTransaction(session, 5), ErrorCodes.TypeMismatch);
-}());

@@ -1973,8 +1973,7 @@ TEST(StorageTimestampTest, KVDropDatabasePrimary) {
  *
  * Secondaries timestamp starting their index build by being in a `TimestampBlock` when the oplog
  * entry is processed. Secondaries will look at the logical clock when completing the index
- * build. This is safe so long as completion is not racing with secondary oplog application (i.e:
- * enforced via the parallel batch writer mode lock).
+ * build. This is safe so long as completion is not racing with secondary oplog application.
  */
 class TimestampIndexBuilds : public StorageTimestampTest {
 private:
@@ -2606,80 +2605,6 @@ TEST_F(StorageTimestampTest, TimestampIndexDropsListed) {
     ASSERT_EQ(indexIdents.size(), 0ul) << "Dropped idents should match created idents";
 }
 
-/**
- * Test specific OplogApplierImpl subclass that allows for custom applyOplogBatchPerWorker to be run
- * during multiApply.
- */
-class SecondaryReadsDuringBatchApplicationAreAllowedApplier : public repl::OplogApplierImpl {
-public:
-    SecondaryReadsDuringBatchApplicationAreAllowedApplier(
-        executor::TaskExecutor* executor,
-        repl::OplogBuffer* oplogBuffer,
-        Observer* observer,
-        repl::ReplicationCoordinator* replCoord,
-        repl::ReplicationConsistencyMarkers* consistencyMarkers,
-        repl::StorageInterface* storageInterface,
-        const OplogApplier::Options& options,
-        ThreadPool* writerPool,
-        OperationContext* opCtx,
-        Promise<bool>* promise,
-        stdx::future<bool>* taskFuture)
-        : repl::OplogApplierImpl(executor,
-                                 oplogBuffer,
-                                 observer,
-                                 replCoord,
-                                 consistencyMarkers,
-                                 storageInterface,
-                                 options,
-                                 writerPool),
-          _testOpCtx(opCtx),
-          _promise(promise),
-          _taskFuture(taskFuture) {}
-
-    Status applyOplogBatchPerWorker(OperationContext* opCtx,
-                                    std::vector<repl::ApplierOperation>* operationsToApply,
-                                    WorkerMultikeyPathInfo* pathInfo,
-                                    bool isDataConsistent) override;
-
-private:
-    // Pointer to the test's op context. This is distinct from the op context used in
-    // applyOplogBatchPerWorker.
-    OperationContext* _testOpCtx;
-    Promise<bool>* _promise;
-    stdx::future<bool>* _taskFuture;
-};
-
-
-// This apply operation function will block until the reader has tried acquiring a collection lock.
-// This returns BadValue statuses instead of asserting so that the worker threads can cleanly exit
-// and this test case fails without crashing the entire suite.
-Status SecondaryReadsDuringBatchApplicationAreAllowedApplier::applyOplogBatchPerWorker(
-    OperationContext* opCtx,
-    std::vector<repl::ApplierOperation>* operationsToApply,
-    WorkerMultikeyPathInfo* pathInfo,
-    const bool isDataConsistent) {
-    if (!_testOpCtx->lockState()->isLockHeldForMode(resourceIdParallelBatchWriterMode, MODE_X)) {
-        return {ErrorCodes::BadValue, "Batch applied was not holding PBWM lock in MODE_X"};
-    }
-
-    // Insert the document. A reader without a PBWM lock should not see it yet.
-    const bool dataIsConsistent = true;
-    auto status = OplogApplierImpl::applyOplogBatchPerWorker(
-        opCtx, operationsToApply, pathInfo, dataIsConsistent);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    // Signals the reader to acquire a collection read lock.
-    _promise->emplaceValue(true);
-
-    // Block while holding the PBWM lock until the reader is done.
-    if (!_taskFuture->get()) {
-        return {ErrorCodes::BadValue, "Client was holding PBWM lock in MODE_IS"};
-    }
-    return Status::OK();
-}
-
 TEST_F(StorageTimestampTest, IndexBuildsResolveErrorsDuringStateChangeToPrimary) {
     NamespaceString nss =
         NamespaceString::createNamespaceString_forTest("unittests.timestampIndexBuilds");
@@ -2838,75 +2763,6 @@ TEST_F(StorageTimestampTest, IndexBuildsResolveErrorsDuringStateChangeToPrimary)
         wuow.commit();
     }
     abortOnExit.dismiss();
-}
-
-TEST_F(StorageTimestampTest, SecondaryReadsDuringBatchApplicationAreAllowed) {
-    ASSERT(_opCtx->getServiceContext()->getStorageEngine()->supportsReadConcernSnapshot());
-
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "unittest.secondaryReadsDuringBatchApplicationAreAllowed");
-    create(ns);
-    UUID uuid = UUID::gen();
-    {
-        AutoGetCollectionForRead autoColl(_opCtx, ns);
-        uuid = autoColl.getCollection()->uuid();
-        ASSERT_EQ(itCount(autoColl.getCollection()), 0);
-    }
-
-    // Returns true when the batch has started, meaning the applier is holding the PBWM lock.
-    // Will return false if the lock was not held.
-    auto batchInProgress = makePromiseFuture<bool>();
-    // Attempt to read when in the middle of a batch.
-    stdx::packaged_task<bool()> task([&] {
-        Client::initThread(getThreadName());
-        auto readOp = cc().makeOperationContext();
-
-        // Wait for the batch to start or fail.
-        if (!batchInProgress.future.get()) {
-            return false;
-        }
-        AutoGetCollectionForRead autoColl(readOp.get(), ns);
-        return !readOp->lockState()->isLockHeldForMode(resourceIdParallelBatchWriterMode, MODE_IS);
-    });
-    auto taskFuture = task.get_future();
-    stdx::thread taskThread{std::move(task)};
-
-    ScopeGuard joinGuard([&] {
-        batchInProgress.promise.emplaceValue(false);
-        taskThread.join();
-    });
-
-    // Make a simple insert operation.
-    BSONObj doc0 = BSON("_id" << 0 << "a" << 0);
-    auto insertOp = repl::OplogEntry(BSON("ts" << _futureTs << "t" << 1LL << "v" << 2 << "op"
-                                               << "i"
-                                               << "ns" << ns.ns_forTest() << "ui" << uuid << "wall"
-                                               << Date_t() << "o" << doc0));
-    DoNothingOplogApplierObserver observer;
-    // Apply the operation.
-    auto storageInterface = repl::StorageInterface::get(_opCtx);
-    auto writerPool = repl::makeReplWriterPool(1);
-    SecondaryReadsDuringBatchApplicationAreAllowedApplier oplogApplier(
-        nullptr,  // task executor. not required for multiApply().
-        nullptr,  // oplog buffer. not required for multiApply().
-        &observer,
-        _coordinatorMock,
-        _consistencyMarkers,
-        storageInterface,
-        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary),
-        writerPool.get(),
-        _opCtx,
-        &(batchInProgress.promise),
-        &taskFuture);
-    auto lastOpTime = unittest::assertGet(oplogApplier.applyOplogBatch(_opCtx, {insertOp}));
-    ASSERT_EQ(insertOp.getOpTime(), lastOpTime);
-
-    joinGuard.dismiss();
-    taskThread.join();
-
-    // Read on the local snapshot to verify the document was inserted.
-    AutoGetCollectionForRead autoColl(_opCtx, ns);
-    assertDocumentAtTimestamp(autoColl.getCollection(), _futureTs, doc0);
 }
 
 /**

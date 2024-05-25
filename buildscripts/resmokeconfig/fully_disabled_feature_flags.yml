@@ -12,3 +12,6 @@
 # its targeted tests should enable it.
 - featureFlagAlwaysCreateConfigTransactionsPartialIndexOnStepUp
 - featureFlagUpdateDocumentShardKeyUsingTransactionApi
+- featureFlagAuthoritativeShardCollection
+- featureFlagAllMongodsAreSharded
+- featureFlagGRPC

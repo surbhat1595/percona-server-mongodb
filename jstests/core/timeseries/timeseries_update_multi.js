@@ -12,13 +12,11 @@
  * ]
  */
 
-(function() {
-"use strict";
-
 const timeFieldName = "time";
 const metaFieldName = "tag";
 const dateTime = ISODate("2021-07-12T16:00:00Z");
 const dateTimeUpdated = ISODate("2023-01-27T16:00:00Z");
+const bucketParam = 3600;
 const collNamePrefix = "timeseries_update_multi_";
 let count = 0;
 
@@ -34,8 +32,8 @@ assert.commandWorked(testDB.dropDatabase());
  * collection's contents.
  */
 function testUpdate({
+    timeseriesOptions,
     initialDocList,
-    createCollectionWithMetaField = true,
     updateList,
     resultDocList,
     nMatched,
@@ -45,9 +43,7 @@ function testUpdate({
 }) {
     const coll = testDB.getCollection(collNamePrefix + count++);
     assert.commandWorked(testDB.createCollection(coll.getName(), {
-        timeseries: createCollectionWithMetaField
-            ? {timeField: timeFieldName, metaField: metaFieldName}
-            : {timeField: timeFieldName},
+        timeseries: {timeField: timeFieldName, ...timeseriesOptions},
     }));
 
     assert.commandWorked(coll.insert(initialDocList));
@@ -128,6 +124,35 @@ const doc_id_8_array_meta = {
     [metaFieldName]: [1, 2, 3, 4],
     f: [4, 3, 2, 1],
 };
+const times = [
+    dateTime,
+    new Date(dateTime.getTime() - (bucketParam * 1000) / 2),
+    new Date(dateTime.getTime() + (bucketParam * 1000) / 2),
+    new Date(dateTime.getTime() + (bucketParam * 1000)),
+];
+const doc_id_9_time_string_metric = {
+    _id: 9,
+    [timeFieldName]: times[0],
+    [metaFieldName]: {a: "A", c: "C"},
+    f: "hello",
+};
+const doc_id_10_time_array_metric = {
+    _id: 11,
+    [timeFieldName]: times[1],
+    [metaFieldName]: {a: "A", c: "C"},
+    f: [10, 11, 12]
+};
+const doc_id_11_time_no_metric = {
+    _id: 11,
+    [timeFieldName]: times[2],
+    [metaFieldName]: {a: "A", c: "C"},
+};
+const doc_id_12_time_int_metric = {
+    _id: 12,
+    [timeFieldName]: times[3],
+    [metaFieldName]: {a: "A", c: "C"},
+    f: 2,
+};
 
 /**
  * Tests op-style updates
@@ -135,6 +160,7 @@ const doc_id_8_array_meta = {
 // Query on the _id field and modify the metaField.
 (function testMetricFieldQueryMetaFieldUpdate() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_1_a_b_no_metrics, doc_id_2_a_b_array_metric],
         updateList: [{
             q: {_id: {$lt: 10}},
@@ -157,6 +183,7 @@ const doc_id_8_array_meta = {
 // Query doesn't match any docs.
 (function testZeroMeasurementUpdate() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList:
             [doc_id_1_a_b_no_metrics, doc_id_2_a_b_array_metric, doc_id_5_a_c_array_metric],
         updateList: [{
@@ -173,6 +200,7 @@ const doc_id_8_array_meta = {
 // No-op update.
 (function testNoopUpdate() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_1_a_b_no_metrics, doc_id_2_a_b_array_metric],
         updateList: [{
             q: {},
@@ -190,6 +218,7 @@ const doc_id_8_array_meta = {
 if (!db.getMongo().isMongos()) {
     (function testMetaFieldQueryTimeFieldUpdate() {
         testUpdate({
+            timeseriesOptions: {metaField: metaFieldName},
             initialDocList:
                 [doc_id_1_a_b_no_metrics, doc_id_2_a_b_array_metric, doc_id_5_a_c_array_metric],
             updateList: [{
@@ -219,6 +248,7 @@ if (!db.getMongo().isMongos()) {
 // Query on the metaField and a metric field.
 (function testMetaFieldQueryMetricFieldMetric() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_3_a_b_string_metric, doc_id_2_a_b_array_metric],
         updateList: [{
             q: {[metaFieldName]: {a: "A", b: "B"}, f: "F"},
@@ -238,9 +268,47 @@ if (!db.getMongo().isMongos()) {
     });
 })();
 
+// Query on the metaField and a metric field. This should be a no-op using the default collation.
+(function testMetaFieldQueryMetricFieldMetricWithDefaultCollation() {
+    testUpdate({
+        initialDocList: [doc_id_3_a_b_string_metric, doc_id_2_a_b_array_metric],
+        updateList: [{
+            q: {[metaFieldName]: {a: "A", b: "B"}, f: "f"},
+            u: {$set: {[metaFieldName]: {c: "C"}}},
+            multi: true,
+        }],
+        resultDocList: [doc_id_3_a_b_string_metric, doc_id_2_a_b_array_metric],
+        nMatched: 0,
+    });
+})();
+
+// Query on the metaField and a metric field using a case insensitive collation.
+(function testMetaFieldQueryMetricFieldMetricWithCaseInsensitiveCollation() {
+    testUpdate({
+        initialDocList: [doc_id_3_a_b_string_metric, doc_id_2_a_b_array_metric],
+        updateList: [{
+            q: {[metaFieldName]: {a: "A", b: "B"}, f: "f"},
+            u: {$set: {[metaFieldName]: {c: "C"}}},
+            multi: true,
+            collation: {locale: "en", strength: 2}
+        }],
+        resultDocList: [
+            {
+                _id: 3,
+                [timeFieldName]: dateTime,
+                [metaFieldName]: {c: "C"},
+                f: "F",
+            },
+            doc_id_2_a_b_array_metric
+        ],
+        nMatched: 1,
+    });
+})();
+
 // Query on the metaField and modify the metaField and a metric field.
 (function testMetaFieldQueryMetaAndMetricFieldUpdate() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_3_a_b_string_metric, doc_id_2_a_b_array_metric],
         updateList: [{
             q: {[metaFieldName]: {a: "A", b: "B"}},
@@ -270,6 +338,7 @@ if (!db.getMongo().isMongos()) {
 if (!db.getMongo().isMongos()) {
     (function testRemoveTimeField() {
         testUpdate({
+            timeseriesOptions: {metaField: metaFieldName},
             initialDocList: [doc_id_3_a_b_string_metric, doc_id_5_a_c_array_metric],
             updateList: [{
                 q: {f: "F"},
@@ -291,6 +360,7 @@ if (!db.getMongo().isMongos()) {
 if (!db.getMongo().isMongos()) {
     (function testChangeTimeFieldType() {
         testUpdate({
+            timeseriesOptions: {metaField: metaFieldName},
             initialDocList: [doc_id_3_a_b_string_metric, doc_id_5_a_c_array_metric],
             updateList: [{
                 q: {f: "F"},
@@ -310,6 +380,7 @@ if (!db.getMongo().isMongos()) {
 // Query on the time field and remove the metaField.
 (function testTimeFieldQueryRemoveMetaField() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList:
             [doc_id_1_a_b_no_metrics, doc_id_2_a_b_array_metric, doc_id_5_a_c_array_metric],
         updateList: [{
@@ -340,6 +411,7 @@ if (!db.getMongo().isMongos()) {
 (function testRenameMetaField() {
     // Rename the metaField.
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_3_a_b_string_metric],
         updateList: [{
             q: {},
@@ -361,6 +433,7 @@ if (!db.getMongo().isMongos()) {
 // Rename a subfield of the metaField to something not in the metaField.
 (function testRenameMetaSubfield() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_3_a_b_string_metric],
         updateList: [{
             q: {[metaFieldName + ".a"]: "A"},
@@ -383,6 +456,7 @@ if (!db.getMongo().isMongos()) {
 // Expand a metric field.
 (function testExpandMetricField() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_1_a_b_no_metrics, doc_id_2_a_b_array_metric],
         updateList: [{
             q: {[metaFieldName]: {a: "A", b: "B"}},
@@ -410,6 +484,7 @@ if (!db.getMongo().isMongos()) {
 // Change the type of an existing field.
 (function testChangeExistingFieldType() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_2_a_b_array_metric, doc_id_3_a_b_string_metric],
         updateList: [{
             q: {[metaFieldName]: {a: "A", b: "B"}},
@@ -437,6 +512,7 @@ if (!db.getMongo().isMongos()) {
 // Add a new field.
 (function testAddNewField() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList:
             [doc_id_1_a_b_no_metrics, doc_id_2_a_b_array_metric, doc_id_3_a_b_string_metric],
         updateList: [{
@@ -467,6 +543,7 @@ if (!db.getMongo().isMongos()) {
 // Update a metric field with a positional operator.
 (function testArrayModifier() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList:
             [doc_id_2_a_b_array_metric, doc_id_5_a_c_array_metric, doc_id_6_a_c_array_metric],
         updateList: [{
@@ -496,6 +573,7 @@ if (!db.getMongo().isMongos()) {
 // Update the meta field with a positional operator.
 (function testMetaFieldArrayModifier() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_8_array_meta, doc_id_2_a_b_array_metric],
         updateList: [{
             q: {[metaFieldName]: {$gt: 2}},
@@ -513,6 +591,7 @@ if (!db.getMongo().isMongos()) {
 // Update meta and metric fields with a positional operator.
 (function testMetaAndMetricFieldArrayModifier() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_8_array_meta, doc_id_2_a_b_array_metric],
         updateList: [{
             q: {[metaFieldName]: {$gt: 2}, f: {$gt: 2}},
@@ -530,6 +609,7 @@ if (!db.getMongo().isMongos()) {
 // Empty query and update a metric field using a positional operator.
 (function testArrayModifierNoFilter() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_3_a_b_string_metric, doc_id_5_a_c_array_metric],
         updateList: [{
             q: {},
@@ -544,6 +624,7 @@ if (!db.getMongo().isMongos()) {
 // Query on the meta field and update a metric field using a positional operator.
 (function testArrayModifierMetaFilter() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_3_a_b_string_metric, doc_id_5_a_c_array_metric],
         updateList: [{
             q: {[metaFieldName]: {a: "A", c: "C"}},
@@ -557,6 +638,7 @@ if (!db.getMongo().isMongos()) {
 
 (function testChangeArrayElementType() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList:
             [doc_id_2_a_b_array_metric, doc_id_5_a_c_array_metric, doc_id_6_a_c_array_metric],
         updateList: [{
@@ -585,6 +667,7 @@ if (!db.getMongo().isMongos()) {
 
 (function testChangeMeasurementId() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_1_a_b_no_metrics],
         updateList: [{
             q: {},
@@ -604,6 +687,7 @@ if (!db.getMongo().isMongos()) {
 // handling of the Halloween Problem.
 (function testHalloweenProblem() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_2_a_b_array_metric, doc_id_3_a_b_string_metric],
         updateList: [{
             q: {},
@@ -636,6 +720,7 @@ if (!db.getMongo().isMongos()) {
 // Add a field of the sum of an array field using aggregation pipeline.
 (function testUpdatePipelineArrayAggregation() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_5_a_c_array_metric, doc_id_6_a_c_array_metric],
         updateList: [{
             q: {[metaFieldName]: {a: "A", c: "C"}},
@@ -666,7 +751,6 @@ if (!db.getMongo().isMongos()) {
 (function testUpdatePipelineAddNewField() {
     testUpdate({
         initialDocList: [doc_id_4_no_meta_string_metric, doc_id_7_no_meta_int_metric],
-        createCollectionWithMetaField: false,
         updateList: [{
             q: {},
             u: [{$set: {newField: true}}],
@@ -694,6 +778,7 @@ if (!db.getMongo().isMongos()) {
 // same bucket to belong in different buckets.
 (function testSplitBucketWithUpdate() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList:
             [doc_id_1_a_b_no_metrics, doc_id_2_a_b_array_metric, doc_id_3_a_b_string_metric],
         updateList: [{
@@ -726,6 +811,7 @@ if (!db.getMongo().isMongos()) {
 // Only touch the meta field in a pipeline update.
 (function testUpdatePipelineOnlyTouchMetaField() {
     testUpdate({
+        timeseriesOptions: {metaField: metaFieldName},
         initialDocList: [doc_id_1_a_b_no_metrics, doc_id_6_a_c_array_metric],
         updateList: [{
             q: {[metaFieldName]: {a: "A", b: "B"}},
@@ -746,6 +832,7 @@ if (!db.getMongo().isMongos()) {
 if (!db.getMongo().isMongos()) {
     (function testUpsertWithNoId() {
         testUpdate({
+            timeseriesOptions: {metaField: metaFieldName},
             initialDocList: [doc_id_1_a_b_no_metrics, doc_id_2_a_b_array_metric],
             updateList: [{
                 q: {[metaFieldName]: {z: "Z"}},
@@ -763,6 +850,7 @@ if (!db.getMongo().isMongos()) {
     // Run an upsert that includes an _id.
     (function testUpsertWithId() {
         testUpdate({
+            timeseriesOptions: {metaField: metaFieldName},
             initialDocList: [doc_id_1_a_b_no_metrics],
             updateList: [{
                 q: {_id: 100},
@@ -780,6 +868,7 @@ if (!db.getMongo().isMongos()) {
     // Run an upsert that updates documents and skips the upsert.
     (function testUpsertUpdatesDocs() {
         testUpdate({
+            timeseriesOptions: {metaField: metaFieldName},
             initialDocList: [doc_id_1_a_b_no_metrics, doc_id_2_a_b_array_metric],
             updateList: [{
                 q: {[metaFieldName + ".a"]: "A"},
@@ -808,6 +897,7 @@ if (!db.getMongo().isMongos()) {
     // Run an upsert that matches documents with no-op updates and skips the upsert.
     (function testUpsertMatchesDocs() {
         testUpdate({
+            timeseriesOptions: {metaField: metaFieldName},
             initialDocList: [doc_id_1_a_b_no_metrics, doc_id_2_a_b_array_metric],
             updateList: [{
                 q: {[metaFieldName + ".a"]: "A"},
@@ -825,6 +915,7 @@ if (!db.getMongo().isMongos()) {
     // bucket with the same parameters.
     (function testUpsertIntoMatchedBucket() {
         testUpdate({
+            timeseriesOptions: {metaField: metaFieldName},
             initialDocList: [doc_id_1_a_b_no_metrics, doc_id_2_a_b_array_metric],
             updateList: [{
                 q: {[metaFieldName]: {a: "A", b: "B"}, f: 111},
@@ -840,6 +931,7 @@ if (!db.getMongo().isMongos()) {
     // Run an upsert that doesn't insert a time field.
     (function testUpsertNoTimeField() {
         testUpdate({
+            timeseriesOptions: {metaField: metaFieldName},
             initialDocList: [doc_id_1_a_b_no_metrics],
             updateList: [{
                 q: {[metaFieldName]: {z: "Z"}},
@@ -857,6 +949,7 @@ if (!db.getMongo().isMongos()) {
     // Run an upsert where the time field is provided in the query.
     (function testUpsertQueryOnTimeField() {
         testUpdate({
+            timeseriesOptions: {metaField: metaFieldName},
             initialDocList: [doc_id_1_a_b_no_metrics],
             updateList: [{
                 q: {[timeFieldName]: dateTimeUpdated},
@@ -877,6 +970,7 @@ if (!db.getMongo().isMongos()) {
     // Run an upsert where a document to insert is supplied by the request.
     (function testUpsertSupplyDoc() {
         testUpdate({
+            timeseriesOptions: {metaField: metaFieldName},
             initialDocList: [doc_id_1_a_b_no_metrics],
             updateList: [{
                 q: {[timeFieldName]: dateTimeUpdated},
@@ -900,6 +994,7 @@ if (!db.getMongo().isMongos()) {
     // field.
     (function testUpsertSupplyDocNoTimeField() {
         testUpdate({
+            timeseriesOptions: {metaField: metaFieldName},
             initialDocList: [doc_id_1_a_b_no_metrics],
             updateList: [{
                 q: {[timeFieldName]: dateTimeUpdated},
@@ -916,4 +1011,115 @@ if (!db.getMongo().isMongos()) {
         });
     })();
 }
+
+/**
+ * Tests fixed buckets optimization, which removes the residualFilter for predicates on the
+ * timeField that align with the bucket boundaries.
+ */
+
+// Since the predicate is $lt and the predicate aligns with the bucket boundaries, we expect no
+// residual filter. Run an upsert where a document to insert is supplied by the request.
+const fixedBucketOptions = {
+    metaField: metaFieldName,
+    bucketMaxSpanSeconds: bucketParam,
+    bucketRoundingSeconds: bucketParam
+};
+if (!db.getMongo().isMongos()) {
+    (function testUpsertSupplyDoc_NoFilter() {
+        testUpdate({
+            timeseriesOptions: fixedBucketOptions,
+            initialDocList: [doc_id_9_time_string_metric],
+            updateList: [{
+                q: {[timeFieldName]: {$lt: dateTime}},
+                u: [{$set: {f: 10}}],
+                upsert: true,
+                multi: true,
+                upsertSupplied: true,
+                c: {new: {[timeFieldName]: dateTime, [metaFieldName]: {"a": 100}, f: 100}}
+            }],
+            upsertedDoc: {
+                [timeFieldName]: dateTime,
+                [metaFieldName]: {"a": 100},
+                f: 100,
+            },
+            resultDocList: [
+                doc_id_9_time_string_metric,
+            ],
+        });
+    })();
+}
+
+// Since the predicate is $gt we expect a residual filter. We will only touch the meta field in
+// a pipeline update.
+(function testPipelineMetaField_WithFilter() {
+    testUpdate({
+        timeseriesOptions: fixedBucketOptions,
+        initialDocList:
+            [doc_id_9_time_string_metric, doc_id_11_time_no_metric, doc_id_12_time_int_metric],
+        updateList: [{
+            q: {[timeFieldName]: {$gt: dateTime}},
+            u: [{$set: {[metaFieldName]: "$" + metaFieldName + ".a"}}],
+            multi: true,
+        }],
+        resultDocList: [
+            doc_id_9_time_string_metric,
+            {_id: 11, [timeFieldName]: times[2], [metaFieldName]: "A"},
+            {_id: 12, [timeFieldName]: times[3], [metaFieldName]: "A", f: 2},
+        ],
+        nMatched: 2,
+    });
+})();
+
+// Since the predicate is a conjunction on the timeField, and only uses $gte and $lt, we expect no
+// residual filter.
+(function testPipelineAddField_ConjunctionNoFilter() {
+    const query = {$and: [{[timeFieldName]: {$lt: times[3]}}, {[timeFieldName]: {$gte: times[0]}}]};
+    testUpdate({
+        timeseriesOptions: fixedBucketOptions,
+        initialDocList: [
+            doc_id_9_time_string_metric,
+            doc_id_10_time_array_metric,
+            doc_id_11_time_no_metric,
+            doc_id_12_time_int_metric
+        ],
+        updateList: [{
+            q: query,
+            u: [{$set: {newField: true}}],
+            multi: true,
+        }],
+        resultDocList: [
+            doc_id_10_time_array_metric,
+            doc_id_12_time_int_metric,
+            {
+                _id: 9,
+                [timeFieldName]: times[0],
+                [metaFieldName]: {a: "A", c: "C"},
+                f: "hello",
+                newField: true
+            },
+            {_id: 11, [timeFieldName]: times[2], [metaFieldName]: {a: "A", c: "C"}, newField: true},
+        ],
+        nMatched: 2,
+    });
+})();
+
+// Since the predicate doesn't align with the bucket boundaries, we expect a residual filter.
+// We will remove the metaField.
+(function testRemoveMetaField_Filter() {
+    testUpdate({
+        timeseriesOptions: fixedBucketOptions,
+        initialDocList:
+            [doc_id_10_time_array_metric, doc_id_11_time_no_metric, doc_id_12_time_int_metric],
+        updateList: [{
+            q: {[timeFieldName]: {$gte: times[2]}},
+            u: {$unset: {[metaFieldName]: ""}},
+            multi: true,
+        }],
+        resultDocList: [
+            doc_id_10_time_array_metric,
+            {_id: 11, [timeFieldName]: times[2]},
+            {_id: 12, [timeFieldName]: times[3], f: 2}
+        ],
+        nMatched: 2,
+    });
 })();

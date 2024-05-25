@@ -46,6 +46,7 @@
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/document_source_out.h"
+#include "mongo/db/pipeline/writer_util.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
@@ -64,8 +65,8 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
-
 namespace mongo {
+
 using namespace fmt::literals;
 
 MONGO_FAIL_POINT_DEFINE(hangWhileBuildingDocumentSourceOutBatch);
@@ -90,12 +91,6 @@ DocumentSourceOut::~DocumentSourceOut() {
             auto cleanupClient =
                 pExpCtx->opCtx->getServiceContext()->makeClient("$out_replace_coll_cleanup");
 
-            // TODO(SERVER-74662): Please revisit if this thread could be made killable.
-            {
-                stdx::lock_guard<Client> lk(*cleanupClient.get());
-                cleanupClient.get()->setSystemOperationUnkillableByStepdown(lk);
-            }
-
             AlternativeClientRegion acr(cleanupClient);
             // Create a new operation context so that any interrupts on the current operation will
             // not affect the dropCollection operation below.
@@ -104,7 +99,15 @@ DocumentSourceOut::~DocumentSourceOut() {
             DocumentSourceWriteBlock writeBlock(cleanupOpCtx.get());
 
             auto deleteNs = _tempNs.size() ? _tempNs : makeBucketNsIfTimeseries(getOutputNs());
-            pExpCtx->mongoProcessInterface->dropCollection(cleanupOpCtx.get(), deleteNs);
+            try {
+                pExpCtx->mongoProcessInterface->dropCollection(cleanupOpCtx.get(), deleteNs);
+            } catch (const DBException& e) {
+                LOGV2_WARNING(7466203,
+                              "Unexpected error dropping temporary collection; drop will complete ",
+                              "on next server restart",
+                              "error"_attr = e.toString(),
+                              "coll"_attr = deleteNs);
+            }
         });
 }
 
@@ -114,7 +117,7 @@ DocumentSourceOutSpec DocumentSourceOut::parseOutSpecAndResolveTargetNamespace(
     if (spec.type() == BSONType::String) {
         outSpec.setColl(spec.valueStringData());
         // TODO SERVER-77000: access a SerializationContext object to serialize properly
-        outSpec.setDb(defaultDB.db());
+        outSpec.setDb(defaultDB.serializeWithoutTenantPrefix_UNSAFE());
     } else if (spec.type() == BSONType::Object) {
         // TODO SERVER-77000: access a SerializationContext object to pass into the IDLParserContext
         outSpec = mongo::DocumentSourceOutSpec::parse(IDLParserContext(kStageName),
@@ -136,8 +139,10 @@ NamespaceString DocumentSourceOut::makeBucketNsIfTimeseries(const NamespaceStrin
 std::unique_ptr<DocumentSourceOut::LiteParsed> DocumentSourceOut::LiteParsed::parse(
     const NamespaceString& nss, const BSONElement& spec) {
     auto outSpec = parseOutSpecAndResolveTargetNamespace(spec, nss.dbName());
-    NamespaceString targetNss = NamespaceStringUtil::parseNamespaceFromRequest(
-        nss.dbName().tenantId(), outSpec.getDb(), outSpec.getColl());
+    NamespaceString targetNss = NamespaceStringUtil::deserialize(nss.dbName().tenantId(),
+                                                                 outSpec.getDb(),
+                                                                 outSpec.getColl(),
+                                                                 outSpec.getSerializationContext());
 
     uassert(ErrorCodes::InvalidNamespace,
             "Invalid {} target namespace, {}"_format(kStageName, targetNss.toStringForErrorMsg()),
@@ -197,10 +202,9 @@ void DocumentSourceOut::initialize() {
     // collection to be the target collection once we are done. Note that this temporary
     // collection name is used by MongoMirror and thus should not be changed without
     // consultation.
-    _tempNs = NamespaceStringUtil::parseNamespaceFromRequest(
-        getOutputNs().tenantId(),
-        str::stream() << getOutputNs().dbName().db() << "."
-                      << NamespaceString::kOutTmpCollectionPrefix << UUID::gen());
+    _tempNs = NamespaceStringUtil::deserialize(
+        getOutputNs().dbName(),
+        str::stream() << NamespaceString::kOutTmpCollectionPrefix << UUID::gen());
 
     // Save the original collection options and index specs so we can check they didn't change
     // during computation.
@@ -303,11 +307,11 @@ void DocumentSourceOut::finalize() {
     _timeseriesStateConsistent = true;
 }
 
-BatchedCommandRequest DocumentSourceOut::initializeBatchedWriteRequest() const {
+BatchedCommandRequest DocumentSourceOut::makeBatchedWriteRequest() const {
     // Note that our insert targets '_tempNs' (or the associated timeseries view) since we will
     // never write to 'outputNs' directly.
     const auto& targetNss = _timeseries ? _tempNs.getTimeseriesViewNamespace() : _tempNs;
-    return DocumentSourceWriter::makeInsertCommand(targetNss, pExpCtx->bypassDocumentValidation);
+    return makeInsertCommand(targetNss, pExpCtx->bypassDocumentValidation);
 }
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceOut::create(
@@ -336,19 +340,21 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceOut::create(
 boost::intrusive_ptr<DocumentSource> DocumentSourceOut::createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     auto outSpec = parseOutSpecAndResolveTargetNamespace(elem, expCtx->ns.dbName());
-    NamespaceString targetNss = NamespaceStringUtil::parseNamespaceFromRequest(
-        expCtx->ns.dbName().tenantId(), outSpec.getDb(), outSpec.getColl());
+    NamespaceString targetNss = NamespaceStringUtil::deserialize(expCtx->ns.dbName().tenantId(),
+                                                                 outSpec.getDb(),
+                                                                 outSpec.getColl(),
+                                                                 outSpec.getSerializationContext());
     return create(std::move(targetNss), expCtx, std::move(outSpec.getTimeseries()));
 }
 
-Value DocumentSourceOut::serialize(SerializationOptions opts) const {
+Value DocumentSourceOut::serialize(const SerializationOptions& opts) const {
     BSONObjBuilder bob;
     DocumentSourceOutSpec spec;
     // TODO SERVER-77000: use SerializatonContext from expCtx and DatabaseNameUtil to serialize
     // spec.setDb(DatabaseNameUtil::serialize(
     //     _outputNs.dbName(),
     //     SerializationContext::stateCommandReply(pExpCtx->serializationCtxt)));
-    spec.setDb(_outputNs.dbName().db());
+    spec.setDb(_outputNs.dbName().serializeWithoutTenantPrefix_UNSAFE());
     spec.setColl(_outputNs.coll());
     spec.setTimeseries(_timeseries);
     spec.serialize(&bob, opts);

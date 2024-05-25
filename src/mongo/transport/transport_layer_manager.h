@@ -129,7 +129,8 @@ public:
     static std::unique_ptr<TransportLayer> createWithConfig(
         const ServerGlobalParams* config,
         ServiceContext* ctx,
-        boost::optional<int> loadBalancerPort = {});
+        boost::optional<int> loadBalancerPort = {},
+        boost::optional<int> routerPort = {});
 
     static std::unique_ptr<TransportLayer> makeAndStartDefaultEgressTransportLayer();
 

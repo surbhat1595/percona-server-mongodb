@@ -102,7 +102,7 @@ public:
             auto response = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
                 opCtx,
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                DatabaseName::kAdmin.toString(),
+                DatabaseName::kAdmin,
                 CommandHelpers::appendMajorityWriteConcern(configsvrCreateDatabase.toBSON({})),
                 Shard::RetryPolicy::kIdempotent));
 
@@ -113,8 +113,7 @@ public:
 
             auto createDbResponse = ConfigsvrCreateDatabaseResponse::parse(
                 IDLParserContext("configsvrCreateDatabaseResponse"), response.response);
-            catalogCache->onStaleDatabaseVersion(DatabaseNameUtil::serialize(dbName),
-                                                 createDbResponse.getDatabaseVersion());
+            catalogCache->onStaleDatabaseVersion(dbName, createDbResponse.getDatabaseVersion());
             purgeDatabaseOnExit.dismiss();
         }
 
@@ -141,8 +140,8 @@ public:
                         ResourcePattern::forDatabaseName(getDbName()), ActionType::enableSharding));
         }
     };
-
-} enableShardingCmd;
+};
+MONGO_REGISTER_COMMAND(EnableShardingCmd);
 
 }  // namespace
 }  // namespace mongo

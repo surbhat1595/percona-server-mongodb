@@ -4,14 +4,10 @@
  * Theory of operation: Create a long running operation from a user which does not have the killOp
  * or inProg privileges. Using the same user, run currentOp to get the opId, and then run killOp
  * against it.
- * TODO SERVER-78101: Investigate the test failure and re-enable the test with CQF enabled.
- * @tags: [requires_sharding, cqf_incompatible]
+ * @tags: [requires_sharding]
  */
 
-(function() {
-'use strict';
-
-load("jstests/libs/fixture_helpers.js");  // For isMongos.
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 function runTest(m, failPointName) {
     var db = m.getDB("foo");
@@ -131,16 +127,16 @@ function runTest(m, failPointName) {
     assert.eq([], ops());
 
     jsTestLog("Checking that an administrative user can kill others' operations");
-    var start = new Date();
+    start = new Date();
     assert.commandWorked(db.killOp(o2[0]));
     assert.commandWorked(db.adminCommand({configureFailPoint: failPointName, mode: "off"}));
     jsTestLog("Waiting for ops to terminate");
-    var exitCode = s2({checkExitSuccess: false});
+    exitCode = s2({checkExitSuccess: false});
     assert.neq(
         0, exitCode, "expected shell to exit abnormally due to JS execution being terminated");
 
-    var end = new Date();
-    var diff = end - start;
+    end = new Date();
+    diff = end - start;
     assert.lt(diff, 30000, "Start: " + start + "; end: " + end + "; diff: " + diff);
 }
 
@@ -153,4 +149,3 @@ var st = new ShardingTest({shards: 1, keyFile: 'jstests/libs/key1'});
 // setYieldAlllocksHang failpoint.
 runTest(st.s, "waitInFindBeforeMakingBatch");
 st.stop();
-})();

@@ -6,10 +6,10 @@
  * @tags: [uses_transactions, uses_multi_shard_transaction]
  */
 
-(function() {
-'use strict';
-
-load('jstests/sharding/libs/sharded_transactions_helpers.js');
+import {
+    getCoordinatorFailpoints,
+    waitForFailpoint
+} from "jstests/sharding/libs/sharded_transactions_helpers.js";
 
 const dbName = "test";
 const collName = "foo";
@@ -170,7 +170,9 @@ const testCommitProtocol = function(shouldCommit, failpointData) {
     awaitResult();
 
     // If deleting the coordinator doc was not robust to killOp, the document would still exist.
-    assert.eq(0, coordinator.getDB("config").getCollection("transaction_coordinators").count());
+    // Deletion is done asynchronously, so we might have to wait.
+    assert.soon(
+        () => coordinator.getDB("config").getCollection("transaction_coordinators").count() == 0);
 
     // Check that the transaction committed or aborted as expected.
     if (!shouldCommit) {
@@ -200,4 +202,3 @@ failpointDataArr.forEach(function(failpointData) {
 });
 
 st.stop();
-})();

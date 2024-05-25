@@ -7,10 +7,8 @@
  * ]
  */
 
-(function() {
-'use strict';
-load('jstests/libs/fail_point_util.js');
-load('jstests/sharding/libs/sharded_transactions_helpers.js');  // for waitForFailpoint
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {waitForFailpoint} from "jstests/sharding/libs/sharded_transactions_helpers.js";
 
 function curOpAfterFailpoint(failPoint, filter, timesEntered, curOpParams) {
     jsTest.log(`waiting for failpoint '${failPoint.failPointName}' to be entered ${
@@ -232,7 +230,7 @@ let failPointStates = {
     },
     'hangBeforeSendingCommit': {
         'expectNumFailPoints': 2,
-        'expectedState': 'waitingForDecisionAck',
+        'expectedState': 'waitingForDecisionAcks',
         'expectedStepDurations': [
             'writingParticipantListMicros',
             'waitingForVotesMicros',
@@ -317,4 +315,3 @@ adminDB.logout();
 })();
 
 st.stop();
-})();

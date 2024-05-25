@@ -8,15 +8,15 @@
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   serverless,
+ *   requires_fcv_71,
  * ]
  */
 
 import {getPlanStage, getWinningPlan} from "jstests/libs/analyze_plan.js";
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {makeTenantDB, makeX509OptionsForTest} from "jstests/replsets/libs/tenant_migration_util.js";
-
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/uuid_util.js");
 
 const getQueryExplainIndexScanStage = function(coll) {
     const explain = coll.find().hint({"a.b": 1, "a.c": 1}).explain();

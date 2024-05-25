@@ -3,17 +3,17 @@
  * should not block on prepare conflicts, but writing out to a collection as a part of an aggregate
  * pipeline should block on prepare conflicts.
  *
- * The test runs commands that are not allowed with security token: endSession, prepareTransaction.
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: endSession,
+ *   # prepareTransaction.
  *   not_allowed_with_security_token,
  *   references_foreign_collection,
  *   uses_transactions,
  *   uses_prepare_transaction,
  * ]
  */
-(function() {
-"use strict";
-load("jstests/core/txns/libs/prepare_helpers.js");
+
+import {PrepareHelpers} from "jstests/core/txns/libs/prepare_helpers.js";
 
 const failureTimeout = 5 * 1000;  // 5 seconds.
 const dbName = "test";
@@ -93,4 +93,3 @@ assert.commandFailedWithCode(testDB.runCommand({
                              ErrorCodes.IllegalOperation);
 
 session.endSession();
-}());

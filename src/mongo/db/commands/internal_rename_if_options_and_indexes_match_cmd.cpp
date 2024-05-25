@@ -105,7 +105,7 @@ public:
             }
 
             /**
-             * Acquiring the local part of the distributed locks for involved namespaces allows:
+             * Acquiring the DDL lock for involved namespaces allows to:
              * - Serialize with sharded DDLs, ensuring no concurrent modifications of the
              * collections.
              * - Check safely if the target collection is sharded or not.
@@ -113,7 +113,7 @@ public:
              */
             static constexpr StringData lockReason{"internalRenameCollection"_sd};
             const DDLLockManager::ScopedCollectionDDLLock fromCollDDLLock{
-                opCtx, fromNss, lockReason, MODE_X, DDLLockManager::kDefaultLockTimeout};
+                opCtx, fromNss, lockReason, MODE_X};
 
             // If we are renaming a buckets collection in the $out stage, we must acquire a lock on
             // the view namespace, instead of the buckets namespace. This lock avoids concurrent
@@ -123,8 +123,7 @@ public:
                 opCtx,
                 fromNss.isOutTmpBucketsCollection() ? toNss.getTimeseriesViewNamespace() : toNss,
                 lockReason,
-                MODE_X,
-                DDLLockManager::kDefaultLockTimeout};
+                MODE_X};
 
             uassert(ErrorCodes::IllegalOperation,
                     str::stream() << "cannot rename to sharded collection '"
@@ -195,8 +194,8 @@ public:
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
     }
-
-} internalRenameIfOptionsAndIndexesMatchCmd;
+};
+MONGO_REGISTER_COMMAND(InternalRenameIfOptionsAndIndexesMatchCmd);
 
 }  // namespace
 }  // namespace mongo

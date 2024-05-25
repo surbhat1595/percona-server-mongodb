@@ -3,10 +3,8 @@
  * @tags: [
  * ]
  */
-(function() {
-"use strict";
-load("jstests/libs/sbe_assert_error_override.js");
-load("jstests/libs/aggregation_pipeline_utils.js");  // For executeAggregationTestCase.
+import "jstests/libs/sbe_assert_error_override.js";
+import {executeAggregationTestCase} from "jstests/libs/aggregation_pipeline_utils.js";
 
 const testDB = db.getSiblingDB(jsTestName());
 const coll = testDB.collection;
@@ -274,4 +272,3 @@ const testCases = [
     }
 ];
 testCases.forEach(testCase => executeAggregationTestCase(coll, testCase));
-}());

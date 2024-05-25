@@ -277,7 +277,7 @@ TEST_F(ReplCoordTest, NodeInitiateInServerlessMode) {
                                                     << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                              << "node1:12345"))),
                                                &result));
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
     auto config = getReplCoord()->getConfig();
     ASSERT_EQUALS("mySet", config.getReplSetName());
 }
@@ -326,7 +326,7 @@ TEST_F(ReplCoordTest,
                                                     << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                              << "node1:12345"))),
                                                &result1));
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
     ASSERT_TRUE(getExternalState()->threadsStarted());
 
     // Show that initiate fails after it has already succeeded.
@@ -342,7 +342,7 @@ TEST_F(ReplCoordTest,
                                                &result2));
 
     // Still in repl set mode, even after failed reinitiate.
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
 }
 
 TEST_F(ReplCoordTest,
@@ -392,7 +392,7 @@ TEST_F(ReplCoordTest,
                                                     << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                              << "node1:12345"))),
                                                &result1));
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
 }
 
 TEST_F(ReplCoordTest,
@@ -449,7 +449,7 @@ TEST_F(ReplCoordTest, NodeReturnsNodeNotFoundWhenQuorumCheckFailsWhileInitiating
     getNet()->enterNetwork();
     const NetworkInterfaceMock::NetworkOperationIterator noi = getNet()->getNextReadyRequest();
     ASSERT_EQUALS(HostAndPort("node2", 54321), noi->getRequest().target);
-    ASSERT_EQUALS("admin", noi->getRequest().dbname);
+    ASSERT_EQUALS(DatabaseName::kAdmin, noi->getRequest().dbname);
     ASSERT_BSONOBJ_EQ(hbArgs.toBSON(), noi->getRequest().cmdObj);
     getNet()->scheduleResponse(noi,
                                startDate + Milliseconds(10),
@@ -486,7 +486,7 @@ TEST_F(ReplCoordTest, InitiateSucceedsWhenQuorumCheckPasses) {
     getNet()->enterNetwork();
     const NetworkInterfaceMock::NetworkOperationIterator noi = getNet()->getNextReadyRequest();
     ASSERT_EQUALS(HostAndPort("node2", 54321), noi->getRequest().target);
-    ASSERT_EQUALS("admin", noi->getRequest().dbname);
+    ASSERT_EQUALS(DatabaseName::kAdmin, noi->getRequest().dbname);
     ASSERT_BSONOBJ_EQ(hbArgs.toBSON(), noi->getRequest().cmdObj);
     ReplSetHeartbeatResponse hbResp;
     hbResp.setSetName("mySet");
@@ -500,7 +500,7 @@ TEST_F(ReplCoordTest, InitiateSucceedsWhenQuorumCheckPasses) {
     ASSERT_EQUALS(startDate + Milliseconds(10), getNet()->now());
     prsiThread.join();
     ASSERT_OK(status);
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
 
     ASSERT_EQUALS(getStorageInterface()->getInitialDataTimestamp(), appliedTS);
 }
@@ -534,7 +534,8 @@ TEST_F(ReplCoordTest, NodeReturnsInvalidReplicaSetConfigWhenInitiatingWithAnEmpt
     BSONObjBuilder result1;
     auto status = getReplCoord()->processReplSetInitiate(opCtx.get(), BSONObj(), &result1);
     ASSERT_EQUALS(ErrorCodes::InvalidReplicaSetConfig, status);
-    ASSERT_STRING_CONTAINS(status.reason(), "'ReplSetConfig._id' is missing but a required field");
+    ASSERT_STRING_CONTAINS(status.reason(),
+                           "'ReplSetConfig.version' is missing but a required field");
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 }
 
@@ -1258,7 +1259,7 @@ TEST_F(ReplCoordTest, NodeCalculatesDefaultWriteConcernOnStartupNewConfigMajorit
     getNet()->enterNetwork();
     const NetworkInterfaceMock::NetworkOperationIterator noi = getNet()->getNextReadyRequest();
     ASSERT_EQUALS(HostAndPort("node2", 12345), noi->getRequest().target);
-    ASSERT_EQUALS("admin", noi->getRequest().dbname);
+    ASSERT_EQUALS(DatabaseName::kAdmin, noi->getRequest().dbname);
     ASSERT_BSONOBJ_EQ(hbArgs.toBSON(), noi->getRequest().cmdObj);
     ReplSetHeartbeatResponse hbResp;
     hbResp.setSetName("mySet");
@@ -1271,7 +1272,7 @@ TEST_F(ReplCoordTest, NodeCalculatesDefaultWriteConcernOnStartupNewConfigMajorit
     getNet()->exitNetwork();
     ASSERT_EQUALS(startDate + Milliseconds(10), getNet()->now());
     prsiThread.join();
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
 
     ASSERT_EQUALS(getStorageInterface()->getInitialDataTimestamp(), appliedTS);
 
@@ -1318,7 +1319,7 @@ TEST_F(ReplCoordTest, NodeCalculatesDefaultWriteConcernOnStartupNewConfigNoMajor
     getNet()->enterNetwork();
     const NetworkInterfaceMock::NetworkOperationIterator noi = getNet()->getNextReadyRequest();
     ASSERT_EQUALS(HostAndPort("node2", 12345), noi->getRequest().target);
-    ASSERT_EQUALS("admin", noi->getRequest().dbname);
+    ASSERT_EQUALS(DatabaseName::kAdmin, noi->getRequest().dbname);
     ASSERT_BSONOBJ_EQ(hbArgs.toBSON(), noi->getRequest().cmdObj);
     ReplSetHeartbeatResponse hbResp;
     hbResp.setSetName("mySet");
@@ -1331,7 +1332,7 @@ TEST_F(ReplCoordTest, NodeCalculatesDefaultWriteConcernOnStartupNewConfigNoMajor
     getNet()->exitNetwork();
     ASSERT_EQUALS(startDate + Milliseconds(10), getNet()->now());
     prsiThread.join();
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
 
     ASSERT_EQUALS(getStorageInterface()->getInitialDataTimestamp(), appliedTS);
 
@@ -1576,6 +1577,21 @@ protected:
         std::shared_ptr<OperationContext> opCtx;
     };
 
+    virtual void initAndStart() {
+        init("mySet/test1:1234,test2:1234,test3:1234");
+        assertStartSuccess(BSON("_id"
+                                << "mySet"
+                                << "version" << 1 << "members"
+                                << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                         << "test1:1234")
+                                              << BSON("_id" << 1 << "host"
+                                                            << "test2:1234")
+                                              << BSON("_id" << 2 << "host"
+                                                            << "test3:1234"))),
+                           HostAndPort("test1", 1234));
+        ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    }
+
     std::pair<SharedClientAndOperation, stdx::future<boost::optional<Status>>> stepDown_nonBlocking(
         bool force, Milliseconds waitTime, Milliseconds stepDownTime) {
         using PromisedClientAndOperation = stdx::promise<SharedClientAndOperation>;
@@ -1646,25 +1662,14 @@ protected:
 private:
     virtual void setUp() {
         ReplCoordTest::setUp();
-        init("mySet/test1:1234,test2:1234,test3:1234");
-        assertStartSuccess(BSON("_id"
-                                << "mySet"
-                                << "version" << 1 << "members"
-                                << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                                         << "test1:1234")
-                                              << BSON("_id" << 1 << "host"
-                                                            << "test2:1234")
-                                              << BSON("_id" << 2 << "host"
-                                                            << "test3:1234"))),
-                           HostAndPort("test1", 1234));
-        ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+        initAndStart();
     }
 };
 
 
 TEST_F(ReplCoordTest, NodeReturnsBadValueWhenUpdateTermIsRunAgainstANonReplNode) {
     init(ReplSettings());
-    ASSERT_TRUE(ReplicationCoordinator::modeNone == getReplCoord()->getReplicationMode());
+    ASSERT_FALSE(getReplCoord()->getSettings().isReplSet());
     auto opCtx = makeOperationContext();
 
     ASSERT_EQUALS(ErrorCodes::BadValue, getReplCoord()->updateTerm(opCtx.get(), 0).code());
@@ -2076,9 +2081,8 @@ TEST_F(StepDownTest, StepDownFailureRestoresDrainState) {
 }
 
 class StepDownTestWithUnelectableNode : public StepDownTest {
-private:
-    void setUp() override {
-        ReplCoordTest::setUp();
+protected:
+    void initAndStart() override {
         init("mySet/test1:1234,test2:1234,test3:1234");
         assertStartSuccess(BSON("_id"
                                 << "mySet"
@@ -2290,11 +2294,8 @@ protected:
         }
     }
 
-private:
-    virtual void setUp() {
-        ReplCoordTest::setUp();
+    void initAndStart() override {
         init("mySet/test1:1234,test2:1234,test3:1234,test4:1234,test5:1234");
-
         assertStartSuccess(BSON("_id"
                                 << "mySet"
                                 << "version" << 1 << "members"
@@ -3029,12 +3030,12 @@ TEST_F(ReplCoordTest, GetReplicationModeNone) {
 }
 
 TEST_F(ReplCoordTest,
-       NodeReturnsModeReplSetInResponseToGetReplicationModeWhenRunningWithTheReplSetFlag) {
-    // modeReplSet if the set name was supplied.
+       NodeReturnsTrueInResponseToGetSettingsIsReplSetWhenRunningWithTheReplSetFlag) {
+    // isReplSet() returns true if the set name was supplied.
     ReplSettings settings;
     settings.setReplSetString("mySet/node1:12345");
     init(settings);
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
     assertStartSuccess(BSON("_id"
                             << "mySet"

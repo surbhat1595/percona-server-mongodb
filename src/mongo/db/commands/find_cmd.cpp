@@ -101,9 +101,9 @@
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_shape.h"
-#include "mongo/db/query/query_stats.h"
-#include "mongo/db/query/query_stats_find_key_generator.h"
-#include "mongo/db/query/query_stats_key_generator.h"
+#include "mongo/db/query/query_stats/find_key_generator.h"
+#include "mongo/db/query/query_stats/key_generator.h"
+#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/serialization_options.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -198,15 +198,16 @@ void beginQueryOp(OperationContext* opCtx, const NamespaceString& nss, const BSO
  */
 std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
     OperationContext* opCtx,
-    const AutoGetCollectionForReadCommandMaybeLockFree& ctx,
+    const CollectionOrViewAcquisition& collOrViewAcquisition,
     const NamespaceString& nss,
     BSONObj requestBody,
-    std::unique_ptr<FindCommandRequest> findCommand,
-    const CollectionPtr& collection) {
+    std::unique_ptr<FindCommandRequest> findCommand) {
     // Fill out curop information.
     beginQueryOp(opCtx, nss, requestBody);
     // Finish the parsing step by using the FindCommandRequest to create a CanonicalQuery.
     const ExtensionsCallbackReal extensionsCallback(opCtx, &nss);
+
+    const auto& collection = collOrViewAcquisition.getCollectionPtr();
 
     auto expCtx =
         makeExpressionContext(opCtx, *findCommand, collection, boost::none /* verbosity */);
@@ -224,19 +225,29 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
     // It is important to do this before canonicalizing and optimizing the query, each of which
     // would alter the query shape.
     if (!(collection && collection.get()->getCollectionOptions().encryptedFieldConfig)) {
-        query_stats::registerRequest(opCtx, nss, [&]() {
-            BSONObj queryShape = query_shape::extractQueryShape(
-                *parsedRequest,
-                SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
-                expCtx);
-            return std::make_unique<query_stats::FindKeyGenerator>(
-                expCtx, *parsedRequest, std::move(queryShape), ctx.getCollectionType());
-        });
+        query_stats::registerRequest(
+            opCtx,
+            nss,
+            [&]() {
+                // This callback is either never invoked or invoked immediately within
+                // registerRequest, so use-after-move of parsedRequest isn't an issue.
+                BSONObj queryShape = query_shape::extractQueryShape(
+                    *parsedRequest,
+                    SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+                    expCtx);
+                return std::make_unique<query_stats::FindKeyGenerator>(
+                    expCtx,
+                    *parsedRequest,
+                    std::move(queryShape),
+                    collOrViewAcquisition.getCollectionType());
+            },
+            /*requiresFullQueryStatsFeatureFlag*/ false);
     }
 
     return uassertStatusOK(
         CanonicalQuery::canonicalize(std::move(expCtx), std::move(parsedRequest)));
 }
+
 /**
  * A command for running .find() queries.
  */
@@ -293,6 +304,10 @@ public:
         return false;
     }
 
+    bool shouldAffectQueryCounter() const override {
+        return true;
+    }
+
     bool shouldAffectReadConcernCounter() const override {
         return true;
     }
@@ -310,8 +325,7 @@ public:
         Invocation(const FindCmd* definition, const OpMsgRequest& request)
             : CommandInvocation(definition),
               _request(request),
-              _dbName(DatabaseNameUtil::deserialize(_request.getValidatedTenantId(),
-                                                    _request.getDatabase())),
+              _dbName(request.getDbName()),
               _ns(CommandHelpers::parseNsFromCommand(_dbName, _request.body)) {
             invariant(_request.body.isOwned());
         }
@@ -365,12 +379,22 @@ public:
                      rpc::ReplyBuilderInterface* result) override {
             // Acquire locks. The RAII object is optional, because in the case of a view, the locks
             // need to be released.
-            boost::optional<AutoGetCollectionForReadCommandMaybeLockFree> ctx;
-            ctx.emplace(opCtx,
-                        CommandHelpers::parseNsCollectionRequired(_dbName, _request.body),
-                        AutoGetCollection::Options{}.viewMode(
-                            auto_get_collection::ViewMode::kViewsPermitted));
-            const auto nss = ctx->getNss();
+            // TODO SERVER-79175: Make nicer. We need to instantiate the AutoStatsTracker before the
+            // acquisition in case it would throw so we can ensure data is written to the profile
+            // collection that some test may rely on.
+            auto const nss = CommandHelpers::parseNsCollectionRequired(_dbName, _request.body);
+            AutoStatsTracker tracker{
+                opCtx,
+                nss,
+                Top::LockType::ReadLocked,
+                AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nss.dbName())};
+
+            const auto acquisitionRequest = CollectionOrViewAcquisitionRequest::fromOpCtx(
+                opCtx, nss, AcquisitionPrerequisites::kRead);
+
+            boost::optional<CollectionOrViewAcquisition> collectionOrView =
+                acquireCollectionOrViewMaybeLockFree(opCtx, acquisitionRequest);
 
             // Going forward this operation must never ignore interrupt signals while waiting for
             // lock acquisition. This InterruptibleLockGuard will ensure that waiting for lock
@@ -382,26 +406,22 @@ public:
             InterruptibleLockGuard interruptibleLockAcquisition(opCtx->lockState());
 
             // Parse the command BSON to a FindCommandRequest.
-            auto findCommand = _parseCmdObjectToFindCommandRequest(opCtx, nss, _request.body);
-
-            // check validated tenantId and correct the serialization context object on the request
-            auto reqSerializationContext = findCommand->getSerializationContext();
-            reqSerializationContext.setTenantIdSource(_request.getValidatedTenantId() !=
-                                                      boost::none);
-            findCommand->setSerializationContext(reqSerializationContext);
+            auto findCommand = _parseCmdObjectToFindCommandRequest(opCtx, nss, _request);
+            auto respSc =
+                SerializationContext::stateCommandReply(findCommand->getSerializationContext());
 
             // Finish the parsing step by using the FindCommandRequest to create a CanonicalQuery.
             const ExtensionsCallbackReal extensionsCallback(opCtx, &nss);
 
             // The collection may be NULL. If so, getExecutor() should handle it by returning an
             // execution tree with an EOFStage.
-            const auto& collection = ctx->getCollection();
-            if (!ctx->getView()) {
-                const bool isClusteredCollection = collection && collection->isClustered();
+            const auto& collectionPtr = collectionOrView->getCollectionPtr();
+            if (!collectionOrView->isView()) {
+                const bool isClusteredCollection = collectionPtr && collectionPtr->isClustered();
                 uassertStatusOK(query_request_helper::validateResumeAfter(
                     findCommand->getResumeAfter(), isClusteredCollection));
             }
-            auto expCtx = makeExpressionContext(opCtx, *findCommand, collection, verbosity);
+            auto expCtx = makeExpressionContext(opCtx, *findCommand, collectionPtr, verbosity);
             const bool isExplain = true;
             auto cq = uassertStatusOK(
                 CanonicalQuery::canonicalize(opCtx,
@@ -417,9 +437,9 @@ public:
 
             // If we are running a query against a view redirect this query through the aggregation
             // system.
-            if (ctx->getView()) {
+            if (collectionOrView->isView()) {
                 // Relinquish locks. The aggregation command will re-acquire them.
-                ctx.reset();
+                collectionOrView.reset();
 
                 // Convert the find command into an aggregation using $match (and other stages, as
                 // necessary), if possible.
@@ -446,23 +466,19 @@ public:
             cq->setUseCqfIfEligible(true);
 
             // Get the execution plan for the query.
+            const auto& collection = collectionOrView->getCollection();
             bool permitYield = true;
             auto exec =
                 uassertStatusOK(getExecutorFind(opCtx,
-                                                &collection,
+                                                collection,
                                                 std::move(cq),
                                                 nullptr /* extractAndAttachPipelineStages */,
                                                 permitYield));
 
             auto bodyBuilder = result->getBodyBuilder();
             // Got the execution tree. Explain it.
-            Explain::explainStages(exec.get(),
-                                   collection,
-                                   verbosity,
-                                   BSONObj(),
-                                   SerializationContext::stateCommandReply(reqSerializationContext),
-                                   _request.body,
-                                   &bodyBuilder);
+            Explain::explainStages(
+                exec.get(), collection, verbosity, BSONObj(), respSc, _request.body, &bodyBuilder);
         }
 
         /**
@@ -476,24 +492,16 @@ public:
          */
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) {
             CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
-            // Although it is a command, a find command gets counted as a query.
-            globalOpCounters.gotQuery();
 
             const BSONObj& cmdObj = _request.body;
 
             // Parse the command BSON to a FindCommandRequest. Pass in the parsedNss in case cmdObj
             // does not have a UUID.
             const bool isOplogNss = (_ns == NamespaceString::kRsOplogNamespace);
-            auto findCommand = _parseCmdObjectToFindCommandRequest(opCtx, _ns, cmdObj);
 
-            // check validated tenantId and correct the serialization context object on the request
-            auto reqSerializationContext = findCommand->getSerializationContext();
-            reqSerializationContext.setTenantIdSource(_request.getValidatedTenantId() !=
-                                                      boost::none);
-            findCommand->setSerializationContext(reqSerializationContext);
-
-            auto respSerializationContext =
-                SerializationContext::stateCommandReply(reqSerializationContext);
+            auto findCommand = _parseCmdObjectToFindCommandRequest(opCtx, _ns, _request);
+            auto respSc =
+                SerializationContext::stateCommandReply(findCommand->getSerializationContext());
 
             CurOp::get(opCtx)->beginQueryPlanningTimer();
 
@@ -555,10 +563,8 @@ public:
                     }
                 }
 
-                auto isInternal = (opCtx->getClient()->session() &&
-                                   (opCtx->getClient()->session()->getTags() &
-                                    transport::Session::kInternalClient));
-
+                auto isInternal =
+                    opCtx->getClient()->session() && opCtx->getClient()->isInternalClient();
                 if (MONGO_unlikely(allowExternalReadsForReverseOplogScanRule.shouldFail())) {
                     isInternal = true;
                 }
@@ -570,13 +576,42 @@ public:
 
             // Acquire locks. If the query is on a view, we release our locks and convert the query
             // request into an aggregation command.
-            boost::optional<AutoGetCollectionForReadCommandMaybeLockFree> ctx;
-            ctx.emplace(opCtx,
-                        CommandHelpers::parseNsOrUUID(_dbName, _request.body),
-                        AutoGetCollection::Options{}
-                            .viewMode(auto_get_collection::ViewMode::kViewsPermitted)
-                            .expectedUUID(findCommand->getCollectionUUID()));
-            const auto& nss = ctx->getNss();
+
+            // TODO SERVER-79175: Make nicer. We need to instantiate the AutoStatsTracker before the
+            // acquisition in case it would throw so we can ensure data is written to the profile
+            // collection that some test may rely on. However, we might not know the namespace at
+            // this point so it is wrapped in a boost::optional. If the request is with a UUID we
+            // instantiate it after, but this is fine as the request should not be for sharded
+            // collections.
+            boost::optional<AutoStatsTracker> tracker;
+            auto const initializeTracker = [&](const NamespaceString& nss) {
+                tracker.emplace(
+                    opCtx,
+                    nss,
+                    Top::LockType::ReadLocked,
+                    AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                    CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nss.dbName()));
+            };
+            auto const nssOrUUID = findCommand->getNamespaceOrUUID();
+            if (nssOrUUID.isNamespaceString()) {
+                CommandHelpers::ensureNsNotCommand(nssOrUUID.nss());
+                initializeTracker(nssOrUUID.nss());
+            }
+            const auto acquisitionRequest = [&] {
+                auto req = CollectionOrViewAcquisitionRequest::fromOpCtx(
+                    opCtx, nssOrUUID, AcquisitionPrerequisites::kRead);
+
+                req.expectedUUID = findCommand->getCollectionUUID();
+                return req;
+            }();
+
+            boost::optional<CollectionOrViewAcquisition> collectionOrView =
+                acquireCollectionOrViewMaybeLockFree(opCtx, acquisitionRequest);
+            const NamespaceString nss = collectionOrView->nss();
+
+            if (!tracker) {
+                initializeTracker(nss);
+            }
 
             if (!findCommand->getMirrored()) {
                 if (auto sampleId = analyze_shard_key::getOrGenerateSampleId(
@@ -603,28 +638,28 @@ public:
             // ignoring interrupt.
             InterruptibleLockGuard interruptibleLockAcquisition(opCtx->lockState());
 
-            const auto& collection = ctx->getCollection();
+            const auto& collectionPtr = collectionOrView->getCollectionPtr();
 
             uassert(ErrorCodes::NamespaceNotFound,
                     str::stream() << "UUID " << findCommand->getNamespaceOrUUID().uuid()
                                   << " specified in query request not found",
-                    collection || !isFindByUUID);
+                    collectionOrView->collectionExists() || !isFindByUUID);
 
             bool isClusteredCollection = false;
-            if (collection) {
+            if (collectionOrView->collectionExists()) {
                 if (isFindByUUID) {
                     // Replace the UUID in the find command with the fully qualified namespace of
                     // the looked up Collection.
-                    findCommand->setNss(ctx->getNss());
+                    findCommand->setNss(nss);
                 }
 
                 // Tailing a replicated capped clustered collection requires majority read concern.
                 const bool isTailable = findCommand->getTailable();
                 const bool isMajorityReadConcern = repl::ReadConcernArgs::get(opCtx).getLevel() ==
                     repl::ReadConcernLevel::kMajorityReadConcern;
-                isClusteredCollection = collection->isClustered();
-                const bool isCapped = collection->isCapped();
-                const bool isReplicated = collection->ns().isReplicated();
+                isClusteredCollection = collectionPtr->isClustered();
+                const bool isCapped = collectionPtr->isCapped();
+                const bool isReplicated = collectionPtr->ns().isReplicated();
                 if (isClusteredCollection && isCapped && isReplicated && isTailable) {
                     uassert(ErrorCodes::Error(6049203),
                             "A tailable cursor on a capped clustered collection requires majority "
@@ -636,19 +671,19 @@ public:
             // Views use the aggregation system and the $_resumeAfter parameter is not allowed. A
             // more descriptive error will be raised later, but we want to validate this parameter
             // before beginning the operation.
-            if (!ctx->getView()) {
+            if (!collectionOrView->isView()) {
                 uassertStatusOK(query_request_helper::validateResumeAfter(
                     findCommand->getResumeAfter(), isClusteredCollection));
             }
 
             auto cq = parseQueryAndBeginOperation(
-                opCtx, *ctx, nss, _request.body, std::move(findCommand), collection);
+                opCtx, *collectionOrView, nss, _request.body, std::move(findCommand));
 
             // If we are running a query against a view redirect this query through the aggregation
             // system.
-            if (ctx->getView()) {
+            if (collectionOrView->isView()) {
                 // Relinquish locks. The aggregation command will re-acquire them.
-                ctx.reset();
+                collectionOrView.reset();
 
                 // Convert the find command into an aggregation using $match (and other stages, as
                 // necessary), if possible.
@@ -674,6 +709,8 @@ public:
                 return;
             }
 
+            const auto& collection = collectionOrView->getCollection();
+
             if (!cq->getFindCommandRequest().getAllowDiskUse().value_or(true)) {
                 allowDiskUseFalseCounter.increment();
             }
@@ -694,7 +731,7 @@ public:
             bool permitYield = true;
             auto exec =
                 uassertStatusOK(getExecutorFind(opCtx,
-                                                &collection,
+                                                collection,
                                                 std::move(cq),
                                                 nullptr /* extractAndAttachPipelineStages */,
                                                 permitYield));
@@ -710,19 +747,15 @@ public:
                 CurOp::get(opCtx)->setPlanSummary_inlock(exec->getPlanExplainer().getPlanSummary());
             }
 
-            if (!collection) {
+            if (!collection.exists()) {
                 // No collection. Just fill out curop indicating that there were zero results and
                 // there is no ClientCursor id, and then return.
                 const long long numResults = 0;
                 const CursorId cursorId = 0;
-                endQueryOp(opCtx, collection, *exec, numResults, boost::none, cmdObj);
+                endQueryOp(opCtx, collectionPtr, *exec, numResults, boost::none, cmdObj);
                 auto bodyBuilder = result->getBodyBuilder();
-                appendCursorResponseObject(cursorId,
-                                           nss,
-                                           BSONArray(),
-                                           boost::none,
-                                           &bodyBuilder,
-                                           respSerializationContext);
+                appendCursorResponseObject(
+                    cursorId, nss, BSONArray(), boost::none, &bodyBuilder, respSc);
                 return;
             }
 
@@ -788,7 +821,7 @@ public:
 
             // Set up the cursor for getMore.
             CursorId cursorId = 0;
-            if (shouldSaveCursor(opCtx, collection, state, exec.get())) {
+            if (shouldSaveCursor(opCtx, collectionPtr, state, exec.get())) {
                 const bool stashResourcesForGetMore =
                     exec->isSaveRecoveryUnitAcrossCommandsEnabled();
                 ClientCursorPin pinnedCursor = CursorManager::get(opCtx)->registerCursor(
@@ -820,7 +853,7 @@ public:
                 }
 
                 // Fill out curop based on the results.
-                endQueryOp(opCtx, collection, *cursorExec, numResults, pinnedCursor, cmdObj);
+                endQueryOp(opCtx, collectionPtr, *cursorExec, numResults, pinnedCursor, cmdObj);
 
                 if (stashResourcesForGetMore) {
                     // Collect storage stats now before we stash the recovery unit. These stats are
@@ -834,22 +867,31 @@ public:
                     CurOp::get(opCtx)->debug().storageStats =
                         opCtx->recoveryUnit()->computeOperationStatisticsSinceLastCall();
                 }
+
+                stashTransactionResourcesFromOperationContext(opCtx, pinnedCursor.getCursor());
+                // During destruction of the pinned cursor we may discover that the operation has
+                // been interrupted. This would cause the transaction resources we just stashed to
+                // be released and destroyed. As we hold a reference here to them in the form of the
+                // acquisition which modifies the resources, we must release it now before
+                // destroying the pinned cursor.
+                collectionOrView.reset();
             } else {
-                endQueryOp(opCtx, collection, *exec, numResults, boost::none, cmdObj);
+                endQueryOp(opCtx, collectionPtr, *exec, numResults, boost::none, cmdObj);
                 // We want to destroy executor as soon as possible to release any resources locks it
                 // may hold.
                 exec.reset();
+                collectionOrView.reset();
             }
 
             // Generate the response object to send to the client.
-            firstBatch.done(cursorId, nss, respSerializationContext);
+            firstBatch.done(cursorId, nss, respSc);
 
             // Increment this metric once we have generated a response and we know it will return
             // documents.
             auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
             metricsCollector.incrementDocUnitsReturned(toStringForLogging(nss), docUnitsReturned);
             query_request_helper::validateCursorResponse(
-                result->getBodyBuilder().asTempObj(), nss.tenantId(), respSerializationContext);
+                result->getBodyBuilder().asTempObj(), nss.tenantId(), respSc);
         }
 
         void appendMirrorableRequest(BSONObjBuilder* bob) const override {
@@ -866,6 +908,7 @@ public:
                 keyBob.append("min", 1);
                 keyBob.append("max", 1);
                 keyBob.append("shardVersion", 1);
+                keyBob.append("encryptionInformation", 1);
                 return keyBob.obj();
             }();
 
@@ -884,15 +927,23 @@ public:
         // Parses the command object to a FindCommandRequest. If the client request did not specify
         // any runtime constants, make them available to the query here.
         std::unique_ptr<FindCommandRequest> _parseCmdObjectToFindCommandRequest(
-            OperationContext* opCtx, NamespaceString nss, BSONObj cmdObj) {
+            OperationContext* opCtx, NamespaceString nss, const OpMsgRequest& request) {
+            // check validated tenantId and set the flag on the serialization context object
+            auto reqSc = request.getSerializationContext();
+
             auto findCommand = query_request_helper::makeFromFindCommand(
-                std::move(cmdObj),
+                request.body,
                 std::move(nss),
+                reqSc,
                 APIParameters::get(opCtx).getAPIStrict().value_or(false));
 
             // Rewrite any FLE find payloads that exist in the query if this is a FLE 2 query.
             if (shouldDoFLERewrite(findCommand)) {
                 invariant(findCommand->getNamespaceOrUUID().isNamespaceString());
+                LOGV2_DEBUG(7964101,
+                            2,
+                            "Processing Queryable Encryption command",
+                            "cmd"_attr = request.body);
 
                 if (!findCommand->getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                     processFLEFindD(
@@ -909,8 +960,8 @@ public:
             return findCommand;
         }
     };
-
-} findCmd;
+};
+MONGO_REGISTER_COMMAND(FindCmd);
 
 }  // namespace
 }  // namespace mongo

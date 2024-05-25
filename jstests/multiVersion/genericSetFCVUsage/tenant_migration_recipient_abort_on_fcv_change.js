@@ -7,12 +7,11 @@
  * ]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {makeTenantDB} from "jstests/replsets/libs/tenant_migration_util.js";
-load("jstests/libs/fail_point_util.js");
-load("jstests/libs/uuid_util.js");       // for 'extractUUIDFromObject'
-load("jstests/libs/parallelTester.js");  // for 'Thread'
-load("jstests/replsets/rslib.js");       // for 'setLogVerbosity'
+import {setLogVerbosity} from "jstests/replsets/rslib.js";
 
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
 
@@ -51,11 +50,12 @@ hangWhileMigratingDonorFP.wait();
 hangWhileMigratingRecipientFP.wait();
 
 // Initiate a downgrade and let it complete.
-assert.commandWorked(
-    recipientPrimary.adminCommand({setFeatureCompatibilityVersion: lastContinuousFCV}));
+assert.commandWorked(recipientPrimary.adminCommand(
+    {setFeatureCompatibilityVersion: lastContinuousFCV, confirm: true}));
 
 // Upgrade again and finish the test.
-assert.commandWorked(recipientPrimary.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+assert.commandWorked(
+    recipientPrimary.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
 
 hangWhileMigratingDonorFP.off();
 hangWhileMigratingRecipientFP.off();

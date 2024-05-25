@@ -1,23 +1,42 @@
 """Enable running tests simultaneously by processing them from a multi-consumer queue."""
 
 import sys
+import threading
 import time
+import logging
 from collections import namedtuple
+from typing import List, Optional, Union, TYPE_CHECKING
 
 from buildscripts.resmokelib import config
 from buildscripts.resmokelib import errors
 from buildscripts.resmokelib.testing import testcases
 from buildscripts.resmokelib.testing.fixtures import shardedcluster
-from buildscripts.resmokelib.testing.fixtures.interface import create_fixture_table
+from buildscripts.resmokelib.testing.fixtures.interface import Fixture, create_fixture_table
+from buildscripts.resmokelib.testing.testcases.interface import TestCase
+from buildscripts.resmokelib.testing.hook_test_archival import HookTestArchival
+from buildscripts.resmokelib.testing.hooks.interface import Hook
+from buildscripts.resmokelib.testing.queue_element import QueueElem, QueueElemRepeatTime
+from buildscripts.resmokelib.testing.report import TestReport
 from buildscripts.resmokelib.testing.testcases import fixture as _fixture
 from buildscripts.resmokelib.utils import queue as _queue
+
+from opentelemetry import trace, context
+from opentelemetry.context.context import Context
+from opentelemetry.trace.status import StatusCode
+
+# TODO: if we ever fix the circular deps in resmoke we will be able to get rid of this
+if TYPE_CHECKING:
+    from buildscripts.resmokelib.testing.executor import TestQueue
+
+TRACER = trace.get_tracer("resmoke")
 
 
 class Job(object):
     """Run tests from a queue."""
 
-    def __init__(self, job_num, logger, fixture, hooks, report, archival, suite_options,
-                 test_queue_logger):
+    def __init__(self, job_num: int, logger: logging.Logger, fixture: Fixture, hooks: List[Hook],
+                 report: TestReport, archival: HookTestArchival, suite_options: config.SuiteOptions,
+                 test_queue_logger: logging.Logger):
         """Initialize the job with the specified fixture and hooks."""
 
         self.logger = logger
@@ -36,19 +55,27 @@ class Job(object):
             hasattr(hook, "STOPS_FIXTURE") and hook.STOPS_FIXTURE for hook in self.hooks)
 
     @property
-    def job_num(self):
+    def job_num(self) -> int:
         """Forward the job_num option from FixtureTestCaseManager."""
         return self.manager.job_num
 
     @staticmethod
-    def _interrupt_all_jobs(queue, interrupt_flag):
+    def _interrupt_all_jobs(queue: 'TestQueue[Union[QueueElemRepeatTime, QueueElem]]',
+                            interrupt_flag: threading.Event):
         # Set the interrupt flag so that other jobs do not start running more tests.
         interrupt_flag.set()
         # Drain the queue to unblock the main thread.
         Job._drain_queue(queue)
 
-    def __call__(self, queue, interrupt_flag, setup_flag=None, teardown_flag=None,
-                 hook_failure_flag=None):
+    def __call__(
+            self,
+            queue: 'TestQueue[Union[QueueElemRepeatTime, QueueElem]]',
+            interrupt_flag: threading.Event,
+            parent_context: Context,
+            setup_flag: Optional[threading.Event] = None,
+            teardown_flag: Optional[threading.Event] = None,
+            hook_failure_flag: Optional[threading.Event] = None,
+    ):
         """Continuously execute tests from 'queue' and records their details in 'report'.
 
         If 'setup_flag' is not None, then a test to set up the fixture will be run
@@ -58,6 +85,10 @@ class Job(object):
         will be run before this method returns. If an error occurs
         while destroying the fixture, then the 'teardown_flag' will be set.
         """
+        # Since this is called from another thread we need to pass the context in
+        # This will make it have the correct parent and traceid
+        context.attach(parent_context)
+
         setup_succeeded = True
         if setup_flag is not None:
             try:
@@ -117,7 +148,9 @@ class Job(object):
         """Get current time to aid in the unit testing of the _run method."""
         return time.time()
 
-    def _run(self, queue, interrupt_flag, teardown_flag=None, hook_failure_flag=None):
+    def _run(self, queue: 'TestQueue[Union[QueueElemRepeatTime, QueueElem]]',
+             interrupt_flag: threading.Event, teardown_flag: Optional[threading.Event] = None,
+             hook_failure_flag: Optional[threading.Event] = None):
         """Call the before/after suite hooks and continuously execute tests from 'queue'."""
 
         self._run_hooks_before_suite(hook_failure_flag)
@@ -136,7 +169,7 @@ class Job(object):
 
         self._run_hooks_after_suite(teardown_flag, hook_failure_flag)
 
-    def _log_requeue_test(self, queue_elem):
+    def _log_requeue_test(self, queue_elem: QueueElemRepeatTime):
         """Log the requeue of a test."""
 
         if self.suite_options.time_repeat_tests_secs:
@@ -149,7 +182,8 @@ class Job(object):
         self.logger.info(("Requeueing test %s %s, cumulative time elapsed %0.2f"),
                          queue_elem.testcase.test_name, progress, queue_elem.repeat_time_elapsed)
 
-    def _requeue_test(self, queue, queue_elem, interrupt_flag):
+    def _requeue_test(self, queue: 'TestQueue[Union[QueueElemRepeatTime, QueueElem]]',
+                      queue_elem: QueueElemRepeatTime, interrupt_flag: threading.Event):
         """Requeue a test if it needs to be repeated."""
 
         if not queue_elem.should_requeue():
@@ -163,14 +197,23 @@ class Job(object):
             self._log_requeue_test(queue_elem)
             queue.put(queue_elem)
 
-    def _execute_test(self, test, hook_failure_flag):
+    @TRACER.start_as_current_span("job._execute_test")
+    def _execute_test(self, test: TestCase, hook_failure_flag: Optional[threading.Event]):
         """Call the before/after test hooks and execute 'test'."""
 
+        common_test_attributes = test.get_test_otel_attributes()
+        execute_test_span = trace.get_current_span()
+        execute_test_span.set_attributes(attributes=common_test_attributes)
+        execute_test_span.set_status(StatusCode.ERROR, "fail_early")
+
         test.configure(self.fixture, config.NUM_CLIENTS_PER_FIXTURE)
+
         self._run_hooks_before_tests(test, hook_failure_flag)
+
         self.report.logging_prefix = create_fixture_table(self.fixture)
 
-        test(self.report)
+        with TRACER.start_as_current_span("run_test", attributes=common_test_attributes):
+            test(self.report)
         try:
             if test.propagate_error is not None:
                 raise test.propagate_error
@@ -193,7 +236,11 @@ class Job(object):
                 raise errors.StopExecution(
                     "%s not running after %s" % (self.fixture, test.short_description()))
         finally:
-            success = self.report.find_test_info(test).status == "pass"
+            success: bool = self.report.find_test_info(test).status == "pass"
+            if success:
+                execute_test_span.set_status(StatusCode.OK)
+            else:
+                execute_test_span.set_status(StatusCode.ERROR, "fail")
 
             # Stop background hooks first since they can interfere with fixture startup and teardown
             # done as part of archival.
@@ -205,7 +252,8 @@ class Job(object):
 
             self._run_hooks_after_tests(test, hook_failure_flag, background=False)
 
-    def _run_hook(self, hook, hook_function, test, hook_failure_flag):
+    def _run_hook(self, hook: Hook, hook_function, test: TestCase,
+                  hook_failure_flag: Optional[threading.Event]):
         """Provide helper to run hook and archival."""
         try:
             success = False
@@ -219,8 +267,10 @@ class Job(object):
                 result = TestResult(test=test, hook=hook, success=success)
                 self.archival.archive(self.logger, result, self.manager)
 
-    def _run_hooks_before_suite(self, hook_failure_flag):
+    @TRACER.start_as_current_span("job._run_hooks_before_suite")
+    def _run_hooks_before_suite(self, hook_failure_flag: Optional[threading.Event]):
         """Run the before_suite method on each of the hooks."""
+        run_hooks_before_suite_span = trace.get_current_span()
         hooks_failed = True
         try:
             for hook in self.hooks:
@@ -229,9 +279,14 @@ class Job(object):
         finally:
             if hooks_failed and hook_failure_flag is not None:
                 hook_failure_flag.set()
+            run_hooks_before_suite_span.set_status(
+                StatusCode.ERROR if hooks_failed else StatusCode.OK)
 
-    def _run_hooks_after_suite(self, teardown_flag, hook_failure_flag):
+    @TRACER.start_as_current_span("job._run_hooks_after_suite")
+    def _run_hooks_after_suite(self, teardown_flag: Optional[threading.Event],
+                               hook_failure_flag: Optional[threading.Event]):
         """Run the after_suite method on each of the hooks."""
+        run_hooks_after_suite_span = trace.get_current_span()
         hooks_failed = True
         try:
             for hook in self.hooks:
@@ -240,30 +295,39 @@ class Job(object):
         finally:
             if hooks_failed and hook_failure_flag is not None:
                 hook_failure_flag.set()
+            run_hooks_after_suite_span.set_status(
+                StatusCode.ERROR if hooks_failed else StatusCode.OK)
 
-    def _run_hooks_before_tests(self, test, hook_failure_flag):
+    @TRACER.start_as_current_span("job._run_hooks_before_tests")
+    def _run_hooks_before_tests(self, test: TestCase, hook_failure_flag: Optional[threading.Event]):
         """Run the before_test method on each of the hooks.
 
         Swallows any TestFailure exceptions if set to continue on
         failure, and reraises any other exceptions.
         """
+        run_hooks_before_tests_span = trace.get_current_span()
+        run_hooks_before_tests_span.set_attributes(attributes=test.get_test_otel_attributes())
+
         try:
             for hook in self.hooks:
                 self._run_hook(hook, hook.before_test, test, hook_failure_flag)
 
         except errors.StopExecution:
+            run_hooks_before_tests_span.set_status(StatusCode.ERROR)
             raise
 
         except errors.ServerFailure:
             self.logger.exception("%s marked as a failure by a hook's before_test.",
                                   test.short_description())
             self._fail_test(test, sys.exc_info(), return_code=2)
+            run_hooks_before_tests_span.set_status(StatusCode.ERROR)
             raise errors.StopExecution("A hook's before_test failed")
 
         except errors.TestFailure:
             self.logger.exception("%s marked as a failure by a hook's before_test.",
                                   test.short_description())
             self._fail_test(test, sys.exc_info(), return_code=1)
+            run_hooks_before_tests_span.set_status(StatusCode.ERROR)
             if self.suite_options.fail_fast:
                 raise errors.StopExecution("A hook's before_test failed")
 
@@ -272,9 +336,14 @@ class Job(object):
             self.report.startTest(test)
             self.report.addError(test, sys.exc_info())
             self.report.stopTest(test)
+            run_hooks_before_tests_span.set_status(StatusCode.ERROR)
             raise
 
-    def _run_hooks_after_tests(self, test, hook_failure_flag, background=False):
+        run_hooks_before_tests_span.set_status(StatusCode.OK)
+
+    @TRACER.start_as_current_span("job._run_hooks_after_tests")
+    def _run_hooks_after_tests(self, test: TestCase, hook_failure_flag: Optional[threading.Event],
+                               background: bool = False):
         """Run the after_test method on each of the hooks.
 
         Swallows any TestFailure exceptions if set to continue on
@@ -283,42 +352,73 @@ class Job(object):
         @param test: the test after which we run the hooks.
         @param background: whether to run background hooks.
         """
+
+        run_hooks_after_tests_span = trace.get_current_span()
+        run_hooks_after_tests_span.set_attributes(attributes=test.get_test_otel_attributes())
+        run_hooks_after_tests_span.set_attribute(TestCase.METRIC_NAMES.BACKGROUND, background)
+
         suite_with_balancer = isinstance(
             self.fixture, shardedcluster.ShardedClusterFixture) and self.fixture.enable_balancer
 
-        try:
-            if not background and suite_with_balancer:
+        if not background and suite_with_balancer:
+            try:
                 self.logger.info("Stopping the balancer before running end-test hooks")
                 self.fixture.stop_balancer()
+            except:
+                self.logger.exception("%s failed while stopping the balancer for end-test hooks",
+                                      test.short_description())
+                self.report.setFailure(test, return_code=2)
+                run_hooks_after_tests_span.set_status(StatusCode.ERROR)
+                if self.archival:
+                    result = TestResult(test=test, hook=None, success=False)
+                    self.archival.archive(self.logger, result, self.manager)
+                raise errors.StopExecution("stop_balancer failed before running after test hooks")
+
+        try:
             for hook in self.hooks:
                 if hook.IS_BACKGROUND == background:
                     self._run_hook(hook, hook.after_test, test, hook_failure_flag)
 
         except errors.StopExecution:
+            run_hooks_after_tests_span.set_status(StatusCode.ERROR)
             raise
 
         except errors.ServerFailure:
             self.logger.exception("%s marked as a failure by a hook's after_test.",
                                   test.short_description())
             self.report.setFailure(test, return_code=2)
+            run_hooks_after_tests_span.set_status(StatusCode.ERROR)
             raise errors.StopExecution("A hook's after_test failed")
 
         except errors.TestFailure:
             self.logger.exception("%s marked as a failure by a hook's after_test.",
                                   test.short_description())
             self.report.setFailure(test, return_code=1)
+            run_hooks_after_tests_span.set_status(StatusCode.ERROR)
             if self.suite_options.fail_fast:
                 raise errors.StopExecution("A hook's after_test failed")
 
         except:
             self.report.setError(test, sys.exc_info())
+            run_hooks_after_tests_span.set_status(StatusCode.ERROR)
             raise
 
         if not background and suite_with_balancer:
-            self.logger.info("Resuming the balancer after running end-test hooks")
-            self.fixture.start_balancer()
+            try:
+                self.logger.info("Resuming the balancer after running end-test hooks")
+                self.fixture.start_balancer()
+            except:
+                self.logger.exception(
+                    "%s failed while re-starting the balancer after end-test hooks",
+                    test.short_description())
+                self.report.setFailure(test, return_code=2)
+                run_hooks_after_tests_span.set_status(StatusCode.ERROR)
+                if self.archival:
+                    result = TestResult(test=test, hook=None, success=False)
+                    self.archival.archive(self.logger, result, self.manager)
+                raise errors.StopExecution("start_balancer failed after running after test hooks")
 
-    def _fail_test(self, test, exc_info, return_code=1):
+    def _fail_test(self, test: TestCase, exc_info, return_code=1):
         """Provide helper to record a test as a failure with the provided return code.
 
         This method should not be used if 'test' has already been
@@ -353,7 +453,8 @@ TestResult = namedtuple('TestResult', ['test', 'hook', 'success'])
 class FixtureTestCaseManager:
     """Class that holds information needed to create new fixture setup/teardown test cases for a single job."""
 
-    def __init__(self, test_queue_logger, fixture, job_num, report):
+    def __init__(self, test_queue_logger: logging.Logger, fixture: Fixture, job_num: int,
+                 report: TestReport):
         """
         Initialize the test case manager.
 
@@ -368,7 +469,7 @@ class FixtureTestCaseManager:
         self.report = report
         self.times_set_up = 0  # Setups and kills may run multiple times.
 
-    def setup_fixture(self, logger):
+    def setup_fixture(self, logger: logging.Logger):
         """
         Run a test that sets up the job's fixture and waits for it to be ready.
 
@@ -383,14 +484,14 @@ class FixtureTestCaseManager:
 
         return True
 
-    def teardown_fixture(self, logger, abort=False):
+    def teardown_fixture(self, logger: logging.Logger, abort: bool = False):
         """
         Run a test that tears down the job's fixture.
 
         Return True if the teardown was successful, False otherwise.
         """
         try:
-            test_case = None
+            test_case: Union[_fixture.FixtureAbortTestCase, _fixture.FixtureTeardownTestCase] = None
 
             if abort:
                 test_case = _fixture.FixtureAbortTestCase(self.test_queue_logger, self.fixture,

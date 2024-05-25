@@ -1,6 +1,7 @@
 // Test killop applied to m/r operations and child ops of m/r operations.
-// The test runs commands that are not allowed with security token: mapreduce.
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: mapreduce.
 //   not_allowed_with_security_token,
 //   # mapReduce does not support afterClusterTime.
 //   does_not_support_causal_consistency,
@@ -11,8 +12,6 @@
 //   no_selinux,
 //   requires_scripting,
 // ]
-(function() {
-"use strict";
 const source = db.jstests_mr_killop;
 source.drop();
 const out = db.jstests_mr_killop_out;
@@ -190,4 +189,3 @@ runMapTests(loop, false);
 runReduceTests(loop, false);
 runFinalizeTests(loop, false);
 db.adminCommand({configureFailPoint: "mr_killop_test_fp", mode: "off"});
-}());

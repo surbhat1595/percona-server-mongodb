@@ -187,7 +187,8 @@ AuthorizationSessionImpl::AuthorizationSessionImpl(
     : _externalState(std::move(externalState)),
       _impersonationFlag(false),
       _contract(TestingProctor::instance().isEnabled()),
-      _mayBypassWriteBlockingMode(false) {}
+      _mayBypassWriteBlockingMode(false),
+      _mayUseTenant(false) {}
 
 AuthorizationSessionImpl::~AuthorizationSessionImpl() {
     invariant(_authenticatedUser == boost::none,
@@ -392,11 +393,11 @@ void AuthorizationSessionImpl::logoutAllDatabases(Client* client, StringData rea
 
 
 void AuthorizationSessionImpl::logoutDatabase(Client* client,
-                                              StringData dbname,
+                                              const DatabaseName& dbname,
                                               StringData reason) {
     bool isLoggedInOnDB =
-        (_authenticatedUser && _authenticatedUser.value()->getName().getDB() == dbname);
-    bool isExpiredOnDB = (_expiredUserName && _expiredUserName.value().getDB() == dbname);
+        (_authenticatedUser && _authenticatedUser.value()->getName().getDatabaseName() == dbname);
+    bool isExpiredOnDB = (_expiredUserName && _expiredUserName.value().getDatabaseName() == dbname);
 
     if (isLoggedInOnDB || isExpiredOnDB) {
         // The session either has an authenticated or expired user belonging to the database being
@@ -459,14 +460,12 @@ PrivilegeVector AuthorizationSessionImpl::_getDefaultPrivileges() {
     // a system and add the first user.
     if (_externalState->shouldAllowLocalhost()) {
 
-        const DatabaseName kAdminDB =
-            DatabaseName::createDatabaseNameForAuth(boost::none, ADMIN_DBNAME);
+        const DatabaseName kAdminDB = DatabaseNameUtil::deserialize(boost::none, ADMIN_DBNAME);
         const ResourcePattern adminDBResource = ResourcePattern::forDatabaseName(kAdminDB);
         const ActionSet setupAdminUserActionSet{ActionType::createUser, ActionType::grantRole};
         Privilege setupAdminUserPrivilege(adminDBResource, setupAdminUserActionSet);
 
-        const DatabaseName kExternalDB =
-            DatabaseName::createDatabaseNameForAuth(boost::none, "$external"_sd);
+        const DatabaseName kExternalDB = DatabaseNameUtil::deserialize(boost::none, "$external"_sd);
         const ResourcePattern externalDBResource = ResourcePattern::forDatabaseName(kExternalDB);
         Privilege setupExternalUserPrivilege(externalDBResource, ActionType::createUser);
 
@@ -847,11 +846,12 @@ bool AuthorizationSessionImpl::isAuthorizedForAnyActionOnResource(const Resource
 bool AuthorizationSessionImpl::_isAuthorizedForPrivilege(const Privilege& privilege) {
     _contract.addPrivilege(privilege);
 
-    auth::ResourcePatternSearchList search(privilege.getResourcePattern());
+    const auto& rp = privilege.getResourcePattern();
+    auth::ResourcePatternSearchList search(rp);
     ActionSet unmetRequirements = privilege.getActions();
     for (const auto& priv : _getDefaultPrivileges()) {
         for (auto patternIt = search.cbegin(); patternIt != search.cend(); ++patternIt) {
-            if (!priv.getResourcePattern().matchesIgnoringTenant(*patternIt)) {
+            if (priv.getResourcePattern() != *patternIt) {
                 continue;
             }
 
@@ -867,6 +867,10 @@ bool AuthorizationSessionImpl::_isAuthorizedForPrivilege(const Privilege& privil
     }
 
     const auto& user = _authenticatedUser.value();
+    // Safeguard that cross-tenant privileges are only granted when users have cluster-useTenant.
+    if (!MONGO_unlikely(_mayUseTenant) && user->getName().getTenant() != rp.tenantId()) {
+        return unmetRequirements.empty();
+    }
     return std::any_of(search.cbegin(), search.cend(), [&](const auto& pattern) {
         unmetRequirements.removeAllActionsFromSet(user->getActionsForResource(pattern));
         return unmetRequirements.empty();
@@ -1028,6 +1032,10 @@ void AuthorizationSessionImpl::verifyContract(const AuthorizationContract* contr
     tempContract.addPrivilege(Privilege(ResourcePattern::forClusterResource(boost::none),
                                         ActionType::bypassWriteBlockingMode));
 
+    // Implicitly checked often to keep useTenant checks fast
+    tempContract.addPrivilege(
+        Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::useTenant));
+
     // Needed for internal sessions started by the server.
     tempContract.addPrivilege(Privilege(ResourcePattern::forClusterResource(boost::none),
                                         ActionType::issueDirectShardOperations));
@@ -1055,6 +1063,12 @@ void AuthorizationSessionImpl::_updateInternalAuthorizationState() {
         ? _isAuthorizedForPrivilege(
               Privilege(ResourcePattern::forClusterResource(getUserTenantId()),
                         ActionType::bypassWriteBlockingMode))
+        : true;
+
+    // Update cached _mayUseTenant to reflect current state.
+    _mayUseTenant = getAuthorizationManager().isAuthEnabled()
+        ? _isAuthorizedForPrivilege(
+              Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::useTenant))
         : true;
 }
 

@@ -4,10 +4,7 @@
  *
  * @tags: [uses_change_streams, requires_replication]
  */
-(function() {
-"use strict";
-
-load("jstests/multiVersion/libs/multi_cluster.js");  // For upgradeCluster.
+import "jstests/multiVersion/libs/multi_cluster.js";
 
 // Checking UUID consistency uses cached connections, which are not valid across restarts or
 // stepdowns.
@@ -344,8 +341,8 @@ function runTests(downgradeVersion) {
     jsTestLog("Running test with 'downgradeVersion': " + downgradeVersion);
     const downgradeFCV = downgradeVersion === "last-lts" ? lastLTSFCV : lastContinuousFCV;
     // Downgrade the entire cluster to the 'downgradeVersion' binVersion.
-    assert.commandWorked(
-        st.s.getDB(dbName).adminCommand({setFeatureCompatibilityVersion: downgradeFCV}));
+    assert.commandWorked(st.s.getDB(dbName).adminCommand(
+        {setFeatureCompatibilityVersion: downgradeFCV, confirm: true}));
     st.downgradeCluster(downgradeVersion);
 
     // Refresh our reference to the sharded collection post-downgrade.
@@ -361,9 +358,9 @@ runTests('last-continuous');
 
 // Upgrade the entire cluster back to the latest version.
 st.upgradeCluster('latest', {waitUntilStable: true});
-assert.commandWorked(st.s.getDB(dbName).adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+assert.commandWorked(
+    st.s.getDB(dbName).adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
 
 // Test resuming change streams after downgrading the cluster to 'last-lts'.
 runTests('last-lts');
 st.stop();
-}());

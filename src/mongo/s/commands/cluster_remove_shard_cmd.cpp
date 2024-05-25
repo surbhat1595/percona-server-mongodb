@@ -105,7 +105,7 @@ public:
         auto cmdResponseStatus = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-            "admin",
+            DatabaseName::kAdmin,
             CommandHelpers::appendMajorityWriteConcern(
                 CommandHelpers::appendGenericCommandArgs(cmdObj,
                                                          BSON("_configsvrRemoveShard" << target)),
@@ -117,8 +117,8 @@ public:
 
         return true;
     }
-
-} removeShardCmd;
+};
+MONGO_REGISTER_COMMAND(RemoveShardCmd);
 
 }  // namespace
 }  // namespace mongo

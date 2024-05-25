@@ -40,8 +40,8 @@
 #include "mongo/db/pipeline/query_request_conversion.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/query_shape.h"
-#include "mongo/db/query/query_stats.h"
-#include "mongo/db/query/query_stats_find_key_generator.h"
+#include "mongo/db/query/query_stats/find_key_generator.h"
+#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -90,8 +90,16 @@ public:
         return ReadWriteType::kRead;
     }
 
-    bool shouldAffectCommandCounter() const final {
+    /**
+     * A find command does not increment the command counter, but rather increments the
+     * query counter.
+     */
+    bool shouldAffectCommandCounter() const override final {
         return false;
+    }
+
+    bool shouldAffectQueryCounter() const override final {
+        return true;
     }
 
     bool allowedInTransactions() const final {
@@ -157,7 +165,7 @@ public:
                         opCtx, findCommand->getNamespaceOrUUID().nss()));
                 shardResponses = scatterGatherVersionedTargetByRoutingTable(
                     opCtx,
-                    findCommand->getNamespaceOrUUID().nss().db_forSharding(),
+                    findCommand->getNamespaceOrUUID().nss().dbName(),
                     findCommand->getNamespaceOrUUID().nss(),
                     cri,
                     explainCmd,
@@ -201,8 +209,6 @@ public:
 
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) {
             CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
-            // We count find command as a query op.
-            globalOpCounters.gotQuery();
 
             Impl::checkCanRunHere(opCtx);
 
@@ -215,14 +221,20 @@ public:
             auto& parsedFind = parsedFindResult.second;
 
             if (!_didDoFLERewrite) {
-                BSONObj queryShape = query_shape::extractQueryShape(
-                    *parsedFind,
-                    SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
-                    expCtx);
-                query_stats::registerRequest(opCtx, expCtx->ns, [&]() {
-                    return std::make_unique<query_stats::FindKeyGenerator>(
-                        expCtx, *parsedFind, std::move(queryShape));
-                });
+                query_stats::registerRequest(
+                    opCtx,
+                    expCtx->ns,
+                    [&]() {
+                        // This callback is either never invoked or invoked immediately within
+                        // registerRequest, so use-after-move of parsedFind isn't an issue.
+                        BSONObj queryShape = query_shape::extractQueryShape(
+                            *parsedFind,
+                            SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+                            expCtx);
+                        return std::make_unique<query_stats::FindKeyGenerator>(
+                            expCtx, *parsedFind, std::move(queryShape));
+                    },
+                    /*requiresFullQueryStatsFeatureFlag*/ false);
             }
             auto cq = uassertStatusOK(CanonicalQuery::canonicalize(expCtx, std::move(parsedFind)));
 
@@ -275,6 +287,7 @@ public:
             auto findCommand = query_request_helper::makeFromFindCommand(
                 std::move(cmdObj),
                 std::move(nss),
+                SerializationContext::stateDefault(),
                 APIParameters::get(opCtx).getAPIStrict().value_or(false));
             if (!findCommand->getReadConcern()) {
                 if (opCtx->isStartingMultiDocumentTransaction() ||

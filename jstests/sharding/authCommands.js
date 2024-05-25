@@ -1,14 +1,11 @@
 /**
  * This tests using DB commands with authentication enabled when sharded.
  */
-(function() {
-'use strict';
-
 // Multiple users cannot be authenticated on one connection within a session.
 TestData.disableImplicitSessions = true;
 
-load("jstests/replsets/rslib.js");
-load("jstests/sharding/libs/find_chunks_util.js");
+import {awaitRSClientHosts} from "jstests/replsets/rslib.js";
+import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
 
 // Replica set nodes started with --shardsvr do not enable key generation until they are added
 // to a sharded cluster and reject commands with gossiped clusterTime from users without the
@@ -214,6 +211,8 @@ var checkWriteOps = function(hasWriteAuth) {
 };
 
 var checkAdminOps = function(hasAuth) {
+    const isMultiversion = jsTest.options().shardMixedBinVersions ||
+        jsTest.options().useRandomBinVersionsWithinReplicaSet;
     if (hasAuth) {
         checkCommandSucceeded(adminDB, {getCmdLineOpts: 1});
         checkCommandSucceeded(adminDB, {serverStatus: 1});
@@ -228,6 +227,9 @@ var checkAdminOps = function(hasAuth) {
         checkCommandSucceeded(
             adminDB,
             {moveChunk: 'test.foo', find: chunk.min, to: st.rs1.name, _waitForDelete: true});
+        if (!isMultiversion) {
+            checkCommandSucceeded(adminDB, {lockInfo: 1});
+        }
     } else {
         checkCommandFailed(adminDB, {getCmdLineOpts: 1});
         checkCommandFailed(adminDB, {serverStatus: 1});
@@ -242,6 +244,9 @@ var checkAdminOps = function(hasAuth) {
         checkCommandFailed(
             adminDB,
             {moveChunk: 'test.foo', find: chunkKey, to: st.rs1.name, _waitForDelete: true});
+        if (!isMultiversion) {
+            checkCommandFailed(adminDB, {lockInfo: 1});
+        }
     }
 };
 
@@ -310,4 +315,3 @@ checkAddShard(true);
 st.printShardingStatus();
 
 st.stop();
-})();

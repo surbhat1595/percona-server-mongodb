@@ -279,11 +279,6 @@ OpMsgRequest OpMsgRequest::fromDBAndBody(const DatabaseName& db,
     return OpMsgRequestBuilder::create(db, std::move(body), extraFields);
 }
 
-OpMsgRequest OpMsgRequest::fromDBAndBody(StringData db, BSONObj body, const BSONObj& extraFields) {
-    return fromDBAndBody(
-        DatabaseNameUtil::deserialize(boost::none, db), std::move(body), extraFields);
-}
-
 boost::optional<TenantId> parseDollarTenant(const BSONObj body) {
     if (auto tenant = body.getField("$tenant")) {
         return TenantId::parseFromBSON(tenant);
@@ -296,19 +291,25 @@ DatabaseName OpMsgRequest::getDbName() const {
     if (!gMultitenancySupport) {
         return DatabaseNameUtil::deserialize(boost::none, getDatabase());
     }
+    auto tenantId = getValidatedTenantId() ? getValidatedTenantId() : parseDollarTenant(body);
 
-    SerializationContext sc = SerializationContext::stateCommandRequest();
-    auto tenantId = getValidatedTenantId();
-    if (!tenantId) {
-        tenantId = parseDollarTenant(body);
-    }
-    sc.setTenantIdSource(tenantId ? true : false);
-
-    if (auto const expectPrefix = body.getField("expectPrefix")) {
-        sc.setPrefixState(expectPrefix.boolean());
-    }
-    return DatabaseNameUtil::deserialize(tenantId, getDatabase(), sc);
+    return DatabaseNameUtil::deserialize(tenantId, getDatabase(), getSerializationContext());
 }
+
+SerializationContext OpMsgRequest::getSerializationContext() const {
+    if (!gMultitenancySupport) {
+        return SerializationContext::stateDefault();
+    }
+    auto serializationCtx = SerializationContext::stateCommandRequest();
+    auto tenantId = getValidatedTenantId() ? getValidatedTenantId() : parseDollarTenant(body);
+
+    serializationCtx.setTenantIdSource(tenantId ? true : false);
+    if (auto const expectPrefix = body.getField("expectPrefix")) {
+        serializationCtx.setPrefixState(expectPrefix.boolean());
+    }
+    return serializationCtx;
+}
+
 
 bool appendDollarTenant(BSONObjBuilder& builder,
                         const TenantId& tenant,
@@ -323,23 +324,36 @@ bool appendDollarTenant(BSONObjBuilder& builder,
     }
 
     if (gMultitenancySupport) {
-        if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)) {
-            tenant.serializeToBSON("$tenant", &builder);
-            return true;
-        }
+        tenant.serializeToBSON("$tenant", &builder);
+        return true;
     }
     return false;
 }
 
-void appendDollarDbAndTenant(BSONObjBuilder& builder,
-                             const DatabaseName& dbName,
-                             boost::optional<TenantId> existingDollarTenant = boost::none) {
-    if (!dbName.tenantId() ||
-        appendDollarTenant(builder, dbName.tenantId().value(), existingDollarTenant)) {
-        builder.append("$db", dbName.serializeWithoutTenantPrefix_UNSAFE());
+BSONObj appendDollarDbAndTenant(const DatabaseName& dbName,
+                                BSONObj body,
+                                const BSONObj& extraFields,
+                                const SerializationContext& sc) {
+    auto existingDollarTenant = parseDollarTenant(body);
+    BSONObjBuilder builder(std::move(body));
+    builder.appendElements(extraFields);
+
+    if (sc != SerializationContext::stateDefault()) {
+        // Recreate each of the fields according to the sc when copying the body from an existing
+        // request.
+        if (sc.receivedNonPrefixedTenantId() && dbName.tenantId())
+            appendDollarTenant(builder, dbName.tenantId().value(), existingDollarTenant);
+        builder.append("$db", DatabaseNameUtil::serialize(dbName, sc));
+        if (sc.getPrefix() != SerializationContext::Prefix::Default)
+            builder.append("expectPrefix",
+                           sc.getPrefix() == SerializationContext::Prefix::IncludePrefix);
     } else {
-        builder.append("$db", DatabaseNameUtil::serialize(dbName));
+        if (dbName.tenantId())
+            appendDollarTenant(builder, dbName.tenantId().value(), existingDollarTenant);
+        builder.append("$db", dbName.serializeWithoutTenantPrefix_UNSAFE());
     }
+
+    return builder.obj();
 }
 
 void OpMsgRequest::setDollarTenant(const TenantId& tenant) {
@@ -358,23 +372,11 @@ OpMsgRequest OpMsgRequestBuilder::createWithValidatedTenancyScope(
     const DatabaseName& dbName,
     boost::optional<auth::ValidatedTenancyScope> validatedTenancyScope,
     BSONObj body,
-    const BSONObj& extraFields) {
-    auto dollarTenant = parseDollarTenant(body);
+    const BSONObj& extraFields,
+    const SerializationContext& sc) {
     OpMsgRequest request;
-    request.body = ([&] {
-        BSONObjBuilder bodyBuilder(std::move(body));
-        bodyBuilder.appendElements(extraFields);
-        if (dollarTenant) {
-            appendDollarDbAndTenant(bodyBuilder, dbName, dollarTenant);
-        } else if (validatedTenancyScope && !validatedTenancyScope->hasAuthenticatedUser()) {
-            // Add $tenant into the body if the validated tenant id comes from $tenant.
-            appendDollarDbAndTenant(bodyBuilder, dbName);
-        } else {
-            bodyBuilder.append("$db", DatabaseNameUtil::serialize(dbName));
-        }
-        return bodyBuilder.obj();
-    }());
 
+    request.body = appendDollarDbAndTenant(dbName, std::move(body), extraFields, sc);
     request.validatedTenancyScope = validatedTenancyScope;
     return request;
 }
@@ -389,7 +391,8 @@ std::string compactStr(const std::string& input) {
 
 OpMsgRequest OpMsgRequestBuilder::create(const DatabaseName& dbName,
                                          BSONObj body,
-                                         const BSONObj& extraFields) {
+                                         const BSONObj& extraFields,
+                                         const SerializationContext& sc) {
     int bodySize = body.objsize();
     int extraFieldsSize = extraFields.objsize();
 
@@ -406,16 +409,11 @@ OpMsgRequest OpMsgRequestBuilder::create(const DatabaseName& dbName,
             "body"_attr = compactStr(body.toString()),
             "db"_attr = dbName.toStringForErrorMsg(),
             "extraFields"_attr = compactStr(extraFields.toString()));
-    }
-
-    auto dollarTenant = parseDollarTenant(body);
-    BSONObjBuilder bodyBuilder(std::move(body));
-    bodyBuilder.appendElements(extraFields);
-
-    appendDollarDbAndTenant(bodyBuilder, dbName, dollarTenant);
+    };
 
     OpMsgRequest request;
-    request.body = bodyBuilder.obj();
+
+    request.body = appendDollarDbAndTenant(dbName, std::move(body), extraFields, sc);
     return request;
 }
 

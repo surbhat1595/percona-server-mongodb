@@ -12,9 +12,19 @@
 import {checkCascadesOptimizerEnabled} from "jstests/libs/optimizer_utils.js";
 import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
+(function() {
+"use strict";
+
+// Only run this test for debug=off opt=on without sanitizers active. With any of these activated,
+// the stack frames are larger and can more easily stack overflow.
 const debugBuild = db.adminCommand("buildInfo").debug;
-// For debug builds we create smaller queries so the test runs in a reasonable amount of time.
-const debugDivider = debugBuild ? 100 : 1;
+if (debugBuild || !_optimizationsEnabled() || _isAddressSanitizerActive() ||
+    _isLeakSanitizerActive() || _isThreadSanitizerActive() ||
+    _isUndefinedBehaviorSanitizerActive()) {
+    jsTestLog("Returning early because debug is on, opt is off, or a sanitizer is enabled.");
+    return;
+}
+
 const isBonsaiEnabled = checkCascadesOptimizerEnabled(db);
 const isSBEEnabled = checkSBEEnabled(db);
 
@@ -35,29 +45,25 @@ function runAgg(pipeline) {
 
 // Construct a {$match: {a: {$in: [0, 1, 2, ...]}}}.
 function testLargeIn() {
-    // TODO: SERVER-78631 remove check after ticket is done. These are Bonsai-specific issues with
-    // PSR.
-    if (!isBonsaiEnabled) {
-        // Int limit is different than double limit.
-        const filterValsInts = range(1200000 / debugDivider).map(i => NumberInt(i));
-        runAgg([{$match: {a: {$in: filterValsInts}}}]);
+    jsTestLog("Testing large $in");
+    // Int limit is different than double limit.
+    const filterValsInts = range(1200000).map(i => NumberInt(i));
+    runAgg([{$match: {a: {$in: filterValsInts}}}]);
 
-        const filterValsDoubles = range(1000000 / debugDivider).map(i => i * 1.0);
-        runAgg([{$match: {a: {$in: filterValsDoubles}}}]);
-    }
+    const filterValsDoubles = range(1000000).map(i => i * 1.0);
+    runAgg([{$match: {a: {$in: filterValsDoubles}}}]);
 }
 
 // Construct a {$project: {a0: 1, a1: 1, ...}}.
 function testLargeProject() {
-    // TODO: SERVER-78580 uncomment this test. This is a project parsing issue affecting all
-    // engines.
-    // const projectFields = {};
-    // range(1000000 / debugDivider).forEach(function(i) {
-    //     projectFields["a" + i] = NumberInt(1);
-    // });
-    // runAgg([{$project: projectFields}]);
+    jsTestLog("Testing large $project");
+    const projectFields = {};
+    range(1000000).forEach(function(i) {
+        projectFields["a" + i] = NumberInt(1);
+    });
+    runAgg([{$project: projectFields}]);
 
-    const pathSize = 10000000 / debugDivider;
+    const pathSize = 1000000;
     let nestedProjectField = "a0";
     for (let i = 1; i < pathSize; i++) {
         nestedProjectField += ".a" + i;
@@ -67,9 +73,8 @@ function testLargeProject() {
 
 // Run $and and $or with many different types of predicates.
 function testLargeAndOrPredicates() {
-    // TODO: SERVER-78635
-    // TODO: SERVER-78631 remove this early return once this and the ticket above are done. These
-    // are Bonsai-specific issues with PSR.
+    // TODO: SERVER-78635 remove this early return once this ticket is done. This is a
+    // Bonsai-specific issues with PSR.
     if (isBonsaiEnabled) {
         return;
     }
@@ -78,65 +83,69 @@ function testLargeAndOrPredicates() {
     if (isSBEEnabled) {
         return;
     }
+    jsTestLog("Testing large $and/$or predicates");
 
+    // TODO: SERVER-79092 uncomment this test. This is an issue with match expression
+    // auto-parameterization. This affects both classic and SBE.
     // Large $match of the form {$match: {a0: 1, a1: 1, ...}}
-    const largeMatch = {};
-    range(1200000 / debugDivider).forEach(function(i) {
-        largeMatch["a" + i] = NumberInt(1);
-    });
-    runAgg([{$match: largeMatch}]);
+    // const largeMatch = {};
+    // range(1200000).forEach(function(i) {
+    //     largeMatch["a" + i] = NumberInt(1);
+    // });
+    // runAgg([{$match: largeMatch}]);
 
-    function intStream(n) {
-        return range(n / debugDivider).map(i => NumberInt(i));
-    }
+    // function intStream(n) {
+    //     return range(n).map(i => NumberInt(i));
+    // }
 
-    const andOrFilters = [
-        // Plain a=i filter.
-        intStream(800000).map(function(i) {
-            return {a: i};
-        }),
-        // a_i = i filter. Different field for each value.
-        intStream(600000).map(function(i) {
-            const field = "a" + i;
-            return {[field]: i};
-        }),
-        // Mix of lt and gt with the same field.
-        intStream(500000).map(function(i) {
-            const predicate = i % 2 ? {$lt: i} : {$gt: i};
-            return {a: predicate};
-        }),
-        // Mix of lt and gt with different fields.
-        intStream(400000).map(function(i) {
-            const field = "a" + i;
-            const predicate = i % 2 ? {$lt: i} : {$gt: i};
-            return {[field]: predicate};
-        }),
-        // Mix of lt and gt wrapped in not with different fields.
-        intStream(300000).map(function(i) {
-            const field = "a" + i;
-            const predicate = i % 2 ? {$lt: i} : {$gt: i};
-            return {[field]: {$not: predicate}};
-        }),
-        // $exists on different fields.
-        intStream(400000).map(function(i) {
-            const field = "a" + i;
-            return {[field]: {$exists: true}};
-        }),
-        intStream(400000).map(function(i) {
-            const field = "a" + i;
-            return {[field]: {$exists: false}};
-        })
-    ];
-    for (const m of andOrFilters) {
-        runAgg([{$match: {$and: m}}]);
-        runAgg([{$match: {$or: m}}]);
-    }
+    // const andOrFilters = [
+    //     // Plain a=i filter.
+    //     intStream(800000).map(function(i) {
+    //         return {a: i};
+    //     }),
+    //     // a_i = i filter. Different field for each value.
+    //     intStream(600000).map(function(i) {
+    //         const field = "a" + i;
+    //         return {[field]: i};
+    //     }),
+    //     // Mix of lt and gt with the same field.
+    //     intStream(500000).map(function(i) {
+    //         const predicate = i % 2 ? {$lt: i} : {$gt: i};
+    //         return {a: predicate};
+    //     }),
+    //     // Mix of lt and gt with different fields.
+    //     intStream(400000).map(function(i) {
+    //         const field = "a" + i;
+    //         const predicate = i % 2 ? {$lt: i} : {$gt: i};
+    //         return {[field]: predicate};
+    //     }),
+    //     // Mix of lt and gt wrapped in not with different fields.
+    //     intStream(300000).map(function(i) {
+    //         const field = "a" + i;
+    //         const predicate = i % 2 ? {$lt: i} : {$gt: i};
+    //         return {[field]: {$not: predicate}};
+    //     }),
+    //     // $exists on different fields.
+    //     intStream(400000).map(function(i) {
+    //         const field = "a" + i;
+    //         return {[field]: {$exists: true}};
+    //     }),
+    //     intStream(400000).map(function(i) {
+    //         const field = "a" + i;
+    //         return {[field]: {$exists: false}};
+    //     })
+    // ];
+    // for (const m of andOrFilters) {
+    //     runAgg([{$match: {$and: m}}]);
+    //     runAgg([{$match: {$or: m}}]);
+    // }
 }
 
 // Test deeply nested queries.
 function testDeeplyNestedPath() {
+    jsTestLog("Testing deeply nested $match");
     let deepQuery = {a: {$eq: 1}};
-    const depth = debugBuild ? 40 : 72;
+    const depth = 72;
     for (let i = 0; i < depth; i++) {
         deepQuery = {a: {$elemMatch: deepQuery}};
     }
@@ -145,27 +154,26 @@ function testDeeplyNestedPath() {
 
 // Test pipeline length.
 function testPipelineLimits() {
-    const pipelineLimit = debugBuild ? 200 : 1000;
+    jsTestLog("Testing large agg pipelines");
+    const pipelineLimit = 1000;
     let stages = [
         {$limit: 1},
         {$skip: 1},
         {$sort: {a: 1}},
         {$unwind: "$a"},
+        {$match: {a: {$mod: [4, 2]}}},
+        {$group: {_id: "$a"}},
         {$addFields: {c: {$add: ["$c", "$d"]}}},
         {$addFields: {a: 5}},
-        {$match: {a: {$mod: [4, 2]}}},
+        // TODO SERVER-78354: Uncomment this test and ensure it passes in the
+        // aggregation_disabled_optimization suite.
+        // {$match: {a: 1}}
     ];
 
     if (!isBonsaiEnabled) {
         // TODO: SERVER-78354 should move $project, $addFields, and $unwind to "stages" so $project
         // runs with Bonsai. This is an issue with the reference tracker.
         stages.push({$project: {a: 1}});
-        stages.push({$match: {a: 1}});
-    }
-    if (!isSBEEnabled && !isBonsaiEnabled) {
-        // TODO: SERVER-78477 should move this to "stages" so $group runs with SBE. This is an issue
-        // with SBE stagebuilders.
-        stages.push({$group: {_id: "$a"}});
     }
     for (const stage of stages) {
         const pipeline = range(pipelineLimit).map(_ => stage);
@@ -204,16 +212,18 @@ function generateNestedAndOr(type, branchingFactor, maxDepth) {
 }
 
 function testNestedAndOr() {
-    for (const topLevelType of ['$and', '$or']) {
-        // Test different types of nested queries
-        let [branchingFactor, maxDepth] = debugBuild ? [3, 6] : [3, 10];
-        const deepNarrowQuery = generateNestedAndOr(topLevelType, branchingFactor, maxDepth);
-        runAgg([{$match: deepNarrowQuery}]);
+    // TODO: SERVER-79092 uncomment this test. This is an issue with match expression
+    // auto-parameterization. jsTestLog("Testing nested $and/$or"); for (const topLevelType of
+    // ['$and', '$or']) {
+    //     // Test different types of nested queries
+    //     let [branchingFactor, maxDepth] = [3, 10];
+    //     const deepNarrowQuery = generateNestedAndOr(topLevelType, branchingFactor, maxDepth);
+    //     runAgg([{$match: deepNarrowQuery}]);
 
-        [branchingFactor, maxDepth] = debugBuild ? [6, 3] : [10, 5];
-        const shallowWideQuery = generateNestedAndOr(topLevelType, branchingFactor, maxDepth);
-        runAgg([{$match: shallowWideQuery}]);
-    }
+    //     [branchingFactor, maxDepth] = [10, 5];
+    //     const shallowWideQuery = generateNestedAndOr(topLevelType, branchingFactor, maxDepth);
+    //     runAgg([{$match: shallowWideQuery}]);
+    // }
 }
 
 const tests = [
@@ -228,3 +238,4 @@ const tests = [
 for (const test of tests) {
     test();
 }
+})();

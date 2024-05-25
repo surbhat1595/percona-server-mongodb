@@ -42,7 +42,6 @@ buildvariants:
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: libunwind_tests
@@ -166,7 +165,6 @@ buildvariants:
     - amazon2-arm64-large
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: replica_sets_gen
@@ -303,6 +301,8 @@ buildvariants:
     distros:
     - ubuntu1804-arm64-build
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -316,7 +316,12 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: x86_64-amazon2023
-    compile_flags: --ssl MONGO_DISTMOD=amazon2023 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars --use-diagnostic-latches=off
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=amazon2023
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --use-diagnostic-latches=off
     test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_external_data_source,requires_latch_analyzer
     has_packages: true
     packager_script: packager.py
@@ -339,7 +344,6 @@ buildvariants:
     - amazon2023.0-large
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: replica_sets_gen
@@ -368,7 +372,12 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: x86_64-enterprise-amazon2023
-    compile_flags: --ssl MONGO_DISTMOD=amazon2023 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars --use-diagnostic-latches=off
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=amazon2023
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --use-diagnostic-latches=off
     crypt_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     # TODO BUILD-13887 should fix uses_pykmip incompatibility.
     test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,uses_pykmip,requires_v4_0,requires_external_data_source,requires_latch_analyzer
@@ -459,8 +468,119 @@ buildvariants:
     distros:
     - ubuntu2204-large
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
+
+# This variant is a special variant to test LTO.
+# We just want it to bake for a while before considering that we turn it on by default.
+- name: enterprise-amazon2023-lto
+  display_name: "Enterprise Amazon Linux 2023 LTO"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  modules:
+  - enterprise
+  run_on:
+  - amazon2023.0-small
+  expansions:
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=amazon2023
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --use-diagnostic-latches=off
+      --lto
+      --linker=gold
+      --link-model=object
+    crypt_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
+    # TODO BUILD-13887 should fix uses_pykmip incompatibility.
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,uses_pykmip,requires_v4_0,requires_external_data_source,requires_latch_analyzer
+    has_packages: true
+    multiversion_platform: amazon2023
+    multiversion_edition: enterprise
+    multiversion_architecture: x86_64
+    repo_edition: enterprise
+    scons_cache_scope: shared
+    compile_variant: enterprise-amazon2023-lto
+  tasks:
+  - name: compile_test_and_package_serial_lto_no_unittests_TG
+    distros:
+    - amazon2023.0-large
+  - name: test_api_version_compatibility
+  - name: .aggfuzzer !.feature_flag_guarded !.multiversion
+  - name: .aggregation !.feature_flag_guarded
+  - name: audit
+  - name: .auth !.multiversion
+  - name: .causally_consistent !.sharding
+  - name: .change_streams
+  - name: .change_stream_fuzzer
+  - name: .misc_js
+  - name: .concurrency !.large !.ubsan !.no_txns
+  - name: .concurrency .large !.ubsan !.no_txns
+    distros:
+    - amazon2023.0-large
+  - name: config_fuzzer_concurrency
+  - name: config_fuzzer_jsCore
+  - name: disk_wiredtiger
+  - name: .encrypt
+  - name: idl_tests
+  - name: initial_sync_fuzzer_gen
+  - name: jsCore
+    distros:
+    - amazon2023.0-large
+  - name: .jscore .common !jsCore !.feature_flag_guarded
+  - name: jsCore_txns_large_txns_format
+  - name: json_schema
+  - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
+  - name: libunwind_tests
+  - name: mqlrun
+  - name: .multi_shard
+  - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
+  - name: .query_fuzzer
+  - name: .read_write_concern .large
+    distros:
+    - amazon2023.0-large
+  - name: .read_write_concern !.large
+  - name: .replica_sets !.encrypt !.auth
+    distros:
+    - amazon2023.0-large
+  - name: replica_sets_api_version_jscore_passthrough_gen
+  - name: replica_sets_reconfig_jscore_passthrough_gen
+  - name: retryable_writes_jscore_passthrough_gen
+  - name: retryable_writes_jscore_stepdown_passthrough_gen
+    distros:
+    - amazon2023.0-large
+  - name: .read_only
+  - name: .rollbackfuzzer
+  - name: sasl
+  - name: search
+  - name: search_auth
+  - name: search_pinned_connections_auth
+  - name: search_ssl
+  - name: session_jscore_passthrough
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: sharding_api_version_jscore_passthrough_gen
+  - name: .sharding .txns
+  - name: .sharding .common !.multiversion
+  # TODO: SERVER-79886 Fix broken .crypt task
+  # - name: .crypt
+  #   distros:
+  #   - amazon2023.0-large
+  - name: secondary_reads_passthrough_gen
+  - name: server_discovery_and_monitoring_json_test_TG
+  - name: .serverless
+    distros:
+    - amazon2023.0-large
+  - name: server_selection_json_test_TG
+    distros:
+    - amazon2023.0-large
+  # TODO: SERVER-79886 Fix broken test_packages task
+  # - name: test_packages
+  #   distros:
+  #   - amazon2023.0-large
+  - name: generate_buildid_to_debug_symbols_mapping
+
 
 - name: amazon2023-arm64
   display_name: Amazon Linux 2023 arm64
@@ -472,7 +592,12 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: aarch64-amazon2023
-    compile_flags: --ssl MONGO_DISTMOD=amazon2023 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars --use-diagnostic-latches=off
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=amazon2023
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --use-diagnostic-latches=off
     test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_external_data_source,requires_latch_analyzer
     has_packages: true
     packager_script: packager.py
@@ -496,7 +621,6 @@ buildvariants:
     - amazon2023.0-arm64-large
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: replica_sets_gen
@@ -525,7 +649,12 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: aarch64-enterprise-amazon2023
-    compile_flags: --ssl MONGO_DISTMOD=amazon2023 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars --use-diagnostic-latches=off
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=amazon2023
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --use-diagnostic-latches=off
     crypt_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     # TODO BUILD-13887 should fix uses_pykmip incompatibility.
     test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,uses_pykmip,requires_v4_0,requires_external_data_source,requires_latch_analyzer
@@ -619,129 +748,123 @@ buildvariants:
     distros:
     - ubuntu2204-arm64-large
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
-- name: debian10
-  display_name: Debian 10
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  run_on:
-  - debian10-test
-  expansions:
-    push_path: linux
-    push_bucket: downloads.mongodb.org
-    push_name: linux
-    push_arch: x86_64-debian10
-    test_flags: --excludeWithAnyTags=requires_external_data_source,requires_latch_analyzer
-    compile_flags: >-
-      --ssl
-      MONGO_DISTMOD=debian10
-      -j$(grep -c ^processor /proc/cpuinfo)
-      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      --use-diagnostic-latches=off
-    multiversion_platform: debian10
-    multiversion_edition: targeted
-    has_packages: true
-    packager_script: packager.py
-    packager_arch: x86_64
-    packager_distro: debian10
-    repo_edition: org
-    scons_cache_scope: shared
-    large_distro_name: debian10-build
-    compile_variant: debian10
-  tasks:
-  - name: compile_test_and_package_serial_no_unittests_TG
-    distros:
-    - debian10-build
-  - name: .aggfuzzer .common !.feature_flag_guarded
-  - name: aggregation !.feature_flag_guarded
-  - name: aggregation_auth
-  - name: .auth !.audit !.multiversion
-  - name: sharding_auth_gen
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: .misc_js
-  - name: .concurrency .common
-  - name: concurrency_replication_causal_consistency_gen
-  - name: disk_wiredtiger
-  - name: free_monitoring
-  - name: .jscore .common !.decimal !.feature_flag_guarded
-  - name: .jstestfuzz .common
-  - name: multiversion_gen
-  - name: replica_sets_gen
-  - name: .replica_sets .common
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.csrs !.encrypt
-  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
-  - name: .ssl
-  - name: .stitch
-  - name: test_packages
-    distros:
-    - ubuntu2004-package
-  - name: .publish
-  - name: generate_buildid_to_debug_symbols_mapping
-
-- name: enterprise-debian10-64
-  display_name: Enterprise Debian 10
+# This variant is a special variant to test LTO.
+# We just want it to bake for a while before considering that we turn it on by default.
+- name: enterprise-amazon2023-arm64-lto
+  display_name: "Enterprise Amazon Linux 2023 arm64 LTO"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
-  - debian10-test
+  - amazon2023.0-arm64-small
   expansions:
-    additional_package_targets: >-
-      archive-mongocryptd
-      archive-mongocryptd-debug
-      archive-mh
-      archive-mh-debug
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: x86_64-enterprise-debian10
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
     compile_flags: >-
       --ssl
-      MONGO_DISTMOD=debian10
+      MONGO_DISTMOD=amazon2023
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
       --use-diagnostic-latches=off
-    test_flags: --excludeWithAnyTags=requires_external_data_source,requires_latch_analyzer
-    crypt_task_compile_flags: >-
-      SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic
-      -Wl,--no-gnu-unique"
-      CCFLAGS="-fno-gnu-unique"
-    multiversion_edition: enterprise
-    multiversion_platform: debian10
+      --lto
+      --linker=gold
+      --link-model=object
+    crypt_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
+    # TODO BUILD-13887 should fix uses_pykmip incompatibility.
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,uses_pykmip,requires_v4_0,requires_external_data_source,requires_latch_analyzer
     has_packages: true
+    multiversion_platform: amazon2023
+    multiversion_edition: enterprise
+    multiversion_architecture: aarch64
     packager_script: packager_enterprise.py
-    packager_arch: x86_64
-    packager_distro: debian10
+    packager_arch: aarch64
+    packager_distro: amazon2023
     repo_edition: enterprise
     scons_cache_scope: shared
-    large_distro_name: debian10-build
-    compile_variant: enterprise-debian10-64
+    compile_variant: enterprise-amazon2023-arm64-lto
   tasks:
-  - name: compile_test_and_package_serial_no_unittests_TG
+  - name: compile_test_and_package_serial_lto_no_unittests_TG
     distros:
-    - debian10-build
-  - name: .aggfuzzer .common !.feature_flag_guarded
+    - amazon2023.0-arm64-large
+  - name: test_api_version_compatibility
+  - name: .aggfuzzer !.feature_flag_guarded !.multiversion
+  - name: .aggregation !.feature_flag_guarded
   - name: audit
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
-  - name: .jepsen_docker
+  - name: .auth !.multiversion
+  - name: .causally_consistent !.sharding
+  - name: .change_streams
+  - name: .change_stream_fuzzer
+  - name: .misc_js
+  - name: .concurrency !.large !.ubsan !.no_txns
+  - name: .concurrency .large !.ubsan !.no_txns
     distros:
-    - debian10-large
-  - name: .jscore .common !.decimal !.sharding !.feature_flag_guarded
-  - name: .jstestfuzz .common
-  - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+    - amazon2023.0-arm64-large
+  - name: .config_fuzzer !.large
+  - name: .config_fuzzer .large
+    distros:
+    - amazon2023.0-arm64-large
+  - name: disk_wiredtiger
+  - name: .encrypt
+  - name: idl_tests
+  - name: initial_sync_fuzzer_gen
+  - name: jsCore
+    distros:
+    - amazon2023.0-arm64-large
+  - name: .jscore .common !jsCore !.feature_flag_guarded
+  - name: jsCore_min_batch_repeat_queries_ese_gsm
+  - name: jsCore_txns_large_txns_format
+  - name: json_schema
+  - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
+  - name: libunwind_tests
+  - name: mqlrun
+  - name: .multi_shard
+  - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
+  - name: .query_fuzzer
+  - name: .read_write_concern .large
+    distros:
+    - amazon2023.0-arm64-large
+  - name: .read_write_concern !.large
+  - name: .replica_sets !.encrypt !.auth
+    distros:
+    - amazon2023.0-arm64-large
+  - name: replica_sets_api_version_jscore_passthrough_gen
+  - name: replica_sets_reconfig_jscore_passthrough_gen
+  - name: retryable_writes_jscore_passthrough_gen
+  - name: retryable_writes_jscore_stepdown_passthrough_gen
+    distros:
+    - amazon2023.0-arm64-large
+  - name: .read_only
+  - name: .rollbackfuzzer
   - name: sasl
-  - name: sharding_auth_audit_gen
-  - name: .stitch
-  - name: .crypt
-  - name: .publish_crypt
-  - name: test_packages
+  - name: search
+  - name: search_auth
+  - name: search_pinned_connections_auth
+  - name: search_ssl
+  - name: session_jscore_passthrough
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: sharding_api_version_jscore_passthrough_gen
+  - name: .sharding .txns
+  - name: .sharding .common !.multiversion
+  # TODO: SERVER-79886 Fix broken .crypt task
+  # - name: .crypt
+  #   distros:
+  #   - amazon2023.0-arm64-large
+  - name: secondary_reads_passthrough_gen
+  - name: server_discovery_and_monitoring_json_test_TG
+  - name: .serverless
     distros:
-    - ubuntu2004-package
-  - name: .publish
+    - amazon2023.0-arm64-large
+  - name: server_selection_json_test_TG
+    distros:
+    - amazon2023.0-arm64-large
+  # TODO: SERVER-79886 Fix broken test_packages task
+  # - name: test_packages
+  #   distros:
+  #   - ubuntu2204-arm64-large
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: debian11
@@ -785,7 +908,6 @@ buildvariants:
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common !.decimal !.feature_flag_guarded
   - name: .jstestfuzz .common
   - name: multiversion_gen
@@ -901,7 +1023,6 @@ buildvariants:
     - rhel70
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: multiversion_gen
@@ -934,7 +1055,7 @@ buildvariants:
       --use-diagnostic-latches=off
     compile_variant: rhel76_compile_rhel70
   tasks:
-  - name: compile_and_archive_dist_test_then_package_TG
+  - name: compile_and_archive_dist_test_TG
     distros:
     - rhel70
   - name: .ssl
@@ -962,7 +1083,7 @@ buildvariants:
       --excludeWithAnyTags=requires_os_access,requires_latch_analyzer
     compile_variant: ubi8
   tasks:
-  - name: compile_and_archive_dist_test_then_package_TG
+  - name: compile_and_archive_dist_test_TG
     distros:
     - rhel80-large
   - name: jsCore
@@ -1012,7 +1133,6 @@ buildvariants:
     - rhel80-build
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: multiversion_gen
@@ -1161,6 +1281,8 @@ buildvariants:
     distros:
     - ubuntu2004-package
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: selinux_rhel8_enterprise
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
@@ -1203,7 +1325,6 @@ buildvariants:
     - rhel82-arm64-large
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: replica_sets_gen
@@ -1286,6 +1407,8 @@ buildvariants:
     distros:
     - ubuntu1804-arm64-build
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -1325,7 +1448,6 @@ buildvariants:
     - rhel90-build
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common !.multiversion
   - name: replica_sets_gen
@@ -1408,6 +1530,8 @@ buildvariants:
     distros:
     - ubuntu2204-large
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: selinux_rhel9_enterprise
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
@@ -1451,7 +1575,6 @@ buildvariants:
     - rhel90-arm64-large
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: replica_sets_gen
@@ -1536,6 +1659,8 @@ buildvariants:
     distros:
     - ubuntu2204-arm64-small
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -1586,7 +1711,6 @@ buildvariants:
     - suse12-sp5-large
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common !.decimal !.feature_flag_guarded
   - name: .jstestfuzz .common
   - name: multiversion_gen
@@ -1761,7 +1885,6 @@ buildvariants:
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common !.decimal !.feature_flag_guarded
   - name: .jstestfuzz .common
   - name: multiversion_gen
@@ -1778,254 +1901,6 @@ buildvariants:
     - ubuntu2004-package
   - name: generate_buildid_to_debug_symbols_mapping
 
-
-- name: ubuntu1804
-  display_name: Ubuntu 18.04
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  run_on:
-  - ubuntu1804-test
-  expansions:
-    push_path: linux
-    push_bucket: downloads.mongodb.org
-    push_name: linux
-    push_arch: x86_64-ubuntu1804
-    compile_flags: >-
-      --ssl
-      --ocsp-stapling=off
-      MONGO_DISTMOD=ubuntu1804
-      -j$(grep -c ^processor /proc/cpuinfo)
-      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      --use-diagnostic-latches=off
-    multiversion_platform: ubuntu1804
-    multiversion_edition: targeted
-    test_flags: --excludeWithAnyTags=requires_ocsp_stapling,requires_external_data_source,requires_latch_analyzer
-    has_packages: true
-    packager_script: packager.py
-    packager_arch: x86_64
-    packager_distro: ubuntu1804
-    repo_edition: org
-    scons_cache_scope: shared
-    large_distro_name: ubuntu1804-build
-    compile_variant: ubuntu1804
-  tasks:
-  - name: compile_test_and_package_serial_no_unittests_TG
-    distros:
-    - ubuntu1804-build
-  - name: .aggfuzzer .common !.feature_flag_guarded
-  - name: aggregation !.feature_flag_guarded
-  - name: .auth !.audit !.multiversion
-  - name: sharding_auth_gen
-  - name: .misc_js
-  - name: .concurrency .common
-  - name: concurrency_replication_causal_consistency_gen
-  - name: disk_wiredtiger
-  - name: free_monitoring
-  - name: .jepsen
-    distros:
-    - ubuntu1804-build
-  - name: .jscore .common
-  - name: .jstestfuzz .common
-  - name: libunwind_tests
-  - name: multiversion_gen
-  - name: .powercycle
-  - name: replica_sets_gen
-  - name: replica_sets_jscore_passthrough
-  - name: .sharding .txns
-  - name: sharding_gen
-  - name: sharding_jscore_passthrough
-  - name: watchdog_wiredtiger
-  - name: .ssl
-  - name: .stitch
-  - name: test_packages
-    distros:
-    - ubuntu2004-package
-  - name: .publish
-  - name: generate_buildid_to_debug_symbols_mapping
-
-- name: enterprise-ubuntu1804-64
-  display_name: Enterprise Ubuntu 18.04
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
-  run_on:
-  - ubuntu1804-test
-  stepback: false
-  expansions:
-    additional_package_targets: >-
-      archive-mongocryptd
-      archive-mongocryptd-debug
-      archive-mh
-      archive-mh-debug
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: x86_64-enterprise-ubuntu1804
-    compile_flags: >-
-      --ssl
-      --ocsp-stapling=off
-      MONGO_DISTMOD=ubuntu1804
-      -j$(grep -c ^processor /proc/cpuinfo)
-      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      --use-diagnostic-latches=off
-    crypt_task_compile_flags: >-
-      SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic
-      -Wl,--no-gnu-unique"
-      CCFLAGS="-fno-gnu-unique"
-    multiversion_platform: ubuntu1804
-    multiversion_edition: enterprise
-    test_flags: --excludeWithAnyTags=requires_ocsp_stapling,requires_external_data_source,requires_latch_analyzer
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: x86_64
-    packager_distro: ubuntu1804
-    repo_edition: enterprise
-    scons_cache_scope: shared
-    large_distro_name: ubuntu1804-build
-    # TODO SERVER-64479 remove external_auth_jobs_max once resolved
-    external_auth_jobs_max: 1
-    compile_variant: enterprise-ubuntu1804-64
-  tasks:
-  - name: compile_test_and_package_serial_no_unittests_TG
-    distros:
-    - ubuntu1804-build
-  - name: compile_build_tools_next_TG
-    distros:
-    - ubuntu1804-build
-  - name: .crypt
-  - name: .publish_crypt
-  - name: .aggfuzzer .common !.feature_flag_guarded
-  - name: audit
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: .encrypt !.aggregation !.replica_sets !.sharding !.jscore
-  - name: external_auth
-  - name: external_auth_aws
-  - name: .jepsen
-    distros:
-    - ubuntu1804-build
-  - name: .jscore .common !.decimal !.sharding !.feature_flag_guarded
-  - name: jsCore_auth
-  - name: .jstestfuzz .common
-  - name: libunwind_tests
-  - name: .multiversion_fuzzer
-  - name: .multiversion_passthrough
-  - name: .ocsp
-  - name: .random_multiversion_ds
-  - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
-  - name: sasl
-  - name: sharding_auth_audit_gen
-  - name: .watchdog
-  - name: test_packages
-    distros:
-    - ubuntu2004-package
-  - name: .publish
-  - name: generate_buildid_to_debug_symbols_mapping
-
-- name: enterprise-ubuntu1804-arm64
-  display_name: Enterprise Ubuntu 18.04 arm64
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
-  run_on:
-  - ubuntu1804-arm64-build
-  expansions:
-    additional_package_targets: >-
-      archive-mongocryptd
-      archive-mongocryptd-debug
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: aarch64-enterprise-ubuntu1804
-    compile_flags: >-
-      --ssl
-      --ocsp-stapling=off
-      MONGO_DISTMOD=ubuntu1804
-      -j$(grep -c ^processor /proc/cpuinfo)
-      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      --use-diagnostic-latches=off
-    crypt_task_compile_flags: >-
-      SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic
-      -Wl,--no-gnu-unique"
-      CCFLAGS="-fno-gnu-unique"
-    test_flags: --excludeWithAnyTags=requires_ocsp_stapling,requires_external_data_source,requires_increased_memlock_limits,requires_latch_analyzer
-    resmoke_jobs_max: 4 # Avoid starting too many mongod's on ARM test servers
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: arm64
-    packager_distro: ubuntu1804
-    repo_edition: enterprise
-    multiversion_platform: ubuntu1804
-    multiversion_architecture: aarch64
-    multiversion_edition: enterprise
-    scons_cache_scope: shared
-    compile_variant: enterprise-ubuntu1804-arm64
-  tasks:
-  - name: compile_test_and_package_serial_no_unittests_TG
-  - name: aggregation !.feature_flag_guarded
-  - name: aggregation_wildcard_fuzzer_gen
-  - name: .auth !.audit !.multiversion !.jscore
-  - name: sharding_auth_gen
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: .misc_js
-  - name: .concurrency .common
-  - name: concurrency_replication_causal_consistency_gen
-  - name: fle
-  - name: .jscore .common !.auth !.feature_flag_guarded
-  - name: .jstestfuzz .common
-  - name: replica_sets_gen
-  - name: .replica_sets .common
-  - name: .sharding .txns
-  - name: sharding_gen
-  - name: sharding_jscore_passthrough
-  - name: .ssl
-  - name: .stitch
-  - name: .crypt
-  - name: .publish_crypt
-  - name: test_packages
-    distros:
-    - ubuntu1804-arm64-build
-  - name: .publish
-  - name: generate_buildid_to_debug_symbols_mapping
-
-- name: ubuntu1804-arm64
-  display_name: Ubuntu 18.04 arm64
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  run_on:
-  - ubuntu1804-arm64-build
-  expansions:
-    push_path: linux
-    push_bucket: downloads.mongodb.org
-    push_name: linux
-    push_arch: aarch64-ubuntu1804
-    compile_flags: >-
-      --ssl
-      --ocsp-stapling=off
-      MONGO_DISTMOD=ubuntu1804
-      -j$(grep -c ^processor /proc/cpuinfo)
-      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      --use-diagnostic-latches=off
-    test_flags: --excludeWithAnyTags=requires_ocsp_stapling,requires_external_data_source,requires_latch_analyzer
-    resmoke_jobs_max: 8 # Avoid starting too many mongod's on ARM test servers
-    has_packages: true
-    packager_script: packager.py
-    packager_arch: arm64
-    packager_distro: ubuntu1804
-    repo_edition: org
-    multiversion_platform: ubuntu1804
-    multiversion_architecture: aarch64
-    multiversion_edition: targeted
-    scons_cache_scope: shared
-    compile_variant: ubuntu1804-arm64
-  tasks:
-  - name: compile_test_and_package_serial_no_unittests_TG
-  - name: free_monitoring
-  - name: jsCore
-  - name: replica_sets_jscore_passthrough
-  - name: test_packages
-    distros:
-    - ubuntu1804-arm64-build
-  - name: .publish
-  - name: generate_buildid_to_debug_symbols_mapping
 
 - name: ubuntu2204
   display_name: Ubuntu 22.04
@@ -2066,7 +1941,6 @@ buildvariants:
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: libunwind_tests
@@ -2123,7 +1997,6 @@ buildvariants:
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common
   - name: .jstestfuzz .common
   - name: libunwind_tests
@@ -2370,7 +2243,6 @@ buildvariants:
     compile_variant: ubuntu2004-arm64
   tasks:
   - name: compile_test_and_package_serial_no_unittests_TG
-  - name: free_monitoring
   - name: jsCore
   - name: replica_sets_jscore_passthrough
   - name: test_packages
@@ -2463,7 +2335,6 @@ buildvariants:
     compile_variant: ubuntu2204-arm64
   tasks:
   - name: compile_test_and_package_serial_no_unittests_TG
-  - name: free_monitoring
   - name: jsCore
   - name: replica_sets_jscore_passthrough
   - name: test_packages
@@ -2494,7 +2365,7 @@ buildvariants:
       --win-version-min=win10
       --use-diagnostic-latches=off
     num_scons_link_jobs_available: 0.25
-    python: '/cygdrive/c/python/python37/python.exe'
+    python: '/cygdrive/c/python/python39/python.exe'
     ext: zip
     scons_cache_scope: shared
     large_distro_name: windows-vsCurrent-large
@@ -2516,7 +2387,6 @@ buildvariants:
     - windows-vsCurrent-large
   - name: .concurrency .common
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: .jscore .common !.auth !.feature_flag_guarded
   - name: json_schema
   - name: .jstestfuzz !.initsync !.flow_control !.stepdowns
@@ -2560,7 +2430,7 @@ buildvariants:
       --win-version-min=win10
       --use-diagnostic-latches=off
     num_scons_link_jobs_available: 0.25
-    python: '/cygdrive/c/python/python37/python.exe'
+    python: '/cygdrive/c/python/python39/python.exe'
     ext: zip
     scons_cache_scope: shared
     multiversion_platform: windows
@@ -2646,7 +2516,6 @@ buildvariants:
   - name: .misc_js
   - name: .concurrency !.ubsan !.no_txns !.kill_terminate
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: initial_sync_fuzzer_gen
   - name: .jscore .common !.auth !.feature_flag_guarded
   - name: jsCore_txns_large_txns_format
@@ -2699,7 +2568,6 @@ buildvariants:
   - name: .misc_js
   - name: .concurrency !.ubsan !.no_txns !.kill_terminate
   - name: disk_wiredtiger
-  - name: free_monitoring
   - name: initial_sync_fuzzer_gen
   - name: .jscore .common !.auth !.feature_flag_guarded
   - name: jsCore_txns_large_txns_format
@@ -2829,14 +2697,12 @@ buildvariants:
       --use-diagnostic-latches=off
       --link-model=dynamic
       ENABLE_GRPC_BUILD=1
-      --use-libunwind=off
-    # TODO: SERVER-75120 disabling libunwind here until the test can pass
     compile_variant: enterprise-rhel-82-arm64-grpc
     scons_cache_scope: shared
   tasks:
-    - name: compile_test_and_package_parallel_unittest_stream_TG
-    - name: compile_test_and_package_parallel_core_stream_TG
-    - name: compile_test_and_package_parallel_dbtest_stream_TG
+    - name: compile_test_parallel_unittest_stream_TG
+    - name: compile_test_parallel_core_stream_TG
+    - name: compile_test_parallel_dbtest_stream_TG
 
 - name: enterprise-amazon2-streams
   display_name: "Amazon Linux 2 enterprise build with streams"
@@ -2873,3 +2739,14 @@ buildvariants:
     - amazon2-build
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
+
+- name: &security-daily-cron security-daily-cron
+  modules:
+  - enterprise
+  display_name: "~ Security Daily Cron"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - rhel80-small
+  stepback: false
+  tasks:
+  - name: blackduck_scanner

@@ -1,14 +1,7 @@
 /**
  * Test out ElemMatchValueMatchExpression
- * @tags: [ skip_for_query_stats ]
- * Note: Separate line for each TODO to ensure the linter checks for each ticket in the queue, but
- * the test shouldn't be formally re-enabled until all TODOs are removed.
- * TODO SERVER-78862 reenable test in query_stats_passthrough
  */
-(function() {
-"use strict";
-
-load("jstests/aggregation/extras/utils.js");  // arrayEq
+import {arrayEq} from "jstests/aggregation/extras/utils.js";
 
 const coll = db.jstests_elemmatch_value;
 coll.drop();
@@ -78,4 +71,3 @@ assert(
         {a: [[{b: [5]}]]},
         {a: [[{b: [3, 7]}]]},
     ]));
-})();

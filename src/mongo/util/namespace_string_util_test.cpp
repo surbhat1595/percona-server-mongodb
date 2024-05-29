@@ -288,11 +288,42 @@ TEST(NamespaceStringUtilTest, SerializeExpectPrefixTrue_CommandReply) {
     }
 }
 
+#define ASSERT_NSS_EQ(nss, expected) \
+    ASSERT_EQ(NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()), expected)
+
 TEST(NamespaceStringUtilTest, SerializeEmptyCollectionName) {
-    auto nss = NamespaceString::createNamespaceString_forTest(
-        DatabaseName::createDatabaseName_forTest(boost::none, "admin"), /* collection = */ "");
-    ASSERT_EQ(NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()), "admin.");
+    const auto& ctx = SerializationContext::stateDefault();
+    StringData dbName = "admin";
+    StringData ns = dbName;
+    StringData collName = "";
+
+    auto dbNameDeserialize = [dbName, &ctx]() {
+        return DatabaseNameUtil::deserialize(boost::none, dbName, ctx);
+    };
+    auto dbNameCreate = [dbName]() {
+        return DatabaseName::createDatabaseName_forTest(boost::none, dbName);
+    };
+
+    ASSERT_NSS_EQ(NamespaceStringUtil::deserialize(boost::none, dbName, collName, ctx), "admin");
+    ASSERT_NSS_EQ(NamespaceStringUtil::deserialize(dbNameDeserialize(), collName), "admin");
+    ASSERT_NSS_EQ(NamespaceStringUtil::deserialize(dbNameCreate(), collName), "admin");
+    ASSERT_NSS_EQ(NamespaceStringUtil::deserialize(boost::none, ns, ctx), "admin");
+    ASSERT_NSS_EQ(NamespaceString(dbNameDeserialize()), "admin");
+    ASSERT_NSS_EQ(NamespaceString(dbNameCreate()), "admin");
+    ASSERT_NSS_EQ(NamespaceString::createNamespaceString_forTest(dbNameDeserialize()), "admin");
+    ASSERT_NSS_EQ(NamespaceString::createNamespaceString_forTest(dbNameCreate()), "admin");
+    ASSERT_NSS_EQ(NamespaceString::createNamespaceString_forTest(dbNameDeserialize(), collName),
+                  "admin");
+    ASSERT_NSS_EQ(NamespaceString::createNamespaceString_forTest(dbNameCreate(), collName),
+                  "admin");
+    ASSERT_NSS_EQ(NamespaceString::createNamespaceString_forTest(ns), "admin");
+    ASSERT_NSS_EQ(NamespaceString::createNamespaceString_forTest(boost::none, ns), "admin");
+    ASSERT_NSS_EQ(NamespaceString::createNamespaceString_forTest(dbName, collName), "admin");
+    ASSERT_NSS_EQ(NamespaceString::createNamespaceString_forTest(boost::none, dbName, collName),
+                  "admin");
 }
+
+#undef ASSERT_NSS_EQ
 
 TEST(NamespaceStringUtilTest, DeserializeMissingExpectPrefix_CommandRequest) {
     RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);

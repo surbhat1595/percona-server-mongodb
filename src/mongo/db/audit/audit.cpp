@@ -83,9 +83,8 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 
-namespace mongo {
-
-namespace audit {
+namespace mongo::audit {
+namespace {
 
 using namespace fmt::literals;
 
@@ -104,7 +103,7 @@ MONGO_COMPILER_NOINLINE void realexit(ExitCode rc) {
 }
 
 /** A system error code's error message. */
-inline static std::string errnoWithDescription(int e) {
+inline std::string errnoWithDescription(int e) {
     return errorMessage(systemError(e));
 }
 
@@ -453,16 +452,16 @@ protected:
     }
 };
 
-static std::shared_ptr<WritableAuditLog> _auditLog;
+std::shared_ptr<WritableAuditLog> _auditLog;
 
-static void _setGlobalAuditLog(WritableAuditLog* log) {
+void _setGlobalAuditLog(WritableAuditLog* log) {
     // Must be the last line because this function is also used
     // for cleanup (log can be nullptr)
     // Otherwise race condition exists during cleanup.
     _auditLog.reset(log);
 }
 
-static bool _auditEnabledOnCommandLine() {
+bool _auditEnabledOnCommandLine() {
     return auditOptions.destination != "";
 }
 
@@ -519,19 +518,15 @@ BSONField<BSONObj> param("param");
 BSONField<int> result("result");
 }  // namespace AuditFields
 
-// This exists because NamespaceString::serialize() prints "admin."
-// when dbname == "admin" and coll == "", which isn't so great.
-// @see the `SerializeEmptyCollectionName` test case in the
-// `namespace_string_util_test.cpp` file.
-static std::string nssToString(const NamespaceString& nss) {
-    std::string nssStr = DatabaseNameUtil::serialize(nss.dbName());
-    if (StringData collStr = nss.coll(); !collStr.empty()) {
-        nssStr.append(1, '.').append(collStr.rawData(), collStr.size());
-    }
-    return nssStr;
+std::string toString(const DatabaseName& dbName) {
+    return DatabaseNameUtil::serialize(dbName, SerializationContext::stateDefault());
 }
 
-static void appendRoles(BSONObjBuilder& builder, RoleNameIterator it) {
+std::string toString(const NamespaceString& nss) {
+    return NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault());
+}
+
+void appendRoles(BSONObjBuilder& builder, RoleNameIterator it) {
     BSONArrayBuilder rolebuilder(builder.subarrayStart("roles"));
     for (; it.more(); it.next()) {
         BSONObjBuilder r(rolebuilder.subobjStart());
@@ -542,11 +537,11 @@ static void appendRoles(BSONObjBuilder& builder, RoleNameIterator it) {
     rolebuilder.doneFast();
 }
 
-static void appendRoles(BSONObjBuilder& builder, const std::vector<RoleName>& roles) {
+void appendRoles(BSONObjBuilder& builder, const std::vector<RoleName>& roles) {
     appendRoles(builder, makeRoleNameIterator(roles.begin(), roles.end()));
 }
 
-static std::string getIpByHost(const std::string& host) {
+std::string getIpByHost(const std::string& host) {
     if (host.empty()) {
         return {};
     }
@@ -567,7 +562,7 @@ static std::string getIpByHost(const std::string& host) {
     return ip;
 }
 
-static void appendCommonInfo(BSONObjBuilder& builder, StringData atype, Client* client) {
+void appendCommonInfo(BSONObjBuilder& builder, StringData atype, Client* client) {
     builder << AuditFields::type(atype);
     builder << AuditFields::timestamp(jsTime());
     builder << AuditFields::local(
@@ -597,7 +592,7 @@ static void appendCommonInfo(BSONObjBuilder& builder, StringData atype, Client* 
     }
 }
 
-static void appendPrivileges(BSONObjBuilder& builder, const PrivilegeVector& privileges) {
+void appendPrivileges(BSONObjBuilder& builder, const PrivilegeVector& privileges) {
     BSONArrayBuilder privbuilder(builder.subarrayStart("privileges"));
     for (PrivilegeVector::const_iterator it = privileges.begin(); it != privileges.end(); ++it) {
         privbuilder.append(it->toBSON());
@@ -606,11 +601,11 @@ static void appendPrivileges(BSONObjBuilder& builder, const PrivilegeVector& pri
 }
 
 
-static void _auditEvent(Client* client,
-                        StringData atype,
-                        const BSONObj& params,
-                        ErrorCodes::Error result = ErrorCodes::OK,
-                        const bool affects_durable_state = true) {
+void _auditEvent(Client* client,
+                 StringData atype,
+                 const BSONObj& params,
+                 ErrorCodes::Error result = ErrorCodes::OK,
+                 const bool affects_durable_state = true) {
     BSONObjBuilder builder;
     appendCommonInfo(builder, atype, client);
     builder << AuditFields::param(params);
@@ -618,13 +613,13 @@ static void _auditEvent(Client* client,
     _auditLog->append(builder.done(), affects_durable_state);
 }
 
-static void _auditAuthz(Client* client,
-                        const NamespaceString& nss,
-                        StringData command,
-                        const BSONObj& args,
-                        ErrorCodes::Error result) {
+void _auditAuthz(Client* client,
+                 const NamespaceString& nss,
+                 StringData command,
+                 const BSONObj& args,
+                 ErrorCodes::Error result) {
     if ((result != ErrorCodes::OK) || auditAuthorizationSuccess.load()) {
-        std::string ns = nssToString(nss);
+        std::string ns = toString(nss);
         const BSONObj params = !ns.empty()
             ? BSON("command" << command << "ns" << ns << "args" << args)
             : BSON("command" << command << "args" << args);
@@ -632,28 +627,15 @@ static void _auditAuthz(Client* client,
     }
 }
 
-static void _auditSystemUsers(Client* client,
-                              const NamespaceString& ns,
-                              StringData atype,
-                              const BSONObj& params,
-                              ErrorCodes::Error result) {
+void _auditSystemUsers(Client* client,
+                       const NamespaceString& ns,
+                       StringData atype,
+                       const BSONObj& params,
+                       ErrorCodes::Error result) {
     if ((result == ErrorCodes::OK) && (ns.coll() == "system.users")) {
         _auditEvent(client, atype, params);
     }
 }
-
-ImpersonatedClientAttrs::ImpersonatedClientAttrs(Client* client) {
-    if (auto optAttrs = rpc::getImpersonatedUserMetadata(client->getOperationContext()); optAttrs) {
-        if (auto optUsers = optAttrs->getUsers(); optUsers) {
-            if (auto users = optUsers.get(); !users.empty()) {
-                userName = users.front();
-                roleNames = optAttrs->getRoles();
-            }
-        }
-    }
-}
-
-void rotateAuditLog() {}
 
 class AuditPercona : public AuditInterface {
 public:
@@ -670,13 +652,11 @@ public:
             return;
         }
 
-        // clang-format off
-        const BSONObj params = BSON(
-            "user" << event.getUser().getName() <<
-            "db" << DatabaseNameUtil::serialize(event.getUser().getDatabaseName()) <<
-            "mechanism" << event.getMechanism());
-        // clang-format on
-        _auditEvent(client, "authenticate", params, event.getResult(), false);
+        BSONObjBuilder params;
+        params << "user" << event.getUser().getName();
+        params << "db" << toString(event.getUser().getDatabaseName());
+        params << "mechanism" << event.getMechanism();
+        _auditEvent(client, "authenticate", params.done(), event.getResult(), false);
     }
 
     void logCommandAuthzCheck(Client* client,
@@ -751,9 +731,11 @@ public:
             return;
         }
 
-        const BSONObj params = BSON("reason" << reason << "initialUsers" << initialUsers
-                                             << "updatedUsers" << updatedUsers);
-        _auditEvent(client, "logout", params, ErrorCodes::OK, false);
+        BSONObjBuilder params;
+        params << "reason" << reason;
+        params << "initialUsers" << initialUsers;
+        params << "updatedUsers" << updatedUsers;
+        _auditEvent(client, "logout", params.done(), ErrorCodes::OK, false);
     }
 
     void logCreateIndex(Client* client,
@@ -767,10 +749,10 @@ public:
         }
 
         BSONObjBuilder params;
-        params.append("ns", nssToString(nsname));
-        params.append("indexName", indexname);
-        params.append("indexSpec", *indexSpec);
-        params.append("indexBuildState", indexBuildState);
+        params << "ns" << toString(nsname);
+        params << "indexName" << indexname;
+        params << "indexSpec" << *indexSpec;
+        params << "indexBuildState" << indexBuildState;
         _auditEvent(client, "createIndex", params.done(), result);
     }
 
@@ -779,22 +761,23 @@ public:
             return;
         }
 
-        const BSONObj params = BSON("ns" << nssToString(nsname));
-        _auditEvent(client, "createCollection", params);
+        _auditEvent(client, "createCollection", BSON("ns" << toString(nsname)));
     }
 
     void logCreateView(Client* client,
                        const NamespaceString& nsname,
-                       StringData viewOn,
+                       const NamespaceString& viewOn,
                        BSONArray pipeline,
                        ErrorCodes::Error code) const override {
         if (!_auditLog) {
             return;
         }
 
-        const BSONObj params =
-            BSON("ns" << nssToString(nsname) << "viewOn" << viewOn << "pipeline" << pipeline);
-        _auditEvent(client, "createView", params, code);
+        BSONObjBuilder params;
+        params << "ns" << toString(nsname);
+        params << "viewOn" << toString(viewOn);
+        params << "pipeline" << pipeline;
+        _auditEvent(client, "createView", params.done(), code);
     }
 
     void logImportCollection(Client* client, const NamespaceString& nsname) const override {
@@ -802,8 +785,7 @@ public:
             return;
         }
 
-        const BSONObj params = BSON("ns" << nssToString(nsname));
-        _auditEvent(client, "importCollection", params);
+        _auditEvent(client, "importCollection", BSON("ns" << toString(nsname)));
     }
 
     void logCreateDatabase(Client* client, const DatabaseName& dbname) const override {
@@ -811,7 +793,7 @@ public:
             return;
         }
 
-        _auditEvent(client, "createDatabase", BSON("ns" << DatabaseNameUtil::serialize(dbname)));
+        _auditEvent(client, "createDatabase", BSON("ns" << toString(dbname)));
     }
 
     void logDropIndex(Client* client,
@@ -821,7 +803,7 @@ public:
             return;
         }
 
-        const BSONObj params = BSON("ns" << nssToString(nsname) << "indexName" << indexname);
+        const BSONObj params = BSON("ns" << toString(nsname) << "indexName" << indexname);
         _auditEvent(client, "dropIndex", params);
     }
 
@@ -830,13 +812,12 @@ public:
             return;
         }
 
-        const BSONObj params = BSON("ns" << nssToString(nsname));
-        _auditEvent(client, "dropCollection", params);
+        _auditEvent(client, "dropCollection", BSON("ns" << toString(nsname)));
     }
 
     void logDropView(Client* client,
                      const NamespaceString& nsname,
-                     StringData viewOn,
+                     const NamespaceString& viewOn,
                      const std::vector<BSONObj>& pipeline,
                      ErrorCodes::Error code) const override {
         if (!_auditLog) {
@@ -844,9 +825,9 @@ public:
         }
 
         BSONObjBuilder params;
-        params.append("ns", nssToString(nsname));
-        params.append("viewOn", viewOn);
-        params.append("pipeline", pipeline);
+        params << "ns" << toString(nsname);
+        params << "viewOn" << toString(viewOn);
+        params << "pipeline" << pipeline;
         _auditEvent(client, "dropView", params.done(), code);
     }
 
@@ -855,7 +836,7 @@ public:
             return;
         }
 
-        _auditEvent(client, "dropDatabase", BSON("ns" << DatabaseNameUtil::serialize(dbname)));
+        _auditEvent(client, "dropDatabase", BSON("ns" << toString(dbname)));
     }
 
     void logRenameCollection(Client* client,
@@ -865,7 +846,7 @@ public:
             return;
         }
 
-        const BSONObj params = BSON("old" << nssToString(source) << "new" << nssToString(target));
+        const BSONObj params = BSON("old" << toString(source) << "new" << toString(target));
         _auditEvent(client, "renameCollection", params);
     }
 
@@ -874,8 +855,7 @@ public:
             return;
         }
 
-        const BSONObj params = BSON("ns" << nsname);
-        _auditEvent(client, "enableSharding", params);
+        _auditEvent(client, "enableSharding", BSON("ns" << nsname));
     }
 
     void logAddShard(Client* client, StringData name, const std::string& servers) const override {
@@ -897,16 +877,18 @@ public:
     }
 
     void logShardCollection(Client* client,
-                            StringData ns,
+                            const NamespaceString& ns,
                             const BSONObj& keyPattern,
                             bool unique) const override {
         if (!_auditLog) {
             return;
         }
 
-        const BSONObj params =
-            BSON("ns" << ns << "key" << keyPattern << "options" << BSON("unique" << unique));
-        _auditEvent(client, "shardCollection", params);
+        BSONObjBuilder params;
+        params << "ns" << toString(ns);
+        params << "key" << keyPattern;
+        params << "options" << BSON("unique" << unique);
+        _auditEvent(client, "shardCollection", params.done());
     }
 
     void logCreateUser(Client* client,
@@ -940,7 +922,7 @@ public:
             return;
         }
 
-        _auditEvent(client, "dropAllUsers", BSON("db" << DatabaseNameUtil::serialize(dbname)));
+        _auditEvent(client, "dropAllUsers", BSON("db" << toString(dbname)));
     }
 
     void logUpdateUser(Client* client,
@@ -1039,7 +1021,7 @@ public:
             return;
         }
 
-        _auditEvent(client, "dropAllRoles", BSON("db" << DatabaseNameUtil::serialize(dbname)));
+        _auditEvent(client, "dropAllRoles", BSON("db" << toString(dbname)));
     }
 
     void logGrantRolesToRole(Client* client,
@@ -1095,13 +1077,13 @@ public:
     }
 
     void logRefineCollectionShardKey(Client* client,
-                                     StringData ns,
+                                     const NamespaceString& ns,
                                      const BSONObj& keyPattern) const override {
         if (!_auditLog) {
             return;
         }
 
-        const BSONObj params = BSON("ns" << ns << "key" << keyPattern);
+        const BSONObj params = BSON("ns" << toString(ns) << "key" << keyPattern);
         _auditEvent(client, "refineCollectionShardKey", params);
     }
 
@@ -1115,9 +1097,11 @@ public:
             return;
         }
 
-        const BSONObj params = BSON("ns" << nssToString(nss) << "document" << doc << "operation"
-                                         << "insert");
-        _auditEvent(client, "directAuthMutation", params);
+        BSONObjBuilder params;
+        params << "ns" << toString(nss);
+        params << "document" << doc;
+        params << "operation" << "insert";
+        _auditEvent(client, "directAuthMutation", params.done());
     }
 
     void logUpdateOperation(Client* client,
@@ -1130,9 +1114,11 @@ public:
             return;
         }
 
-        const BSONObj params = BSON("ns" << nssToString(nss) << "document" << doc << "operation"
-                                         << "update");
-        _auditEvent(client, "directAuthMutation", params);
+        BSONObjBuilder params;
+        params << "ns" << toString(nss);
+        params << "document" << doc;
+        params << "operation" << "update";
+        _auditEvent(client, "directAuthMutation", params.done());
     }
 
     void logRemoveOperation(Client* client,
@@ -1145,9 +1131,12 @@ public:
             return;
         }
 
-        const BSONObj params = BSON("ns" << nssToString(nss) << "document" << doc << "operation"
-                                         << "remove");
-        _auditEvent(client, "directAuthMutation", params);
+        BSONObjBuilder params;
+        params << "ns" << toString(nss);
+        params << "document" << doc;
+        params << "operation"
+               << "remove";
+        _auditEvent(client, "directAuthMutation", params.done());
     }
 
     void logGetClusterParameter(Client* client,
@@ -1216,25 +1205,24 @@ public:
     void logConfigEvent(Client* client, const AuditConfigDocument& config) const override {}
 };
 
-namespace {
 ServiceContext::ConstructorActionRegisterer registerCreateAuditPercona{
     "CreatePerconaAudit", [](ServiceContext* service) {
         AuditInterface::set(service, std::make_unique<AuditPercona>());
     }};
 }  // namespace
 
-void writeImpersonatedUsersToMetadata(OperationContext* txn, BSONObjBuilder* metadata) {}
+ImpersonatedClientAttrs::ImpersonatedClientAttrs(Client* client) {
+    if (auto optAttrs = rpc::getImpersonatedUserMetadata(client->getOperationContext()); optAttrs) {
+        if (auto optUsers = optAttrs->getUsers(); optUsers) {
+            if (auto users = optUsers.get(); !users.empty()) {
+                userName = users.front();
+                roleNames = optAttrs->getRoles();
+            }
+        }
+    }
+}
 
-void parseAndRemoveImpersonatedUsersField(BSONObj cmdObj,
-                                          AuthorizationSession* authSession,
-                                          std::vector<UserName>* parsedUserNames,
-                                          bool* fieldIsPresent) {}
-
-void parseAndRemoveImpersonatedRolesField(BSONObj cmdObj,
-                                          AuthorizationSession* authSession,
-                                          std::vector<RoleName>* parsedRoleNames,
-                                          bool* fieldIsPresent) {}
-
+void rotateAuditLog() {}
 
 void flushAuditLog() {
     if (!_auditLog) {
@@ -1252,7 +1240,6 @@ void fsyncAuditLog() {
     _auditLog->fsync();
 }
 
-}  // namespace audit
-}  // namespace mongo
+}  // namespace mongo::audit
 
 #endif  // PERCONA_AUDIT_ENABLED

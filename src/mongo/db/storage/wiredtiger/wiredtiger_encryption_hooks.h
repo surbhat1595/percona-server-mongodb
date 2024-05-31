@@ -85,7 +85,7 @@ protected:
     const EVP_CIPHER *_cipher{nullptr};
     int _iv_len = 0;
 
-    const unsigned char* dbKey(boost::optional<std::string> dbName, unsigned char* buf);
+    const unsigned char* dbKey(boost::optional<DatabaseName> dbName, unsigned char* buf);
 };
 
 class WiredTigerEncryptionHooksCBC: public WiredTigerEncryptionHooks
@@ -102,7 +102,7 @@ public:
                                   uint8_t* out,
                                   size_t outLen,
                                   size_t* resultLen,
-                                  boost::optional<std::string> dbName) override;
+                                  boost::optional<DatabaseName> dbName) override;
 
     /**
      * Tranforms temp data back to readable form, after reading from disk.
@@ -112,7 +112,7 @@ public:
                                     uint8_t* out,
                                     size_t outLen,
                                     size_t* resultLen,
-                                    boost::optional<std::string> dbName) override;
+                                    boost::optional<DatabaseName> dbName) override;
 
     /**
      * Returns the maximum size addition when doing transforming temp data.
@@ -148,7 +148,7 @@ public:
                                   uint8_t* out,
                                   size_t outLen,
                                   size_t* resultLen,
-                                  boost::optional<std::string> dbName) override;
+                                  boost::optional<DatabaseName> dbName) override;
 
     /**
      * Tranforms temp data back to readable form, after reading from disk.
@@ -158,7 +158,7 @@ public:
                                     uint8_t* out,
                                     size_t outLen,
                                     size_t* resultLen,
-                                    boost::optional<std::string> dbName) override;
+                                    boost::optional<DatabaseName> dbName) override;
 
     /**
      * Returns the maximum size addition when doing transforming temp data.

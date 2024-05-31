@@ -149,11 +149,9 @@ BackupCursorState WiredTigerBackupCursorHooks::openBackupCursor(
         if (!requeriedCheckpointTimestamp ||
             requeriedCheckpointTimestamp.get() < checkpointTimestamp.get()) {
             LOGV2_FATAL(50916,
-                        "The last stable recovery timestamp went backwards. Original: "
-                        "{checkpointTimestamp} Found: {requeriedCheckpointTimestamp}",
                         "The last stable recovery timestamp went backwards",
                         "checkpointTimestamp"_attr = checkpointTimestamp.get(),
-                        "requeriedCheckpointTimestamp"_attr = requeriedCheckpointTimestamp);
+                        "requeriedCheckpointTimestamp"_attr = requeriedCheckpointTimestamp.get());
         }
 
         uassert(50915,

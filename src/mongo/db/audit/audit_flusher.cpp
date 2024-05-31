@@ -54,7 +54,7 @@ public:
     }
 
     void run() {
-        ThreadClient tc(name(), getGlobalServiceContext());
+        ThreadClient tc(name(), getGlobalServiceContext()->getService());
         if (!_with_fsync) {
             // This branch is for wiredTiger storage engine
             // audit::fsyncAuditLog is called by journal flusher

@@ -32,6 +32,7 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include <boost/crc.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
+#include <boost/none.hpp>
 
 #include "mongo/platform/basic.h"
 
@@ -173,12 +174,14 @@ void test_encryption_hooks(WiredTigerEncryptionHooks* hooks) {
 
     // dataprotector uses masterkey to encrypt data so provide empty string to select correct key
     // for decryption
-    ASSERT_OK(hooks->unprotectTmpData(protectorText.get(),
-                                      protectorTextLen,
-                                      plainText.get(),
-                                      protectorTextLen,
-                                      &plainLen,
-                                      std::string()));
+    ASSERT_OK(hooks->unprotectTmpData(
+        protectorText.get(),
+        protectorTextLen,
+        plainText.get(),
+        protectorTextLen,
+        &plainLen,
+        DatabaseNameUtil::deserialize(
+            boost::none, StringData(""), SerializationContext::stateDefault())));
     ASSERT_EQ(plainLen, datalen);
     ASSERT_EQ(0, memcmp(plainText.get(), data, datalen));
 }

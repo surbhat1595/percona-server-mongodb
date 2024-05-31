@@ -41,6 +41,7 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/db/storage/wiredtiger/wiredtiger_data_protector.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_encryption_hooks.h"
 #include "mongo/logv2/log.h"
+#include "mongo/util/database_name_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -125,7 +126,7 @@ StatusWith<std::deque<std::string>> WiredTigerEncryptionHooks::extendBackupCurso
     return _encryptionKeyDB->extendBackupCursor(opCtx);
 }
 
-const unsigned char* WiredTigerEncryptionHooks::dbKey(boost::optional<std::string> dbName,
+const unsigned char* WiredTigerEncryptionHooks::dbKey(boost::optional<DatabaseName> dbName,
                                                       unsigned char* buf) {
     if (!dbName) {
         // static local initialization is thread safe since C++11
@@ -138,7 +139,9 @@ const unsigned char* WiredTigerEncryptionHooks::dbKey(boost::optional<std::strin
         } tmp_key_holder;
         return static_cast<const unsigned char*>(tmp_key_holder._tmpkey);
     }
-    get_key_by_id(dbName->c_str(), dbName->length(), buf, nullptr);
+    std::string dbNameStr =
+        DatabaseNameUtil::serialize(*dbName, SerializationContext::stateDefault());
+    get_key_by_id(dbNameStr.c_str(), dbNameStr.length(), buf, nullptr);
     return buf;
 }
 
@@ -158,7 +161,7 @@ Status WiredTigerEncryptionHooksCBC::protectTmpData(const uint8_t* in,
                                                     uint8_t* out,
                                                     size_t outLen,
                                                     size_t* resultLen,
-                                                    boost::optional<std::string> dbName) {
+                                                    boost::optional<DatabaseName> dbName) {
 
     if (outLen < _chksum_len + _iv_len + inLen + EVP_CIPHER_block_size(_cipher))
         return Status(ErrorCodes::InternalError,
@@ -197,7 +200,7 @@ Status WiredTigerEncryptionHooksCBC::unprotectTmpData(const uint8_t* in,
                                                       uint8_t* out,
                                                       size_t outLen,
                                                       size_t* resultLen,
-                                                      boost::optional<std::string> dbName) {
+                                                      boost::optional<DatabaseName> dbName) {
 
     *resultLen = 0;
     EVPCipherCtx ctx;
@@ -259,7 +262,7 @@ Status WiredTigerEncryptionHooksGCM::protectTmpData(const uint8_t* in,
                                                     uint8_t* out,
                                                     size_t outLen,
                                                     size_t* resultLen,
-                                                    boost::optional<std::string> dbName) {
+                                                    boost::optional<DatabaseName> dbName) {
 
     if (outLen < _iv_len + inLen + _gcm_tag_len)
         return Status(ErrorCodes::InternalError,
@@ -307,7 +310,7 @@ Status WiredTigerEncryptionHooksGCM::unprotectTmpData(const uint8_t* in,
                                                       uint8_t* out,
                                                       size_t outLen,
                                                       size_t* resultLen,
-                                                      boost::optional<std::string> dbName) {
+                                                      boost::optional<DatabaseName> dbName) {
 
     *resultLen = 0;
     EVPCipherCtx ctx;

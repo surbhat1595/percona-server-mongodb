@@ -34,7 +34,6 @@ Copyright (C) 2021-present Percona and/or its affiliates. All rights reserved.
 
 #include "mongo/db/pipeline/document_source_backup_cursor.h"
 
-#include "mongo/db/query/serialization_options.h"
 #include "mongo/logv2/log.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -212,10 +211,8 @@ DocumentSourceBackupCursor::~DocumentSourceBackupCursor() {
         pExpCtx->mongoProcessInterface->closeBackupCursor(pExpCtx->opCtx,
                                                           _backupCursorState.backupId);
     } catch (DBException& exc) {
-        LOGV2_FATAL(29091,
-                    "Error closing a backup cursor with Id {backupId}",
-                    "Error closing a backup cursor.",
-                    "backupId"_attr = _backupCursorState.backupId);
+        LOGV2_FATAL(
+            29091, "Error closing a backup cursor.", "backupId"_attr = _backupCursorState.backupId);
     }
 }
 }  // namespace mongo

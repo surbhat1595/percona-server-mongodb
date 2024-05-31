@@ -291,7 +291,7 @@ TEST(NamespaceStringUtilTest, SerializeExpectPrefixTrue_CommandReply) {
 TEST(NamespaceStringUtilTest, SerializeEmptyCollectionName) {
     auto nss = NamespaceString::createNamespaceString_forTest(
         DatabaseName::createDatabaseName_forTest(boost::none, "admin"), /* collection = */ "");
-    ASSERT_EQ(NamespaceStringUtil::serialize(nss), "admin.");
+    ASSERT_EQ(NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()), "admin.");
 }
 
 TEST(NamespaceStringUtilTest, DeserializeMissingExpectPrefix_CommandRequest) {

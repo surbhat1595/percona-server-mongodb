@@ -274,7 +274,7 @@ public:
     }
 
     virtual void run() override {
-        ThreadClient tc(name(), getGlobalServiceContext());
+        ThreadClient tc(name(), getGlobalServiceContext()->getService());
         LOGV2_DEBUG(29057, 1, "starting thread", "name"_attr = name());
         stdx::unique_lock<Latch> lock(_mutex);
 

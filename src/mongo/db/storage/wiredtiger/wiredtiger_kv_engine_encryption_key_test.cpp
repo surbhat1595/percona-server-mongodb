@@ -353,7 +353,7 @@ protected:
     }
 
     std::unique_ptr<WiredTigerKVEngine> _createWiredTigerKVEngine() {
-        auto client = _svcCtx->makeClient("opCtx");
+        auto client = _svcCtx->getService()->makeClient("opCtx");
         auto opCtx = client->makeOperationContext();
         auto engine = std::make_unique<WiredTigerKVEngine>(
             opCtx.get(),

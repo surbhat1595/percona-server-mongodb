@@ -3345,7 +3345,8 @@ void WiredTigerKVEngine::dropIdentForImport(OperationContext* opCtx, StringData 
 
 void WiredTigerKVEngine::keydbDropDatabase(const DatabaseName& dbName) {
     if (_encryptionKeyDB) {
-        int res = _encryptionKeyDB->delete_key_by_id(DatabaseNameUtil::serialize(dbName));
+        int res = _encryptionKeyDB->delete_key_by_id(
+            DatabaseNameUtil::serialize(dbName, SerializationContext::stateDefault()));
         if (res) {
             // we cannot throw exceptions here because we are inside WUOW::commit
             // every other part of DB is already dropped so we just log error message

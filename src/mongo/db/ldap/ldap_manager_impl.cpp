@@ -226,7 +226,7 @@ public:
     }
 
     virtual void run() override {
-        ThreadClient tc(name(), getGlobalServiceContext());
+        ThreadClient tc(name(), getGlobalServiceContext()->getService());
         LOGV2_DEBUG(29061, 1, "starting thread", "name"_attr = name());
 
         // poller thread will handle disconnection events

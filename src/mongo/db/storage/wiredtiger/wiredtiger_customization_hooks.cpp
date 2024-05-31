@@ -59,8 +59,10 @@ public:
      *  `WT_SESSION::create` call.
      */
     virtual std::string getTableCreateConfig(StringData tableName) {
-        NamespaceString ns = NamespaceStringUtil::deserialize(boost::none, tableName);
-        std::string keyIdStr = DatabaseNameUtil::serialize(ns.dbName());
+        NamespaceString ns = NamespaceStringUtil::deserialize(
+            boost::none, tableName, SerializationContext::stateDefault());
+        std::string keyIdStr =
+            DatabaseNameUtil::serialize(ns.dbName(), SerializationContext::stateDefault());
         StringData keyid(keyIdStr);
         // Keep compatibility with v3.6 after SERVER-34617
         const size_t minsize = 6; // Minimum size which allows following condition to be true

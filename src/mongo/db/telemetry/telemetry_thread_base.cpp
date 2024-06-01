@@ -49,6 +49,7 @@ Copyright (C) 2024-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/telemetry/telemetry_parameter_gen.h"
+#include "mongo/db/telemetry/telemetry_path.h"
 #include "mongo/idl/server_parameter.h"
 #include "mongo/logv2/log.h"
 #include "mongo/stdx/mutex.h"
@@ -252,12 +253,12 @@ Status TelemetryThreadBase::_advance(ServiceContext* serviceContext) try {
 Status TelemetryThreadBase::_cleanupTelemetryDir() try {
     namespace fs = boost::filesystem;
     const auto ts = Date_t::now().toMillisSinceEpoch() / 1000;
-    const auto telePath = sdPath(perconaTelemetryPath);
+    const auto telePath = sdPath(getTelemetryPath());
     // We do not create any directories
     if (!fs::is_directory(telePath)) {
         return {ErrorCodes::NonExistentPath,
                 fmt::format("telemetry directory doesn't exist or isn't a directory: {}",
-                            perconaTelemetryPath)};
+                            getTelemetryPath())};
     }
 
     // clear outdated files
@@ -298,7 +299,7 @@ Status TelemetryThreadBase::_cleanupTelemetryDir() try {
 // write metrics file
 Status TelemetryThreadBase::_writeMetrics(ServiceContext* serviceContext) try {
     const auto ts = Date_t::now().toMillisSinceEpoch() / 1000;
-    const auto telePath = sdPath(perconaTelemetryPath);
+    const auto telePath = sdPath(getTelemetryPath());
 
     // dump new metrics file
     const auto tmpName = telePath / fmt::format("{}-{}.tmp", ts, _metricFileSuffix);

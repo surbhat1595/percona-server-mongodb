@@ -9,11 +9,13 @@ env.Library(
     source=[
         'telemetry_parameter.cpp',
         'telemetry_parameter.idl',
+        'telemetry_path.cpp',
         'telemetry_thread_base.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/s/is_mongos',
         '$BUILD_DIR/mongo/util/background_job',
     ],
 )

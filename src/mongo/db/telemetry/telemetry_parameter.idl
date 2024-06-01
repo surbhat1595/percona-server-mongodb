@@ -46,9 +46,7 @@ server_parameters:
     perconaTelemetryPath:
         description: "Path to the directory where metric files are created"
         set_at: startup
-        cpp_varname: perconaTelemetryPath
-        cpp_vartype: std::string
-        default: "/usr/local/percona/telemetry/psmdb"
+        cpp_class: TelemetryPath
         redact: false
     perconaTelemetryGracePeriod:
         description: >-

@@ -9,6 +9,7 @@ env.Library(
     source=[
         'telemetry_parameter.cpp',
         'telemetry_parameter.idl',
+        'telemetry_path.cpp',
         'telemetry_thread_base.cpp',
     ],
     LIBDEPS_PRIVATE=[

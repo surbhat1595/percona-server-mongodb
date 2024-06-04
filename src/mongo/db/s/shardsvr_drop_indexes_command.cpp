@@ -102,7 +102,7 @@ void updateStateForStaleConfigRetry(OperationContext* opCtx,
                    std::inserter(okShardIds, okShardIds.begin()));
 
     retryState->shardsWithSuccessResponses = std::move(okShardIds);
-    retryState->shardSuccessResponses = std::move(response.successResponses);
+    retryState->shardSuccessResponses = response.successResponses;
 }
 
 class ShardsvrDropIndexesCommand final : public TypedCommand<ShardsvrDropIndexesCommand> {
@@ -166,7 +166,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(ShardsvrDropIndexesCommand);
+MONGO_REGISTER_COMMAND(ShardsvrDropIndexesCommand).forShard();
 
 ShardsvrDropIndexesCommand::Invocation::Response ShardsvrDropIndexesCommand::Invocation::typedRun(
     OperationContext* opCtx) {
@@ -190,7 +190,6 @@ ShardsvrDropIndexesCommand::Invocation::Response ShardsvrDropIndexesCommand::Inv
     auto dropIdxBSON = dropIdxCmd.toBSON({});
 
     // Checking if it is a timeseries collection under the collection DDL lock
-    boost::optional<DDLLockManager::ScopedCollectionDDLLock> timeseriesCollDDLLock;
     if (auto timeseriesOptions = timeseries::getTimeseriesOptions(opCtx, ns(), true)) {
         dropIdxBSON =
             timeseries::makeTimeseriesCommand(dropIdxBSON,
@@ -199,10 +198,6 @@ ShardsvrDropIndexesCommand::Invocation::Response ShardsvrDropIndexesCommand::Inv
                                               DropIndexes::kIsTimeseriesNamespaceFieldName);
 
         resolvedNs = ns().makeTimeseriesBucketsNamespace();
-
-        // If it is a timeseries collection, we actually need to acquire the bucket namespace DDL
-        // lock
-        timeseriesCollDDLLock.emplace(opCtx, resolvedNs, lockReason, MODE_X);
     }
 
     StaleConfigRetryState retryState;

@@ -139,6 +139,11 @@ NSS_CONSTANT(kShardingDDLCoordinatorsNamespace,
              DatabaseName::kConfig,
              "system.sharding_ddl_coordinators"_sd)
 
+// Namespace for storing MultiUpdateCoordinator state documents.
+NSS_CONSTANT(kMultiUpdateCoordinatorsNamespace,
+             DatabaseName::kConfig,
+             "localMigrationBlockingOperations.multiUpdateCoordinators"_sd)
+
 // Namespace for persisting sharding DDL rename participant state documents
 NSS_CONSTANT(kShardingRenameParticipantsNamespace,
              DatabaseName::kConfig,
@@ -292,3 +297,9 @@ NSS_CONSTANT(kDefaultMinValidNamespace, DatabaseName::kLocal, "replset.minvalid"
 
 // Namespace used by the test command to pin the oldest timestamp.
 NSS_CONSTANT(kDurableHistoryTestNamespace, DatabaseName::kMdbTesting, "pinned_timestamp"_sd)
+
+// Namespace used by DocumentSourceOut on shard servers to store a list of temporary collections
+// that shall be garbage-collected (dropped) on the next step up.
+NSS_CONSTANT(kAggTempCollections, DatabaseName::kConfig, "agg_temp_collections"_sd)
+
+NSS_CONSTANT(kEmpty, DatabaseName::kEmpty, ""_sd)

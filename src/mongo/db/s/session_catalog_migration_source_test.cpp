@@ -30,7 +30,6 @@
 #include <algorithm>
 #include <boost/cstdint.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -120,6 +119,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
         nss,                              // namespace
         boost::none,                      // uuid
         boost::none,                      // fromMigrate
+        boost::none,                      // checkExistenceForDiffInsert
         repl::OplogEntry::kOplogVersion,  // version
         object,                           // o
         object2,                          // o2
@@ -174,6 +174,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
                                 kNs,                              // namespace
                                 boost::none,                      // uuid
                                 boost::none,                      // fromMigrate
+                                boost::none,                      // checkExistenceForDiffInsert
                                 repl::OplogEntry::kOplogVersion,  // version
                                 oField,                           // o
                                 o2Field,                          // o2

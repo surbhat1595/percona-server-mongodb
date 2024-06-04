@@ -77,6 +77,10 @@ struct URITestCase {
     MongoURI::OptionsMap options;
     std::string database;
     ConnectSSLMode sslMode;
+// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
+#ifdef MONGO_CONFIG_GRPC
+    bool gRPC = false;
+#endif
 };
 
 struct InvalidURITestCase {
@@ -102,8 +106,6 @@ void compareOptions(size_t lineNumber,
     for (std::size_t i = 0; i < std::min(options.size(), expectedOptions.size()); ++i) {
         if (options[i] != expectedOptions[i]) {
             LOGV2(20152,
-                  "Option: \"tolower({key})={value}\" doesn't equal: "
-                  "\"tolower({expectedKey})={expectedValue}\" data on line: {lineNumber}",
                   "Option key-value pair doesn't equal expected pair",
                   "key"_attr = options[i].first.original(),
                   "value"_attr = options[i].second,
@@ -511,6 +513,30 @@ const URITestCase validCases[] = {
     {"mongodb://localhost/?ssl=false", "", "", kMaster, "", 1, {{"ssl", "false"}}, "", kDisableSSL},
     {"mongodb://localhost/?tls=true", "", "", kMaster, "", 1, {{"tls", "true"}}, "", kEnableSSL},
     {"mongodb://localhost/?tls=false", "", "", kMaster, "", 1, {{"tls", "false"}}, "", kDisableSSL},
+// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
+#ifdef MONGO_CONFIG_GRPC
+    {"mongodb://localhost", "", "", kMaster, "", 1, {}, "", kDisableSSL, false},
+    {"mongodb://localhost/?grpc=false",
+     "",
+     "",
+     kMaster,
+     "",
+     1,
+     {{"grpc", "false"}},
+     "",
+     kGlobalSSLMode,
+     false},
+    {"mongodb://localhost/?grpc=true",
+     "",
+     "",
+     kMaster,
+     "",
+     1,
+     {{"grpc", "true"}},
+     "",
+     kGlobalSSLMode,
+     true},
+#endif
 };
 
 const InvalidURITestCase invalidCases[] = {
@@ -583,8 +609,13 @@ const InvalidURITestCase invalidCases[] = {
     {"mongodb://127.0.0.1:1234/dbName?foo=a&&c=b"},
 
     // Illegal value for ssl/tls.
-    {"mongodb://127.0.0.1:1234/dbName?ssl=blah", ErrorCodes::duplicateCodeForTest(51041)},
-    {"mongodb://127.0.0.1:1234/dbName?tls=blah", ErrorCodes::duplicateCodeForTest(51041)},
+    {"mongodb://127.0.0.1:1234/dbName?ssl=blah", ErrorCodes::FailedToParse},
+    {"mongodb://127.0.0.1:1234/dbName?tls=blah", ErrorCodes::FailedToParse},
+
+// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
+#ifdef MONGO_CONFIG_GRPC
+    {"mongodb://127.0.0.1:1234/dbName?gRPC=blah", ErrorCodes::FailedToParse},
+#endif
 };
 
 // Helper Method to take a filename for a json file and return the array of tests inside of it
@@ -615,7 +646,7 @@ std::string returnStringFromElementOrNull(BSONElement element) {
 
 // Helper method to take a valid test case, parse() it, and assure the output is correct
 void testValidURIFormat(URITestCase testCase) {
-    LOGV2(20153, "Testing URI: {mongoUri}", "Testing URI", "mongoUri"_attr = testCase.URI);
+    LOGV2(20153, "Testing URI", "mongoUri"_attr = testCase.URI);
     std::string errMsg;
     const auto cs_status = MongoURI::parse(testCase.URI);
     ASSERT_OK(cs_status);
@@ -643,7 +674,7 @@ TEST(MongoURI, InvalidURIs) {
 
     for (size_t i = 0; i != numCases; ++i) {
         const InvalidURITestCase testCase = invalidCases[i];
-        LOGV2(20154, "Testing URI: {mongoUri}", "Testing URI", "mongoUri"_attr = testCase.URI);
+        LOGV2(20154, "Testing URI", "mongoUri"_attr = testCase.URI);
         auto cs_status = MongoURI::parse(testCase.URI);
         ASSERT_NOT_OK(cs_status);
         if (testCase.code) {
@@ -725,10 +756,7 @@ TEST(MongoURI, specTests) {
             if (!valid) {
                 // This uri string is invalid --> parse the uri and ensure it fails
                 const InvalidURITestCase testCase = InvalidURITestCase{uri};
-                LOGV2(20155,
-                      "Testing URI: {mongoUri}",
-                      "Testing URI",
-                      "mongoUri"_attr = testCase.URI);
+                LOGV2(20155, "Testing URI", "mongoUri"_attr = testCase.URI);
                 auto cs_status = MongoURI::parse(testCase.URI);
                 ASSERT_NOT_OK(cs_status);
             } else {

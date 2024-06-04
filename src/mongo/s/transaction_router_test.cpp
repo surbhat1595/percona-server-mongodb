@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <algorithm>
 #include <compare>
@@ -108,7 +107,8 @@ const BSONObj kNoSuchTransactionResponse =
 const BSONObj kDummyFindCmd = BSON("find"
                                    << "dummy");
 
-class TransactionRouterTest : public ShardingTestFixture {
+class TransactionRouterTest : public virtual service_context_test::RouterRoleOverride,
+                              public ShardingTestFixture {
 protected:
     const LogicalTime kInMemoryLogicalTime = LogicalTime(Timestamp(3, 1));
 
@@ -239,7 +239,7 @@ protected:
     }
 
     void runFunctionFromDifferentOpCtx(std::function<void(OperationContext*)> func) {
-        auto newClientOwned = getServiceContext()->makeClient("newClient");
+        auto newClientOwned = getServiceContext()->getService()->makeClient("newClient");
         AlternativeClientRegion acr(newClientOwned);
         auto newOpCtx = cc().makeOperationContext();
         func(newOpCtx.get());

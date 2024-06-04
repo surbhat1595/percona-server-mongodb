@@ -35,6 +35,7 @@
 #include "mongo/s/request_types/reshard_collection_gen.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
+#include "mongo/s/shard_util.h"
 #include "mongo/util/assert_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
@@ -64,19 +65,19 @@ public:
 
             ReshardCollectionRequest reshardCollectionRequest;
             reshardCollectionRequest.setKey(BSON("_id" << 1));
-            reshardCollectionRequest.setProvenance(StringData("unshardCollection"));
+            reshardCollectionRequest.setProvenance(ProvenanceEnum::kUnshardCollection);
 
-            std::vector<mongo::ShardKeyRange> destinationShard;
+            ShardId toShard;
             if (request().getToShard().has_value()) {
-                destinationShard.push_back(ShardKeyRange(request().getToShard().get()));
-                reshardCollectionRequest.setShardDistribution(destinationShard);
+                toShard = request().getToShard().get();
             } else {
-                // TODO (SERVER-80265) : Calculate emptiest shard for unshard collection.
-                // This uassert is temporary until we have implemented this ticket.
-                uassert(8018401, "Need to specify toShard option", false);
+                toShard = shardutil::selectLeastLoadedShard(opCtx);
             }
 
+            std::vector<mongo::ShardKeyRange> destinationShard = {toShard};
+            reshardCollectionRequest.setShardDistribution(destinationShard);
             reshardCollectionRequest.setForceRedistribution(true);
+            reshardCollectionRequest.setNumInitialChunks(1);
 
             shardsvrReshardCollection.setReshardCollectionRequest(
                 std::move(reshardCollectionRequest));
@@ -84,10 +85,10 @@ public:
             LOGV2(8018400,
                   "Running a reshard collection command for the unshard collection request.",
                   "dbName"_attr = request().getDbName(),
-                  "toShard"_attr = request().getToShard());
+                  "toShard"_attr = toShard);
 
-            auto catalogCache = Grid::get(opCtx)->catalogCache();
-            const auto dbInfo = uassertStatusOK(catalogCache->getDatabase(opCtx, nss.dbName()));
+            const auto dbInfo =
+                uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nss.dbName()));
 
             auto cmdResponse = executeCommandAgainstDatabasePrimary(
                 opCtx,
@@ -134,7 +135,8 @@ public:
 };
 
 MONGO_REGISTER_COMMAND(ClusterUnshardCollectionCmd)
-    .requiresFeatureFlag(&resharding::gFeatureFlagMoveCollection);
+    .requiresFeatureFlag(&resharding::gFeatureFlagUnshardCollection)
+    .forRouter();
 
 }  // namespace
 }  // namespace mongo

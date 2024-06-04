@@ -31,7 +31,6 @@
 #include <utility>
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
@@ -65,8 +64,8 @@ std::string getAuthenticatedUserNamesToken(Client* client) {
 }
 }  // namespace
 
-JsFunction::JsFunction(OperationContext* opCtx, std::string code, std::string dbName) {
-    _init(opCtx, std::move(code), std::move(dbName));
+JsFunction::JsFunction(OperationContext* opCtx, std::string code, const DatabaseName& dbName) {
+    _init(opCtx, std::move(code), dbName);
 }
 
 JsFunction::JsFunction(const JsFunction& other) {
@@ -80,13 +79,13 @@ JsFunction& JsFunction::operator=(const JsFunction& other) {
     return *this;
 }
 
-void JsFunction::_init(OperationContext* opCtx, std::string code, std::string dbName) {
+void JsFunction::_init(OperationContext* opCtx, std::string code, const DatabaseName& dbName) {
     invariant(opCtx != nullptr);
     uassert(6108304, "no globalScriptEngine in $where parsing", getGlobalScriptEngine());
-    uassert(6108305, "ns for $where cannot be empty", !dbName.empty());
+    uassert(6108305, "ns for $where cannot be empty", !dbName.isEmpty());
 
     _code = std::move(code);
-    _dbName = std::move(dbName);
+    _dbName = dbName;
 
     const auto userToken = getAuthenticatedUserNamesToken(opCtx->getClient());
     _scope = getGlobalScriptEngine()->getPooledScope(opCtx, _dbName, "where" + userToken);

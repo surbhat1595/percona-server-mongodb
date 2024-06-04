@@ -42,7 +42,6 @@
 #include <type_traits>
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -148,9 +147,11 @@ PlanCacheKey makeKey(const CanonicalQuery& cq, const std::vector<CoreIndexInfo>&
     indexabilityState.updateDiscriminators(indexCores);
 
     StringBuilder indexabilityKeyBuilder;
-    plan_cache_detail::encodeIndexability(cq.root(), indexabilityState, &indexabilityKeyBuilder);
+    plan_cache_detail::encodeIndexability(
+        cq.getPrimaryMatchExpression(), indexabilityState, &indexabilityKeyBuilder);
 
-    return {PlanCacheKeyInfo{cq.encodeKey(), indexabilityKeyBuilder.str()}};
+    return {PlanCacheKeyInfo{
+        cq.encodeKey(), indexabilityKeyBuilder.str(), query_settings::QuerySettings()}};
 }
 
 /**
@@ -876,7 +877,7 @@ TEST_F(PlanCacheTest, GetMatchingStatsMatchesAndSerializesCorrectly) {
     ASSERT_EQ(2U, planCache.size());
 
     // Define a serialization function which just serializes the number of works.
-    const auto serializer = [](const PlanCacheEntry& entry) {
+    const auto serializer = [](const auto key, const PlanCacheEntry& entry) {
         ASSERT_TRUE(entry.works);
         return BSON("works" << static_cast<int>(entry.works.value()));
     };
@@ -1051,16 +1052,12 @@ protected:
         findCommand->setHint(hint);
         findCommand->setMin(minObj);
         findCommand->setMax(maxObj);
-        const boost::intrusive_ptr<ExpressionContext> expCtx;
-        auto statusWithCQ =
-            CanonicalQuery::canonicalize(opCtx.get(),
-                                         std::move(findCommand),
-                                         false,
-                                         expCtx,
-                                         ExtensionsCallbackNoop(),
-                                         MatchExpressionParser::kAllowAllSpecialFeatures);
-        ASSERT_OK(statusWithCQ.getStatus());
-        auto statusWithMultiPlanSolns = QueryPlanner::plan(*statusWithCQ.getValue(), params);
+        auto cq = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+            .expCtx = makeExpressionContext(opCtx.get(), *findCommand),
+            .parsedFind = ParsedFindCommandParams{
+                .findCommand = std::move(findCommand),
+                .allowedFeatures = MatchExpressionParser::kAllowAllSpecialFeatures}});
+        auto statusWithMultiPlanSolns = QueryPlanner::plan(*cq, params);
         ASSERT_OK(statusWithMultiPlanSolns.getStatus());
         solns = std::move(statusWithMultiPlanSolns.getValue());
     }
@@ -1072,20 +1069,14 @@ protected:
         // Clean up any previous state from a call to runQueryFull or runQueryAsCommand.
         solns.clear();
 
-        const bool isExplain = false;
         std::unique_ptr<FindCommandRequest> findCommand(
             query_request_helper::makeFromFindCommandForTests(cmdObj));
-
-        const boost::intrusive_ptr<ExpressionContext> expCtx;
-        auto statusWithCQ =
-            CanonicalQuery::canonicalize(opCtx.get(),
-                                         std::move(findCommand),
-                                         isExplain,
-                                         expCtx,
-                                         ExtensionsCallbackNoop(),
-                                         MatchExpressionParser::kAllowAllSpecialFeatures);
-        ASSERT_OK(statusWithCQ.getStatus());
-        auto statusWithMultiPlanSolns = QueryPlanner::plan(*statusWithCQ.getValue(), params);
+        auto cq = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+            .expCtx = makeExpressionContext(opCtx.get(), *findCommand),
+            .parsedFind = ParsedFindCommandParams{
+                .findCommand = std::move(findCommand),
+                .allowedFeatures = MatchExpressionParser::kAllowAllSpecialFeatures}});
+        auto statusWithMultiPlanSolns = QueryPlanner::plan(*cq, params);
         ASSERT_OK(statusWithMultiPlanSolns.getStatus());
         solns = std::move(statusWithMultiPlanSolns.getValue());
     }
@@ -1158,16 +1149,11 @@ protected:
         findCommand->setSort(sort);
         findCommand->setProjection(proj);
         findCommand->setCollation(collation);
-        const boost::intrusive_ptr<ExpressionContext> expCtx;
-        auto statusWithCQ =
-            CanonicalQuery::canonicalize(opCtx.get(),
-                                         std::move(findCommand),
-                                         false,
-                                         expCtx,
-                                         ExtensionsCallbackNoop(),
-                                         MatchExpressionParser::kAllowAllSpecialFeatures);
-        ASSERT_OK(statusWithCQ.getStatus());
-        unique_ptr<CanonicalQuery> scopedCq = std::move(statusWithCQ.getValue());
+        auto scopedCq = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+            .expCtx = makeExpressionContext(opCtx.get(), *findCommand),
+            .parsedFind = ParsedFindCommandParams{
+                .findCommand = std::move(findCommand),
+                .allowedFeatures = MatchExpressionParser::kAllowAllSpecialFeatures}});
 
         // Create a CachedSolution the long way..
         // QuerySolution -> PlanCacheEntry -> CachedSolution
@@ -1289,7 +1275,8 @@ protected:
 };
 
 const std::string mockKey("mock_cache_key");
-const PlanCacheKey CachePlanSelectionTest::ck{PlanCacheKeyInfo{mockKey, ""}};
+const PlanCacheKey CachePlanSelectionTest::ck{
+    PlanCacheKeyInfo{mockKey, "", query_settings::QuerySettings()}};
 
 //
 // Equality
@@ -2210,10 +2197,9 @@ private:
         findCommand->setSort(sort);
         findCommand->setProjection(projection);
         findCommand->setCollation(collation);
-        auto statusWithInputQuery =
-            CanonicalQuery::canonicalize(_operationContext.get(), std::move(findCommand));
-        ASSERT_OK(statusWithInputQuery.getStatus());
-        return std::move(statusWithInputQuery.getValue());
+        return std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+            .expCtx = makeExpressionContext(_operationContext.get(), *findCommand),
+            .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     }
 
     std::unique_ptr<CanonicalQuery> makeCQ(const char* queryStr,
@@ -2230,10 +2216,9 @@ private:
         findCommand->setSort(sort);
         findCommand->setProjection(projection);
         findCommand->setCollation(collation);
-        auto statusWithInputQuery =
-            CanonicalQuery::canonicalize(_operationContext.get(), std::move(findCommand));
-        ASSERT_OK(statusWithInputQuery.getStatus());
-        return std::move(statusWithInputQuery.getValue());
+        return std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+            .expCtx = makeExpressionContext(_operationContext.get(), *findCommand),
+            .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     }
 
     std::unique_ptr<QueryTestServiceContext> _queryTestServiceContext;

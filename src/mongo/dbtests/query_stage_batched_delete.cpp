@@ -225,9 +225,9 @@ public:
     std::unique_ptr<CanonicalQuery> canonicalize(const BSONObj& query) {
         auto findCommand = std::make_unique<FindCommandRequest>(nss);
         findCommand->setFilter(query);
-        auto statusWithCQ = CanonicalQuery::canonicalize(&_opCtx, std::move(findCommand));
-        ASSERT_OK(statusWithCQ.getStatus());
-        return std::move(statusWithCQ.getValue());
+        return std::make_unique<CanonicalQuery>(
+            CanonicalQueryParams{.expCtx = makeExpressionContext(&_opCtx, *findCommand),
+                                 .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     }
 
     // Uses the default _expCtx tied to the test suite.
@@ -387,7 +387,7 @@ TEST_F(QueryStageBatchedDeleteTest, BatchedDeleteStagedDocIsDeletedWriteConflict
     auto serviceContext = getGlobalServiceContext();
 
     // Issue the batched delete through different client than the default _client test member.
-    auto batchedDeleteClient = serviceContext->makeClient("batchedDeleteClient");
+    auto batchedDeleteClient = serviceContext->getService()->makeClient("batchedDeleteClient");
     auto batchedDeleteOpCtx = batchedDeleteClient->makeOperationContext();
     boost::intrusive_ptr<ExpressionContext> batchedDeleteExpCtx =
         make_intrusive<ExpressionContext>(batchedDeleteOpCtx.get(), nullptr, nss);
@@ -522,7 +522,7 @@ TEST_F(QueryStageBatchedDeleteTest, BatchedDeleteStagedDocIsUpdatedToNotMatchCli
     auto serviceContext = getGlobalServiceContext();
 
     // Issue the batched delete through different client than the default _client test member.
-    auto batchedDeleteClient = serviceContext->makeClient("batchedDeleteClient");
+    auto batchedDeleteClient = serviceContext->getService()->makeClient("batchedDeleteClient");
     auto batchedDeleteOpCtx = batchedDeleteClient->makeOperationContext();
     boost::intrusive_ptr<ExpressionContext> batchedDeleteExpCtx =
         make_intrusive<ExpressionContext>(batchedDeleteOpCtx.get(), nullptr, nss);

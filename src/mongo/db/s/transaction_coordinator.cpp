@@ -31,7 +31,6 @@
 #include <absl/container/flat_hash_set.h>
 #include <algorithm>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <iterator>
@@ -103,7 +102,7 @@ ExecutorFuture<void> waitForMajorityWithHangFailpoint(
     auto executor = Grid::get(service)->getExecutorPool()->getFixedExecutor();
     auto waitForWC = [service, executor, cancelToken](repl::OpTime opTime) {
         return WaitForMajorityService::get(service)
-            .waitUntilMajority(opTime, cancelToken)
+            .waitUntilMajorityForWrite(opTime, cancelToken)
             .thenRunOn(executor);
     };
 
@@ -121,7 +120,7 @@ ExecutorFuture<void> waitForMajorityWithHangFailpoint(
                 if (!data["useUninterruptibleSleep"].eoo()) {
                     failpoint.pauseWhileSet();
                 } else {
-                    ThreadClient tc(failPointName, service);
+                    ThreadClient tc(failPointName, service->getService(ClusterRole::ShardServer));
 
                     // TODO(SERVER-74658): Please revisit if this thread could be made killable.
                     {
@@ -133,7 +132,7 @@ ExecutorFuture<void> waitForMajorityWithHangFailpoint(
                     failpoint.pauseWhileSet(opCtx.get());
                 }
 
-                return waitForWC(std::move(opTime));
+                return waitForWC(opTime);
             });
     }
 
@@ -301,15 +300,12 @@ TransactionCoordinator::TransactionCoordinator(
                         std::move(affectedNamespacesSet.begin(),
                                   affectedNamespacesSet.end(),
                                   std::back_inserter(_affectedNamespaces));
-                        LOGV2_DEBUG(
-                            22446,
-                            3,
-                            "{sessionId}:{_txnNumberAndRetryCounter} Advancing cluster time to "
-                            "the commit timestamp {commitTimestamp}",
-                            "Advancing cluster time to the commit timestamp",
-                            "sessionId"_attr = _lsid,
-                            "txnNumberAndRetryCounter"_attr = _txnNumberAndRetryCounter,
-                            "commitTimestamp"_attr = *_decision->getCommitTimestamp());
+                        LOGV2_DEBUG(22446,
+                                    3,
+                                    "Advancing cluster time to the commit timestamp",
+                                    "sessionId"_attr = _lsid,
+                                    "txnNumberAndRetryCounter"_attr = _txnNumberAndRetryCounter,
+                                    "commitTimestamp"_attr = *_decision->getCommitTimestamp());
 
                         VectorClockMutable::get(_serviceContext)
                             ->tickClusterTimeTo(LogicalTime(*_decision->getCommitTimestamp()));
@@ -486,10 +482,10 @@ void TransactionCoordinator::continueCommit(const TransactionCoordinatorDocument
 
     _transactionCoordinatorMetricsObserver->onRecoveryFromFailover();
 
-    _participants = std::move(doc.getParticipants());
+    _participants = doc.getParticipants();
     if (doc.getDecision()) {
         _participantsDurable = true;
-        _decision = std::move(doc.getDecision());
+        _decision = doc.getDecision();
     }
     _affectedNamespaces = doc.getAffectedNamespaces().get_value_or({});
 
@@ -538,7 +534,6 @@ void TransactionCoordinator::_done(Status status) {
 
     LOGV2_DEBUG(22447,
                 3,
-                "{sessionId}:{_txnNumberAndRetryCounter} Two-phase commit completed with {status}",
                 "Two-phase commit completed",
                 "sessionId"_attr = _lsid,
                 "txnNumberAndRetryCounter"_attr = _txnNumberAndRetryCounter,

@@ -62,6 +62,7 @@ class DependsReportTypes(Enum):
     """Enums for the different type of depends reports to perform on a graph."""
 
     DIRECT_DEPENDS = auto()
+    PROGRAM_DEPENDS = auto()
     COMMON_DEPENDS = auto()
     EXCLUDE_DEPENDS = auto()
     GRAPH_PATHS = auto()
@@ -69,6 +70,7 @@ class DependsReportTypes(Enum):
     IN_DEGREE_ONE = auto()
     SYMBOL_DEPENDS = auto()
     EFFICIENCY = auto()
+    BAZEL_CONV_CANDIDATES = auto()
 
 
 class LinterTypes(Enum):

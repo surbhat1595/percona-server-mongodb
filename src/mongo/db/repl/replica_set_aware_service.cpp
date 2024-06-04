@@ -30,7 +30,6 @@
 
 #include <algorithm>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
@@ -140,6 +139,9 @@ void ReplicaSetAwareServiceRegistry::onStepUpComplete(OperationContext* opCtx, l
                   "durationMillis"_attr = timeSpent);
         }
     });
+
+    LOGV2(8025900, "ReplicaSetAwareServiceRegistry::onStepUpComplete stepping up all services");
+
     std::for_each(_services.begin(), _services.end(), [&](ReplicaSetAwareInterface* service) {
         // Additionally, generate a warning if any individual service is taking too long.
         Timer t{};
@@ -155,6 +157,8 @@ void ReplicaSetAwareServiceRegistry::onStepUpComplete(OperationContext* opCtx, l
                       "serviceName"_attr = service->getServiceName());
             }
         });
+        LOGV2_DEBUG(
+            8025901, 1, "Stepping up service", "serviceName"_attr = service->getServiceName());
         service->onStepUpComplete(opCtx, term);
     });
 }
@@ -162,6 +166,12 @@ void ReplicaSetAwareServiceRegistry::onStepUpComplete(OperationContext* opCtx, l
 void ReplicaSetAwareServiceRegistry::onStepDown() {
     std::for_each(_services.begin(), _services.end(), [](ReplicaSetAwareInterface* service) {
         service->onStepDown();
+    });
+}
+
+void ReplicaSetAwareServiceRegistry::onRollback() {
+    std::for_each(_services.begin(), _services.end(), [](ReplicaSetAwareInterface* service) {
+        service->onRollback();
     });
 }
 

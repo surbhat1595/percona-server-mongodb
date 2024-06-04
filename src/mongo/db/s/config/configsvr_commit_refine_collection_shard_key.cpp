@@ -64,9 +64,8 @@ public:
             // finishes the writes will be majority written.
             opCtx->setWriteConcern(opCtx->getWriteConcern());
 
-            audit::logRefineCollectionShardKey(opCtx->getClient(),
-                                               NamespaceStringUtil::serialize(ns()),
-                                               request().getKey().toBSON());
+            audit::logRefineCollectionShardKey(
+                opCtx->getClient(), ns(), request().getKey().toBSON());
 
             ShardingCatalogManager::get(opCtx)->commitRefineCollectionShardKey(
                 opCtx,
@@ -114,6 +113,6 @@ public:
         return AllowedOnSecondary::kNever;
     }
 };
-MONGO_REGISTER_COMMAND(ConfigsvrCommitRefineCollectionShardKeyCommand);
+MONGO_REGISTER_COMMAND(ConfigsvrCommitRefineCollectionShardKeyCommand).forShard();
 }  // namespace
 }  // namespace mongo

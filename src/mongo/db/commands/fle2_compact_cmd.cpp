@@ -92,8 +92,10 @@ namespace {
 
 CompactStats compactEncryptedCompactionCollection(OperationContext* opCtx,
                                                   const CompactStructuredEncryptionData& request) {
-
-    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+    }
 
     uassert(6583201,
             str::stream() << CompactStructuredEncryptionData::kCommandName
@@ -186,8 +188,10 @@ CompactStats compactEncryptedCompactionCollection(OperationContext* opCtx,
         // create ECOC
         CreateCommand createCmd(namespaces.ecocNss);
         mongo::ClusteredIndexSpec clusterIdxSpec(BSON("_id" << 1), true);
-        createCmd.setClusteredIndex(
+        CreateCollectionRequest request;
+        request.setClusteredIndex(
             stdx::variant<bool, mongo::ClusteredIndexSpec>(std::move(clusterIdxSpec)));
+        createCmd.setCreateCollectionRequest(std::move(request));
         auto status = createCollection(opCtx, createCmd);
         if (!status.isOK()) {
             if (status != ErrorCodes::NamespaceExists) {
@@ -295,7 +299,7 @@ public:
         return {CompactStructuredEncryptionData::kCompactionTokensFieldName};
     }
 };
-MONGO_REGISTER_COMMAND(CompactStructuredEncryptionDataCmd);
+MONGO_REGISTER_COMMAND(CompactStructuredEncryptionDataCmd).forShard();
 
 }  // namespace
 }  // namespace mongo

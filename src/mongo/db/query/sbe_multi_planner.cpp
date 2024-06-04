@@ -29,7 +29,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
@@ -181,9 +180,12 @@ bool MultiPlanner::fetchOneDocument(plan_ranker::CandidatePlan* candidate) {
     if (!fetchNextDocument(candidate, _maxNumResults)) {
         candidate->root->detachFromTrialRunTracker();
         if (candidate->status.isOK()) {
-            _maxNumReads = std::min(
-                _maxNumReads,
-                candidate->data.tracker->getMetric<TrialRunTracker::TrialRunMetric::kNumReads>());
+            auto numReads =
+                candidate->data.tracker->getMetric<TrialRunTracker::TrialRunMetric::kNumReads>();
+            // In the case of number of read of the plan is 0, we don't want to set _maxNumReads to
+            // 0 for the following plans, because that will effectively disable the max read bound.
+            // Instead we set a hard limit of 1 _maxNumReads here.
+            _maxNumReads = std::max(static_cast<size_t>(1), std::min(_maxNumReads, numReads));
         }
         return false;
     }
@@ -303,7 +305,7 @@ CandidatePlans MultiPlanner::finalizeExecutionPlans(
     // around this limitation, we clone the tree from the original tree. If there is a pipeline in
     // "_cq" the winning candidate will be extended by building a new SBE tree below, so we don't
     // need to clone a new copy here if the winner exited early.
-    if (winner.exitedEarly && _cq.pipeline().empty()) {
+    if (winner.exitedEarly && _cq.cqPipeline().empty()) {
         // Remove all the registered plans from _yieldPolicy's list of trees.
         _yieldPolicy->clearRegisteredPlans();
 
@@ -337,7 +339,7 @@ CandidatePlans MultiPlanner::finalizeExecutionPlans(
     // the trial was done with find-only part of the query, we cannot reuse the results. The
     // non-winning plans are only used in 'explain()' so, to save on unnecessary work, we extend
     // them only if this is an 'explain()' request.
-    if (!_cq.pipeline().empty()) {
+    if (!_cq.cqPipeline().empty()) {
         winner.root->close();
         _yieldPolicy->clearRegisteredPlans();
         auto solution = QueryPlanner::extendWithAggPipeline(

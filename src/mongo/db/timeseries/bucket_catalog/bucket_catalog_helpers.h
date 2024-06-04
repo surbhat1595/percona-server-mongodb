@@ -37,7 +37,7 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/base/string_data_comparator_interface.h"
+#include "mongo/base/string_data_comparator.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -46,7 +46,9 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/kv/kv_engine.h"
+#include "mongo/db/timeseries/bucket_catalog/bucket.h"
 #include "mongo/db/timeseries/bucket_catalog/flat_bson.h"
+#include "mongo/db/timeseries/bucket_catalog/write_batch.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/util/time_support.h"
 
@@ -59,7 +61,7 @@ namespace mongo::timeseries::bucket_catalog {
  * Returns a bad status if the bucket document is malformed.
  */
 StatusWith<MinMax> generateMinMaxFromBucketDoc(const BSONObj& bucketDoc,
-                                               const StringData::ComparatorInterface* comparator);
+                                               const StringDataComparator* comparator);
 
 /**
  * Generates and returns a Schema object from an existing bucket document. Avoids unpacking the
@@ -68,7 +70,7 @@ StatusWith<MinMax> generateMinMaxFromBucketDoc(const BSONObj& bucketDoc,
  * Returns a bad status if the bucket document is malformed or contains mixed schema measurements.
  */
 StatusWith<Schema> generateSchemaFromBucketDoc(const BSONObj& bucketDoc,
-                                               const StringData::ComparatorInterface* comparator);
+                                               const StringDataComparator* comparator);
 
 /**
  * Extracts the time field of a measurement document.
@@ -95,16 +97,6 @@ BSONObj buildControlMinTimestampDoc(StringData timeField, Date_t roundedTime);
  * Retrieves a document from the record store based off of the bucket ID.
  */
 BSONObj findDocFromOID(OperationContext* opCtx, const Collection* coll, const OID& bucketId);
-
-/**
- * Normalize metaField value (i.e. sort object keys) for a time-series measurement so that we can
- * more effectively match a measurement to an existing bucket. If 'as' is specified, the normalized
- * value will be added to 'builder' with the specified field name; otherwise it will be added with
- * its original field name.
- */
-void normalizeMetadata(BSONObjBuilder* builder,
-                       const BSONElement& elem,
-                       boost::optional<StringData> as);
 
 /**
  * Generates an aggregation pipeline to identify a bucket eligible to receive a new measurement

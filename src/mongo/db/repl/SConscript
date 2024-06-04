@@ -231,6 +231,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/collection_options',
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/record_id_helpers',
+        '$BUILD_DIR/mongo/db/repl/repl_server_parameters',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/util/md5',
     ],
@@ -510,6 +511,28 @@ env.Library(
 )
 
 env.Library(
+    target='dbcheck_test_fixture',
+    source=[
+        'dbcheck_test_fixture.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/catalog/catalog_test_fixture',
+        '$BUILD_DIR/mongo/db/catalog/collection_crud',
+        '$BUILD_DIR/mongo/db/catalog/health_log',
+        '$BUILD_DIR/mongo/db/catalog/health_log_interface',
+        '$BUILD_DIR/mongo/db/commands/dbcheck_command',
+        '$BUILD_DIR/mongo/db/dbdirectclient',
+        '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
+        '$BUILD_DIR/mongo/db/op_observer/op_observer',
+        '$BUILD_DIR/mongo/db/op_observer/op_observer_impl',
+        '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
+        '$BUILD_DIR/mongo/unittest/unittest',
+        'dbcheck',
+        'storage_interface',
+    ],
+)
+
+env.Library(
     target='rollback_test_fixture',
     source=[
         'rollback_test_fixture.cpp',
@@ -567,6 +590,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/storage/remove_saver',
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'drop_pending_collection_reaper',
+        'replica_set_aware_service',
     ],
 )
 
@@ -657,6 +681,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/curop_metrics',
         '$BUILD_DIR/mongo/db/session/session_catalog_mongod',
         '$BUILD_DIR/mongo/db/storage/storage_control',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'repl_server_parameters',
         'replication_auth',
     ],
@@ -1093,7 +1118,6 @@ env.Library(
         'tenant_base_cloner.cpp',
         'tenant_file_cloner.cpp',
         'tenant_file_importer_service.cpp',
-        'tenant_migration_shard_merge_util.cpp',
     ],
     LIBDEPS=[
         'base_cloner',
@@ -1403,6 +1427,7 @@ env.Library(
 env.Library(
     target='tenant_migration_utils',
     source=[
+        'tenant_migration_shard_merge_util.cpp',
         'tenant_migration_util.cpp',
         'tenant_migration_recipient_entry_helpers.cpp',
     ],
@@ -1420,6 +1445,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/shard_role',
+        '$BUILD_DIR/mongo/db/storage/storage_file_util',
         '$BUILD_DIR/mongo/db/storage/write_unit_of_work',
         'tenant_migration_state_machine_idl',
     ],
@@ -1466,6 +1492,7 @@ env.Library(
         'tenant_migration_cloners',
         'tenant_migration_state_machine_idl',
         'tenant_oplog_processing',
+        'timestamp_block',
     ],
 )
 
@@ -1541,6 +1568,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/local_oplog_info',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
+        'tenant_migration_utils',
     ],
 )
 
@@ -1737,10 +1765,12 @@ if wiredtiger:
             'abstract_async_component_test.cpp',
             'apply_ops_test.cpp',
             'check_quorum_for_config_change_test.cpp',
+            'dbcheck_test.cpp',
             'delayable_timeout_callback_test.cpp',
             'drop_pending_collection_reaper_test.cpp',
             'idempotency_document_structure_test.cpp',
             'initial_syncer_test.cpp',
+            'insert_group_test.cpp',
             'isself_test.cpp',
             'member_config_test.cpp',
             'multiapplier_test.cpp',
@@ -1798,6 +1828,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/auth/authmocks',
             '$BUILD_DIR/mongo/db/auth/authorization_manager_global',
             '$BUILD_DIR/mongo/db/catalog/catalog_helpers',
+            '$BUILD_DIR/mongo/db/catalog/catalog_test_fixture',
             '$BUILD_DIR/mongo/db/catalog/health_log',
             '$BUILD_DIR/mongo/db/change_stream_pre_images_collection_manager',
             '$BUILD_DIR/mongo/db/commands/create_command',
@@ -1814,6 +1845,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/query/command_request_response',
             '$BUILD_DIR/mongo/db/s/sharding_runtime_d',
             '$BUILD_DIR/mongo/db/server_base',
+            '$BUILD_DIR/mongo/db/serverless/serverless_lock',
             '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
             '$BUILD_DIR/mongo/db/service_context_test_fixture',
             '$BUILD_DIR/mongo/db/session/logical_session_id_helpers',
@@ -1835,6 +1867,8 @@ if wiredtiger:
             '$BUILD_DIR/mongo/util/concurrency/thread_pool',
             'abstract_async_component',
             'data_replicator_external_state_mock',
+            'dbcheck',
+            'dbcheck_test_fixture',
             'delayable_timeout_callback',
             'drop_pending_collection_reaper',
             'idempotency_test_fixture',
@@ -2166,6 +2200,7 @@ env.Benchmark(
         '$BUILD_DIR/mongo/db/storage/storage_control',
         '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/db/storage/wiredtiger/storage_wiredtiger',
+        '$BUILD_DIR/mongo/transport/session_manager',
         '$BUILD_DIR/mongo/unittest/unittest',
         '$BUILD_DIR/mongo/util/periodic_runner_factory',
         'drop_pending_collection_reaper',

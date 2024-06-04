@@ -33,7 +33,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <functional>
 #include <vector>
@@ -47,7 +46,7 @@
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/memory_usage_tracker.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/stats/stats_gen.h"
 #include "mongo/db/query/stats/value_utils.h"
 #include "mongo/platform/basic.h"
@@ -81,7 +80,7 @@ public:
 
     AccumulatorState(ExpressionContext* const expCtx,
                      int64_t maxAllowedMemoryUsageBytes = std::numeric_limits<int64_t>::max())
-        : _memUsageTracker(nullptr /* base */, maxAllowedMemoryUsageBytes), _expCtx(expCtx) {}
+        : _memUsageTracker(maxAllowedMemoryUsageBytes), _expCtx(expCtx) {}
 
     /** Marks the beginning of a new group. The input is the result of evaluating
      *  AccumulatorExpression::initializer, which can read from the group key.
@@ -168,7 +167,7 @@ protected:
     }
 
     /// subclasses are expected to update this as necessary
-    MemoryUsageTracker::Impl _memUsageTracker;
+    SimpleMemoryUsageTracker _memUsageTracker;
 
     /// Member which tracks if this accumulator requires any more input values to compute its final
     /// result. In general, most accumulators require all input values, however, some accumulators

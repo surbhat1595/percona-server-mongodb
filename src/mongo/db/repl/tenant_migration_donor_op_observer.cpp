@@ -35,7 +35,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/timestamp.h"
@@ -90,7 +89,8 @@ void onTransitionToAbortingIndexBuilds(OperationContext* opCtx,
                                                                     donorStateDoc.getId());
     if (donorStateDoc.getProtocol().value_or(MigrationProtocolEnum::kMultitenantMigrations) ==
         MigrationProtocolEnum::kMultitenantMigrations) {
-        const auto tenantId = TenantId::parseFromString(donorStateDoc.getTenantId());
+        invariant(donorStateDoc.getTenantId());
+        const auto tenantId = TenantId::parseFromString(*donorStateDoc.getTenantId());
         TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext()).add(tenantId, mtab);
     } else {
         tassert(6448702,
@@ -185,7 +185,7 @@ void onTransitionToAborted(OperationContext* opCtx,
  */
 class TenantMigrationDonorCommitOrAbortHandler final : public RecoveryUnit::Change {
 public:
-    TenantMigrationDonorCommitOrAbortHandler(const TenantMigrationDonorDocument donorStateDoc)
+    TenantMigrationDonorCommitOrAbortHandler(TenantMigrationDonorDocument donorStateDoc)
         : _donorStateDoc(std::move(donorStateDoc)) {}
 
     void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {
@@ -344,6 +344,7 @@ void TenantMigrationDonorOpObserver::aboutToDelete(OperationContext* opCtx,
 void TenantMigrationDonorOpObserver::onDelete(OperationContext* opCtx,
                                               const CollectionPtr& coll,
                                               StmtId stmtId,
+                                              const BSONObj& doc,
                                               const OplogDeleteEntryArgs& args,
                                               OpStateAccumulator* opAccumulator) {
     if (coll->ns() == NamespaceString::kTenantMigrationDonorsNamespace &&

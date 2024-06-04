@@ -35,7 +35,6 @@
 #include <utility>
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -196,25 +195,21 @@ Status UpdateDriver::populateDocumentWithQueryFields(OperationContext* opCtx,
     // We canonicalize the query to collapse $and/$or, and the namespace is not needed.  Also,
     // because this is for the upsert case, where we insert a new document if one was not found, the
     // $where/$text clauses do not make sense, hence empty ExtensionsCallback.
-    auto findCommand = std::make_unique<FindCommandRequest>(NamespaceString());
+    auto findCommand = std::make_unique<FindCommandRequest>(NamespaceString::kEmpty);
     findCommand->setFilter(query);
-    const boost::intrusive_ptr<ExpressionContext> expCtx;
     // $expr is not allowed in the query for an upsert, since it is not clear what the equality
     // extraction behavior for $expr should be.
-    auto statusWithCQ =
-        CanonicalQuery::canonicalize(opCtx,
-                                     std::move(findCommand),
-                                     false,
-                                     expCtx,
-                                     ExtensionsCallbackNoop(),
-                                     MatchExpressionParser::kAllowAllSpecialFeatures &
-                                         ~MatchExpressionParser::AllowedFeatures::kExpr);
+    auto allowedFeatures = MatchExpressionParser::kAllowAllSpecialFeatures &
+        ~MatchExpressionParser::AllowedFeatures::kExpr;
+    auto statusWithCQ = CanonicalQuery::make(
+        {.expCtx = makeExpressionContext(opCtx, *findCommand),
+         .parsedFind = ParsedFindCommandParams{.findCommand = std::move(findCommand),
+                                               .allowedFeatures = allowedFeatures}});
     if (!statusWithCQ.isOK()) {
         return statusWithCQ.getStatus();
     }
-    std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
-
-    return populateDocumentWithQueryFields(*cq->root(), immutablePaths, doc);
+    auto cq = std::move(statusWithCQ.getValue());
+    return populateDocumentWithQueryFields(*cq->getPrimaryMatchExpression(), immutablePaths, doc);
 }
 
 Status UpdateDriver::populateDocumentWithQueryFields(const MatchExpression& query,

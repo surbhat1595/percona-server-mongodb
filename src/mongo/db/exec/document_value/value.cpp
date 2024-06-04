@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/numeric/conversion/converter_policies.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cmath>
@@ -50,9 +49,8 @@
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
 #include "mongo/base/error_codes.h"
-#include "mongo/base/simple_string_data_comparator.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data_comparator_interface.h"
+#include "mongo/base/string_data_comparator.h"
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -675,9 +673,7 @@ inline static int cmp(const T& left, const T& right) {
     }
 }
 
-int Value::compare(const Value& rL,
-                   const Value& rR,
-                   const StringData::ComparatorInterface* stringComparator) {
+int Value::compare(const Value& rL, const Value& rR, const StringDataComparator* stringComparator) {
     // Note, this function needs to behave identically to BSONElement::compareElements().
     // Additionally, any changes here must be replicated in hash_combine().
     BSONType lType = rL.getType();
@@ -863,8 +859,7 @@ size_t hashStringData(StringData sd, size_t seed) {
 }
 }  // namespace
 
-void Value::hash_combine(size_t& seed,
-                         const StringData::ComparatorInterface* stringComparator) const {
+void Value::hash_combine(size_t& seed, const StringDataComparator* stringComparator) const {
     BSONType type = getType();
 
     boost::hash_combine(seed, canonicalizeBSONType(type));
@@ -980,7 +975,7 @@ void Value::hash_combine(size_t& seed,
 
         case CodeWScope: {
             intrusive_ptr<const RCCodeWScope> cws = _storage.getCodeWScope();
-            SimpleStringDataComparator::kInstance.hash_combine(seed, cws->code);
+            simpleStringDataComparator.hash_combine(seed, cws->code);
             SimpleBSONObjComparator::kInstance.hash_combine(seed, cws->scope);
             break;
         }
@@ -1252,14 +1247,17 @@ ostream& operator<<(ostream& out, const Value& val) {
     MONGO_verify(false);
 }
 
-void Value::fillCache() const {
+Value Value::shred() const {
     if (isObject()) {
-        getDocument().fillCache();
+        return Value(getDocument().shred());
     } else if (isArray()) {
+        std::vector<Value> values;
         for (auto&& val : getArray()) {
-            val.fillCache();
+            values.push_back(val.shred());
         }
+        return Value(values);
     }
+    return Value(*this);
 }
 
 void Value::serializeForSorter(BufBuilder& buf) const {

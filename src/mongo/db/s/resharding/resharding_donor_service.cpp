@@ -33,7 +33,6 @@
 #include <absl/container/node_hash_map.h>
 #include <algorithm>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <fmt/format.h>
 #include <mutex>
@@ -201,7 +200,7 @@ public:
     void refreshCatalogCache(OperationContext* opCtx, const NamespaceString& nss) override {
         auto catalogCache = Grid::get(opCtx)->catalogCache();
         uassertStatusOK(
-            catalogCache->getShardedCollectionRoutingInfoWithPlacementRefresh(opCtx, nss));
+            catalogCache->getTrackedCollectionRoutingInfoWithPlacementRefresh(opCtx, nss));
     }
 
     void waitForCollectionFlush(OperationContext* opCtx, const NamespaceString& nss) override {
@@ -283,7 +282,8 @@ ReshardingDonorService::DonorStateMachine::DonorStateMachine(
       _critSecReason(BSON("command"
                           << "resharding_donor"
                           << "collection"
-                          << NamespaceStringUtil::serialize(_metadata.getSourceNss()))),
+                          << NamespaceStringUtil::serialize(_metadata.getSourceNss(),
+                                                            SerializationContext::stateDefault()))),
       _isAlsoRecipient([&] {
           auto myShardId = _externalState->myShardId(_serviceContext);
           return std::find(_recipientShardIds.begin(), _recipientShardIds.end(), myShardId) !=
@@ -779,9 +779,11 @@ void ReshardingDonorService::DonorStateMachine::
             oplog.setOpType(repl::OpTypeEnum::kNoop);
             oplog.setUuid(_metadata.getSourceUUID());
             oplog.setDestinedRecipient(destinedRecipient);
-            oplog.setObject(BSON(
-                "msg" << fmt::format("Writes to {} are temporarily blocked for resharding.",
-                                     NamespaceStringUtil::serialize(_metadata.getSourceNss()))));
+            oplog.setObject(
+                BSON("msg" << fmt::format(
+                         "Writes to {} are temporarily blocked for resharding.",
+                         NamespaceStringUtil::serialize(_metadata.getSourceNss(),
+                                                        SerializationContext::stateDefault()))));
             oplog.setObject2(BSON("type" << resharding::kReshardFinalOpLogType << "reshardingUUID"
                                          << _metadata.getReshardingUUID()));
             oplog.setOpTime(OplogSlot());
@@ -1003,7 +1005,7 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_updateCoordinat
     repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
     auto clientOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
     return WaitForMajorityService::get(opCtx->getServiceContext())
-        .waitUntilMajority(clientOpTime, CancellationToken::uncancelable())
+        .waitUntilMajorityForWrite(clientOpTime, CancellationToken::uncancelable())
         .thenRunOn(**executor)
         .then([this] {
             auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());

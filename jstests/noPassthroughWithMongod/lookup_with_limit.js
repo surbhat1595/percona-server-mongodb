@@ -9,7 +9,7 @@ if (!checkSBEEnabled(db)) {
     quit();
 }
 
-// TODO SERVER-72549: Remove 'featureFlagSbeFull' used by SBE Pushdown feature here and below.
+// SERVER-80226: Remove 'featureFlagSbeFull' used by SBE Pushdown, SBE $unwind.
 const featureFlagSbeFull = checkSBEEnabled(db, ["featureFlagSbeFull"]);
 
 const coll = db.lookup_with_limit;
@@ -53,7 +53,7 @@ var pipeline = [
     {$lookup: {from: other.getName(), localField: "x", foreignField: "x", as: "from_other"}},
     {$limit: 5}
 ];
-checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "$limit"]);
+checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "LIMIT"]);
 checkResults(pipeline, true, ["COLLSCAN", "LIMIT", "EQ_LOOKUP"]);
 
 // Check that lookup->addFields->lookup->limit is reordered to limit->lookup->addFields->lookup,
@@ -64,15 +64,9 @@ pipeline = [
     {$lookup: {from: other.getName(), localField: "x", foreignField: "x", as: "additional"}},
     {$limit: 5}
 ];
-if (featureFlagSbeFull) {
-    checkResults(
-        pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "PROJECTION_DEFAULT", "EQ_LOOKUP", "$limit"]);
-    checkResults(
-        pipeline, true, ["COLLSCAN", "LIMIT", "EQ_LOOKUP", "PROJECTION_DEFAULT", "EQ_LOOKUP"]);
-} else {
-    checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "$addFields", "$lookup", "$limit"]);
-    checkResults(pipeline, true, ["COLLSCAN", "LIMIT", "EQ_LOOKUP", "$addFields", "$lookup"]);
-}
+checkResults(
+    pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "PROJECTION_DEFAULT", "EQ_LOOKUP", "LIMIT"]);
+checkResults(pipeline, true, ["COLLSCAN", "LIMIT", "EQ_LOOKUP", "PROJECTION_DEFAULT", "EQ_LOOKUP"]);
 
 // Check that lookup->unwind->limit is reordered to lookup->limit, with the unwind stage being
 // absorbed into the lookup stage and preventing the limit from swapping before it.
@@ -81,7 +75,12 @@ pipeline = [
     {$unwind: "$from_other"},
     {$limit: 5}
 ];
-checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "$unwind", "$limit"]);
+// TODO SERVER-80226: Remove 'featureFlagSbeFull' used by SBE $unwind feature.
+if (featureFlagSbeFull) {
+    checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "UNWIND", "LIMIT"]);
+} else {
+    checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "$unwind", "$limit"]);
+}
 checkResults(pipeline, true, ["COLLSCAN", "$lookup", "$limit"]);
 
 // Check that lookup->unwind->sort->limit is reordered to lookup->sort, with the unwind stage being
@@ -93,5 +92,10 @@ pipeline = [
     {$sort: {x: 1}},
     {$limit: 5}
 ];
-checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "$unwind", "$sort", "$limit"]);
+// TODO SERVER-80226: Remove 'featureFlagSbeFull' used by SBE $unwind feature.
+if (featureFlagSbeFull) {
+    checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "UNWIND", "SORT", "LIMIT"]);
+} else {
+    checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "$unwind", "$sort", "$limit"]);
+}
 checkResults(pipeline, true, ["COLLSCAN", "$lookup", "$sort"]);

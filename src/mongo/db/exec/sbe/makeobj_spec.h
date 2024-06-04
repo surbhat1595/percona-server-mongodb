@@ -36,19 +36,19 @@
 
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
+#include "mongo/db/exec/sbe/makeobj_input_plan.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/util/indexed_string_vector.h"
+#include "mongo/util/field_set.h"
+#include "mongo/util/string_listset.h"
 
 namespace mongo::sbe {
-/**
- * MakeObjSpec is a wrapper around a FieldBehavior value and a list of field names / project names.
- */
 struct MakeObjSpec {
-    enum class FieldBehavior { kClosed, kOpen };
     enum class NonObjInputBehavior { kReturnNothing, kReturnInput, kNewObj };
+    enum class ActionType : uint8_t { kKeep, kDrop, kValueArg, kLambdaArg, kMakeObj };
 
-    struct KeepOrDrop {};
+    struct Keep {};
+    struct Drop {};
     struct ValueArg {
         size_t argIdx;
     };
@@ -61,35 +61,52 @@ struct MakeObjSpec {
     };
 
     /**
-     * This class holds info about what action should be taken for a given field. Each FieldInfo
+     * This class holds info about what action should be taken for a given field. Each FieldAction
      * can be one of the following:
-     *   1) KeepOrDrop: If 'fieldBehavior == kClosed' is true then copy the field, otherwise ignore
-     *                  the field.
-     *   2) ValueArg:   If the field exists then overwrite it with the corresponding argument,
-     *                  otherwise add a new field set to the corresponding argument.
-     *   3) LambdaArg:  Pass the current value of the field (or Nothing if the field doesn't exist)
-     *                  to the corresponding lambda arg, and then replace the field with the return
-     *                  value of the lambda.
-     *   4) MakeObj:    Recursively invoke makeBsonObj() passing in the field as the input object,
-     *                  and replace the field with output produced.
+     *   1) Keep:      Copy the field.
+     *   2) Drop:      Ignore the field.
+     *   3) ValueArg:  If the field exists then overwrite it with the corresponding argument,
+     *                 otherwise add a new field set to the corresponding argument.
+     *   4) LambdaArg: Pass the current value of the field (or Nothing if the field doesn't exist)
+     *                 to the corresponding lambda arg, and then replace the field with the return
+     *                 value of the lambda.
+     *   5) MakeObj:   Recursively invoke makeBsonObj() passing in the field as the input object,
+     *                 and replace the field with output produced.
      */
-    class FieldInfo {
+    class FieldAction {
     public:
-        using VariantType = stdx::variant<KeepOrDrop, ValueArg, LambdaArg, MakeObj>;
+        using Type = ActionType;
 
-        FieldInfo() = default;
-        FieldInfo(size_t valueArgIdx) : _data(ValueArg{valueArgIdx}) {}
-        FieldInfo(std::unique_ptr<MakeObjSpec> spec) : _data(MakeObj{std::move(spec)}) {}
+        using VariantType = stdx::variant<Keep, Drop, ValueArg, LambdaArg, MakeObj>;
 
-        FieldInfo(KeepOrDrop) : _data(KeepOrDrop{}) {}
-        FieldInfo(ValueArg valueArg) : _data(valueArg) {}
-        FieldInfo(LambdaArg lambdaArg) : _data(lambdaArg) {}
-        FieldInfo(MakeObj makeObj) : _data(std::move(makeObj)) {}
+        FieldAction() = default;
+        FieldAction(size_t valueArgIdx) : _data(ValueArg{valueArgIdx}) {}
+        FieldAction(std::unique_ptr<MakeObjSpec> spec) : _data(MakeObj{std::move(spec)}) {}
 
-        FieldInfo clone() const;
+        FieldAction(Keep) : _data(Keep{}) {}
+        FieldAction(Drop) : _data(Drop{}) {}
+        FieldAction(ValueArg valueArg) : _data(valueArg) {}
+        FieldAction(LambdaArg lambdaArg) : _data(lambdaArg) {}
+        FieldAction(MakeObj makeObj) : _data(std::move(makeObj)) {}
 
-        bool isKeepOrDrop() const {
-            return stdx::holds_alternative<KeepOrDrop>(_data);
+        FieldAction clone() const;
+
+        Type type() const {
+            return stdx::visit(OverloadedVisitor{[](Keep) { return Type::kKeep; },
+                                                 [](Drop) { return Type::kDrop; },
+                                                 [](ValueArg) { return Type::kValueArg; },
+                                                 [](LambdaArg) { return Type::kLambdaArg; },
+                                                 [](const MakeObj&) {
+                                                     return Type::kMakeObj;
+                                                 }},
+                               _data);
+        }
+
+        bool isKeep() const {
+            return stdx::holds_alternative<Keep>(_data);
+        }
+        bool isDrop() const {
+            return stdx::holds_alternative<Drop>(_data);
         }
         bool isValueArg() const {
             return stdx::holds_alternative<ValueArg>(_data);
@@ -111,43 +128,63 @@ struct MakeObjSpec {
             return stdx::get<MakeObj>(_data).spec.get();
         }
 
+        bool isMandatory() const {
+            return isValueArg() ||
+                (isLambdaArg() && !getLambdaArg().returnsNothingOnMissingInput) ||
+                (isMakeObj() && !getMakeObjSpec()->returnsNothingOnMissingInput());
+        }
+
     private:
         VariantType _data;
     };
 
-    MakeObjSpec(FieldBehavior fieldBehavior,
+    MakeObjSpec(FieldListScope fieldsScope,
                 std::vector<std::string> fields,
-                std::vector<FieldInfo> fieldInfos = {},
+                std::vector<FieldAction> actions = {},
                 NonObjInputBehavior nonObjInputBehavior = NonObjInputBehavior::kNewObj,
                 boost::optional<int32_t> traversalDepth = boost::none)
-        : fieldBehavior(fieldBehavior),
+        : fieldsScope(fieldsScope),
           nonObjInputBehavior(nonObjInputBehavior),
           traversalDepth(traversalDepth),
-          fieldInfos(std::move(fieldInfos)),
-          fields(buildIndexedFieldVector(std::move(fields))) {}
+          actions(std::move(actions)),
+          fields(buildFieldDict(std::move(fields))) {}
+
+    MakeObjSpec(FieldListScope fieldsScope,
+                std::vector<std::string> fields,
+                std::vector<FieldAction> actions,
+                NonObjInputBehavior nonObjInputBehavior,
+                boost::optional<int32_t> traversalDepth,
+                const MakeObjInputPlan& inputPlan)
+        : fieldsScope(fieldsScope),
+          nonObjInputBehavior(nonObjInputBehavior),
+          traversalDepth(traversalDepth),
+          actions(std::move(actions)),
+          fields(buildFieldDict(std::move(fields), inputPlan)) {}
 
     MakeObjSpec(const MakeObjSpec& other)
-        : numKeepOrDrops(other.numKeepOrDrops),
-          numValueArgs(other.numValueArgs),
-          numMandatoryMakeObjs(other.numMandatoryMakeObjs),
-          numMandatoryLambdas(other.numMandatoryLambdas),
-          totalNumArgs(other.totalNumArgs),
-          fieldBehavior(other.fieldBehavior),
+        : fieldsScope(other.fieldsScope),
           nonObjInputBehavior(other.nonObjInputBehavior),
           traversalDepth(other.traversalDepth),
-          fieldInfos(other.cloneFieldInfos()),
+          actions(other.cloneActions()),
+          numFieldsOfInterest(other.numFieldsOfInterest),
+          numValueArgs(other.numValueArgs),
+          totalNumArgs(other.totalNumArgs),
+          mandatoryFields(std::move(other.mandatoryFields)),
+          numInputFields(other.numInputFields),
+          displayOrder(other.displayOrder),
           fields(other.fields) {}
 
     MakeObjSpec(MakeObjSpec&& other)
-        : numKeepOrDrops(other.numKeepOrDrops),
-          numValueArgs(other.numValueArgs),
-          numMandatoryMakeObjs(other.numMandatoryMakeObjs),
-          numMandatoryLambdas(other.numMandatoryLambdas),
-          totalNumArgs(other.totalNumArgs),
-          fieldBehavior(other.fieldBehavior),
+        : fieldsScope(other.fieldsScope),
           nonObjInputBehavior(other.nonObjInputBehavior),
           traversalDepth(other.traversalDepth),
-          fieldInfos(std::move(other.fieldInfos)),
+          actions(std::move(other.actions)),
+          numFieldsOfInterest(other.numFieldsOfInterest),
+          numValueArgs(other.numValueArgs),
+          totalNumArgs(other.totalNumArgs),
+          mandatoryFields(std::move(other.mandatoryFields)),
+          numInputFields(other.numInputFields),
+          displayOrder(std::move(other.displayOrder)),
           fields(std::move(other.fields)) {}
 
     MakeObjSpec& operator=(const MakeObjSpec& other) = delete;
@@ -158,93 +195,44 @@ struct MakeObjSpec {
         return std::make_unique<MakeObjSpec>(*this);
     }
 
+    bool fieldsScopeIsClosed() const {
+        return fieldsScope == FieldListScope::kClosed;
+    }
+
+    bool fieldsScopeIsOpen() const {
+        return fieldsScope == FieldListScope::kOpen;
+    }
+
     bool returnsNothingOnMissingInput() const {
         return nonObjInputBehavior != NonObjInputBehavior::kNewObj;
     }
 
-    std::vector<FieldInfo> cloneFieldInfos() const {
-        std::vector<FieldInfo> fieldInfosCopy;
-        for (auto&& info : fieldInfos) {
-            fieldInfosCopy.emplace_back(info.clone());
+    std::vector<FieldAction> cloneActions() const {
+        std::vector<FieldAction> actionsCopy;
+        for (auto&& info : actions) {
+            actionsCopy.emplace_back(info.clone());
         }
 
-        return fieldInfosCopy;
+        return actionsCopy;
     }
 
-    std::string toString() const {
-        const bool isClosed = fieldBehavior == FieldBehavior::kClosed;
-
-        StringBuilder builder;
-        builder << "[";
-
-        for (size_t i = 0; i < fields.size(); ++i) {
-            auto& info = fieldInfos[i];
-
-            if (i != 0) {
-                builder << ", ";
-            }
-
-            builder << "\"" << fields[i] << "\"";
-
-            if (info.isKeepOrDrop()) {
-                continue;
-            } else {
-                builder << " = ";
-            }
-
-            if (info.isValueArg()) {
-                builder << "Arg(" << info.getValueArgIdx() << ")";
-            } else if (info.isLambdaArg()) {
-                const auto& lambdaArg = info.getLambdaArg();
-                builder << "LambdaArg(" << lambdaArg.argIdx
-                        << (lambdaArg.returnsNothingOnMissingInput ? "" : ", false") << ")";
-            } else if (info.isMakeObj()) {
-                auto spec = info.getMakeObjSpec();
-                builder << "MakeObj(" << spec->toString() << ")";
-            }
-        }
-
-        builder << "], " << (isClosed ? "Closed" : "Open");
-
-        if (nonObjInputBehavior == NonObjInputBehavior::kReturnNothing) {
-            builder << ", ReturnNothing";
-        } else if (nonObjInputBehavior == NonObjInputBehavior::kReturnInput) {
-            builder << ", ReturnInput";
-        } else if (traversalDepth.has_value()) {
-            builder << ", NewObj";
-        }
-
-        if (traversalDepth.has_value()) {
-            builder << ", " << *traversalDepth;
-        }
-
-        return builder.str();
-    }
-
-    IndexedStringVector buildIndexedFieldVector(std::vector<std::string> names);
+    std::string toString() const;
 
     size_t getApproximateSize() const;
 
-    // Number of 'fields' that are simple "keeps" or "drops".
-    size_t numKeepOrDrops = 0;
+private:
+    StringListSet buildFieldDict(std::vector<std::string> names);
 
-    // Number of 'fields' that are ValueArgs.
-    size_t numValueArgs = 0;
+    StringListSet buildFieldDict(std::vector<std::string> names, const MakeObjInputPlan& inputPlan);
 
-    // Number of 'fields' that are MakeObjs where 'returnsNothingOnMissingInput()' is false.
-    size_t numMandatoryMakeObjs = 0;
+    void initCounters();
 
-    // Number of 'fields' that are LambdaArgs where 'returnsNothingOnMissingInput' is false.
-    size_t numMandatoryLambdas = 0;
-
-    // The total number of ValueArgs and LamdbaArgs in this MakeObjSpec and all of its descendents.
-    size_t totalNumArgs = 0;
-
-    // 'fieldBehavior' indicates how other fields not present in 'fields' should be handled.
-    // If 'fieldBehavior == kOpen', then other fields not present in 'fields' should be copied
-    // to the output object. If 'fieldBehavior == kClosed', then other fields not present in
+public:
+    // 'fieldsScope' indicates how other fields not present in 'fields' should be handled.
+    // If 'fieldsScope == kOpen', then other fields not present in 'fields' should be copied
+    // to the output object. If 'fieldsScope == kClosed', then other fields not present in
     // 'fields' should be ignored/dropped.
-    FieldBehavior fieldBehavior = FieldBehavior::kOpen;
+    FieldListScope fieldsScope = FieldListScope::kOpen;
 
     // 'nonObjInputBehavior' indicates how makeBsonObj() should behave if the input value is not an
     // object. If 'nonObjInputBehavior == kNewObj', then makeBsonObj() should replace the input
@@ -253,16 +241,32 @@ struct MakeObjSpec {
     // should return the input value.
     NonObjInputBehavior nonObjInputBehavior = NonObjInputBehavior::kNewObj;
 
-    // If this MakeObjSpec is part of a "MakeObj" FieldInfo, 'traversalDepth' indicates what
+    // If this MakeObjSpec is part of a "MakeObj" FieldAction, 'traversalDepth' indicates what
     // the array traversal depth limit should be. By default 'traversalDepth' is 'boost::none'
     // (i.e. by default there is no depth limit).
     boost::optional<int32_t> traversalDepth;
 
-    // Contains info about each field of interest. 'fields' and 'fieldInfos' are parallel vectors
-    // (i.e. the info corresponding to field[i] is stored in fieldInfos[i]).
-    std::vector<FieldInfo> fieldInfos;
+    // Contains info about each field of interest. 'fields' and 'actions' are parallel vectors
+    // (i.e. the info corresponding to field[i] is stored in actions[i]).
+    std::vector<FieldAction> actions;
+
+    // Number of 'fields' whose FieldAction type is not kDrop (if 'fieldsScope' is kClosed) or
+    // whose FieldAction type is not kKeep (if 'fieldsScope' is kOpen).
+    size_t numFieldsOfInterest = 0;
+
+    // Number of 'fields' that are ValueArgs.
+    size_t numValueArgs = 0;
+
+    // The total number of ValueArgs and LamdbaArgs in this MakeObjSpec and all of its descendents.
+    size_t totalNumArgs = 0;
+
+    std::vector<size_t> mandatoryFields;
+
+    boost::optional<size_t> numInputFields;
+
+    std::vector<size_t> displayOrder;
 
     // Searchable vector of fields of interest.
-    IndexedStringVector fields;
+    StringListSet fields;
 };
 }  // namespace mongo::sbe

@@ -31,7 +31,6 @@
 
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <string>
 
 #include <boost/move/utility_core.hpp>
@@ -155,14 +154,13 @@ void MigrationCoordinator::startMigration(OperationContext* opCtx) {
     donorDeletionTask.setKeyPattern(*_shardKeyPattern);
     const auto currentTime = VectorClock::get(opCtx)->getTime();
     donorDeletionTask.setTimestamp(currentTime.clusterTime().asTimestamp());
-    migrationutil::persistRangeDeletionTaskLocally(
+    rangedeletionutil::persistRangeDeletionTaskLocally(
         opCtx, donorDeletionTask, WriteConcerns::kMajorityWriteConcernShardingTimeout);
 }
 
 void MigrationCoordinator::setMigrationDecision(DecisionEnum decision) {
     LOGV2_DEBUG(23891,
                 2,
-                "MigrationCoordinator setting migration decision to {decision}",
                 "MigrationCoordinator setting migration decision",
                 "decision"_attr = (decision == DecisionEnum::kCommitted ? "committed" : "aborted"),
                 "migrationId"_attr = _migrationInfo.getId());
@@ -185,7 +183,6 @@ boost::optional<SharedSemiFuture<void>> MigrationCoordinator::completeMigration(
     }
 
     LOGV2(23893,
-          "MigrationCoordinator delivering decision {decision} to self and to recipient",
           "MigrationCoordinator delivering decision to self and to recipient",
           "decision"_attr = (decision == DecisionEnum::kCommitted ? "committed" : "aborted"),
           "migrationId"_attr = _migrationInfo.getId());
@@ -227,17 +224,14 @@ SharedSemiFuture<void> MigrationCoordinator::_commitMigrationOnDonorAndRecipient
 
     _waitForReleaseRecipientCriticalSectionFutureIgnoreShardNotFound(opCtx);
 
-    LOGV2_DEBUG(
-        23895,
-        2,
-        "Bumping transaction number with lsid {lsid} and current txnNumber {currentTxnNumber} on "
-        "recipient shard {recipientShardId} for commit of collection {nss}",
-        "Bumping transaction number on recipient shard for commit",
-        logAttrs(_migrationInfo.getNss()),
-        "recipientShardId"_attr = _migrationInfo.getRecipientShardId(),
-        "lsid"_attr = _migrationInfo.getLsid(),
-        "currentTxnNumber"_attr = _migrationInfo.getTxnNumber(),
-        "migrationId"_attr = _migrationInfo.getId());
+    LOGV2_DEBUG(23895,
+                2,
+                "Bumping transaction number on recipient shard for commit",
+                logAttrs(_migrationInfo.getNss()),
+                "recipientShardId"_attr = _migrationInfo.getRecipientShardId(),
+                "lsid"_attr = _migrationInfo.getLsid(),
+                "currentTxnNumber"_attr = _migrationInfo.getTxnNumber(),
+                "migrationId"_attr = _migrationInfo.getId());
     migrationutil::advanceTransactionOnRecipient(opCtx,
                                                  _migrationInfo.getRecipientShardId(),
                                                  _migrationInfo.getLsid(),
@@ -250,10 +244,11 @@ SharedSemiFuture<void> MigrationCoordinator::_commitMigrationOnDonorAndRecipient
                 "Retrieving number of orphan documents from recipient",
                 "migrationId"_attr = _migrationInfo.getId());
 
-    const auto numOrphans = migrationutil::retrieveNumOrphansFromRecipient(opCtx, _migrationInfo);
+    const auto numOrphans = rangedeletionutil::retrieveNumOrphansFromShard(
+        opCtx, _migrationInfo.getRecipientShardId(), _migrationInfo.getId());
 
     if (numOrphans > 0) {
-        persistUpdatedNumOrphans(
+        rangedeletionutil::persistUpdatedNumOrphans(
             opCtx, _migrationInfo.getCollectionUuid(), _migrationInfo.getRange(), numOrphans);
     }
 
@@ -261,11 +256,11 @@ SharedSemiFuture<void> MigrationCoordinator::_commitMigrationOnDonorAndRecipient
                 2,
                 "Deleting range deletion task on recipient",
                 "migrationId"_attr = _migrationInfo.getId());
-    migrationutil::deleteRangeDeletionTaskOnRecipient(opCtx,
-                                                      _migrationInfo.getRecipientShardId(),
-                                                      _migrationInfo.getCollectionUuid(),
-                                                      _migrationInfo.getRange(),
-                                                      _migrationInfo.getId());
+    rangedeletionutil::deleteRangeDeletionTaskOnRecipient(opCtx,
+                                                          _migrationInfo.getRecipientShardId(),
+                                                          _migrationInfo.getCollectionUuid(),
+                                                          _migrationInfo.getRange(),
+                                                          _migrationInfo.getId());
 
     RangeDeletionTask deletionTask(_migrationInfo.getId(),
                                    _migrationInfo.getNss(),
@@ -307,7 +302,7 @@ SharedSemiFuture<void> MigrationCoordinator::_commitMigrationOnDonorAndRecipient
 
     // Mark the range deletion task document as non-pending in order to unblock the previously
     // registered range deletion
-    migrationutil::markAsReadyRangeDeletionTaskLocally(
+    rangedeletionutil::markAsReadyRangeDeletionTaskLocally(
         opCtx, deletionTask.getCollectionUuid(), deletionTask.getRange());
 
     return rangeDeletionCompletionFuture;
@@ -330,15 +325,12 @@ void MigrationCoordinator::_abortMigrationOnDonorAndRecipient(OperationContext* 
                 2,
                 "Deleting range deletion task on donor",
                 "migrationId"_attr = _migrationInfo.getId());
-    migrationutil::deleteRangeDeletionTaskLocally(
+    rangedeletionutil::deleteRangeDeletionTaskLocally(
         opCtx, _migrationInfo.getCollectionUuid(), _migrationInfo.getRange());
 
     try {
         LOGV2_DEBUG(23900,
                     2,
-                    "Bumping transaction number with lsid {lsid} and current txnNumber "
-                    "{currentTxnNumber} on "
-                    "recipient shard {recipientShardId} for abort of collection {nss}",
                     "Bumping transaction number on recipient shard for abort",
                     logAttrs(_migrationInfo.getNss()),
                     "recipientShardId"_attr = _migrationInfo.getRecipientShardId(),
@@ -365,11 +357,11 @@ void MigrationCoordinator::_abortMigrationOnDonorAndRecipient(OperationContext* 
                 2,
                 "Marking range deletion task on recipient as ready for processing",
                 "migrationId"_attr = _migrationInfo.getId());
-    migrationutil::markAsReadyRangeDeletionTaskOnRecipient(opCtx,
-                                                           _migrationInfo.getRecipientShardId(),
-                                                           _migrationInfo.getCollectionUuid(),
-                                                           _migrationInfo.getRange(),
-                                                           _migrationInfo.getId());
+    rangedeletionutil::markAsReadyRangeDeletionTaskOnRecipient(opCtx,
+                                                               _migrationInfo.getRecipientShardId(),
+                                                               _migrationInfo.getCollectionUuid(),
+                                                               _migrationInfo.getRange(),
+                                                               _migrationInfo.getId());
 }
 
 void MigrationCoordinator::forgetMigration(OperationContext* opCtx) {

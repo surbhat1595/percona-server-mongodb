@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -632,8 +631,7 @@ private:
  * Currently, telemetry is only collected for find and aggregate requests (and their subsequent
  * getMore requests), so these should only be called from those request paths.
  */
-void collectQueryStatsMongos(OperationContext* opCtx,
-                             std::unique_ptr<query_stats::KeyGenerator> keyGenerator);
+void collectQueryStatsMongos(OperationContext* opCtx, std::unique_ptr<query_stats::Key> key);
 void collectQueryStatsMongos(OperationContext* opCtx, ClusterClientCursorGuard& cursor);
 void collectQueryStatsMongos(OperationContext* opCtx, ClusterCursorManager::PinnedCursor& cursor);
 

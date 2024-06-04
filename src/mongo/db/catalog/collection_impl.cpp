@@ -38,7 +38,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
@@ -257,6 +256,14 @@ StatusWith<std::shared_ptr<Ident>> findSharedIdentForIndex(OperationContext* opC
             str::stream() << "Index ident " << ident << " is being dropped or is already dropped."};
 }
 
+bool collUsesCappedSnapshots(const NamespaceString& nss, const CollectionOptions& options) {
+    // Only use the behavior for non-replicated capped collections (which can accept concurrent
+    // writes). This behavior relies on RecordIds being allocated in increasing order. For clustered
+    // collections, users define their RecordIds and are not constrained to creating them in
+    // increasing order.
+    // The oplog tracks its visibility through support from the storage engine.
+    return options.capped && !nss.isReplicated() && !options.clusteredIndex && !nss.isOplog();
+}
 }  // namespace
 
 std::unique_ptr<CollatorInterface> CollectionImpl::parseCollation(OperationContext* opCtx,
@@ -286,7 +293,8 @@ std::unique_ptr<CollatorInterface> CollectionImpl::parseCollation(OperationConte
     return std::move(collator.getValue());
 }
 
-CollectionImpl::SharedState::SharedState(CollectionImpl* collection,
+CollectionImpl::SharedState::SharedState(OperationContext* opCtx,
+                                         CollectionImpl* collection,
                                          std::unique_ptr<RecordStore> recordStore,
                                          const CollectionOptions& options)
     : _recordStore(std::move(recordStore)),
@@ -297,7 +305,17 @@ CollectionImpl::SharedState::SharedState(CollectionImpl* collection,
       _needCappedLock(_isCapped && collection->ns().isReplicated() && !options.clusteredIndex),
       // The record store will be null when the collection is instantiated as part of the repair
       // path.
-      _cappedObserver(_recordStore ? _recordStore->getIdent() : "") {}
+      _cappedObserver(_recordStore ? _recordStore->getIdent() : "") {
+
+    if (!_recordStore || !collUsesCappedSnapshots(collection->ns(), options)) {
+        return;
+    }
+
+    // Capped visibility must be initialized with the largest key in the store. All existing records
+    // when opening the collection should be visible. Concurrent writes will be past this key.
+    auto largestId = _recordStore->getLargestKey(opCtx);
+    _cappedObserver.setRecordImmediatelyVisible(largestId);
+}
 
 CollectionImpl::SharedState::~SharedState() {
     // The record store will be null when the collection is instantiated as part of the repair path.
@@ -316,7 +334,8 @@ CollectionImpl::CollectionImpl(OperationContext* opCtx,
     : _ns(nss),
       _catalogId(std::move(catalogId)),
       _uuid(metadata->options.uuid.value()),
-      _shared(std::make_shared<SharedState>(this, std::move(recordStore), metadata->options)),
+      _shared(
+          std::make_shared<SharedState>(opCtx, this, std::move(recordStore), metadata->options)),
       _metadata(std::move(metadata)),
       _indexCatalog(std::make_unique<IndexCatalogImpl>()) {}
 
@@ -472,7 +491,6 @@ void CollectionImpl::_initCommon(OperationContext* opCtx) {
         // Log an error and startup warning if the collection validator is malformed.
         LOGV2_WARNING_OPTIONS(20293,
                               {logv2::LogTag::kStartupWarnings},
-                              "Collection {namespace} has malformed validator: {validatorStatus}",
                               "Collection has malformed validator",
                               logAttrs(_ns),
                               "validatorStatus"_attr = _validator.getStatus());
@@ -926,12 +944,7 @@ long long CollectionImpl::getCappedMaxSize() const {
 }
 
 bool CollectionImpl::usesCappedSnapshots() const {
-    // Only use the behavior for non-replicated capped collections (which can accept concurrent
-    // writes). This behavior relies on RecordIds being allocated in increasing order. For clustered
-    // collections, users define their RecordIds and are not constrained to creating them in
-    // increasing order.
-    // The oplog tracks its visibility through support from the storage engine.
-    return isCapped() && !ns().isReplicated() && !ns().isOplog() && !isClustered();
+    return collUsesCappedSnapshots(ns(), getCollectionOptions());
 }
 
 CappedVisibilityObserver* CollectionImpl::getCappedVisibilityObserver() const {
@@ -1238,60 +1251,84 @@ const CollectionOptions& CollectionImpl::getCollectionOptions() const {
     return _metadata->options;
 }
 
+namespace {
+StatusWith<BSONObj> addCollationToIndexSpec(OperationContext* opCtx,
+                                            const CollatorInterface* collator,
+                                            CollatorFactoryInterface* collatorFactory,
+                                            const BSONObj& originalIndexSpec) {
+    auto validateResult =
+        index_key_validate::validateIndexSpecCollation(opCtx, originalIndexSpec, collator);
+    if (!validateResult.isOK()) {
+        return validateResult.getStatus()
+            .withContext(str::stream()
+                         << "failed to add collation information to index spec for index creation: "
+                         << originalIndexSpec);
+    }
+    BSONObj newIndexSpec = validateResult.getValue();
+
+    auto keyPattern = newIndexSpec[IndexDescriptor::kKeyPatternFieldName].Obj();
+    if (IndexDescriptor::isIdIndexPattern(keyPattern)) {
+        std::unique_ptr<CollatorInterface> indexCollator;
+        if (auto collationElem = newIndexSpec[IndexDescriptor::kCollationFieldName]) {
+            auto indexCollatorResult = collatorFactory->makeFromBSON(collationElem.Obj());
+            // validateIndexSpecCollation() should have checked that the index collation spec is
+            // valid.
+            invariant(indexCollatorResult.getStatus(),
+                      str::stream() << "invalid collation in index spec: " << newIndexSpec);
+            indexCollator = std::move(indexCollatorResult.getValue());
+        }
+        if (!CollatorInterface::collatorsMatch(collator, indexCollator.get())) {
+            return {ErrorCodes::BadValue,
+                    str::stream() << "The _id index must have the same collation as the "
+                                     "collection. Index collation: "
+                                  << (indexCollator.get() ? indexCollator->getSpec().toBSON()
+                                                          : CollationSpec::kSimpleSpec)
+                                  << ", collection collation: "
+                                  << (collator ? collator->getSpec().toBSON()
+                                               : CollationSpec::kSimpleSpec)};
+        }
+    }
+
+    if (originalIndexSpec.hasField(IndexDescriptor::kOriginalSpecFieldName)) {
+        // Validation was already performed above.
+        BSONObj newOriginalIndexSpec = invariant(index_key_validate::validateIndexSpecCollation(
+            opCtx,
+            originalIndexSpec.getObjectField(IndexDescriptor::kOriginalSpecFieldName),
+            collator));
+
+        BSONObj specToAdd = BSON(IndexDescriptor::kOriginalSpecFieldName << newOriginalIndexSpec);
+        newIndexSpec = newIndexSpec.addField(specToAdd.firstElement());
+    }
+
+    return newIndexSpec;
+}
+}  // namespace
+
+StatusWith<BSONObj> CollectionImpl::addCollationDefaultsToIndexSpecsForCreate(
+    OperationContext* opCtx, const BSONObj& originalIndexSpec) const {
+
+    auto collator = getDefaultCollator();  // could be null.
+    auto collatorFactory = CollatorFactoryInterface::get(opCtx->getServiceContext());
+
+    return addCollationToIndexSpec(opCtx, collator, collatorFactory, originalIndexSpec);
+}
+
 StatusWith<std::vector<BSONObj>> CollectionImpl::addCollationDefaultsToIndexSpecsForCreate(
     OperationContext* opCtx, const std::vector<BSONObj>& originalIndexSpecs) const {
     std::vector<BSONObj> newIndexSpecs;
+    newIndexSpecs.reserve(originalIndexSpecs.size());
 
     auto collator = getDefaultCollator();  // could be null.
     auto collatorFactory = CollatorFactoryInterface::get(opCtx->getServiceContext());
 
     for (const auto& originalIndexSpec : originalIndexSpecs) {
-        auto validateResult =
-            index_key_validate::validateIndexSpecCollation(opCtx, originalIndexSpec, collator);
-        if (!validateResult.isOK()) {
-            return validateResult.getStatus().withContext(
-                str::stream()
-                << "failed to add collation information to index spec for index creation: "
-                << originalIndexSpec);
+        auto newIndexSpec =
+            addCollationToIndexSpec(opCtx, collator, collatorFactory, originalIndexSpec);
+
+        if (!newIndexSpec.isOK()) {
+            return newIndexSpec.getStatus();
         }
-        BSONObj newIndexSpec = validateResult.getValue();
-
-        auto keyPattern = newIndexSpec[IndexDescriptor::kKeyPatternFieldName].Obj();
-        if (IndexDescriptor::isIdIndexPattern(keyPattern)) {
-            std::unique_ptr<CollatorInterface> indexCollator;
-            if (auto collationElem = newIndexSpec[IndexDescriptor::kCollationFieldName]) {
-                auto indexCollatorResult = collatorFactory->makeFromBSON(collationElem.Obj());
-                // validateIndexSpecCollation() should have checked that the index collation spec is
-                // valid.
-                invariant(indexCollatorResult.getStatus(),
-                          str::stream() << "invalid collation in index spec: " << newIndexSpec);
-                indexCollator = std::move(indexCollatorResult.getValue());
-            }
-            if (!CollatorInterface::collatorsMatch(collator, indexCollator.get())) {
-                return {ErrorCodes::BadValue,
-                        str::stream() << "The _id index must have the same collation as the "
-                                         "collection. Index collation: "
-                                      << (indexCollator.get() ? indexCollator->getSpec().toBSON()
-                                                              : CollationSpec::kSimpleSpec)
-                                      << ", collection collation: "
-                                      << (collator ? collator->getSpec().toBSON()
-                                                   : CollationSpec::kSimpleSpec)};
-            }
-        }
-
-        if (originalIndexSpec.hasField(IndexDescriptor::kOriginalSpecFieldName)) {
-            // Validation was already performed above.
-            BSONObj newOriginalIndexSpec = invariant(index_key_validate::validateIndexSpecCollation(
-                opCtx,
-                originalIndexSpec.getObjectField(IndexDescriptor::kOriginalSpecFieldName),
-                collator));
-
-            BSONObj specToAdd =
-                BSON(IndexDescriptor::kOriginalSpecFieldName << newOriginalIndexSpec);
-            newIndexSpec = newIndexSpec.addField(specToAdd.firstElement());
-        }
-
-        newIndexSpecs.push_back(newIndexSpec);
+        newIndexSpecs.emplace_back(std::move(newIndexSpec.getValue()));
     }
 
     return newIndexSpecs;
@@ -1460,10 +1497,10 @@ Status CollectionImpl::prepareForIndexBuild(OperationContext* opCtx,
         }
     }
 
-    _writeMetadata(opCtx,
-                   [indexMetaData = std::move(imd)](BSONCollectionCatalogEntry::MetaData& md) {
-                       md.insertIndex(std::move(indexMetaData));
-                   });
+    _writeMetadata(
+        opCtx, [indexMetaData = std::move(imd)](BSONCollectionCatalogEntry::MetaData& md) mutable {
+            md.insertIndex(std::move(indexMetaData));
+        });
 
     return durableCatalog->createIndex(opCtx, getCatalogId(), ns(), getCollectionOptions(), spec);
 }
@@ -1833,6 +1870,15 @@ void CollectionImpl::replaceMetadata(OperationContext* opCtx,
 
 bool CollectionImpl::isMetadataEqual(const BSONObj& otherMetadata) const {
     return !_metadata->toBSON().woCompare(otherMetadata);
+}
+
+void CollectionImpl::sanitizeCollectionOptions(OperationContext* opCtx) {
+    _writeMetadata(opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) {
+        const auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+        const auto& storageEngineOptions = md.options.storageEngine;
+        md.options.storageEngine = uassertStatusOK(
+            storageEngine->getSanitizedStorageOptionsForSecondaryReplication(storageEngineOptions));
+    });
 }
 
 template <typename Func>

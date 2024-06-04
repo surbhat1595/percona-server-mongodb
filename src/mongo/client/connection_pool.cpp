@@ -37,7 +37,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -64,14 +63,10 @@ const Minutes kMaxConnectionAge(30);
 
 }  // namespace
 
-ConnectionPool::ConnectionPool(int messagingPortTags,
-                               std::unique_ptr<executor::NetworkConnectionHook> hook)
-    : _messagingPortTags(messagingPortTags),
-      _lastCleanUpTime(Date_t::now()),
-      _hook(std::move(hook)) {}
+ConnectionPool::ConnectionPool(std::unique_ptr<executor::NetworkConnectionHook> hook)
+    : _lastCleanUpTime(Date_t::now()), _hook(std::move(hook)) {}
 
-ConnectionPool::ConnectionPool(int messagingPortTags)
-    : ConnectionPool(messagingPortTags, nullptr) {}
+ConnectionPool::ConnectionPool() : ConnectionPool(nullptr) {}
 
 ConnectionPool::~ConnectionPool() {
     cleanUpOlderThan(Date_t::max());
@@ -201,11 +196,10 @@ ConnectionPool::ConnectionList::iterator ConnectionPool::acquireConnection(
     // the number of seconds with a fractional part.
     conn->setSoTimeout(durationCount<Milliseconds>(timeout) / 1000.0);
 
-    uassertStatusOK(conn->connect(target, StringData(), boost::none));
-    conn->setTags(_messagingPortTags);
+    conn->connect(target, StringData(), boost::none);
 
     if (auth::isInternalAuthSet()) {
-        uassertStatusOK(conn->authenticateInternalUser());
+        conn->authenticateInternalUser();
     }
 
     if (_hook) {

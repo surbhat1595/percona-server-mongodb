@@ -36,6 +36,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/bson/json.h"
+#include "mongo/bson/unordered_fields_bsonobj_comparator.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
@@ -68,39 +69,8 @@ const StringData kDefaultWhenMatchedMode =
 const StringData kDefaultWhenNotMatchedMode =
     MergeWhenNotMatchedMode_serializer(MergeWhenNotMatchedModeEnum::kInsert);
 
-/**
- * For the purpsoses of this test, assume every collection is unsharded. Stages may ask this during
- * setup. For example, to compute its constraints, the $merge stage needs to know if the output
- * collection is sharded.
- */
-class MongoProcessInterfaceForTest : public StubMongoProcessInterface {
-public:
-    bool isSharded(OperationContext* opCtx, const NamespaceString& ns) override {
-        return false;
-    }
-
-    /**
-     * For the purposes of these tests, assume each collection is unsharded and has a document key
-     * of just "_id".
-     */
-    std::vector<FieldPath> collectDocumentKeyFieldsActingAsRouter(
-        OperationContext* opCtx, const NamespaceString& nss) const override {
-        return {"_id"};
-    }
-
-    void checkRoutingInfoEpochOrThrow(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                      const NamespaceString&,
-                                      ChunkVersion) const override {
-        return;  // Assume it always matches for our tests here.
-    }
-};
-
 class DocumentSourceMergeTest : public AggregationContextFixture {
 public:
-    DocumentSourceMergeTest() : AggregationContextFixture() {
-        getExpCtx()->mongoProcessInterface = std::make_shared<MongoProcessInterfaceForTest>();
-    }
-
     intrusive_ptr<DocumentSourceMerge> createMergeStage(BSONObj spec) {
         auto specElem = spec.firstElement();
         intrusive_ptr<DocumentSourceMerge> mergeStage = dynamic_cast<DocumentSourceMerge*>(
@@ -179,11 +149,11 @@ TEST_F(DocumentSourceMergeTest, FailsToParseIncorrectMergeSpecType) {
 
 TEST_F(DocumentSourceMergeTest, FailsToParseIfMergeSpecObjectWithoutInto) {
     auto spec = BSON("$merge" << BSONObj());
-    ASSERT_THROWS_CODE(createMergeStage(spec), AssertionException, 40414);
+    ASSERT_THROWS_CODE(createMergeStage(spec), AssertionException, ErrorCodes::IDLFailedToParse);
 
     spec = BSON("$merge" << BSON("whenMatched"
                                  << "replace"));
-    ASSERT_THROWS_CODE(createMergeStage(spec), AssertionException, 40414);
+    ASSERT_THROWS_CODE(createMergeStage(spec), AssertionException, ErrorCodes::IDLFailedToParse);
 }
 
 TEST_F(DocumentSourceMergeTest, FailsToParseIfIntoIsNotStringAndNotObject) {
@@ -1192,24 +1162,29 @@ TEST_F(DocumentSourceMergeServerlessTest,
 TEST_F(DocumentSourceMergeTest, QueryShape) {
     auto pipeline = BSON_ARRAY(BSON("$project" << BSON("x"
                                                        << "1")));
+    auto let = BSON("new"
+                    << "$$ROOT"
+                    << "year"
+                    << "2020");
     auto spec =
         BSON("$merge" << BSON("into"
                               << "target_collection"
-                              << "let" << BSONObj() << "whenMatched" << pipeline << "whenNotMatched"
+                              << "let" << let << "whenMatched" << pipeline << "whenNotMatched"
                               << "insert"));
     auto mergeStage = createMergeStage(spec);
     ASSERT(mergeStage);
     auto serialized = mergeStage->serialize().getDocument();
-    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
-        R"({
+
+    auto expectedBson = fromjson(R"({
             "$merge": {
                 "into": {
-                    "db": "unittests",
-                    "coll": "target_collection"
+                    "db": "HASH<unittests>",
+                    "coll": "HASH<target_collection>"
                 },
-                "on": "_id",
+                "on": "HASH<_id>",
                 "let": {
-                    "new": "$$ROOT"
+                        "HASH<year>": "?string",
+                        "HASH<new>": "$$ROOT"
                 },
                 "whenMatched": [
                     {
@@ -1221,8 +1196,11 @@ TEST_F(DocumentSourceMergeTest, QueryShape) {
                 ],
                 "whenNotMatched": "insert"
             }
-        })",
-        redact(*mergeStage));
+        })");
+    auto result = redact(*mergeStage);
+    UnorderedFieldsBSONObjComparator comparator;
+    ASSERT_EQ(0, comparator.compare(redact(*mergeStage), expectedBson))
+        << "Expected [" << expectedBson << "] but found [" << result << "]";
 }
 
 }  // namespace

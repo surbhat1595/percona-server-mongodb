@@ -33,7 +33,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <iterator>
 #include <tuple>
 #include <type_traits>
@@ -161,7 +160,9 @@ bool RangeDeleterService::ReadyRangeDeletionsProcessor::_stopRequested() const {
 void RangeDeleterService::ReadyRangeDeletionsProcessor::emplaceRangeDeletion(
     const RangeDeletionTask& rdt) {
     stdx::unique_lock<Latch> lock(_mutex);
-    invariant(_state == kRunning);
+    if (_state != kRunning) {
+        return;
+    }
     _queue.push(rdt);
     _condVar.notify_all();
 }
@@ -173,7 +174,8 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_completedRangeDeletion(
 }
 
 void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
-    ThreadClient threadClient(kRangeDeletionThreadName, _service);
+    ThreadClient threadClient(rangedeletionutil::kRangeDeletionThreadName,
+                              _service->getService(ClusterRole::ShardServer));
 
     {
         stdx::lock_guard<Latch> lock(_mutex);
@@ -231,7 +233,7 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
                             (optKeyPattern ? (*optKeyPattern).toBSON()
                                            : getShardKeyPattern(opCtx, dbName, collectionUuid));
 
-                        uassertStatusOK(deleteRangeInBatches(
+                        uassertStatusOK(rangedeletionutil::deleteRangeInBatches(
                             opCtx, dbName, collectionUuid, shardKeyPattern, range));
                         orphansRemovalCompleted = true;
                     } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
@@ -283,13 +285,14 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
                     // out of order the deletions of orphans and the removal of the
                     // entry persisted in `config.rangeDeletions`
                     WaitForMajorityService::get(opCtx->getServiceContext())
-                        .waitUntilMajority(clientOpTime, CancellationToken::uncancelable())
+                        .waitUntilMajorityForWrite(clientOpTime, CancellationToken::uncancelable())
                         .get(opCtx);
                 }
 
                 // Remove persistent range deletion task
                 try {
-                    removePersistentRangeDeletionTask(opCtx, collectionUuid, range);
+                    rangedeletionutil::removePersistentRangeDeletionTask(
+                        opCtx, collectionUuid, range);
 
                     LOGV2_DEBUG(6872504,
                                 2,
@@ -377,7 +380,8 @@ void RangeDeleterService::_recoverRangeDeletionsOnStepUp(OperationContext* opCtx
     _stepUpCompletedFuture =
         ExecutorFuture<void>(_executor)
             .then([serviceContext = opCtx->getServiceContext(), this] {
-                ThreadClient tc("ResubmitRangeDeletionsOnStepUp", serviceContext);
+                ThreadClient tc("ResubmitRangeDeletionsOnStepUp",
+                                serviceContext->getService(ClusterRole::ShardServer));
 
                 {
                     auto lock = _acquireMutexUnconditionally();

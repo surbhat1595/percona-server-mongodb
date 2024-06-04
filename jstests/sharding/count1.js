@@ -1,5 +1,6 @@
 let s = new ShardingTest({shards: 2});
 let db = s.getDB("test");
+s.adminCommand({enablesharding: "test", primaryShard: s.shard1.shardName});
 
 // ************** Test Set #1 *************
 // Basic counts on "bar" collections, not yet sharded.
@@ -12,8 +13,6 @@ assert.eq(1, db.bar.find({n: 1}).count());
 // Basic counts on sharded  "foo" collection.
 
 // 1. Create foo collection, insert 6 docs.
-s.adminCommand({enablesharding: "test"});
-s.ensurePrimaryShard('test', s.shard1.shardName);
 s.adminCommand({shardcollection: "test.foo", key: {name: 1}});
 
 let primary = s.getPrimaryShard("test").getDB("test");
@@ -143,12 +142,18 @@ assert.commandFailedWithCode(db.runCommand({count: 'foo', query: {$c: {$abc: 3}}
                              ErrorCodes.BadValue);
 
 // ii. Negative skip values should return error.
-assert.commandFailedWithCode(db.runCommand({count: 'foo', skip: -2}),
-                             [ErrorCodes.FailedToParse, 51024]);
+assert.commandFailedWithCode(db.runCommand({count: 'foo', skip: -2}), [
+    ErrorCodes.BadValue,
+    ErrorCodes.FailedToParse,
+    51024
+]);  // getting BadValue when binary is > 7.1, else 51024
 
 // iii. Negative skip values with positive limit should return error.
-assert.commandFailedWithCode(db.runCommand({count: 'foo', skip: -2, limit: 1}),
-                             [ErrorCodes.FailedToParse, 51024]);
+assert.commandFailedWithCode(db.runCommand({count: 'foo', skip: -2, limit: 1}), [
+    ErrorCodes.BadValue,
+    ErrorCodes.FailedToParse,
+    51024
+]);  // getting BadValue when binary is > 7.1, else 51024
 
 // iv. Unknown options should return error.
 assert.commandFailedWithCode(db.runCommand({count: 'foo', random: true}), 40415);

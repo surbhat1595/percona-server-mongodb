@@ -111,8 +111,15 @@ public:
             return repl::OpTimeWith<std::vector<ShardType>>(_shards);
         }
 
+        std::vector<CollectionType> getShardedCollections(OperationContext* opCtx,
+                                                          const DatabaseName& dbName,
+                                                          repl::ReadConcernLevel readConcernLevel,
+                                                          const BSONObj& sort) override {
+            return {};
+        }
+
         std::vector<CollectionType> getCollections(OperationContext* opCtx,
-                                                   StringData dbName,
+                                                   const DatabaseName& dbName,
                                                    repl::ReadConcernLevel readConcernLevel,
                                                    const BSONObj& sort) override {
             return _colls;
@@ -132,8 +139,7 @@ public:
     }
 
     DatabaseType createDatabase(const UUID& uuid, const Timestamp& timestamp) {
-        return DatabaseType(
-            kDbName.toString_forTest(), kShardList[0].getName(), DatabaseVersion(uuid, timestamp));
+        return DatabaseType(kDbName, kShardList[0].getName(), DatabaseVersion(uuid, timestamp));
     }
 };
 

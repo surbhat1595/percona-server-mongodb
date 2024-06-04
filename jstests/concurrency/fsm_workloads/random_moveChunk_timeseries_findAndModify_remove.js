@@ -7,10 +7,9 @@
  *  # Time-series findAndModify does not support retryable writes.
  *  requires_non_retryable_writes,
  *  does_not_support_transactions,
- *  requires_fcv_71,
+ *  featureFlagTimeseriesUpdatesSupport,
  * ]
  */
-import {assertAlways} from "jstests/concurrency/fsm_libs/assert.js";
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {
     $config as $baseConfig
@@ -18,7 +17,9 @@ import {
 
 export const $config = extendWorkload($baseConfig, function($config, $super) {
     $config.states.doFindAndRemove = function doFindAndRemove(db, collName, connCache) {
-        const filterFieldName = "f.tid" + this.tid;
+        const fieldNameF = "f";
+        const fieldNameTid = `tid${this.tid}`;
+        const filterFieldName = `${fieldNameF}.${fieldNameTid}`;
         const filterFieldVal = Random.randInt($config.data.numMetaCount);
         const filter = {
             [filterFieldName]: {
@@ -26,19 +27,19 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
             },
         };
         // May delete different measurements from the two collections.
-        const res1 = assertAlways.commandWorked(
+        const res1 = assert.commandWorked(
             db.runCommand({findAndModify: collName, query: filter, remove: true}));
-        const res2 = assertAlways.commandWorked(
+        const res2 = assert.commandWorked(
             db.runCommand({findAndModify: this.nonShardCollName, query: filter, remove: true}));
         if (res1 && res1.lastErrorObject.n) {
-            assert(res1.value[filterFieldName] >= filterFieldVal,
-                   `Deleted measurement ${res1.value} should match the query predicate ${
-                       tojson(filter)}}`);
+            assert(res1.value[fieldNameF][fieldNameTid] >= filterFieldVal,
+                   `Deleted measurement ${tojson(res1.value)} should match the query predicate ${
+                       tojson(filter)}} for the sharded collection`);
         }
         if (res2 && res2.lastErrorObject.n) {
-            assert(res2.value[filterFieldName] >= filterFieldVal,
-                   `Deleted measurement ${res2.value} should match the query predicate ${
-                       tojson(filter)}}`);
+            assert(res2.value[fieldNameF][fieldNameTid] >= filterFieldVal,
+                   `Deleted measurement ${tojson(res2.value)} should match the query predicate ${
+                       tojson(filter)}} for the non-sharded collection`);
         }
     };
 

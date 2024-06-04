@@ -100,7 +100,9 @@ public:
                 5748800, "_configsvrRemoveTags must be run as a retryable write", txnParticipant);
 
             {
-                auto newClient = opCtx->getServiceContext()->makeClient("RemoveTagsMetadata");
+                auto newClient = opCtx->getServiceContext()
+                                     ->getService(ClusterRole::ShardServer)
+                                     ->makeClient("RemoveTagsMetadata");
                 AlternativeClientRegion acr(newClient);
                 auto executor =
                     Grid::get(opCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
@@ -112,7 +114,8 @@ public:
                 uassertStatusOK(catalogClient->removeConfigDocuments(
                     newOpCtxPtr.get(),
                     TagsType::ConfigNS,
-                    BSON(TagsType::ns(NamespaceStringUtil::serialize(nss))),
+                    BSON(TagsType::ns(
+                        NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()))),
                     ShardingCatalogClient::kLocalWriteConcern));
             }
 
@@ -168,7 +171,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(ConfigsvrRemoveTagsCommand);
+MONGO_REGISTER_COMMAND(ConfigsvrRemoveTagsCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

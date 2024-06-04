@@ -62,7 +62,8 @@ assert.eq(s.normalize(s.config.databases.findOne({_id: "testDB"}).primary),
           "DB primary is wrong");
 
 var origShard = s.getNonPrimaries("testDB")[0];
-s.ensurePrimaryShard("testDB", origShard);
+assert.commandWorked(s.s.adminCommand({movePrimary: "testDB", to: origShard}));
+
 assert.eq(s.normalize(s.config.databases.findOne({_id: "testDB"}).primary),
           origShard,
           "DB primary didn't move");
@@ -79,7 +80,6 @@ assert.eq(2,
           "wrong chunk number after splitting collection that existed before");
 assert.eq(numObjs, sdb1.foo.count(), "wrong count after splitting collection that existed before");
 
+s.stop();
 rs1.stopSet();
 rs2.stopSet();
-
-s.stop();

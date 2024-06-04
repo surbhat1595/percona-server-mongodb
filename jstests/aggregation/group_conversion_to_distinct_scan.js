@@ -15,10 +15,11 @@
  *   # Index filter commands do not support causal consistency.
  *   does_not_support_causal_consistency,
  *   requires_fcv_63,
+ *   not_allowed_with_security_token,
  * ]
  */
 
-import {getAggPlanStage} from "jstests/libs/analyze_plan.js";
+import {getAggPlanStage, getQueryPlanner} from "jstests/libs/analyze_plan.js";
 
 const coll = db.group_conversion_to_distinct_scan;
 coll.drop();
@@ -148,7 +149,8 @@ function assertPipelineResultsAndExplain({
     const explain = coll.explain().aggregate(pipeline, passedOptions);
     validateExplain(explain);
     if (expectsIndexFilter) {
-        assert.eq(true, explain.stages[0].$cursor.queryPlanner.indexFilterSet);
+        const queryPlanner = getQueryPlanner(explain);
+        assert.eq(true, queryPlanner.indexFilterSet, queryPlanner);
     }
 }
 

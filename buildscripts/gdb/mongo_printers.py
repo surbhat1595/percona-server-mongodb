@@ -15,8 +15,8 @@ if ROOT_PATH not in sys.path:
 from src.third_party.immer.dist.tools.gdb_pretty_printers.printers import ListIter as ImmerListIter  # pylint: disable=wrong-import-position
 
 if not gdb:
-    from buildscripts.gdb.mongo import get_boost_optional, lookup_type
-    from buildscripts.gdb.optimizer_printers import register_abt_printers
+    from buildscripts.gdb.mongo import get_boost_optional, lookup_type, get_decorable_info, get_object_decoration
+    from buildscripts.gdb.optimizer_printers import register_optimizer_printers
 
 try:
     import bson
@@ -275,29 +275,35 @@ class RecordIdPrinter(object):
         """Display hint."""
         return 'string'
 
+    ## Get the address at given offset of data as the selected pointer type
+    def __get_data_address(self, ptr, offset):
+        ptr_type = gdb.lookup_type(ptr).pointer()
+        return self.val['_data']['_M_elems'][offset].address.cast(ptr_type)
+
     def to_string(self):
         """Return RecordId for printing."""
         rid_format = int(self.val["_format"])
         if rid_format == 0:
             return "null RecordId"
         elif rid_format == 1:
-            long_id = int(self.val['_data']['longId']['id'])
-            return "RecordId long: %d" % (long_id)
+            koffset = 8 - 1  ##  std::alignment_of_v<int64_t> - sizeof(Format); (see record_id.h)
+            rid_address = self.__get_data_address('int64_t', koffset)
+            return "RecordId long: %d" % int(rid_address.dereference())
         elif rid_format == 2:
-            inline_str = self.val['_data']['inlineStr']
-            str_len = int(inline_str['size'])
-            str_array = inline_str['dataArr']
-            # Reading the std::array elements
-            raw_bytes = [int(str_array['_M_elems'][i]) for i in range(0, str_len)]
+            str_len = self.__get_data_address('int8_t', 0).dereference()
+            array_address = self.__get_data_address('int8_t', 1)
+            raw_bytes = [array_address[i] for i in range(0, str_len)]
             hex_bytes = [hex(b & 0xFF)[2:].zfill(2) for b in raw_bytes]
             return "RecordId small string %d hex bytes: %s" % (str_len, str("".join(hex_bytes)))
         elif rid_format == 3:
-            holder_ptr = self.val['_data']['heapStr']["buffer"]['_buffer']["_holder"]["px"]
-            holder = holder_ptr.dereference()
+            koffset = 8 - 1  ## std::alignment_of_v<ConstSharedBuffer> - sizeof(Format); (see record_id.h)
+            buffer = self.__get_data_address('mongo::ConstSharedBuffer', koffset).dereference()
+            holder_ptr = holder = buffer['_buffer']["_holder"]["px"]
+            holder = holder.dereference()
             str_len = int(holder["_capacity"])
             # Start of data is immediately after pointer for holder
             start_ptr = (holder_ptr + 1).dereference().cast(lookup_type("char")).address
-            raw_bytes = [int(start_ptr[i]) for i in range(0, str_len)]
+            raw_bytes = [start_ptr[i] for i in range(0, str_len)]
             hex_bytes = [hex(b & 0xFF)[2:].zfill(2) for b in raw_bytes]
             return "RecordId big string %d hex bytes @ %s: %s" % (str_len, holder_ptr + 1,
                                                                   str("".join(hex_bytes)))
@@ -360,16 +366,7 @@ class DecorablePrinter(object):
     def __init__(self, val):
         """Initialize DecorablePrinter."""
         self.val = val
-        decorable_t = val.type.template_argument(0)
-
-        reg_sym, _ = gdb.lookup_symbol(
-            "mongo::decorable_detail::gdbRegistry<{}>".format(decorable_t))
-        decl_vector = reg_sym.value()["_entries"]
-        # TODO: abstract out navigating a std::vector
-        self.start = decl_vector["_M_impl"]["_M_start"]
-        finish = decl_vector["_M_impl"]["_M_finish"]
-        decinfo_t = lookup_type('mongo::decorable_detail::RegistryEntry')
-        self.count = int((int(finish) - int(self.start)) / decinfo_t.sizeof)
+        self.start, self.count = get_decorable_info(val)
 
     @staticmethod
     def display_hint():
@@ -382,22 +379,13 @@ class DecorablePrinter(object):
 
     def children(self):
         """Children."""
-        decoration_data = get_unique_ptr_bytes(self.val["_decorations"]["_data"])
-
         for index in range(self.count):
-            entry = self.start[index]
-            deco_type_info = str(entry["_typeInfo"])
-            deco_type_name = re.sub(r'.* <typeinfo for (.*)>', r'\1', deco_type_info)
-            offset = int(entry["_offset"])
-            obj = decoration_data[offset]
-            obj_addr = re.sub(r'^(.*) .*', r'\1', str(obj.address))
             try:
-                deco_type = lookup_type(deco_type_name)
-                obj = obj.cast(deco_type)
+                deco_type_name, obj, obj_addr = get_object_decoration(self.val, self.start, index)
+                yield ('key', "{}:{}:{}".format(index, obj_addr, deco_type_name))
+                yield ('value', obj)
             except Exception as err:
-                obj = f'[[Err:{err}]]'
-            yield ('key', "{}:{}:{}".format(index, obj_addr, deco_type_name))
-            yield ('value', obj)
+                print("Failed to look up decoration type: " + deco_type_name + ": " + str(err))
 
 
 class LazyInitPrinter(object):
@@ -1054,7 +1042,7 @@ def build_pretty_printer():
     pp.add('LazyInit', 'mongo::decorable_detail::LazyInit', True, LazyInitPrinter)
 
     # Optimizer/ABT related pretty printers that can be used only with a running process.
-    register_abt_printers(pp)
+    register_optimizer_printers(pp)
 
     return pp
 

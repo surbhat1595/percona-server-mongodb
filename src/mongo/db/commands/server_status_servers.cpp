@@ -29,7 +29,6 @@
 
 #include <memory>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
@@ -42,11 +41,9 @@
 #include "mongo/db/stats/counters.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/transport/message_compressor_registry.h"
-#include "mongo/transport/service_entry_point.h"
-#include "mongo/transport/service_executor_fixed.h"
-#include "mongo/transport/service_executor_reserved.h"
-#include "mongo/transport/service_executor_synchronous.h"
-#include "mongo/transport/transport_layer.h"
+#include "mongo/transport/service_executor.h"
+#include "mongo/transport/session_manager.h"
+#include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util_core.h"
 #include "mongo/util/net/hostname_canonicalization.h"
 #include "mongo/util/net/socket_utils.h"
@@ -69,11 +66,9 @@ public:
     BSONObj generateSection(OperationContext* opCtx,
                             const BSONElement& configElement) const override {
         BSONObjBuilder bb;
-
-        auto serviceEntryPoint = opCtx->getServiceContext()->getServiceEntryPoint();
-        invariant(serviceEntryPoint);
-
-        serviceEntryPoint->appendStats(&bb);
+        if (auto tlm = opCtx->getServiceContext()->getTransportLayerManager()) {
+            tlm->appendSessionManagerStats(&bb);
+        }
         return bb.obj();
     }
 
@@ -94,22 +89,13 @@ public:
         appendMessageCompressionStats(&b);
 
         auto svcCtx = opCtx->getServiceContext();
+
         {
             BSONObjBuilder section = b.subobjStart("serviceExecutors");
-
-            if (auto executor = transport::ServiceExecutorSynchronous::get(svcCtx)) {
-                executor->appendStats(&section);
-            }
-
-            if (auto executor = transport::ServiceExecutorReserved::get(svcCtx)) {
-                executor->appendStats(&section);
-            }
-
-            if (auto executor = transport::ServiceExecutorFixed::get(svcCtx)) {
-                executor->appendStats(&section);
-            }
+            transport::ServiceExecutor::appendAllServerStats(&section, svcCtx);
         }
-        if (auto tl = svcCtx->getTransportLayer())
+
+        if (auto tl = svcCtx->getTransportLayerManager())
             tl->appendStatsForServerStatus(&b);
 
         return b.obj();

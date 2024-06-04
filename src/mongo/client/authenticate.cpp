@@ -28,7 +28,6 @@
  */
 
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <utility>
@@ -116,7 +115,7 @@ StatusWith<OpMsgRequest> createX509AuthCmd(const BSONObj& params, StringData cli
     }
     auto db = extractDBField(params);
     if (!db.isOK())
-        return std::move(db.getStatus());
+        return db.getStatus();
 
     std::string username;
     auto response = bsonExtractStringFieldWithDefault(
@@ -133,10 +132,12 @@ StatusWith<OpMsgRequest> createX509AuthCmd(const BSONObj& params, StringData cli
         return {ErrorCodes::AuthenticationFailed, message.str()};
     }
 
-    return OpMsgRequest::fromDBAndBody(DatabaseNameUtil::deserialize(boost::none, db.getValue()),
-                                       BSON("authenticate" << 1 << "mechanism"
-                                                           << "MONGODB-X509"
-                                                           << "user" << username));
+    return OpMsgRequest::fromDBAndBody(
+        DatabaseNameUtil::deserialize(
+            boost::none, db.getValue(), SerializationContext::stateAuthPrevalidated()),
+        BSON("authenticate" << 1 << "mechanism"
+                            << "MONGODB-X509"
+                            << "user" << username));
 }
 
 // Use the MONGODB-X509 protocol to authenticate as "username." The certificate details
@@ -235,7 +236,7 @@ Future<std::string> negotiateSaslMechanism(RunCommandHook runCommand,
     }
     const auto request = builder.obj();
 
-    return runCommand(OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin, std::move(request)))
+    return runCommand(OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin, request))
         .then([](BSONObj reply) -> Future<std::string> {
             auto mechsArrayObj = reply.getField("saslSupportedMechs");
             if (mechsArrayObj.type() != Array) {
@@ -298,10 +299,13 @@ BSONObj buildAuthParams(const DatabaseName& dbname,
                         StringData mechanism) {
     // Direct authentication expects no tenantId to be present.
     fassert(8032000, dbname.tenantId() == boost::none);
-    return BSON(saslCommandMechanismFieldName
-                << mechanism << saslCommandUserDBFieldName << DatabaseNameUtil::serialize(dbname)
-                << saslCommandUserFieldName << username << saslCommandPasswordFieldName
-                << passwordText);
+    // Because we assert above there is no TenantId, serialiazing the `dbname` will never include
+    // a tenantId as part of the dbName regardless of the serialization context.
+    SerializationContext sc = SerializationContext::stateDefault();
+    return BSON(saslCommandMechanismFieldName << mechanism << saslCommandUserDBFieldName
+                                              << DatabaseNameUtil::serialize(dbname, sc)
+                                              << saslCommandUserFieldName << username
+                                              << saslCommandPasswordFieldName << passwordText);
 }
 
 StringData getSaslCommandUserDBFieldName() {

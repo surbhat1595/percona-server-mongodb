@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
 
 #include "mongo/db/index/column_store_sorter.h"
 
@@ -42,7 +41,6 @@
 #include <absl/container/flat_hash_map.h>
 #include <boost/filesystem/path.hpp>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/error_codes.h"
@@ -50,6 +48,8 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/random.h"
 #include "mongo/util/str.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
 
 namespace mongo {
 struct ComparisonForPathAndRid {
@@ -93,23 +93,23 @@ ColumnStoreSorter::Value ColumnStoreSorter::Value::deserializeForSorter(
 }
 
 ColumnStoreSorter::ColumnStoreSorter(size_t maxMemoryUsageBytes,
-                                     StringData dbName,
+                                     const DatabaseName& dbName,
                                      SorterFileStats* stats,
                                      SorterTracker* tracker)
     : SorterBase(tracker),
-      _dbName(dbName.toString()),
+      _dbName(dbName),
       _fileStats(stats),
       _maxMemoryUsageBytes(maxMemoryUsageBytes),
       _spillFile(std::make_shared<Sorter<Key, Value>::File>(pathForNewSpillFile(), _fileStats)) {}
 
 ColumnStoreSorter::ColumnStoreSorter(size_t maxMemoryUsageBytes,
-                                     StringData dbName,
+                                     const DatabaseName& dbName,
                                      SorterFileStats* stats,
                                      StringData fileName,
                                      const std::vector<SorterRange>& ranges,
                                      SorterTracker* tracker)
     : SorterBase(tracker),
-      _dbName(dbName.toString()),
+      _dbName(dbName),
       _fileStats(stats),
       _maxMemoryUsageBytes(maxMemoryUsageBytes),
       _spillFile(std::make_shared<Sorter<Key, Value>::File>(
@@ -164,7 +164,7 @@ std::string tempDir() {
 }
 }  // namespace
 
-SortOptions ColumnStoreSorter::makeSortOptions(const std::string& dbName, SorterFileStats* stats) {
+SortOptions ColumnStoreSorter::makeSortOptions(const DatabaseName& dbName, SorterFileStats* stats) {
     return SortOptions().TempDir(tempDir()).ExtSortAllowed().FileStats(stats).DBName(dbName);
 }
 

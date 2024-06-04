@@ -1864,8 +1864,6 @@ TEST_F(BatchWriteOpTransactionTest, ThrowTargetingErrorsInTransaction_Delete) {
     std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
 
     auto status = batchOp.targetBatch(targeter, false, &targeted);
-    batchOp.forgetTargetedBatchesOnTransactionAbortingError();
-
     ASSERT_EQ(ErrorCodes::UnknownError, status.getStatus().code());
 
     BatchedCommandResponse response;
@@ -1895,8 +1893,6 @@ TEST_F(BatchWriteOpTransactionTest, ThrowTargetingErrorsInTransaction_Update) {
     std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
 
     auto status = batchOp.targetBatch(targeter, false, &targeted);
-    batchOp.forgetTargetedBatchesOnTransactionAbortingError();
-
     ASSERT_EQ(ErrorCodes::UnknownError, status.getStatus().code());
 
     BatchedCommandResponse response;
@@ -1910,10 +1906,10 @@ TEST_F(BatchWriteOpTransactionTest, ThrowTargetingErrorsInTransaction_Update) {
 const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
 const int splitPoint = 0;
 
-class WriteWithoutShardKeyFixture : public CatalogCacheTestFixture {
+class WriteWithoutShardKeyFixture : public RouterCatalogCacheTestFixture {
 public:
     void setUp() override {
-        CatalogCacheTestFixture::setUp();
+        RouterCatalogCacheTestFixture::setUp();
         const ShardKeyPattern shardKeyPattern(BSON("x" << 1));
         makeCollectionRoutingInfo(
             kNss, shardKeyPattern, nullptr, false, {BSON("x" << splitPoint)}, {});
@@ -2162,10 +2158,10 @@ TEST_F(WriteWithoutShardKeyFixture, MultipleUnorderedDeletesWithoutShardKey) {
 //
 // Tests targeting for retryable time-series updates.
 //
-class TimeseriesRetryableUpdateFixture : public CatalogCacheTestFixture {
+class TimeseriesRetryableUpdateFixture : public RouterCatalogCacheTestFixture {
 public:
     void setUp() override {
-        CatalogCacheTestFixture::setUp();
+        RouterCatalogCacheTestFixture::setUp();
         const ShardKeyPattern shardKeyPattern(BSON("a" << 1));
         makeCollectionRoutingInfo(
             kNss, shardKeyPattern, nullptr, false, {BSON("a" << splitPoint)}, {});
@@ -2183,7 +2179,7 @@ public:
     const TxnNumber kTxnNumber = 5;
 
 private:
-    FailPointEnableBlock fp{"isShardedTimeSeriesBucketsNamespaceAlwaysTrue"};
+    FailPointEnableBlock fp{"isTrackedTimeSeriesBucketsNamespaceAlwaysTrue"};
     boost::optional<CollectionRoutingInfoTargeter> _criTargeter;
 };
 
@@ -2324,6 +2320,338 @@ TEST_F(TimeseriesRetryableUpdateFixture, MultipleUnorderedUpdateWithShardKey) {
 
     // Respond to second targeted batch.
     batchOp.noteBatchResponse(*targeted.begin()->second, response, nullptr);
+    ASSERT(batchOp.isFinished());
+}
+
+class WriteWithoutShardKeyWithIdFixture : public RouterCatalogCacheTestFixture {
+public:
+    void setUp() override {
+        RouterCatalogCacheTestFixture::setUp();
+    }
+
+    OperationContext* getOpCtx() {
+        return operationContext();
+    }
+    CollectionRoutingInfoTargeter getCollectionRoutingInfoTargeter() const {
+        return *_criTargeter;
+    }
+
+protected:
+    boost::optional<CollectionRoutingInfoTargeter> _criTargeter;
+    const ShardKeyPattern _shardKeyPattern{BSON("x" << 1)};
+};
+
+TEST_F(WriteWithoutShardKeyWithIdFixture, UpdateOneSingleShardIsOrdinary) {
+    RAIIServerParameterControllerForTest _featureFlagController{
+        "featureFlagUpdateOneWithIdWithoutShardKey", true};
+
+    BatchedCommandRequest request([&] {
+        write_ops::UpdateCommandRequest updateOp(kNss);
+        updateOp.setUpdates({buildUpdate(BSON("_id" << 1), BSON("$inc" << BSON("a" << 1)), false)});
+        return updateOp;
+    }());
+
+    BatchWriteOp batchOp(getOpCtx(), request);
+
+    makeCollectionRoutingInfo(kNss, _shardKeyPattern, nullptr, false, {}, {});
+    _criTargeter = CollectionRoutingInfoTargeter(getOpCtx(), kNss);
+
+    std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
+    ASSERT_OK(status);
+    ASSERT_EQUALS(status.getValue(), WriteType::Ordinary);
+    ASSERT_EQUALS(targeted.size(), 1u);
+}
+
+TEST_F(WriteWithoutShardKeyWithIdFixture,
+       UpdateOneReplacementStyleIsNotWriteWithoutShardKeyWithId) {
+    RAIIServerParameterControllerForTest _featureFlagController{
+        "featureFlagUpdateOneWithIdWithoutShardKey", true};
+
+    BatchedCommandRequest request([&] {
+        write_ops::UpdateCommandRequest updateOp(kNss);
+        // Replacement style update.
+        updateOp.setUpdates({buildUpdate(BSON("_id" << 1), BSON("a" << 1), false)});
+        return updateOp;
+    }());
+
+    BatchWriteOp batchOp(getOpCtx(), request);
+
+    makeCollectionRoutingInfo(kNss, _shardKeyPattern, nullptr, false, {}, {});
+    _criTargeter = CollectionRoutingInfoTargeter(getOpCtx(), kNss);
+
+    std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
+    ASSERT_OK(status);
+    ASSERT_NOT_EQUALS(status.getValue(), WriteType::WithoutShardKeyWithId);
+}
+
+TEST_F(WriteWithoutShardKeyWithIdFixture, UpdateOneBroadcast) {
+    RAIIServerParameterControllerForTest _featureFlagController{
+        "featureFlagUpdateOneWithIdWithoutShardKey", true};
+
+    BatchedCommandRequest request([&] {
+        write_ops::UpdateCommandRequest updateOp(kNss);
+        // Op style update.
+        updateOp.setUpdates({buildUpdate(BSON("_id" << 1), BSON("$inc" << BSON("a" << 1)), false)});
+        return updateOp;
+    }());
+
+    makeCollectionRoutingInfo(kNss, _shardKeyPattern, nullptr, false, {BSON("x" << 0)}, {});
+    _criTargeter = CollectionRoutingInfoTargeter(getOpCtx(), kNss);
+
+    BatchWriteOp batchOp(getOpCtx(), request);
+
+    std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
+    ASSERT_OK(status);
+    ASSERT_EQ(status.getValue(), WriteType::WithoutShardKeyWithId);
+    ASSERT_EQUALS(targeted.size(), 2);
+
+    BatchedCommandResponse response;
+    buildResponse(1, &response);
+    auto iterator = targeted.begin();
+
+    // Respond to first targeted batch.
+    batchOp.noteBatchResponse(*iterator->second, response, nullptr);
+    ASSERT(batchOp.isFinished());
+}
+
+TEST_F(WriteWithoutShardKeyWithIdFixture, UpdateOneBroadcastWithNoMatch) {
+    RAIIServerParameterControllerForTest _featureFlagController{
+        "featureFlagUpdateOneWithIdWithoutShardKey", true};
+
+    BatchedCommandRequest request([&] {
+        write_ops::UpdateCommandRequest updateOp(kNss);
+        // Op style update.
+        updateOp.setUpdates({buildUpdate(BSON("_id" << 1), BSON("$inc" << BSON("a" << 1)), false)});
+        return updateOp;
+    }());
+
+    makeCollectionRoutingInfo(kNss, _shardKeyPattern, nullptr, false, {BSON("x" << 0)}, {});
+    _criTargeter = CollectionRoutingInfoTargeter(getOpCtx(), kNss);
+
+    BatchWriteOp batchOp(getOpCtx(), request);
+
+    std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
+    ASSERT_OK(status);
+    ASSERT_EQ(status.getValue(), WriteType::WithoutShardKeyWithId);
+    ASSERT_EQUALS(targeted.size(), 2);
+
+    BatchedCommandResponse firstShardResp;
+    buildResponse(0, &firstShardResp);
+
+    auto iterator = targeted.begin();
+
+    // Respond to first targeted batch.
+    batchOp.noteBatchResponse(*iterator->second, firstShardResp, nullptr);
+
+    ASSERT(!batchOp.isFinished());
+    iterator++;
+
+    BatchedCommandResponse secondShardResp;
+    buildResponse(0, &secondShardResp);
+
+    // Respond to second targeted batch.
+    batchOp.noteBatchResponse(*iterator->second, secondShardResp, nullptr);
+
+    ASSERT(batchOp.isFinished());
+}
+
+TEST_F(WriteWithoutShardKeyWithIdFixture, UpdateOneBroadcastNoMatchWithNonRetryableErrors) {
+    RAIIServerParameterControllerForTest _featureFlagController{
+        "featureFlagUpdateOneWithIdWithoutShardKey", true};
+
+    BatchedCommandRequest request([&] {
+        write_ops::UpdateCommandRequest updateOp(kNss);
+        // Op style update.
+        updateOp.setUpdates({buildUpdate(BSON("_id" << 1), BSON("$inc" << BSON("a" << 1)), false)});
+        return updateOp;
+    }());
+
+    makeCollectionRoutingInfo(kNss, _shardKeyPattern, nullptr, false, {BSON("x" << 0)}, {});
+    _criTargeter = CollectionRoutingInfoTargeter(getOpCtx(), kNss);
+
+    BatchWriteOp batchOp(getOpCtx(), request);
+
+    std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
+    ASSERT_OK(status);
+    ASSERT_EQ(status.getValue(), WriteType::WithoutShardKeyWithId);
+    ASSERT_EQUALS(targeted.size(), 2);
+
+    BatchedCommandResponse firstShardResp;
+    buildErrResponse(ErrorCodes::NotWritablePrimary, "", &firstShardResp);
+
+    auto iterator = targeted.begin();
+
+    // Respond to first targeted batch.
+    batchOp.noteBatchResponse(*iterator->second, firstShardResp, nullptr);
+    ASSERT(!batchOp.isFinished());
+    iterator++;
+
+    BatchedCommandResponse secondShardResp;
+    buildResponse(0, &secondShardResp);
+
+    // Respond to second targeted batch.
+    batchOp.noteBatchResponse(*iterator->second, secondShardResp, nullptr);
+
+    ASSERT(batchOp.isFinished());
+}
+
+TEST_F(WriteWithoutShardKeyWithIdFixture, UpdateOneBroadcastMatchWithNonRetryableErrors) {
+    RAIIServerParameterControllerForTest _featureFlagController{
+        "featureFlagUpdateOneWithIdWithoutShardKey", true};
+
+    BatchedCommandRequest request([&] {
+        write_ops::UpdateCommandRequest updateOp(kNss);
+        // Op style update.
+        updateOp.setUpdates({buildUpdate(BSON("_id" << 1), BSON("$inc" << BSON("a" << 1)), false)});
+        return updateOp;
+    }());
+
+    makeCollectionRoutingInfo(kNss, _shardKeyPattern, nullptr, false, {BSON("x" << 0)}, {});
+    _criTargeter = CollectionRoutingInfoTargeter(getOpCtx(), kNss);
+
+    BatchWriteOp batchOp(getOpCtx(), request);
+
+    std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
+    ASSERT_OK(status);
+    ASSERT_EQ(status.getValue(), WriteType::WithoutShardKeyWithId);
+    ASSERT_EQUALS(targeted.size(), 2);
+
+    BatchedCommandResponse firstShardResp;
+    buildErrResponse(ErrorCodes::NotWritablePrimary, "", &firstShardResp);
+
+    auto iterator = targeted.begin();
+
+    // Respond to first targeted batch.
+    batchOp.noteBatchResponse(*iterator->second, firstShardResp, nullptr);
+    ASSERT(!batchOp.isFinished());
+    iterator++;
+
+    BatchedCommandResponse secondShardResp;
+    buildResponse(1, &secondShardResp);
+
+    // Respond to second targeted batch.
+    batchOp.noteBatchResponse(*iterator->second, secondShardResp, nullptr);
+
+    ASSERT(batchOp.isFinished());
+}
+
+TEST_F(WriteWithoutShardKeyWithIdFixture, UpdateOneBroadcastNoMatchWithRetryableErrors) {
+    RAIIServerParameterControllerForTest _featureFlagController{
+        "featureFlagUpdateOneWithIdWithoutShardKey", true};
+
+    BatchedCommandRequest request([&] {
+        write_ops::UpdateCommandRequest updateOp(kNss);
+        // Op style update.
+        updateOp.setUpdates({buildUpdate(BSON("_id" << 1), BSON("$inc" << BSON("a" << 1)), false)});
+        return updateOp;
+    }());
+
+    makeCollectionRoutingInfo(kNss, _shardKeyPattern, nullptr, false, {BSON("x" << 0)}, {});
+    _criTargeter = CollectionRoutingInfoTargeter(getOpCtx(), kNss);
+
+    BatchWriteOp batchOp(getOpCtx(), request);
+
+    std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
+    ASSERT_OK(status);
+    ASSERT_EQ(status.getValue(), WriteType::WithoutShardKeyWithId);
+    ASSERT_EQUALS(targeted.size(), 2);
+
+    const static OID epoch = OID::gen();
+    const static Timestamp timestamp{2};
+
+    BatchedCommandResponse firstShardResp;
+    firstShardResp.addToErrDetails(write_ops::WriteError(
+        0,
+        Status(StaleConfigInfo(
+                   kNss,
+                   ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
+                                             boost::optional<CollectionIndexes>(boost::none)),
+                   ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0}),
+                                             boost::optional<CollectionIndexes>(boost::none)),
+                   ShardId("TestShard")),
+               "Stale error")));
+    firstShardResp.setStatus(Status::OK());
+
+    auto iterator = targeted.begin();
+
+    // Respond to first targeted batch.
+    TrackedErrors trackedErrors;
+    trackedErrors.startTracking(ErrorCodes::StaleConfig);
+    batchOp.noteBatchResponse(*iterator->second, firstShardResp, &trackedErrors);
+
+    ASSERT(!batchOp.isFinished());
+    iterator++;
+
+    BatchedCommandResponse secondShardResp;
+    buildResponse(0, &secondShardResp);
+
+    // Respond to second targeted batch.
+    batchOp.noteBatchResponse(*iterator->second, secondShardResp, nullptr);
+
+    ASSERT(!batchOp.isFinished());
+}
+
+TEST_F(WriteWithoutShardKeyWithIdFixture, UpdateOneBroadcastMatchWithRetryableErrors) {
+    RAIIServerParameterControllerForTest _featureFlagController{
+        "featureFlagUpdateOneWithIdWithoutShardKey", true};
+
+    BatchedCommandRequest request([&] {
+        write_ops::UpdateCommandRequest updateOp(kNss);
+        // Op style update.
+        updateOp.setUpdates({buildUpdate(BSON("_id" << 1), BSON("$inc" << BSON("a" << 1)), false)});
+        return updateOp;
+    }());
+
+    makeCollectionRoutingInfo(
+        kNss, _shardKeyPattern, nullptr, false, {BSON("x" << 0), BSON("x" << 100)}, {});
+    _criTargeter = CollectionRoutingInfoTargeter(getOpCtx(), kNss);
+
+    BatchWriteOp batchOp(getOpCtx(), request);
+
+    std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
+    auto status = batchOp.targetBatch(getCollectionRoutingInfoTargeter(), false, &targeted);
+    ASSERT_OK(status);
+    ASSERT_EQ(status.getValue(), WriteType::WithoutShardKeyWithId);
+    ASSERT_EQUALS(targeted.size(), 3);
+
+    const static OID epoch = OID::gen();
+    const static Timestamp timestamp{2};
+
+    BatchedCommandResponse firstShardResp;
+    firstShardResp.addToErrDetails(write_ops::WriteError(
+        0,
+        Status(StaleConfigInfo(
+                   kNss,
+                   ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
+                                             boost::optional<CollectionIndexes>(boost::none)),
+                   ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0}),
+                                             boost::optional<CollectionIndexes>(boost::none)),
+                   ShardId("TestShard")),
+               "Stale error")));
+    firstShardResp.setStatus(Status::OK());
+
+    auto iterator = targeted.begin();
+
+    // Respond to first targeted batch.
+    TrackedErrors trackedErrors;
+    trackedErrors.startTracking(ErrorCodes::StaleConfig);
+    batchOp.noteBatchResponse(*iterator->second, firstShardResp, &trackedErrors);
+    ASSERT(!batchOp.isFinished());
+    iterator++;
+
+    BatchedCommandResponse secondShardResp;
+    buildResponse(1, &secondShardResp);
+
+    // Respond to second targeted batch.
+    batchOp.noteBatchResponse(*iterator->second, secondShardResp, nullptr);
+
     ASSERT(batchOp.isFinished());
 }
 

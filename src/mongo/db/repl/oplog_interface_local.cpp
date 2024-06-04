@@ -30,7 +30,6 @@
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -73,7 +72,7 @@ OplogIteratorLocal::OplogIteratorLocal(OperationContext* opCtx)
       _exec(_oplogRead.getCollection()
                 ? InternalPlanner::collectionScan(opCtx,
                                                   &_oplogRead.getCollection(),
-                                                  PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                                  PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                                   InternalPlanner::BACKWARD)
                 : nullptr) {}
 

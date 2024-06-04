@@ -107,9 +107,11 @@ ShouldRestoreDocument shouldRestoreDocument(OperationContext* opCtx,
     auto findRequest = FindCommandRequest(NamespaceString::kConfigsvrRestoreNamespace);
     if (nss && uuid) {
         findRequest.setFilter(
-            BSON("ns" << NamespaceStringUtil::serialize(*nss) << "uuid" << *uuid));
+            BSON("ns" << NamespaceStringUtil::serialize(*nss, SerializationContext::stateDefault())
+                      << "uuid" << *uuid));
     } else if (nss) {
-        findRequest.setFilter(BSON("ns" << NamespaceStringUtil::serialize(*nss)));
+        findRequest.setFilter(BSON(
+            "ns" << NamespaceStringUtil::serialize(*nss, SerializationContext::stateDefault())));
     } else if (uuid) {
         findRequest.setFilter(BSON("uuid" << *uuid));
     }
@@ -153,8 +155,8 @@ std::set<std::string> getDatabasesToRestore(OperationContext* opCtx) {
             continue;
         }
 
-        NamespaceString nss =
-            NamespaceStringUtil::deserialize(boost::none, doc.getStringField("ns"));
+        NamespaceString nss = NamespaceStringUtil::deserialize(
+            boost::none, doc.getStringField("ns"), SerializationContext::stateDefault());
         databasesToRestore.emplace(nss.db_forSharding());
     }
 
@@ -241,8 +243,7 @@ public:
         if (TestingProctor::instance().isEnabled()) {
             // All collections in the config server must be defined in kConfigCollections.
             // Collections to restore should be defined in kCollectionEntries.
-            auto collInfos =
-                client.getCollectionInfos(DatabaseNameUtil::deserialize(boost::none, "config"));
+            auto collInfos = client.getCollectionInfos(DatabaseName::kConfig);
             for (auto&& info : collInfos) {
                 StringData collName = info.getStringField("name");
                 // Ignore cache collections as they will be dropped later in the restore procedure.
@@ -285,10 +286,14 @@ public:
                         // "config.system.sharding_ddl_coordinators".
                         const auto obj = doc.getField(nssFieldName->substr(0, dotPosition)).Obj();
                         docNss = NamespaceStringUtil::deserialize(
-                            boost::none, obj.getStringField(nssFieldName->substr(dotPosition + 1)));
+                            boost::none,
+                            obj.getStringField(nssFieldName->substr(dotPosition + 1)),
+                            SerializationContext::stateDefault());
                     } else {
-                        docNss = NamespaceStringUtil::deserialize(
-                            boost::none, doc.getStringField(*nssFieldName));
+                        docNss =
+                            NamespaceStringUtil::deserialize(boost::none,
+                                                             doc.getStringField(*nssFieldName),
+                                                             SerializationContext::stateDefault());
                     }
                 }
 
@@ -359,7 +364,9 @@ public:
                     auto doc = cursor->next();
 
                     const NamespaceString dbNss =
-                        NamespaceStringUtil::deserialize(boost::none, doc.getStringField("_id"));
+                        NamespaceStringUtil::deserialize(boost::none,
+                                                         doc.getStringField("_id"),
+                                                         SerializationContext::stateDefault());
                     if (!dbNss.coll().empty()) {
                         // We want to handle database only namespaces.
                         continue;
@@ -399,7 +406,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(ConfigSvrRunRestoreCommand);
+MONGO_REGISTER_COMMAND(ConfigSvrRunRestoreCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

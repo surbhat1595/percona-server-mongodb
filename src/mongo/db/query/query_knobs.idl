@@ -838,6 +838,15 @@ server_parameters:
     cpp_vartype: AtomicWord<bool>
     default: false
     on_update: plan_cache_util::clearSbeCacheOnParameterChange
+  
+  internalCascadesOptimizerSampleChunks:
+    description: "Controls the number of chunks to sample for CE."
+    set_at: [ startup, runtime ]
+    cpp_varname: "internalCascadesOptimizerSampleChunks"
+    cpp_vartype: AtomicWord<int>
+    default: 0
+    validator:
+      gte: 0
 
   internalCascadesOptimizerDisableYieldingTolerantPlans:
     description: "Controls if we prefer to insert redundant index predicates on the Seek side in order to prevent issues arising from yielding."
@@ -895,6 +904,21 @@ server_parameters:
     cpp_vartype: AtomicWord<bool>
     default: false
     test_only: true
+  
+  internalCascadesOptimizerEnableNotPushdown:
+    description: "Enables the NotPushdown optimization which attempts to remove Not nodes by pushing them down towards the leaves."
+    set_at: [ startup, runtime ]
+    cpp_varname: "internalCascadesOptimizerEnableNotPushdown"
+    cpp_vartype: AtomicWord<bool>
+    default: false
+    on_update: plan_cache_util::clearSbeCacheOnParameterChange
+
+  internalCascadesOptimizerSamplingCEFallBackForFilterNode:
+    description: "Forces sampling CE to fall back on heuristic for filter node."
+    set_at: [ startup, runtime ]
+    cpp_varname: "internalCascadesOptimizerSamplingCEFallBackForFilterNode"
+    cpp_vartype: AtomicWord<bool>
+    default: true
 
   internalQueryFrameworkControl:
     description: "Knob to control the optimizer/execution engine to use."
@@ -1009,7 +1033,7 @@ server_parameters:
     description: "Cost Model Coefficients Override"
     set_at: [ startup, runtime ]
     cpp_varname: "internalCostModelCoefficients"
-    cpp_vartype: "std::string"
+    cpp_vartype: synchronized_value<std::string>
     on_update: cost_model::updateCostCoefficientsOnUpdate
 
   # TODO SERVER-68341 Remove this query knob after tenancy is supported in the sharded cluster.
@@ -1221,6 +1245,45 @@ server_parameters:
       gte: 0
     on_update: plan_cache_util::clearSbeCacheOnParameterChange
 
+  internalQueryEnableBooleanExpressionsSimplifier:
+    description: "Boolean expression simplifier converts filter expression into Disjunctive Normal 
+     Form and applies some simplifications."
+    set_at: [ startup, runtime ]
+    cpp_varname: internalQueryEnableBooleanExpressionsSimplifier
+    cpp_vartype: AtomicWord<bool>
+    default: true
+
+  internalQueryMaximumNumberOfUniquePredicatesToSimplify:
+    description: "If the number of unique predicates in an expression is larger than
+     'maximumNumberOfUniquePredicates' the expression is considered too big to be simplified."
+    set_at: [ startup, runtime ]
+    cpp_varname: internalQueryMaximumNumberOfUniquePredicatesToSimplify
+    cpp_vartype: AtomicWord<int>
+    default: 64
+
+  internalQueryMaximumNumberOfMintermsInSimplifier:
+    description: "Maximum number of minterms allowed during boolean transformations."
+    set_at: [ startup, runtime ]
+    cpp_varname: internalQueryMaximumNumberOfMintermsInSimplifier
+    cpp_vartype: AtomicWord<int>
+    default: 1000
+
+  internalQueryMaxSizeFactorToSimplify:
+    description: "If the simplified expression is larger than the original expression's size times 
+      `internalQueryMaxSizeFactorToSimplify`, the simplified one will be rejected."
+    set_at: [ startup, runtime ]
+    cpp_varname: internalQueryMaxSizeFactorToSimplify
+    cpp_vartype: AtomicDouble
+    default: 1.0
+
+  internalQueryDoNotOpenContainedOrsInSimplifier:
+    description: "If the original expression contains AND operator it is still simplified but the
+     common predicate of the simplified conjunctive terms are taken out of brackets."
+    set_at: [ startup, runtime ]
+    cpp_varname: internalQueryDoNotOpenContainedOrsInSimplifier
+    cpp_vartype: AtomicWord<bool>
+    default: true
+
   internalQueryMaxSpoolMemoryUsageBytes:
     description: "The maximum amount of memory a query or command is willing to use to execute a
       spool, measured in bytes. If disk use is allowed, then it may be possible to spool more data,
@@ -1268,6 +1331,44 @@ server_parameters:
       lte:
         expr: 8 * 1024 * 1024 # 8MB
     default: 0
+
+  internalQuerySlotBasedExecutionWindowBufferMemorySamplingAtLeast:
+    description: "The window buffer memory sampling in the window stage is performed in an exponential
+    backoff way on the processed records. This setting defines the least sampling frequency."
+    set_at: [ startup, runtime ]
+    cpp_varname: "internalQuerySlotBasedExecutionWindowBufferMemorySamplingAtLeast"
+    cpp_vartype: AtomicWord<long long>
+    default: 1024
+    validator:
+        gt: 0
+
+  internalQuerySlotBasedExecutionWindowStateMemorySamplingAtLeast:
+    description: "The window state memory sampling in the window stage is performed in an exponential
+    backoff way for different window frame size. This setting defines the least sampling frequency."
+    set_at: [ startup, runtime ]
+    cpp_varname: "internalQuerySlotBasedExecutionWindowStateMemorySamplingAtLeast"
+    cpp_vartype: AtomicWord<long long>
+    default: 1024
+    validator:
+        gt: 0
+  
+  internalQuerySlotBasedExecutionDisableTimeSeriesPushdown:
+    description: "If true, the system will not push down time-series queries to the SBE execution engine."
+    set_at: [ startup, runtime ]
+    cpp_varname: "internalQuerySlotBasedExecutionDisableTimeSeriesPushdown"
+    cpp_vartype: AtomicWord<bool>
+    default: false
+    on_update: plan_cache_util::clearSbeCacheOnParameterChange
+
+  internalQuerySpillingMaxWaitTimeout:
+    description: "Timeout in MS that the storage engine will block a spilling operation when the
+      cache is under pressure."
+    set_at: [ startup, runtime ]
+    cpp_vartype: AtomicWord<int>
+    cpp_varname: internalQuerySpillingMaxWaitTimeout
+    default: 1000
+    validator:
+      gte: 0
 
 # Note for adding additional query knobs:
 #

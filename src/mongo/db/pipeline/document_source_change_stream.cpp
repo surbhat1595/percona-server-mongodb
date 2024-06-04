@@ -30,7 +30,6 @@
 
 #include "mongo/db/pipeline/document_source_change_stream.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
@@ -162,12 +161,21 @@ std::string DocumentSourceChangeStream::getNsRegexForChangeStream(
     switch (type) {
         case ChangeStreamType::kSingleCollection:
             // Match the target namespace exactly.
-            return "^" + regexEscapeNsForChangeStream(NamespaceStringUtil::serialize(nss)) + "$";
+            return "^" +
+                // Change streams will only be enabled in serverless when multitenancy and
+                // featureFlag are on, therefore we don't have a tenantid prefix.
+                regexEscapeNsForChangeStream(
+                       NamespaceStringUtil::serialize(nss, expCtx->serializationCtxt)) +
+                "$";
         case ChangeStreamType::kSingleDatabase:
             // Match all namespaces that start with db name, followed by ".", then NOT followed by
             // '$' or 'system.' unless 'showSystemEvents' is set.
-            return "^" + regexEscapeNsForChangeStream(nss.db_deprecated().toString()) + "\\." +
-                resolveAllCollectionsRegex(expCtx);
+            return "^" +
+                // Change streams will only be enabled in serverless when multitenancy and
+                // featureFlag are on, therefore we don't have a tenantid prefix.
+                regexEscapeNsForChangeStream(
+                       DatabaseNameUtil::serialize(nss.dbName(), expCtx->serializationCtxt)) +
+                "\\." + resolveAllCollectionsRegex(expCtx);
         case ChangeStreamType::kAllChangesForCluster:
             // Match all namespaces that start with any db name other than admin, config, or local,
             // followed by ".", then NOT '$' or 'system.' unless 'showSystemEvents' is set.
@@ -184,7 +192,9 @@ std::string DocumentSourceChangeStream::getViewNsRegexForChangeStream(
         case ChangeStreamType::kSingleDatabase:
             // For a single database, match any events on the system.views collection on that
             // database.
-            return "^" + regexEscapeNsForChangeStream(nss.db_deprecated().toString()) +
+            return "^" +
+                regexEscapeNsForChangeStream(
+                       DatabaseNameUtil::serialize(nss.dbName(), expCtx->serializationCtxt)) +
                 "\\.system.views$";
         case ChangeStreamType::kAllChangesForCluster:
             // Match all system.views collections on all databases.
@@ -221,7 +231,8 @@ std::string DocumentSourceChangeStream::getCmdNsRegexForChangeStream(
         case ChangeStreamType::kSingleDatabase:
             // Match the target database command namespace exactly.
             return "^" +
-                regexEscapeNsForChangeStream(NamespaceStringUtil::serialize(nss.getCommandNS())) +
+                regexEscapeNsForChangeStream(NamespaceStringUtil::serialize(
+                    nss.getCommandNS(), SerializationContext::stateDefault())) +
                 "$";
         case ChangeStreamType::kAllChangesForCluster:
             // Match all command namespaces on any database.
@@ -277,6 +288,23 @@ list<intrusive_ptr<DocumentSource>> DocumentSourceChangeStream::createFromBson(
         // Make sure we update the 'startAtOperationTime' in the 'spec' so that we serialize the
         // correct start point when sending it to the shards.
         spec.setStartAtOperationTime(DocumentSourceChangeStream::getStartTimeForNewStream(expCtx));
+    }
+
+    // If the stream's default version differs from the client's token version, adopt the higher.
+    // This is the token version that will be used once the stream has passed the resume token.
+    const auto clientToken = change_stream::resolveResumeTokenFromSpec(expCtx, spec);
+    expCtx->changeStreamTokenVersion =
+        std::max(expCtx->changeStreamTokenVersion, clientToken.version);
+
+    // If the user explicitly requested to resume from a high water mark token, but its version
+    // differs from the version chosen above, regenerate it with the new version. There is no need
+    // for a resumed HWM stream to adopt the old token version for events at the same clusterTime.
+    const bool tokenVersionsDiffer = (clientToken.version != expCtx->changeStreamTokenVersion);
+    const bool isHighWaterMark = ResumeToken::isHighWaterMarkToken(clientToken);
+    if (isHighWaterMark && tokenVersionsDiffer && (spec.getResumeAfter() || spec.getStartAfter())) {
+        spec.setResumeAfter(ResumeToken(ResumeToken::makeHighWaterMarkToken(
+            clientToken.clusterTime, expCtx->changeStreamTokenVersion)));
+        spec.setStartAfter(boost::none);
     }
 
     // Save a copy of the spec on the expression context. Used when building the oplog filter.

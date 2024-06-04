@@ -14,7 +14,7 @@ import pymongo.errors
 from buildscripts.resmokelib.testing.fixtures import interface
 
 
-class MongoDFixture(interface.Fixture):
+class MongoDFixture(interface.Fixture, interface._DockerComposeInterface):
     """Fixture which provides JSTests with a standalone mongod to run against."""
 
     def __init__(self, logger, job_num, fixturelib, mongod_executable=None, mongod_options=None,
@@ -55,6 +55,7 @@ class MongoDFixture(interface.Fixture):
         self.mongod = None
         self.port = port or fixturelib.get_next_port(job_num)
         self.mongod_options["port"] = self.port
+        self.router_port = mongod_options.get("routerPort", None)
 
         # Always log backtraces to a file in the dbpath in our testing.
         backtrace_log_file_name = os.path.join(self.get_dbpath_prefix(),
@@ -77,9 +78,11 @@ class MongoDFixture(interface.Fixture):
                                                    mongod_options=self.mongod_options)
 
         try:
-            self.logger.info("Starting mongod on port %d...\n%s", self.port, mongod.as_command())
+            msg = f"Starting mongod on port { self.port }{(' with embedded router on port ' + str(self.router_port)) if self.router_port else ''}...\n{ mongod.as_command() }"
+            self.logger.info(msg)
             mongod.start()
-            self.logger.info("mongod started on port %d with pid %d.", self.port, mongod.pid)
+            msg = f"mongod started on port { self.port }{(' with embedded router on port ' + str(self.router_port)) if self.router_port else ''} with pid { mongod.pid }"
+            self.logger.info(msg)
         except Exception as err:
             msg = "Failed to start mongod on port {:d}: {}".format(self.port, err)
             self.logger.exception(msg)
@@ -87,13 +90,9 @@ class MongoDFixture(interface.Fixture):
 
         self.mongod = mongod
 
-    def get_options(self):
-        """Return the mongod options of this fixture."""
-        launcher = MongodLauncher(self.fixturelib)
-        _, mongod_options = launcher.launch_mongod_program(self.logger, self.job_num,
-                                                           executable=self.mongod_executable,
-                                                           mongod_options=self.mongod_options)
-        return mongod_options
+    def _all_mongo_d_s(self):
+        """Return the standalone `mongod` `Process` instance."""
+        return [self]
 
     def pids(self):
         """:return: pids owned by this fixture if any."""
@@ -135,6 +134,12 @@ class MongoDFixture(interface.Fixture):
         self.logger.info("Successfully contacted the mongod on port %d.", self.port)
 
     def _do_teardown(self, mode=None):
+        if self.config.NOOP_MONGO_D_S_PROCESSES:
+            self.logger.info(
+                "This is running against an External System Under Test setup with `docker-compose.yml` -- skipping teardown."
+            )
+            return
+
         if self.mongod is None:
             self.logger.warning("The mongod fixture has not been set up yet.")
             return  # Still a success even if nothing is running.
@@ -181,12 +186,12 @@ class MongoDFixture(interface.Fixture):
             return []
 
         info = interface.NodeInfo(full_name=self.logger.full_name, name=self.logger.name,
-                                  port=self.port, pid=self.mongod.pid)
+                                  port=self.port, pid=self.mongod.pid, router_port=self.router_port)
         return [info]
 
     def get_internal_connection_string(self):
         """Return the internal connection string."""
-        return "localhost:%d" % self.port
+        return f"{self.logger.external_sut_hostname if self.config.NOOP_MONGO_D_S_PROCESSES else 'localhost'}:{self.port}"
 
     def get_driver_connection_url(self):
         """Return the driver connection URL."""
@@ -332,7 +337,6 @@ class MongodLauncher(object):
         shortcut_opts = {
             "enableMajorityReadConcern": self.config.MAJORITY_READ_CONCERN,
             "storageEngine": self.config.STORAGE_ENGINE,
-            "transportLayer": self.config.TRANSPORT_LAYER,
             "wiredTigerCollectionConfigString": self.config.WT_COLL_CONFIG,
             "wiredTigerEngineConfigString": self.config.WT_ENGINE_CONFIG,
             "wiredTigerIndexConfigString": self.config.WT_INDEX_CONFIG,
@@ -370,7 +374,7 @@ class MongodLauncher(object):
 
         # Override the storage engine specified on the command line with "wiredTiger" if running a
         # config server replica set.
-        if "replSet" in mongod_options and "configsvr" in mongod_options:
+        if "configsvr" in mongod_options:
             mongod_options["storageEngine"] = "wiredTiger"
 
         return self.fixturelib.mongod_program(logger, job_num, executable, process_kwargs,

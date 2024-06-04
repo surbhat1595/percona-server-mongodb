@@ -32,7 +32,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
@@ -204,7 +203,9 @@ BSONObj buildCountChunksInRangeCommand(const UUID& collectionUUID,
     AggregateCommandRequest countRequest(ChunkType::ConfigNS);
 
     BSONObjBuilder builder;
-    builder.append("aggregate", NamespaceStringUtil::serialize(ChunkType::ConfigNS));
+    builder.append(
+        "aggregate",
+        NamespaceStringUtil::serialize(ChunkType::ConfigNS, SerializationContext::stateDefault()));
 
     BSONObjBuilder queryBuilder;
     queryBuilder << ChunkType::collectionUUID << collectionUUID;
@@ -299,7 +300,8 @@ StatusWith<std::pair<CollectionType, ChunkVersion>> getCollectionAndVersion(
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
         repl::ReadConcernLevel::kLocalReadConcern,
         CollectionType::ConfigNS,
-        BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(nss)),
+        BSON(CollectionType::kNssFieldName
+             << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())),
         {},
         1);
     if (!findCollResponse.isOK()) {
@@ -312,9 +314,9 @@ StatusWith<std::pair<CollectionType, ChunkVersion>> getCollectionAndVersion(
                               << "' no longer exists"};
     }
 
-    const CollectionType coll(findCollResponse.getValue().docs[0]);
+    CollectionType coll(findCollResponse.getValue().docs[0]);
     const auto chunksQuery = BSON(ChunkType::collectionUUID << coll.getUuid());
-    const auto version = uassertStatusOK(getMaxChunkVersionFromQueryResponse(
+    auto version = uassertStatusOK(getMaxChunkVersionFromQueryResponse(
         coll,
         configShard->exhaustiveFindOnConfig(opCtx,
                                             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
@@ -369,7 +371,8 @@ void bumpCollectionMinorVersion(OperationContext* opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
         repl::ReadConcernLevel::kLocalReadConcern,
         CollectionType::ConfigNS,
-        BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(nss)),
+        BSON(CollectionType::kNssFieldName
+             << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())),
         {},
         1));
     uassert(
@@ -462,7 +465,7 @@ void logMergeToChangelog(OperationContext* opCtx,
 
     ShardingLogging::get(opCtx)->logChange(opCtx,
                                            "merge",
-                                           NamespaceStringUtil::serialize(nss),
+                                           nss,
                                            logDetail.obj(),
                                            WriteConcernOptions(),
                                            std::move(configShard),
@@ -782,6 +785,14 @@ ShardingCatalogManager::commitChunkSplit(OperationContext* opCtx,
     const auto [coll, version] = std::move(swCollAndVersion.getValue());
     auto collPlacementVersion = version;
 
+    if (coll.getUnsplittable()) {
+        return {
+            ErrorCodes::NamespaceNotSharded,
+            str::stream() << "Can't execute splitChunk on unsharded collection "
+                          << nss.toStringForErrorMsg(),
+        };
+    }
+
     // Return an error if collection epoch does not match epoch of request.
     if (coll.getEpoch() != requestEpoch ||
         (requestTimestamp && coll.getTimestamp() != requestTimestamp)) {
@@ -825,7 +836,7 @@ ShardingCatalogManager::commitChunkSplit(OperationContext* opCtx,
 
         ShardingLogging::get(opCtx)->logChange(opCtx,
                                                "split",
-                                               NamespaceStringUtil::serialize(nss),
+                                               nss,
                                                logDetail.obj(),
                                                WriteConcernOptions(),
                                                _localConfigShard,
@@ -847,7 +858,7 @@ ShardingCatalogManager::commitChunkSplit(OperationContext* opCtx,
             const auto status =
                 ShardingLogging::get(opCtx)->logChangeChecked(opCtx,
                                                               "multi-split",
-                                                              NamespaceStringUtil::serialize(nss),
+                                                              nss,
                                                               chunkDetail.obj(),
                                                               WriteConcernOptions(),
                                                               _localConfigShard,
@@ -1131,6 +1142,12 @@ ShardingCatalogManager::commitMergeAllChunksOnShard(OperationContext* opCtx,
         // 1. Retrieve the collection entry and the initial version.
         const auto [coll, originalVersion] =
             uassertStatusOK(getCollectionAndVersion(opCtx, _localConfigShard.get(), nss));
+
+        uassert(ErrorCodes::NamespaceNotSharded,
+                str::stream() << "Can't execute mergeChunks on unsharded collection "
+                              << nss.toStringForErrorMsg(),
+                !coll.getUnsplittable());
+
         const auto& collUuid = coll.getUuid();
         const auto& keyPattern = coll.getKeyPattern();
         auto newVersion = originalVersion;
@@ -1189,7 +1206,8 @@ ShardingCatalogManager::commitMergeAllChunksOnShard(OperationContext* opCtx,
             DBDirectClient zonesClient{opCtx};
             FindCommandRequest zonesFindRequest{TagsType::ConfigNS};
             zonesFindRequest.setSort(BSON(TagsType::min << 1));
-            zonesFindRequest.setFilter(BSON(TagsType::ns(NamespaceStringUtil::serialize(nss))));
+            zonesFindRequest.setFilter(BSON(TagsType::ns(
+                NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()))));
             zonesFindRequest.setProjection(BSON(TagsType::min << 1 << TagsType::max << 1));
             const auto zonesCursor{zonesClient.find(std::move(zonesFindRequest))};
 
@@ -1372,7 +1390,8 @@ ShardingCatalogManager::commitChunkMigration(OperationContext* opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
         repl::ReadConcernLevel::kLocalReadConcern,
         CollectionType::ConfigNS,
-        BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(nss)),
+        BSON(CollectionType::kNssFieldName
+             << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())),
         {},
         1));
     uassert(ErrorCodes::ConflictingOperationInProgress,
@@ -1384,6 +1403,13 @@ ShardingCatalogManager::commitChunkMigration(OperationContext* opCtx,
             "Collection is undergoing changes and chunks cannot be moved",
             coll.getAllowMigrations() && coll.getPermitMigrations());
 
+    if (coll.getUnsplittable()) {
+        return {
+            ErrorCodes::NamespaceNotSharded,
+            str::stream() << "Can't execute moveChunk on the unsharded collection "
+                          << coll.getNss().toStringForErrorMsg(),
+        };
+    }
     const auto findChunkQuery = BSON(ChunkType::collectionUUID() << coll.getUuid());
 
     auto findResponse = uassertStatusOK(_localConfigShard->exhaustiveFindOnConfig(
@@ -1749,7 +1775,8 @@ void ShardingCatalogManager::upgradeChunksHistory(OperationContext* opCtx,
                 opCtx,
                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                 DatabaseName::kAdmin,
-                BSON("_flushRoutingTableCacheUpdates" << NamespaceStringUtil::serialize(nss)),
+                BSON("_flushRoutingTableCacheUpdates"
+                     << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())),
                 Shard::RetryPolicy::kIdempotent)));
     }
 }
@@ -1771,7 +1798,8 @@ void ShardingCatalogManager::clearJumboFlag(OperationContext* opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
         repl::ReadConcernLevel::kLocalReadConcern,
         CollectionType::ConfigNS,
-        BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(nss)),
+        BSON(CollectionType::kNssFieldName
+             << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())),
         {},
         1));
     uassert(ErrorCodes::ConflictingOperationInProgress,
@@ -1934,8 +1962,6 @@ void ShardingCatalogManager::ensureChunkVersionIsGreaterThan(OperationContext* o
             // dropped, its shard key has been refined, the chunk has been split, or the chunk
             // has been merged.
             LOGV2(23884,
-                  "ensureChunkVersionIsGreaterThan did not find any chunks with minKey {minKey}, "
-                  "maxKey {maxKey}, and epoch {epoch}. Returning success.",
                   "ensureChunkVersionIsGreaterThan did not find any matching chunks; returning "
                   "success",
                   "minKey"_attr = minKey,
@@ -1949,11 +1975,6 @@ void ShardingCatalogManager::ensureChunkVersionIsGreaterThan(OperationContext* o
 
         if (version.isOlderThan(matchingChunk.getVersion())) {
             LOGV2(23885,
-                  "ensureChunkVersionIsGreaterThan found that the chunk with minKey {minKey}, "
-                  "maxKey "
-                  "{maxKey}, and epoch {epoch} already has a higher version than {version}. "
-                  "Current "
-                  "chunk is {currentChunk}. Returning success.",
                   "ensureChunkVersionIsGreaterThan found that the chunk already has a higher "
                   "version; "
                   "returning success",
@@ -1982,12 +2003,6 @@ void ShardingCatalogManager::ensureChunkVersionIsGreaterThan(OperationContext* o
                 .docs;
         if (highestChunksVector.empty()) {
             LOGV2(23886,
-                  "ensureChunkVersionIsGreaterThan did not find any chunks with epoch {epoch} "
-                  "when "
-                  "attempting to find the collection placement version. The collection must have "
-                  "been "
-                  "dropped "
-                  "concurrently or had its shard key refined. Returning success.",
                   "ensureChunkVersionIsGreaterThan did not find any chunks with a matching epoch "
                   "when "
                   "attempting to find the collection placement version. The collection must have "
@@ -2018,9 +2033,6 @@ void ShardingCatalogManager::ensureChunkVersionIsGreaterThan(OperationContext* o
                                                                   kNoWaitWriteConcern));
     if (didUpdate) {
         LOGV2(23887,
-              "ensureChunkVersionIsGreaterThan bumped the version of the chunk with minKey "
-              "{minKey}, "
-              "maxKey {maxKey}, and epoch {epoch}. Chunk is now {newChunk}",
               "ensureChunkVersionIsGreaterThan bumped the the chunk version",
               "minKey"_attr = minKey,
               "maxKey"_attr = maxKey,
@@ -2028,11 +2040,6 @@ void ShardingCatalogManager::ensureChunkVersionIsGreaterThan(OperationContext* o
               "newChunk"_attr = newChunk.toConfigBSON());
     } else {
         LOGV2(23888,
-              "ensureChunkVersionIsGreaterThan did not find a chunk matching minKey {minKey}, "
-              "maxKey {maxKey}, and epoch {epoch} when trying to bump its version. The "
-              "collection "
-              "must have been dropped concurrently or had its shard key refined. Returning "
-              "success.",
               "ensureChunkVersionIsGreaterThan did not find a matching chunk when trying to bump "
               "its "
               "version. The collection must have been dropped concurrently or had its shard key "
@@ -2133,10 +2140,7 @@ void ShardingCatalogManager::splitOrMarkJumbo(OperationContext* opCtx,
                                               limit));
 
         if (splitPoints.empty()) {
-            LOGV2(21873,
-                  "Marking chunk {chunk} as jumbo",
-                  "Marking chunk as jumbo",
-                  "chunk"_attr = redact(chunk.toString()));
+            LOGV2(21873, "Marking chunk as jumbo", "chunk"_attr = redact(chunk.toString()));
             chunk.markAsJumbo();
 
             // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk modifications. Note
@@ -2151,7 +2155,8 @@ void ShardingCatalogManager::splitOrMarkJumbo(OperationContext* opCtx,
                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                 repl::ReadConcernLevel::kLocalReadConcern,
                 CollectionType::ConfigNS,
-                BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(nss)),
+                BSON(CollectionType::kNssFieldName
+                     << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())),
                 {},
                 1));
             uassert(ErrorCodes::ConflictingOperationInProgress,
@@ -2171,8 +2176,6 @@ void ShardingCatalogManager::splitOrMarkJumbo(OperationContext* opCtx,
                 ShardingCatalogClient::kMajorityWriteConcern);
             if (!status.isOK()) {
                 LOGV2(21874,
-                      "Couldn't mark chunk with namespace {namespace} and min key {minKey} as "
-                      "jumbo due to {error}",
                       "Couldn't mark chunk as jumbo",
                       "namespace"_attr = redact(toStringForLogging(nss)),
                       "minKey"_attr = redact(chunk.getMin()),
@@ -2233,8 +2236,8 @@ void ShardingCatalogManager::setAllowMigrationsAndBumpOneChunk(
                 ? BSON("$unset" << BSON(CollectionType::kAllowMigrationsFieldName << ""))
                 : BSON("$set" << BSON(CollectionType::kAllowMigrationsFieldName << false));
 
-            BSONObj query =
-                BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(nss));
+            BSONObj query = BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(
+                                     nss, SerializationContext::stateDefault()));
             if (collectionUUID) {
                 query = query.addFields(BSON(CollectionType::kUuidFieldName << *collectionUUID));
             }
@@ -2252,8 +2255,8 @@ void ShardingCatalogManager::setAllowMigrationsAndBumpOneChunk(
                 updateCollResponse.getN() == 1);
 
         FindCommandRequest collQuery{CollectionType::ConfigNS};
-        collQuery.setFilter(
-            BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(nss)));
+        collQuery.setFilter(BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(
+                                     nss, SerializationContext::stateDefault())));
         collQuery.setLimit(1);
 
         const auto findCollResponse = txnClient.exhaustiveFindSync(collQuery);
@@ -2412,7 +2415,7 @@ void ShardingCatalogManager::_commitChunkMigrationInTransaction(
         return false;
     }();
 
-    const auto configChunksUpdateRequest = [&migratedChunk, &splitChunks, &controlChunk] {
+    auto configChunksUpdateRequest = [&migratedChunk, &splitChunks, &controlChunk] {
         write_ops::UpdateCommandRequest updateOp(ChunkType::ConfigNS);
         std::vector<write_ops::UpdateOpEntry> updateEntries;
         updateEntries.reserve(1 + splitChunks->size() + (controlChunk ? 1 : 0));

@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/db/change_stream_serverless_helpers.h"
 
@@ -37,7 +36,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/oid.h"
@@ -59,9 +57,14 @@
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util_core.h"
 
-namespace mongo {
-namespace change_stream_serverless_helpers {
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
+
+namespace mongo {
+
+MONGO_FAIL_POINT_DEFINE(injectCurrentWallTimeForChangeCollectionRemoval);
+
+namespace change_stream_serverless_helpers {
 namespace {
 bool isServerlessChangeStreamFeatureFlagEnabled() {
     return feature_flags::gFeatureFlagServerlessChangeStreams.isEnabled(
@@ -151,5 +154,11 @@ int64_t getExpireAfterSeconds(const TenantId& tenantId) {
     return expireAfterSeconds;
 }
 
+Date_t getCurrentTimeForChangeCollectionRemoval(OperationContext* opCtx) {
+    auto now = opCtx->getServiceContext()->getFastClockSource()->now();
+    injectCurrentWallTimeForChangeCollectionRemoval.execute(
+        [&](const BSONObj& data) { now = data.getField("currentWallTime").date(); });
+    return now;
+}
 }  // namespace change_stream_serverless_helpers
 }  // namespace mongo

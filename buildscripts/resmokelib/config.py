@@ -111,7 +111,6 @@ DEFAULTS = {
     "suite_files": "with_server",
     "tag_files": [],
     "test_files": [],
-    "transport_layer": None,
     "user_friendly_output": None,
     "mixed_bin_versions": None,
     "old_bin_version": None,
@@ -137,6 +136,7 @@ DEFAULTS = {
     "task_doc": None,
     "variant_name": None,
     "version_id": None,
+    "evg_project_config_path": "etc/evergreen.yml",
 
     # WiredTiger options.
     "wt_coll_config": None,
@@ -151,6 +151,9 @@ DEFAULTS = {
 
     # Config Dir
     "config_dir": "buildscripts/resmokeconfig",
+
+    # Directory with jstests
+    "jstests_dir": "jstests",
 
     # UndoDB options
     "undo_recorder_path": None,
@@ -167,8 +170,19 @@ DEFAULTS = {
     # otel info
     "otel_trace_id": None,
     "otel_parent_id": None,
-    "otel_collector_endpoint": None,
-    "otel_collector_file": None,
+    "otel_collector_dir": None,
+
+    # The images to build for an External System Under Test
+    "docker_compose_build_images": None,
+
+    # Where the `--dockerComposeBuildImages` is happening.
+    "docker_compose_build_env": "local",
+
+    # Tag to use for images built & used for an External System Under Test
+    "docker_compose_tag": "development",
+
+    # Whether or not this resmoke suite is running against an External System Under Test
+    "external_sut": False,
 }
 
 _SuiteOptions = collections.namedtuple("_SuiteOptions", [
@@ -356,6 +370,9 @@ EVERGREEN_VARIANT_NAME = None
 # the commit hash.
 EVERGREEN_VERSION_ID = None
 
+# Path to evergreen project configuration yaml file
+EVERGREEN_PROJECT_CONFIG_PATH = None
+
 # If set, then any jstests that have any of the specified tags will be excluded from the suite(s).
 EXCLUDE_WITH_ANY_TAGS = None
 
@@ -535,14 +552,10 @@ TAG_FILES = None
 # The test files to execute.
 TEST_FILES = None
 
-# If set, then mongod/mongos's started by resmoke.py will use the specified transport layer.
-TRANSPORT_LAYER = None
-
 # Metrics for open telemetry
 OTEL_TRACE_ID = None
 OTEL_PARENT_ID = None
-OTEL_COLLECTOR_ENDPOINT = None
-OTEL_COLLECTOR_FILE = None
+OTEL_COLLECTOR_DIR = None
 
 # If set, then all mongod's started by resmoke.py and by the mongo shell will use the specified
 # WiredTiger collection configuration settings.
@@ -608,6 +621,9 @@ EXTERNAL_SUITE_SELECTORS = (DEFAULT_BENCHMARK_TEST_LIST, DEFAULT_UNIT_TEST_LIST,
 CONFIG_DIR = None
 LOGGER_DIR = None
 
+# Where to look for jstests existence
+JSTESTS_DIR = None
+
 # Generated logging config for the current invocation.
 LOGGING_CONFIG: dict = {}
 SHORTEN_LOGGER_NAME_CONFIG: dict = {}
@@ -629,3 +645,24 @@ SYMBOLIZER_CLIENT_ID = None
 
 # Sanity check
 SANITY_CHECK = False
+
+# The images to build for an External System Under Test
+DOCKER_COMPOSE_BUILD_IMAGES = None
+
+# Where the `--dockerComposeBuildImages` is happening.
+DOCKER_COMPOSE_BUILD_ENV = "local"
+
+# Tag to use for images built & used for an External System Under Test
+DOCKER_COMPOSE_TAG = "development"
+
+# Whether or not this resmoke suite is running against an External System Under Test
+EXTERNAL_SUT = False
+
+# This will be set to True when:
+# (1) We are building images for an External SUT
+# (2) Running against an External SUT
+NOOP_MONGO_D_S_PROCESSES = False
+
+# If resmoke is running from within a `workload` container,
+# we may need to do additional setup to run the suite successfully.
+REQUIRES_WORKLOAD_CONTAINER_SETUP = False

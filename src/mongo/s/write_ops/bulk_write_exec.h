@@ -44,7 +44,9 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_id.h"
 #include "mongo/db/write_concern_options.h"
+#include "mongo/s/async_requests_sender.h"
 #include "mongo/s/ns_targeter.h"
 #include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/write_op.h"
@@ -57,7 +59,12 @@ namespace bulk_write_exec {
  * Contains replies for individual bulk write ops along with a count of how many replies in the
  * vector are errors.
  */
-using BulkWriteReplyInfo = std::pair<std::vector<BulkWriteReplyItem>, int>;
+struct BulkWriteReplyInfo {
+    std::vector<BulkWriteReplyItem> replyItems;
+    int numErrors = 0;
+    boost::optional<BulkWriteWriteConcernError> wcErrors;
+    boost::optional<std::vector<StmtId>> retriedStmtIds;
+};
 
 /**
  * Attempt to run the bulkWriteCommandRequest through Queryable Encryption code path.
@@ -90,18 +97,20 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
  * 0) Client request comes in, a BulkWriteOp is initialized.
  *
  * 1a) One or more ops in the bulkWrite are targeted, resulting in TargetedWriteBatches for these
- *     ops.
- * 1b) There are targeting errors, and the batch must be retargeted after refreshing the NSTargeter.
+ *     ops. OR
+ * 1b) There are targeting errors, and the ops must be retargeted after refreshing the
+ *     NSTargeter(s).
  *
- * 2) Child bulkWrite requests are built for each TargetedWriteBatch before sending.
+ * 2) Child bulkWrite requests (referred to in code as child batches) are built for each
+ *    TargetedWriteBatch before sending.
  *
- * 3) Responses for sent TargetedWriteBatches are noted, errors are stored and aggregated
- *    per-write-op. Errors the caller is interested in are returned.
+ * 3) Responses for sent child batches are noted, and errors are stored and aggregated per-write-op.
+ *    Certain errors are returned immediately (e.g. any error in a transaction).
  *
  * 4) If the whole bulkWrite is not finished, goto 0.
  *
- * 5) When all responses come back for all write ops, errors are aggregated and returned in
- *    a client response.
+ * 5) When all responses come back for all write ops, success responses and errors are aggregated
+ *    and returned in a client response.
  *
  */
 class BulkWriteOp {
@@ -138,7 +147,10 @@ public:
     /**
      * Fills a BulkWriteCommandRequest from a TargetedWriteBatch for this BulkWriteOp.
      */
-    BulkWriteCommandRequest buildBulkCommandRequest(const TargetedWriteBatch& targetedBatch) const;
+    BulkWriteCommandRequest buildBulkCommandRequest(
+        const std::vector<std::unique_ptr<NSTargeter>>& targeters,
+        const TargetedWriteBatch& targetedBatch,
+        boost::optional<bool> allowShardKeyUpdatesWithoutFullShardKeyInQuery) const;
 
     /**
      * Returns false if the bulk write op needs more processing.
@@ -150,33 +162,113 @@ public:
     int numWriteOpsIn(WriteOpState opState) const;
 
     /**
-     * Aborts any further writes in the batch with the provided error status.  There must be no
-     * pending ops awaiting results when a batch is aborted.
-     *
-     * Batch is finished immediately after aborting.
+     * Saves all the write concern errors received from all the shards so that they can
+     * be concatenated into a single error when mongos responds to the client.
      */
-    void abortBatch(const Status& status);
+    void saveWriteConcernError(ShardId shardId, BulkWriteWriteConcernError wcError);
+    void saveWriteConcernError(ShardWCError shardWCError);
+    std::vector<ShardWCError> getWriteConcernErrors() const {
+        return _wcErrors;
+    }
 
     /**
-     * Processes the response to a TargetedWriteBatch. The response is captured by the vector of
-     * BulkWriteReplyItems. Sharding related errors are then grouped by namespace and captured in
-     * the map passed in.
+     * Marks this bulkWrite request as aborted if the error falls under one of the following cases:
+     * 1. A shutdown error and the router/mongos is shutting down.
+     * 2. The bulkWrite request is part of a transaction and we get an error.
+     *
+     * This may also throw if the bulkWrite request should fail with a top-level error code.
      */
-    void noteBatchResponse(TargetedWriteBatch& targetedBatch,
-                           const std::vector<BulkWriteReplyItem>& replyItems,
-                           stdx::unordered_map<NamespaceString, TrackedErrors>& errorsPerNamespace);
+    void abortIfNeeded(const Status& error);
+
+    /**
+     * Marks any further writes for this BulkWriteOp as failed with the provided error status. There
+     * must be no pending ops awaiting results when this method is called.
+     */
+    void noteErrorForRemainingWrites(const Status& status);
+
+    /**
+     * Processes the response to a TargetedWriteBatch. Sharding related errors are then grouped
+     * by namespace and captured in the map passed in.
+     */
+    void noteChildBatchResponse(
+        const TargetedWriteBatch& targetedBatch,
+        const std::vector<BulkWriteReplyItem>& replyItems,
+        const boost::optional<std::vector<StmtId>>& retriedStmtIds,
+        boost::optional<stdx::unordered_map<NamespaceString, TrackedErrors>&> errorsPerNamespace);
+
+
+    void processChildBatchResponseFromRemote(
+        const TargetedWriteBatch& writeBatch,
+        const AsyncRequestsSender::Response& response,
+        boost::optional<stdx::unordered_map<NamespaceString, TrackedErrors>&> errorsPerNamespace);
+
+    /**
+     * Records the error contained in the given status for write(s) in the given targetedBatch.
+     * This is used in cases where we get a top-level error in response to a batch sent to a shard
+     * but that we do not want to return the top-level error directly to the user.
+     * Instead, we treat the error as a failure of the relevant write(s) within the batch: for
+     * unordered writes that is all writes in the batch, and for ordered writes it is only the first
+     * write (since we would stop after that failed and not attempt execution of further writes.)
+     */
+    void noteChildBatchError(const TargetedWriteBatch& targetedBatch, const Status& status);
+
+    /**
+     * Processes a local error encountered while trying to send a child batch to a shard. This could
+     * be e.g. a network error or an error due to this mongos shutting down.
+     */
+    void processLocalChildBatchError(const TargetedWriteBatch& batch,
+                                     const AsyncRequestsSender::Response& response);
+
+
+    /**
+     * Processes an error encountered while trying to target writes in this BulkWriteOp.
+     */
+    void processTargetingError(const StatusWith<WriteType>& targetStatus);
+
+    /**
+     * Processes the response to a single WriteOp at index opIdx directly and cleans up all
+     * associated childOps. The response is captured by the BulkWriteReplyItem. It also captures the
+     * writeConcern from ShardWCError if the WriteConcernErrorDetail inside is non-OK. We don't
+     * expect sharding related stale version/db errors because response set by this method should be
+     * final (i.e. not retryable).
+     *
+     * This is currently used by retryable timeseries updates and writes without shard key because
+     * those operations are processed individually with the use of internal transactions.
+     */
+    void noteWriteOpFinalResponse(size_t opIdx,
+                                  const BulkWriteReplyItem& reply,
+                                  const ShardWCError& shardWCError,
+                                  const boost::optional<std::vector<StmtId>>& retriedStmtIds);
+
+    /**
+     * Mark the corresponding targeter stale based on errorsPerNamespace.
+     */
+    void noteStaleResponses(
+        const std::vector<std::unique_ptr<NSTargeter>>& targeters,
+        const stdx::unordered_map<NamespaceString, TrackedErrors>& errorsPerNamespace);
 
     /**
      * Returns a vector of BulkWriteReplyItem based on the end state of each individual write in
      * this bulkWrite operation, along with the number of error replies contained in the vector.
      */
-    BulkWriteReplyInfo generateReplyInfo();
+    BulkWriteReplyInfo generateReplyInfo(bool errorsOnly);
+
+    /**
+     * Creates a BulkWriteWriteConcernError object which combines write concern errors
+     * from all shards. If no write concern errors exist, returns boost::none.
+     */
+    boost::optional<BulkWriteWriteConcernError> generateWriteConcernError() const;
 
     /**
      * Calculates an estimate of the size, in bytes, required to store the common fields that will
-     * go into each sub-batch command sent to a shard, i.e. all fields besides the actual write ops.
+     * go into each child batch command sent to a shard, i.e. all fields besides the actual write
+     * ops.
      */
-    int getBaseBatchCommandSizeEstimate() const;
+    int getBaseChildBatchCommandSizeEstimate() const;
+
+    const BulkWriteCommandRequest& getClientRequest() const {
+        return _clientRequest;
+    }
 
 private:
     // The OperationContext the client bulkWrite request is run on.
@@ -193,10 +285,23 @@ private:
 
     // The write concern that the bulk write command was issued with.
     WriteConcernOptions _writeConcern;
+    // A list of write concern errors from all shards.
+    std::vector<ShardWCError> _wcErrors;
+
+    // Statement ids for the ops that had already been executed, thus were not executed in this
+    // bulkWrite.
+    boost::optional<std::vector<StmtId>> _retriedStmtIds;
 
     // Set to true if this write is part of a transaction.
     const bool _inTransaction{false};
     const bool _isRetryableWrite{false};
+
+    // Set to true if we encountered an error that prevents us from executing the rest of the
+    // bulkWrite. Note this does *not* include cases where we saw an error for an individual
+    // statement in an ordered bulkWrite, but instead covers these cases:
+    // - Any error encountered while in a transaction.
+    // - A local error indicating that this process is shutting down.
+    bool _aborted = false;
 };
 
 /**

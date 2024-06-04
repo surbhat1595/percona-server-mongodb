@@ -33,7 +33,6 @@
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <fmt/format.h>
 #include <tuple>
@@ -120,8 +119,8 @@ void DropCollectionCoordinator::dropCollectionLocally(OperationContext* opCtx,
     if (collectionUUID) {
         // The multi-document remove command cannot be run in  transactions, so run it using
         // an alternative client.
-        auto newClient = opCtx->getServiceContext()->makeClient("removeRangeDeletions-" +
-                                                                collectionUUID->toString());
+        auto newClient =
+            opCtx->getService()->makeClient("removeRangeDeletions-" + collectionUUID->toString());
         AlternativeClientRegion acr{newClient};
         auto executor =
             Grid::get(opCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
@@ -130,7 +129,8 @@ void DropCollectionCoordinator::dropCollectionLocally(OperationContext* opCtx,
             cc().makeOperationContext(), opCtx->getCancellationToken(), executor);
 
         try {
-            removePersistentRangeDeletionTasksByUUID(alternativeOpCtx.get(), *collectionUUID);
+            rangedeletionutil::removePersistentRangeDeletionTasksByUUID(alternativeOpCtx.get(),
+                                                                        *collectionUUID);
         } catch (const DBException& e) {
             LOGV2_ERROR(6501601,
                         "Failed to remove persistent range deletion tasks on drop collection",
@@ -244,10 +244,8 @@ void DropCollectionCoordinator::_freezeMigrations(
         logChangeDetail.append("collectionUUID", _doc.getCollInfo()->getUuid().toBSON());
     }
 
-    ShardingLogging::get(opCtx)->logChange(opCtx,
-                                           "dropCollection.start",
-                                           NamespaceStringUtil::serialize(nss()),
-                                           logChangeDetail.obj());
+    ShardingLogging::get(opCtx)->logChange(
+        opCtx, "dropCollection.start", nss(), logChangeDetail.obj());
 
     if (_doc.getCollInfo()) {
         const auto collUUID = _doc.getCollInfo()->getUuid();
@@ -271,7 +269,7 @@ void DropCollectionCoordinator::_enterCriticalSection(
     async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
     async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
     auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        blockCRUDOperationsRequest, **executor, token, args);
+        **executor, token, blockCRUDOperationsRequest, args);
     sharding_ddl_util::sendAuthenticatedCommandToShards(
         opCtx, opts, Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx));
 
@@ -292,7 +290,7 @@ void DropCollectionCoordinator::_commitDropCollection(
     sharding_ddl_util::removeQueryAnalyzerMetadataFromConfig(
         opCtx,
         BSON(analyze_shard_key::QueryAnalyzerDocument::kNsFieldName
-             << NamespaceStringUtil::serialize(nss())));
+             << NamespaceStringUtil::serialize(nss(), SerializationContext::stateDefault())));
 
     if (collIsSharded) {
         invariant(_doc.getCollInfo());
@@ -338,8 +336,7 @@ void DropCollectionCoordinator::_commitDropCollection(
     sharding_ddl_util::sendDropCollectionParticipantCommandToShards(
         opCtx, nss(), {primaryShardId}, **executor, getNewSession(opCtx), false /*fromMigrate*/);
 
-    ShardingLogging::get(opCtx)->logChange(
-        opCtx, "dropCollection", NamespaceStringUtil::serialize(nss()));
+    ShardingLogging::get(opCtx)->logChange(opCtx, "dropCollection", nss());
     LOGV2(5390503, "Collection dropped", logAttrs(nss()));
 }
 
@@ -359,7 +356,7 @@ void DropCollectionCoordinator::_exitCriticalSection(
     async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
     async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
     auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        unblockCRUDOperationsRequest, **executor, token, args);
+        **executor, token, unblockCRUDOperationsRequest, args);
     sharding_ddl_util::sendAuthenticatedCommandToShards(
         opCtx, opts, Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx));
 

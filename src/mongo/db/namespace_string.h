@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <cstring>
 #include <fmt/format.h>
@@ -258,29 +257,6 @@ public:
     }
 
     /**
-     * These functions construct a NamespaceString without checking for presence of TenantId. These
-     * must only be used by auth systems which are not yet tenant aware.
-     *
-     * TODO SERVER-74896 Remove these functions. Any remaining call sites must be changed to use a
-     * function on NamespaceStringUtil.
-     */
-    static NamespaceString createNamespaceStringForAuth(const boost::optional<TenantId>& tenantId,
-                                                        StringData db,
-                                                        StringData coll) {
-        return NamespaceString(tenantId, db, coll);
-    }
-
-    static NamespaceString createNamespaceStringForAuth(const boost::optional<TenantId>& tenantId,
-                                                        StringData ns) {
-        return NamespaceString(tenantId, ns);
-    }
-
-    static NamespaceString createNamespaceStringForAuth(const DatabaseName& dbName,
-                                                        StringData coll) {
-        return NamespaceString(dbName, coll);
-    }
-
-    /**
      * Constructs the namespace '<dbName>.$cmd.aggregate', which we use as the namespace for
      * aggregation commands with the format {aggregate: 1}.
      */
@@ -381,16 +357,6 @@ public:
      */
     static NamespaceString makeDummyNamespace(const boost::optional<TenantId>& tenantId);
 
-    /**
-     * NOTE: DollarInDbNameBehavior::allow is deprecated.
-     *
-     * Please use DollarInDbNameBehavior::disallow and check explicitly for any DB names that must
-     * contain a $.
-     */
-    enum class DollarInDbNameBehavior {
-        Disallow,
-        Allow,  // Deprecated
-    };
 
     boost::optional<TenantId> tenantId() const {
         if (!_hasTenantId()) {
@@ -398,18 +364,6 @@ public:
         }
 
         return TenantId{OID::from(&_data[kDataOffset])};
-    }
-
-    /**
-     * This method is deprecated and will be removed as part of SERVER-65456. We strongly
-     * encourage to make the use of `dbName`, which returns a DatabaseName object instead.
-     * In case you would need to a StringData object instead we strongly recommend taking a look
-     * at the DatabaseNameUtil::serialize method which takes in a DatabaseName object.
-     */
-    StringData db_deprecated() const {
-        // TODO SERVER-65456 Remove this function.
-        auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
-        return StringData{_data.data() + offset, _dbNameOffsetEnd()};
     }
 
     /**
@@ -548,6 +502,9 @@ public:
     bool isSystemDotJavascript() const {
         return coll() == kSystemDotJavascriptCollectionName;
     }
+    bool isSystemDotUsers() const {
+        return coll() == kSystemUsers;
+    }
     bool isServerConfigurationCollection() const {
         return isAdminDB() && (coll() == "system.version");
     }
@@ -572,6 +529,16 @@ public:
 
     bool isOrphanCollection() const {
         return isLocalDB() && coll().startsWith(kOrphanCollectionPrefix);
+    }
+
+    /**
+     * foo = true
+     * foo. = false
+     * foo.a = false
+     */
+    bool isDbOnly() const {
+        auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
+        return offset + _dbNameOffsetEnd() == _data.size();
     }
 
     /**
@@ -731,12 +698,14 @@ public:
      * Returns true if the namespace is valid. Special namespaces for internal use are considered as
      * valid.
      */
-    bool isValid(DollarInDbNameBehavior behavior = DollarInDbNameBehavior::Allow) const {
-        return validDBName(db_deprecated(), behavior) && !coll().empty();
+    bool isValid(DatabaseName::DollarInDbNameBehavior behavior =
+                     DatabaseName::DollarInDbNameBehavior::Allow) const {
+        return DatabaseName::validDBName(db_deprecated(), behavior) && !coll().empty();
     }
 
     static bool isValid(StringData ns,
-                        DollarInDbNameBehavior behavior = DollarInDbNameBehavior::Allow) {
+                        DatabaseName::DollarInDbNameBehavior behavior =
+                            DatabaseName::DollarInDbNameBehavior::Allow) {
         const auto nss = NamespaceString(boost::none, ns);
         return nss.isValid(behavior);
     }
@@ -759,29 +728,6 @@ public:
         return ns.startsWith("local.oplog.");
     }
 
-    /**
-     * samples:
-     *   good
-     *      foo
-     *      bar
-     *      foo-bar
-     *   bad:
-     *      foo bar
-     *      foo.bar
-     *      foo"bar
-     *
-     * @param db - a possible database name
-     * @param DollarInDbNameBehavior - please do not change the default value. DB names that must
-     *                                 contain a $ should be checked explicitly.
-     * @return if db is an allowed database name
-     */
-    static bool validDBName(StringData dbName,
-                            DollarInDbNameBehavior behavior = DollarInDbNameBehavior::Disallow);
-
-    static bool validDBName(const DatabaseName& dbName,
-                            DollarInDbNameBehavior behavior = DollarInDbNameBehavior::Disallow) {
-        return validDBName(dbName.db(), behavior);
-    }
 
     /**
      * Takes a fully qualified namespace (ie dbname.collectionName), and returns true if
@@ -903,10 +849,11 @@ private:
                 "namespaces cannot have embedded null characters",
                 collectionName.find('\0') == std::string::npos);
 
-        _data.resize(dbName._data.size() + 1 + collectionName.size());
+        _data.resize(collectionName.empty() ? dbName._data.size()
+                                            : dbName._data.size() + 1 + collectionName.size());
         std::memcpy(_data.data(), dbName._data.data(), dbName._data.size());
-        *reinterpret_cast<uint8_t*>(_data.data() + dbName._data.size()) = '.';
         if (!collectionName.empty()) {
+            *reinterpret_cast<uint8_t*>(_data.data() + dbName._data.size()) = '.';
             std::memcpy(_data.data() + dbName._data.size() + 1,
                         collectionName.rawData(),
                         collectionName.size());
@@ -940,6 +887,17 @@ private:
     StringData ns() const {
         auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
         return StringData{_data.data() + offset, _data.size() - offset};
+    }
+
+    /**
+     * This method is deprecated and will be removed as part of SERVER-65456. We strongly
+     * encourage to make the use of `dbName`, which returns a DatabaseName object instead.
+     * In case you would need to a StringData object instead we strongly recommend taking a look
+     * at the DatabaseNameUtil::serialize method which takes in a DatabaseName object.
+     */
+    StringData db_deprecated() const {
+        auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
+        return StringData{_data.data() + offset, _dbNameOffsetEnd()};
     }
 
     static constexpr size_t kDataOffset = sizeof(uint8_t);
@@ -1078,6 +1036,15 @@ public:
 
     void serialize(BSONObjBuilder* builder, StringData fieldName) const;
 
+    template <typename H>
+    friend H AbslHashValue(H h, const NamespaceStringOrUUID& nssOrUUID) {
+        if (nssOrUUID.isNamespaceString()) {
+            return H::combine(std::move(h), nssOrUUID.nss());
+        } else {
+            return H::combine(std::move(h), nssOrUUID.uuid());
+        }
+    }
+
 private:
     using UUIDWithDbName = std::tuple<DatabaseName, UUID>;
     stdx::variant<NamespaceString, UUIDWithDbName> _nssOrUUID;
@@ -1129,51 +1096,6 @@ inline bool nsIsFull(StringData ns) {
     return true;
 }
 
-/**
- * foo = true
- * foo. = false
- * foo.a = false
- */
-inline bool nsIsDbOnly(StringData ns) {
-    size_t i = ns.find('.');
-    if (i == std::string::npos)
-        return true;
-    return false;
-}
-
-inline bool NamespaceString::validDBName(StringData db, DollarInDbNameBehavior behavior) {
-    if (db.size() == 0 || db.size() > DatabaseName::kMaxDatabaseNameLength)
-        return false;
-
-    for (StringData::const_iterator iter = db.begin(), end = db.end(); iter != end; ++iter) {
-        switch (*iter) {
-            case '\0':
-            case '/':
-            case '\\':
-            case '.':
-            case ' ':
-            case '"':
-                return false;
-            case '$':
-                if (behavior == DollarInDbNameBehavior::Disallow)
-                    return false;
-                continue;
-#ifdef _WIN32
-            // We prohibit all FAT32-disallowed characters on Windows
-            case '*':
-            case '<':
-            case '>':
-            case ':':
-            case '|':
-            case '?':
-                return false;
-#endif
-            default:
-                continue;
-        }
-    }
-    return true;
-}
 
 inline bool NamespaceString::validCollectionComponent(const NamespaceString& ns) {
     const auto nsStr = ns.ns();

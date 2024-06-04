@@ -126,7 +126,7 @@ public:
     unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeCollScanExec(
         const CollectionPtr* coll,
         BSONObj& filterObj,
-        PlanYieldPolicy::YieldPolicy yieldPolicy = PlanYieldPolicy::YieldPolicy::NO_YIELD,
+        PlanYieldPolicy::YieldPolicy yieldPolicy = PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
         TailableModeEnum tailableMode = TailableModeEnum::kNormal) {
         CollectionScanParams csparams;
         csparams.direction = CollectionScanParams::FORWARD;
@@ -136,14 +136,13 @@ public:
         auto findCommand = std::make_unique<FindCommandRequest>(nss);
         findCommand->setFilter(filterObj);
         query_request_helper::setTailableMode(tailableMode, findCommand.get());
-        auto statusWithCQ = CanonicalQuery::canonicalize(&_opCtx, std::move(findCommand));
-        ASSERT_OK(statusWithCQ.getStatus());
-        unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
-        MONGO_verify(nullptr != cq.get());
+        auto cq = std::make_unique<CanonicalQuery>(
+            CanonicalQueryParams{.expCtx = makeExpressionContext(&_opCtx, *findCommand),
+                                 .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
 
         // Make the stage.
-        unique_ptr<PlanStage> root(
-            new CollectionScan(cq->getExpCtxRaw(), coll, csparams, ws.get(), cq.get()->root()));
+        unique_ptr<PlanStage> root(new CollectionScan(
+            cq->getExpCtxRaw(), coll, csparams, ws.get(), cq->getPrimaryMatchExpression()));
 
         // Hand the plan off to the executor.
         auto statusWithPlanExecutor = plan_executor_factory::make(std::move(cq),
@@ -183,10 +182,9 @@ public:
             std::make_unique<FetchStage>(_expCtx.get(), ws.get(), std::move(ixscan), nullptr, coll);
 
         auto findCommand = std::make_unique<FindCommandRequest>(nss);
-        auto statusWithCQ = CanonicalQuery::canonicalize(&_opCtx, std::move(findCommand));
-        MONGO_verify(statusWithCQ.isOK());
-        unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
-        MONGO_verify(nullptr != cq.get());
+        auto cq = std::make_unique<CanonicalQuery>(
+            CanonicalQueryParams{.expCtx = makeExpressionContext(&_opCtx, *findCommand),
+                                 .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
 
         // Hand the plan off to the executor.
         auto statusWithPlanExecutor =
@@ -194,7 +192,7 @@ public:
                                         std::move(ws),
                                         std::move(root),
                                         coll,
-                                        PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                        PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                         QueryPlannerParams::DEFAULT);
         ASSERT_OK(statusWithPlanExecutor.getStatus());
         return std::move(statusWithPlanExecutor.getValue());

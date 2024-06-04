@@ -35,7 +35,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
@@ -303,7 +302,7 @@ void deleteKey(OperationContext* opCtx,
         opCtx,
         container,
         std::move(deleteStageParams),
-        PlanYieldPolicy::YieldPolicy::NO_YIELD,
+        PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
         InternalPlanner::FORWARD,
         docKeyRecordId,
         docKeyRecordId,

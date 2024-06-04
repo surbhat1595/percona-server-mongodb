@@ -36,6 +36,31 @@ variables:
         variant: compile-amazon-linux2-arm64-mongocrypt-shlib
       - name: schedule_global_auto_tasks
         variant: task_generation
+  _real_compile_amazon2_streams: &_compile_amazon2_streams
+      - name: compile
+        variant: compile-amazon2-streams
+      - name: schedule_global_auto_tasks
+        variant: task_generation
+  _real_compile_al2023_arm64: &_compile_al2023_arm64
+      - name: compile
+        variant: compile-al2023-arm64
+      - name: schedule_global_auto_tasks
+        variant: task_generation
+  _real_compile_al2023_arm64_with_mongocrypt_shlib: &_compile_al2023_arm64_with_mongocrypt_shlib
+      - name: compile
+        variant: compile-al2023-arm64
+      - name: compile_mongocrypt_shlib
+        variant: compile-al2023-arm64-mongocrypt-shlib
+      - name: schedule_global_auto_tasks
+        variant: task_generation
+  _real_compile_mixed_amazon_linux2_al2023_arm64: &_compile_mixed_amazon_linux2_al2023_arm64
+      - name: compile
+        variant: compile-amazon-linux2-arm64
+      - name: compile
+        variant: compile-al2023-arm64
+      - name: schedule_global_auto_tasks
+        variant: task_generation
+
   _real_expansions: &_expansion_updates
       []
   ###
@@ -52,6 +77,12 @@ variables:
 #     - name: schedule_global_auto_tasks
 #       variant: task_generation
 #  _skip_compile_amazon_linux2_arm64_with_mongocrypt_shlib: &_compile_amazon_linux2_arm64_with_mongocrypt_shlib
+#     - name: schedule_global_auto_tasks
+#       variant: task_generation
+#  _skip_compile_amazon2_streams: &_compile_amazon2_streams
+#     - name: schedule_global_auto_tasks
+#       variant: task_generation
+#  _skip_compile_al2023_arm64: &_compile_al2023_arm64
 #     - name: schedule_global_auto_tasks
 #       variant: task_generation
 #  _skip_expansions: &_expansion_updates
@@ -171,6 +202,7 @@ functions:
     - command: git.get_project
       params:
         directory: *src_dir
+        clone_depth: 1000
         revisions:
           dsi: ${dsi_rev}
           genny: ${genny_rev}
@@ -293,10 +325,16 @@ functions:
 
           mkdir -p mongodb/bin
 
-          /opt/mongodbtoolchain/v4/bin/virtualenv --python /opt/mongodbtoolchain/v4/bin/python3 "${workdir}/compile_venv"
+          # This is copied from evergreen/functions/venv_setup.sh
+          # Consider consolidating this in the future
+          /opt/mongodbtoolchain/v4/bin/python3 -m venv "${workdir}/compile_venv"
           source "${workdir}/compile_venv/bin/activate"
 
-          python -m pip install -r etc/pip/compile-requirements.txt
+          python -m pip install "poetry==1.5.1"
+          # See BF-29897 / https://github.com/python-poetry/poetry/issues/7584
+          poetry config installer.max-workers 10
+          # Trying poetry install due to https://github.com/python-poetry/poetry/issues/7611
+          python -m poetry install --no-root --sync || python -m poetry install --no-root --sync
     - command: expansions.write
       params:
          file: expansions.yml
@@ -369,6 +407,21 @@ functions:
               set -o igncr
             fi;
 
+            export cleanup=false
+
+            # install go for tools if required (al2023 for now).
+            if [ ! -d "/opt/golang/go1.19" ]; then
+              cleanup=true
+              echo -n "go-lang missing downloading ..."
+              go_file=./go1.19.8.tar.gz
+              wget --quiet https://go.dev/dl/go1.19.8.linux$(echo ${compile_variant} | sed 's/^-al202.//').tar.gz -O "$go_file"
+              echo -n " installing ..."
+              sudo mkdir -p /opt/golang/go1.19
+              sudo tar -C /opt/golang/go1.19 -xzf "$go_file" --strip-components=1
+              [ -e "$go_file" ] && rm -f "$go_file"
+              echo  "done"
+            fi
+
             # set_goenv provides set_goenv()
             . ./set_goenv.sh
             GOROOT="" set_goenv || exit
@@ -382,6 +435,9 @@ functions:
                 go build -o "../../../../../mongodb/bin/$i${exe|}" $i/main/$i.go
                 "../../../../../mongodb/bin/$i${exe|}" --version
             done
+            if "$cleanup"; then
+              sudo rm -rf "/opt/golang/go1.19"
+            fi
           fi
     - command: shell.exec
       params:
@@ -506,6 +562,7 @@ functions:
     - command: git.get_project
       params:
         directory: *src_dir
+        clone_depth: 1000
         revisions:
           dsi: ${dsi_rev}
           genny: ${genny_rev}
@@ -556,6 +613,12 @@ tasks:
       - func: f_run_dsi_workload
         vars:
           test_control: short
+  - name: canaries_only
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: canaries
   - name: smoke_test_ssl
     priority: 5
     commands:
@@ -764,6 +827,33 @@ tasks:
         vars:
           test_control: "tsbs_query_manual_bucketing"
 
+  - name: tsbs_query_fixed_bucketing
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "tsbs_query_fixed_bucketing"
+
+  - name: tsbs-query-genny
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "tsbs_query_genny"
+          test_control_params: |
+            {task_name: tsbs_query_genny,
+             config_filename: ./src/genny/dist/etc/genny/workloads/query/TimeseriesTsbsQuery.yml}
+
+  - name: tsbs-query-optimizations
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "tsbs_query_genny"
+          test_control_params: |
+            {task_name: tsbs_query_optimizations,
+             config_filename: ./src/genny/dist/etc/genny/workloads/query/TimeseriesTsbsOptimizations.yml}
+
   - name: tpcc
     priority: 5
     commands:
@@ -826,6 +916,13 @@ tasks:
       - func: f_run_dsi_workload
         vars:
           test_control: "ycsb_rolling_restarts"
+
+  - name: locust_bulk_insert
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "locust_bulk_insert"
 
   - name: industry_benchmarks_non_retryable_writes_stepdowns
     priority: 5
@@ -1150,13 +1247,13 @@ tasks:
         vars:
           test_control: medical_workload_diagnosis_50_50
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/encrypted/medical_workload-diagnosis-50-50.yml
-  - name: ycsb_like_queryable_encrypt1_cfdefault_sharded_high_value
+  - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
     priority: 5
     commands:
       - func: f_run_dsi_workload
         vars:
-          test_control: ycsb_like_queryable_encrypt1_cfdefault_sharded
-          auto_workload_path: ./src/genny/dist/etc/genny/workloads/encrypted/YCSBLikeQueryableEncrypt1CfdefaultSharded.yml
+          test_control: ycsb_like_queryable_encrypt1_cfdefault
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/encrypted/YCSBLikeQueryableEncrypt1Cfdefault.yml
   - name: filter_with_complex_logical_expression_high_value
     priority: 5
     commands:
@@ -1272,26 +1369,6 @@ tasks:
           test_control: "initialsync"
           mongodb_setup: "replica-2node-fcbis"
 
-  - name: initialsync-logkeeper-short
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "initialsync-logkeeper"
-          mongodb_setup: "initialsync-logkeeper-short"
-          # Logkeeper dataset with FCV set to 6.0
-          mongodb_dataset: "https://dsi-donot-remove.s3-us-west-2.amazonaws.com/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-7.0.tgz"
-
-  - name: initialsync-logkeeper-short-fcbis
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "initialsync-logkeeper"
-          mongodb_setup: "initialsync-logkeeper-short-fcbis"
-          # Logkeeper dataset with FCV set to 6.0
-          mongodb_dataset: "https://dsi-donot-remove.s3-us-west-2.amazonaws.com/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-7.0.tgz"
-
   - name: initialsync-logkeeper
     priority: 5
     exec_timeout_secs: 43200 # 12 hours
@@ -1314,15 +1391,6 @@ tasks:
   # The following two initial sync logkeeper automation tasks are only used in the commented-out
   # "Linux ReplSet Initial Sync LogKeeper Snapshot Update" variant below and are only intended to be
   # run in patch builds to update FCV for logkeeper datasets.
-  - name: initialsync-logkeeper-short-s3-update
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "initialsync-logkeeper-short-s3-update"
-          mongodb_setup: "initialsync-logkeeper-short-s3-update"
-          # Update this to Logkeeper dataset with FCV set to latest after each LTS release.
-          mongodb_dataset: "https://dsi-donot-remove.s3-us-west-2.amazonaws.com/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-7.0.tgz"
 
   - name: initialsync-logkeeper-snapshot-update
     priority: 5
@@ -1412,6 +1480,24 @@ tasks:
         vars:
           test_control: auto_genny_workload
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/query/TenMDocCollection_SubDocId.yml
+  - name: genny_query_TenMDocCollection_IntId_Agg
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: auto_genny_workload
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/query/TenMDocCollection_IntId_Agg.yml
+  - name: genny_query_TenMDocCollection_IntId_IdentityView
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: auto_genny_workload
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/query/TenMDocCollection_IntId_IdentityView.yml
+  - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: auto_genny_workload
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/query/TenMDocCollection_IntId_IdentityView_Agg.yml
   - name: genny_resharding_withIndexes
     exec_timeout_secs: 172800 # 2 days
     commands:
@@ -1579,6 +1665,17 @@ tasks:
              exclude_filter: single_threaded,
              threads: "1 2 4 8",
              read_cmd: 'true'}
+  - name: tie-breaking-heuristics
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: mongo-perf.2023-02
+          test_control_params: |
+            {include_filter_1: tie-breaking,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
   - name: geo_read_commands
     commands:
       - func: f_run_dsi_workload
@@ -1728,6 +1825,11 @@ tasks:
              exclude_filter: none,
              threads: "1 2 4 8",
              read_cmd: 'true'}
+  - name: stream_workloads
+    commands:
+    - func: f_run_dsi_workload
+      vars:
+        test_control: streams.2023-10
 
 buildvariants:
   - name: task_generation
@@ -1766,6 +1868,26 @@ buildvariants:
     tasks:
       - name: compile
 
+  - &compile-amazon2-streams
+    name: compile-amazon2-streams
+    display_name: Compile Mongo Streams for Amazon2
+    modules: *modules
+    cron: "0 0 * * *"  # Everyday at 00:00
+    expansions:
+      <<: *compile-expansions
+      compile_variant: -stream-x86_64
+      compile_flags: >-
+        --ssl
+        --separate-debug
+        MONGO_DISTMOD=amazon2
+        -j$(grep -c ^processor /proc/cpuinfo)
+        --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+        --streams-release-build
+    run_on:
+      - "amazon2-xlarge"
+    tasks:
+      - name: compile
+
   - &compile-amazon-linux2-arm64
     name: compile-amazon-linux2-arm64
     display_name: Compile for Amazon Linux 2 arm64
@@ -1775,7 +1897,7 @@ buildvariants:
       <<: *compile-expansions
       compile_variant: -arm64
     run_on:
-      - "amazon2-arm64-large"
+      - "amazon2-arm64-xlarge"
     tasks:
       - name: compile
 
@@ -1803,6 +1925,58 @@ buildvariants:
         CCFLAGS="-fno-gnu-unique"
     run_on:
       - "amazon2-arm64-large"
+    tasks:
+      - name: compile_mongocrypt_shlib
+
+  - &compile-al2023-arm64
+    name: compile-al2023-arm64
+    display_name: Compile for Al2023 arm64
+    modules: *modules
+    cron: "0 0 * * *"  # Everyday at 00:00
+    expansions: &compile-al2023-expansions
+      platform: linux
+      project_dir: *project_dir
+      tooltags: ""
+      use_scons_cache: true
+      compile_flags: >-
+        --ssl
+        --separate-debug
+        MONGO_DISTMOD=rhel82
+        -j$(grep -c ^processor /proc/cpuinfo)
+        --release
+        --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+        --use-diagnostic-latches=off
+        install-mongocryptd
+      compile_variant: -al2023-arm64
+    run_on:
+      - "amazon2023.0-arm64-large"
+    tasks:
+      - name: compile
+
+  - name: compile-al2023-arm64-mongocrypt-shlib
+    display_name: Compile mongo_crypt_v1.so for Al2023 arm64
+    modules: *modules
+    cron: "0 0 * * 4"  # 00:00 on Thursday
+    expansions:
+      <<: *compile-al2023-expansions
+      compile_variant: -al2023-arm64
+      compile_flags: >-
+        --separate-debug
+        MONGO_DISTMOD=rhel82
+        -j$(grep -c ^processor /proc/cpuinfo)
+        --release
+        --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+        --use-diagnostic-latches=off
+        --allocator=system
+        --enterprise-features=fle,search,vector_search
+        --js-engine=none
+        --link-model=dynamic-sdk
+        --enable-http-client=off
+        --ssl=off
+        SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique"
+        CCFLAGS="-fno-gnu-unique"
+    run_on:
+      - "amazon2023.0-arm64-large"
     tasks:
       - name: compile_mongocrypt_shlib
 
@@ -1843,6 +2017,7 @@ buildvariants:
       - name: tpch_1_denormalized
       - name: tpch_10_normalized
       - name: tpch_10_denormalized
+      - name: canaries_only
 
   - name: linux-intel-standalone-sbe
     display_name: Linux Intel Standalone (SBE)
@@ -1886,6 +2061,7 @@ buildvariants:
       - name: linkbench
       - name: linkbench2
       - name: snapshot_reads
+      - name: canaries_only
 
   - name: linux-intel-1-node-replSet-sbe
     display_name: Linux Intel 1-Node ReplSet (SBE)
@@ -1952,7 +2128,7 @@ buildvariants:
         --use-diagnostic-latches=off
       compile_variant: -rhel70
     run_on:
-      - rhel70-large
+      - rhel70-xlarge
     tasks:
       - name: compile
 
@@ -1975,7 +2151,7 @@ buildvariants:
     run_on:
       - "rhel70-perf-M60-like"
     depends_on: *_compile_amazon_linux2_arm64
-    tasks:  # Cannot use *3nodetasks because secondary_performance uses a special mongodb setup.
+    tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
@@ -1984,9 +2160,45 @@ buildvariants:
       - name: tpcc_majority
       - name: linkbench
       - name: linkbench2
+      - name: genny_query_TenMDocCollection_IntId
+      - name: genny_query_TenMDocCollection_ObjectId
+      - name: genny_query_TenMDocCollection_SubDocId
+      - name: genny_query_TenMDocCollection_IntId_Agg
+      - name: genny_query_TenMDocCollection_IntId_IdentityView
+      - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
+
+  - name: m60-like-al2023-3-node-replSet.arm.aws.2023-09
+    display_name: M60-like AL2023 3-Node ReplSet ARM AWS 2023-09
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday, Thursday
+    modules: *modules
+    expansions:
+      mongodb_setup: atlas-like-replica.2023-09
+      infrastructure_provisioning: M60-like-replica.2023-09
+      infrastructure_provisioning_release: 2022-11
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+      client_compile_variant: "-al2023-arm64"
+      compile_variant: "-al2023-arm64"
+      canaries: none # Packages required for the canaries are missing.
+    run_on:
+      - "rhel70-perf-M60-like"
+    depends_on: *_compile_al2023_arm64
+    tasks:
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: industry_benchmarks
+      - name: ycsb_60GB
+      # TODO: Turn on with Python3 py-tpcc support (PERF-4758)
+      # - name: tpcc
+      # - name: tpcc_majority
+      - name: linkbench
+      - name: linkbench2
 
   - name: atlas-like-replica-query-stats.2022-10
-    display_name: M60-like-replica.2022-10 3-Node ReplSet (Query Stats)
+    display_name: M60-like-replica.2022-10 3-Node ReplSet (QueryStats)
     cron: *atlas-like-repl-cron
     modules: *modules
     expansions:
@@ -2002,7 +2214,7 @@ buildvariants:
     run_on:
       - "rhel70-perf-M60-like"
     depends_on: *_compile_amazon_linux2_arm64
-    tasks:  # Cannot use *3nodetasks because secondary_performance uses a special mongodb setup.
+    tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
@@ -2011,6 +2223,12 @@ buildvariants:
       - name: tpcc_majority
       - name: linkbench
       - name: linkbench2
+      - name: genny_query_TenMDocCollection_IntId
+      - name: genny_query_TenMDocCollection_ObjectId
+      - name: genny_query_TenMDocCollection_SubDocId
+      - name: genny_query_TenMDocCollection_IntId_Agg
+      - name: genny_query_TenMDocCollection_IntId_IdentityView
+      - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
 
   - name: atlas-M30-real
     display_name: M30-Atlas ReplSet AWS
@@ -2039,7 +2257,7 @@ buildvariants:
         variant: compile-amazon-linux2-arm64
       - name: schedule_global_auto_tasks
         variant: task_generation
-    tasks: # Cannot use *3nodetasks because secondary_performance uses a special mongodb setup
+    tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
@@ -2073,16 +2291,44 @@ buildvariants:
         variant: compile-amazon-linux2-arm64
       - name: schedule_global_auto_tasks
         variant: task_generation
-    tasks: # Cannot use *3nodetasks because secondary_performance uses a special mongodb setup
+    tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
-        cron: "0 */4 * * 1-5"
+        cron: &high-value-workload-cron "0 */4 * * 1-5" # High-value workloads run every weekday, every 4 hours
       - name: ycsb_60GB
       - name: tpcc
       - name: tpcc_majority
       - name: linkbench
       - name: linkbench2
+
+  - name: atlas-M60-shard-real-aws-multi-client.2023-09
+    display_name: M60-Shard Atlas AWS Multiple Workload Clients 2023-09
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday, Thursday
+    modules: *modules
+    expansions:
+      mongodb_setup: atlas-shard
+      canaries: none
+      atlas_setup: M60-shard
+      use_custom_build: true
+      infrastructure_provisioning: workload_client_multiple.arm.2023-09
+      infrastructure_provisioning_release: 2022-11
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      storageEngine: wiredTiger
+      compile_variant: "-arm64"
+    run_on:
+      - "rhel70-perf-atlas-large"
+    depends_on:
+      - name: schedule_global_auto_tasks
+        variant: task_generation
+      - name: compile
+        variant: compile-amazon-linux2-arm64
+      - name: schedule_global_auto_tasks
+        variant: task_generation
+    tasks:
+      - name: locust_bulk_insert
 
   - name: atlas-M60-real-azure
     display_name: M60-Atlas ReplSet Azure
@@ -2155,6 +2401,7 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: dsi_integ_test_run_command_simple
       - name: smoke_test
+      - name: canaries_only
       - name: industry_benchmarks
       - name: ycsb_60GB
       - name: ycsb_60GB.long
@@ -2177,9 +2424,15 @@ buildvariants:
       - name: tpch_10_normalized
       - name: tpch_10_denormalized
       - name: array_traversal_high_value
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: filter_with_complex_logical_expression_high_value
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
+      - name: genny_query_TenMDocCollection_IntId
+      - name: genny_query_TenMDocCollection_ObjectId
+      - name: genny_query_TenMDocCollection_SubDocId
+      - name: genny_query_TenMDocCollection_IntId_Agg
+      - name: genny_query_TenMDocCollection_IntId_IdentityView
+      - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
 
   - name: linux-standalone-all-feature-flags.2022-11
     display_name: Linux Standalone (all feature flags) 2022-11
@@ -2226,6 +2479,36 @@ buildvariants:
       - name: column_store_tpch_10_denormalized
       - name: column_store_tpch_10_denormalized_unindexed
       - name: ssb_column_store_comparison
+      - name: genny_query_TenMDocCollection_IntId
+      - name: genny_query_TenMDocCollection_ObjectId
+      - name: genny_query_TenMDocCollection_SubDocId
+      - name: genny_query_TenMDocCollection_IntId_Agg
+      - name: genny_query_TenMDocCollection_IntId_IdentityView
+      - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
+
+  - name: streams-single.intel.2023-10
+    display_name: Streams-Single Intel 2023-10
+    cron: "0 0 * * 2,4,6"  # Tuesday, Thursday and Saturday at 00:00
+    modules: *modules
+    expansions:
+      compile_variant: -stream-x86_64
+      requires_mongostream: true
+      mongodb_setup_release: 2022-11
+      mongodb_setup: streams-single.2023-10
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: streams-single.intel.2023-10
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon2_streams
+    tasks:
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: stream_workloads
 
   - name: linux-standalone-classic-query-engine.2022-11
     display_name: Linux Standalone (Classic Query Engine) 2022-11
@@ -2249,7 +2532,9 @@ buildvariants:
 
   - name: linux-standalone-sbe.2022-11
     display_name: Linux Standalone (SBE) 2022-11
-    cron: *cron_query_perf_schedule
+    # TODO SERVER-82669: Reduce frequency back to baseline.
+    # cron: *cron_query_perf_schedule
+    cron: *linux-standalone-cron
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2288,11 +2573,6 @@ buildvariants:
     tasks: &bonsai_standalone_tasks
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
-      - name: industry_benchmarks
-      - name: ycsb_60GB
-      - name: ycsb_60GB.long
-      - name: bestbuy_agg
-      - name: bestbuy_query
 
   - name: linux-intel-standalone-sampling-bonsai
     display_name: Linux Intel Standalone (Bonsai with Sampling CE)
@@ -2501,6 +2781,16 @@ buildvariants:
       - name: ycsb_60GB.long
       - name: crud_workloads_majority
       - name: tpcc
+      - name: tpch_1_normalized
+      - name: tpch_1_denormalized
+      - name: tpch_10_normalized
+      - name: tpch_10_denormalized
+      - name: genny_query_TenMDocCollection_IntId
+      - name: genny_query_TenMDocCollection_ObjectId
+      - name: genny_query_TenMDocCollection_SubDocId
+      - name: genny_query_TenMDocCollection_IntId_Agg
+      - name: genny_query_TenMDocCollection_IntId_IdentityView
+      - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
 
   - name: linux-standalone-limited-query-stats
     display_name: Linux Standalone 2022-11 (Rate Limited QueryStats)
@@ -2524,6 +2814,12 @@ buildvariants:
     tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
+      - name: genny_query_TenMDocCollection_IntId
+      - name: genny_query_TenMDocCollection_ObjectId
+      - name: genny_query_TenMDocCollection_SubDocId
+      - name: genny_query_TenMDocCollection_IntId_Agg
+      - name: genny_query_TenMDocCollection_IntId_IdentityView
+      - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
 
   - name: linux-1-node-replSet-all-feature-flags.2022-11
     display_name: Linux 1-Node ReplSet (all feature flags) 2022-11
@@ -2577,6 +2873,7 @@ buildvariants:
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: smoke_test
+      - name: canaries_only
       - name: non_sharded_workloads
       - name: bestbuy_agg
       - name: bestbuy_agg_merge_different_db
@@ -2592,12 +2889,42 @@ buildvariants:
       - name: tsbs_query
       - name: tsbs_query_finance
       - name: tsbs_query_manual_bucketing
+      - name: tsbs_query_fixed_bucketing
+      - name: tsbs-query-genny
+      - name: tsbs-query-optimizations
       - name: tpcc
       - name: tpcc_majority
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
       - name: tpch_10_normalized
       - name: tpch_10_denormalized
+      - name: genny_query_TenMDocCollection_IntId
+      - name: genny_query_TenMDocCollection_ObjectId
+      - name: genny_query_TenMDocCollection_SubDocId
+      - name: genny_query_TenMDocCollection_IntId_Agg
+      - name: genny_query_TenMDocCollection_IntId_IdentityView
+      - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
+
+  - name: perf-1-node-replSet.arm.aws.2023-09
+    display_name: PERF 1-Node ReplSet ARM AWS 2023-09
+    # Leave off for now
+    activate: false
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: single-replica
+      infrastructure_provisioning_release: 2023-09
+      infrastructure_provisioning: single
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+      compile_variant: "-arm64"
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon_linux2_arm64
+    tasks: *1nodetasks
 
   - name: linux-1-node-replSet-test-commands.2022-11
     display_name: Linux 1-Node ReplSet With Test Commands 2022-11
@@ -2715,6 +3042,20 @@ buildvariants:
       - name: tpcc
       - name: linkbench
       - name: linkbench2
+      - name: tpch_1_normalized
+      - name: tpch_1_denormalized
+      - name: tpch_10_normalized
+      - name: tpch_10_denormalized
+      - name: tsbs_query
+      - name: tsbs_query_finance
+      - name: tsbs_query_manual_bucketing
+      - name: tsbs_query_fixed_bucketing
+      - name: genny_query_TenMDocCollection_IntId
+      - name: genny_query_TenMDocCollection_ObjectId
+      - name: genny_query_TenMDocCollection_SubDocId
+      - name: genny_query_TenMDocCollection_IntId_Agg
+      - name: genny_query_TenMDocCollection_IntId_IdentityView
+      - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
 
   - name: linux-shard-lite-fle.2022-11
     display_name: Linux Shard Lite FLE 2022-11
@@ -2739,9 +3080,9 @@ buildvariants:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
       - name: medical_workload_diagnosis_50_50_high_value
-        cron: "0 */4 * * 1-5"
-      - name: ycsb_like_queryable_encrypt1_cfdefault_sharded_high_value
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
+      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
+        cron: *high-value-workload-cron
 
   - name: linux-1-node-replSet-audit-log-encryption-compression.2022-11
     display_name: Linux Single-node Replica Set Audit w/ At-Rest Log Encryption (With compression) 2022-11
@@ -2923,18 +3264,27 @@ buildvariants:
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: smoke_test
+      - name: canaries_only
       - name: mongos_workloads
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: mongos_large_catalog_workloads
+      - name: move_chunk_workloads
+        cron: *high-value-workload-cron
       - name: change_streams_latency
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: change_streams_listen_throughput
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: change_streams_multi_mongos
       - name: tsbs_query_sharded
       - name: tsbs_query_finance_sharded
       - name: tsbs_query_sharded_balancer
       - name: tsbs_query_finance_sharded_balancer
+      - name: genny_query_TenMDocCollection_IntId
+      - name: genny_query_TenMDocCollection_ObjectId
+      - name: genny_query_TenMDocCollection_SubDocId
+      - name: genny_query_TenMDocCollection_IntId_Agg
+      - name: genny_query_TenMDocCollection_IntId_IdentityView
+      - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
 
 # A variant of 3-shard with $queryStats activated (unlimited).
   - <<: *shard-baseline
@@ -2954,6 +3304,12 @@ buildvariants:
       - name: tsbs_query_finance_sharded
       - name: tsbs_query_sharded_balancer
       - name: tsbs_query_finance_sharded_balancer
+      - name: genny_query_TenMDocCollection_IntId
+      - name: genny_query_TenMDocCollection_ObjectId
+      - name: genny_query_TenMDocCollection_SubDocId
+      - name: genny_query_TenMDocCollection_IntId_Agg
+      - name: genny_query_TenMDocCollection_IntId_IdentityView
+      - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
 
 # A variant of 3-shard with $queryStats activated but with a rate limit.
   - <<: *shard-baseline
@@ -2996,7 +3352,7 @@ buildvariants:
       mongodb_setup_release: 2022-11
       mongodb_setup: shard-lite-audit
       infrastructure_provisioning_release: 2022-11
-      infrastructure_provisioning: shard-lite
+      infrastructure_provisioning: shard-lite-audit
       workload_setup: 2022-11
       platform: linux
       project_dir: *project_dir
@@ -3047,13 +3403,18 @@ buildvariants:
       - name: mongos_large_catalog_workloads
       - name: move_chunk_large_chunk_map_workloads
       - name: move_chunk_workloads
-        cron: "0 */4 * * 1-5"
       - name: move_chunk_waiting_workloads
       - name: smoke_test
       - name: tsbs_query_sharded
       - name: tsbs_query_finance_sharded
       - name: tsbs_query_sharded_balancer
       - name: tsbs_query_finance_sharded_balancer
+      - name: genny_query_TenMDocCollection_IntId
+      - name: genny_query_TenMDocCollection_ObjectId
+      - name: genny_query_TenMDocCollection_SubDocId
+      - name: genny_query_TenMDocCollection_IntId_Agg
+      - name: genny_query_TenMDocCollection_IntId_IdentityView
+      - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
 
   - name: linux-shard-lite-intel.2022-11
     display_name: Linux Shard Lite Cluster Intel 2022-11
@@ -3151,6 +3512,12 @@ buildvariants:
       - name: tsbs_query_finance_sharded
       - name: tsbs_query_sharded_balancer
       - name: tsbs_query_finance_sharded_balancer
+      - name: genny_query_TenMDocCollection_IntId
+      - name: genny_query_TenMDocCollection_ObjectId
+      - name: genny_query_TenMDocCollection_SubDocId
+      - name: genny_query_TenMDocCollection_IntId_Agg
+      - name: genny_query_TenMDocCollection_IntId_IdentityView
+      - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
 
 # A variant of shard-lite with $queryStats enabled with a rate limit.
   - <<: *shard-lite-baseline
@@ -3201,15 +3568,15 @@ buildvariants:
     run_on:
       - "rhel70-perf-replset"
     depends_on: *_compile_amazon_linux2_arm64
-    tasks: &3nodetasks
+    tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: industry_benchmarks_w1
       - name: ycsb_60GB
       - name: ycsb_60GB.long
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: industry_benchmarks_secondary_reads
       - name: crud_workloads_majority
       - name: crud_workloads_w1
@@ -3220,7 +3587,7 @@ buildvariants:
       - name: secondary_performance  # Uses a special 2 node mongodb setup
       - name: non_sharded_workloads
       - name: bestbuy_agg
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: bestbuy_agg_merge_different_db
       - name: bestbuy_agg_merge_same_db
       - name: bestbuy_agg_merge_wordcount
@@ -3233,7 +3600,7 @@ buildvariants:
       - name: secondary_reads
       - name: tpcc
       - name: tpcc_majority
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
       # TODO: Enable in SERVER-66572.
@@ -3241,31 +3608,40 @@ buildvariants:
       # - name: tpch_10_denormalized
       - name: linkbench
       - name: linkbench2
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: tsbs_load
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: tsbs_query
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: tsbs_query_finance
       - name: tsbs_query_manual_bucketing
+      - name: tsbs_query_fixed_bucketing
+      - name: tsbs-query-genny
+      - name: tsbs-query-optimizations
       - name: big_update_10k
       - name: mixed_workloads_genny_rate_limited_high_value
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: load_test_high_value
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: majority_reads10_k_threads_high_value
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: large_indexed_ins_high_value
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: expressive_queries_high_value
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
       - name: time_series_sort_high_value
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
+      - name: genny_query_TenMDocCollection_IntId
+      - name: genny_query_TenMDocCollection_ObjectId
+      - name: genny_query_TenMDocCollection_SubDocId
+      - name: genny_query_TenMDocCollection_IntId_Agg
+      - name: genny_query_TenMDocCollection_IntId_IdentityView
+      - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
 
 
   - name: linux-3-node-replSet-intel.2022-11
     display_name: Linux 3-Node ReplSet Intel 2022-11
-    cron: "0 0 * * 1,2,3,4,5,6"  # Everyday except Sunday at 00:00
+    cron: *linux-3-node-cron
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3280,18 +3656,129 @@ buildvariants:
     run_on:
       - "rhel70-perf-replset"
     depends_on: *_compile_amazon2
-    tasks: &3nodetasks
+    tasks: &3node-intel-tasks
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
+        cron: &query-stats-cron "0 */4 * * 1-5" # runs every weekday, every 4 hours
       - name: ycsb_60GB
+      - name: ycsb_60GB.long
+        cron: *query-stats-cron
       - name: crud_workloads_majority
       - name: smoke_test
+      - name: bestbuy_agg
+        cron: *query-stats-cron
+      - name: bestbuy_agg_merge_different_db
+      - name: bestbuy_agg_merge_same_db
+      - name: bestbuy_agg_merge_wordcount
+      - name: bestbuy_query
+      - name: tpcc_majority
+        cron: *query-stats-cron
       - name: linkbench
       - name: linkbench2
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
+      - name: tsbs_query
+        cron: *query-stats-cron
       - name: mixed_workloads_genny_rate_limited_high_value
-        cron: "0 */4 * * 1-5"
+        cron: *high-value-workload-cron
+      - name: load_test_high_value
+        cron: *query-stats-cron
+      - name: majority_reads10_k_threads_high_value
+        cron: *query-stats-cron
+      - name: large_indexed_ins_high_value
+        cron: *query-stats-cron
+      - name: expressive_queries_high_value
+        cron: *query-stats-cron
+      - name: time_series_sort_high_value
+        cron: *query-stats-cron
+
+  - name: linux-3-node-replSet-intel-query-stats.2022-11
+    display_name: Linux 3-Node ReplSet Intel 2022-11 (QueryStats)
+    cron: *linux-3-node-cron
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: replica-query-stats
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: replica-intel.2022-11
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+    run_on:
+      - "rhel70-perf-replset"
+    depends_on: *_compile_amazon2
+    tasks: *3node-intel-tasks
+
+  - &3node-query-stats-rate-limit
+    name: linux-3-node-replSet-intel-limited-1-query-stats.2022-11
+    display_name: Linux 3-Node ReplSet Intel 2022-11 (Rate Limited with 1, QueryStats)
+    cron: *query-stats-cron
+    modules: *modules
+    expansions: &3node-query-stats-rate-limit-expansions
+      mongodb_setup_release: 2022-11
+      # All of the Rate Limited 3node ReplSet QueryStats build variants currently use this
+      # mongodb_setup file with config params passed in for the different rate limits.
+      # If genny uses this setup file for autorun workloads, all of the build variants
+      # using this setup file will run those workloads. If you want to create a special workload
+      # configuration for a specific rate limit, a separate mongodb_setup YAML will need to be
+      # created. This will be changed in EVG-20490.
+      mongodb_setup: replica-query-stats-rate-limit
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: replica-intel.2022-11
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+      config_params_json: '{"v": 0, "internalQueryStatsRateLimit": 1}'
+    run_on:
+      - "rhel70-perf-replset"
+    depends_on: *_compile_amazon2
+    tasks:
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: industry_benchmarks
+      - name: ycsb_60GB.long
+      - name: linkbench2
+      - name: tpcc_majority
+      - name: mixed_workloads_genny_rate_limited_high_value
+      - name: majority_reads10_k_threads_high_value
+      - name: bestbuy_agg
+      - name: large_indexed_ins_high_value
+      - name: expressive_queries_high_value
+      - name: time_series_sort_high_value
+      - name: tsbs_query
+      - name: genny_query_TenMDocCollection_IntId
+
+  - <<: *3node-query-stats-rate-limit
+    name: linux-3-node-replSet-intel-limited-10-query-stats.2022-11
+    display_name: Linux 3-Node ReplSet Intel 2022-11 (Rate Limited with 10, QueryStats)
+    expansions:
+      <<: *3node-query-stats-rate-limit-expansions
+      config_params_json: '{"v": 0, "internalQueryStatsRateLimit": 10}'
+
+  - <<: *3node-query-stats-rate-limit
+    name: linux-3-node-replSet-intel-limited-100-query-stats.2022-11
+    display_name: Linux 3-Node ReplSet Intel 2022-11 (Rate Limited with 100, QueryStats)
+    expansions:
+      <<: *3node-query-stats-rate-limit-expansions
+      config_params_json: '{"v": 0, "internalQueryStatsRateLimit": 100}'
+
+  - <<: *3node-query-stats-rate-limit
+    name: linux-3-node-replSet-intel-limited-1000-query-stats.2022-11
+    display_name: Linux 3-Node ReplSet Intel 2022-11 (Rate Limited with 1000, QueryStats)
+    expansions:
+      <<: *3node-query-stats-rate-limit-expansions
+      config_params_json: '{"v": 0, "internalQueryStatsRateLimit": 1000}'
+
+  - <<: *3node-query-stats-rate-limit
+    name: linux-3-node-replSet-intel-limited-10000-query-stats.2022-11
+    display_name: Linux 3-Node ReplSet Intel 2022-11 (Rate Limited with 10000, QueryStats)
+    expansions:
+      <<: *3node-query-stats-rate-limit-expansions
+      config_params_json: '{"v": 0, "internalQueryStatsRateLimit": 10000}'
 
   - name: linux-3-node-replSet-last-continuous-fcv.2022-11
     display_name: Linux 3-Node ReplSet (Last Continuous FCV) 2022-11
@@ -3349,6 +3836,9 @@ buildvariants:
       - name: tsbs_query
       - name: tsbs_query_finance
       - name: tsbs_query_manual_bucketing
+      - name: tsbs_query_fixed_bucketing
+      - name: tsbs-query-genny
+      - name: tsbs-query-optimizations
 
   - name: linux-3-node-replSet-last-lts-fcv.2022-11
     display_name: Linux 3-Node ReplSet (Last LTS FCV) 2022-11
@@ -3406,6 +3896,9 @@ buildvariants:
       - name: tsbs_query
       - name: tsbs_query_finance
       - name: tsbs_query_manual_bucketing
+      - name: tsbs_query_fixed_bucketing
+      - name: tsbs-query-genny
+      - name: tsbs-query-optimizations
 
   - name: linux-3-node-replSet-all-feature-flags.2022-11
     display_name: Linux 3-Node ReplSet (all feature flags) 2022-11
@@ -3465,6 +3958,9 @@ buildvariants:
       - name: tsbs_query
       - name: tsbs_query_finance
       - name: tsbs_query_manual_bucketing
+      - name: tsbs_query_fixed_bucketing
+      - name: tsbs-query-genny
+      - name: tsbs-query-optimizations
       - name: dbcheck
 
   - name: linux-3-node-replSet-notls.2022-11
@@ -3581,8 +4077,8 @@ buildvariants:
       infrastructure_provisioning_release: 2022-11
       infrastructure_provisioning: initialsync-logkeeper
       workload_setup: 2022-11
-      # EBS logkeeper snapshot with FCV set to 6.0
-      snapshotId: snap-0eca13ca4935455a2
+      # EBS logkeeper snapshot with FCV set to 7.2
+      snapshotId: snap-042ca2a003313ebc2
       platform: linux
       authentication: disabled
       storageEngine: wiredTiger
@@ -3599,29 +4095,29 @@ buildvariants:
 
   # Uncomment this to run logkeeper FCV updates automatically. This is only intended to be run in
   # patch builds.
-  #- name: linux-replSet-initialsync-logkeeper-snapshot-update
-  #  display_name: Linux ReplSet Initial Sync LogKeeper Snapshot Update
-  #  cron: "0 0 * * 4"  # 00:00 on Thursday
-  #  modules: *modules
-  #  expansions:
-  #    mongodb_setup_release: 2022-11
-  #    mongodb_setup: initialsync-logkeeper-snapshot-update
-  #    infrastructure_provisioning_release: 2022-11
-  #    infrastructure_provisioning: initialsync-logkeeper-snapshot-update
-  #    # Update this to latest snapshot after each LTS release.
-  #    snapshotId: snap-0eca13ca4935455a2
-  #    platform: linux
-  #    authentication: disabled
-  #    storageEngine: wiredTiger
-  #    project_dir: *project_dir
-  #  run_on:
-  #    - "rhel70-perf-initialsync-logkeeper"
-  #  depends_on: *_compile_amazon2
-  #  tasks:
-  #    - name: schedule_patch_auto_tasks
-  #    - name: schedule_variant_auto_tasks
-  #    - name: initialsync-logkeeper-snapshot-update
-  #    - name: initialsync-logkeeper-short-s3-update
+  # - name: linux-replSet-initialsync-logkeeper-snapshot-update
+  #   display_name: Linux ReplSet Initial Sync LogKeeper Snapshot Update
+  #   cron: "0 0 * * 4"  # 00:00 on Thursday
+  #   modules: *modules
+  #   expansions:
+  #     mongodb_setup_release: 2022-11
+  #     mongodb_setup: initialsync-logkeeper-snapshot-update
+  #     infrastructure_provisioning_release: 2022-11
+  #     infrastructure_provisioning: initialsync-logkeeper-snapshot-update
+  #     # Update this to latest snapshot after each LTS release.
+  #     snapshotId: snap-042ca2a003313ebc2
+  #     platform: linux
+  #     authentication: disabled
+  #     storageEngine: wiredTiger
+  #     project_dir: *project_dir
+  #     compile_variant: "-arm64"
+  #   run_on:
+  #     - "rhel70-perf-initialsync-logkeeper"
+  #   depends_on: *_compile_amazon_linux2_arm64
+  #   tasks:
+  #     - name: schedule_patch_auto_tasks
+  #     - name: schedule_variant_auto_tasks
+  #     - name: initialsync-logkeeper-snapshot-update
 
   - name: linux-replSet-audit.2022-11
     display_name: Linux 3-Node ReplSet Audit 2022-11
@@ -3690,13 +4186,44 @@ buildvariants:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
+        cron: *high-value-workload-cron
       - name: ycsb_60GB
       - name: ycsb_60GB.long
+        cron: *high-value-workload-cron
       - name: crud_workloads_majority
       - name: crud_workloads_w1
       - name: tpcc
+      - name: tpcc_majority
+        cron: *high-value-workload-cron
       - name: linkbench
       - name: linkbench2
+        cron: *high-value-workload-cron
+      - name: mixed_workloads_genny_rate_limited_high_value
+        cron: *high-value-workload-cron
+      - name: majority_reads10_k_threads_high_value
+        cron: *high-value-workload-cron
+      - name: bestbuy_agg
+        cron: *high-value-workload-cron
+      - name: large_indexed_ins_high_value
+        cron: *high-value-workload-cron
+      - name: expressive_queries_high_value
+        cron: *high-value-workload-cron
+      - name: tpch_1_normalized
+      - name: tpch_1_denormalized
+      # TODO: Enable in SERVER-66572.
+      # - name: tpch_10_normalized
+      # - name: tpch_10_denormalized
+      - name: tsbs_query
+        cron: *high-value-workload-cron
+      - name: tsbs_query_finance
+      - name: tsbs_query_manual_bucketing
+      - name: tsbs_query_fixed_bucketing
+      - name: genny_query_TenMDocCollection_IntId
+      - name: genny_query_TenMDocCollection_ObjectId
+      - name: genny_query_TenMDocCollection_SubDocId
+      - name: genny_query_TenMDocCollection_IntId_Agg
+      - name: genny_query_TenMDocCollection_IntId_IdentityView
+      - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
 
   - name: linux-3-node-replSet-250mbwtcache.2023-05
     display_name: Linux 3-Node ReplSet 250 MB WiredTiger Cache 2023-05
@@ -3720,9 +4247,10 @@ buildvariants:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
 
+  # Template below used to create an anchor for linux microbenchmarks standalone arm without the high-value-workload cron override that would transfer to any variant that uses this
   - &linux-microbenchmarks-standalone-arm
-    name: linux-microbenchmarks-standalone-arm.2023-01
-    display_name: MicroBenchmarks Arm Standalone inMemory.2023-01
+    name: linux-microbenchmarks-standalone-arm-template
+    display_name: Linux Microbenchmarks Standalone Template (Don't Use)
     # TODO SERVER-74399 Reduce frequency back to baseline.
     # cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     cron: &linux-microbench-cron "0 0 * * *"  # Everyday at 00:00
@@ -3749,7 +4277,6 @@ buildvariants:
     - name: aggregation_read_commands
     - name: aggregation_read_commands_large_dataset
     - name: agg-query-comparison_read_commands
-      cron: "0 */4 * * 1-5"
     - name: query_read_commands
     - name: query_read_commands_large_dataset
     - name: views-aggregation
@@ -3771,6 +4298,43 @@ buildvariants:
     - name: javascript
     - name: compound_wildcard_index_write_commands
     - name: compound_wildcard_index_read_commands
+    - name: tie-breaking-heuristics
+
+  - <<: *linux-microbenchmarks-standalone-arm
+    name: linux-microbenchmarks-standalone-arm.2023-01
+    display_name: MicroBenchmarks Arm Standalone inMemory.2023-01
+    modules: *modules
+    expansions: *standalone-arm-expansions
+    tasks:
+    - name: big_collection
+    - name: genny_scale_InsertRemove
+    - name: genny_execution_UserAcquisition
+    - name: aggregation_read_commands
+    - name: aggregation_read_commands_large_dataset
+    - name: agg-query-comparison_read_commands
+      cron: *high-value-workload-cron
+    - name: query_read_commands
+    - name: query_read_commands_large_dataset
+    - name: views-aggregation
+    - name: views-query
+    - name: where_read_commands
+    - name: update_read_commands
+    - name: insert_read_commands
+    - name: wildcard-index-read_read_commands
+    - name: wildcard-index-write_read_commands
+    - name: geo_read_commands
+    - name: misc_read_commands
+    - name: misc_custom_filter_default_read_commands
+    - name: misc_custom_filter_slow_or_sample_read_commands
+    - name: misc_custom_filter_complex_read_commands
+    - name: misc_custom_filter_whole_doc_read_commands
+    - name: misc_slowms_everything_read_commands
+    - name: singleThreaded_read_commands
+    - name: pipeline-updates
+    - name: javascript
+    - name: compound_wildcard_index_write_commands
+    - name: compound_wildcard_index_read_commands
+    - name: tie-breaking-heuristics
 
 # Specialized Temporary Variants to understand the impact of query stats better.
   - <<: *linux-microbenchmarks-standalone-arm
@@ -3784,6 +4348,9 @@ buildvariants:
     - name: genny_query_TenMDocCollection_IntId
     - name: genny_query_TenMDocCollection_ObjectId
     - name: genny_query_TenMDocCollection_SubDocId
+    - name: genny_query_TenMDocCollection_IntId_Agg
+    - name: genny_query_TenMDocCollection_IntId_IdentityView
+    - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
     - name: views-aggregation
     - name: views-query
   - <<: *linux-microbenchmarks-standalone-arm
@@ -3796,6 +4363,9 @@ buildvariants:
     - name: genny_query_TenMDocCollection_IntId
     - name: genny_query_TenMDocCollection_ObjectId
     - name: genny_query_TenMDocCollection_SubDocId
+    - name: genny_query_TenMDocCollection_IntId_Agg
+    - name: genny_query_TenMDocCollection_IntId_IdentityView
+    - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
     - name: views-aggregation
     - name: views-query
     expansions:
@@ -3811,6 +4381,9 @@ buildvariants:
     - name: genny_query_TenMDocCollection_IntId
     - name: genny_query_TenMDocCollection_ObjectId
     - name: genny_query_TenMDocCollection_SubDocId
+    - name: genny_query_TenMDocCollection_IntId_Agg
+    - name: genny_query_TenMDocCollection_IntId_IdentityView
+    - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
     - name: views-aggregation
     - name: views-query
     expansions:
@@ -3898,6 +4471,7 @@ buildvariants:
     - name: javascript
     - name: compound_wildcard_index_write_commands
     - name: compound_wildcard_index_read_commands
+    - name: tie-breaking-heuristics
 
   - <<: *linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-classic-query-engine-arm.2023-01
@@ -3913,7 +4487,9 @@ buildvariants:
   - <<: *linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-sbe-arm.2023-01
     display_name: MicroBenchmarks Arm Standalone inMemory (SBE).2023-01
-    cron: *cron_query_perf_schedule
+    # TODO SERVER-82669: Reduce frequency back to baseline.
+    # cron: *cron_query_perf_schedule
+    cron: *linux-microbench-cron
     expansions:
       <<: *standalone-arm-expansions
       mongodb_setup: mongo-perf-standalone-sbe.2023-02

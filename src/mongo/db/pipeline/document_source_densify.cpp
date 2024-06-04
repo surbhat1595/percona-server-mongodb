@@ -36,7 +36,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <iterator>
 #include <memory>
@@ -181,11 +180,8 @@ list<intrusive_ptr<DocumentSource>> createFromBsonInternal(
                   "One cannot specify the bounds as 'partition' without specifying a non-empty "
                   "array of partitionByFields. You may have meant to specify 'full' bounds.");
 
-    return create(std::move(expCtx),
-                  std::move(partitions),
-                  std::move(field),
-                  std::move(rangeStatement),
-                  isInternal);
+    return create(
+        expCtx, std::move(partitions), std::move(field), std::move(rangeStatement), isInternal);
 }
 
 list<intrusive_ptr<DocumentSource>> createFromBson(BSONElement elem,
@@ -236,8 +232,8 @@ list<intrusive_ptr<DocumentSource>> create(const intrusive_ptr<ExpressionContext
     }
 
     // Constructing resulting stages.
-    results.push_back(
-        make_intrusive<DocumentSourceInternalDensify>(expCtx, field, partitions, rangeStatement));
+    results.push_back(make_intrusive<DocumentSourceInternalDensify>(
+        expCtx, std::move(field), std::move(partitions), std::move(rangeStatement)));
 
     return results;
 }
@@ -252,7 +248,7 @@ DocumentSourceInternalDensify::DocGenerator::DocGenerator(DensifyValue min,
                                                           size_t* counter)
     : _comp(std::move(comp)),
       _range(std::move(range)),
-      _path(std::move(fieldName.fullPath())),
+      _path(std::move(fieldName)),
       _finalDoc(std::move(finalDoc)),
       _min(std::move(min)),
       _counter(counter) {
@@ -436,6 +432,7 @@ DocumentSource::GetNextResult DocumentSourceInternalDensify::processFirstDocForE
         case ValComparedToRange::kRangeMin: {
             _densifyState = DensifyState::kNeedGen;
             _current = val;
+            setPartitionValue(doc);
             return doc;
         }
         case ValComparedToRange::kBelow: {

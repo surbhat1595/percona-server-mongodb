@@ -33,7 +33,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <string>
 #include <utility>
 
@@ -84,28 +83,29 @@ void OperationShardingState::setShardRole(OperationContext* opCtx,
     auto& oss = OperationShardingState::get(opCtx);
 
     if (shardVersion) {
-        auto emplaceResult =
-            oss._shardVersions.try_emplace(NamespaceStringUtil::serialize(nss), *shardVersion);
+        auto emplaceResult = oss._shardVersions.try_emplace(
+            NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()),
+            *shardVersion);
         auto& tracker = emplaceResult.first->second;
         if (!emplaceResult.second) {
-            uassert(640570,
+            uassert(ErrorCodes::IllegalChangeToExpectedShardVersion,
                     str::stream() << "Illegal attempt to change the expected shard version for "
                                   << nss.toStringForErrorMsg() << " from " << tracker.v << " to "
-                                  << *shardVersion,
+                                  << *shardVersion << " at recursion level " << tracker.recursion,
                     tracker.v == *shardVersion);
         }
         invariant(++tracker.recursion > 0);
     }
 
     if (databaseVersion) {
-        auto emplaceResult =
-            oss._databaseVersions.try_emplace(nss.db_forSharding(), *databaseVersion);
+        auto emplaceResult = oss._databaseVersions.try_emplace(nss.dbName(), *databaseVersion);
         auto& tracker = emplaceResult.first->second;
         if (!emplaceResult.second) {
-            uassert(640571,
+            uassert(ErrorCodes::IllegalChangeToExpectedDatabaseVersion,
                     str::stream() << "Illegal attempt to change the expected database version for "
                                   << nss.dbName().toStringForErrorMsg() << " from " << tracker.v
-                                  << " to " << *databaseVersion,
+                                  << " to " << *databaseVersion << " at recursion level "
+                                  << tracker.recursion,
                     tracker.v == *databaseVersion);
         }
         invariant(++tracker.recursion > 0);
@@ -116,7 +116,8 @@ void OperationShardingState::unsetShardRoleForLegacyDDLOperationsSentWithShardVe
     OperationContext* opCtx, const NamespaceString& nss) {
     auto& oss = OperationShardingState::get(opCtx);
 
-    auto it = oss._shardVersions.find(NamespaceStringUtil::serialize(nss));
+    auto it = oss._shardVersions.find(
+        NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
     if (it != oss._shardVersions.end()) {
         auto& tracker = it->second;
         tassert(6848500,
@@ -129,7 +130,8 @@ void OperationShardingState::unsetShardRoleForLegacyDDLOperationsSentWithShardVe
 }
 
 boost::optional<ShardVersion> OperationShardingState::getShardVersion(const NamespaceString& nss) {
-    const auto it = _shardVersions.find(NamespaceStringUtil::serialize(nss));
+    const auto it = _shardVersions.find(
+        NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
     if (it != _shardVersions.end()) {
         return it->second.v;
     }
@@ -138,7 +140,7 @@ boost::optional<ShardVersion> OperationShardingState::getShardVersion(const Name
 
 boost::optional<DatabaseVersion> OperationShardingState::getDbVersion(
     const DatabaseName& dbName) const {
-    const auto it = _databaseVersions.find(DatabaseNameUtil::serialize(dbName));
+    const auto it = _databaseVersions.find(dbName);
     if (it != _databaseVersions.end()) {
         return it->second.v;
     }
@@ -179,7 +181,7 @@ Status OperationShardingState::waitForCriticalSectionToComplete(
 
 void OperationShardingState::setShardingOperationFailedStatus(const Status& status) {
     invariant(!_shardingOperationFailedStatus);
-    _shardingOperationFailedStatus = std::move(status);
+    _shardingOperationFailedStatus = status;
 }
 
 boost::optional<Status> OperationShardingState::resetShardingOperationFailedStatus() {
@@ -236,7 +238,8 @@ ScopedSetShardRole::~ScopedSetShardRole() {
     auto& oss = OperationShardingState::get(_opCtx);
 
     if (_shardVersion) {
-        auto it = oss._shardVersions.find(NamespaceStringUtil::serialize(_nss));
+        auto it = oss._shardVersions.find(
+            NamespaceStringUtil::serialize(_nss, SerializationContext::stateDefault()));
         invariant(it != oss._shardVersions.end());
         auto& tracker = it->second;
         invariant(--tracker.recursion >= 0);
@@ -245,7 +248,7 @@ ScopedSetShardRole::~ScopedSetShardRole() {
     }
 
     if (_databaseVersion) {
-        auto it = oss._databaseVersions.find(_nss.db_forSharding());
+        auto it = oss._databaseVersions.find(_nss.dbName());
         invariant(it != oss._databaseVersions.end());
         auto& tracker = it->second;
         invariant(--tracker.recursion >= 0);

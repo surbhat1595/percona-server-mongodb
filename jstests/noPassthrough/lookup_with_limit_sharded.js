@@ -16,7 +16,8 @@ import {
     flattenQueryPlanTree,
     getAggPlanStages,
     getPlanStage,
-    getWinningPlan
+    getSingleNodeExplain,
+    getWinningPlan,
 } from "jstests/libs/analyze_plan.js";
 import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
@@ -37,7 +38,7 @@ other.drop();
 // Checks that the order of the query stages and pipeline stages matches the expected optimized
 // ordering for an unsharded collection.
 function checkUnshardedResults(pipeline, expectedPlanStages, expectedPipeline) {
-    const explain = coll.explain().aggregate(pipeline);
+    const explain = getSingleNodeExplain(coll.explain().aggregate(pipeline));
     if (explain.stages) {
         const queryStages =
             flattenQueryPlanTree(getWinningPlan(explain.stages[0].$cursor.queryPlanner));
@@ -86,16 +87,8 @@ const multiLookupPipeline = [
     {$lookup: {from: other.getName(), localField: "x", foreignField: "x", as: "additional"}},
     {$limit: 5}
 ];
-
-// TODO SERVER-72549: Remove use of featureFlagSbeFull by SBE Pushdown feature.
-if (checkSBEEnabled(db, ["featureFlagSbeFull"])) {
-    checkUnshardedResults(multiLookupPipeline,
-                          ["COLLSCAN", "LIMIT", "EQ_LOOKUP", "PROJECTION_DEFAULT", "EQ_LOOKUP"],
-                          []);
-} else {
-    checkUnshardedResults(
-        multiLookupPipeline, ["COLLSCAN", "LIMIT", "EQ_LOOKUP"], ["$addFields", "$lookup"]);
-}
+checkUnshardedResults(
+    multiLookupPipeline, ["COLLSCAN", "LIMIT", "EQ_LOOKUP", "PROJECTION_DEFAULT", "EQ_LOOKUP"], []);
 
 // Check that lookup->unwind->limit is reordered to lookup->limit, with the unwind stage being
 // absorbed into the lookup stage and preventing the limit from swapping before it.
@@ -125,7 +118,7 @@ const topKSortPipeline = [
     {$limit: 5}
 ];
 checkUnshardedResults(topKSortPipeline, ["COLLSCAN", "SORT", "EQ_LOOKUP"], []);
-const explain = coll.explain().aggregate(topKSortPipeline);
+const explain = getSingleNodeExplain(coll.explain().aggregate(topKSortPipeline));
 assert.eq(getPlanStage(getWinningPlan(explain.queryPlanner), "SORT").limitAmount, 5, explain);
 
 // Tests on a sharded collection.

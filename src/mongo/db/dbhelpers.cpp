@@ -34,7 +34,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/status_with.h"
@@ -130,26 +129,19 @@ RecordId Helpers::findOne(OperationContext* opCtx,
     if (!collection)
         return RecordId();
 
-    const ExtensionsCallbackReal extensionsCallback(opCtx, &collection->ns());
-
-    const boost::intrusive_ptr<ExpressionContext> expCtx;
-    auto statusWithCQ =
-        CanonicalQuery::canonicalize(opCtx,
-                                     std::move(findCommand),
-                                     false,
-                                     expCtx,
-                                     extensionsCallback,
-                                     MatchExpressionParser::kAllowAllSpecialFeatures);
-
-    massertStatusOK(statusWithCQ.getStatus());
-    unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
+    auto cq = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+        .expCtx = makeExpressionContext(opCtx, *findCommand),
+        .parsedFind = ParsedFindCommandParams{
+            .findCommand = std::move(findCommand),
+            .extensionsCallback = ExtensionsCallbackReal(opCtx, &collection->ns()),
+            .allowedFeatures = MatchExpressionParser::kAllowAllSpecialFeatures}});
     cq->setForceGenerateRecordId(true);
 
     auto exec = uassertStatusOK(getExecutor(opCtx,
                                             &collection,
                                             std::move(cq),
                                             nullptr /* extractAndAttachPipelineStages */,
-                                            PlanYieldPolicy::YieldPolicy::NO_YIELD));
+                                            PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY));
 
     PlanExecutor::ExecState state;
     BSONObj obj;
@@ -255,8 +247,8 @@ bool Helpers::getSingleton(OperationContext* opCtx, const NamespaceString& nss, 
         return false;
     }
 
-    auto exec =
-        InternalPlanner::collectionScan(opCtx, &collection, PlanYieldPolicy::YieldPolicy::NO_YIELD);
+    auto exec = InternalPlanner::collectionScan(
+        opCtx, &collection, PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
     PlanExecutor::ExecState state = exec->getNext(&result, nullptr);
 
     CurOp::get(opCtx)->done();
@@ -280,8 +272,10 @@ bool Helpers::getLast(OperationContext* opCtx, const NamespaceString& nss, BSONO
         return false;
     }
 
-    auto exec = InternalPlanner::collectionScan(
-        opCtx, &collection, PlanYieldPolicy::YieldPolicy::NO_YIELD, InternalPlanner::BACKWARD);
+    auto exec = InternalPlanner::collectionScan(opCtx,
+                                                &collection,
+                                                PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
+                                                InternalPlanner::BACKWARD);
     PlanExecutor::ExecState state = exec->getNext(&result, nullptr);
 
     // Non-yielding collection scans from InternalPlanner will never error.
@@ -321,7 +315,7 @@ UpdateResult Helpers::upsert(OperationContext* opCtx,
     if (fromMigrate) {
         request.setSource(OperationSource::kFromMigrate);
     }
-    request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::NO_YIELD);
+    request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
 
     return ::mongo::update(opCtx, coll, request);
 }
@@ -341,7 +335,7 @@ void Helpers::update(OperationContext* opCtx,
     if (fromMigrate) {
         request.setSource(OperationSource::kFromMigrate);
     }
-    request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::NO_YIELD);
+    request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
 
     ::mongo::update(opCtx, coll, request);
 }

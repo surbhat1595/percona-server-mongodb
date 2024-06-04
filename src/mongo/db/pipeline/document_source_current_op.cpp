@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
@@ -158,8 +157,7 @@ DocumentSource::GetNextResult DocumentSourceCurrentOp::doGetNext() {
         // Add the shard name to the output document.
         doc.addField(kShardFieldName, Value(_shardName));
 
-        if (feature_flags::gClusterFsyncLock.isEnabled(serverGlobalParams.featureCompatibility) &&
-            mongo::lockedForWriting()) {
+        if (mongo::lockedForWriting()) {
             doc.addField(StringData("fsyncLock"), Value(true));
         }
 

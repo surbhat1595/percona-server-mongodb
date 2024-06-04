@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <set>
 #include <string>
@@ -150,8 +149,6 @@ public:
 
             LOGV2_DEBUG(22483,
                         3,
-                        "{sessionId}:{txnNumberAndRetryCounter} Participant shard received "
-                        "prepareTransaction",
                         "Participant shard received prepareTransaction",
                         "sessionId"_attr = opCtx->getLogicalSessionId()->toBSON(),
                         "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter);
@@ -252,7 +249,7 @@ public:
         return AllowedOnSecondary::kNever;
     }
 };
-MONGO_REGISTER_COMMAND(PrepareTransactionCmd);
+MONGO_REGISTER_COMMAND(PrepareTransactionCmd).forShard();
 
 std::set<ShardId> validateParticipants(OperationContext* opCtx,
                                        const std::vector<mongo::CommitParticipant>& participants) {
@@ -270,16 +267,13 @@ std::set<ShardId> validateParticipants(OperationContext* opCtx,
     }
     ss << ']';
 
-    LOGV2_DEBUG(
-        22484,
-        3,
-        "{sessionId}:{txnNumber} Coordinator shard received request to coordinate commit with "
-        "participant list {participantList}",
-        "Coordinator shard received request to coordinate commit",
-        "sessionId"_attr = opCtx->getLogicalSessionId()->getId(),
-        "txnNumber"_attr = opCtx->getTxnNumber(),
-        "txnRetryCounter"_attr = opCtx->getTxnRetryCounter(),
-        "participantList"_attr = ss.str());
+    LOGV2_DEBUG(22484,
+                3,
+                "Coordinator shard received request to coordinate commit",
+                "sessionId"_attr = opCtx->getLogicalSessionId()->getId(),
+                "txnNumber"_attr = opCtx->getTxnNumber(),
+                "txnRetryCounter"_attr = opCtx->getTxnRetryCounter(),
+                "participantList"_attr = ss.str());
 
     return participantsSet;
 }
@@ -364,8 +358,6 @@ public:
 
             LOGV2_DEBUG(22486,
                         3,
-                        "{sessionId}:{txnNumberAndRetryCounter} Going to recover decision from "
-                        "local participant",
                         "Going to recover decision from local participant",
                         "sessionId"_attr = opCtx->getLogicalSessionId()->getId(),
                         "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter);
@@ -447,7 +439,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CoordinateCommitTransactionCmd);
+MONGO_REGISTER_COMMAND(CoordinateCommitTransactionCmd).forShard();
 
 }  // namespace
 }  // namespace mongo

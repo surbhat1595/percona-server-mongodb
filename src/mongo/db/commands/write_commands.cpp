@@ -31,7 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -83,6 +82,7 @@
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/query_settings_gen.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
@@ -287,8 +287,11 @@ public:
 
             doTransactionValidationForWrites(opCtx, ns());
             if (request().getEncryptionInformation().has_value()) {
-                // Flag set here and in fle_crud.cpp since this only executes on a mongod.
-                CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+                {
+                    // Flag set here and in fle_crud.cpp since this only executes on a mongod.
+                    stdx::lock_guard<Client> lk(*opCtx->getClient());
+                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+                }
 
                 if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                     write_ops::InsertCommandReply insertReply;
@@ -299,7 +302,9 @@ public:
                 }
             }
 
-            if (auto [isTimeseries, _] = timeseries::isTimeseries(opCtx, request()); isTimeseries) {
+            if (auto [isTimeseriesViewRequest, _] =
+                    timeseries::isTimeseriesViewRequest(opCtx, request());
+                isTimeseriesViewRequest) {
                 // Re-throw parsing exceptions to be consistent with CmdInsert::Invocation's
                 // constructor.
                 try {
@@ -350,7 +355,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(CmdInsert);
+MONGO_REGISTER_COMMAND(CmdInsert).forShard();
 
 class CmdUpdate final : public write_ops::UpdateCmdVersion1Gen<CmdUpdate> {
 public:
@@ -456,6 +461,10 @@ public:
                 !shardVersion.eoo()) {
                 bob->append(shardVersion);
             }
+            if (const auto& databaseVersion = _commandObj.getField("databaseVersion");
+                !databaseVersion.eoo()) {
+                bob->append(databaseVersion);
+            }
             if (const auto& encryptionInfo = _commandObj.getField("encryptionInformation");
                 !encryptionInfo.eoo()) {
                 bob->append(encryptionInfo);
@@ -471,16 +480,20 @@ public:
             doTransactionValidationForWrites(opCtx, ns());
             write_ops::UpdateCommandReply updateReply;
             if (request().getEncryptionInformation().has_value()) {
-                // Flag set here and in fle_crud.cpp since this only executes on a mongod.
-                CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+                {
+                    // Flag set here and in fle_crud.cpp since this only executes on a mongod.
+                    stdx::lock_guard<Client> lk(*opCtx->getClient());
+                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+                }
                 if (!request().getEncryptionInformation().value().getCrudProcessed()) {
                     return processFLEUpdate(opCtx, request());
                 }
             }
 
-            auto [isTimeseries, bucketNs] = timeseries::isTimeseries(opCtx, request());
-            OperationSource source =
-                isTimeseries ? OperationSource::kTimeseriesUpdate : OperationSource::kStandard;
+            auto [isTimeseriesViewRequest, bucketNs] =
+                timeseries::isTimeseriesViewRequest(opCtx, request());
+            OperationSource source = isTimeseriesViewRequest ? OperationSource::kTimeseriesUpdate
+                                                             : OperationSource::kStandard;
 
             long long nModified = 0;
 
@@ -491,7 +504,8 @@ public:
             write_ops_exec::WriteResult reply;
             // For retryable updates on time-series collections, we needs to run them in
             // transactions to ensure the multiple writes are replicated atomically.
-            if (isTimeseries && opCtx->isRetryableWrite() && !opCtx->inMultiDocumentTransaction()) {
+            if (isTimeseriesViewRequest && opCtx->isRetryableWrite() &&
+                !opCtx->inMultiDocumentTransaction()) {
                 auto executor = serverGlobalParams.clusterRole.has(ClusterRole::None)
                     ? ReplicaSetNodeProcessInterface::getReplicaSetNodeExecutor(
                           opCtx->getServiceContext())
@@ -537,21 +551,10 @@ public:
 
             // Collect metrics.
             for (auto&& update : request().getUpdates()) {
-                // If this was a pipeline style update, record that pipeline-style was used and
-                // which stages were being used.
-                auto& updateMod = update.getU();
-                if (updateMod.type() == write_ops::UpdateModification::Type::kPipeline) {
-                    AggregateCommandRequest aggCmd(request().getNamespace(),
-                                                   updateMod.getUpdatePipeline());
-                    LiteParsedPipeline pipeline(aggCmd);
-                    pipeline.tickGlobalStageCounters();
-                    CmdUpdate::updateMetrics.incrementExecutedWithAggregationPipeline();
-                }
-
-                // If this command had arrayFilters option, record that it was used.
-                if (update.getArrayFilters()) {
-                    CmdUpdate::updateMetrics.incrementExecutedWithArrayFilters();
-                }
+                incrementUpdateMetrics(update.getU(),
+                                       request().getNamespace(),
+                                       CmdUpdate::updateMetrics,
+                                       update.getArrayFilters());
             }
 
             return updateReply;
@@ -577,12 +580,16 @@ public:
                     "explained write batches must be of size 1",
                     request().getUpdates().size() == 1);
 
-            auto [isRequestToTimeseries, nss] = timeseries::isTimeseries(opCtx, request());
+            auto [isTimeseriesViewRequest, nss] =
+                timeseries::isTimeseriesViewRequest(opCtx, request());
 
             UpdateRequest updateRequest(request().getUpdates()[0]);
             updateRequest.setNamespaceString(nss);
             if (shouldDoFLERewrite(request())) {
-                CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+                {
+                    stdx::lock_guard<Client> lk(*opCtx->getClient());
+                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+                }
 
                 if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                     updateRequest.setQuery(
@@ -599,44 +606,13 @@ public:
             updateRequest.setYieldPolicy(PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
             updateRequest.setExplain(verbosity);
 
-            // Explains of write commands are read-only, but we take write locks so that timing
-            // info is more accurate.
-            const auto collection =
-                acquireCollection(opCtx,
-                                  CollectionAcquisitionRequest::fromOpCtx(
-                                      opCtx, nss, AcquisitionPrerequisites::kWrite),
-                                  MODE_IX);
-
-            if (isRequestToTimeseries) {
-                timeseries::assertTimeseriesBucketsCollection(collection.getCollectionPtr().get());
-
-                const auto& requestHint = request().getUpdates()[0].getHint();
-                if (timeseries::isHintIndexKey(requestHint)) {
-                    auto timeseriesOptions = collection.getCollectionPtr()->getTimeseriesOptions();
-                    updateRequest.setHint(
-                        uassertStatusOK(timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(
-                            *timeseriesOptions, requestHint)));
-                }
-            }
-
-            ParsedUpdate parsedUpdate(opCtx,
-                                      &updateRequest,
-                                      collection.getCollectionPtr(),
-                                      false /* forgoOpCounterIncrements */,
-                                      isRequestToTimeseries);
-            uassertStatusOK(parsedUpdate.parseRequest());
-
-            auto exec = uassertStatusOK(getExecutorUpdate(
-                &CurOp::get(opCtx)->debug(), collection, &parsedUpdate, verbosity));
-            auto bodyBuilder = result->getBodyBuilder();
-            Explain::explainStages(
-                exec.get(),
-                collection.getCollectionPtr(),
-                verbosity,
-                BSONObj(),
-                SerializationContext::stateCommandReply(request().getSerializationContext()),
-                _commandObj,
-                &bodyBuilder);
+            write_ops_exec::explainUpdate(opCtx,
+                                          updateRequest,
+                                          isTimeseriesViewRequest,
+                                          request().getSerializationContext(),
+                                          _commandObj,
+                                          verbosity,
+                                          result);
         }
 
         BSONObj _commandObj;
@@ -648,7 +624,7 @@ public:
     // Update related command execution metrics.
     static UpdateMetrics updateMetrics;
 };
-MONGO_REGISTER_COMMAND(CmdUpdate);
+MONGO_REGISTER_COMMAND(CmdUpdate).forShard();
 
 UpdateMetrics CmdUpdate::updateMetrics{"update"};
 
@@ -718,15 +694,20 @@ public:
             OperationSource source = OperationSource::kStandard;
 
             if (request().getEncryptionInformation().has_value()) {
-                // Flag set here and in fle_crud.cpp since this only executes on a mongod.
-                CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+                {
+                    // Flag set here and in fle_crud.cpp since this only executes on a mongod.
+                    stdx::lock_guard<Client> lk(*opCtx->getClient());
+                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+                }
 
                 if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                     return processFLEDelete(opCtx, request());
                 }
             }
 
-            if (auto [isTimeseries, _] = timeseries::isTimeseries(opCtx, request()); isTimeseries) {
+            if (auto [isTimeseriesViewRequest, _] =
+                    timeseries::isTimeseriesViewRequest(opCtx, request());
+                isTimeseriesViewRequest) {
                 source = OperationSource::kTimeseriesDelete;
             }
 
@@ -761,8 +742,10 @@ public:
                     "explained write batches must be of size 1",
                     request().getDeletes().size() == 1);
 
+            auto [isTimeseriesViewRequest, nss] =
+                timeseries::isTimeseriesViewRequest(opCtx, request());
+
             auto deleteRequest = DeleteRequest{};
-            auto [isRequestToTimeseries, nss] = timeseries::isTimeseries(opCtx, request());
             deleteRequest.setNsString(nss);
             deleteRequest.setLegacyRuntimeConstants(request().getLegacyRuntimeConstants().value_or(
                 Variables::generateRuntimeConstants(opCtx)));
@@ -771,7 +754,10 @@ public:
             const auto& firstDelete = request().getDeletes()[0];
             BSONObj query = firstDelete.getQ();
             if (shouldDoFLERewrite(request())) {
-                CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+                {
+                    stdx::lock_guard<Client> lk(*opCtx->getClient());
+                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+                }
 
                 if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                     query = processFLEWriteExplainD(
@@ -786,46 +772,19 @@ public:
             deleteRequest.setHint(firstDelete.getHint());
             deleteRequest.setIsExplain(true);
 
-            // Explains of write commands are read-only, but we take write locks so that timing
-            // info is more accurate.
-            const auto collection = acquireCollection(
-                opCtx,
-                CollectionAcquisitionRequest::fromOpCtx(
-                    opCtx, deleteRequest.getNsString(), AcquisitionPrerequisites::kWrite),
-                MODE_IX);
-            if (isRequestToTimeseries) {
-                timeseries::assertTimeseriesBucketsCollection(collection.getCollectionPtr().get());
-
-                if (timeseries::isHintIndexKey(firstDelete.getHint())) {
-                    auto timeseriesOptions = collection.getCollectionPtr()->getTimeseriesOptions();
-                    deleteRequest.setHint(
-                        uassertStatusOK(timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(
-                            *timeseriesOptions, firstDelete.getHint())));
-                }
-            }
-
-            ParsedDelete parsedDelete(
-                opCtx, &deleteRequest, collection.getCollectionPtr(), isRequestToTimeseries);
-            uassertStatusOK(parsedDelete.parseRequest());
-
-            // Explain the plan tree.
-            auto exec = uassertStatusOK(getExecutorDelete(
-                &CurOp::get(opCtx)->debug(), collection, &parsedDelete, verbosity));
-            auto bodyBuilder = result->getBodyBuilder();
-            Explain::explainStages(
-                exec.get(),
-                collection.getCollectionPtr(),
-                verbosity,
-                BSONObj(),
-                SerializationContext::stateCommandReply(request().getSerializationContext()),
-                _commandObj,
-                &bodyBuilder);
+            write_ops_exec::explainDelete(opCtx,
+                                          deleteRequest,
+                                          isTimeseriesViewRequest,
+                                          request().getSerializationContext(),
+                                          _commandObj,
+                                          verbosity,
+                                          result);
         }
 
         const BSONObj& _commandObj;
     };
 };
-MONGO_REGISTER_COMMAND(CmdDelete);
+MONGO_REGISTER_COMMAND(CmdDelete).forShard();
 
 }  // namespace
 }  // namespace mongo

@@ -113,7 +113,8 @@ public:
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
         return NamespaceStringUtil::deserialize(dbName.tenantId(),
-                                                CommandHelpers::parseNsFullyQualified(cmdObj));
+                                                CommandHelpers::parseNsFullyQualified(cmdObj),
+                                                SerializationContext::stateDefault());
     }
 
     bool errmsgRun(OperationContext* opCtx,
@@ -145,10 +146,7 @@ public:
         auto parseShardNameStatus = bsonExtractStringField(cmdObj, "from", &shardName);
         uassertStatusOK(parseShardNameStatus);
 
-        LOGV2(22104,
-              "Received splitChunk request: {request}",
-              "Received splitChunk request",
-              "request"_attr = redact(cmdObj));
+        LOGV2(22104, "Received splitChunk request", "request"_attr = redact(cmdObj));
 
         std::vector<BSONObj> splitKeys;
         {
@@ -189,27 +187,19 @@ public:
             checkChunkMatchesRange(opCtx, nss, metadata, indexInfo, chunkRange);
         }
 
-        auto topChunk = uassertStatusOK(splitChunk(opCtx,
-                                                   nss,
-                                                   keyPatternObj,
-                                                   chunkRange,
-                                                   std::move(splitKeys),
-                                                   shardName,
-                                                   expectedCollectionEpoch,
-                                                   expectedCollectionTimestamp));
-
-        // Otherwise, we want to check whether or not top-chunk optimization should be performed. If
-        // yes, then we should have a ChunkRange that was returned. Regardless of whether it should
-        // be performed, we will return true.
-        if (topChunk) {
-            result.append("shouldMigrate",
-                          BSON("min" << topChunk->getMin() << "max" << topChunk->getMax()));
-        }
+        uassertStatusOK(splitChunk(opCtx,
+                                   nss,
+                                   keyPatternObj,
+                                   chunkRange,
+                                   std::move(splitKeys),
+                                   shardName,
+                                   expectedCollectionEpoch,
+                                   expectedCollectionTimestamp));
 
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(SplitChunkCommand);
+MONGO_REGISTER_COMMAND(SplitChunkCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

@@ -68,15 +68,14 @@ void ShardingConnectionHook::onCreate(DBClientBase* conn) {
     // Authenticate as the first thing we do
     // NOTE: Replica set authentication allows authentication against *any* online host
     if (auth::isInternalAuthSet()) {
-        LOGV2_DEBUG(22722,
-                    2,
-                    "Calling onCreate auth for {connectionString}",
-                    "Calling onCreate auth",
-                    "connectionString"_attr = conn->toString());
-
-        uassertStatusOKWithContext(conn->authenticateInternalUser(),
-                                   str::stream() << "can't authenticate to server "
-                                                 << conn->getServerAddress());
+        LOGV2_DEBUG(22722, 2, "Calling onCreate auth", "connectionString"_attr = conn->toString());
+        try {
+            conn->authenticateInternalUser();
+        } catch (DBException& e) {
+            e.addContext(str::stream()
+                         << "can't authenticate to server " << conn->getServerAddress());
+            throw;
+        }
     }
 
     conn->setRequestMetadataWriter([this](OperationContext* opCtx, BSONObjBuilder* metadataBob) {

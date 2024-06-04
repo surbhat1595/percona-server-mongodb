@@ -95,7 +95,7 @@ public:
 
             std::vector<SharedSemiFuture<void>> futuresToWait;
 
-            if (auto machine = resharding::tryGetReshardingStateMachine<
+            if (auto machine = resharding::tryGetReshardingStateMachineAndThrowIfShuttingDown<
                     ReshardingRecipientService,
                     ReshardingRecipientService::RecipientStateMachine,
                     ReshardingRecipientDocument>(opCtx, uuid())) {
@@ -107,7 +107,7 @@ public:
                 (*machine)->abort(isUserCanceled());
             }
 
-            if (auto machine = resharding::tryGetReshardingStateMachine<
+            if (auto machine = resharding::tryGetReshardingStateMachineAndThrowIfShuttingDown<
                     ReshardingDonorService,
                     ReshardingDonorService::DonorStateMachine,
                     ReshardingDonorDocument>(opCtx, uuid())) {
@@ -190,7 +190,7 @@ public:
         return AllowedOnSecondary::kNever;
     }
 };
-MONGO_REGISTER_COMMAND(ShardsvrAbortReshardCollectionCommand);
+MONGO_REGISTER_COMMAND(ShardsvrAbortReshardCollectionCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

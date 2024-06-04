@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -149,7 +148,8 @@ const DeleteRequest* ParsedDelete::getRequest() const {
 }
 
 PlanYieldPolicy::YieldPolicy ParsedDelete::yieldPolicy() const {
-    return _request->getGod() ? PlanYieldPolicy::YieldPolicy::NO_YIELD : _request->getYieldPolicy();
+    return _request->getGod() ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
+                              : _request->getYieldPolicy();
 }
 
 bool ParsedDelete::hasParsedQuery() const {

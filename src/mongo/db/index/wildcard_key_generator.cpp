@@ -31,7 +31,6 @@
 #include <boost/container/vector.hpp>
 #include <boost/dynamic_bitset/dynamic_bitset.hpp>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <string>
 #include <utility>
@@ -309,7 +308,7 @@ WildcardProjection WildcardKeyGenerator::createProjectionExecutor(BSONObj keyPat
     // ExpressionContext's OperationContext and CollatorInterface to 'nullptr' and the namespace
     // string to '' here; since we ban computed fields from the projection, the ExpressionContext
     // will never be used.
-    auto expCtx = make_intrusive<ExpressionContext>(nullptr, nullptr, NamespaceString());
+    auto expCtx = make_intrusive<ExpressionContext>(nullptr, nullptr, NamespaceString::kEmpty);
     auto policies = ProjectionPolicies::wildcardIndexSpecProjectionPolicies();
     auto projection = projection_ast::parseAndAnalyze(expCtx, projSpec, policies);
     return WildcardProjection{projection_executor::buildProjectionExecutor(

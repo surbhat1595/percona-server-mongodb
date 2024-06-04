@@ -140,7 +140,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(CmdDropIndexes);
+MONGO_REGISTER_COMMAND(CmdDropIndexes).forShard();
 
 class CmdReIndex : public BasicCommand {
 public:
@@ -182,7 +182,7 @@ public:
         const NamespaceString toReIndexNss =
             CommandHelpers::parseNsCollectionRequired(dbName, cmdObj);
 
-        LOGV2(20457, "CMD: reIndex {namespace}", "CMD reIndex", logAttrs(toReIndexNss));
+        LOGV2(20457, "CMD reIndex", logAttrs(toReIndexNss));
 
         if (repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()) {
             uasserted(
@@ -315,7 +315,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CmdReIndex);
+MONGO_REGISTER_COMMAND(CmdReIndex).forShard();
 
 }  // namespace
 }  // namespace mongo

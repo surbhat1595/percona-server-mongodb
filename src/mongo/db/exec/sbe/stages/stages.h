@@ -181,8 +181,12 @@ public:
         }
 
         stage->doSaveState(relinquishCursor);
-        if (!stage->_children.empty()) {
-            saveChildrenState(relinquishCursor, disableSlotAccess);
+        // Save the children in a right to left order so dependent stages (i.e. one using correlated
+        // slots) are saved first.
+        auto& children = stage->_children;
+        for (auto idx = children.size(); idx-- > 0;) {
+            children[idx]->saveState(relinquishCursor,
+                                     disableSlotAccess ? shouldOptimizeSaveState(idx) : false);
         }
 
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
@@ -236,30 +240,23 @@ protected:
     SaveState _saveState{SaveState::kNotSaved};
 #endif
 
-    virtual void saveChildrenState(bool relinquishCursor, bool disableSlotAccess) {
-        // clang-format off
-        static const StringDataSet propagateSet = {
-            "branch", "cfilter", "efilter", "exchangep", "filter",   "limit", "limitskip",
-            "lspool", "mkbson",  "mkobj",   "project",   "traverse", "union", "unique"};
-        // clang-format on
-
-        auto stage = static_cast<T*>(this);
-        if (!propagateSet.count(stage->getCommonStats()->stageType)) {
-            disableSlotAccess = false;
-        }
-
-        // Save the children in a right to left order so dependent stages (i.e. one using correlated
-        // slots) are saved first.
-        for (auto it = stage->_children.rbegin(); it != stage->_children.rend(); ++it) {
-            (*it)->saveState(relinquishCursor, disableSlotAccess);
-        }
+    virtual bool shouldOptimizeSaveState(size_t idx) const {
+        return false;
     }
 
     static bool shouldCopyValue(value::TypeTags tag) {
+        if (isShallowType(tag)) {
+            return false;
+        }
         switch (tag) {
+            case value::TypeTags::NumberDecimal:
+            case value::TypeTags::StringBig:
             case value::TypeTags::Array:
             case value::TypeTags::ArraySet:
+            case value::TypeTags::ArrayMultiSet:
             case value::TypeTags::Object:
+            case value::TypeTags::ObjectId:
+            case value::TypeTags::RecordId:
                 return false;
 
             default:
@@ -509,7 +506,7 @@ public:
      * Checks for interrupt if necessary. If yielding has been enabled for this object, then also
      * performs a yield if necessary.
      */
-    void checkForInterrupt(OperationContext* opCtx) {
+    void checkForInterruptAndYield(OperationContext* opCtx) {
         invariant(opCtx);
 
         if (!_yieldPolicy) {
@@ -522,6 +519,19 @@ public:
             }
         } else if (_yieldPolicy->shouldYieldOrInterrupt(opCtx)) {
             uassertStatusOK(_yieldPolicy->yieldOrInterrupt(opCtx));
+        }
+    }
+
+    /**
+     * Checks for interrupt if necessary. Will never yield regardless of the yielding policy.
+     * Should only be used for ValueBlock stages.
+     */
+    void checkForInterrupt(OperationContext* opCtx) {
+        invariant(opCtx);
+
+        if (--_interruptCounter == 0) {
+            _interruptCounter = kInterruptCheckPeriod;
+            opCtx->checkForInterrupt();
         }
     }
 

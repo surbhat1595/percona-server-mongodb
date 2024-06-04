@@ -5,6 +5,8 @@
  *   # The validation hook in this suite enforces that all time-series buckets are compressed. This
  *   # will not be the case in multiversion suites.
  *   requires_fcv_71,
+ *   # TODO (SERVER-80521): Re-enable this test once redness is resolve in multiversion suites.
+ *   DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE,
  * ]
  */
 
@@ -27,8 +29,8 @@ const otherShard = st.shard1;
 const otherShardDB = otherShard.getDB(dbName);
 
 testDB.dropDatabase();
-assert.commandWorked(mongos.adminCommand({enableSharding: dbName}));
-st.ensurePrimaryShard(testDB.getName(), primary.shardName);
+assert.commandWorked(
+    mongos.adminCommand({enableSharding: dbName, primaryShard: primary.shardName}));
 
 assert.commandWorked(testDB.createCollection(
     collName, {timeseries: {timeField: "time", metaField: "location", granularity: "hours"}}));
@@ -55,7 +57,13 @@ function testUpdateRouting({updates, nModified, shardsTargetedCount}) {
 
     // Verify profiling output.
     if (shardsTargetedCount > 0) {
-        let filter = {"op": "update", "ns": "testDB.weather"};
+        let filter = {
+            $or: [
+                {op: 'update'},
+                {op: 'bulkWrite', "command.update": {$exists: true}},
+            ],
+            ns: "testDB.weather",
+        };
         let actualCount = 0;
         for (const db of [primaryDB, otherShardDB]) {
             const expectedEntries = db.system.profile.find(filter).toArray();

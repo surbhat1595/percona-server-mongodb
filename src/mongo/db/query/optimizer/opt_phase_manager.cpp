@@ -32,7 +32,6 @@
 #include <absl/container/node_hash_set.h>
 #include <absl/meta/type_traits.h>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <string>
 
 #include <absl/container/node_hash_map.h>
@@ -43,22 +42,25 @@
 #include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
 #include "mongo/db/query/optimizer/props.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
+#include "mongo/db/query/optimizer/rewrites/normalize_projections.h"
 #include "mongo/db/query/optimizer/rewrites/path.h"
 #include "mongo/db/query/optimizer/rewrites/path_lower.h"
+#include "mongo/db/query/optimizer/rewrites/sampling_const_eval.h"
 #include "mongo/db/query/optimizer/utils/memo_utils.h"
 #include "mongo/db/query/optimizer/utils/strong_alias.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/debug_util.h"
 #include "mongo/util/str.h"
 
 namespace mongo::optimizer {
 
-OptPhaseManager::PhaseSet OptPhaseManager::_allRewrites = {OptPhase::ConstEvalPre,
-                                                           OptPhase::PathFuse,
-                                                           OptPhase::MemoSubstitutionPhase,
-                                                           OptPhase::MemoExplorationPhase,
-                                                           OptPhase::MemoImplementationPhase,
-                                                           OptPhase::PathLower,
-                                                           OptPhase::ConstEvalPost};
+OptPhaseManager::PhaseSet OptPhaseManager::_allProdRewrites = {OptPhase::ConstEvalPre,
+                                                               OptPhase::PathFuse,
+                                                               OptPhase::MemoSubstitutionPhase,
+                                                               OptPhase::MemoExplorationPhase,
+                                                               OptPhase::MemoImplementationPhase,
+                                                               OptPhase::PathLower,
+                                                               OptPhase::ConstEvalPost};
 
 OptPhaseManager::OptPhaseManager(OptPhaseManager::PhaseSet phaseSet,
                                  PrefixId& prefixId,
@@ -116,11 +118,16 @@ void OptPhaseManager::runStructuralPhase(C instance, VariableEnvironment& env, A
         return;
     }
 
-    for (int iterationCount = 0; instance.optimize(input); iterationCount++) {
+    int optimizeIterations = 0;
+    for (; instance.optimize(input); optimizeIterations++) {
         tassert(6808708,
                 str::stream() << "Iteration limit exceeded while running the following phase: "
                               << toStringData(phase) << ".",
-                !_debugInfo.exceedsIterationLimit(iterationCount));
+                !_debugInfo.exceedsIterationLimit(optimizeIterations));
+    }
+
+    if (optimizeIterations > 0) {
+        env.rebuild(input);
     }
 
     if (env.hasFreeVariables()) {
@@ -193,11 +200,13 @@ void OptPhaseManager::runMemoLogicalRewrite(const OptPhase phase,
         tassert(6808702, "Logical writer failed to rewrite fix point.", fixPointRewritten);
 
         input = extractLatestPlan(_memo, rootGroupId);
-        env.rebuild(input);
     }
 
-    if (env.hasFreeVariables()) {
-        tasserted(6808703, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
+    if constexpr (kDebugBuild) {
+        env.rebuild(input);
+        tassert(6808703,
+                "Plan has free variables: " + generateFreeVarsAssertMsg(env),
+                !env.hasFreeVariables());
     }
 }
 
@@ -265,6 +274,7 @@ PlanExtractorResult OptPhaseManager::runMemoPhysicalRewrite(
             tasserted(6808707, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
         }
     }
+
     return result;
 }
 
@@ -304,7 +314,8 @@ PlanExtractorResult OptPhaseManager::optimizeNoAssert(ABT input, const bool incl
             "Requesting rejected plans without the requiring to keep them first.",
             !includeRejected || _hints._keepRejectedPlans);
 
-    VariableEnvironment env = VariableEnvironment::build(input);
+    VariableEnvironment env =
+        VariableEnvironment::build(input, nullptr /*memoInterface*/, false /*computeLastRefs*/);
     if (env.hasFreeVariables()) {
         tasserted(6808711, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
     }
@@ -381,11 +392,11 @@ PlanExtractorResult OptPhaseManager::optimizeNoAssert(ABT input, const bool incl
             ConstEval{env, {} /*canInlineEvalFn*/, erasedProjFn, renamedProjFn},
             env,
             planEntry._node);
+        runStructuralPhase<OptPhase::ProjNormalize, ProjNormalize>(
+            ProjNormalize{renamedProjFn, _prefixId}, env, planEntry._node);
 
-        env.rebuild(planEntry._node);
-        if (env.hasFreeVariables()) {
-            tasserted(6808710, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
-        }
+        runStructuralPhase<OptPhase::ConstEvalPost_ForSampling, SamplingConstEval>(
+            SamplingConstEval{}, env, planEntry._node);
     }
 
     tassert(6624174,
@@ -409,8 +420,8 @@ bool OptPhaseManager::hasPhase(const OptPhase phase) const {
     return _phaseSet.find(phase) != _phaseSet.cend();
 }
 
-const OptPhaseManager::PhaseSet& OptPhaseManager::getAllRewritesSet() {
-    return _allRewrites;
+const OptPhaseManager::PhaseSet& OptPhaseManager::getAllProdRewrites() {
+    return _allProdRewrites;
 }
 
 MemoPhysicalNodeId OptPhaseManager::getPhysicalNodeId() const {
@@ -439,6 +450,10 @@ const PathToIntervalFn& OptPhaseManager::getPathToInterval() const {
 
 const Metadata& OptPhaseManager::getMetadata() const {
     return _metadata;
+}
+
+const RIDProjectionsMap& OptPhaseManager::getRIDProjections() const {
+    return _ridProjections;
 }
 
 }  // namespace mongo::optimizer

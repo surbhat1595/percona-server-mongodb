@@ -35,7 +35,6 @@
 #include <cstddef>
 #include <vector>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/data_range.h"
 #include "mongo/bson/bsonelement.h"
@@ -189,7 +188,7 @@ void User::setIndirectRestrictions(RestrictionDocuments restrictions) & {
 }
 
 Status User::validateRestrictions(OperationContext* opCtx) const {
-    const auto& env = RestrictionEnvironment::get(*(opCtx->getClient()));
+    auto& env = opCtx->getClient()->session()->getAuthEnvironment();
     auto status = _restrictions.validate(env);
     if (!status.isOK()) {
         return {status.code(),

@@ -7,14 +7,14 @@ from threading import Lock
 from typing import Dict, List
 
 import yaml
-from buildscripts.antithesis_suite import get_antithesis_suite_config
+from buildscripts.resmokelib.utils.external_suite import make_external
 
 import buildscripts.resmokelib.utils.filesystem as fs
 from buildscripts.resmokelib.logging import loggers
 from buildscripts.resmokelib import config as _config, errors, utils
 from buildscripts.resmokelib.testing import suite as _suite
 from buildscripts.resmokelib.utils import load_yaml_file
-from buildscripts.resmokelib.utils.dictionary import get_dict_value, merge_dicts, set_dict_value
+from buildscripts.resmokelib.utils.dictionary import extend_dict_lists, get_dict_value, merge_dicts, set_dict_value
 
 SuiteName = str
 
@@ -118,7 +118,8 @@ def get_suites(suite_names_or_paths, test_files) -> List[_suite.Suite]:
                         loggers.ROOT_EXECUTOR_LOGGER.warning("Will forcibly run excluded test: %s",
                                                              test)
                     else:
-                        raise errors.ResmokeError(f"'{test}' excluded in '{suite.get_name()}'")
+                        raise errors.TestExcludedFromSuiteError(
+                            f"'{test}' excluded in '{suite.get_name()}'")
             suite = override_suite
         suites.append(suite)
     return suites
@@ -275,17 +276,13 @@ class MatrixSuiteConfig(SuiteConfigInterface):
     def process_overrides(cls, suite, overrides, suite_name):
         """Provide override key-value pairs for a given matrix suite."""
         base_suite_name = suite["base_suite"]
-        antithesis = suite.get("antithesis", None)
         override_names = suite.get("overrides", None)
         excludes_names = suite.get("excludes", None)
         eval_names = suite.get("eval", None)
+        extends_names = suite.get("extends", None)
         description = suite.get("description")
 
-        if antithesis:
-            base_suite = get_antithesis_suite_config(base_suite_name)
-            base_suite["antithesis"] = True
-        else:
-            base_suite = ExplicitSuiteConfig.get_config_obj_no_verify(base_suite_name)
+        base_suite = ExplicitSuiteConfig.get_config_obj_no_verify(base_suite_name)
 
         if base_suite is None:
             raise ValueError(f"Unknown base suite {base_suite_name} for matrix suite {suite_name}")
@@ -339,6 +336,10 @@ class MatrixSuiteConfig(SuiteConfigInterface):
                     set_dict_value(res, path, base_value + "; " + value)
                 else:
                     set_dict_value(res, path, value)
+
+        if extends_names:
+            for extends_name in extends_names:
+                extend_dict_lists(res, overrides[extends_name])
 
         return res
 
@@ -475,7 +476,13 @@ class SuiteFinder(object):
             raise errors.DuplicateSuiteDefinition(
                 "Multiple definitions for suite '%s'" % suite_path)
 
-        return matrix_suite or explicit_suite
+        suite = matrix_suite or explicit_suite
+
+        # If this is running against an External System Under Test, we need to make the suite compatible.
+        if _config.NOOP_MONGO_D_S_PROCESSES:
+            make_external(suite)
+
+        return suite
 
 
 def get_suite(suite_name_or_path) -> _suite.Suite:

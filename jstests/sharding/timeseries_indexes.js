@@ -36,8 +36,8 @@ function generateDoc(time, metaValue) {
 // Shard key on just the time field.
 (function timeShardKey() {
     const mongosDB = st.s.getDB(dbName);
-    assert.commandWorked(mongosDB.adminCommand({enableSharding: dbName}));
-    st.ensurePrimaryShard(dbName, st.shard0.shardName);
+    assert.commandWorked(
+        mongosDB.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
 
     // Shard time-series collection.
     const shardKey = {[timeField]: 1};
@@ -70,14 +70,9 @@ function generateDoc(time, metaValue) {
 
     const coll = mongosDB.getCollection(collName);
 
-    let extraIndexes = [];
-    let extraBucketIndexes = [];
-    if (TimeseriesTest.timeseriesScalabilityImprovementsEnabled(st.shard0)) {
-        // When enabled, the {meta: 1, time: 1} index gets built by default on the time-series
-        // bucket collection.
-        extraIndexes.push({[metaField]: 1, [timeField]: 1});
-        extraBucketIndexes.push({"meta": 1, "control.min.time": 1, "control.max.time": 1});
-    }
+    // The {meta: 1, time: 1} index gets built by default on the time-series bucket collection.
+    let extraIndexes = [{[metaField]: 1, [timeField]: 1}];
+    let extraBucketIndexes = [{"meta": 1, "control.min.time": 1, "control.max.time": 1}];
 
     for (let i = 0; i < 2; i++) {
         assert.commandWorked(coll.insert(generateDoc("2019-11-11", -1)));

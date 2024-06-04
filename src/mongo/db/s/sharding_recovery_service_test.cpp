@@ -155,7 +155,7 @@ public:
     }
 
     void assertCriticalSectionCatchUpEnteredInMemory(const NamespaceString& nss) {
-        if (nsIsDbOnly(nss.ns_forTest())) {
+        if (nss.isDbOnly()) {
             AutoGetDb db(opCtx(), nss.dbName(), MODE_IS);
             const auto scopedDss =
                 DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx(), nss.dbName());
@@ -173,7 +173,7 @@ public:
     }
 
     void assertCriticalSectionCommitEnteredInMemory(const NamespaceString& nss) {
-        if (nsIsDbOnly(nss.ns_forTest())) {
+        if (nss.isDbOnly()) {
             AutoGetDb db(opCtx(), nss.dbName(), MODE_IS);
             const auto scopedDss =
                 DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx(), nss.dbName());
@@ -190,7 +190,7 @@ public:
     }
 
     void assertCriticalSectionLeftInMemory(const NamespaceString& nss) {
-        if (nsIsDbOnly(nss.ns_forTest())) {
+        if (nss.isDbOnly()) {
             AutoGetDb db(opCtx(), nss.dbName(), MODE_IS);
             const auto scopedDss =
                 DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx(), nss.dbName());
@@ -649,7 +649,8 @@ TEST_F(ShardingRecoveryServiceTestOnSecondary, BlockAndUnblockOperationsOnDataba
         AutoGetDb db(opCtx(), dbName.dbName(), MODE_IX);
         OplogDeleteEntryArgs args;
         opObserver().aboutToDelete(opCtx(), criticalSectionColl(), doc.toBSON(), &args);
-        opObserver().onDelete(opCtx(), criticalSectionColl(), kUninitializedStmtId, args);
+        opObserver().onDelete(
+            opCtx(), criticalSectionColl(), kUninitializedStmtId, doc.toBSON(), args);
         wuow.commit();
     }
 
@@ -718,7 +719,8 @@ TEST_F(ShardingRecoveryServiceTestOnSecondary, BlockAndUnblockOperationsOnCollec
         AutoGetCollection coll(opCtx(), collNss, MODE_IX);
         OplogDeleteEntryArgs args;
         opObserver().aboutToDelete(opCtx(), criticalSectionColl(), doc.toBSON(), &args);
-        opObserver().onDelete(opCtx(), criticalSectionColl(), kUninitializedStmtId, args);
+        opObserver().onDelete(
+            opCtx(), criticalSectionColl(), kUninitializedStmtId, doc.toBSON(), args);
         wuow.commit();
     }
 

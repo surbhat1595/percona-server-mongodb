@@ -31,7 +31,6 @@
 #include <vector>
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -157,7 +156,7 @@ public:
         }
     }
 };
-MONGO_REGISTER_COMMAND(ClusterLockInfoCmd);
+MONGO_REGISTER_COMMAND(ClusterLockInfoCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

@@ -28,7 +28,6 @@
  */
 
 #include <algorithm>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -93,12 +92,12 @@ TaskExecutorCursor::TaskExecutorCursor(std::shared_ptr<executor::TaskExecutor> e
     _processResponse(rcr.opCtx, std::move(response));
 }
 
-TaskExecutorCursor::TaskExecutorCursor(TaskExecutorCursor&& other)
+TaskExecutorCursor::TaskExecutorCursor(TaskExecutorCursor&& other) noexcept
     : _executor(std::move(other._executor)),
       _underlyingExecutor(std::move(other._underlyingExecutor)),
-      _rcr(other._rcr),
+      _rcr(other._rcr),  // NOLINT
       _options(std::move(other._options)),
-      _lsid(other._lsid),
+      _lsid(other._lsid),  // NOLINT
       _cmdState(std::move(other._cmdState)),
       _cursorId(other._cursorId),
       _millisecondsWaiting(other._millisecondsWaiting),
@@ -310,7 +309,15 @@ void TaskExecutorCursor::_getNextBatch(OperationContext* opCtx) {
     auto dateStart = clock->now();
     // pull out of the pipe before setting cursor id so we don't spoil this object if we're opCtx
     // interrupted
-    auto out = _cmdState->promise.getFuture().getNoThrow(opCtx);
+    StatusOrStatusWith<mongo::BSONObj> out = Status{ErrorCodes::Error::BadValue, ""};
+    auto getDataFunc = [&]() {
+        out = _cmdState->promise.getFuture().getNoThrow(opCtx);
+    };
+    if (_options.yieldPolicy) {
+        uassertStatusOK(_options.yieldPolicy->yieldOrInterrupt(opCtx, getDataFunc));
+    } else {
+        getDataFunc();
+    }
     auto dateEnd = clock->now();
     _millisecondsWaiting += std::max(Milliseconds(0), dateEnd - dateStart);
     uassertStatusOK(out);

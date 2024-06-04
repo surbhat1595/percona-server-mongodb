@@ -32,7 +32,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <fmt/format.h>
 // IWYU pragma: no_include "ext/alloc_traits.h"
@@ -829,15 +828,16 @@ TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenantAcrossTenantsRequ
 }
 
 OplogEntry makeInvalidateOp(OpTime opTime,
-                            NamespaceString nss,
+                            const NamespaceString& nss,
                             BSONObj document,
                             OperationSessionInfo sessionInfo,
                             mongo::UUID uuid) {
     return DurableOplogEntry(opTime,                     // optime
                              OpTypeEnum::kUpdate,        // opType
-                             std::move(nss),             // namespace
+                             nss,                        // namespace
                              uuid,                       // uuid
                              boost::none,                // fromMigrate
+                             boost::none,                // checkExistenceForDiffInsert
                              OplogEntry::kOplogVersion,  // version
                              document,                   // o
                              boost::none,                // o2
@@ -3171,6 +3171,7 @@ protected:
         _opObserver->onDeleteFn = [&](OperationContext*,
                                       const CollectionPtr& coll,
                                       StmtId,
+                                      const BSONObj&,
                                       const OplogDeleteEntryArgs& args) {
             stdx::lock_guard<Latch> lock(_deleteMutex);
             auto nss = coll->ns();
@@ -4109,28 +4110,36 @@ TEST_F(IdempotencyTest, CreateCollectionWithCollation) {
     UUID uuid = UUID::gen();
 
     auto runOpsAndValidate = [this, uuid]() {
-        auto options = BSON("collation"
-                            << BSON("locale"
-                                    << "en"
-                                    << "caseLevel" << false << "caseFirst"
-                                    << "off"
-                                    << "strength" << 1 << "numericOrdering" << false << "alternate"
-                                    << "non-ignorable"
-                                    << "maxVariable"
-                                    << "punct"
-                                    << "normalization" << false << "backwards" << false << "version"
-                                    << "57.1")
-                            << "uuid" << uuid);
+        auto collationOpts = BSON("locale"
+                                  << "en"
+                                  << "caseLevel" << false << "caseFirst"
+                                  << "off"
+                                  << "strength" << 1 << "numericOrdering" << false << "alternate"
+                                  << "non-ignorable"
+                                  << "maxVariable"
+                                  << "punct"
+                                  << "normalization" << false << "backwards" << false << "version"
+                                  << "57.1");
+        auto options = BSON("collation" << collationOpts << "uuid" << uuid << "idIndex"
+                                        << BSON("collation" << collationOpts << "key"
+                                                            << BSON("_id" << 1) << "name"
+                                                            << "_id_"
+                                                            << "v" << 2));
         auto createColl = makeCreateCollectionOplogEntry(nextOpTime(), _nss, options);
         auto insertOp1 = insert(fromjson("{ _id: 'foo' }"));
+        auto updateOp1 = update("foo",
+                                update_oplog_entry::makeDeltaOplogEntry(
+                                    BSON(doc_diff::kUpdateSectionFieldName << fromjson("{x: 2}"))));
+        auto deleteOp1 =
+            makeDeleteDocumentOplogEntry(nextOpTime(), _nss, fromjson("{ _id: 'foo' }"));
         auto insertOp2 = insert(fromjson("{ _id: 'Foo', x: 1 }"));
-        auto updateOp = update("foo",
-                               update_oplog_entry::makeDeltaOplogEntry(
-                                   BSON(doc_diff::kUpdateSectionFieldName << fromjson("{x: 2}"))));
+        auto updateOp2 = update("Foo",
+                                update_oplog_entry::makeDeltaOplogEntry(
+                                    BSON(doc_diff::kUpdateSectionFieldName << fromjson("{x: 2}"))));
 
         // We don't drop and re-create the collection since we don't have ways
         // to wait until second-phase drop to completely finish.
-        auto ops = {createColl, insertOp1, insertOp2, updateOp};
+        auto ops = {createColl, insertOp1, updateOp1, deleteOp1, insertOp2, updateOp2};
         ASSERT_OK(runOpsInitialSync(ops));
         auto state = validate(_nss);
 
@@ -4366,6 +4375,7 @@ public:
             ns,             // namespace
             boost::none,    // uuid
             boost::none,    // fromMigrate
+            boost::none,    // checkExistenceForDiffInsert
             0,              // version
             object,         // o
             object2,        // o2
@@ -4397,6 +4407,7 @@ public:
             ns,             // namespace
             boost::none,    // uuid
             true,           // fromMigrate
+            boost::none,    // checkExistenceForDiffInsert
             0,              // version
             object,         // o
             object2,        // o2

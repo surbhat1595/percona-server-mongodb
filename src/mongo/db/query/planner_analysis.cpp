@@ -35,7 +35,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <cstring>
 #include <s2cellid.h>
@@ -565,7 +564,7 @@ std::unique_ptr<QuerySolutionNode> analyzeProjection(const CanonicalQuery& query
             // too many fields output, so we need to trim them down.
             return std::make_unique<ProjectionNodeSimple>(
                 addSortKeyGeneratorStageIfNeeded(query, hasSortStage, std::move(solnRoot)),
-                query.root(),
+                query.getPrimaryMatchExpression(),
                 projection);
         }
         if (isInclusionOnly) {
@@ -575,7 +574,7 @@ std::unique_ptr<QuerySolutionNode> analyzeProjection(const CanonicalQuery& query
                 // projection can cover.
                 return std::make_unique<ProjectionNodeCovered>(
                     addSortKeyGeneratorStageIfNeeded(query, hasSortStage, std::move(solnRoot)),
-                    query.root(),
+                    query.getPrimaryMatchExpression(),
                     projection,
                     std::move(coveredKeyObj));
             }
@@ -585,7 +584,7 @@ std::unique_ptr<QuerySolutionNode> analyzeProjection(const CanonicalQuery& query
     // No fast path available, we need to add this generic projection node.
     return std::make_unique<ProjectionNodeDefault>(
         addSortKeyGeneratorStageIfNeeded(query, hasSortStage, std::move(solnRoot)),
-        query.root(),
+        query.getPrimaryMatchExpression(),
         projection);
 }
 
@@ -725,7 +724,7 @@ boost::optional<const projection_ast::Projection*> attemptToGetProjectionFromQue
  * Returns true if 'setL' is a non-strict subset of 'setR'.
  *
  * The types of the sets are permitted to be different to allow checking something with compatible
- * but different types e.g. std::set<std::string> and StringDataUnorderedMap.
+ * but different types e.g. std::set<std::string>, StringMap.
  */
 template <typename SetL, typename SetR>
 bool isSubset(const SetL& setL, const SetR& setR) {

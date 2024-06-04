@@ -12,6 +12,7 @@ executor:
     - CheckReplDBHash
     - CheckReplOplogs
     - CheckReplPreImagesConsistency
+    - CheckReplChangeCollectionConsistency
     - ValidateCollections
     tests: true
   config:
@@ -61,11 +62,17 @@ executor:
       settings:
         catchUpTimeoutMillis: 0
   hooks:
+  - class: ClusterParameter
+    key: changeStreamOptions
+    value:
+      preAndPostImages:
+        expireAfterSeconds: 10
   - class: ContinuousStepdown
     kill: false
     terminate: false
   - class: CheckReplOplogs
   - class: CheckReplPreImagesConsistency
+  - class: CheckReplChangeCollectionConsistency
   - class: CheckReplDBHash
   - class: ValidateCollections
     shell_options:
@@ -74,11 +81,6 @@ executor:
           skipEnforceFastCountOnValidate: true
   - class: CleanEveryN
     n: 20
-  - class: ClusterParameter
-    key: changeStreamOptions
-    value:
-      preAndPostImages:
-        expireAfterSeconds: 10
 matrix_suite: true
 selector:
   exclude_files:

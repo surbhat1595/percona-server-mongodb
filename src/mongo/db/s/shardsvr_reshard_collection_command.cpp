@@ -85,6 +85,7 @@ public:
         using InvocationBase::InvocationBase;
 
         void typedRun(OperationContext* opCtx) {
+            opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
             uassertStatusOK(ShardingState::get(opCtx)->canAcceptShardedCommands());
             uassert(ErrorCodes::IllegalOperation,
                     "Can't reshard a collection in the config database",
@@ -131,7 +132,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(ShardsvrReshardCollectionCommand);
+MONGO_REGISTER_COMMAND(ShardsvrReshardCollectionCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

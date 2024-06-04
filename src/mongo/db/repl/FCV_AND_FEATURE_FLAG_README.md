@@ -12,8 +12,10 @@ feature *f* while there are still older version nodes in the cluster that are un
 
 FCV is persisted as a document in the `admin.system.version` collection. It will look something like
 the following if a node were to be in FCV 5.0:
-<pre><code>
-   { "_id" : "featureCompatibilityVersion", "version" : "5.0" }</code></pre>
+
+```
+   { "_id" : "featureCompatibilityVersion", "version" : "5.0" }
+```
 
 This document is present in every mongod in the cluster and is replicated to other members of the
 replica set whenever it is updated via writes to the `admin.system.version` collection. The FCV
@@ -21,9 +23,9 @@ document is also present on standalone nodes.
 
 ## FCV on Startup
 
-On a clean startup (the server currently has no replicated collections), the server will [create the FCV document for the first time](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/startup_recovery.cpp#L619). 
+On a clean startup (the server currently has no replicated collections), the server will [create the FCV document for the first time](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/startup_recovery.cpp#L619). 
 If it is running as a shard server (with the `--shardsvr option`),
-the server will [set the FCV to be the last LTS version](https://github.com/10gen/mongo/blob/386b1c0c74aa24c306f0ef5bcbde892aec89c8f6/src/mongo/db/commands/feature_compatibility_version.cpp#L442). 
+the server will [set the FCV to be the last LTS version](https://github.com/mongodb/mongo/blob/386b1c0c74aa24c306f0ef5bcbde892aec89c8f6/src/mongo/db/commands/feature_compatibility_version.cpp#L442). 
 This is to ensure compatibility when adding
 the shard to a downgraded version cluster. The config server will run
 `setFeatureCompatibilityVersion`on the shard to match the clusters FCV as part of `addShard`. If the
@@ -74,7 +76,7 @@ Each `mongod` release will support the following upgrade/downgrade paths:
 
 The command also requires a `{confirm: true}` parameter. This is so that users acknowledge that an 
 FCV + binary downgrade will require support assistance. Without this parameter, the 
-setFeatureCompatibilityVersion command for downgrade will [error](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L290-L298)
+setFeatureCompatibilityVersion command for downgrade will [error](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L290-L298)
 and say that once they have downgraded the FCV, if you choose to downgrade the binary version, it
 will require support assistance. Similarly, the setFeatureCompatibilityVersion command for upgrade
 will also error and say that once the cluster is upgraded, FCV + binary downgrade will no longer be
@@ -97,7 +99,7 @@ for more information on how to add upgrade/downgrade code to the command.
 1. **Transition to `kUpgradingFrom_X_To_Y` or `kDowngradingFrom_X_To_Y`**
 
     * In the first part, we start transition to `requestedVersion` by [updating the local FCV document to a
-`kUpgradingFrom_X_To_Y` or `kDowngradingFrom_X_To_Y` state](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L430-L437), respectively.
+`kUpgradingFrom_X_To_Y` or `kDowngradingFrom_X_To_Y` state](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L430-L437), respectively.
 
     * Transitioning to one of the `kUpgradingFrom_X_To_Y`/`kDowngradingFrom_X_To_Y` states updates
 the FCV document in `admin.system.version` with a new `targetVersion` field. Transitioning to a
@@ -105,8 +107,8 @@ the FCV document in `admin.system.version` with a new `targetVersion` field. Tra
 `targetVersion` field. These updates are done with `writeConcern: majority`. 
 
     * Transitioning to one of the `kUpgradingFrom_X_To_Y`/`kDowngradingFrom_X_to_Y`/`kVersion_Y`(on
-upgrade) states [sets the `minWireVersion` to `WireVersion::LATEST_WIRE_VERSION`](https://github.com/10gen/mongo/blob/386b1c0c74aa24c306f0ef5bcbde892aec89c8f6/src/mongo/db/op_observer/fcv_op_observer.cpp#L69)
-and also [closes all incoming connections from internal clients with lower binary versions](https://github.com/10gen/mongo/blob/386b1c0c74aa24c306f0ef5bcbde892aec89c8f6/src/mongo/db/op_observer/fcv_op_observer.cpp#L76-L82).
+upgrade) states [sets the `minWireVersion` to `WireVersion::LATEST_WIRE_VERSION`](https://github.com/mongodb/mongo/blob/386b1c0c74aa24c306f0ef5bcbde892aec89c8f6/src/mongo/db/op_observer/fcv_op_observer.cpp#L69)
+and also [closes all incoming connections from internal clients with lower binary versions](https://github.com/mongodb/mongo/blob/386b1c0c74aa24c306f0ef5bcbde892aec89c8f6/src/mongo/db/op_observer/fcv_op_observer.cpp#L76-L82).
 The reason we do this on `kDowngradingFrom_X_to_Y` is because we shouldn’t decrease the 
 minWireVersion until we have fully downgraded to the lower FCV in case we get any backwards 
 compatibility breakages, since during `kDowngradingFrom_X_to_Y` we may still be stopping/cleaning up
@@ -117,7 +119,7 @@ able to communicate with downgraded binary nodes until the FCV is completely dow
     e.g. if the requested FCV is not a valid transition).
 
 Some examples of on-disk representations of the upgrading and downgrading states:
-<pre><code>
+```
 kUpgradingFrom_5_0_To_5_1:
 {
     version: 5.0,
@@ -130,10 +132,10 @@ kDowngradingFrom_5_1_To_5_0:
     targetVersion: 5.0,
     previousVersion: 5.1
 }
-</code></pre>
+```
 
 
-2. **Run [`_prepareToUpgrade` or `_prepareToDowngrade`](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L497-L501):** 
+2. **Run [`_prepareToUpgrade` or `_prepareToDowngrade`](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L497-L501):** 
     * First, we do any actions to prepare for upgrade/downgrade that must be taken before the FCV
  full transition lock. For example, we cancel serverless migrations in this step. 
     * Then, the FCV full transition lock is acquired in shared
@@ -151,18 +153,18 @@ for more information on the locks used in the setFCV command.
     * If an FCV downgrade fails at this point, the user can either remove the incompatible user data and retry the FCV downgrade, or they can upgrade the FCV back to the original FCV.
     * On this part no metadata cleanup is performed yet.
 
-3. **Complete any [upgrade or downgrade specific code](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L524-L528), done in `_runUpgrade` or `_runDowngrade`.** This may include metadata cleanup. 
+3. **Complete any [upgrade or downgrade specific code](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L524-L528), done in `_runUpgrade` or `_runDowngrade`.** This may include metadata cleanup. 
     * For upgrade, we update metadata to make sure the new features in the upgraded version work for 
  both sharded and non-sharded clusters. 
     * For downgrade, we transition from `kDowngradingFrom_X_to_Y` to 
-`isCleaningServerMetadata`, which indicates that we have started [cleaning up internal server metadata](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L1495).  Transitioning to 
+`isCleaningServerMetadata`, which indicates that we have started [cleaning up internal server metadata](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L1495).  Transitioning to 
 `isCleaningServerMetadata` will add a `isCleaningServerMetadata` field, which will be removed upon
 transitioning to `kVersion_Y`. This update is also done using `writeConcern: majority`.
 After this point, if the FCV downgrade fails, it is no longer safe to transition back to the original 
 upgraded FCV, and the user must retry the FCV downgrade. Then we perform any internal server downgrade cleanup.
 
 Examples on-disk representation of the `isCleaningServerMetadata` state:
-<pre><code>
+```
 isCleaningServerMetadata after kDowngradingFrom_5_1_To_5_0:
 { 
     version: 5.0, 
@@ -170,9 +172,9 @@ isCleaningServerMetadata after kDowngradingFrom_5_1_To_5_0:
     previousVersion: 5.1,
     isCleaningServerMetadata: true
 }
-</code></pre>
+```
 
-4. Finally, we [complete transition](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L541-L548) by updating the
+4. Finally, we [complete transition](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L541-L548) by updating the
 local FCV document to the fully upgraded or downgraded version. As part of transitioning to the 
 `kVersion_Y` state, the `targetVersion`, `previousVersion`, and `isCleaningServerMetadata` 
 (if applicable) fields of the FCV document are deleted while the `version` field is updated to 
@@ -194,27 +196,27 @@ or one phase ahead of shard servers. For example, the config server cannot be in
 shard server is still in phase 1. 
 
 Additionally, when the config server sends each command to each of
-the shards, this is done [synchronously](https://github.com/10gen/mongo/blob/1c97952f194d80e0ba58a4fbe553f09326a5407f/src/mongo/db/s/config/sharding_catalog_manager.cpp#L858-L887), so the config will send the command to one shard and wait for 
+the shards, this is done [synchronously](https://github.com/mongodb/mongo/blob/1c97952f194d80e0ba58a4fbe553f09326a5407f/src/mongo/db/s/config/sharding_catalog_manager.cpp#L858-L887), so the config will send the command to one shard and wait for 
 either a success or failure response. If it succeeds, then the config server will send the 
-command to the next shard. If it fails, then the whole FCV upgrade/downgrade will [fail](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L1032-L1033). This means that if one shard succeeds but another fails, the overall FCV upgrade/downgrade
+command to the next shard. If it fails, then the whole FCV upgrade/downgrade will [fail](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L1032-L1033). This means that if one shard succeeds but another fails, the overall FCV upgrade/downgrade
 will fail.
 
 1. First, the config server transitions to `kUpgradingFrom_X_To_Y` or `kDowngradingFrom_X_To_Y` (shards are still in the 
 old FCV). 
 2. Phase-1
-    * a. Config server [sends phase-1 command to shards](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L476).
+    * a. Config server [sends phase-1 command to shards](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L476).
     * b. Shard servers transition  to `kUpgradingFrom_X_To_Y` or `kDowngradingFrom_X_To_Y`.
-    * c. Shard servers do any [phase-1 tasks](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L460) (for downgrading, this would include stopping new features).
+    * c. Shard servers do any [phase-1 tasks](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L460) (for downgrading, this would include stopping new features).
 3. Phase-2 (throughout this phase config and shards are all in the transitional FCV)
     * a. Config server runs `_prepareToUpgrade` or `_prepareToDowngrade`, takes the full FCV transition lock, 
     and verifies user data compatibility for upgrade/downgrade. 
-    * b. Config server [sends phase-2 command to shards](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L506-L507). 
+    * b. Config server [sends phase-2 command to shards](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L506-L507). 
     * c. Shard servers run `_prepareToUpgrade` or `_prepareToDowngrade`, takes the full FCV transition lock, 
     and verifies user data compatibility for upgrade/downgrade. 
 4. Phase-3
     * a. Config server runs `_runUpgrade` or `_runDowngrade`. For downgrade, this means the config
     server enters the `isCleaningServerMetadata` phase and cleans up any internal server metadata.
-    * b. Config server [sends phase-3 command to shards](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L1499).
+    * b. Config server [sends phase-3 command to shards](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L1499).
     * c. Shard servers run `_runUpgrade` or `_runDowngrade`. For downgrade, this means the shard
     servers enter the `isCleaningServerMetadata` phase and cleans up any internal server metadata.
     * d. Shards finish and enter the fully upgraded or downgraded state (on upgrade, the config 
@@ -256,8 +258,8 @@ There are three locks used in the setFCV command:
 * [fcvDocumentLock](https://github.com/mongodb/mongo/blob/bd8a8d4d880577302c777ff961f359b03435126a/src/mongo/db/commands/feature_compatibility_version.cpp#L215) 
     * The setFCV command takes this lock in X mode when it modifies the FCV document. This includes
     from [fully upgraded -> downgrading](https://github.com/mongodb/mongo/blob/bd8a8d4d880577302c777ff961f359b03435126a/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L350), 
-    [downgrading -> isCleaningServerMetadata](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L1459-L1460),
-    [isCleaningServerMetadata -> fully downgraded](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L533),
+    [downgrading -> isCleaningServerMetadata](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L1459-L1460),
+    [isCleaningServerMetadata -> fully downgraded](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L533),
     and vice versa. 
     * Other operations should [take this lock in shared mode](https://github.com/mongodb/mongo/blob/bd8a8d4d880577302c777ff961f359b03435126a/src/mongo/db/commands/feature_compatibility_version.cpp#L594-L599)
     if they want to ensure that the FCV state _does not change at all_ during the operation. 
@@ -293,19 +295,19 @@ The `setFeatureCompatibilityVersion` command is done in three parts. This corres
 states that the FCV document can be in, as described in the above section.
 
 In the first part, we start transition to `requestedVersion` by [updating the local FCV document to a
-`kUpgradingFrom_X_To_Y` or `kDowngradingFrom_X_To_Y` state](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L430-L437), respectively. 
+`kUpgradingFrom_X_To_Y` or `kDowngradingFrom_X_To_Y` state](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L430-L437), respectively. 
 **This step is expected to be fast and always succeed.** This means that code that
 might fail or take a long time should ***not*** be added before this point in the 
 `setFeatureCompatibilityVersion` command.
 
-In the second part, we perform [upgrade/downgrade-ability checks](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L497-L501). This is done on `_prepareToUpgrade`
+In the second part, we perform [upgrade/downgrade-ability checks](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L497-L501). This is done on `_prepareToUpgrade`
 and `_prepareToDowngrade`. On this part no metadata cleanup is performed yet.
 
-In the last part, we complete any [upgrade or downgrade specific code](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L524-L528), done in `_runUpgrade` and 
+In the last part, we complete any [upgrade or downgrade specific code](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L524-L528), done in `_runUpgrade` and 
 `_runDowngrade`. This includes possible metadata cleanup. Note that once we start `_runDowngrade`, 
 we cannot transition back to `kUpgradingFrom_X_To_Y`until the full downgrade completes.
 
-Then we [complete transition](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L541-L548) by updating the
+Then we [complete transition](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L541-L548) by updating the
 local FCV document to the fully upgraded or downgraded version.
 
 ***All feature-specific FCV upgrade or downgrade code should go into the following functions.*** 
@@ -384,7 +386,7 @@ downgrade because it is not enabled on the downgraded version. For example, if w
 downgrading to 6.0, we must check if there are any new features that may have been used that are not
 enabled on 6.0, and perform any necessary downgrade logic for that. 
 
-To do so, we must do the following ([example in the codebase](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L1061-L1063)): 
+To do so, we must do the following ([example in the codebase](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L1061-L1063)): 
 
 ```
 if (!featureFlag.isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, originalVersion)) {
@@ -394,7 +396,7 @@ if (!featureFlag.isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, 
 where `requestedVersion` is the version we are downgrading to and `originalVersion` is the version
 we are downgrading from. 
 
-Similarly, we can use [isEnabledOnTargetFCVButDisabledOnOriginalFCV](https://github.com/10gen/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L809-L810)
+Similarly, we can use [isEnabledOnTargetFCVButDisabledOnOriginalFCV](https://github.com/mongodb/mongo/blob/c6e5701933a98b4fe91c2409c212fcce2d3d34f0/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L809-L810)
 for upgrade checks. 
 
 ```
@@ -410,7 +412,7 @@ Sometimes, we may want to make a generic FCV reference to implement logic around
 that is not specific to a certain release version.
 
 For these checks, we *must* use the [generic constants](https://github.com/mongodb/mongo/blob/e08eba28ab9ad4d54adb95e8517c9d43276e5336/src/mongo/db/server_options.h#L202-L216). 
-We should not be using the FCV constants like kVersion_6_0 ([example of what to avoid](https://github.com/10gen/mongo/blob/ef8bdb8d0cbd584d47c54d64c3215ae29ec1a32f/src/mongo/db/pipeline/document_source_list_catalog.cpp#L130)). 
+We should not be using the FCV constants like kVersion_6_0 ([example of what to avoid](https://github.com/mongodb/mongo/blob/ef8bdb8d0cbd584d47c54d64c3215ae29ec1a32f/src/mongo/db/pipeline/document_source_list_catalog.cpp#L130)). 
 Instead, we should branch 
 the different behavior using feature flags (see [When to Use Feature Flags](#when-to-use-feature-flags) and [Feature Flag Gating](#feature-flag-gating)).
 For generic cases
@@ -484,7 +486,7 @@ development.
 Additionally, any project or ticket that wants to introduce different behavior based on which FCV
 the server is running ***must*** add a feature flag. In the past, the branching of the different
 behavior would be done by directly checking which FCV the server was running. However, we now must 
-***not*** be using any references to FCV constants such as kVersion_6_0 ([example of what to avoid](https://github.com/10gen/mongo/blob/ef8bdb8d0cbd584d47c54d64c3215ae29ec1a32f/src/mongo/db/pipeline/document_source_list_catalog.cpp#L130)).
+***not*** be using any references to FCV constants such as kVersion_6_0 ([example of what to avoid](https://github.com/mongodb/mongo/blob/ef8bdb8d0cbd584d47c54d64c3215ae29ec1a32f/src/mongo/db/pipeline/document_source_list_catalog.cpp#L130)).
 Instead we should branch 
 the different behavior using feature flags (see [Feature Flag Gating](#feature-flag-gating)).
 ***This means that individual ticket that wants to introduce an FCV check will also need to create a 
@@ -549,7 +551,7 @@ Feature flags are created by adding it to an IDL file:
 
 A feature flag has the following properties:
 
-* Server Parameter Name: featureFlag<MyFeatureName>
+* Server Parameter Name: featureFlag\<MyFeatureName\>
     * The name should not include "Use", "Allow", "Enable", or "Disable".
 * Server Parameter set_at value: [ startup ]
     * Feature flags should generally be settable at server startup only. This supports the use of
@@ -607,17 +609,32 @@ if(feature_flags::gFeatureFlagToaster.isEnabled(serverGlobalParams.featureCompat
 }
 ```
 
-Note that `isEnabled` checks if the feature flag is enabled on the input FCV, which is usually
-the server's current FCV `serverGlobalParams.featureCompatibility`. If the FCV has not been
-initialized yet, it will check if the feature flag is enabled on the lastLTS FCV.
 If the feature flag has `shouldBeFCVGated` set to false, then `isEnabled` will simply return
 whether the feature flag is enabled.
 
+### Feature Flag Gating During Initial Sync
+***IMPORTANT NOTE ABOUT INITIAL SYNC***:
 
-There are some places where we only want to check if the feature flag is turned on, regardless of
-which FCV we are on. For example, this could be the case if we need to perform the check in a spot
-in the code when the FCV has not been initialized yet during startup. In these cases we should use the 
-`isEnabledAndIgnoreFCVUnsafeAtStartup` helper.
+// TODO SERVER-82246: Update README once invariant is added back in.
+
+`isEnabled` checks if the feature flag is enabled on the input FCV, which is usually
+the server's current FCV `serverGlobalParams.featureCompatibility`. However, during initial sync, we temporarily reset the FCV to be uninintialized. 
+
+Currently, if the FCV has not been initialized yet, it will check if the feature flag is enabled on the lastLTS FCV. After SERVER-82246, 
+this function will instead throw an invariant if the FCV is uninitialized.
+
+Each feature team should think about whether the feature could be run during initial sync, for example: 
+ * if the feature is part of initial sync itself
+ * if the feature is in a background thread that runs during initial sync
+ * if the feature is run in a command that is allowed during initial sync, such as `hello`, etc 
+
+If the feature will never run during initial sync, it's fine to continue using `isEnabled`. However, if the feature could be run during initial sync, the feature team 
+should use one of these options instead: 
+ * Use `isEnabledUseLastLTSFCVWhenUninitialized`. This is currently the same as the `isEnabled` function. It checks against the default last LTS FCV version if the FCV version is unset, but note that this could result in the feature not being turned on even though the FCV will be set to latest once initial sync is complete.
+ * Use `isEnabledUseLatestFCVWhenUninitialized`. This instead checks against the 
+latest FCV version if the FCV version is unset, but note that this could result in the feature being turned on
+even though the FCV has not been upgraded yet and will be set to lastLTS once initial sync is complete.
+ * Write your own special logic to avoid the invariant. If there is a request for creating additional server-wide helper functions in this area, please reach out to the Replication team. 
 
 There are some cases outside of startup where we also want to check if the feature flag is turned on,
 regardless of which FCV we are on. In these cases we can use the `isEnabledAndIgnoreFCVUnsafe`
@@ -652,7 +669,7 @@ const isToasterEnabled = db.adminCommand({getParameter: 1, featureFlagToaster: 1
 ```
 We can also use the FeatureFlagUtil library like so: 
 ```
-if (FeatureFlagUtil.isEnabled(db, "Toaster")) {
+if (FeatureFlagUtil.isPresentAndEnabled(db, "Toaster")) {
 }
 ```
 

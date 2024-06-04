@@ -44,6 +44,8 @@
 #include "mongo/db/basic_types.h"
 #include "mongo/db/commands/bulk_write_crud_op.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/ops/delete_request_gen.h"
+#include "mongo/db/ops/update_request.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/repl/oplog.h"
@@ -54,7 +56,7 @@
 namespace mongo {
 namespace bulk_write_common {
 
-void validateRequest(const BulkWriteCommandRequest& req) {
+void validateRequest(const BulkWriteCommandRequest& req, bool isRouter) {
     const auto& ops = req.getOps();
     const auto& nsInfos = req.getNsInfo();
 
@@ -82,10 +84,16 @@ void validateRequest(const BulkWriteCommandRequest& req) {
 
     // Validate the namespaces in nsInfo.
     for (const auto& nsInfo : nsInfos) {
+        auto& ns = nsInfo.getNs();
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "Invalid namespace specified for bulkWrite: '"
                               << nsInfo.getNs().toStringForErrorMsg() << "'",
-                nsInfo.getNs().isValid());
+                ns.isValid());
+        uassert(7934201,
+                "'isTimeseriesNamespace' parameter can only be set when the request is sent on "
+                "'system.buckets' namespace to each shard",
+                !nsInfo.getIsTimeseriesNamespace() ||
+                    (!isRouter && ns.isTimeseriesBucketsCollection()));
     }
 
     // Validate that every ops entry has a valid nsInfo index.
@@ -165,8 +173,65 @@ write_ops::InsertCommandRequest makeInsertCommandRequestForFLE(
     requestBase.setEncryptionInformation(nsInfoEntry.getEncryptionInformation());
     requestBase.setOrdered(req.getOrdered());
     requestBase.setBypassDocumentValidation(req.getBypassDocumentValidation());
+    requestBase.setCollectionUUID(nsInfoEntry.getCollectionUUID());
 
     return request;
+}
+
+write_ops::UpdateOpEntry makeUpdateOpEntryFromUpdateOp(const BulkWriteUpdateOp* op) {
+    write_ops::UpdateOpEntry update;
+    update.setQ(op->getFilter());
+    update.setMulti(op->getMulti());
+    update.setC(op->getConstants());
+    update.setU(op->getUpdateMods());
+    update.setHint(op->getHint());
+    update.setCollation(op->getCollation());
+    update.setArrayFilters(op->getArrayFilters().value_or(std::vector<BSONObj>()));
+    update.setUpsert(op->getUpsert());
+    update.setUpsertSupplied(op->getUpsertSupplied());
+    update.setSampleId(op->getSampleId());
+    update.setAllowShardKeyUpdatesWithoutFullShardKeyInQuery(
+        op->getAllowShardKeyUpdatesWithoutFullShardKeyInQuery());
+    return update;
+}
+
+UpdateRequest makeUpdateRequestFromUpdateOp(OperationContext* opCtx,
+                                            const NamespaceInfoEntry& nsEntry,
+                                            const BulkWriteUpdateOp* op,
+                                            const StmtId& stmtId,
+                                            const boost::optional<BSONObj>& letParameters) {
+    auto updateRequest = UpdateRequest(bulk_write_common::makeUpdateOpEntryFromUpdateOp(op));
+    updateRequest.setNamespaceString(nsEntry.getNs());
+    updateRequest.setIsTimeseriesNamespace(nsEntry.getIsTimeseriesNamespace());
+    updateRequest.setProj(BSONObj());
+    updateRequest.setLegacyRuntimeConstants(Variables::generateRuntimeConstants(opCtx));
+    updateRequest.setLetParameters(letParameters);
+    updateRequest.setReturnDocs(UpdateRequest::RETURN_NONE);
+    updateRequest.setYieldPolicy(PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
+    updateRequest.setStmtIds({stmtId});
+    return updateRequest;
+}
+
+DeleteRequest makeDeleteRequestFromDeleteOp(OperationContext* opCtx,
+                                            const NamespaceInfoEntry& nsEntry,
+                                            const BulkWriteDeleteOp* op,
+                                            const StmtId& stmtId,
+                                            const boost::optional<BSONObj>& letParameters) {
+    auto deleteRequest = DeleteRequest();
+    deleteRequest.setNsString(nsEntry.getNs());
+    deleteRequest.setIsTimeseriesNamespace(nsEntry.getIsTimeseriesNamespace());
+    deleteRequest.setQuery(op->getFilter());
+    deleteRequest.setProj(BSONObj());
+    deleteRequest.setLegacyRuntimeConstants(Variables::generateRuntimeConstants(opCtx));
+    deleteRequest.setLet(letParameters);
+    deleteRequest.setHint(op->getHint());
+    deleteRequest.setCollation(op->getCollation().value_or(BSONObj()));
+    deleteRequest.setMulti(op->getMulti());
+    deleteRequest.setIsExplain(false);
+    deleteRequest.setSampleId(op->getSampleId());
+    deleteRequest.setYieldPolicy(PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
+    deleteRequest.setStmtId(stmtId);
+    return deleteRequest;
 }
 
 write_ops::UpdateCommandRequest makeUpdateCommandRequestFromUpdateOp(
@@ -176,19 +241,7 @@ write_ops::UpdateCommandRequest makeUpdateCommandRequestFromUpdateOp(
 
     auto stmtId = bulk_write_common::getStatementId(req, currentOpIdx);
 
-    write_ops::UpdateOpEntry update;
-    update.setQ(op->getFilter());
-    update.setMulti(op->getMulti());
-    update.setC(op->getConstants());
-    update.setU(op->getUpdateMods());
-    update.setHint(op->getHint());
-    if (op->getCollation()) {
-        update.setCollation(op->getCollation().value());
-    }
-    update.setArrayFilters(op->getArrayFilters().value_or(std::vector<BSONObj>()));
-    update.setUpsert(op->getUpsert());
-
-    std::vector<write_ops::UpdateOpEntry> updates{update};
+    std::vector<write_ops::UpdateOpEntry> updates{makeUpdateOpEntryFromUpdateOp(op)};
     write_ops::UpdateCommandRequest updateCommand(nsEntry.getNs(), updates);
 
     updateCommand.setDollarTenant(req.getDollarTenant());
@@ -235,6 +288,33 @@ write_ops::DeleteCommandRequest makeDeleteCommandRequestForFLE(
         req.getBypassDocumentValidation());
 
     return deleteRequest;
+}
+
+BulkWriteCommandRequest makeSingleOpBulkWriteCommandRequest(
+    const BulkWriteCommandRequest& bulkWriteReq, size_t opIdx) {
+
+    auto op = BulkWriteCRUDOp(bulkWriteReq.getOps()[opIdx]);
+
+    // Make a copy of the nsEntry for the op at opIdx.
+    NamespaceInfoEntry newNsEntry = bulkWriteReq.getNsInfo()[op.getNsInfoIdx()];
+
+    // Make a copy of the operation and adjust its namespace index to 0.
+    auto newOp = bulkWriteReq.getOps()[opIdx];
+    stdx::visit(OverloadedVisitor{
+                    [](mongo::BulkWriteInsertOp& op) { op.setInsert(0); },
+                    [](mongo::BulkWriteUpdateOp& op) { op.setUpdate(0); },
+                    [](mongo::BulkWriteDeleteOp& op) { op.setDeleteCommand(0); },
+                },
+                newOp);
+
+    BulkWriteCommandRequest singleOpRequest;
+    singleOpRequest.setOps({newOp});
+    singleOpRequest.setNsInfo({newNsEntry});
+    singleOpRequest.setBypassDocumentValidation(bulkWriteReq.getBypassDocumentValidation());
+    singleOpRequest.setLet(bulkWriteReq.getLet());
+    singleOpRequest.setStmtId(bulk_write_common::getStatementId(bulkWriteReq, opIdx));
+    singleOpRequest.setDbName(DatabaseName::kAdmin);
+    return singleOpRequest;
 }
 
 }  // namespace bulk_write_common

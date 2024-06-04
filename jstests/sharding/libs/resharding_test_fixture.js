@@ -1,4 +1,5 @@
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {getDBNameAndCollNameFromFullNamespace} from "jstests/libs/namespace_utils.js";
 import {Thread} from "jstests/libs/parallelTester.js";
 import {extractUUIDFromObject, getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
 import {CreateShardedCollectionUtil} from "jstests/sharding/libs/create_sharded_collection_util.js";
@@ -68,6 +69,8 @@ export var ReshardingTest = class {
         this._configShard = configShard || jsTestOptions().configShard;
         this._wiredTigerConcurrentWriteTransactions = wiredTigerConcurrentWriteTransactions;
         this._reshardingOplogBatchTaskCount = reshardingOplogBatchTaskCount;
+        /** @private */
+        this._opType = "reshardCollection";
 
         // Properties set by setup().
         /** @private */
@@ -281,6 +284,31 @@ export var ReshardingTest = class {
     }
 
     /**
+     * Creates an unsharded collection with unsplittable: true
+     */
+    createUnshardedCollection({ns, primaryShardName = this.donorShardNames[0]}) {
+        this._ns = ns;
+        this._currentShardKey = Object.assign({_id: 1});
+        const [dbName, collName] = getDBNameAndCollNameFromFullNamespace(ns);
+
+        assert.commandWorked(
+            this._st.s.adminCommand({enableSharding: dbName, primaryShard: primaryShardName}));
+        assert.commandWorked(
+            this._st.s.getDB(dbName).runCommand({createUnsplittableCollection: collName}));
+
+        const sourceCollection = this._st.s.getCollection(ns);
+        const sourceDB = sourceCollection.getDB();
+
+        this._primaryShardName = primaryShardName;
+
+        this._sourceCollectionUUID = getUUIDFromListCollections(sourceDB, collName);
+        const sourceCollectionUUIDString = extractUUIDFromObject(this._sourceCollectionUUID);
+        this._tempNs = `${sourceDB.getName()}.system.resharding.${sourceCollectionUUIDString}`;
+
+        return sourceCollection;
+    }
+
+    /**
      * Shards a non-existing collection using the specified shard key and chunk ranges.
      *
      * @param chunks - an array of
@@ -295,13 +323,12 @@ export var ReshardingTest = class {
         const sourceCollection = this._st.s.getCollection(ns);
         const sourceDB = sourceCollection.getDB();
 
-        assert.commandWorked(sourceDB.adminCommand({enableSharding: sourceDB.getName()}));
-
         // mongos won't know about the temporary resharding collection and will therefore assume the
         // collection is unsharded. We configure one of the recipient shards to be the primary shard
         // for the database so mongos still ends up routing operations to a shard which owns the
         // temporary resharding collection.
-        this._st.ensurePrimaryShard(sourceDB.getName(), primaryShardName);
+        assert.commandWorked(sourceDB.adminCommand(
+            {enableSharding: sourceDB.getName(), primaryShard: primaryShardName}));
         this._primaryShardName = primaryShardName;
 
         CreateShardedCollectionUtil.shardCollectionWithChunks(
@@ -348,7 +375,8 @@ export var ReshardingTest = class {
 
     /** @private */
     _startReshardingInBackgroundAndAllowCommandFailure(
-        {newShardKeyPattern, newChunks, forceRedistribution, reshardingUUID}, expectedErrorCode) {
+        {newShardKeyPattern, newChunks, forceRedistribution, reshardingUUID, toShard},
+        expectedErrorCode) {
         for (let disallowedErrorCode of [ErrorCodes.FailedToSatisfyReadPreference,
                                          ErrorCodes.HostUnreachable,
         ]) {
@@ -360,11 +388,13 @@ export var ReshardingTest = class {
                     " up retrying and the client must instead retry");
         }
 
-        newChunks = newChunks.map(
-            chunk => ({min: chunk.min, max: chunk.max, recipientShardId: chunk.shard}));
-        this._presetReshardedChunks = newChunks;
-
         this._newShardKey = Object.assign({}, newShardKeyPattern);
+
+        if (toShard === undefined) {
+            newChunks = newChunks.map(
+                chunk => ({min: chunk.min, max: chunk.max, recipientShardId: chunk.shard}));
+            this._presetReshardedChunks = newChunks;
+        }
 
         this._pauseCoordinatorBeforeBlockingWritesFailpoints = [];
         this._pauseCoordinatorBeforeDecisionPersistedFailpoints = [];
@@ -389,7 +419,9 @@ export var ReshardingTest = class {
                      newChunks,
                      forceRedistribution,
                      reshardingUUID,
-                     commandDoneSignal) {
+                     commandDoneSignal,
+                     opType,
+                     toShard) {
                 const conn = new Mongo(host);
 
                 // We allow the client to retry the reshardCollection a large but still finite
@@ -401,11 +433,25 @@ export var ReshardingTest = class {
 
                 let res;
                 for (let i = 1; i <= kMaxNumAttempts; ++i) {
-                    let command = {
-                        reshardCollection: ns,
-                        key: newShardKeyPattern,
-                        _presetReshardedChunks: newChunks,
-                    };
+                    let command = {};
+                    switch (opType) {
+                        case 'reshardCollection':
+                            command = {
+                                reshardCollection: ns,
+                                key: newShardKeyPattern,
+                                _presetReshardedChunks: newChunks,
+                            };
+                            break;
+                        case 'moveCollection':
+                            command = {moveCollection: ns};
+                            break;
+                        case 'unshardCollection':
+                            command = {unshardCollection: ns};
+                            break;
+                        default:
+                            assert(false, "Unexpected opType");
+                    }
+
                     if (forceRedistribution !== undefined) {
                         command = Object.merge(command, {forceRedistribution: forceRedistribution});
                     }
@@ -414,6 +460,9 @@ export var ReshardingTest = class {
                         // through the thread constructor.
                         reshardingUUID = eval(reshardingUUID);
                         command = Object.merge(command, {reshardingUUID: reshardingUUID});
+                    }
+                    if (toShard !== undefined) {
+                        command = Object.merge(command, {toShard: toShard});
                     }
                     res = conn.adminCommand(command);
 
@@ -438,10 +487,106 @@ export var ReshardingTest = class {
             newChunks,
             forceRedistribution,
             reshardingUUID ? reshardingUUID.toString() : undefined,
-            this._commandDoneSignal);
+            this._commandDoneSignal,
+            this._opType,
+            toShard);
 
         this._reshardingThread.start();
         this._isReshardingActive = true;
+    }
+
+    /**
+     * Moves an existing unsharded collection to toShard.
+     *
+     * @param toShard - shardId of the shard to move to.
+     *
+     * @param duringReshardingFn - a function which optionally accepts the temporary resharding
+     * namespace string. It is only guaranteed to be called after mongos has started running the
+     * reshardCollection command. Callers should use DiscoverTopology.findConnectedNodes() to
+     * introspect the state of the donor or recipient shards if they need more specific
+     * synchronization.
+     *
+     * @param expectedErrorCode - the expected response code for the reshardCollection command.
+     *
+     * @param postCheckConsistencyFn - a function for evaluating additional correctness
+     * assertions. This function is called in the critical section, after the `reshardCollection`
+     * command has shuffled data, but before the coordinator persists a decision.
+     *
+     * @param postDecisionPersistedFn - a function for evaluating addition assertions after
+     * the decision has been persisted, but before the resharding operation finishes and returns
+     * to the client.
+     *
+     * @param afterReshardingFn - a function that will be called after the resharding operation
+     * finishes but before checking the the state post resharding. By the time afterReshardingFn
+     * is called the temporary resharding collection will either have been dropped or renamed.
+     */
+    withMoveCollectionInBackground({toShard}, duringReshardingFn = (tempNs) => {}, {
+        expectedErrorCode = ErrorCodes.OK,
+        postCheckConsistencyFn = (tempNs) => {},
+        postDecisionPersistedFn = () => {},
+        afterReshardingFn = () => {}
+    } = {}) {
+        this._opType = "moveCollection";
+        this._startReshardingInBackgroundAndAllowCommandFailure(
+            {newShardKeyPattern: {_id: 1}, toShard: toShard}, expectedErrorCode);
+
+        assert.soon(() => {
+            const op = this._findMoveCollectionCommandOp();
+            return op !== undefined || this._commandDoneSignal.getCount() === 0;
+        }, "failed to find moveCollection in $currentOp output");
+
+        this._callFunctionSafely(() => duringReshardingFn(this._tempNs));
+        this._checkConsistencyAndPostState(expectedErrorCode,
+                                           () => postCheckConsistencyFn(this._tempNs),
+                                           () => postDecisionPersistedFn(),
+                                           () => afterReshardingFn());
+    }
+
+    /**
+     * Unshards an existing sharded collection to toShard.
+     *
+     * @param toShard (Optional) - shardId of the shard to unshard to.
+     *
+     * @param duringReshardingFn - a function which optionally accepts the temporary resharding
+     * namespace string. It is only guaranteed to be called after mongos has started running the
+     * reshardCollection command. Callers should use DiscoverTopology.findConnectedNodes() to
+     * introspect the state of the donor or recipient shards if they need more specific
+     * synchronization.
+     *
+     * @param expectedErrorCode - the expected response code for the reshardCollection command.
+     *
+     * @param postCheckConsistencyFn - a function for evaluating additional correctness
+     * assertions. This function is called in the critical section, after the `reshardCollection`
+     * command has shuffled data, but before the coordinator persists a decision.
+     *
+     * @param postDecisionPersistedFn - a function for evaluating addition assertions after
+     * the decision has been persisted, but before the resharding operation finishes and returns
+     * to the client.
+     *
+     * @param afterReshardingFn - a function that will be called after the resharding operation
+     * finishes but before checking the the state post resharding. By the time afterReshardingFn
+     * is called the temporary resharding collection will either have been dropped or renamed.
+     */
+    withUnshardCollectionInBackground({toShard}, duringReshardingFn = (tempNs) => {}, {
+        expectedErrorCode = ErrorCodes.OK,
+        postCheckConsistencyFn = (tempNs) => {},
+        postDecisionPersistedFn = () => {},
+        afterReshardingFn = () => {}
+    } = {}) {
+        this._opType = "unshardCollection";
+        this._startReshardingInBackgroundAndAllowCommandFailure(
+            {newShardKeyPattern: {_id: 1}, toShard: toShard}, expectedErrorCode);
+
+        assert.soon(() => {
+            const op = this._findUnshardCollectionCommandOp();
+            return op !== undefined || this._commandDoneSignal.getCount() === 0;
+        }, "failed to find unshardCollection in $currentOp output");
+
+        this._callFunctionSafely(() => duringReshardingFn(this._tempNs));
+        this._checkConsistencyAndPostState(expectedErrorCode,
+                                           () => postCheckConsistencyFn(this._tempNs),
+                                           () => postDecisionPersistedFn(),
+                                           () => afterReshardingFn());
     }
 
     /**
@@ -479,6 +624,7 @@ export var ReshardingTest = class {
                                    postDecisionPersistedFn = () => {},
                                    afterReshardingFn = () => {}
                                } = {}) {
+        this._opType = "reshardCollection";
         this._startReshardingInBackgroundAndAllowCommandFailure(
             {newShardKeyPattern, newChunks, forceRedistribution, reshardingUUID},
             expectedErrorCode);
@@ -493,6 +639,32 @@ export var ReshardingTest = class {
                                            () => postCheckConsistencyFn(this._tempNs),
                                            () => postDecisionPersistedFn(),
                                            () => afterReshardingFn());
+    }
+
+    /** @private */
+    _findMoveCollectionCommandOp() {
+        const filter = {
+            type: "op",
+            "originatingCommand.reshardCollection": this._ns,
+            "provenance": "moveCollection"
+        };
+
+        return this._st.s.getDB("admin")
+            .aggregate([{$currentOp: {allUsers: true, localOps: false}}, {$match: filter}])
+            .toArray()[0];
+    }
+
+    /** @private */
+    _findUnshardCollectionCommandOp() {
+        const filter = {
+            type: "op",
+            "originatingCommand.reshardCollection": this._ns,
+            "provenance": "unshardCollection"
+        };
+
+        return this._st.s.getDB("admin")
+            .aggregate([{$currentOp: {allUsers: true, localOps: false}}, {$match: filter}])
+            .toArray()[0];
     }
 
     /** @private */

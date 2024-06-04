@@ -81,10 +81,10 @@ public:
             const auto& dbNss = ns();
             const auto& toShardId = request().getTo();
 
-            uassert(ErrorCodes::InvalidNamespace,
-                    "invalid database {}"_format(dbNss.toStringForErrorMsg()),
-                    NamespaceString::validDBName(dbNss.dbName(),
-                                                 NamespaceString::DollarInDbNameBehavior::Allow));
+            uassert(
+                ErrorCodes::InvalidNamespace,
+                "invalid database {}"_format(dbNss.toStringForErrorMsg()),
+                DatabaseName::isValid(dbNss.dbName(), DatabaseName::DollarInDbNameBehavior::Allow));
 
             uassert(
                 ErrorCodes::InvalidOptions,
@@ -92,7 +92,7 @@ public:
                 !dbNss.isOnInternalDb());
 
             ScopeGuard onBlockExit(
-                [&] { Grid::get(opCtx)->catalogCache()->purgeDatabase(dbNss.db_forSharding()); });
+                [&] { Grid::get(opCtx)->catalogCache()->purgeDatabase(dbNss.dbName()); });
 
             const auto coordinatorFuture = [&] {
                 FixedFCVRegion fcvRegion(opCtx);
@@ -106,7 +106,7 @@ public:
                     shardRegistry->getShard(opCtx, toShardId),
                     "requested primary shard {} does not exist"_format(toShardId.toString()));
 
-                const auto coordinatorDoc = [&] {
+                auto coordinatorDoc = [&] {
                     MovePrimaryCoordinatorDocument doc;
                     doc.setShardingDDLCoordinatorMetadata(
                         {{dbNss, DDLCoordinatorTypeEnum::kMovePrimary}});
@@ -162,7 +162,7 @@ private:
         return "Internal command. Do not call directly.";
     }
 };
-MONGO_REGISTER_COMMAND(ShardsvrMovePrimaryCommand);
+MONGO_REGISTER_COMMAND(ShardsvrMovePrimaryCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

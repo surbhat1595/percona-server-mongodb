@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstring>
 #include <tuple>
@@ -199,6 +198,11 @@ public:
 
     std::ptrdiff_t debug_offset() const {
         return _debug_offset;
+    }
+
+    template <typename H>
+    friend H AbslHashValue(H h, const ConstDataRange& range) {
+        return H::combine_contiguous(std::move(h), range.data(), range.length());
     }
 
 protected:

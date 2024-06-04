@@ -34,7 +34,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
 #include <functional>
@@ -213,7 +212,7 @@ CollectionRoutingInfoTargeter makeCollectionRoutingInfoTargeter(
     auto routingTableHistory = RoutingTableHistory::makeNew(nss,
                                                             collUuid,
                                                             shardKey,
-                                                            false, /*unsplittable*/
+                                                            false, /* unsplittable */
                                                             getDefaultCollator(opCtx, nss),
                                                             false /* unique */,
                                                             OID::gen(),
@@ -264,7 +263,8 @@ void processSampledQueries(OperationContext* opCtx,
             }
             case SampledCommandNameEnum::kUpdate:
             case SampledCommandNameEnum::kDelete:
-            case SampledCommandNameEnum::kFindAndModify: {
+            case SampledCommandNameEnum::kFindAndModify:
+            case SampledCommandNameEnum::kBulkWrite: {
                 writeDistributionCalculator->addQuery(opCtx, doc);
                 break;
             }

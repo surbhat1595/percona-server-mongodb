@@ -37,7 +37,6 @@
 #include <boost/move/algo/move.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 // IWYU pragma: no_include "boost/move/algo/detail/set_difference.hpp"
 #include <algorithm>
@@ -155,10 +154,7 @@ std::unique_ptr<IndexAccessMethod> IndexAccessMethod::make(
         return std::make_unique<WildcardAccessMethod>(entry, makeSDI());
     else if (IndexNames::COLUMN == type)
         return std::make_unique<ColumnStoreAccessMethod>(entry, makeCS());
-    LOGV2(20688,
-          "Can't find index for keyPattern {keyPattern}",
-          "Can't find index for keyPattern",
-          "keyPattern"_attr = desc->keyPattern());
+    LOGV2(20688, "Can't find index for keyPattern", "keyPattern"_attr = desc->keyPattern());
     fassertFailed(31021);
 }
 
@@ -237,7 +233,7 @@ SortOptions makeSortOptions(size_t maxMemoryUsageBytes,
         .UseMemoryPool(true)
         .FileStats(stats)
         .Tracker(&indexBulkBuilderSSS.sorterTracker)
-        .DBName(DatabaseNameUtil::serializeForCatalog(dbName));
+        .DBName(dbName);
 }
 
 MultikeyPaths createMultikeyPaths(const std::vector<MultikeyPath>& multikeyPathsVec) {
@@ -496,8 +492,6 @@ void SortedDataIndexAccessMethod::removeOneKey(OperationContext* opCtx,
 
         NamespaceString ns = entry->getNSSFromCatalog(opCtx);
         LOGV2(20683,
-              "Assertion failure: _unindex failed on: {namespace} for index: {indexName}. "
-              "{error}  KeyString:{keyString}",
               "Assertion failure: _unindex failed",
               "error"_attr = redact(e),
               "keyString"_attr = keyString,
@@ -561,7 +555,7 @@ RecordId SortedDataIndexAccessMethod::findSingle(OperationContext* opCtx,
         } else {
             key_string::HeapBuilder requestedKeyString(
                 getSortedDataInterface()->getKeyStringVersion(),
-                BSONObj::stripFieldNames(requestedKey),
+                requestedKey,
                 getSortedDataInterface()->getOrdering());
             return requestedKeyString.release();
         }
@@ -1268,7 +1262,7 @@ void SortedDataIndexAccessMethod::validateDocument(const CollectionPtr& collecti
  */
 std::string nextFileName() {
     static AtomicWord<unsigned> indexAccessMethodFileCounter;
-    static const int64_t randomSuffix = SecureRandom().nextInt64();
+    static const uint64_t randomSuffix = SecureRandom().nextUInt64();
     return str::stream() << "extsort-index." << indexAccessMethodFileCounter.fetchAndAdd(1) << '-'
                          << randomSuffix;
 }

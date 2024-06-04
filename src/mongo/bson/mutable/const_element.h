@@ -29,8 +29,8 @@
 
 #pragma once
 
+#include "mongo/bson/mutable/api.h"
 #include "mongo/bson/mutable/element.h"
-#include "mongo/platform/visibility.h"
 
 namespace mongo {
 namespace mutablebson {
@@ -48,7 +48,7 @@ namespace mutablebson {
  *
  *  All calls on ConstElement are simply forwarded to the underlying Element.
  */
-class MONGO_API(mutable_bson) ConstElement {
+class MONGO_MUTABLE_BSON_API ConstElement {
 public:
     // This one argument constructor is intentionally not explicit, since we want to be
     // able to pass Elements to functions taking ConstElements without complaint.
@@ -92,15 +92,15 @@ public:
     inline SafeNum getValueSafeNum() const;
 
     inline int compareWithElement(const ConstElement& other,
-                                  const StringData::ComparatorInterface* comparator,
+                                  const StringDataComparator* comparator,
                                   bool considerFieldName = true) const;
 
     inline int compareWithBSONElement(const BSONElement& other,
-                                      const StringData::ComparatorInterface* comparator,
+                                      const StringDataComparator* comparator,
                                       bool considerFieldName = true) const;
 
     inline int compareWithBSONObj(const BSONObj& other,
-                                  const StringData::ComparatorInterface* comparator,
+                                  const StringDataComparator* comparator,
                                   bool considerFieldName = true) const;
 
     inline void writeTo(BSONObjBuilder* builder) const;
@@ -271,19 +271,19 @@ inline SafeNum ConstElement::getValueSafeNum() const {
 }
 
 inline int ConstElement::compareWithElement(const ConstElement& other,
-                                            const StringData::ComparatorInterface* comparator,
+                                            const StringDataComparator* comparator,
                                             bool considerFieldName) const {
     return _basis.compareWithElement(other, comparator, considerFieldName);
 }
 
 inline int ConstElement::compareWithBSONElement(const BSONElement& other,
-                                                const StringData::ComparatorInterface* comparator,
+                                                const StringDataComparator* comparator,
                                                 bool considerFieldName) const {
     return _basis.compareWithBSONElement(other, comparator, considerFieldName);
 }
 
 inline int ConstElement::compareWithBSONObj(const BSONObj& other,
-                                            const StringData::ComparatorInterface* comparator,
+                                            const StringDataComparator* comparator,
                                             bool considerFieldName) const {
     return _basis.compareWithBSONObj(other, comparator, considerFieldName);
 }

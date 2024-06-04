@@ -35,7 +35,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 // IWYU pragma: no_include "ext/alloc_traits.h"
@@ -82,9 +81,9 @@ ABTPrinter::ABTPrinter(Metadata metadata,
       _explainVersion(explainVersion) {}
 
 BSONObj ABTPrinter::explainBSON() const {
-    const auto explainPlanStr = [&](std::string planStr) {
+    const auto explainPlanStr = [&](const std::string& planStr) {
         BSONObjBuilder builder;
-        builder.append("plan", std::move(planStr));
+        builder.append("plan", planStr);
         return builder.done().getOwned();
     };
 
@@ -744,7 +743,9 @@ public:
         nodePrinter.printAppend(res);
     }
 
-    void nodeCEPropsPrint(ExplainPrinter& nodePrinter, const ABT& n, const Node& node) {
+    void nodeCEPropsPrint(ExplainPrinter& nodePrinter,
+                          const ABT::reference_type n,
+                          const Node& node) {
         tassert(6701801,
                 "Cannot have both _displayProperties and _nodeCEMap set.",
                 !(_displayProperties && _nodeCEMap));
@@ -838,11 +839,10 @@ public:
         printProjectionsOrdered(printer, projections);
     }
 
-
     /**
      * Nodes
      */
-    ExplainPrinter transport(const ABT& /*n*/,
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
                              const References& references,
                              std::vector<ExplainPrinter> inResults) {
         ExplainPrinter printer;
@@ -857,7 +857,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/,
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
                              const ExpressionBinder& binders,
                              std::vector<ExplainPrinter> inResults) {
         ExplainPrinter printer;
@@ -913,7 +913,9 @@ public:
         }
     }
 
-    ExplainPrinter transport(const ABT& n, const ScanNode& node, ExplainPrinter bindResult) {
+    ExplainPrinter transport(const ABT::reference_type n,
+                             const ScanNode& node,
+                             ExplainPrinter bindResult) {
         ExplainPrinter printer("Scan");
         maybePrintProps(printer, node);
         printer.separator(" [")
@@ -930,7 +932,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const PhysicalScanNode& node,
                              ExplainPrinter bindResult) {
         ExplainPrinter printer("PhysicalScan");
@@ -947,7 +949,9 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n, const ValueScanNode& node, ExplainPrinter bindResult) {
+    ExplainPrinter transport(const ABT::reference_type n,
+                             const ValueScanNode& node,
+                             ExplainPrinter bindResult) {
         ExplainPrinter valuePrinter = generate(node.getValueArray());
 
         // Specifically not printing optional logical properties here. They can be displayed with
@@ -965,7 +969,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n, const CoScanNode& node) {
+    ExplainPrinter transport(const ABT::reference_type n, const CoScanNode& node) {
         ExplainPrinter printer("CoScan");
         maybePrintProps(printer, node);
         printer.separator(" []");
@@ -1330,7 +1334,9 @@ public:
         const PrinterFn& _tPrinter;
     };
 
-    ExplainPrinter transport(const ABT& n, const IndexScanNode& node, ExplainPrinter bindResult) {
+    ExplainPrinter transport(const ABT::reference_type n,
+                             const IndexScanNode& node,
+                             ExplainPrinter bindResult) {
         ExplainPrinter printer("IndexScan");
         maybePrintProps(printer, node);
         printer.separator(" [{");
@@ -1356,7 +1362,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const SeekNode& node,
                              ExplainPrinter bindResult,
                              ExplainPrinter refsResult) {
@@ -1382,7 +1388,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n, const MemoLogicalDelegatorNode& node) {
+    ExplainPrinter transport(const ABT::reference_type n, const MemoLogicalDelegatorNode& node) {
         ExplainPrinter printer("MemoLogicalDelegator");
         maybePrintProps(printer, node);
         printer.separator(" [").fieldName("groupId").print(node.getGroupId()).separator("]");
@@ -1390,7 +1396,8 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const MemoPhysicalDelegatorNode& node) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
+                             const MemoPhysicalDelegatorNode& node) {
         const auto id = node.getNodeId();
 
         if (_displayProperties) {
@@ -1444,7 +1451,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const FilterNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter filterResult) {
@@ -1460,7 +1467,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const EvaluationNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter projectionResult) {
@@ -1518,7 +1525,7 @@ public:
         parent.fieldName("residualReqs").print(residualReqsPrinter);
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const SargableNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter bindResult,
@@ -1605,7 +1612,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const RIDIntersectNode& node,
                              ExplainPrinter leftChildResult,
                              ExplainPrinter rightChildResult) {
@@ -1626,7 +1633,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const RIDUnionNode& node,
                              ExplainPrinter leftChildResult,
                              ExplainPrinter rightChildResult,
@@ -1651,7 +1658,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const BinaryJoinNode& node,
                              ExplainPrinter leftChildResult,
                              ExplainPrinter rightChildResult,
@@ -1704,7 +1711,7 @@ public:
         }
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const HashJoinNode& node,
                              ExplainPrinter leftChildResult,
                              ExplainPrinter rightChildResult,
@@ -1731,7 +1738,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const MergeJoinNode& node,
                              ExplainPrinter leftChildResult,
                              ExplainPrinter rightChildResult,
@@ -1777,7 +1784,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const SortedMergeNode& node,
                              std::vector<ExplainPrinter> childResults,
                              ExplainPrinter bindResult,
@@ -1793,7 +1800,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const NestedLoopJoinNode& node,
                              ExplainPrinter leftChildResult,
                              ExplainPrinter rightChildResult,
@@ -1820,7 +1827,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const UnionNode& node,
                              std::vector<ExplainPrinter> childResults,
                              ExplainPrinter bindResult,
@@ -1842,7 +1849,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const GroupByNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter bindAggResult,
@@ -1910,7 +1917,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const UnwindNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter bindResult,
@@ -1956,7 +1963,7 @@ public:
         });
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const UniqueNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter /*refsResult*/) {
@@ -1981,7 +1988,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const SpoolProducerNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter filterResult,
@@ -2011,7 +2018,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const SpoolConsumerNode& node,
                              ExplainPrinter bindResult) {
         ExplainPrinter printer("SpoolConsumer");
@@ -2035,7 +2042,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const CollationNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter refsResult) {
@@ -2099,7 +2106,9 @@ public:
         });
     }
 
-    ExplainPrinter transport(const ABT& n, const LimitSkipNode& node, ExplainPrinter childResult) {
+    ExplainPrinter transport(const ABT::reference_type n,
+                             const LimitSkipNode& node,
+                             ExplainPrinter childResult) {
         ExplainPrinter printer("LimitSkip");
         maybePrintProps(printer, node);
         printer.separator(" [");
@@ -2182,7 +2191,7 @@ public:
         printPropertyProjections(parent, property.getProjections().getVector(), directToParent);
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const ExchangeNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter refsResult) {
@@ -2434,7 +2443,7 @@ public:
         return printProps<properties::PhysProperty, PhysPropPrintVisitor>(description, props);
     }
 
-    ExplainPrinter transport(const ABT& n,
+    ExplainPrinter transport(const ABT::reference_type n,
                              const RootNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter refsResult) {
@@ -2464,13 +2473,13 @@ public:
     /**
      * Expressions
      */
-    ExplainPrinter transport(const ABT& /*n*/, const Blackhole& expr) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/, const Blackhole& expr) {
         ExplainPrinter printer("Blackhole");
         printer.separator(" []");
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const Constant& expr) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/, const Constant& expr) {
         ExplainPrinter printer("Const");
         printer.separator(" [").fieldName("tag", ExplainVersion::V3);
 
@@ -2485,7 +2494,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const Variable& expr) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/, const Variable& expr) {
         ExplainPrinter printer("Variable");
         printer.separator(" [")
             .fieldName("name", ExplainVersion::V3)
@@ -2494,7 +2503,9 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const UnaryOp& expr, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
+                             const UnaryOp& expr,
+                             ExplainPrinter inResult) {
         ExplainPrinter printer("UnaryOp");
         printer.separator(" [")
             .fieldName("op", ExplainVersion::V3)
@@ -2506,7 +2517,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/,
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
                              const BinaryOp& expr,
                              ExplainPrinter leftResult,
                              ExplainPrinter rightResult) {
@@ -2525,7 +2536,7 @@ public:
     }
 
 
-    ExplainPrinter transport(const ABT& /*n*/,
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
                              const If& expr,
                              ExplainPrinter condResult,
                              ExplainPrinter thenResult,
@@ -2543,7 +2554,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/,
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
                              const Let& expr,
                              ExplainPrinter bindResult,
                              ExplainPrinter exprResult) {
@@ -2561,7 +2572,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/,
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
                              const LambdaAbstraction& expr,
                              ExplainPrinter inResult) {
         ExplainPrinter printer("LambdaAbstraction");
@@ -2575,7 +2586,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/,
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
                              const LambdaApplication& expr,
                              ExplainPrinter lambdaResult,
                              ExplainPrinter argumentResult) {
@@ -2590,7 +2601,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/,
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
                              const FunctionCall& expr,
                              std::vector<ExplainPrinter> argResults) {
         ExplainPrinter printer("FunctionCall");
@@ -2607,7 +2618,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/,
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
                              const EvalPath& expr,
                              ExplainPrinter pathResult,
                              ExplainPrinter inputResult) {
@@ -2622,7 +2633,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/,
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
                              const EvalFilter& expr,
                              ExplainPrinter pathResult,
                              ExplainPrinter inputResult) {
@@ -2640,7 +2651,9 @@ public:
     /**
      * Paths
      */
-    ExplainPrinter transport(const ABT& /*n*/, const PathConstant& path, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
+                             const PathConstant& path,
+                             ExplainPrinter inResult) {
         ExplainPrinter printer("PathConstant");
         printer.separator(" []")
             .setChildCount(1)
@@ -2649,7 +2662,9 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const PathLambda& path, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
+                             const PathLambda& path,
+                             ExplainPrinter inResult) {
         ExplainPrinter printer("PathLambda");
         printer.separator(" []")
             .setChildCount(1)
@@ -2658,13 +2673,15 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const PathIdentity& path) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/, const PathIdentity& path) {
         ExplainPrinter printer("PathIdentity");
         printer.separator(" []");
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const PathDefault& path, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
+                             const PathDefault& path,
+                             ExplainPrinter inResult) {
         ExplainPrinter printer("PathDefault");
         printer.separator(" []")
             .setChildCount(1)
@@ -2673,7 +2690,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/,
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
                              const PathCompare& path,
                              ExplainPrinter valueResult) {
         ExplainPrinter printer("PathCompare");
@@ -2711,7 +2728,7 @@ public:
         }
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const PathDrop& path) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/, const PathDrop& path) {
         ExplainPrinter printer("PathDrop");
         printer.separator(" [");
         printPathProjections(printer, path.getNames());
@@ -2719,7 +2736,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const PathKeep& path) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/, const PathKeep& path) {
         ExplainPrinter printer("PathKeep");
         printer.separator(" [");
         printPathProjections(printer, path.getNames());
@@ -2727,19 +2744,21 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const PathObj& path) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/, const PathObj& path) {
         ExplainPrinter printer("PathObj");
         printer.separator(" []");
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const PathArr& path) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/, const PathArr& path) {
         ExplainPrinter printer("PathArr");
         printer.separator(" []");
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const PathTraverse& path, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
+                             const PathTraverse& path,
+                             ExplainPrinter inResult) {
         ExplainPrinter printer("PathTraverse");
         printer.separator(" [");
 
@@ -2762,7 +2781,9 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const PathField& path, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
+                             const PathField& path,
+                             ExplainPrinter inResult) {
         ExplainPrinter printer("PathField");
         printer.separator(" [")
             .fieldName("path", ExplainVersion::V3)
@@ -2774,7 +2795,9 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const PathGet& path, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
+                             const PathGet& path,
+                             ExplainPrinter inResult) {
         ExplainPrinter printer("PathGet");
         printer.separator(" [")
             .fieldName("path", ExplainVersion::V3)
@@ -2786,7 +2809,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/,
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
                              const PathComposeM& path,
                              ExplainPrinter leftResult,
                              ExplainPrinter rightResult) {
@@ -2801,7 +2824,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/,
+    ExplainPrinter transport(const ABT::reference_type /*n*/,
                              const PathComposeA& path,
                              ExplainPrinter leftResult,
                              ExplainPrinter rightResult) {
@@ -2816,13 +2839,13 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const ABT& /*n*/, const Source& expr) {
+    ExplainPrinter transport(const ABT::reference_type /*n*/, const Source& expr) {
         ExplainPrinter printer("Source");
         printer.separator(" []");
         return printer;
     }
 
-    ExplainPrinter generate(const ABT& node) {
+    ExplainPrinter generate(const ABT::reference_type node) {
         return algebra::transport<true>(node, *this);
     }
 
@@ -2949,7 +2972,7 @@ using ExplainGeneratorV2 = ExplainGeneratorTransporter<ExplainVersion::V2>;
 using ExplainGeneratorV2Compact = ExplainGeneratorTransporter<ExplainVersion::V2Compact>;
 using ExplainGeneratorV3 = ExplainGeneratorTransporter<ExplainVersion::V3>;
 
-std::string ExplainGenerator::explain(const ABT& node,
+std::string ExplainGenerator::explain(const ABT::reference_type node,
                                       const bool displayProperties,
                                       const cascades::MemoExplainInterface* memoInterface,
                                       const NodeToGroupPropsMap& nodeMap) {
@@ -2957,7 +2980,7 @@ std::string ExplainGenerator::explain(const ABT& node,
     return gen.generate(node).str();
 }
 
-std::string ExplainGenerator::explainV2(const ABT& node,
+std::string ExplainGenerator::explainV2(const ABT::reference_type node,
                                         const bool displayProperties,
                                         const cascades::MemoExplainInterface* memoInterface,
                                         const NodeToGroupPropsMap& nodeMap) {
@@ -2965,7 +2988,7 @@ std::string ExplainGenerator::explainV2(const ABT& node,
     return gen.generate(node).str();
 }
 
-std::string ExplainGenerator::explainV2Compact(const ABT& node,
+std::string ExplainGenerator::explainV2Compact(const ABT::reference_type node,
                                                const bool displayProperties,
                                                const cascades::MemoExplainInterface* memoInterface,
                                                const NodeToGroupPropsMap& nodeMap) {
@@ -2973,7 +2996,7 @@ std::string ExplainGenerator::explainV2Compact(const ABT& node,
     return gen.generate(node).str();
 }
 
-std::string ExplainGenerator::explainNode(const ABT& node) {
+std::string ExplainGenerator::explainNode(const ABT::reference_type node) {
     if (node.empty()) {
         return "Empty\n";
     }
@@ -2981,7 +3004,7 @@ std::string ExplainGenerator::explainNode(const ABT& node) {
 }
 
 std::pair<sbe::value::TypeTags, sbe::value::Value> ExplainGenerator::explainBSON(
-    const ABT& node,
+    const ABT::reference_type node,
     const bool displayProperties,
     const cascades::MemoExplainInterface* memoInterface,
     const NodeToGroupPropsMap& nodeMap) {
@@ -2998,7 +3021,7 @@ BSONObj convertSbeValToBSONObj(const std::pair<sbe::value::TypeTags, sbe::value:
     return builder.done().getOwned();
 }
 
-BSONObj ExplainGenerator::explainBSONObj(const ABT& node,
+BSONObj ExplainGenerator::explainBSONObj(const ABT::reference_type node,
                                          const bool displayProperties,
                                          const cascades::MemoExplainInterface* memoInterface,
                                          const NodeToGroupPropsMap& nodeMap) {
@@ -3053,7 +3076,7 @@ static void printBSONstr(PrinterType& printer,
     }
 }
 
-std::string ExplainGenerator::explainBSONStr(const ABT& node,
+std::string ExplainGenerator::explainBSONStr(const ABT::reference_type node,
                                              bool displayProperties,
                                              const cascades::MemoExplainInterface* memoInterface,
                                              const NodeToGroupPropsMap& nodeMap) {

@@ -35,7 +35,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/timestamp.h"
@@ -436,6 +435,7 @@ void ShardSplitDonorOpObserver::aboutToDelete(OperationContext* opCtx,
 void ShardSplitDonorOpObserver::onDelete(OperationContext* opCtx,
                                          const CollectionPtr& coll,
                                          StmtId stmtId,
+                                         const BSONObj& doc,
                                          const OplogDeleteEntryArgs& args,
                                          OpStateAccumulator* opAccumulator) {
     if (coll->ns() != NamespaceString::kShardSplitDonorsNamespace || !splitCleanupDetails(opCtx) ||

@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <string>
 #include <vector>
@@ -164,7 +163,9 @@ private:
         return !getMarkers().empty();
     }
 
-    virtual bool _hasPartialMarkerExpired(OperationContext* opCtx) const override {
+    virtual bool _hasPartialMarkerExpired(OperationContext* opCtx,
+                                          const RecordId& highestSeenRecordId,
+                                          const Date_t& highestSeenWallTime) const override {
         return _expirePartialMarker;
     }
 };

@@ -75,8 +75,8 @@ const index = {
 // The steps after cloning starts and before the donor enters the critical section.
 const stepNames = [moveChunkStepNames.startedMoveChunk, moveChunkStepNames.reachedSteadyState];
 
-assert.commandWorked(st.s.adminCommand({enableSharding: dbName}));
-st.ensurePrimaryShard(dbName, st.shard0.shardName);
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
 
 stepNames.forEach((stepName) => {
     jsTest.log(`Testing that createIndexes aborts concurrent outgoing migrations that are in step ${
@@ -170,6 +170,8 @@ stepNames.forEach((stepName) => {
 
 // TODO: Remove feature flag check once project is backported.
 if (FeatureFlagUtil.isPresentAndEnabled(st.shard0.getDB('admin'),
+                                        "ShardKeyIndexOptionalHashedSharding") &&
+    FeatureFlagUtil.isPresentAndEnabled(st.shard1.getDB('admin'),
                                         "ShardKeyIndexOptionalHashedSharding")) {
     stepNames.forEach((stepName) => {
         jsTest.log(

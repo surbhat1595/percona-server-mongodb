@@ -15,7 +15,7 @@ import {
     waitForMoveChunkStep,
 } from "jstests/libs/chunk_manipulation_util.js";
 import {configureFailPointForRS} from "jstests/libs/fail_point_util.js";
-import {removeShard} from "jstests/sharding/libs/remove_shard_util.js";
+import {moveOutSessionChunks, removeShard} from "jstests/sharding/libs/remove_shard_util.js";
 
 // TODO SERVER-50144 Remove this and allow orphan checking.
 // This test calls removeShard which can leave docs in config.rangeDeletions in state "pending",
@@ -27,15 +27,17 @@ let staticMongod = MongoRunner.runMongod({});
 
 let st = new ShardingTest({shards: 2});
 
-assert.commandWorked(st.s.adminCommand({enableSharding: 'test'}));
-st.ensurePrimaryShard('test', st.shard0.shardName);
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: 'test', primaryShard: st.shard0.shardName}));
 assert.commandWorked(st.s.adminCommand({shardCollection: 'test.user', key: {x: 1}}));
 assert.commandWorked(st.s.adminCommand({split: 'test.user', middle: {x: 0}}));
 
+moveOutSessionChunks(st, st.shard1.shardName, st.shard0.shardName);
+
 pauseMoveChunkAtStep(st.shard0, moveChunkStepNames.reachedSteadyState);
 
-configureFailPointForRS(
-    st.configRS.nodes, 'overrideBalanceRoundInterval', {intervalMs: 200}, 'alwaysOn');
+st.forEachConfigServer((conn) => {assert.commandWorked(conn.adminCommand(
+                           {setParameter: 1, balancerMigrationsThrottlingMs: 200}))});
 
 let joinMoveChunk = moveChunkParallel(staticMongod,
                                       st.s.host,

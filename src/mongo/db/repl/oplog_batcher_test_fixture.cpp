@@ -28,7 +28,6 @@
  */
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <mutex>
 
@@ -202,6 +201,7 @@ OplogEntry makeInsertOplogEntry(int t, const NamespaceString& nss, boost::option
                               nss,                         // namespace
                               uuid,                        // uuid
                               boost::none,                 // fromMigrate
+                              boost::none,                 // checkExistenceForDiffInsert
                               OplogEntry::kOplogVersion,   // version
                               oField,                      // o
                               boost::none,                 // o2
@@ -233,6 +233,7 @@ OplogEntry makeUpdateOplogEntry(int t,
                               nss,                         // namespace
                               uuid,                        // uuid
                               boost::none,                 // fromMigrate
+                              boost::none,                 // checkExistenceForDiffInsert
                               OplogEntry::kOplogVersion,   // version
                               oField,                      // o
                               boost::none,                 // o2
@@ -252,9 +253,10 @@ OplogEntry makeNoopOplogEntry(int t, const StringData& msg) {
     BSONObj oField = BSON("msg" << msg << "count" << t);
     return {DurableOplogEntry(OpTime(Timestamp(t, 1), 1),  // optime
                               OpTypeEnum::kNoop,           // op type
-                              NamespaceString(),           // namespace
+                              NamespaceString::kEmpty,     // namespace
                               boost::none,                 // uuid
                               boost::none,                 // fromMigrate
+                              boost::none,                 // checkExistenceForDiffInsert
                               OplogEntry::kOplogVersion,   // version
                               oField,                      // o
                               boost::none,                 // o2
@@ -289,6 +291,7 @@ OplogEntry makeApplyOpsOplogEntry(int t, bool prepare, const std::vector<OplogEn
                               nss,                         // namespace
                               boost::none,                 // uuid
                               boost::none,                 // fromMigrate
+                              boost::none,                 // checkExistenceForDiffInsert
                               OplogEntry::kOplogVersion,   // version
                               oField.obj(),                // o
                               boost::none,                 // o2
@@ -335,6 +338,7 @@ OplogEntry makeCommitTransactionOplogEntry(int t,
                               nss,                         // namespace
                               boost::none,                 // uuid
                               boost::none,                 // fromMigrate
+                              boost::none,                 // checkExistenceForDiffInsert
                               OplogEntry::kOplogVersion,   // version
                               oField,                      // o
                               boost::none,                 // o2
@@ -365,6 +369,7 @@ OplogEntry makeAbortTransactionOplogEntry(int t, const DatabaseName& dbName) {
                               nss,                         // namespace
                               boost::none,                 // uuid
                               boost::none,                 // fromMigrate
+                              boost::none,                 // checkExistenceForDiffInsert
                               OplogEntry::kOplogVersion,   // version
                               oField,                      // o
                               boost::none,                 // o2
@@ -425,6 +430,7 @@ OplogEntry makeLargeTransactionOplogEntries(int t,
                               nss,                         // namespace
                               boost::none,                 // uuid
                               boost::none,                 // fromMigrate
+                              boost::none,                 // checkExistenceForDiffInsert
                               OplogEntry::kOplogVersion,   // version
                               oField,                      // o
                               boost::none,                 // o2

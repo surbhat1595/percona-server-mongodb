@@ -36,10 +36,10 @@
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/config.h"  // IWYU pragma: keep
-#include "mongo/db/wire_version.h"
 #include "mongo/executor/connection_metrics.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/transport/session.h"
+#include "mongo/transport/session_manager.h"
 #include "mongo/transport/ssl_connection_context.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/util/duration.h"
@@ -62,8 +62,9 @@ class TransportLayerMock : public TransportLayer {
     TransportLayerMock& operator=(const TransportLayerMock&) = delete;
 
 public:
-    explicit TransportLayerMock(const WireSpec& wireSpec = WireSpec::instance())
-        : TransportLayer(wireSpec), _shutdown(false) {}
+    TransportLayerMock();
+    explicit TransportLayerMock(std::unique_ptr<SessionManager> sm)
+        : _sessionManager(std::move(sm)) {}
     ~TransportLayerMock();
 
     std::shared_ptr<Session> createSession();
@@ -88,6 +89,9 @@ public:
     void shutdown() override;
     bool inShutdown() const;
 
+    StringData getNameForLogging() const override {
+        return "mock"_sd;
+    }
 
     virtual ReactorHandle getReactor(WhichReactor which) override;
 
@@ -104,6 +108,10 @@ public:
         const TransientSSLParams& transientSSLParams) override;
 #endif
 
+    SessionManager* getSessionManager() const {
+        return _sessionManager.get();
+    }
+
 private:
     friend class MockSession;
 
@@ -113,7 +121,9 @@ private:
         SSLPeerInfo peerInfo;
     };
     stdx::unordered_map<Session::Id, Connection> _sessions;
-    bool _shutdown;
+    bool _shutdown = false;
+
+    std::unique_ptr<SessionManager> _sessionManager;
 };
 
 }  // namespace transport

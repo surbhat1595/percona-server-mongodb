@@ -30,7 +30,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <mutex>
 #include <stack>
@@ -60,10 +59,11 @@ stdx::condition_variable shutdownTasksComplete;
 boost::optional<ExitCode> shutdownExitCode;
 bool shutdownTasksInProgress = false;
 AtomicWord<unsigned> shutdownFlag;
-std::stack<unique_function<void(const ShutdownTaskArgs&)>> shutdownTasks;
+std::stack<ShutdownTask> shutdownTasks;
 stdx::thread::id shutdownTasksThreadId;
 
-void runTasks(decltype(shutdownTasks) tasks, const ShutdownTaskArgs& shutdownArgs) noexcept {
+void runRegisteredShutdownTasks(decltype(shutdownTasks) tasks,
+                                const ShutdownTaskArgs& shutdownArgs) noexcept {
     while (!tasks.empty()) {
         const auto& task = tasks.top();
         task(shutdownArgs);
@@ -76,7 +76,7 @@ void runTasks(decltype(shutdownTasks) tasks, const ShutdownTaskArgs& shutdownArg
 // has its own 'quickExitMutex' to prohibit multiple threads from attempting to call _exit().
 MONGO_COMPILER_NORETURN void logAndQuickExit_inlock() {
     ExitCode code = shutdownExitCode.value();
-    LOGV2(23138, "Shutting down with code: {exitCode}", "Shutting down", "exitCode"_attr = code);
+    LOGV2(23138, "Shutting down", "exitCode"_attr = code);
     quickExit(code);
 }
 
@@ -100,7 +100,7 @@ ExitCode waitForShutdown() {
     return shutdownExitCode.value();
 }
 
-void registerShutdownTask(unique_function<void(const ShutdownTaskArgs&)> task) {
+void registerShutdownTask(ShutdownTask task) {
     stdx::lock_guard<Latch> lock(shutdownMutex);
     invariant(!globalInShutdownDeprecated());
     shutdownTasks.emplace(std::move(task));
@@ -122,10 +122,6 @@ void shutdown(ExitCode code, const ShutdownTaskArgs& shutdownArgs) {
             ExitCode originallyRequestedCode = shutdownExitCode.value();
             if (code != originallyRequestedCode) {
                 LOGV2(23139,
-                      "While running shutdown tasks with the intent to exit with code "
-                      "{originalExitCode}, an additional shutdown request arrived with "
-                      "the intent to exit with a different exit code {newExitCode}; "
-                      "ignoring the conflicting exit code",
                       "Conflicting exit code at shutdown",
                       "originalExitCode"_attr = originallyRequestedCode,
                       "newExitCode"_attr = code);
@@ -146,7 +142,7 @@ void shutdown(ExitCode code, const ShutdownTaskArgs& shutdownArgs) {
         localTasks.swap(shutdownTasks);
     }
 
-    runTasks(std::move(localTasks), shutdownArgs);
+    runRegisteredShutdownTasks(std::move(localTasks), shutdownArgs);
 
     {
         stdx::lock_guard<Latch> lock(shutdownMutex);
@@ -174,7 +170,7 @@ void shutdownNoTerminate(const ShutdownTaskArgs& shutdownArgs) {
         localTasks.swap(shutdownTasks);
     }
 
-    runTasks(std::move(localTasks), shutdownArgs);
+    runRegisteredShutdownTasks(std::move(localTasks), shutdownArgs);
 
     {
         stdx::lock_guard<Latch> lock(shutdownMutex);
@@ -184,5 +180,4 @@ void shutdownNoTerminate(const ShutdownTaskArgs& shutdownArgs) {
 
     shutdownTasksComplete.notify_all();
 }
-
 }  // namespace mongo

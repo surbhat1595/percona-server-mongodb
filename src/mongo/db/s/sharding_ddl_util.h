@@ -99,7 +99,8 @@ template <typename CommandType>
 std::vector<AsyncRequestsSender::Response> sendAuthenticatedCommandToShards(
     OperationContext* opCtx,
     std::shared_ptr<async_rpc::AsyncRPCOptions<CommandType>> originalOpts,
-    const std::vector<ShardId>& shardIds) {
+    const std::vector<ShardId>& shardIds,
+    bool ignoreResponses = false) {
     if (shardIds.size() == 0) {
         return {};
     }
@@ -121,16 +122,16 @@ std::vector<AsyncRequestsSender::Response> sendAuthenticatedCommandToShards(
         ReadPreferenceSetting readPref(ReadPreference::PrimaryOnly);
         std::unique_ptr<async_rpc::Targeter> targeter =
             std::make_unique<async_rpc::ShardIdTargeter>(
-                shardIds[i], opCtx, readPref, originalOpts->exec);
+                originalOpts->exec, opCtx, shardIds[i], readPref);
         bool startTransaction = originalOpts->genericArgs.stable.getStartTransaction()
             ? *originalOpts->genericArgs.stable.getStartTransaction()
             : false;
         auto retryPolicy = std::make_shared<async_rpc::ShardRetryPolicyWithIsStartingTransaction>(
             Shard::RetryPolicy::kIdempotentOrCursorInvalidated, startTransaction);
         auto opts =
-            std::make_shared<async_rpc::AsyncRPCOptions<CommandType>>(originalOpts->cmd,
-                                                                      originalOpts->exec,
+            std::make_shared<async_rpc::AsyncRPCOptions<CommandType>>(originalOpts->exec,
                                                                       cancelSource.token(),
+                                                                      originalOpts->cmd,
                                                                       originalOpts->genericArgs,
                                                                       retryPolicy);
         futures.push_back(async_rpc::sendCommand<CommandType>(opts, opCtx, std::move(targeter)));
@@ -155,6 +156,10 @@ std::vector<AsyncRequestsSender::Response> sendAuthenticatedCommandToShards(
                         reply.targetUsed, replyBob.obj(), reply.elapsed)};
             })
             .getNoThrow();
+
+    if (ignoreResponses) {
+        return {};
+    }
 
     if (auto status = responses.getStatus(); status != Status::OK()) {
         uassertStatusOK(async_rpc::unpackRPCStatus(status));
@@ -208,8 +213,10 @@ void checkCatalogConsistencyAcrossShardsForRename(
  * - Check that no tags exist for the destination collection
  */
 void checkRenamePreconditions(OperationContext* opCtx,
-                              bool sourceIsSharded,
+                              const NamespaceString& fromNss,
+                              const boost::optional<CollectionType>& sourceCollType,
                               const NamespaceString& toNss,
+                              const boost::optional<CollectionType>& optTargetCollType,
                               bool dropTarget);
 
 /**
@@ -223,17 +230,21 @@ void checkDbPrimariesOnTheSameShard(OperationContext* opCtx,
                                     const NamespaceString& toNss);
 
 /**
- * Throws an exception if the collection is already sharded with different options.
+ * Throws an exception if the collection is already tracked with different options.
  *
- * If the collection is already sharded with the same options, returns the existing collection's
+ * If the collection is already tracked with the same options, returns the existing collection's
  * full spec, else returns boost::none.
+ *
+ * If the collection is tracked as unsplittable and the request is for a splittable collection,
+ * returns boost::none.
  */
-boost::optional<CreateCollectionResponse> checkIfCollectionAlreadySharded(
+boost::optional<CreateCollectionResponse> checkIfCollectionAlreadyTrackedWithOptions(
     OperationContext* opCtx,
     const NamespaceString& nss,
     const BSONObj& key,
     const BSONObj& collation,
-    bool unique);
+    bool unique,
+    bool unsplittable);
 
 /**
  * Stops ongoing migrations and prevents future ones to start for the given nss.
@@ -308,5 +319,14 @@ void runTransactionOnShardingCatalog(
     const OperationSessionInfo& osi,
     bool useClusterTransaction,
     const std::shared_ptr<executor::TaskExecutor>& inputExecutor = nullptr);
+
+/**
+ * Returns the default key pattern value for unsplittable collections.
+ */
+const KeyPattern& unsplittableCollectionShardKey();
+
+boost::optional<CollectionType> getCollectionFromConfigServer(OperationContext* opCtx,
+                                                              const NamespaceString& nss);
+
 }  // namespace sharding_ddl_util
 }  // namespace mongo

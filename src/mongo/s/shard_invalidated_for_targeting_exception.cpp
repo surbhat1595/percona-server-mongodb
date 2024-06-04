@@ -43,7 +43,7 @@ constexpr StringData kNss = "nss"_sd;
 }  // namespace
 
 void ShardInvalidatedForTargetingInfo::serialize(BSONObjBuilder* bob) const {
-    bob->append(kNss, NamespaceStringUtil::serialize(_nss));
+    bob->append(kNss, NamespaceStringUtil::serialize(_nss, SerializationContext::stateDefault()));
 }
 
 std::shared_ptr<const ErrorExtraInfo> ShardInvalidatedForTargetingInfo::parse(const BSONObj& obj) {
@@ -52,8 +52,8 @@ std::shared_ptr<const ErrorExtraInfo> ShardInvalidatedForTargetingInfo::parse(co
 
 ShardInvalidatedForTargetingInfo ShardInvalidatedForTargetingInfo::parseFromCommandError(
     const BSONObj& obj) {
-    return ShardInvalidatedForTargetingInfo(
-        NamespaceStringUtil::deserialize(boost::none, obj["nss"].String()));
+    return ShardInvalidatedForTargetingInfo(NamespaceStringUtil::deserialize(
+        boost::none, obj["nss"].String(), SerializationContext::stateDefault()));
 }
 
 }  // namespace mongo

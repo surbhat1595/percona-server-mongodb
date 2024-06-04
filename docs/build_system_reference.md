@@ -294,7 +294,7 @@ The libdeps linter also has the `--libdeps-linting=print` option which will perf
 The dependency graph can be analyzed post-build by leveraging the completeness of the graph to perform more extensive analysis. You will need to install the libdeps requirements file to python when attempting to use the post-build analysis tools:
 
 ```
-python3 -m pip install -r etc/pip/libdeps-requirements.txt
+python3 -m poetry install --no-root --sync -E libdeps
 ```
 
 The command line interface tool (gacli) has a comprehensive help text which will describe the available analysis options and interface. The visualizer tool includes a GUI which displays the available analysis options graphically. These tools will be briefly covered in the following sections.
@@ -304,7 +304,7 @@ The command line interface tool (gacli) has a comprehensive help text which will
 To generate the full graph, build the target `generate-libdeps-graph`. This will build all things involving libdeps and construct a graphml file representing the library dependency graph. The graph can be used in the command line interface tool or the visualizer web service tool. The minimal set of required SCons arguments to build the graph file is shown below:
 
 ```
-python3 buildscripts/scons.py --link-model=dynamic --build-tools=next generate-libdeps-graph
+python3 buildscripts/scons.py --link-model=dynamic --build-tools=next generate-libdeps-graph --linker=gold --modules=
 ```
 
 The graph file by default will be generate to `build/opt/libdeps/libdeps.graphml` (where `build/opt` is the `$BUILD_DIR`).

@@ -89,6 +89,7 @@
  *       configShard {boolean}: Add the config server as a shard if true.
  *       useAutoBootstrapProcedure {boolean}: Use the auto-bootstrapping procedure on every shard
  *          and config server if set to true.
+ *       alwaysUseTestNameForShardName {boolean}: Always use the testname as the name of the shard.
  *     }
  *   }
  *
@@ -1038,16 +1039,6 @@ var ShardingTest = function ShardingTest(params) {
     };
 
     /**
-     * Helper method for setting primary shard of a database and making sure that it was successful.
-     * Note: first mongos needs to be up.
-     */
-    ShardingTest.prototype.ensurePrimaryShard = function(dbName, shardName) {
-        var db = this.s0.getDB('admin');
-        var res = db.adminCommand({movePrimary: dbName, to: shardName});
-        assert(res.ok || res.errmsg == "it is already the primary", tojson(res));
-    };
-
-    /**
      * Returns a document {isMixedVersion: <bool>, oldestBinVersion: <string>}.
      * The 'isMixedVersion' field is true if any settings to ShardingTest or jsTestOptions indicate
      * this is a multiversion cluster.
@@ -1187,6 +1178,9 @@ var ShardingTest = function ShardingTest(params) {
         : false;
     useAutoBootstrapProcedure =
         useAutoBootstrapProcedure || jsTestOptions().useAutoBootstrapProcedure;
+    let alwaysUseTestNameForShardName = otherParams.hasOwnProperty('alwaysUseTestNameForShardName')
+        ? otherParams.alwaysUseTestNameForShardName
+        : false;
 
     let isConfigShardMode =
         otherParams.hasOwnProperty('configShard') ? otherParams.configShard : false;
@@ -1662,6 +1656,17 @@ var ShardingTest = function ShardingTest(params) {
         this.configRS.awaitNodesAgreeOnPrimary();
         var csrsPrimary = this.configRS.getPrimary();
 
+        // TODO: SERVER-80100 Remove assert.soon.
+        if (useAutoBootstrapProcedure) {
+            assert.soonNoExcept(() => {
+                function isShardingReady() {
+                    return csrsPrimary.adminCommand({getShardingReady: 1}).isReady;
+                }
+                return this.keyFile ? authutil.asCluster(csrsPrimary, this.keyFile, isShardingReady)
+                                    : isShardingReady();
+            });
+        }
+
         print("ShardingTest startup and initiation for all nodes took " + (new Date() - startTime) +
               "ms with " + this.configRS.nodeList().length + " config server nodes and " +
               totalNumShardNodes(this) + " total shard nodes.");
@@ -1822,33 +1827,39 @@ var ShardingTest = function ShardingTest(params) {
                     var n = z.name || z.host || z;
 
                     var name;
-                    // TODO: SERVER-80010 Don't transition when auto-bootstrapping.
                     if (isConfigShardMode && idx == 0) {
                         name = "config";
 
-                        print("ShardingTest " + testName + " transitioning to config shard");
+                        if (!useAutoBootstrapProcedure) {
+                            print("ShardingTest " + testName + " transitioning to config shard");
 
-                        function transitionFromDedicatedConfigServer() {
-                            return assert.commandWorked(
-                                admin.runCommand({transitionFromDedicatedConfigServer: 1}));
-                        }
+                            function transitionFromDedicatedConfigServer() {
+                                return assert.commandWorked(
+                                    admin.runCommand({transitionFromDedicatedConfigServer: 1}));
+                            }
 
-                        if (keyFile) {
-                            authutil.asCluster(
-                                admin.getMongo(), keyFile, transitionFromDedicatedConfigServer);
-                        } else if (mongosOptions[0] && mongosOptions[0].keyFile) {
-                            authutil.asCluster(admin.getMongo(),
-                                               mongosOptions[0].keyFile,
-                                               transitionFromDedicatedConfigServer);
-                        } else {
-                            transitionFromDedicatedConfigServer();
+                            if (keyFile) {
+                                authutil.asCluster(
+                                    admin.getMongo(), keyFile, transitionFromDedicatedConfigServer);
+                            } else if (mongosOptions[0] && mongosOptions[0].keyFile) {
+                                authutil.asCluster(admin.getMongo(),
+                                                   mongosOptions[0].keyFile,
+                                                   transitionFromDedicatedConfigServer);
+                            } else {
+                                transitionFromDedicatedConfigServer();
+                            }
                         }
 
                         z.shardName = name;
                     } else {
                         print("ShardingTest " + testName + " going to add shard : " + n);
 
-                        var result = assert.commandWorked(admin.runCommand({addshard: n}),
+                        let addShardCmd = {addShard: n};
+                        if (alwaysUseTestNameForShardName) {
+                            addShardCmd.name = `${testName}-${idx}`;
+                        }
+
+                        var result = assert.commandWorked(admin.runCommand(addShardCmd),
                                                           "Failed to add shard " + n);
                         z.shardName = result.shardAdded;
                     }

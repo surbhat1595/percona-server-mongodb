@@ -53,7 +53,8 @@ class OpTime;
 /**
  * Renames the collection from "source" to "target" and drops the existing collection if
  * "dropTarget" is true. "stayTemp" indicates whether a collection should maintain its
- * temporariness.
+ * temporariness. "newTargetCollectionUUID" is the UUID set to the final collection when renaming
+ * across DBs (if not present, a random UUID will be assigned).
  */
 struct RenameCollectionOptions {
     bool dropTarget = false;
@@ -61,6 +62,7 @@ struct RenameCollectionOptions {
     bool markFromMigrate = false;
     boost::optional<UUID> expectedSourceUUID;
     boost::optional<UUID> expectedTargetUUID;
+    boost::optional<UUID> newTargetCollectionUuid;
 };
 
 void doLocalRenameIfOptionsAndIndexesHaveNotChanged(OperationContext* opCtx,
@@ -69,6 +71,25 @@ void doLocalRenameIfOptionsAndIndexesHaveNotChanged(OperationContext* opCtx,
                                                     const RenameCollectionOptions& options,
                                                     std::list<BSONObj> originalIndexes,
                                                     BSONObj collectionOptions);
+
+/**
+ * Checks that CollectionOptions 'expectedOptions' and 'currentOptions' are equal, except for the
+ * 'uuid' field. Throws CommandFailed otherwise.
+ * To be used by doLocalRenameIfOptionsAndIndexesHaveNotChanged and also its sharding-aware
+ * equivalent in RenameCollectionCoordinator.
+ */
+void checkTargetCollectionOptionsMatch(const NamespaceString& targetNss,
+                                       const BSONObj& expectedOptions,
+                                       const BSONObj& currentOptions);
+
+/**
+ * Checks that the lists of index specs 'expectedIndexes' and 'currentIndexes' are equal.
+ * To be used by doLocalRenameIfOptionsAndIndexesHaveNotChanged and also its sharding-aware
+ * equivalent in RenameCollectionCoordinator.
+ */
+void checkTargetCollectionIndexesMatch(const NamespaceString& targetNss,
+                                       const std::list<BSONObj>& expectedIndexes,
+                                       const std::list<BSONObj>& currentIndexes);
 
 Status renameCollection(OperationContext* opCtx,
                         const NamespaceString& source,

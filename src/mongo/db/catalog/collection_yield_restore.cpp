@@ -31,7 +31,6 @@
 
 #include <memory>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
@@ -64,7 +63,7 @@ bool locked(OperationContext* opCtx, const NamespaceString& ns) {
 
 LockedCollectionYieldRestore::LockedCollectionYieldRestore(OperationContext* opCtx,
                                                            const CollectionPtr& coll)
-    : _nss(coll ? coll->ns() : NamespaceString()) {
+    : _nss(coll ? coll->ns() : NamespaceString::kEmpty) {
     invariant(locked(opCtx, _nss));
 }
 

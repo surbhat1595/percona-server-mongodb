@@ -31,7 +31,6 @@
 
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <iterator>
 #include <memory>
@@ -217,8 +216,9 @@ AccumulationExpression AccumulatorMinMaxN::parseMinMaxN(ExpressionContext* const
 
 void AccumulatorMinMaxN::_processValue(const Value& val) {
     // Ignore nullish values.
-    if (val.nullish())
+    if (val.nullish()) {
         return;
+    }
 
     // Only compare if we have 'n' elements.
     if (static_cast<long long>(_set.size()) == *_n) {
@@ -234,7 +234,7 @@ void AccumulatorMinMaxN::_processValue(const Value& val) {
         }
     }
 
-    _set.emplace(MemoryToken{val.getApproximateSize(), &_memUsageTracker}, val);
+    _set.emplace(SimpleMemoryToken{val.getApproximateSize(), &_memUsageTracker}, val);
     checkMemUsage();
 }
 
@@ -323,8 +323,8 @@ void AccumulatorFirstLastN::_processValue(const Value& val) {
         }
     }
 
-    _deque.emplace_back(MemoryToken{valToProcess.getApproximateSize(), &_memUsageTracker},
-                        valToProcess);
+    _deque.emplace_back(SimpleMemoryToken{valToProcess.getApproximateSize(), &_memUsageTracker},
+                        std::move(valToProcess));
     checkMemUsage();
 }
 
@@ -358,7 +358,7 @@ boost::intrusive_ptr<Expression> AccumulatorFirstLastN::parseExpression(
 }
 
 void AccumulatorFirstLastN::reset() {
-    _deque = std::deque<MemoryTokenWith<Value>>();
+    _deque = std::deque<SimpleMemoryTokenWith<Value>>();
 }
 
 Value AccumulatorFirstLastN::getValue(bool toBeMerged) {
@@ -450,7 +450,7 @@ AccumulatorTopBottomN<sense, single>::AccumulatorTopBottomN(ExpressionContext* c
     int sortOrder = 0;
     for (auto part : _sortPattern) {
         const auto newFieldName =
-            (StringBuilder() << AccumulatorN::kFieldNameSortFields << "." << sortOrder).str();
+            (StringBuilder() << AccumulatorN::kFieldNameSortFields << sortOrder).str();
         part.fieldPath.reset(FieldPath(newFieldName));
 
         if (part.expression) {
@@ -560,11 +560,20 @@ AccumulationExpression AccumulatorTopBottomN<sense, single>::parseTopBottomN(
     }
 
     // Construct argument expression. If given sortBy: {field1: 1, field2: 1} it will be shaped like
-    // {output: <output expression>, sortFields: ["$field1", "$field2"]}. This projects out only the
-    // fields we need for sorting so we can use SortKeyComparator without copying the entire
-    // document. This argument expression will be evaluated and become the input to _processValue.
-    boost::intrusive_ptr<Expression> argument = Expression::parseObject(
-        expCtx, BSON(output << AccumulatorN::kFieldNameSortFields << sortFieldsExp), vps);
+    // {output: <output expression>, sortFields0: "$field1", sortFields1: "$field2"}. This projects
+    // out only the fields we need for sorting so we can use SortKeyComparator without copying the
+    // entire document. This argument expression will be evaluated and become the input to
+    // _processValue.
+    BSONObjBuilder argumentBuilder;
+    argumentBuilder.append(output);
+    int sortOrder = 0;
+    for (const auto& sortField : sortFieldsExp) {
+        argumentBuilder.appendAs(
+            sortField, (StringBuilder() << AccumulatorN::kFieldNameSortFields << sortOrder).str());
+        sortOrder++;
+    }
+    boost::intrusive_ptr<Expression> argument =
+        Expression::parseObject(expCtx, argumentBuilder.obj(), vps);
     auto factory = [expCtx, sortPattern = std::move(sortPattern)] {
         return make_intrusive<AccumulatorTopBottomN<sense, single>>(
             expCtx, sortPattern, /* isRemovable */ false);
@@ -641,12 +650,11 @@ void AccumulatorTopBottomN<sense, single>::_processValue(const Value& val) {
         }
     }
 
-    keyOutPair.first.fillCache();
     const auto memUsage = keyOutPair.first.getApproximateSize() +
         keyOutPair.second.getApproximateSize() + sizeof(KeyOutPair);
-    _map->emplace(
-        keyOutPair.first,
-        MemoryTokenWith<Value>{MemoryToken{memUsage, &_memUsageTracker}, keyOutPair.second});
+    _map->emplace(keyOutPair.first,
+                  SimpleMemoryTokenWith<Value>{SimpleMemoryToken{memUsage, &_memUsageTracker},
+                                               keyOutPair.second});
     checkMemUsage();
 }
 

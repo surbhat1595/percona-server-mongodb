@@ -92,7 +92,7 @@ public:
         threadPoolOptions.threadNamePrefix = "ShardingDDLCoordinatorServiceTest-";
         threadPoolOptions.poolName = "ShardingDDLCoordinatorServiceTestThreadPool";
         threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-            Client::initThread(threadName.c_str());
+            Client::initThread(threadName.c_str(), getGlobalServiceContext()->getService());
         };
 
         auto executor = std::make_shared<executor::ThreadPoolTaskExecutor>(
@@ -269,7 +269,7 @@ TEST_F(ShardingDDLCoordinatorServiceTest, DDLLockMustBeEventuallyAcquiredAfterAS
     });
 
     ASSERT_DOES_NOT_THROW(
-        acquireDbAndCollDDLLocks(opCtx.get(), nss, reason, MODE_X, 1000 /*timeoutMillisec*/));
+        acquireDbAndCollDDLLocks(opCtx.get(), nss, reason, MODE_X, 10000 /*timeoutMillisec*/));
 
     // Lock should be acquired after step up conclusion
     ASSERT(stepUpFuture.isReady());

@@ -33,7 +33,6 @@
 #include <boost/cstdint.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
@@ -197,7 +196,7 @@ ExecutorFuture<void> ReshardingOplogFetcher::schedule(
     }
 
     return ExecutorFuture(executor)
-        .then([this, executor, cancelToken, factory] {
+        .then([this, executor, cancelToken, factory]() mutable {
             return _reschedule(std::move(executor), cancelToken, factory);
         })
         .onError([](Status status) {
@@ -215,7 +214,7 @@ ExecutorFuture<void> ReshardingOplogFetcher::_reschedule(
             ThreadClient client(fmt::format("OplogFetcher-{}-{}",
                                             _reshardingUUID.toString(),
                                             _donorShard.toString()),
-                                _service());
+                                _service()->getService(ClusterRole::ShardServer));
 
             // TODO(SERVER-74658): Please revisit if this thread could be made killable.
             {
@@ -233,7 +232,7 @@ ExecutorFuture<void> ReshardingOplogFetcher::_reschedule(
                 return moreToCome;
             });
         })
-        .then([this, executor, cancelToken, factory](bool moreToCome) {
+        .then([this, executor, cancelToken, factory](bool moreToCome) mutable {
             if (!moreToCome) {
                 LOGV2_INFO(6077401,
                            "Resharding oplog fetcher done fetching",
@@ -244,7 +243,7 @@ ExecutorFuture<void> ReshardingOplogFetcher::_reschedule(
 
             if (cancelToken.isCanceled()) {
                 return ExecutorFuture<void>(
-                    executor,
+                    std::move(executor),
                     Status{ErrorCodes::CallbackCanceled,
                            "Resharding oplog fetcher canceled due to abort or stepdown"});
             }
@@ -381,7 +380,7 @@ bool ReshardingOplogFetcher::consume(Client* client,
             ThreadClient client(fmt::format("ReshardingFetcher-{}-{}",
                                             _reshardingUUID.toString(),
                                             _donorShard.toString()),
-                                _service(),
+                                _service()->getService(ClusterRole::ShardServer),
                                 nullptr);
             auto opCtxRaii = factory.makeOperationContext(client.get());
             auto opCtx = opCtxRaii.get();

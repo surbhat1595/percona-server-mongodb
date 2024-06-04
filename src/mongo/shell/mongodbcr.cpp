@@ -33,7 +33,6 @@
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -84,8 +83,10 @@ StatusWith<OpMsgRequest> createMongoCRGetNonceCmd(const BSONObj& params) {
         return std::move(db.getStatus());
     }
 
-    return OpMsgRequest::fromDBAndBody(DatabaseNameUtil::deserialize(boost::none, db.getValue()),
-                                       kGetNonceCmd);
+    return OpMsgRequest::fromDBAndBody(
+        DatabaseNameUtil::deserialize(
+            boost::none, db.getValue(), SerializationContext::stateDefault()),
+        kGetNonceCmd);
 }
 
 OpMsgRequest createMongoCRAuthenticateCmd(const BSONObj& params, StringData nonce) {
@@ -120,7 +121,9 @@ OpMsgRequest createMongoCRAuthenticateCmd(const BSONObj& params, StringData nonc
     }
 
     return OpMsgRequest::fromDBAndBody(
-        DatabaseNameUtil::deserialize(boost::none, uassertStatusOK(extractDBField(params))),
+        DatabaseNameUtil::deserialize(boost::none,
+                                      uassertStatusOK(extractDBField(params)),
+                                      SerializationContext::stateDefault()),
         b.obj());
 }
 

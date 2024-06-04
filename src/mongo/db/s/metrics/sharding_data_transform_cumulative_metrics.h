@@ -95,6 +95,10 @@ public:
     friend ScopedObserver;
 
     static ShardingDataTransformCumulativeMetrics* getForResharding(ServiceContext* context);
+    static ShardingDataTransformCumulativeMetrics* getForMoveCollection(ServiceContext* context);
+    static ShardingDataTransformCumulativeMetrics* getForBalancerMoveCollection(
+        ServiceContext* context);
+    static ShardingDataTransformCumulativeMetrics* getForUnshardCollection(ServiceContext* context);
     static ShardingDataTransformCumulativeMetrics* getForGlobalIndexes(ServiceContext* context);
     static ShardingDataTransformCumulativeMetrics* getForMovePrimary(ServiceContext* context);
 
@@ -106,12 +110,12 @@ public:
     int64_t getOldestOperationLowEstimateRemainingTimeMillis(Role role) const;
     size_t getObservedMetricsCount() const;
     size_t getObservedMetricsCount(Role role) const;
-    void reportForServerStatus(BSONObjBuilder* bob) const;
+    virtual void reportForServerStatus(BSONObjBuilder* bob) const;
 
-    void onStarted(bool isSameKeyResharding);
-    void onSuccess(bool isSameKeyResharding);
-    void onFailure(bool isSameKeyResharding);
-    void onCanceled(bool isSameKeyResharding);
+    void onStarted();
+    void onSuccess();
+    void onFailure();
+    void onCanceled();
 
     void setLastOpEndingChunkImbalance(int64_t imbalanceCount);
 
@@ -130,6 +134,9 @@ protected:
     virtual void reportLatencies(BSONObjBuilder* bob) const;
     virtual void reportCurrentInSteps(BSONObjBuilder* bob) const;
 
+    const std::string _rootSectionName;
+    AtomicWord<bool> _operationWasAttempted;
+
 private:
     enum EstimateType { kHigh, kLow };
 
@@ -143,10 +150,8 @@ private:
     void deregisterMetrics(const Role& role, const MetricsSet::iterator& metrics);
 
     mutable Mutex _mutex;
-    const std::string _rootSectionName;
     std::unique_ptr<NameProvider> _fieldNames;
     std::vector<MetricsSet> _instanceMetricsForAllRoles;
-    AtomicWord<bool> _operationWasAttempted;
 
     AtomicWord<int64_t> _countStarted{0};
     AtomicWord<int64_t> _countSucceeded{0};
@@ -165,11 +170,6 @@ private:
     AtomicWord<int64_t> _collectionCloningTotalLocalBatchInserts{0};
     AtomicWord<int64_t> _collectionCloningTotalLocalInsertTimeMillis{0};
     AtomicWord<int64_t> _writesToStashedCollections{0};
-
-    AtomicWord<int64_t> _countSameKeyStarted{0};
-    AtomicWord<int64_t> _countSameKeySucceeded{0};
-    AtomicWord<int64_t> _countSameKeyFailed{0};
-    AtomicWord<int64_t> _countSameKeyCancelled{0};
 };
 
 }  // namespace mongo

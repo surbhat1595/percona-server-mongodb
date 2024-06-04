@@ -33,7 +33,6 @@
 #include <string>
 #include <utility>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -126,7 +125,7 @@ Status clear(OperationContext* opCtx,
                                    version,
                                    false /*matchSecondaryCollections*/);
 
-    LOGV2_DEBUG(23908, 1, "{namespace}: Cleared plan cache", "Cleared plan cache", logAttrs(nss));
+    LOGV2_DEBUG(23908, 1, "Cleared plan cache", logAttrs(nss));
 
     return Status::OK();
 }
@@ -170,7 +169,7 @@ public:
         return "Drops one or all plan cache entries in a collection.";
     }
 };
-MONGO_REGISTER_COMMAND(PlanCacheClearCommand);
+MONGO_REGISTER_COMMAND(PlanCacheClearCommand).forShard();
 
 Status PlanCacheClearCommand::checkAuthForOperation(OperationContext* opCtx,
                                                     const DatabaseName& dbName,

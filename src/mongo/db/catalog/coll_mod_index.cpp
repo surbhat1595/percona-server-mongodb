@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <string>
 
@@ -48,6 +47,7 @@
 #include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/catalog/throttle_cursor.h"
+#include "mongo/db/catalog/validate_gen.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/key_string.h"
@@ -90,16 +90,15 @@ void _processCollModIndexRequestExpireAfterSeconds(OperationContext* opCtx,
         const auto& coll = autoColl->getCollection();
         // Do not refer to 'idx' within this commit handler as it may be be invalidated by
         // IndexCatalog::refreshEntry().
-        opCtx->recoveryUnit()->onCommit(
-            [ttlCache, uuid = coll->uuid(), indexName = idx->indexName()](
-                OperationContext*, boost::optional<Timestamp>) {
-                // We assume the expireAfterSeconds field is valid, because we've already done
-                // validation of this field.
-                ttlCache->registerTTLInfo(
-                    uuid,
-                    TTLCollectionCache::Info{
-                        indexName, TTLCollectionCache::Info::ExpireAfterSecondsType::kInt});
-            });
+        opCtx->recoveryUnit()->onCommit([ttlCache,
+                                         uuid = coll->uuid(),
+                                         indexName = idx->indexName()](OperationContext*,
+                                                                       boost::optional<Timestamp>) {
+            // We assume the expireAfterSeconds field is valid, because we've already done
+            // validation of this field.
+            ttlCache->registerTTLInfo(
+                uuid, TTLCollectionCache::Info{indexName, /*isExpireAfterSecondsInvalid=*/false});
+        });
 
         // Change the value of "expireAfterSeconds" on disk.
         autoColl->getWritableCollection(opCtx)->updateTTLSetting(
@@ -130,8 +129,7 @@ void _processCollModIndexRequestExpireAfterSeconds(OperationContext* opCtx,
         opCtx->recoveryUnit()->onCommit(
             [ttlCache, uuid = coll->uuid(), indexName = idx->indexName()](
                 OperationContext*, boost::optional<Timestamp>) {
-                ttlCache->setTTLIndexExpireAfterSecondsType(
-                    uuid, indexName, TTLCollectionCache::Info::ExpireAfterSecondsType::kInt);
+                ttlCache->unsetTTLIndexExpireAfterSecondsInvalid(uuid, indexName);
             });
         return;
     }
@@ -373,7 +371,7 @@ std::list<std::set<RecordId>> scanIndexForDuplicates(
     // Scans index for duplicates, comparing consecutive index entries.
     // KeyStrings will be in strictly increasing order because all keys are sorted and they are
     // in the format (Key, RID), and all RecordIDs are unique.
-    DataThrottle dataThrottle(opCtx);
+    DataThrottle dataThrottle(opCtx, [&]() { return gMaxValidateMBperSec.load(); });
     dataThrottle.turnThrottlingOff();
     SortedDataInterfaceThrottleCursor indexCursor(opCtx, accessMethod, &dataThrottle);
     boost::optional<KeyStringEntry> prevIndexEntry;

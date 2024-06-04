@@ -30,7 +30,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <mutex>
 #include <utility>
@@ -93,7 +92,7 @@ void JournalFlusher::set(ServiceContext* serviceCtx, std::unique_ptr<JournalFlus
 }
 
 void JournalFlusher::run() {
-    ThreadClient tc(name(), getGlobalServiceContext());
+    ThreadClient tc(name(), getGlobalServiceContext()->getService());
     LOGV2_DEBUG(4584701, 1, "starting {name} thread", "name"_attr = name());
 
     // The thread must not run and access the service context to create an opCtx while unit test

@@ -55,8 +55,7 @@ class BalancerChunkSelectionPolicy {
     BalancerChunkSelectionPolicy& operator=(const BalancerChunkSelectionPolicy&) = delete;
 
 public:
-    BalancerChunkSelectionPolicy(ClusterStatistics* clusterStats);
-    ~BalancerChunkSelectionPolicy();
+    explicit BalancerChunkSelectionPolicy(ClusterStatistics* clusterStats);
 
     /**
      * Potentially blocking method, which gives out a set of chunks, which need to be split because
@@ -97,15 +96,6 @@ public:
     StatusWith<boost::optional<MigrateInfo>> selectSpecificChunkToMove(OperationContext* opCtx,
                                                                        const NamespaceString& nss,
                                                                        const ChunkType& chunk);
-
-    /**
-     * Asks the chunk selection policy to validate that the specified chunk migration is allowed
-     * given the current rules. Returns `OK` if the migration won't violate any rules or any other
-     * failed status otherwise.
-     */
-    Status checkMoveAllowed(OperationContext* opCtx,
-                            const ChunkType& chunk,
-                            const ShardId& newShardId);
 
 private:
     /**

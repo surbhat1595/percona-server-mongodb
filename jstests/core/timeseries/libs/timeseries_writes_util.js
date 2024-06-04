@@ -633,6 +633,7 @@ export function testFindOneAndUpdate({
 }
 
 export function getRelevantProfilerEntries(db, coll, requestType) {
+    const collName = coll.getName();
     const sysCollName = sysCollNamePrefix + coll.getName();
     const profilerFilter = {
         $or: [
@@ -645,17 +646,11 @@ export function getRelevantProfilerEntries(db, coll, requestType) {
                 // Filters out events recorded because of StaleConfig error.
                 "ok": {$ne: 0},
             },
-            // Potential two-phase protocol write command.
+            // Potential two-phase protocol write command and targeted write command.
             {
                 "op": "command",
-                "ns": `${db.getName()}.${sysCollName}`,
-                [`command.${requestType}`]: `${sysCollName}`,
-            },
-            // Targeted write command.
-            {
-                "op": "command",
-                "ns": `${db.getName()}.${sysCollName}`,
-                [`command.${requestType}`]: `${coll.getName()}`,
+                "ns": `${db.getName()}.${collName}`,
+                [`command.${requestType}`]: `${collName}`,
             }
         ]
     };
@@ -1057,7 +1052,6 @@ export function setUpShardedCluster({nMongos} = {
     assert.commandWorked(testDB.dropDatabase());
     assert.commandWorked(testDB.adminCommand({enableSharding: testDB.getName()}));
     primaryShard = st.getPrimaryShard(testDB.getName());
-    st.ensurePrimaryShard(testDB.getName(), primaryShard.shardName);
     otherShard = st.getOther(primaryShard);
     mongos0DB = st.s0.getDB(testDB.getName());
     if (nMongos > 1) {

@@ -43,7 +43,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -283,15 +282,6 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(
         }
 
         auto cmrIndex = &parsed.indexRequest;
-
-        if ((cmdIndex.getUnique() || cmdIndex.getPrepareUnique()) &&
-            !feature_flags::gCollModIndexUnique.isEnabled(
-                serverGlobalParams.featureCompatibility)) {
-            return {ErrorCodes::InvalidOptions,
-                    "collMod does not support converting an index to 'unique' or to "
-                    "'prepareUnique' mode in this FCV."};
-        }
-
         if (cmdIndex.getUnique() && cmdIndex.getForceNonUnique()) {
             return {ErrorCodes::InvalidOptions,
                     "collMod does not support 'unique' and 'forceNonUnique' options at the "
@@ -854,7 +844,6 @@ Status _collModInternal(OperationContext* opCtx,
     // This can kill all cursors so don't allow running it while a background operation is in
     // progress.
     if (coll) {
-        assertNoMovePrimaryInProgress(opCtx, nss);
         IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(coll->uuid());
     }
 
@@ -996,6 +985,19 @@ Status _collModInternal(OperationContext* opCtx,
                         opCtx, true);
                 };
             }
+        }
+
+        // We perform an empty collMod command during an FCV upgrade to perform sanitization of the
+        // WT creation string.
+        // (Generic FCV reference): This FCV check happens whenever we upgrade to the latest
+        // version.
+        // TODO SERVER-80490: remove this check when 8.0 becomes the next LTS release.
+        if (auto version = serverGlobalParams.featureCompatibility.getVersion();
+            cmrNew.numModifications == 0 &&
+            (version == multiversion::GenericFCV::kUpgradingFromLastContinuousToLatest ||
+             version == multiversion::GenericFCV::kUpgradingFromLastLTSToLatest)) {
+            auto writableCollection = coll.getWritableCollection(opCtx);
+            writableCollection->sanitizeCollectionOptions(opCtx);
         }
 
         // We involve an empty collMod command during a setFCV downgrade to clean timeseries

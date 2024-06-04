@@ -30,7 +30,6 @@
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <deque>
 #include <fmt/format.h>
@@ -243,8 +242,15 @@ public:
             return repl::OpTimeWith<std::vector<ShardType>>(_shards);
         }
 
+        std::vector<CollectionType> getShardedCollections(OperationContext* opCtx,
+                                                          const DatabaseName& dbName,
+                                                          repl::ReadConcernLevel readConcernLevel,
+                                                          const BSONObj& sort) override {
+            return {};
+        }
+
         std::vector<CollectionType> getCollections(OperationContext* opCtx,
-                                                   StringData dbName,
+                                                   const DatabaseName& dbName,
                                                    repl::ReadConcernLevel readConcernLevel,
                                                    const BSONObj& sort) override {
             return _colls;
@@ -296,7 +302,7 @@ public:
         auto rt = RoutingTableHistory::makeNew(kCrudNs,
                                                kCrudUUID,
                                                kOriginalShardKeyPattern,
-                                               false, /*unsplittable*/
+                                               false, /* unsplittable */
                                                nullptr,
                                                false,
                                                epoch,
@@ -315,7 +321,7 @@ public:
 
     void loadCatalogCacheValues() {
         _mockCatalogCacheLoader->setDatabaseRefreshReturnValue(
-            DatabaseType(kAppliedToNs.db_forTest().toString(), _cm->dbPrimary(), _cm->dbVersion()));
+            DatabaseType(kAppliedToNs.dbName(), _cm->dbPrimary(), _cm->dbVersion()));
         std::vector<ChunkType> chunks;
         _cm->forEachChunk([&](const auto& chunk) {
             chunks.emplace_back(
@@ -353,6 +359,7 @@ public:
                                         kCrudNs,
                                         kCrudUUID,
                                         false /* fromMigrate */,
+                                        boost::none,  // checkExistenceForDiffInsert
                                         0 /* version */,
                                         obj1,
                                         obj2,
@@ -425,7 +432,7 @@ protected:
         threadPoolOptions.threadNamePrefix = "TestReshardOplogApplication-";
         threadPoolOptions.poolName = "TestReshardOplogApplicationThreadPool";
         threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-            Client::initThread(threadName.c_str());
+            Client::initThread(threadName.c_str(), getGlobalServiceContext()->getService());
             auto* client = Client::getCurrent();
             AuthorizationSession::get(*client)->grantInternalAuthorization(client);
         };

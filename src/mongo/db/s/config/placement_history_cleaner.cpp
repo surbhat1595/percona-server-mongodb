@@ -38,7 +38,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -157,7 +156,8 @@ void PlacementHistoryCleaner::runOnce(Client* client, size_t minPlacementHistory
         const auto match =
             BSON(NamespacePlacementType::kNssFieldName
                  << NamespaceStringUtil::serialize(
-                        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker)
+                        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker,
+                        SerializationContext::stateDefault())
                  << NamespacePlacementType::kTimestampFieldName
                  << BSON("$gte" << earliestOplogTime->toBSON()));
 

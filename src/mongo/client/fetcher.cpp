@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <mutex>
 #include <ostream>
 #include <utility>
@@ -122,9 +121,8 @@ Status parseCursorResponse(const BSONObj& obj,
                       str::stream() << "'" << kCursorFieldName << "." << kNamespaceFieldName
                                     << "' field must be a string: " << obj);
     }
-    // Since this is client code we are passing boost::none as the tenantId.
-    const NamespaceString tempNss =
-        NamespaceStringUtil::deserialize(boost::none, namespaceElement.valueStringData());
+    const NamespaceString tempNss = NamespaceStringUtil::deserialize(
+        boost::none, namespaceElement.valueStringData(), SerializationContext::stateDefault());
     if (!tempNss.isValid()) {
         return Status(ErrorCodes::BadValue,
                       str::stream() << "'" << kCursorFieldName << "." << kNamespaceFieldName
@@ -395,7 +393,7 @@ void Fetcher::_callback(const RemoteCommandCallbackArgs& rcbd, const char* batch
         return;
     }
 
-    batchData.otherFields.metadata = std::move(rcbd.response.data);
+    batchData.otherFields.metadata = rcbd.response.data;
     batchData.elapsed = rcbd.response.elapsed.value_or(Microseconds{0});
     {
         stdx::lock_guard<Latch> lk(_mutex);
@@ -441,17 +439,13 @@ void Fetcher::_sendKillCursors(const CursorId id, const NamespaceString& nss) {
         auto logKillCursorsResult = [](const RemoteCommandCallbackArgs& args) {
             if (!args.response.isOK()) {
                 LOGV2_WARNING(23918,
-                              "killCursors command task failed: {error}",
                               "killCursors command task failed",
                               "error"_attr = redact(args.response.status));
                 return;
             }
             auto status = getStatusFromCommandResult(args.response.data);
             if (!status.isOK()) {
-                LOGV2_WARNING(23919,
-                              "killCursors command failed: {error}",
-                              "killCursors command failed",
-                              "error"_attr = redact(status));
+                LOGV2_WARNING(23919, "killCursors command failed", "error"_attr = redact(status));
             }
         };
 
@@ -462,7 +456,6 @@ void Fetcher::_sendKillCursors(const CursorId id, const NamespaceString& nss) {
         auto scheduleResult = _executor->scheduleRemoteCommand(request, logKillCursorsResult);
         if (!scheduleResult.isOK()) {
             LOGV2_WARNING(23920,
-                          "Failed to schedule killCursors command: {error}",
                           "Failed to schedule killCursors command",
                           "error"_attr = redact(scheduleResult.getStatus()));
         }

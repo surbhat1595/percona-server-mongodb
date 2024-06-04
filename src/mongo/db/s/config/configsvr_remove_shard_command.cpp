@@ -153,7 +153,6 @@ public:
                 return shardingCatalogManager->removeShard(opCtx, shardId);
             } catch (const DBException& ex) {
                 LOGV2(21923,
-                      "Failed to remove shard {shardId} due to {error}",
                       "Failed to remove shard",
                       "shardId"_attr = shardId,
                       "error"_attr = redact(ex));
@@ -167,7 +166,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(ConfigSvrRemoveShardCommand);
+MONGO_REGISTER_COMMAND(ConfigSvrRemoveShardCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

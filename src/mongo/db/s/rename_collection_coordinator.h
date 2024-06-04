@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <set>
 
@@ -89,6 +88,9 @@ private:
                                   const CancellationToken& token) noexcept override;
 
     std::set<NamespaceString> _getAdditionalLocksToAcquire(OperationContext* opCtx) override;
+
+    // TODO (SERVER-80704): Get rid of this method once v8.0 branches out
+    void _updateNewOptTrackedCollInfoFieldAfterBinaryUpgrade();
 
     boost::optional<RenameCollectionResponse> _response;
     const RenameCollectionRequest _request;

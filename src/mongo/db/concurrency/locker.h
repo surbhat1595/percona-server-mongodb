@@ -30,7 +30,6 @@
 #pragma once
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <climits>  // For UINT_MAX
 #include <functional>
 #include <limits>
@@ -267,12 +266,6 @@ public:
                       ResourceId resId,
                       LockMode mode,
                       Date_t deadline = Date_t::max()) = 0;
-
-    /**
-     * Calling lock without an OperationContext does not allow LOCK_WAITING states to be
-     * interrupted.
-     */
-    virtual void lock(ResourceId resId, LockMode mode, Date_t deadline = Date_t::max()) = 0;
 
     /**
      * Downgrades the specified resource's lock mode without changing the reference count.

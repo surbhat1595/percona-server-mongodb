@@ -32,7 +32,6 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/meta/type_traits.h>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -66,7 +65,9 @@ public:
 
     struct CSSAndLock {
         CSSAndLock(std::unique_ptr<CollectionShardingState> css)
-            : cssMutex("CSSMutex::" + NamespaceStringUtil::serialize(css->nss())),
+            : cssMutex(
+                  "CSSMutex::" +
+                  NamespaceStringUtil::serialize(css->nss(), SerializationContext::stateDefault())),
               css(std::move(css)) {}
 
         const Lock::ResourceMutex cssMutex;
@@ -82,8 +83,9 @@ public:
     }
 
     CSSAndLock* getOrCreate(const NamespaceString& nss) noexcept {
+        const auto nssStr =
+            NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault());
         stdx::lock_guard<Latch> lg(_mutex);
-        const auto nssStr = NamespaceStringUtil::serialize(nss);
         auto it = _collections.find(nssStr);
         if (it == _collections.end()) {
             auto inserted =
@@ -113,7 +115,8 @@ public:
         std::vector<NamespaceString> result;
         result.reserve(_collections.size());
         for (const auto& [ns, _] : _collections) {
-            result.emplace_back(NamespaceStringUtil::deserialize(boost::none, ns));
+            result.emplace_back(NamespaceStringUtil::deserialize(
+                boost::none, ns, SerializationContext::stateDefault()));
         }
         return result;
     }
@@ -161,7 +164,7 @@ CollectionShardingState::ScopedCollectionShardingState::acquireScopedCollectionS
         // First lock the RESOURCE_MUTEX associated to this nss to guarantee stability of the
         // CollectionShardingState* . After that, it is safe to get and store the
         // CollectionShadingState*, as long as the RESOURCE_MUTEX is kept locked.
-        Lock::ResourceLock lock(opCtx->lockState(), cssAndLock->cssMutex.getRid(), mode);
+        Lock::ResourceLock lock(opCtx, cssAndLock->cssMutex.getRid(), mode);
         return ScopedCollectionShardingState(std::move(lock), cssAndLock->css.get());
     } else {
         // No need to lock the CSSLock on non-shardsvrs. For performance, skip doing it.

@@ -38,7 +38,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -363,7 +362,7 @@ void CursorEstablisher::killOpOnShards(ServiceContext* srvCtx,
                                        std::shared_ptr<executor::TaskExecutor> executor,
                                        std::vector<OperationKey> opKeys,
                                        std::set<HostAndPort> remotes) noexcept try {
-    ThreadClient tc("establishCursors cleanup", srvCtx);
+    ThreadClient tc("establishCursors cleanup", srvCtx->getService());
     auto opCtx = tc->makeOperationContext();
 
     for (auto&& host : remotes) {

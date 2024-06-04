@@ -66,7 +66,8 @@ bool ReplicationCoordinatorEmbedded::inQuiesceMode() const {
     return false;
 }
 
-void ReplicationCoordinatorEmbedded::shutdown(OperationContext* opCtx) {}
+void ReplicationCoordinatorEmbedded::shutdown(OperationContext* opCtx,
+                                              BSONObjBuilder* shutdownTimeElapsedBuilder) {}
 
 const ReplSettings& ReplicationCoordinatorEmbedded::getSettings() const {
     static ReplSettings _settings;
@@ -145,7 +146,7 @@ OpTime ReplicationCoordinatorEmbedded::getCurrentCommittedSnapshotOpTime() const
     UASSERT_NOT_IMPLEMENTED;
 }
 
-void ReplicationCoordinatorEmbedded::appendDiagnosticBSON(mongo::BSONObjBuilder*) {
+void ReplicationCoordinatorEmbedded::appendDiagnosticBSON(mongo::BSONObjBuilder*, StringData) {
     UASSERT_NOT_IMPLEMENTED;
 }
 

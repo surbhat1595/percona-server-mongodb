@@ -7,6 +7,7 @@
 //   do_not_wrap_aggregations_in_facets,
 //   does_not_support_stepdowns,
 //   requires_profiling,
+//   not_allowed_with_security_token,
 // ]
 
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
@@ -37,7 +38,10 @@ function testPushedDownSBEPlanReplanning(match1, match2, pushedDownStage) {
     lcoll.aggregate(pushedDownPipeline).itcount();
     lcoll.aggregate(pushedDownPipeline).itcount();
 
-    assert.commandWorked(testDB.setProfilingLevel(2));
+    // Don't profile the setFCV command, which could be run during this test in the
+    // fcv_upgrade_downgrade_replica_sets_jscore_passthrough suite.
+    assert.commandWorked(testDB.setProfilingLevel(
+        1, {filter: {'command.setFeatureCompatibilityVersion': {'$exists': false}}}));
     // The cached plan is not efficient for the 'match2' stage and replanning will happen.
     const pipelineTriggeringReplanning = [match2, pushedDownStage];
     lcoll.aggregate(pipelineTriggeringReplanning).itcount();

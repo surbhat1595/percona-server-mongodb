@@ -29,10 +29,10 @@
 
 #include "mongo/s/write_ops/write_op.h"
 
+#include "mongo/s/write_ops/batch_write_op.h"
 #include <absl/container/flat_hash_set.h>
 #include <algorithm>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <ostream>
 #include <string>
 
@@ -44,9 +44,12 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/s/query_analysis_sampler_util.h"
 #include "mongo/s/shard_version.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/assert_util.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
 namespace {
@@ -149,12 +152,16 @@ BulkWriteReplyItem WriteOp::takeBulkWriteReplyItem() {
 void WriteOp::targetWrites(OperationContext* opCtx,
                            const NSTargeter& targeter,
                            std::vector<std::unique_ptr<TargetedWrite>>* targetedWrites,
-                           bool* useTwoPhaseWriteProtocol) {
+                           bool* useTwoPhaseWriteProtocol,
+                           bool* isNonTargetedWriteWithoutShardKeyWithExactId) {
     auto endpoints = [&] {
         if (_itemRef.getOpType() == BatchedCommandRequest::BatchType_Insert) {
             return std::vector{targeter.targetInsert(opCtx, _itemRef.getDocument())};
         } else if (_itemRef.getOpType() == BatchedCommandRequest::BatchType_Update) {
-            return targeter.targetUpdate(opCtx, _itemRef, useTwoPhaseWriteProtocol);
+            return targeter.targetUpdate(opCtx,
+                                         _itemRef,
+                                         useTwoPhaseWriteProtocol,
+                                         isNonTargetedWriteWithoutShardKeyWithExactId);
         } else if (_itemRef.getOpType() == BatchedCommandRequest::BatchType_Delete) {
             return targeter.targetDelete(opCtx, _itemRef, useTwoPhaseWriteProtocol);
         }
@@ -186,7 +193,14 @@ void WriteOp::targetWrites(OperationContext* opCtx,
         // Outside of a transaction, multiple endpoints currently imply no versioning, since we
         // can't retry half a regular multi-write.
         if (endpoints.size() > 1u && !inTransaction) {
-            endpoint.shardVersion->setPlacementVersionIgnored();
+            // Do not ignore shard version if this is an updateOne/deleteOne with exact _id
+            // equality.
+            if (!feature_flags::gUpdateOneWithIdWithoutShardKey.isEnabled(
+                    serverGlobalParams.featureCompatibility) ||
+                (isNonTargetedWriteWithoutShardKeyWithExactId &&
+                 !*isNonTargetedWriteWithoutShardKeyWithExactId)) {
+                endpoint.shardVersion->setPlacementVersionIgnored();
+            }
         }
 
         const auto sampleId = targetedSampleId && targetedSampleId->isFor(endpoint)
@@ -222,7 +236,7 @@ void WriteOp::_updateOpState() {
     for (const auto& childOp : _childOps) {
         // Don't do anything till we have all the info. Unless we're in a transaction because
         // we abort aggresively whenever we get an error during a transaction.
-        if (childOp.state != WriteOpState_Completed && childOp.state != WriteOpState_Error) {
+        if (childOp.state < WriteOpState_Deferred) {
             hasPendingChild = true;
 
             if (!_inTxn) {
@@ -244,7 +258,22 @@ void WriteOp::_updateOpState() {
         }
     }
 
+    // If we already combined replies from a previous round of targeting, we need to make sure to
+    // combine that partial result with any new ones. _bulkWriteReplyItem will be overwritten
+    // below with a new merged reply combining all of the values in childSuccesses, and so we need
+    // to add our existing partial result to childSuccesses to get it merged in too.
+    if (_bulkWriteReplyItem) {
+        childSuccesses.push_back(&_bulkWriteReplyItem.value());
+    }
+
     if (!childErrors.empty() && isRetryError) {
+        if (!childSuccesses.empty()) {
+            // Some child operations were successful on some of the shards. We must remember the
+            // previous replies before we retry targeting this operation. This is because it is
+            // possible to only target shards in _successfulShardSet on retry and as a result, we
+            // may transition to Completed immediately after that.
+            _bulkWriteReplyItem = combineBulkWriteReplyItems(childSuccesses);
+        }
         _state = WriteOpState_Ready;
     } else if (!childErrors.empty()) {
         _error = combineOpErrors(childErrors);
@@ -262,7 +291,7 @@ void WriteOp::_updateOpState() {
     _childOps.clear();
 }
 
-void WriteOp::cancelWrites() {
+void WriteOp::resetWriteToReady() {
     invariant(_state == WriteOpState_Pending || _state == WriteOpState_Ready);
     _state = WriteOpState_Ready;
     _childOps.clear();
@@ -295,6 +324,48 @@ void WriteOp::noteWriteError(const TargetedWrite& targetedWrite,
     _updateOpState();
 }
 
+void WriteOp::noteWriteWithoutShardKeyWithIdResponse(const TargetedWrite& targetedWrite, int n) {
+    dassert(n == 0 || n == 1);
+    const WriteOpRef& ref = targetedWrite.writeOpRef;
+    auto& currentChildOp = _childOps[ref.second];
+    if (n == 0) {
+        // Defer the completion of this child WriteOp until later when we are sure that we do not
+        // need to retry them due to StaleConfig or StaleDBVersion.
+        currentChildOp.state = WriteOpState_Deferred;
+        _updateOpState();
+    } else {
+        for (auto& childOp : _childOps) {
+            dassert(childOp.parentOp->_writeType == WriteType::WithoutShardKeyWithId);
+            if (childOp.state == WriteOpState_Pending &&
+                childOp.pendingWrite->writeOpRef != targetedWrite.writeOpRef) {
+                childOp.state = WriteOpState_NoOp;
+            } else if (childOp.state == WriteOpState_Error) {
+                // When n equals 1, the write operation without a shard key with _id
+                // equality has successfully occurred on the intended shard. In this case, any
+                // errors from other shards can be safely disregarded. These errors will not
+                // impact the parent write operation for us or the user.
+                LOGV2_DEBUG(8083900,
+                            4,
+                            "Ignoring write without shard key with id child op error.",
+                            "error"_attr = childOp.error->serialize());
+                childOp.state = WriteOpState_Completed;
+                childOp.error = boost::none;
+            }
+        }
+        noteWriteComplete(targetedWrite);
+    }
+}
+
+void WriteOp::setOpComplete(boost::optional<BulkWriteReplyItem> bulkWriteReplyItem) {
+    dassert(_state == WriteOpState_Ready);
+    _bulkWriteReplyItem = std::move(bulkWriteReplyItem);
+    // The reply item will currently have the index for the batch it was sent to a shard with,
+    // rather than its index in the client request, so we need to correct it.
+    _bulkWriteReplyItem->setIdx(getWriteItem().getItemIndex());
+    _state = WriteOpState_Completed;
+    // No need to updateOpState, set directly
+}
+
 void WriteOp::setOpError(const write_ops::WriteError& error) {
     dassert(_state == WriteOpState_Ready);
     _error = error;
@@ -303,35 +374,40 @@ void WriteOp::setOpError(const write_ops::WriteError& error) {
     // No need to updateOpState, set directly
 }
 
+void WriteOp::setWriteType(WriteType writeType) {
+    _writeType = writeType;
+}
+
+WriteType WriteOp::getWriteType() {
+    return _writeType;
+}
+
 boost::optional<BulkWriteReplyItem> WriteOp::combineBulkWriteReplyItems(
     std::vector<BulkWriteReplyItem const*> replies) {
-    boost::optional<BulkWriteReplyItem> combinedReply;
-    for (auto reply : replies) {
-        if (!combinedReply) {
-            combinedReply = *reply;
-        } else {
-            if (auto n = reply->getN(); n.has_value()) {
-                combinedReply->setN(combinedReply->getN().get_value_or(0) + n.value());
-            }
-            if (auto nModified = reply->getNModified(); nModified.has_value()) {
-                combinedReply->setNModified(combinedReply->getNModified().get_value_or(0) +
-                                            nModified.value());
-            }
-
-            if (auto upserted = reply->getUpserted(); upserted.has_value()) {
-                tassert(7700400,
-                        "Unexpectedly got bulkWrite upserted replies from multiple shards for a "
-                        "single update operation",
-                        !combinedReply->getUpserted().has_value());
-                combinedReply->setUpserted(reply->getUpserted());
-            }
-        }
+    if (replies.empty()) {
+        return boost::none;
     }
-    if (combinedReply) {
-        // The combined item will currently have its idx set to the idx the first reply item we
-        // processed had in the batch it was sent to a shard in. We need to correct it so the idx
-        // corresponds to the idx this write had in the client request.
-        combinedReply->setIdx(getWriteItem().getItemIndex());
+
+    BulkWriteReplyItem combinedReply;
+    combinedReply.setOk(1);
+    combinedReply.setIdx(getWriteItem().getItemIndex());
+
+    for (auto reply : replies) {
+        if (auto n = reply->getN(); n.has_value()) {
+            combinedReply.setN(combinedReply.getN().get_value_or(0) + n.value());
+        }
+        if (auto nModified = reply->getNModified(); nModified.has_value()) {
+            combinedReply.setNModified(combinedReply.getNModified().get_value_or(0) +
+                                       nModified.value());
+        }
+
+        if (auto upserted = reply->getUpserted(); upserted.has_value()) {
+            tassert(7700400,
+                    "Unexpectedly got bulkWrite upserted replies from multiple shards for a "
+                    "single update operation",
+                    !combinedReply.getUpserted().has_value());
+            combinedReply.setUpserted(reply->getUpserted());
+        }
     }
 
     return combinedReply;

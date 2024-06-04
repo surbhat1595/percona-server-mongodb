@@ -35,7 +35,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -230,7 +229,7 @@ public:
         MONGO_UNREACHABLE;
     }
 };
-MONGO_REGISTER_COMMAND(FileMD5Cmd);
+MONGO_REGISTER_COMMAND(FileMD5Cmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

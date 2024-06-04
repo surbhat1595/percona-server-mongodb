@@ -29,7 +29,6 @@
 
 #include "mongo/s/collection_routing_info_targeter.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <memory>
 #include <string>
@@ -61,6 +60,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/timeseries/metadata.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
@@ -75,6 +75,7 @@
 #include "mongo/s/index_version.h"
 #include "mongo/s/shard_key_pattern_query_util.h"
 #include "mongo/s/shard_version.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/sharding_index_catalog_cache.h"
 #include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/s/write_ops/batched_command_request.h"
@@ -88,7 +89,7 @@
 namespace mongo {
 namespace {
 
-MONGO_FAIL_POINT_DEFINE(isShardedTimeSeriesBucketsNamespaceAlwaysTrue);
+MONGO_FAIL_POINT_DEFINE(isTrackedTimeSeriesBucketsNamespaceAlwaysTrue);
 
 constexpr auto kIdFieldName = "_id"_sd;
 
@@ -242,7 +243,7 @@ CollectionRoutingInfoTargeter::CollectionRoutingInfoTargeter(const NamespaceStri
  * Initializes and returns the CollectionRoutingInfo which needs to be used for targeting.
  * If 'refresh' is true, additionally fetches the latest routing info from the config servers.
  *
- * Note: For sharded time-series collections, we use the buckets collection for targeting. If the
+ * Note: For tracked time-series collections, we use the buckets collection for targeting. If the
  * user request is on the view namespace, we implicitly transform the request to the buckets
  * namespace.
  */
@@ -255,19 +256,20 @@ CollectionRoutingInfo CollectionRoutingInfoTargeter::_init(OperationContext* opC
     }
     auto [cm, sii] = uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, _nss));
 
-    // For a sharded time-series collection, only the underlying buckets collection is stored on the
+    // For a tracked time-series collection, only the underlying buckets collection is stored on the
     // config servers. If the user operation is on the time-series view namespace, we should check
-    // if the buckets namespace is sharded. There are a few cases that we need to take care of,
-    // 1. The request is on the view namespace. We check if the buckets collection is sharded. If
-    //    it is, we use the buckets collection namespace for the purpose of targeting. Additionally,
-    //    we set the '_isRequestOnTimeseriesViewNamespace' to true for this case.
+    // if the buckets namespace is tracked on the configsvr. There are a few cases that we need to
+    // take care of:
+    // 1. The request is on the view namespace. We check if the buckets collection is tracked. If it
+    //    is, we use the buckets collection namespace for the purpose of targeting. Additionally, we
+    //    set the '_isRequestOnTimeseriesViewNamespace' to true for this case.
     // 2. If request is on the buckets namespace, we don't need to execute any additional
     //    time-series logic. We can treat the request as though it was a request on a regular
     //    collection.
-    // 3. During a cache refresh the buckets collection changes from sharded to unsharded. In this
+    // 3. During a cache refresh the buckets collection changes from tracked to untracked. In this
     //    case, if the original request is on the view namespace, then we should reset the namespace
     //    back to the view namespace and reset '_isRequestOnTimeseriesViewNamespace'.
-    if (!cm.isSharded() && !_nss.isTimeseriesBucketsCollection()) {
+    if (!cm.hasRoutingTable() && !_nss.isTimeseriesBucketsCollection()) {
         auto bucketsNs = _nss.makeTimeseriesBucketsNamespace();
         if (refresh) {
             uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(
@@ -275,14 +277,14 @@ CollectionRoutingInfo CollectionRoutingInfoTargeter::_init(OperationContext* opC
         }
         auto [bucketsPlacementInfo, bucketsIndexInfo] =
             uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, bucketsNs));
-        if (bucketsPlacementInfo.isSharded()) {
+        if (bucketsPlacementInfo.hasRoutingTable()) {
             _nss = bucketsNs;
             cm = std::move(bucketsPlacementInfo);
             sii = std::move(bucketsIndexInfo);
             _isRequestOnTimeseriesViewNamespace = true;
         }
-    } else if (!cm.isSharded() && _isRequestOnTimeseriesViewNamespace) {
-        // This can happen if a sharded time-series collection is dropped and re-created. Then we
+    } else if (!cm.hasRoutingTable() && _isRequestOnTimeseriesViewNamespace) {
+        // This can happen if a tracked time-series collection is dropped and re-created. Then we
         // need to reset the namespace to the original namespace.
         _nss = _nss.getTimeseriesViewNamespace();
 
@@ -334,7 +336,7 @@ BSONObj CollectionRoutingInfoTargeter::extractBucketsShardKeyFromTimeseriesDoc(
 
     if (auto metaField = timeseriesOptions.getMetaField(); metaField) {
         if (auto metaElement = doc.getField(*metaField); !metaElement.eoo()) {
-            builder.appendAs(metaElement, timeseries::kBucketMetaFieldName);
+            timeseries::metadata::normalize(metaElement, builder, timeseries::kBucketMetaFieldName);
         }
     }
 
@@ -373,13 +375,13 @@ bool CollectionRoutingInfoTargeter::isExactIdQuery(OperationContext* opCtx,
     if (!collation.isEmpty()) {
         findCommand->setCollation(collation);
     }
-    const auto cq = CanonicalQuery::canonicalize(opCtx,
-                                                 std::move(findCommand),
-                                                 false, /* isExplain */
-                                                 nullptr,
-                                                 ExtensionsCallbackNoop(),
-                                                 MatchExpressionParser::kAllowAllSpecialFeatures);
 
+    auto cq = CanonicalQuery::make({
+        .expCtx = makeExpressionContext(opCtx, *findCommand),
+        .parsedFind = ParsedFindCommandParams{.findCommand = std::move(findCommand),
+                                              .allowedFeatures =
+                                                  MatchExpressionParser::kAllowAllSpecialFeatures},
+    });
     return cq.isOK() && _isExactIdQuery(*cq.getValue(), cm);
 }
 
@@ -422,6 +424,7 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
     OperationContext* opCtx,
     const BatchItemRef& itemRef,
     bool* useTwoPhaseWriteProtocol,
+    bool* isNonTargetedWriteWithoutShardKeyWithExactId,
     std::set<ChunkRange>* chunkRanges) const {
     // If the update is replacement-style:
     // 1. Attempt to target using the query. If this fails, AND the query targets more than one
@@ -458,6 +461,7 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
 
     auto expCtx = makeExpressionContextWithDefaultsForTargeter(opCtx,
                                                                _nss,
+                                                               _cri,
                                                                collation,
                                                                boost::none,  // explain
                                                                itemRef.getLet(),
@@ -598,6 +602,10 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
             updateOneOpStyleBroadcastWithExactIDCount.increment(1);
             if (isUpsert && useTwoPhaseWriteProtocol) {
                 *useTwoPhaseWriteProtocol = true;
+            } else if (!isUpsert && isNonTargetedWriteWithoutShardKeyWithExactId &&
+                       feature_flags::gUpdateOneWithIdWithoutShardKey.isEnabled(
+                           serverGlobalParams.featureCompatibility)) {
+                *isNonTargetedWriteWithoutShardKeyWithExactId = true;
             }
         } else {
             if (useTwoPhaseWriteProtocol) {
@@ -632,6 +640,7 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetDelete(
     // Collection is sharded
     auto expCtx = makeExpressionContextWithDefaultsForTargeter(opCtx,
                                                                _nss,
+                                                               _cri,
                                                                collation,
                                                                boost::none,  // explain
                                                                itemRef.getLet(),
@@ -731,12 +740,12 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CollectionRoutingInfoTargeter::_cano
         expCtx->setCollator(defaultCollator->clone());
     }
 
-    return CanonicalQuery::canonicalize(opCtx,
-                                        std::move(findCommand),
-                                        false, /* isExplain */
-                                        expCtx,
-                                        ExtensionsCallbackNoop(),
-                                        MatchExpressionParser::kAllowAllSpecialFeatures);
+    return CanonicalQuery::make({
+        .expCtx = expCtx,
+        .parsedFind = ParsedFindCommandParams{.findCommand = std::move(findCommand),
+                                              .allowedFeatures =
+                                                  MatchExpressionParser::kAllowAllSpecialFeatures},
+    });
 }
 
 StatusWith<std::vector<ShardEndpoint>> CollectionRoutingInfoTargeter::_targetQuery(
@@ -832,6 +841,12 @@ void CollectionRoutingInfoTargeter::noteStaleDbResponse(OperationContext* opCtx,
     _lastError = LastErrorType::kStaleDbVersion;
 }
 
+bool CollectionRoutingInfoTargeter::hasStaleShardResponse() {
+    return _lastError &&
+        (_lastError.value() == LastErrorType::kStaleShardVersion ||
+         _lastError.value() == LastErrorType::kStaleDbVersion);
+}
+
 bool CollectionRoutingInfoTargeter::refreshIfNeeded(OperationContext* opCtx) {
     // Did we have any stale config or targeting errors at all?
     if (!_lastError) {
@@ -870,17 +885,17 @@ int CollectionRoutingInfoTargeter::getNShardsOwningChunks() const {
     return 0;
 }
 
-bool CollectionRoutingInfoTargeter::isShardedTimeSeriesBucketsNamespace() const {
-    // Used for testing purposes to force that we always have a sharded timeseries bucket namespace.
-    if (MONGO_unlikely(isShardedTimeSeriesBucketsNamespaceAlwaysTrue.shouldFail())) {
+bool CollectionRoutingInfoTargeter::isTrackedTimeSeriesBucketsNamespace() const {
+    // Used for testing purposes to force that we always have a tracked timeseries bucket namespace.
+    if (MONGO_unlikely(isTrackedTimeSeriesBucketsNamespaceAlwaysTrue.shouldFail())) {
         return true;
     }
-    return _cri.cm.isSharded() && _cri.cm.getTimeseriesFields();
+    return _cri.cm.hasRoutingTable() && _cri.cm.getTimeseriesFields();
 }
 
 bool CollectionRoutingInfoTargeter::timeseriesNamespaceNeedsRewrite(
     const NamespaceString& nss) const {
-    return isShardedTimeSeriesBucketsNamespace() && !nss.isTimeseriesBucketsCollection();
+    return isTrackedTimeSeriesBucketsNamespace() && !nss.isTimeseriesBucketsCollection();
 }
 
 const CollectionRoutingInfo& CollectionRoutingInfoTargeter::getRoutingInfo() const {

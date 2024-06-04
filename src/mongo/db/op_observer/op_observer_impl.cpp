@@ -31,7 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
 #include <cstddef>
@@ -244,6 +243,9 @@ OpTimeBundle replLogUpdate(OperationContext* opCtx,
     oplogEntry->setObject(args.updateArgs->update);
     oplogEntry->setObject2(args.updateArgs->criteria);
     oplogEntry->setFromMigrateIfTrue(args.updateArgs->source == OperationSource::kFromMigrate);
+    if (args.updateArgs->mustCheckExistenceForInsertOperations) {
+        oplogEntry->setCheckExistenceForDiffInsert();
+    }
     if (!args.updateArgs->oplogSlots.empty()) {
         oplogEntry->setOpTime(args.updateArgs->oplogSlots.back());
     }
@@ -460,7 +462,8 @@ void OpObserverImpl::onStartIndexBuildSinglePhase(OperationContext* opCtx,
         {},
         boost::none,
         BSON("msg" << std::string(str::stream() << "Creating indexes. Coll: "
-                                                << NamespaceStringUtil::serialize(nss))),
+                                                << NamespaceStringUtil::serialize(
+                                                       nss, SerializationContext::stateDefault()))),
         boost::none,
         boost::none,
         boost::none,
@@ -479,7 +482,8 @@ void OpObserverImpl::onAbortIndexBuildSinglePhase(OperationContext* opCtx,
         {},
         boost::none,
         BSON("msg" << std::string(str::stream() << "Aborting indexes. Coll: "
-                                                << NamespaceStringUtil::serialize(nss))),
+                                                << NamespaceStringUtil::serialize(
+                                                       nss, SerializationContext::stateDefault()))),
         boost::none,
         boost::none,
         boost::none,
@@ -645,9 +649,6 @@ std::vector<repl::OpTime> _logInsertOps(OperationContext* opCtx,
     sleepBetweenInsertOpTimeGenerationAndLogOp.execute([&](const BSONObj& data) {
         auto numMillis = data["waitForMillis"].numberInt();
         LOGV2(7456300,
-              "Sleeping for {sleepMillis}ms after receiving {numOpTimesReceived} optimes from "
-              "{firstOpTime} to "
-              "{lastOpTime}",
               "Sleeping due to sleepBetweenInsertOpTimeGenerationAndLogOp failpoint",
               "sleepMillis"_attr = numMillis,
               "numOpTimesReceived"_attr = count,
@@ -861,6 +862,9 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
         operation.setDestinedRecipient(
             shardingWriteRouter->getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
         operation.setFromMigrateIfTrue(args.updateArgs->source == OperationSource::kFromMigrate);
+        if (args.updateArgs->mustCheckExistenceForInsertOperations) {
+            operation.setCheckExistenceForDiffInsert(true);
+        }
         batchedWriteContext.addBatchedOperation(opCtx, operation);
     } else if (inMultiDocumentTransaction) {
         const bool inRetryableInternalTransaction =
@@ -922,6 +926,9 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
         operation.setDestinedRecipient(
             shardingWriteRouter->getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
         operation.setFromMigrateIfTrue(args.updateArgs->source == OperationSource::kFromMigrate);
+        if (args.updateArgs->mustCheckExistenceForInsertOperations) {
+            operation.setCheckExistenceForDiffInsert(true);
+        }
         txnParticipant.addTransactionOperation(opCtx, operation);
     } else {
         MutableOplogEntry oplogEntry;
@@ -987,6 +994,7 @@ void OpObserverImpl::aboutToDelete(OperationContext* opCtx,
 void OpObserverImpl::onDelete(OperationContext* opCtx,
                               const CollectionPtr& coll,
                               StmtId stmtId,
+                              const BSONObj& doc,
                               const OplogDeleteEntryArgs& args,
                               OpStateAccumulator* opAccumulator) {
     const auto& nss = coll->ns();
@@ -1026,19 +1034,19 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
             operation.setInitializedStatementIds({stmtId});
             if (args.retryableFindAndModifyLocation ==
                 RetryableFindAndModifyLocation::kSideCollection) {
-                invariant(!args.deletedDoc->isEmpty(),
+                invariant(!doc.isEmpty(),
                           str::stream()
                               << "Deleted document must be present for pre-image recording");
-                operation.setPreImage(args.deletedDoc->getOwned());
+                operation.setPreImage(doc.getOwned());
                 operation.setPreImageRecordedForRetryableInternalTransaction();
                 operation.setNeedsRetryImage(repl::RetryImageEnum::kPreImage);
             }
         }
 
         if (args.changeStreamPreAndPostImagesEnabledForCollection) {
-            invariant(!args.deletedDoc->isEmpty(),
+            invariant(!doc.isEmpty(),
                       str::stream() << "Deleted document must be present for pre-image recording");
-            operation.setPreImage(args.deletedDoc->getOwned());
+            operation.setPreImage(doc.getOwned());
             operation.setChangeStreamPreImageRecordingMode(
                 ChangeStreamPreImageRecordingMode::kPreImagesCollection);
         }
@@ -1051,13 +1059,13 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
 
         if (args.retryableFindAndModifyLocation ==
             RetryableFindAndModifyLocation::kSideCollection) {
-            invariant(!args.deletedDoc->isEmpty(),
+            invariant(!doc.isEmpty(),
                       str::stream() << "Deleted document must be present for pre-image recording");
             invariant(opCtx->getTxnNumber());
 
             oplogEntry.setNeedsRetryImage({repl::RetryImageEnum::kPreImage});
-            if (!args.oplogSlots.empty()) {
-                oplogEntry.setOpTime(args.oplogSlots.back());
+            if (!args.retryableFindAndModifyOplogSlots.empty()) {
+                oplogEntry.setOpTime(args.retryableFindAndModifyOplogSlots.back());
             }
         }
 
@@ -1077,11 +1085,9 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
             // If the oplog entry has `needsRetryImage` (retryable findAndModify), gather the
             // pre/post image information to be stored in the the image collection.
             if (oplogEntry.getNeedsRetryImage()) {
-                const auto& dataImage = *(args.deletedDoc);
                 opAccumulator->retryableFindAndModifyImageToWrite =
-                    repl::ReplOperation::ImageBundle{repl::RetryImageEnum::kPreImage,
-                                                     dataImage,
-                                                     opTime.writeOpTime.getTimestamp()};
+                    repl::ReplOperation::ImageBundle{
+                        repl::RetryImageEnum::kPreImage, doc, opTime.writeOpTime.getTimestamp()};
             }
         }
 
@@ -1315,8 +1321,11 @@ repl::OpTime OpObserverImpl::preRenameCollection(OperationContext* const opCtx,
                                                  bool markFromMigrate) {
     BSONObjBuilder builder;
 
-    builder.append("renameCollection", NamespaceStringUtil::serialize(fromCollection));
-    builder.append("to", NamespaceStringUtil::serialize(toCollection));
+    builder.append(
+        "renameCollection",
+        NamespaceStringUtil::serialize(fromCollection, SerializationContext::stateDefault()));
+    builder.append(
+        "to", NamespaceStringUtil::serialize(toCollection, SerializationContext::stateDefault()));
     builder.append("stayTemp", stayTemp);
     if (dropTargetUUID) {
         dropTargetUUID->appendToBuilder(&builder, "dropTarget");
@@ -1396,17 +1405,6 @@ void OpObserverImpl::onImportCollection(OperationContext* opCtx,
     logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _oplogWriter.get());
 }
 
-void OpObserverImpl::onApplyOps(OperationContext* opCtx,
-                                const DatabaseName& dbName,
-                                const BSONObj& applyOpCmd) {
-    MutableOplogEntry oplogEntry;
-    oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
-
-    oplogEntry.setTid(dbName.tenantId());
-    oplogEntry.setNss(NamespaceString::makeCommandNamespace(dbName));
-    oplogEntry.setObject(applyOpCmd);
-    logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _oplogWriter.get());
-}
 
 void OpObserverImpl::onEmptyCapped(OperationContext* opCtx,
                                    const NamespaceString& collectionName,
@@ -1948,7 +1946,8 @@ void OpObserverImpl::onModifyCollectionShardingIndexCatalog(OperationContext* op
                                                             const UUID& uuid,
                                                             BSONObj opDoc) {
     repl::MutableOplogEntry oplogEntry;
-    auto obj = BSON(kShardingIndexCatalogOplogEntryName << NamespaceStringUtil::serialize(nss))
+    auto obj = BSON(kShardingIndexCatalogOplogEntryName
+                    << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()))
                    .addFields(opDoc);
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
     oplogEntry.setNss(nss);

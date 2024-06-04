@@ -163,7 +163,8 @@ public:
     }
 
     boost::optional<BSONObj> getCatalogEntry(OperationContext* opCtx,
-                                             const NamespaceString& ns) const final {
+                                             const NamespaceString& ns,
+                                             const boost::optional<UUID>& collUUID) const final {
         MONGO_UNREACHABLE;
     }
 
@@ -214,6 +215,11 @@ public:
         MONGO_UNREACHABLE;
     }
 
+    void createTempCollection(OperationContext* opCtx,
+                              const NamespaceString& nss,
+                              const BSONObj& collectionOptions) final {
+        MONGO_UNREACHABLE;
+    }
 
     void createTimeseriesView(OperationContext* opCtx,
                               const NamespaceString& ns,
@@ -229,6 +235,10 @@ public:
     }
 
     void dropCollection(OperationContext* opCtx, const NamespaceString& collection) final {
+        MONGO_UNREACHABLE;
+    }
+
+    void dropTempCollection(OperationContext* opCtx, const NamespaceString& nss) final {
         MONGO_UNREACHABLE;
     }
 

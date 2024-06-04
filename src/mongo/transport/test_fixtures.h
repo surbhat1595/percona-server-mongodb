@@ -33,10 +33,15 @@
 #include <memory>
 #include <queue>
 
+#include <boost/filesystem.hpp>
+
+#include "mongo/db/dbmessage.h"
 #include "mongo/logv2/log.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/session.h"
+#include "mongo/transport/transport_layer_mock.h"
+#include "mongo/unittest/temp_dir.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -115,25 +120,68 @@ private:
     JoinThread _thread;  // Appears after the members _run uses.
 };
 
-class MockSEP : public ServiceEntryPoint {
+class NoopReactor : public Reactor {
 public:
-    MockSEP() = default;
-    explicit MockSEP(std::function<void(SessionThread&)> onStartSession)
+    void run() noexcept override {}
+    void stop() override {}
+
+    void runFor(Milliseconds time) noexcept override {
+        MONGO_UNREACHABLE;
+    }
+
+    void drain() override {
+        MONGO_UNREACHABLE;
+    }
+
+    void schedule(Task) override {
+        MONGO_UNREACHABLE;
+    }
+
+    void dispatch(Task) override {
+        MONGO_UNREACHABLE;
+    }
+
+    bool onReactorThread() const override {
+        MONGO_UNREACHABLE;
+    }
+
+    std::unique_ptr<ReactorTimer> makeTimer() override {
+        MONGO_UNREACHABLE;
+    }
+
+    Date_t now() override {
+        MONGO_UNREACHABLE;
+    }
+
+    void appendStats(BSONObjBuilder&) const {
+        MONGO_UNREACHABLE;
+    }
+};
+
+class TransportLayerMockWithReactor : public TransportLayerMock {
+public:
+    using TransportLayerMock::TransportLayerMock;
+
+    ReactorHandle getReactor(WhichReactor) override {
+        return _mockReactor;
+    }
+
+private:
+    ReactorHandle _mockReactor = std::make_unique<NoopReactor>();
+};
+
+class MockSessionManager : public SessionManager {
+public:
+    MockSessionManager() = default;
+    explicit MockSessionManager(std::function<void(SessionThread&)> onStartSession)
         : _onStartSession(std::move(onStartSession)) {}
 
-    ~MockSEP() override {
+    ~MockSessionManager() override {
         _join();
     }
 
     Status start() override {
         return Status::OK();
-    }
-
-    void appendStats(BSONObjBuilder*) const override {}
-
-    Future<DbResponse> handleRequest(OperationContext* opCtx,
-                                     const Message& request) noexcept override {
-        MONGO_UNREACHABLE;
     }
 
     void startSession(std::shared_ptr<transport::Session> session) override {
@@ -148,7 +196,11 @@ public:
         LOGV2(6109511, "started session");
     }
 
-    void endAllSessions(transport::Session::TagMask tags) override {
+    void endSessionByClient(Client* client) override {}
+
+    void appendStats(BSONObjBuilder*) const override {}
+
+    void endAllSessions(Client::TagMask tags) override {
         _join();
     }
 
@@ -157,12 +209,8 @@ public:
         return true;
     }
 
-    size_t numOpenSessions() const override {
+    std::size_t numOpenSessions() const override {
         return _sessions->size();
-    }
-
-    logv2::LogSeverity slowSessionWorkflowLogSeverity() override {
-        MONGO_UNIMPLEMENTED;
     }
 
     void setOnStartSession(std::function<void(SessionThread&)> cb) {
@@ -178,6 +226,63 @@ private:
     std::function<void(SessionThread&)> _onStartSession;
     synchronized_value<std::vector<std::unique_ptr<SessionThread>>> _sessions;
 };
+
+class ServiceEntryPointUnimplemented : public ServiceEntryPoint {
+public:
+    ServiceEntryPointUnimplemented() = default;
+
+    Future<DbResponse> handleRequest(OperationContext* opCtx,
+                                     const Message& request) noexcept override {
+        MONGO_UNREACHABLE;
+    }
+
+    logv2::LogSeverity slowSessionWorkflowLogSeverity() override {
+        MONGO_UNIMPLEMENTED;
+    }
+};
+
+class TempCertificatesDir {
+public:
+    TempCertificatesDir(std::string directoryPrefix) {
+        _dir = std::make_unique<unittest::TempDir>(directoryPrefix + "_certs_test");
+        boost::filesystem::path directoryPath(_dir->path());
+        boost::filesystem::path filePathCA(directoryPath / "ca.pem");
+        boost::filesystem::path filePathPEM(directoryPath / "server_pem.pem");
+        _filePathCA = filePathCA.string();
+        _filePathPEM = filePathPEM.string();
+    }
+
+    StringData getCAFile() const {
+        return _filePathPEM;
+    }
+
+    StringData getPEMKeyFile() const {
+        return _filePathCA;
+    }
+
+private:
+    std::unique_ptr<unittest::TempDir> _dir;
+    std::string _filePathCA;
+    std::string _filePathPEM;
+};
+
+/**
+ * Creates a temporary directory and copies the certificates at the provided filepaths into two new
+ * files in the temporary directory, which the caller can access through TempCertificatesDir. Allows
+ * tests to modify certificate contents mid-test to mimic the actions taken by a user when they call
+ * rotateCertificates.
+ */
+inline std::unique_ptr<TempCertificatesDir> copyCertsToTempDir(std::string caFile,
+                                                               std::string pemFile,
+                                                               std::string directoryPrefix) {
+    auto tempDir = std::make_unique<TempCertificatesDir>(directoryPrefix);
+
+    boost::filesystem::copy_file(caFile, tempDir->getCAFile().toString());
+    boost::filesystem::copy_file(pemFile, tempDir->getPEMKeyFile().toString());
+
+    return tempDir;
+}
+
 }  // namespace mongo::transport::test
 
 #undef MONGO_LOGV2_DEFAULT_COMPONENT

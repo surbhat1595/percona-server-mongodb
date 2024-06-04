@@ -5,6 +5,8 @@
  *   # The validation hook in this suite enforces that all time-series buckets are compressed. This
  *   # will not be the case in multiversion suites.
  *   requires_fcv_71,
+ *   # TODO (SERVER-80521): Re-enable this test once redness is resolve in multiversion suites.
+ *   DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE,
  * ]
  */
 import {documentEq} from "jstests/aggregation/extras/utils.js";
@@ -31,8 +33,8 @@ function generateId() {
     return currentId++;
 }
 
-assert.commandWorked(testDB.adminCommand({enableSharding: dbName}));
-st.ensurePrimaryShard(testDB.getName(), primary.shardName);
+assert.commandWorked(
+    testDB.adminCommand({enableSharding: dbName, primaryShard: primary.shardName}));
 
 const testColl = testDB[collName];
 

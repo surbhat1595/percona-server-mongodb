@@ -31,7 +31,6 @@
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <absl/container/inlined_vector.h>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <functional>
 #include <mutex>
@@ -57,7 +56,7 @@ MONGO_INITIALIZER(s_globalThreadPool)(InitializerContext* context) {
     options.minThreads = 0;
     options.maxThreads = 128;
     options.onCreateThread = [](const std::string& name) {
-        Client::initThread(name);
+        Client::initThread(name, getGlobalServiceContext()->getService(ClusterRole::ShardServer));
     };
     s_globalThreadPool = std::make_unique<ThreadPool>(options);
     s_globalThreadPool->startup();

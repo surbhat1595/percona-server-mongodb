@@ -30,7 +30,6 @@
 #pragma once
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/shared_array.hpp>
 #include <boost/smart_ptr/shared_array.hpp>
 #include <cstddef>
@@ -142,6 +141,11 @@ public:
         stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
         invariant(_data->records.size() == size_t(numRecords));
         _data->dataSize = dataSize;
+    }
+
+    RecordId getLargestKey(OperationContext* opCtx) const final {
+        stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
+        return RecordId(_data->nextId - 1);
     }
 
     virtual void reserveRecordIds(OperationContext* opCtx,

@@ -34,7 +34,6 @@
 #include <string>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -121,8 +120,6 @@ public:
                     serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) ? 0 : 2;
                 LOGV2_DEBUG(21975,
                             debugLevel,
-                            "Command on database {db} timed out waiting for read concern to be "
-                            "satisfied. Command: {command}. Info: {error}",
                             "Command timed out waiting for read concern to be satisfied",
                             "db"_attr = request.getDatabase(),
                             "command"_attr =
@@ -149,9 +146,16 @@ public:
                              const repl::OpTime& lastOpBeforeRun,
                              BSONObjBuilder& commandResponseBuilder) const override {
 
-        // Prevent waiting for writeConcern if the command is changing an unreplicated namespace.
+        // Prevent waiting for writeConcern if the command is changing only unreplicated namespaces.
         invariant(invocation);
-        if (!invocation->ns().isReplicated()) {
+        bool anyReplicatedNamespace = false;
+        for (auto& ns : invocation->allNamespaces()) {
+            if (ns.isReplicated()) {
+                anyReplicatedNamespace = true;
+                break;
+            }
+        }
+        if (!anyReplicatedNamespace) {
             return;
         }
 

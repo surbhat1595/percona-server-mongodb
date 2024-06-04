@@ -28,7 +28,6 @@
  */
 
 
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <cstdint>
 #include <exception>
@@ -127,11 +126,7 @@ public:
 
         const bool lock = cmdObj["lock"].trueValue();
         const bool forBackup = cmdObj["forBackup"].trueValue();
-        LOGV2(20461,
-              "CMD fsync: lock:{lock}",
-              "CMD fsync",
-              "lock"_attr = lock,
-              "forBackup"_attr = forBackup);
+        LOGV2(20461, "CMD fsync", "lock"_attr = lock, "forBackup"_attr = forBackup);
 
         // fsync + lock is sometimes used to block writes out of the system and does not care if
         // the `BackupCursorService::fsyncLock` call succeeds.
@@ -164,9 +159,7 @@ public:
                 threadStatus = Status::OK();
                 threadStarted = false;
                 Milliseconds deadline = Milliseconds::max();
-                if (forBackup &&
-                    feature_flags::gClusterFsyncLock.isEnabled(
-                        serverGlobalParams.featureCompatibility)) {
+                if (forBackup) {
                     // Set a default deadline of 90s for the fsyncLock to be acquired.
                     deadline = Milliseconds(90000);
                     // Parse the cmdObj and update the deadline if
@@ -197,14 +190,14 @@ public:
                 uassertStatusOK(status);
             }
         }
-        if (forBackup &&
-            feature_flags::gClusterFsyncLock.isEnabled(serverGlobalParams.featureCompatibility)) {
+        if (forBackup) {
+            // The check must be performed only if the fsync+lock command has been issued for backup
+            // purposes (through monogs). There are valid cases where fsync+lock can be invoked on
+            // the mongod while DDLs are in progress.
             checkForInProgressDDLOperations(opCtx);
         }
 
         LOGV2(20462,
-              "mongod is locked and no writes are allowed. db.fsyncUnlock() to unlock, "
-              "lock count is {lockCount}, for more info see {seeAlso}",
               "mongod is locked and no writes are allowed",
               "lockCount"_attr = getLockCount(),
               "seeAlso"_attr = url());
@@ -338,7 +331,7 @@ public:
         return fsyncCore.runFsyncCommand(opCtx, cmdObj, result);
     }
 };
-MONGO_REGISTER_COMMAND(FSyncCommand);
+MONGO_REGISTER_COMMAND(FSyncCommand).forShard();
 
 class FSyncUnlockCommand : public BasicCommand {
 public:
@@ -374,7 +367,7 @@ public:
         return fsyncCore.runFsyncUnlockCommand(opCtx, cmdObj, result);
     }
 };
-MONGO_REGISTER_COMMAND(FSyncUnlockCommand);
+MONGO_REGISTER_COMMAND(FSyncUnlockCommand).forShard();
 
 bool FSyncCore::runFsyncUnlockCommand(OperationContext* opCtx,
                                       const BSONObj& cmdObj,
@@ -422,7 +415,7 @@ void FSyncLockThread::shutdown(stdx::unique_lock<Latch>& stateLock) {
 }
 
 void FSyncLockThread::run() {
-    ThreadClient tc("fsyncLockWorker", _serviceContext);
+    ThreadClient tc("fsyncLockWorker", _serviceContext->getService(ClusterRole::ShardServer));
     stdx::lock_guard<SimpleMutex> lkf(filesLockedFsync);
     stdx::unique_lock<Latch> stateLock(fsyncStateMutex);
 
@@ -452,10 +445,7 @@ void FSyncLockThread::run() {
             storageEngine->flushAllFiles(&opCtx, /*callerHoldsReadLock*/ true);
         } catch (const std::exception& e) {
             if (!_allowFsyncFailure) {
-                LOGV2_ERROR(20472,
-                            "Error doing flushAll: {error}",
-                            "Error doing flushAll",
-                            "error"_attr = e.what());
+                LOGV2_ERROR(20472, "Error doing flushAll", "error"_attr = e.what());
                 fsyncCore.threadStatus = Status(ErrorCodes::CommandFailed, e.what());
                 fsyncCore.acquireFsyncLockSyncCV.notify_one();
                 return;
@@ -482,16 +472,11 @@ void FSyncLockThread::run() {
                                });
         } catch (const DBException& e) {
             if (_allowFsyncFailure) {
-                LOGV2_WARNING(
-                    20470,
-                    "Locking despite storage engine being unable to begin backup: {error}",
-                    "Locking despite storage engine being unable to begin backup",
-                    "error"_attr = e);
+                LOGV2_WARNING(20470,
+                              "Locking despite storage engine being unable to begin backup",
+                              "error"_attr = e);
             } else {
-                LOGV2_ERROR(20473,
-                            "Storage engine unable to begin backup: {error}",
-                            "Storage engine unable to begin backup",
-                            "error"_attr = e);
+                LOGV2_ERROR(20473, "Storage engine unable to begin backup", "error"_attr = e);
                 fsyncCore.threadStatus = e.toStatus();
                 fsyncCore.acquireFsyncLockSyncCV.notify_one();
                 return;
@@ -528,10 +513,7 @@ void FSyncLockThread::run() {
         fsyncCore.acquireFsyncLockSyncCV.notify_one();
         return;
     } catch (const std::exception& e) {
-        LOGV2_FATAL(40350,
-                    "FSyncLockThread exception: {error}",
-                    "FSyncLockThread exception",
-                    "error"_attr = e.what());
+        LOGV2_FATAL(40350, "FSyncLockThread exception", "error"_attr = e.what());
     }
 }
 

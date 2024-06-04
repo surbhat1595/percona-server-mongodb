@@ -45,6 +45,8 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/s/analyze_shard_key_documents_gen.h"
+#include "mongo/s/analyze_shard_key_util.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/namespace_string_util.h"
 
@@ -87,11 +89,14 @@ DocumentSource::GetNextResult DocumentSourceListSampledQueries::doGetNext() {
 
         std::vector<BSONObj> stages;
         if (auto& nss = _spec.getNamespace()) {
-            stages.push_back(BSON("$match" << BSON(SampledQueryDocument::kNsFieldName
-                                                   << NamespaceStringUtil::serialize(*nss))));
+            uassertStatusOK(validateNamespace(*nss));
+            stages.push_back(
+                BSON("$match" << BSON(SampledQueryDocument::kNsFieldName
+                                      << NamespaceStringUtil::serialize(
+                                             *nss, SerializationContext::stateDefault()))));
         }
         try {
-            _pipeline = Pipeline::makePipeline(std::move(stages), foreignExpCtx, opts);
+            _pipeline = Pipeline::makePipeline(stages, foreignExpCtx, opts);
         } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>& ex) {
             LOGV2(7807800,
                   "Failed to create aggregation pipeline to list sampled queries",
@@ -101,7 +106,7 @@ DocumentSource::GetNextResult DocumentSourceListSampledQueries::doGetNext() {
     }
 
     if (auto doc = _pipeline->getNext()) {
-        const auto queryDoc = SampledQueryDocument::parse(
+        auto queryDoc = SampledQueryDocument::parse(
             IDLParserContext(DocumentSourceListSampledQueries::kStageName), doc->toBson());
         DocumentSourceListSampledQueriesResponse response;
         response.setSampledQueryDocument(std::move(queryDoc));

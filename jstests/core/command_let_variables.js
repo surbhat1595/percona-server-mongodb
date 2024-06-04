@@ -1,10 +1,13 @@
 // Tests that commands like find, aggregate and update accepts a 'let' parameter which defines
 // variables for use in expressions within the command.
 // @tags: [
+//   # Before 7.2, $rand was evaluated more than once in sharded find (SERVER-75927).
+//   requires_fcv_72,
 // ]
 //
-import {getPlanStage} from "jstests/libs/analyze_plan.js";
+import {getPlanStage, planHasStage} from "jstests/libs/analyze_plan.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {checkSBEEnabled} from "jstests/libs/sbe_util.js";  // TODO SERVER-80226: Remove this import
 
 const testDB = db.getSiblingDB("command_let_variables");
 const coll = testDB.command_let_variables;
@@ -88,10 +91,16 @@ let explain = assert.commandWorked(testDB.runCommand({
     verbosity: "executionStats"
 }));
 if (!isMongos) {
-    assert(explain.hasOwnProperty("stages"), explain);
-    assert.neq(explain.stages.length, 0, explain);
-    let lastStage = explain.stages[explain.stages.length - 1];
-    assert.eq(lastStage.nReturned, 2, explain);
+    // TODO SERVER-80226: Remove 'featureFlagSbeFull' used by $unwind Pushdown feature.
+    if (checkSBEEnabled(db, ["featureFlagSbeFull"])) {
+        // $unwind should be pushed down to SBE.
+        assert(planHasStage(db, explain, "UNWIND"), explain);
+    } else {
+        assert(explain.hasOwnProperty("stages"), explain);
+        assert.neq(explain.stages.length, 0, explain);
+        let lastStage = explain.stages[explain.stages.length - 1];
+        assert.eq(lastStage.nReturned, 2, explain);
+    }
 }
 
 if (!isMongos) {
@@ -574,9 +583,9 @@ result = assert
              .commandWorked(testDB.runCommand({
                  find: coll.getName(),
                  filter: {},
-                 projection: {_id: "$$a"},
+                 projection: {_id: "$$r"},
                  limit: 1,
-                 let : {a: {$rand: {}}},
+                 let : {r: {$rand: {}}},
              }))
              .cursor.firstBatch[0]
              ._id;
@@ -605,23 +614,18 @@ assert.between(0, result, 1);
 }
 
 // Test that the expressions are evaluated once up front.
-//
-// TODO SERVER-75927: This does not work as expected when the collection is sharded. Once the bug
-// is fixed, we should re-enable this test case when the collection is sharded.
-if (!isCollSharded) {
-    const values = assert
-                       .commandWorked(testDB.runCommand({
-                           find: coll.getName(),
-                           filter: {},
-                           projection: {_id: "$$a"},
-                           let : {a: {$rand: {}}},
-                       }))
-                       .cursor.firstBatch.map(doc => doc._id);
-    assert.gt(values.length, 1);
+const values = assert
+                   .commandWorked(testDB.runCommand({
+                       find: coll.getName(),
+                       filter: {},
+                       projection: {_id: "$$r"},
+                       let : {r: {$rand: {}}},
+                   }))
+                   .cursor.firstBatch.map(doc => doc._id);
+assert.gt(values.length, 1);
 
-    const deduped = [...new Set(values)];
-    assert.eq(1, deduped.length, `Expected all identical values: ${deduped}`);
-}
+const deduped = [...new Set(values)];
+assert.eq(1, deduped.length, `Expected all identical values: ${deduped}`);
 
 // Test that expressions wrapped with $literal are serialized correctly when run in sharded cluster
 // environments.

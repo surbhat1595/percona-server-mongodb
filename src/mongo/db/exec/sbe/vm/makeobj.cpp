@@ -33,6 +33,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/sbe/makeobj_spec.h"
 #include "mongo/db/exec/sbe/values/util.h"
+#include "mongo/db/exec/sbe/vm/makeobj_input_fields_cursors.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
 
 namespace mongo::sbe::vm {
@@ -64,7 +65,7 @@ void ByteCode::traverseAndProduceBsonObj(const TraverseAndProduceBsonObjContext&
         } else {
             // For all other cases, call produceBsonObject().
             UniqueBSONObjBuilder bob(bab.subobjStart());
-            produceBsonObject(ctx.spec, elemTag, elemVal, ctx.stackStartOffset, ctx.code, bob);
+            produceBsonObject(ctx.spec, ctx.stackOffsets, ctx.code, bob, elemTag, elemVal);
         }
     });
 }
@@ -95,295 +96,284 @@ void ByteCode::traverseAndProduceBsonObj(const TraverseAndProduceBsonObjContext&
     } else {
         // For all other cases, call produceBsonObject().
         UniqueBSONObjBuilder nestedBob(bob.subobjStart(fieldName));
-        produceBsonObject(ctx.spec, tag, val, ctx.stackStartOffset, ctx.code, nestedBob);
+        produceBsonObject(ctx.spec, ctx.stackOffsets, ctx.code, nestedBob, tag, val);
     }
 }
 
-// Iterator for BSON objects.
-class BsonFieldCursor {
-public:
-    BsonFieldCursor(const char* be) : _be(be) {
-        _end = _be + ConstDataView(_be).read<LittleEndian<uint32_t>>();
-        _be += 4;
-        if (_be != _end - 1) {
-            _fieldName = bson::fieldNameAndLength(_be);
-            _nextBe = bson::advance(_be, _fieldName.size());
-        }
-    }
-    bool atEnd() const {
-        return _be == _end - 1;
-    }
-    void moveNext() {
-        _be = _nextBe;
-        if (_be != _end - 1) {
-            _fieldName = bson::fieldNameAndLength(_be);
-            _nextBe = bson::advance(_be, _fieldName.size());
-        }
-    }
-    StringData fieldName() const {
-        return _fieldName;
-    }
-    std::pair<value::TypeTags, value::Value> value() const {
-        return bson::convertFrom<true>(bsonElement());
-    }
-    void appendTo(UniqueBSONObjBuilder& bob) const {
-        bob.append(bsonElement());
-    }
-
-private:
-    BSONElement bsonElement() const {
-        auto fieldNameLenWithNull = _fieldName.size() + 1;
-        auto totalSize = _nextBe - _be;
-        return BSONElement(_be, fieldNameLenWithNull, totalSize, BSONElement::TrustedInitTag{});
-    }
-
-    const char* _be{nullptr};
-    const char* _end{nullptr};
-    const char* _nextBe{nullptr};
-    StringData _fieldName;
-};
-
-// Iterator for SBE objects.
-class FieldCursor {
-public:
-    FieldCursor(value::Object* objRoot) : _objRoot(objRoot), _idx(0) {}
-    bool atEnd() const {
-        return _idx >= _objRoot->size();
-    }
-    void moveNext() {
-        ++_idx;
-    }
-    StringData fieldName() const {
-        return _objRoot->field(_idx);
-    }
-    std::pair<value::TypeTags, value::Value> value() const {
-        return _objRoot->getAt(_idx);
-    }
-    void appendTo(UniqueBSONObjBuilder& bob) const {
-        auto [tag, val] = _objRoot->getAt(_idx);
-        bson::appendValueToBsonObj(bob, _objRoot->field(_idx), tag, val);
-    }
-
-private:
-    value::Object* _objRoot{nullptr};
-    size_t _idx{0};
-};
-
-// "Empty" iterator type whose atEnd() method always returns true.
-class EmptyFieldCursor {
-public:
-    EmptyFieldCursor() = default;
-    bool atEnd() const {
-        return true;
-    }
-    void moveNext() {}
-    StringData fieldName() const {
-        return ""_sd;
-    }
-    std::pair<value::TypeTags, value::Value> value() const {
-        return {value::TypeTags::Nothing, 0};
-    }
-    void appendTo(UniqueBSONObjBuilder& bob) const {}
-};
-
+template <typename CursorT>
 void ByteCode::produceBsonObject(const MakeObjSpec* spec,
-                                 value::TypeTags rootTag,
-                                 value::Value rootVal,
-                                 int stackStartOffset,
+                                 MakeObjStackOffsets stackOffsets,
                                  const CodeFragment* code,
-                                 UniqueBSONObjBuilder& bob) {
+                                 UniqueBSONObjBuilder& bob,
+                                 CursorT cursor) {
     using TypeTags = value::TypeTags;
+    using InputFields = MakeObjCursorInputFields;
 
-    // Define the processFields() lambda, which will do the actual work of scanning the root
-    // object ('rootTag' / 'rootVal') and building the output object.
-    auto processFields = [&](auto&& cursor) {
-        auto& fields = spec->fields;
-        auto& fieldInfos = spec->fieldInfos;
-        const size_t numFields = fields.size();
-        const size_t numKeepOrDrops = spec->numKeepOrDrops;
-        const size_t numValueArgs = spec->numValueArgs;
-        const size_t numMandatoryLamsAndMakeObjs =
-            spec->numMandatoryLambdas + spec->numMandatoryMakeObjs;
-        const bool isClosed = spec->fieldBehavior == MakeObjSpec::FieldBehavior::kClosed;
-        const bool recordVisits = numValueArgs + numMandatoryLamsAndMakeObjs > 0;
+    auto [fieldsStackOff, argsStackOff] = stackOffsets;
 
-        // The 'visited' array keeps track of which computed fields have been visited so far so
-        // that later we can append the non-visited computed fields to the end of the object.
-        //
-        // Note that we only use the 'visited' array when 'recordVisits' is true.
-        char* visited = nullptr;
-        absl::InlinedVector<char, 128> visitedVec;
+    auto& fields = spec->fields;
+    auto& actions = spec->actions;
+    auto& mandatoryFields = spec->mandatoryFields;
+    const size_t numFieldsOfInterest = spec->numFieldsOfInterest;
+    const size_t numValueArgs = spec->numValueArgs;
+    const size_t numMandatoryLamsAndMakeObjs = spec->mandatoryFields.size() - spec->numValueArgs;
+    const bool isClosed = spec->fieldsScopeIsClosed();
+    const bool recordVisits = numValueArgs + numMandatoryLamsAndMakeObjs > 0;
 
+    // The 'visited' array keeps track of which computed fields have been visited so far so
+    // that later we can append the non-visited computed fields to the end of the object.
+    //
+    // Note that we only use the 'visited' array when 'recordVisits' is true.
+    char* visited = nullptr;
+    absl::InlinedVector<char, 128> visitedVec;
+
+    if (recordVisits) {
+        size_t visitedSize = fields.size();
+        visitedVec.resize(visitedSize);
+        visited = visitedVec.data();
+    }
+
+    size_t fieldsLeft = numFieldsOfInterest;
+    size_t valueArgsLeft = numValueArgs;
+    size_t mandatoryLamsAndMakeObjsVisited = 0;
+
+    // If 'isClosed' is false, loop over the input object until 'fieldsLeft == 0' is true. If
+    // 'isClosed' is true, loop over the input object until 'fieldsLeft == 0' is true or until
+    // 'fieldsLeft == 1 && valueArgsLeft == 1' is true.
+    for (; !cursor.atEnd() && (fieldsLeft > (isClosed ? 1 : 0) || fieldsLeft != valueArgsLeft);
+         cursor.moveNext()) {
+        // Get the idx and type of the current field.
+        auto [fieldIdx, t] = cursor.fieldIdxAndType();
+
+        if (t == MakeObjSpec::ActionType::kDrop) {
+            fieldsLeft -= static_cast<uint8_t>(!isClosed);
+            continue;
+        }
+
+        if (t == MakeObjSpec::ActionType::kKeep) {
+            fieldsLeft -= static_cast<uint8_t>(isClosed);
+            cursor.appendTo(bob);
+            continue;
+        }
+
+        --fieldsLeft;
         if (recordVisits) {
-            size_t visitedSize = numFields - numKeepOrDrops;
-            visitedVec.resize(visitedSize);
-            visited = visitedVec.data();
+            visited[fieldIdx] = 1;
         }
 
-        size_t fieldsLeft = numFields;
-        size_t valueArgsLeft = numValueArgs;
-        size_t mandatoryLamsAndMakeObjsVisited = 0;
+        auto& action = actions[fieldIdx];
 
-        // If 'isClosed' is false, loop over the input object until 'fieldsLeft == 0' is true. If
-        // 'isClosed' is true, loop over the input object until 'fieldsLeft == 0' is true or until
-        // 'fieldsLeft == 1 && valueArgsLeft == 1' is true.
-        for (; !cursor.atEnd() && (fieldsLeft > (isClosed ? 1 : 0) || fieldsLeft != valueArgsLeft);
-             cursor.moveNext()) {
-            // Get the current field name, store it in 'fieldName', and look it up in 'fields'.
-            StringData fieldName = cursor.fieldName();
-            size_t fieldIdx = fields.findPos(fieldName);
+        if (t == MakeObjSpec::ActionType::kValueArg) {
+            // Get the value arg and store it into 'tag'/'val'.
+            --valueArgsLeft;
+            size_t argIdx = action.getValueArgIdx();
+            auto [_, tag, val] = getFromStack(argsStackOff + argIdx);
 
-            if (fieldIdx == IndexedStringVector::npos) {
-                if (!isClosed) {
-                    cursor.appendTo(bob);
-                }
-            } else if (fieldIdx < numKeepOrDrops) {
-                --fieldsLeft;
-
-                if (isClosed) {
-                    cursor.appendTo(bob);
-                }
-            } else {
-                --fieldsLeft;
-
-                auto& fieldInfo = fieldInfos[fieldIdx];
-
-                if (recordVisits) {
-                    auto visitedIdx = fieldIdx - numKeepOrDrops;
-                    visited[visitedIdx] = 1;
-                }
-
-                if (fieldInfo.isValueArg()) {
-                    // Get the value arg and store it into 'tag'/'val'.
-                    --valueArgsLeft;
-                    size_t argIdx = fieldInfo.getValueArgIdx();
-                    auto [_, tag, val] = getFromStack(stackStartOffset + argIdx);
-                    // Append the value arg to 'bob'.
-                    bson::appendValueToBsonObj(bob, fieldName, tag, val);
-                } else if (fieldInfo.isLambdaArg()) {
-                    // Increment 'mandatoryLamsAndMakeObjsVisited' if appropriate.
-                    const auto& lambdaArg = fieldInfo.getLambdaArg();
-                    if (!lambdaArg.returnsNothingOnMissingInput) {
-                        ++mandatoryLamsAndMakeObjsVisited;
-                    }
-                    // Get the current value from 'cursor' and store it to 'inputTag'/'inputVal'.
-                    auto [inputTag, inputVal] = cursor.value();
-                    // Get the lambda corresponding to 'fieldIdx'.
-                    size_t argIdx = lambdaArg.argIdx;
-                    auto [_, t, v] = getFromStack(stackStartOffset + argIdx);
-                    // Get the offset of the lambda.
-                    tassert(7103501, "Expected arg to be LocalLambda", t == TypeTags::LocalLambda);
-                    int64_t lamPos = value::bitcastTo<int64_t>(v);
-                    // Push the lambda's input onto the stack and invoke the lambda.
-                    pushStack(false, inputTag, inputVal);
-                    runLambdaInternal(code, lamPos);
-                    // Append the lambda's return value to 'bob', then pop the return value
-                    // off of the stack and release it.
-                    auto [__, tag, val] = getFromStack(0);
-                    bson::appendValueToBsonObj(bob, fieldName, tag, val);
-                    popAndReleaseStack();
-                } else if (fieldInfo.isMakeObj()) {
-                    // Increment 'mandatoryLamsAndMakeObjsVisited' if appropriate.
-                    auto fieldSpec = fieldInfo.getMakeObjSpec();
-                    if (!fieldSpec->returnsNothingOnMissingInput()) {
-                        ++mandatoryLamsAndMakeObjsVisited;
-                    }
-                    // Get the current value from 'cursor' and store it to 'inputTag'/'inputVal'.
-                    auto [inputTag, inputVal] = cursor.value();
-                    // Call traverseAndProduceBsonObj() to produce the object.
-                    TraverseAndProduceBsonObjContext ctx{fieldSpec, stackStartOffset, code};
-                    traverseAndProduceBsonObj(ctx, inputTag, inputVal, fieldName, bob);
-                } else {
-                    MONGO_UNREACHABLE_TASSERT(7103502);
-                }
+            // Append the value arg to 'bob'.
+            auto fieldName = cursor.fieldName();
+            bson::appendValueToBsonObj(bob, fieldName, tag, val);
+        } else if (t == MakeObjSpec::ActionType::kLambdaArg) {
+            // Increment 'mandatoryLamsAndMakeObjsVisited' if appropriate.
+            const auto& lambdaArg = action.getLambdaArg();
+            if (!lambdaArg.returnsNothingOnMissingInput) {
+                ++mandatoryLamsAndMakeObjsVisited;
             }
-        }
+            // Get the current value from 'cursor' and store it to 'inputTag'/'inputVal'.
+            auto [inputTag, inputVal] = cursor.value();
 
-        // If 'isClosed' is false and 'cursor' has not reached the end of the input object,
-        // copy over the remaining fields from the input object to the output object.
-        if (!isClosed) {
-            for (; !cursor.atEnd(); cursor.moveNext()) {
-                cursor.appendTo(bob);
+            // Get the lambda corresponding to 'fieldIdx' and get the offset of the lambda.
+            size_t argIdx = lambdaArg.argIdx;
+            auto [_, t, v] = getFromStack(argsStackOff + argIdx);
+            tassert(7103501, "Expected arg to be LocalLambda", t == TypeTags::LocalLambda);
+            int64_t lamPos = value::bitcastTo<int64_t>(v);
+
+            // Push the lambda's input onto the stack and invoke the lambda.
+            pushStack(false, inputTag, inputVal);
+            runLambdaInternal(code, lamPos);
+
+            // Append the lambda's return value to 'bob', then pop the return value
+            // off of the stack and release it.
+            auto fieldName = cursor.fieldName();
+            auto [__, tag, val] = getFromStack(0);
+            bson::appendValueToBsonObj(bob, fieldName, tag, val);
+            popAndReleaseStack();
+        } else if (t == MakeObjSpec::ActionType::kMakeObj) {
+            // Increment 'mandatoryLamsAndMakeObjsVisited' if appropriate.
+            auto fieldSpec = action.getMakeObjSpec();
+            if (!fieldSpec->returnsNothingOnMissingInput()) {
+                ++mandatoryLamsAndMakeObjsVisited;
             }
-        }
 
-        // If there are remaining fields in 'fields' that need to be processed, take care of
-        // processing those remaining fields here.
-        if (recordVisits &&
-            (valueArgsLeft > 0 || mandatoryLamsAndMakeObjsVisited < numMandatoryLamsAndMakeObjs)) {
-            // Loop over 'fields' (skipping past the simple "keeps"/"drops" at the beginning
-            // of the vector).
-            for (size_t fieldIdx = numKeepOrDrops; fieldIdx < numFields; ++fieldIdx) {
-                // Skip fields that have already been visited.
-                auto& fieldInfo = fieldInfos[fieldIdx];
-                auto visitedIdx = fieldIdx - numKeepOrDrops;
-                if (visited[visitedIdx]) {
+            // Get the current value from 'cursor' and store it to 'inputTag'/'inputVal', and then
+            // call traverseAndProduceBsonObj() to produce the object.
+            auto [inputTag, inputVal] = cursor.value();
+            auto fieldName = cursor.fieldName();
+            TraverseAndProduceBsonObjContext ctx{fieldSpec, {fieldsStackOff, argsStackOff}, code};
+            traverseAndProduceBsonObj(ctx, inputTag, inputVal, fieldName, bob);
+        } else {
+            MONGO_UNREACHABLE_TASSERT(7103502);
+        }
+    }
+
+    // If 'isClosed' is false and 'cursor' has not reached the end of the input object, copy over
+    // the remaining fields from the input object to the output object.
+    if (!isClosed) {
+        for (; !cursor.atEnd(); cursor.moveNext()) {
+            cursor.appendTo(bob);
+        }
+    }
+
+    // If there are remaining fields in 'fields' that need to be processed, take care of processing
+    // those remaining fields here.
+    if (recordVisits &&
+        (valueArgsLeft > 0 || mandatoryLamsAndMakeObjsVisited < numMandatoryLamsAndMakeObjs)) {
+        // Loop over 'fields' (skipping past the simple "keeps"/"drops" at the beginning
+        // of the vector).
+        for (size_t i = 0; i < mandatoryFields.size(); ++i) {
+            // Skip fields that have already been visited.
+            size_t fieldIdx = mandatoryFields[i];
+            if (visited[fieldIdx]) {
+                continue;
+            }
+
+            // Get the field name for this field, and then consult 'action' to see what
+            // action should be taken.
+            auto fieldName = StringData(fields[fieldIdx]);
+            auto& action = actions[fieldIdx];
+
+            if (action.isValueArg()) {
+                // Get the value arg and store it into 'tag'/'val'.
+                size_t argIdx = action.getValueArgIdx();
+                auto [_, tag, val] = getFromStack(argsStackOff + argIdx);
+
+                // Append the value arg to 'bob'.
+                bson::appendValueToBsonObj(bob, fieldName, tag, val);
+            } else if (action.isLambdaArg()) {
+                // If 'lambdaArg.returnsNothingOnMissingInput' is false, then we need to
+                // invoke the lamdba.
+                const auto& lambdaArg = action.getLambdaArg();
+                if (lambdaArg.returnsNothingOnMissingInput) {
                     continue;
                 }
 
-                // Get the field name for this field and then consult 'fieldInfo' to see what
-                // action should be taken.
-                auto fieldName = StringData(fields[fieldIdx]);
+                // Get the lambda corresponding to 'fieldIdx' and the offset of the lambda.
+                size_t argIdx = lambdaArg.argIdx;
+                auto [_, t, v] = getFromStack(argsStackOff + argIdx);
+                tassert(7103506, "Expected arg to be LocalLambda", t == TypeTags::LocalLambda);
+                int64_t lamPos = value::bitcastTo<int64_t>(v);
 
-                if (fieldInfo.isValueArg()) {
-                    // Get the value arg and store it into 'tag'/'val'.
-                    size_t argIdx = fieldInfo.getValueArgIdx();
-                    auto [_, tag, val] = getFromStack(stackStartOffset + argIdx);
+                // Push the lambda's input (Nothing) onto the stack and invoke the lambda.
+                pushStack(false, TypeTags::Nothing, 0);
+                runLambdaInternal(code, lamPos);
 
-                    // Append the value arg to 'bob'.
-                    bson::appendValueToBsonObj(bob, fieldName, tag, val);
-                } else if (fieldInfo.isLambdaArg()) {
-                    // If 'lambdaArg.returnsNothingOnMissingInput' is false, then we need to
-                    // invoke the lamdba.
-                    const auto& lambdaArg = fieldInfo.getLambdaArg();
-                    if (lambdaArg.returnsNothingOnMissingInput) {
-                        continue;
-                    }
-                    // Get the lambda corresponding to 'fieldIdx'.
-                    size_t argIdx = lambdaArg.argIdx;
-                    auto [_, t, v] = getFromStack(stackStartOffset + argIdx);
-                    // Get the offset of the lambda.
-                    tassert(7103506, "Expected arg to be LocalLambda", t == TypeTags::LocalLambda);
-                    int64_t lamPos = value::bitcastTo<int64_t>(v);
-                    // Push the lambda's input (Nothing) onto the stack and invoke the lambda.
-                    pushStack(false, TypeTags::Nothing, 0);
-                    runLambdaInternal(code, lamPos);
-                    // Append the lambda's return value to 'bob', then pop the return value
-                    // off of the stack and release it.
-                    auto [__, tag, val] = getFromStack(0);
-                    bson::appendValueToBsonObj(bob, fieldName, tag, val);
-                    popAndReleaseStack();
-                } else if (fieldInfo.isMakeObj()) {
-                    // If 'fieldSpec->returnsNothingOnMissingInput()' is false, then we need to
-                    // produce the object.
-                    MakeObjSpec* fieldSpec = fieldInfo.getMakeObjSpec();
-
-                    if (!fieldSpec->returnsNothingOnMissingInput()) {
-                        // Call traverseAndProduceBsonObj() to produce the object.
-                        TraverseAndProduceBsonObjContext ctx{fieldSpec, stackStartOffset, code};
-                        traverseAndProduceBsonObj(ctx, TypeTags::Nothing, 0, fieldName, bob);
-                    }
-                } else {
-                    MONGO_UNREACHABLE_TASSERT(7103503);
+                // Append the lambda's return value to 'bob', then pop the return value
+                // off of the stack and release it.
+                auto [__, tag, val] = getFromStack(0);
+                bson::appendValueToBsonObj(bob, fieldName, tag, val);
+                popAndReleaseStack();
+            } else if (action.isMakeObj()) {
+                // If 'fieldSpec->returnsNothingOnMissingInput()' is false, then we need to
+                // produce the object.
+                MakeObjSpec* fieldSpec = action.getMakeObjSpec();
+                if (fieldSpec->returnsNothingOnMissingInput()) {
+                    continue;
                 }
+
+                // Call traverseAndProduceBsonObj() to produce the object.
+                TraverseAndProduceBsonObjContext ctx{
+                    fieldSpec, {fieldsStackOff, argsStackOff}, code};
+                traverseAndProduceBsonObj(ctx, TypeTags::Nothing, 0, fieldName, bob);
+            } else {
+                MONGO_UNREACHABLE_TASSERT(7103503);
             }
         }
-    };
+    }
+}
 
-    // Invoke the processFields() lambda with the appropriate iterator type.
-    switch (rootTag) {
-        case TypeTags::bsonObject:
-            // For BSON objects, use BsonFieldCursor.
-            processFields(BsonFieldCursor(value::bitcastTo<const char*>(rootVal)));
-            break;
-        case TypeTags::Object:
-            // For SBE objects, use FieldCursor.
-            processFields(FieldCursor(value::getObjectView(rootVal)));
-            break;
-        default:
-            // For all other types, use EmptyFieldCursor.
-            processFields(EmptyFieldCursor());
-            break;
+template void ByteCode::produceBsonObject<BsonObjCursor>(const MakeObjSpec* spec,
+                                                         MakeObjStackOffsets stackOffsets,
+                                                         const CodeFragment* code,
+                                                         UniqueBSONObjBuilder& bob,
+                                                         BsonObjCursor cursor);
+
+template void ByteCode::produceBsonObject<ObjectCursor>(const MakeObjSpec* spec,
+                                                        MakeObjStackOffsets stackOffsets,
+                                                        const CodeFragment* code,
+                                                        UniqueBSONObjBuilder& bob,
+                                                        ObjectCursor cursor);
+
+template void ByteCode::produceBsonObject<InputFieldsOnlyCursor>(const MakeObjSpec* spec,
+                                                                 MakeObjStackOffsets stackOffsets,
+                                                                 const CodeFragment* code,
+                                                                 UniqueBSONObjBuilder& bob,
+                                                                 InputFieldsOnlyCursor cursor);
+
+template void ByteCode::produceBsonObject<BsonObjWithInputFieldsCursor>(
+    const MakeObjSpec* spec,
+    MakeObjStackOffsets stackOffsets,
+    const CodeFragment* code,
+    UniqueBSONObjBuilder& bob,
+    BsonObjWithInputFieldsCursor cursor);
+
+template void ByteCode::produceBsonObject<ObjWithInputFieldsCursor>(
+    const MakeObjSpec* spec,
+    MakeObjStackOffsets stackOffsets,
+    const CodeFragment* code,
+    UniqueBSONObjBuilder& bob,
+    ObjWithInputFieldsCursor cursor);
+
+void ByteCode::produceBsonObjectWithInputFields(const MakeObjSpec* spec,
+                                                MakeObjStackOffsets stackOffs,
+                                                const CodeFragment* code,
+                                                UniqueBSONObjBuilder& bob,
+                                                value::TypeTags objTag,
+                                                value::Value objVal) {
+    using TypeTags = value::TypeTags;
+    using InputFields = MakeObjCursorInputFields;
+
+    const auto& fields = spec->fields;
+    const auto& actions = spec->actions;
+    const auto defActionType = spec->fieldsScopeIsClosed() ? MakeObjSpec::ActionType::kDrop
+                                                           : MakeObjSpec::ActionType::kKeep;
+
+    const size_t numInputFields = spec->numInputFields ? *spec->numInputFields : 0;
+
+    auto [fieldsStackOff, _] = stackOffs;
+    auto inputFields = InputFields(*this, fieldsStackOff, numInputFields);
+
+    auto bsonObjCursor = objTag == TypeTags::bsonObject
+        ? boost::make_optional(
+              BsonObjCursor(fields, actions, defActionType, value::bitcastTo<const char*>(objVal)))
+        : boost::none;
+    auto objCursor = objTag == TypeTags::Object
+        ? boost::make_optional(
+              ObjectCursor(fields, actions, defActionType, value::getObjectView(objVal)))
+        : boost::none;
+
+    // Invoke the produceBsonObject() lambda with the appropriate cursor type.
+    if (objTag == TypeTags::Null) {
+        size_t n = numInputFields;
+        produceBsonObject(spec,
+                          stackOffs,
+                          code,
+                          bob,
+                          InputFieldsOnlyCursor(fields, actions, defActionType, inputFields, n));
+    } else if (objTag == TypeTags::bsonObject) {
+        produceBsonObject(spec,
+                          stackOffs,
+                          code,
+                          bob,
+                          BsonObjWithInputFieldsCursor(
+                              fields, actions, defActionType, inputFields, *bsonObjCursor));
+    } else if (objTag == TypeTags::Object) {
+        produceBsonObject(
+            spec,
+            stackOffs,
+            code,
+            bob,
+            ObjWithInputFieldsCursor(fields, actions, defActionType, inputFields, *objCursor));
+    } else {
+        MONGO_UNREACHABLE_TASSERT(8146602);
     }
 }
 

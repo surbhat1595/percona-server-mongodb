@@ -30,7 +30,6 @@
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <set>
 #include <string>
@@ -192,8 +191,11 @@ void checkTimeseriesBucketsCollectionOptions(OperationContext* opCtx,
                                              CollectionOptions& options) {
     auto coll = acquireCollectionMaybeLockFree(
         opCtx,
-        CollectionAcquisitionRequest::fromOpCtx(
-            opCtx, bucketsNs, AcquisitionPrerequisites::OperationType::kRead));
+        // TODO (SERVER-82072): Do not skip shard version checks.
+        CollectionAcquisitionRequest{bucketsNs,
+                                     PlacementConcern{},
+                                     repl::ReadConcernArgs::get(opCtx),
+                                     AcquisitionPrerequisites::OperationType::kRead});
     uassert(error.code(), error.reason(), coll.exists());
 
     auto existingOptions = coll.getCollectionPtr()->getCollectionOptions();
@@ -473,7 +475,7 @@ public:
                               "'idIndex' must have the same collation as the collection.");
                 }
 
-                cmd.setIdIndex(idIndexSpec);
+                cmd.getCreateCollectionRequest().setIdIndex(idIndexSpec);
             }
 
             if (cmd.getValidator() || cmd.getValidationLevel() || cmd.getValidationAction()) {
@@ -492,7 +494,8 @@ public:
                 if (!cmd.getViewOn() &&
                     validateChangeStreamPreAndPostImagesOptionIsPermitted(cmd.getNamespace())
                         .isOK()) {
-                    cmd.setChangeStreamPreAndPostImages(ChangeStreamPreAndPostImagesOptions{true});
+                    cmd.getCreateCollectionRequest().setChangeStreamPreAndPostImages(
+                        ChangeStreamPreAndPostImagesOptions{true});
                 }
             });
 
@@ -521,7 +524,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(CmdCreate);
+MONGO_REGISTER_COMMAND(CmdCreate).forShard();
 
 }  // namespace
 }  // namespace mongo

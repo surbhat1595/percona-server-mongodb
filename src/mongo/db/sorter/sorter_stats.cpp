@@ -29,7 +29,6 @@
 
 #include "mongo/db/sorter/sorter_stats.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/util/assert_util_core.h"
 
@@ -44,6 +43,7 @@ void SorterFileStats::addSpilledDataSize(long long data) {
 }
 
 void SorterFileStats::addSpilledDataSizeUncompressed(long long data) {
+    _bytesSpilledUncompressed.fetchAndAdd(data);
     if (_sorterTracker) {
         _sorterTracker->bytesSpilledUncompressed.fetchAndAdd(data);
     }

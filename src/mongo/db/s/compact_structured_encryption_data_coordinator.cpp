@@ -38,7 +38,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
@@ -226,8 +225,10 @@ bool doRenameOperation(const CompactionState& state,
         // Create the new ECOC collection
         CreateCommand createCmd(ecocNss);
         mongo::ClusteredIndexSpec clusterIdxSpec(BSON("_id" << 1), true);
-        createCmd.setClusteredIndex(
+        CreateCollectionRequest request;
+        request.setClusteredIndex(
             stdx::variant<bool, mongo::ClusteredIndexSpec>(std::move(clusterIdxSpec)));
+        createCmd.setCreateCollectionRequest(std::move(request));
         auto status = doRunCommand(opCtx.get(), ecocNss.dbName(), createCmd);
         if (!status.isOK()) {
             if (status != ErrorCodes::NamespaceExists) {
@@ -325,10 +326,16 @@ boost::optional<BSONObj> CompactStructuredEncryptionDataCoordinator::reportForCu
     auto bob = basicReportBuilder();
 
     stdx::lock_guard lg{_docMutex};
-    bob.append("escNss", NamespaceStringUtil::serialize(_doc.getEscNss()));
-    bob.append("ecocNss", NamespaceStringUtil::serialize(_doc.getEcocNss()));
+    bob.append(
+        "escNss",
+        NamespaceStringUtil::serialize(_doc.getEscNss(), SerializationContext::stateDefault()));
+    bob.append(
+        "ecocNss",
+        NamespaceStringUtil::serialize(_doc.getEcocNss(), SerializationContext::stateDefault()));
     bob.append("ecocUuid", _doc.getEcocUuid() ? _doc.getEcocUuid().value().toString() : "none");
-    bob.append("ecocRenameNss", NamespaceStringUtil::serialize(_doc.getEcocRenameNss()));
+    bob.append("ecocRenameNss",
+               NamespaceStringUtil::serialize(_doc.getEcocRenameNss(),
+                                              SerializationContext::stateDefault()));
     bob.append("ecocRenameUuid",
                _doc.getEcocRenameUuid() ? _doc.getEcocRenameUuid().value().toString() : "none");
     return bob.obj();

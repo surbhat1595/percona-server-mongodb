@@ -32,7 +32,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <functional>
 #include <map>
@@ -197,7 +196,8 @@ void abortAllReshardCollection(OperationContext* opCtx) {
 
     std::vector<std::string> nsWithReshardColl;
     store.forEach(opCtx, {}, [&](const ReshardingCoordinatorDocument& doc) {
-        nsWithReshardColl.push_back(NamespaceStringUtil::serialize(doc.getSourceNss()));
+        nsWithReshardColl.push_back(NamespaceStringUtil::serialize(
+            doc.getSourceNss(), SerializationContext::stateDefault()));
         return true;
     });
 
@@ -594,6 +594,20 @@ private:
                     opCtx, DDLCoordinatorTypeEnum::kRenameCollection);
         }
 
+        // TODO SERVER-77915: Remove once v8.0 branches out
+        if ((isUpgrading &&
+             feature_flags::gTrackUnshardedCollectionsOnShardingCatalog
+                 .isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion,
+                                                               originalVersion)) ||
+            (isDowngrading &&
+             feature_flags::gTrackUnshardedCollectionsOnShardingCatalog
+                 .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion,
+                                                               originalVersion))) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(
+                    opCtx, DDLCoordinatorTypeEnum::kRenameCollection);
+        }
+
         // TODO SERVER-79064: Remove once 8.0 becomes last LTS.
         if (isDowngrading &&
             feature_flags::gAuthoritativeRefineCollectionShardKey
@@ -604,12 +618,29 @@ private:
         }
 
         // TODO SERVER-79304 Remove once shardCollection authoritative version becomes LTS
+        // TODO (SERVER-77915): Remove once 8.0 (trackUnshardedCollections) becomes lastLTS.
         if (isDowngrading &&
-            feature_flags::gAuthoritativeShardCollection
-                .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, originalVersion)) {
+            (feature_flags::gAuthoritativeShardCollection
+                 .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, originalVersion) ||
+             feature_flags::gTrackUnshardedCollectionsOnShardingCatalog
+                 .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion,
+                                                               originalVersion))) {
             ShardingDDLCoordinatorService::getService(opCtx)
                 ->waitForCoordinatorsOfGivenTypeToComplete(
                     opCtx, DDLCoordinatorTypeEnum::kCreateCollection);
+        }
+
+        // TODO SERVER-77915: Remove once trackUnshardedCollections becomes lastLTS.
+        if ((isUpgrading &&
+             feature_flags::gTrackUnshardedCollectionsOnShardingCatalog
+                 .isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion,
+                                                               originalVersion)) ||
+            (isDowngrading &&
+             feature_flags::gTrackUnshardedCollectionsOnShardingCatalog
+                 .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion,
+                                                               originalVersion))) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(opCtx, DDLCoordinatorTypeEnum::kCollMod);
         }
 
         if (isUpgrading) {
@@ -678,6 +709,48 @@ private:
             // Delete any possible leftover ShardingStateRecovery document.
             // TODO SERVER-78330 remove this.
             deleteShardingStateRecoveryDoc(opCtx);
+        }
+
+        // TODO SERVER-80490: Remove this once 8.0 is released.
+        // Sanitizes the wiredTiger.creationString option from the durable catalog. Removes the
+        // encryption config options since they are ephemeral in nature.
+        _sanitizeCreationConfigString(opCtx, requestedVersion);
+    }
+
+    // TODO SERVER-80490: Remove this method once 8.0 is released.
+    void _sanitizeCreationConfigString(
+        OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
+        // We bypass the UserWritesBlock mode here in order to not see errors arising from the
+        // block. The user already has permission to run FCV at this point and the writes performed
+        // here aren't modifying any user data with the exception of fixing up the collection
+        // metadata.
+        auto originalValue = WriteBlockBypass::get(opCtx).isWriteBlockBypassEnabled();
+        ON_BLOCK_EXIT([&] { WriteBlockBypass::get(opCtx).set(originalValue); });
+        WriteBlockBypass::get(opCtx).set(true);
+
+        for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+            Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
+            catalog::forEachCollectionFromDb(
+                opCtx,
+                dbName,
+                MODE_X,
+                [&](const Collection* collection) {
+                    NamespaceStringOrUUID nsOrUUID(dbName, collection->uuid());
+                    CollMod collModCmd(collection->ns());
+                    BSONObjBuilder unusedBuilder;
+                    uassertStatusOK(
+                        processCollModCommand(opCtx, nsOrUUID, collModCmd, &unusedBuilder));
+
+                    return true;
+                },
+                [&](const Collection* coll) {
+                    // Performing sanitisation on node local collections is unnecessary since by
+                    // definition they can use configuration specific to this node.
+                    //
+                    // We also only focus on normal collections that are created by the user.
+                    const auto ns = coll->ns();
+                    return ns.isReplicated() && ns.isNormalCollection() && !ns.isOnInternalDb();
+                });
         }
     }
 
@@ -1494,7 +1567,7 @@ private:
         }
     }
 };
-MONGO_REGISTER_COMMAND(SetFeatureCompatibilityVersionCommand);
+MONGO_REGISTER_COMMAND(SetFeatureCompatibilityVersionCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

@@ -32,7 +32,6 @@
 #include <absl/container/node_hash_map.h>
 #include <algorithm>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <iterator>
 
 #include <boost/move/utility_core.hpp>
@@ -110,13 +109,15 @@ void appendWriteConcernErrorToCmdResponse(const ShardId& shardId,
 boost::intrusive_ptr<ExpressionContext> makeExpressionContextWithDefaultsForTargeter(
     OperationContext* opCtx,
     const NamespaceString& nss,
+    const CollectionRoutingInfo& cri,
     const BSONObj& collation,
     const boost::optional<ExplainOptions::Verbosity>& verbosity,
     const boost::optional<BSONObj>& letParameters,
     const boost::optional<LegacyRuntimeConstants>& runtimeConstants) {
 
+    const auto noCollationSpecified = collation.isEmpty();
     auto&& cif = [&]() {
-        if (collation.isEmpty()) {
+        if (noCollationSpecified) {
             return std::unique_ptr<CollatorInterface>{};
         } else {
             return uassertStatusOK(
@@ -128,7 +129,7 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContextWithDefaultsForTarg
     resolvedNamespaces.emplace(nss.coll(),
                                ExpressionContext::ResolvedNamespace(nss, std::vector<BSONObj>{}));
 
-    return make_intrusive<ExpressionContext>(
+    auto expCtx = make_intrusive<ExpressionContext>(
         opCtx,
         verbosity,
         true,   // fromMongos
@@ -145,14 +146,62 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContextWithDefaultsForTarg
         letParameters,
         false  // mongos has no profile collection
     );
+
+    // Ignore the collator if the collection is untracked and the user did not specify a collator.
+    if (!cri.cm.hasRoutingTable() && noCollationSpecified) {
+        expCtx->setIgnoreCollator();
+    }
+    return expCtx;
 }
 
 namespace {
 
+std::vector<AsyncRequestsSender::Request> buildVersionedRequests(
+    boost::intrusive_ptr<ExpressionContext> expCtx,
+    const NamespaceString& nss,
+    const CollectionRoutingInfo& cri,
+    const std::set<ShardId>& shardIds,
+    const std::set<ShardId>& shardsToSkip,
+    const BSONObj& cmdObj,
+    bool eligibleForSampling) {
+    const auto& cm = cri.cm;
+    auto cmdObjWithDbVersion = cmdObj;
+    bool needShardVersion = cm.hasRoutingTable();
+    if (!needShardVersion) {
+        cmdObjWithDbVersion = !cm.dbVersion().isFixed()
+            ? appendShardVersion(cmdObjWithDbVersion, ShardVersion::UNSHARDED())
+            : cmdObjWithDbVersion;
+        cmdObjWithDbVersion = appendDbVersionIfPresent(cmdObjWithDbVersion, cm.dbVersion());
+    }
+
+    std::vector<AsyncRequestsSender::Request> requests;
+    requests.reserve(shardIds.size());
+
+    const auto targetedSampleId = eligibleForSampling
+        ? analyze_shard_key::tryGenerateTargetedSampleId(
+              expCtx->opCtx, nss, cmdObj.firstElementFieldNameStringData(), shardIds)
+        : boost::none;
+
+    for (const ShardId& shardId : shardIds) {
+        if (shardsToSkip.find(shardId) == shardsToSkip.end()) {
+            auto shardCmdObj = needShardVersion
+                ? appendShardVersion(cmdObjWithDbVersion, cri.getShardVersion(shardId))
+                : cmdObjWithDbVersion;
+            if (targetedSampleId && targetedSampleId->isFor(shardId)) {
+                shardCmdObj =
+                    analyze_shard_key::appendSampleId(shardCmdObj, targetedSampleId->getId());
+            }
+            requests.emplace_back(shardId, std::move(shardCmdObj));
+        }
+    }
+
+    return requests;
+}
+
 /**
  * Consults the routing info to build requests for:
- * 1. If sharded, shards that own chunks for the namespace, or
- * 2. If unsharded, the primary shard for the database.
+ *  - If it has a routing table, shards that own chunks for the namespace, or
+ *  - If it doesn't have a routing table, the primary shard for the database.
  *
  * If a shard is included in shardsToSkip, it will be excluded from the list returned to the
  * caller.
@@ -172,63 +221,24 @@ std::vector<AsyncRequestsSender::Request> buildVersionedRequestsForTargetedShard
     auto opCtx = expCtx->opCtx;
 
     const auto& cm = cri.cm;
-
-    if (!cm.isSharded()) {
-        // The collection is unsharded. Target only the primary shard for the database.
-
-        auto primaryShardId = cm.dbPrimary();
-
-        if (shardsToSkip.find(primaryShardId) != shardsToSkip.end()) {
-            return {};
-        }
-
-        // Attach shardVersion "UNSHARDED", unless targeting a fixed db collection.
-        auto cmdObjWithVersions = !cm.dbVersion().isFixed()
-            ? appendShardVersion(cmdObj, ShardVersion::UNSHARDED())
-            : cmdObj;
-        cmdObjWithVersions = appendDbVersionIfPresent(cmdObjWithVersions, cm.dbVersion());
-
-        if (eligibleForSampling) {
-            if (auto sampleId = analyze_shard_key::tryGenerateSampleId(
-                    opCtx, nss, cmdObj.firstElementFieldName())) {
-                cmdObjWithVersions =
-                    analyze_shard_key::appendSampleId(cmdObjWithVersions, *sampleId);
-            }
-        }
-
-        return std::vector<AsyncRequestsSender::Request>{
-            AsyncRequestsSender::Request(std::move(primaryShardId), std::move(cmdObjWithVersions))};
-    }
-
-    std::vector<AsyncRequestsSender::Request> requests;
-
-    // The collection is sharded. Target all shards that own chunks that match the query.
     std::set<ShardId> shardIds;
-    std::unique_ptr<CollatorInterface> collator;
-    if (!collation.isEmpty()) {
-        collator = uassertStatusOK(
-            CollatorFactoryInterface::get(opCtx->getServiceContext())->makeFromBSON(collation));
-    }
-
-    getShardIdsForQuery(expCtx, query, collation, cm, &shardIds, nullptr /* info */);
-
-    const auto targetedSampleId = eligibleForSampling
-        ? analyze_shard_key::tryGenerateTargetedSampleId(
-              opCtx, nss, cmdObj.firstElementFieldNameStringData(), shardIds)
-        : boost::none;
-
-    for (const ShardId& shardId : shardIds) {
-        if (shardsToSkip.find(shardId) == shardsToSkip.end()) {
-            auto cmdObjWithVersions = appendShardVersion(cmdObj, cri.getShardVersion(shardId));
-            if (targetedSampleId && targetedSampleId->isFor(shardId)) {
-                cmdObjWithVersions = analyze_shard_key::appendSampleId(cmdObjWithVersions,
-                                                                       targetedSampleId->getId());
-            }
-            requests.emplace_back(shardId, std::move(cmdObjWithVersions));
+    if (!cm.hasRoutingTable()) {
+        // The collection does not have a routing table. Target only the primary shard for the
+        // database.
+        shardIds.emplace(cm.dbPrimary());
+    } else {
+        // The collection has a routing table. Target all shards that own chunks that match the
+        // query.
+        std::unique_ptr<CollatorInterface> collator;
+        if (!collation.isEmpty()) {
+            collator = uassertStatusOK(
+                CollatorFactoryInterface::get(opCtx->getServiceContext())->makeFromBSON(collation));
         }
-    }
 
-    return requests;
+        getShardIdsForQuery(expCtx, query, collation, cm, &shardIds, nullptr /* info */);
+    }
+    return buildVersionedRequests(
+        expCtx, nss, cri, shardIds, shardsToSkip, cmdObj, eligibleForSampling);
 }
 
 std::vector<AsyncRequestsSender::Response> gatherResponsesImpl(
@@ -472,8 +482,13 @@ std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRouting
     const boost::optional<BSONObj>& letParameters,
     const boost::optional<LegacyRuntimeConstants>& runtimeConstants,
     bool eligibleForSampling) {
-    auto expCtx = makeExpressionContextWithDefaultsForTargeter(
-        opCtx, nss, collation, boost::none /*explainVerbosity*/, letParameters, runtimeConstants);
+    auto expCtx = makeExpressionContextWithDefaultsForTargeter(opCtx,
+                                                               nss,
+                                                               cri,
+                                                               collation,
+                                                               boost::none /*explainVerbosity*/,
+                                                               letParameters,
+                                                               runtimeConstants);
     return scatterGatherVersionedTargetByRoutingTable(expCtx,
                                                       dbName,
                                                       nss,
@@ -502,6 +517,24 @@ std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRouting
     return gatherResponses(expCtx->opCtx, dbName, readPref, retryPolicy, requests);
 }
 
+/**
+ * Utility for dispatching versioned commands on a namespace to a passed set of shards
+ */
+[[nodiscard]] std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetSpecificShards(
+    boost::intrusive_ptr<ExpressionContext> expCtx,
+    const DatabaseName& dbName,
+    const NamespaceString& nss,
+    const CollectionRoutingInfo& cri,
+    const BSONObj& cmdObj,
+    const ReadPreferenceSetting& readPref,
+    Shard::RetryPolicy retryPolicy,
+    const std::set<ShardId>& shardIds,
+    bool eligibleForSampling) {
+    const auto requests = buildVersionedRequests(
+        expCtx, nss, cri, shardIds, {} /* shardsToSkip */, cmdObj, eligibleForSampling);
+    return gatherResponses(expCtx->opCtx, dbName, readPref, retryPolicy, requests);
+}
+
 std::vector<AsyncRequestsSender::Response>
 scatterGatherVersionedTargetByRoutingTableNoThrowOnStaleShardVersionErrors(
     OperationContext* opCtx,
@@ -516,8 +549,13 @@ scatterGatherVersionedTargetByRoutingTableNoThrowOnStaleShardVersionErrors(
     const BSONObj& collation,
     const boost::optional<BSONObj>& letParameters,
     const boost::optional<LegacyRuntimeConstants>& runtimeConstants) {
-    auto expCtx = makeExpressionContextWithDefaultsForTargeter(
-        opCtx, nss, collation, boost::none /*explainVerbosity*/, letParameters, runtimeConstants);
+    auto expCtx = makeExpressionContextWithDefaultsForTargeter(opCtx,
+                                                               nss,
+                                                               cri,
+                                                               collation,
+                                                               boost::none /*explainVerbosity*/,
+                                                               letParameters,
+                                                               runtimeConstants);
     const auto requests = buildVersionedRequestsForTargetedShards(
         expCtx, nss, cri, shardsToSkip, cmdObj, query, collation);
 
@@ -556,6 +594,7 @@ AsyncRequestsSender::Response executeCommandAgainstShardWithMinKeyChunk(
     Shard::RetryPolicy retryPolicy) {
     auto expCtx = makeExpressionContextWithDefaultsForTargeter(opCtx,
                                                                nss,
+                                                               cri,
                                                                BSONObj() /*collation*/,
                                                                boost::none /*explainVerbosity*/,
                                                                boost::none /*letParameters*/,
@@ -737,15 +776,15 @@ std::set<ShardId> getTargetedShardsForQuery(boost::intrusive_ptr<ExpressionConte
                                             const ChunkManager& cm,
                                             const BSONObj& query,
                                             const BSONObj& collation) {
-    if (cm.isSharded()) {
-        // The collection is sharded. Use the routing table to decide which shards to target based
-        // on the query and collation.
+    if (cm.hasRoutingTable()) {
+        // The collection has a routing table. Use it to decide which shards to target based on the
+        // query and collation.
         std::set<ShardId> shardIds;
         getShardIdsForQuery(expCtx, query, collation, cm, &shardIds, nullptr /* info */);
         return shardIds;
     }
 
-    // The collection is unsharded. Target only the primary shard for the database.
+    // The collection does not have a routing table. Target only the primary shard for the database.
     return {cm.dbPrimary()};
 }
 
@@ -758,8 +797,14 @@ std::vector<std::pair<ShardId, BSONObj>> getVersionedRequestsForTargetedShards(
     const BSONObj& collation,
     const boost::optional<BSONObj>& letParameters,
     const boost::optional<LegacyRuntimeConstants>& runtimeConstants) {
-    auto expCtx = makeExpressionContextWithDefaultsForTargeter(
-        opCtx, nss, collation, boost::none /*explainVerbosity*/, letParameters, runtimeConstants);
+    auto expCtx = makeExpressionContextWithDefaultsForTargeter(opCtx,
+                                                               nss,
+                                                               cri,
+                                                               collation,
+                                                               boost::none /*explainVerbosity*/,
+                                                               letParameters,
+                                                               runtimeConstants);
+
     std::vector<std::pair<ShardId, BSONObj>> requests;
     auto ars_requests = buildVersionedRequestsForTargetedShards(
         expCtx, nss, cri, {} /* shardsToSkip */, cmdObj, query, collation);
@@ -796,11 +841,8 @@ StatusWith<CollectionRoutingInfo> getCollectionRoutingInfoForTxnCmd(OperationCon
     return catalogCache->getCollectionRoutingInfo(opCtx, nss);
 }
 
-StatusWith<Shard::QueryResponse> loadIndexesFromAuthoritativeShard(OperationContext* opCtx,
-                                                                   const NamespaceString& nss) {
-    const auto cri =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
-
+StatusWith<Shard::QueryResponse> loadIndexesFromAuthoritativeShard(
+    OperationContext* opCtx, const NamespaceString& nss, const CollectionRoutingInfo& cri) {
     auto [indexShard, listIndexesCmd] = [&]() -> std::pair<std::shared_ptr<Shard>, BSONObj> {
         const auto& [cm, sii] = cri;
         auto cmdNoVersion = applyReadWriteConcern(
@@ -812,16 +854,17 @@ StatusWith<Shard::QueryResponse> loadIndexesFromAuthoritativeShard(OperationCont
                    BSON(ReadConcernArgs::kLevelFieldName << repl::readConcernLevels::kLocalName));
         cmdNoVersion = bob.obj();
 
-        if (cm.isSharded()) {
-            // For a sharded collection we must load indexes from a shard with chunks. For
-            // consistency with cluster listIndexes, load from the shard that owns the minKey chunk.
+        if (cm.hasRoutingTable()) {
+            // For a collection that has a routing table, we must load indexes from a shard with
+            // chunks. For consistency with cluster listIndexes, load from the shard that owns the
+            // minKey chunk.
             const auto minKeyShardId = cm.getMinKeyShardIdWithSimpleCollation();
             return {
                 uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, minKeyShardId)),
                 appendShardVersion(cmdNoVersion, cri.getShardVersion(minKeyShardId))};
         } else {
-            // For an unsharded collection, the primary shard will have correct indexes. We attach
-            // unsharded shard version to detect if the collection has become sharded.
+            // For a collection without routing table, the primary shard will have correct indexes.
+            // Attach dbVersion + shardVersion: UNSHARDED.
             const auto cmdObjWithShardVersion = !cm.dbVersion().isFixed()
                 ? appendShardVersion(cmdNoVersion, ShardVersion::UNSHARDED())
                 : cmdNoVersion;

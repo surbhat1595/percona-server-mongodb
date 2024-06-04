@@ -29,7 +29,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
@@ -554,7 +553,8 @@ protected:
                     // assumptions made in its implementation.
                     stdx::thread runBackgroundValidate =
                         stdx::thread([&serviceContext, &numRecords, &nss, &results] {
-                            ThreadClient tc("BackgroundValidate-thread", serviceContext);
+                            ThreadClient tc("BackgroundValidate-thread",
+                                            serviceContext->getService());
                             auto threadOpCtx = tc->makeOperationContext();
                             auto bgResults = backgroundValidate(nss,
                                                                 threadOpCtx.get(),
@@ -766,7 +766,8 @@ TEST_F(CollectionValidationDiskTest, BackgroundValidateRunsConcurrentlyWithWrite
         // run background validation in parallel.
         FailPointEnableBlock failPoint("pauseCollectionValidationWithLock");
         runBackgroundValidate = stdx::thread([&serviceContext, &numRecords] {
-            ThreadClient tc("BackgroundValidateConcurrentWithCRUD-thread", serviceContext);
+            ThreadClient tc("BackgroundValidateConcurrentWithCRUD-thread",
+                            serviceContext->getService());
             auto threadOpCtx = tc->makeOperationContext();
             backgroundValidate(
                 kNss, threadOpCtx.get(), true, numRecords, 0, 0, /*runForegroundAsWell*/ false);

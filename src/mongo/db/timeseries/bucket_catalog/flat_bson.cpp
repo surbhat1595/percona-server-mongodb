@@ -33,7 +33,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstring>
 
 #include <boost/optional/optional.hpp>
@@ -106,6 +105,11 @@ void FlatBSONStore<Element, Value>::Data::setValue(const BSONElement& elem) {
     _value.set(elem);
     _type = Type::kValue;
     _updated = true;
+}
+
+template <class Element, class Value>
+int64_t FlatBSONStore<Element, Value>::Data::calculateMemUsage() const {
+    return sizeof(Value) + _value.size();
 }
 
 template <class Element, class Value>
@@ -322,6 +326,30 @@ FlatBSONStore<Element, Value>::Obj::insert(FlatBSONStore<Element, Value>::Iterat
     return std::make_pair(Iterator(inserted), end());
 }
 
+size_t stringHeapUsage(const std::string& s) {
+    static const std::string emptyString;
+    return s.capacity() > emptyString.capacity() ? s.capacity() : 0;
+}
+
+template <class Element, class Value>
+int64_t FlatBSONStore<Element, Value>::calculateMemUsage() const {
+    auto memUsage = entries.capacity() * sizeof(Entry);
+    for (auto&& entry : entries) {
+        int64_t approxFieldNameToIndexMemUsage = 0;
+        if (entry._fieldNameToIndex) {
+            approxFieldNameToIndexMemUsage =
+                (sizeof(StringMap<uint32_t>::slot_type)) * entry._fieldNameToIndex->capacity();
+            auto it = entry._fieldNameToIndex->begin();
+            auto itEnd = entry._fieldNameToIndex->end();
+            for (; it != itEnd; ++it) {
+                approxFieldNameToIndexMemUsage += stringHeapUsage(it->first);
+            }
+        }
+        memUsage += entry._element.calculateMemUsage() + approxFieldNameToIndexMemUsage;
+    }
+    return memUsage;
+}
+
 template <class Element, class Value>
 typename FlatBSONStore<Element, Value>::Iterator FlatBSONStore<Element, Value>::Obj::begin() {
     return {_pos + 1};
@@ -371,7 +399,7 @@ template <class Derived, class Element, class Value>
 typename FlatBSON<Derived, Element, Value>::UpdateStatus FlatBSON<Derived, Element, Value>::update(
     const BSONObj& doc,
     boost::optional<StringData> omitField,
-    const StringData::ComparatorInterface* stringComparator) {
+    const StringDataComparator* stringComparator) {
     auto obj = _store.root();
     return _updateObj(obj, doc, {}, stringComparator, [&omitField](StringData fieldName) {
         return omitField && fieldName == omitField;
@@ -379,14 +407,18 @@ typename FlatBSON<Derived, Element, Value>::UpdateStatus FlatBSON<Derived, Eleme
 }
 
 template <class Derived, class Element, class Value>
+int64_t FlatBSON<Derived, Element, Value>::calculateMemUsage() {
+    return sizeof(FlatBSONStore<Element, Value>) + _store.calculateMemUsage();
+}
+
+template <class Derived, class Element, class Value>
 std::tuple<typename FlatBSON<Derived, Element, Value>::UpdateStatus,
            typename FlatBSONStore<Element, Value>::Iterator,
            typename FlatBSONStore<Element, Value>::Iterator>
-FlatBSON<Derived, Element, Value>::_update(
-    typename FlatBSONStore<Element, Value>::Obj obj,
-    BSONElement elem,
-    typename Element::UpdateContext updateValues,
-    const StringData::ComparatorInterface* stringComparator) {
+FlatBSON<Derived, Element, Value>::_update(typename FlatBSONStore<Element, Value>::Obj obj,
+                                           BSONElement elem,
+                                           typename Element::UpdateContext updateValues,
+                                           const StringDataComparator* stringComparator) {
     UpdateStatus status{UpdateStatus::Updated};
 
     if (elem.type() == Object) {
@@ -436,12 +468,11 @@ FlatBSON<Derived, Element, Value>::_update(
 
 template <class Derived, class Element, class Value>
 typename FlatBSON<Derived, Element, Value>::UpdateStatus
-FlatBSON<Derived, Element, Value>::_updateObj(
-    typename FlatBSONStore<Element, Value>::Obj& obj,
-    const BSONObj& doc,
-    typename Element::UpdateContext updateContext,
-    const StringData::ComparatorInterface* stringComparator,
-    std::function<bool(StringData)> skipFieldFn) {
+FlatBSON<Derived, Element, Value>::_updateObj(typename FlatBSONStore<Element, Value>::Obj& obj,
+                                              const BSONObj& doc,
+                                              typename Element::UpdateContext updateContext,
+                                              const StringDataComparator* stringComparator,
+                                              std::function<bool(StringData)> skipFieldFn) {
     auto it = obj.begin();
     auto end = obj.end();
     int allHandledOffset = 0;
@@ -720,6 +751,10 @@ BSONType BSONElementValueBuffer::type() const {
     return (BSONType)_buffer[0];
 }
 
+int64_t BSONElementValueBuffer::size() const {
+    return _size;
+}
+
 BSONElement BSONTypeValue::get() const {
     MONGO_UNREACHABLE;
 }
@@ -730,6 +765,10 @@ void BSONTypeValue::set(const BSONElement& elem) {
 
 BSONType BSONTypeValue::type() const {
     return _type;
+}
+
+int64_t BSONTypeValue::size() const {
+    return 0;
 }
 
 StringData Element::fieldName() const {
@@ -747,6 +786,10 @@ bool Element::isArrayFieldName() const {
 void Element::claimArrayFieldNameForObject(std::string name) {
     invariant(isArrayFieldName());
     _fieldName = std::move(name);
+}
+
+int64_t Element::calculateMemUsage() const {
+    return _fieldName.capacity();
 }
 
 void MinMaxElement::initializeRoot() {
@@ -768,6 +811,10 @@ MinMaxStore::Data& MinMaxElement::max() {
 
 const MinMaxStore::Data& MinMaxElement::max() const {
     return _max;
+}
+
+int64_t MinMaxElement::calculateMemUsage() const {
+    return Element::calculateMemUsage() + _min.calculateMemUsage() + _max.calculateMemUsage();
 }
 
 std::pair<MinMax::UpdateStatus, MinMaxElement::UpdateContext> MinMax::_shouldUpdateObj(
@@ -821,11 +868,10 @@ std::pair<MinMax::UpdateStatus, MinMaxElement::UpdateContext> MinMax::_shouldUpd
                           MinMaxElement::UpdateContext{updateMin, updateMax});
 }
 
-MinMax::UpdateStatus MinMax::_maybeUpdateValue(
-    MinMaxStore::Obj& obj,
-    const BSONElement& elem,
-    MinMaxElement::UpdateContext updateValues,
-    const StringData::ComparatorInterface* stringComparator) {
+MinMax::UpdateStatus MinMax::_maybeUpdateValue(MinMaxStore::Obj& obj,
+                                               const BSONElement& elem,
+                                               MinMaxElement::UpdateContext updateValues,
+                                               const StringDataComparator* stringComparator) {
     auto maybeUpdateValue = [&](MinMaxStore::Data& data, auto comp) {
         if (data.type() == MinMaxStore::Type::kUnset ||
             (data.type() == MinMaxStore::Type::kObject && comp(typeComp(elem, Object), 0)) ||
@@ -873,7 +919,7 @@ BSONObj MinMax::maxUpdates() {
 
 MinMax MinMax::parseFromBSON(const BSONObj& min,
                              const BSONObj& max,
-                             const StringData::ComparatorInterface* stringComparator) {
+                             const StringDataComparator* stringComparator) {
     MinMax minmax;
 
     // The metadata field is already excluded from generated min/max summaries.
@@ -906,9 +952,13 @@ const SchemaStore::Data& SchemaElement::data() const {
     return _data;
 }
 
+int64_t SchemaElement::calculateMemUsage() const {
+    return Element::calculateMemUsage() + _data.calculateMemUsage();
+}
+
 Schema Schema::parseFromBSON(const BSONObj& min,
                              const BSONObj& max,
-                             const StringData::ComparatorInterface* stringComparator) {
+                             const StringDataComparator* stringComparator) {
     Schema schema;
 
     // The metadata field is already excluded from generated min/max summaries.
@@ -955,11 +1005,10 @@ std::pair<Schema::UpdateStatus, SchemaElement::UpdateContext> Schema::_shouldUpd
     return std::make_pair(status, SchemaElement::UpdateContext{});
 }
 
-Schema::UpdateStatus Schema::_maybeUpdateValue(
-    SchemaStore::Obj& obj,
-    const BSONElement& elem,
-    SchemaElement::UpdateContext,
-    const StringData::ComparatorInterface* stringComparator) {
+Schema::UpdateStatus Schema::_maybeUpdateValue(SchemaStore::Obj& obj,
+                                               const BSONElement& elem,
+                                               SchemaElement::UpdateContext,
+                                               const StringDataComparator* stringComparator) {
     UpdateStatus status{UpdateStatus::Updated};
     SchemaStore::Data& data = obj.element().data();
 

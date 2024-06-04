@@ -31,7 +31,6 @@
 
 #include <algorithm>
 #include <array>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cmath>
 #include <cstdint>
 #include <cstring>  // strlen
@@ -49,7 +48,7 @@
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/base/string_data_comparator_interface.h"
+#include "mongo/base/string_data_comparator.h"
 #include "mongo/bson/bson_comparator_interface_base.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/oid.h"
@@ -120,7 +119,7 @@ public:
     static int compareElements(const BSONElement& l,
                                const BSONElement& r,
                                ComparisonRulesSet rules,
-                               const StringData::ComparatorInterface* comparator);
+                               const StringDataComparator* comparator);
 
 
     /**
@@ -160,7 +159,14 @@ public:
     bool Bool() const {
         return chk(mongo::Bool).boolean();
     }
-    std::vector<BSONElement> Array() const;  // see implementation for detailed comments
+
+    /**
+     * Transform a BSON array into a vector of BSONElements.
+     * If the array keys are not in sequential order or are otherwise invalid, an exception is
+     * thrown.
+     */
+    std::vector<BSONElement> Array() const;
+
     mongo::OID OID() const {
         return chk(jstOID).__oid();
     }
@@ -727,7 +733,7 @@ public:
      */
     int woCompare(const BSONElement& elem,
                   ComparisonRulesSet rules = ComparisonRules::kConsiderFieldName,
-                  const StringData::ComparatorInterface* comparator = nullptr) const;
+                  const StringDataComparator* comparator = nullptr) const;
 
     DeferredComparison operator<(const BSONElement& other) const {
         return DeferredComparison(DeferredComparison::Type::kLT, *this, other);

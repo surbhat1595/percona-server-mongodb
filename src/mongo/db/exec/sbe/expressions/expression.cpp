@@ -35,7 +35,6 @@
 
 #include <absl/container/inlined_vector.h>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/bson/ordering.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
@@ -62,7 +61,7 @@ namespace sbe {
  */
 EVariable* getFrameVariable(EExpression* e) {
     auto var = e->as<EVariable>();
-    if (var && var->getFrameId() && !var->isMoveFrom()) {
+    if (var && var->getFrameId()) {
         return var;
     }
     return nullptr;
@@ -73,7 +72,7 @@ EVariable* getFrameVariable(EExpression* e) {
  */
 vm::Instruction::Parameter getParam(EVariable* var) {
     if (var) {
-        return {(int)var->getSlotId(), var->getFrameId()};
+        return {(int)var->getSlotId(), var->isMoveFrom(), var->getFrameId()};
     } else {
         return {};
     }
@@ -210,118 +209,88 @@ std::unique_ptr<EExpression> EPrimBinary::clone() const {
     }
 }
 
+
+/*
+ * Given a vector of clauses named [lhs1,...,lhsN-1, rhs], and a boolean isDisjunctive to indicate
+ * whether we are ANDing or ORing the clauses, we output the appropriate short circuiting
+ * CodeFragment. For AND (conjunctive) we compile them as following byte code:
+ * @true1:    lhs1
+ *            jumpNothing @end
+ *            jumpFalse @false
+ * ...
+ * @trueN-1:  lhsN-1
+ *            jumpNothing @end
+ *            jumpFalse @false
+ * @trueN:    rhs
+ *            jmp @end
+ * @false:    push false
+ * @end:
+ *
+ * For OR (disjunctive) we compile them as:
+ * @false1:   lhs1
+ *            jumpNothing @end
+ *            jumpTrue @true
+ * ...
+ * @falseN-1: lhsN-1
+ *            jumpNothing @end
+ *            jumpTrue @true
+ * @tfalseN:  rhs
+ *            jmp @end
+ * @true:     push true
+ * @end:
+ */
+vm::CodeFragment buildShortCircuitCode(CompileCtx& ctx,
+                                       const std::vector<const EExpression*>& clauses,
+                                       bool isDisjunction) {
+    return withNewLabels(ctx, [&](vm::LabelId endLabel, vm::LabelId resultLabel) {
+        // Build code fragment for all but the last clause, which is used for the final result
+        // branch.
+        tassert(7858700,
+                "There should be two or more clauses when compiling a logicAnd/logicOr.",
+                clauses.size() >= 2);
+        vm::CodeFragment code;
+        for (size_t i = 0; i < clauses.size() - 1; i++) {
+            auto clauseCode = clauses.at(i)->compileDirect(ctx);
+            clauseCode.appendLabelJumpNothing(endLabel);
+
+            if (isDisjunction) {
+                clauseCode.appendLabelJumpTrue(resultLabel);
+            } else {
+                clauseCode.appendLabelJumpFalse(resultLabel);
+            }
+
+            code.append(std::move(clauseCode));
+        }
+
+        // Build code fragment for final clause.
+        auto finalClause = clauses.back()->compileDirect(ctx);
+        finalClause.appendLabelJump(endLabel);
+
+        // Build code fragment for the short-circuited result.
+        vm::CodeFragment resultBranch;
+        resultBranch.appendLabel(resultLabel);
+        resultBranch.appendConstVal(value::TypeTags::Boolean,
+                                    value::bitcastFrom<bool>(isDisjunction));
+
+        // Only one of `finalClause` or `resultBranch` will execute, so the stack size adjustment
+        // should only be made one time here, rather than one adjustment for each CodeFragment.
+        code.append(std::move(finalClause), std::move(resultBranch));
+        code.appendLabel(endLabel);
+        return code;
+    });
+}
+
 vm::CodeFragment EPrimBinary::compileDirect(CompileCtx& ctx) const {
     const bool hasCollatorArg = (_nodes.size() == 3);
 
     invariant(!hasCollatorArg || isComparisonOp(_op));
 
     if (_op == EPrimBinary::logicAnd) {
-        /*
-         * We collect all connected AND clauses, named [lhs1,...,lhsN-1, rhs],
-         *  and compile them as following byte code:
-         *
-         * @true1:    lhs1
-         *            jumpNothing @end
-         *            jumpFalse @false
-         * ...
-         * @trueN-1:  lhsN-1
-         *            jumpNothing @end
-         *            jumpFalse @false
-         * @trueN:    rhs
-         *            jmp @end
-         * @false:    push false
-         * @end:
-         */
         auto clauses = collectAndClauses();
-        invariant(clauses.size() >= 2);
-
-        return withNewLabels(ctx, [&](vm::LabelId endLabel, vm::LabelId falseLabel) {
-            vm::CodeFragment code;
-
-            // Build code fragment for @false
-            vm::CodeFragment codeFalseBranch;
-            codeFalseBranch.appendLabel(falseLabel);
-            codeFalseBranch.appendConstVal(value::TypeTags::Boolean,
-                                           value::bitcastFrom<bool>(false));
-
-            // Build code fragment for @trueN
-            auto it = clauses.rbegin();
-            auto rhs = (*it)->compileDirect(ctx);
-            rhs.appendLabelJump(endLabel);
-
-            code.append(std::move(rhs), std::move(codeFalseBranch));
-
-            ++it;
-            invariant(it != clauses.rend());
-
-            // Build code fragment for @trueN-1 to @true1
-            for (; it != clauses.rend(); ++it) {
-                auto lhs = (*it)->compileDirect(ctx);
-                lhs.appendLabelJumpNothing(endLabel);
-                lhs.appendLabelJumpFalse(falseLabel);
-
-                lhs.append(std::move(code));
-                code = std::move(lhs);
-            }
-
-            // Append the end label
-            code.appendLabel(endLabel);
-
-            return code;
-        });
+        return buildShortCircuitCode(ctx, clauses, false /*isDisjunction*/);
     } else if (_op == EPrimBinary::logicOr) {
-        /*
-         * We collect all connected OR clauses, named [lhs1,...,lhsN-1, rhs],
-         * and compile them as following byte code:
-         *
-         * @false1:   lhs1
-         *            jumpNothing @end
-         *            jumpTrue @true
-         * ...
-         * @falseN-1: lhsN-1
-         *            jumpNothing @end
-         *            jumpTrue @true
-         * @tfalseN:  rhs
-         *            jmp @end
-         * @true:     push true
-         * @end:
-         */
         auto clauses = collectOrClauses();
-        invariant(clauses.size() >= 2);
-
-        return withNewLabels(ctx, [&](vm::LabelId endLabel, vm::LabelId trueLabel) {
-            vm::CodeFragment code;
-
-            auto it = clauses.rbegin();
-
-            // Build code fragment for @true
-            vm::CodeFragment codeTrueBranch;
-            codeTrueBranch.appendLabel(trueLabel);
-            codeTrueBranch.appendConstVal(value::TypeTags::Boolean, value::bitcastFrom<bool>(true));
-
-            // Build code fragment for @falseN
-            auto rhs = (*it)->compileDirect(ctx);
-            rhs.appendLabelJump(endLabel);
-            code.append(std::move(rhs), std::move(codeTrueBranch));
-
-            ++it;
-            invariant(it != clauses.rend());
-
-            // Build code fragment for @falseN-1 to @true1
-            for (; it != clauses.rend(); ++it) {
-                auto lhs = (*it)->compileDirect(ctx);
-                lhs.appendLabelJumpNothing(endLabel);
-                lhs.appendLabelJumpTrue(trueLabel);
-
-                lhs.append(std::move(code));
-                code = std::move(lhs);
-            }
-
-            // Append the end label
-            code.appendLabel(endLabel);
-
-            return code;
-        });
+        return buildShortCircuitCode(ctx, clauses, true /*isDisjunction*/);
     } else if (_op == EPrimBinary::fillEmpty) {
         // Special cases: rhs is trivial to evaluate -> avoid a jump
         if (EConstant* rhsConst = _nodes[1]->as<EConstant>()) {
@@ -639,7 +608,7 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"newArrayFromRange",
      BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::newArrayFromRange, false}},
     {"newObj", BuiltinFn{[](size_t n) { return n % 2 == 0; }, vm::Builtin::newObj, false}},
-    {"makeBsonObj", BuiltinFn{[](size_t n) { return n >= 2; }, vm::Builtin::makeBsonObj, false}},
+    {"makeBsonObj", BuiltinFn{[](size_t n) { return n >= 3; }, vm::Builtin::makeBsonObj, false}},
     {"ksToString", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::ksToString, false}},
     {"ks",
      BuiltinFn{[](size_t n) { return n >= 3 && n <= Ordering::kMaxCompoundIndexKeys + 3; },
@@ -668,6 +637,7 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"collAddToSet", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::collAddToSet, true}},
     {"collAddToSetCapped",
      BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::collAddToSetCapped, true}},
+    {"setToArray", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::setToArray, false}},
     {"doubleDoubleSum",
      BuiltinFn{[](size_t n) { return n > 0; }, vm::Builtin::doubleDoubleSum, false}},
     {"aggDoubleDoubleSum",
@@ -738,6 +708,7 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"setDifference",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::setDifference, false}},
     {"setEquals", BuiltinFn{[](size_t n) { return n >= 2; }, vm::Builtin::setEquals, false}},
+    {"setIsSubset", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::setIsSubset, false}},
     {"collSetUnion", BuiltinFn{[](size_t n) { return n >= 1; }, vm::Builtin::collSetUnion, false}},
     {"collSetIntersection",
      BuiltinFn{[](size_t n) { return n >= 1; }, vm::Builtin::collSetIntersection, false}},
@@ -745,6 +716,8 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::collSetDifference, false}},
     {"collSetEquals",
      BuiltinFn{[](size_t n) { return n >= 3; }, vm::Builtin::collSetEquals, false}},
+    {"collSetIsSubset",
+     BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::collSetIsSubset, false}},
     {"aggSetUnion", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggSetUnion, true}},
     {"aggSetUnionCapped",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggSetUnionCapped, true}},
@@ -851,14 +824,8 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggIntegralRemove, true}},
     {"aggIntegralFinalize",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggIntegralFinalize, false}},
-    {"aggDerivativeInit",
-     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggDerivativeInit, false}},
-    {"aggDerivativeAdd",
-     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggDerivativeAdd, true}},
-    {"aggDerivativeRemove",
-     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggDerivativeRemove, true}},
     {"aggDerivativeFinalize",
-     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggDerivativeFinalize, false}},
+     BuiltinFn{[](size_t n) { return n == 5; }, vm::Builtin::aggDerivativeFinalize, false}},
     {"aggCovarianceAdd",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggCovarianceAdd, true}},
     {"aggCovarianceRemove",
@@ -870,7 +837,7 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"aggRemovablePushAdd",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovablePushAdd, true}},
     {"aggRemovablePushRemove",
-     BuiltinFn{[](size_t n) { return n == 0; }, vm::Builtin::aggRemovablePushRemove, true}},
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovablePushRemove, true}},
     {"aggRemovablePushFinalize",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovablePushFinalize, false}},
     {"aggRemovableStdDevAdd",
@@ -882,14 +849,50 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
          [](size_t n) { return n == 1; }, vm::Builtin::aggRemovableStdDevSampFinalize, false}},
     {"aggRemovableStdDevPopFinalize",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableStdDevPopFinalize, false}},
+    {"aggRemovableAvgFinalize",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggRemovableAvgFinalize, false}},
+    {"aggLinearFillCanAdd",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggLinearFillCanAdd, false}},
+    {"aggLinearFillAdd",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggLinearFillAdd, true}},
+    {"aggLinearFillFinalize",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggLinearFillFinalize, false}},
+    {"aggRemovableFirstNInit",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableFirstNInit, false}},
+    {"aggRemovableFirstNAdd",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableFirstNAdd, true}},
+    {"aggRemovableFirstNRemove",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableFirstNRemove, true}},
+    {"aggRemovableFirstNFinalize",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableFirstNFinalize, false}},
+    {"aggRemovableLastNInit",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableLastNInit, false}},
+    {"aggRemovableLastNAdd",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableLastNAdd, true}},
+    {"aggRemovableLastNRemove",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableLastNRemove, true}},
+    {"aggRemovableLastNFinalize",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableLastNFinalize, false}},
+    {"aggRemovableAddToSetInit",
+     BuiltinFn{[](size_t n) { return n == 0; }, vm::Builtin::aggRemovableAddToSetInit, false}},
+    {"aggRemovableAddToSetCollInit",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableAddToSetCollInit, false}},
+    {"aggRemovableAddToSetAdd",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggRemovableAddToSetAdd, true}},
+    {"aggRemovableAddToSetRemove",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableAddToSetRemove, true}},
+    {"aggRemovableAddToSetFinalize",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableAddToSetFinalize, false}},
     {"valueBlockExists",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockExists, false}},
     {"valueBlockFillEmpty",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockFillEmpty, false}},
+    {"valueBlockFillEmptyBlock",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockFillEmptyBlock, false}},
     {"valueBlockMin",
-     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockMin, false}},
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockMin, false}},
     {"valueBlockMax",
-     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockMax, false}},
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockMax, false}},
     {"valueBlockCount",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockCount, false}},
     {"valueBlockGtScalar",
@@ -898,12 +901,34 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockGteScalar, false}},
     {"valueBlockEqScalar",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockEqScalar, false}},
+    {"valueBlockNeqScalar",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockNeqScalar, false}},
     {"valueBlockLtScalar",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockLtScalar, false}},
     {"valueBlockLteScalar",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockLteScalar, false}},
+    {"valueBlockCmp3wScalar",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockCmp3wScalar, false}},
     {"valueBlockCombine",
      BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::valueBlockCombine, false}},
+    {"valueBlockLogicalAnd",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockLogicalAnd, false}},
+    {"valueBlockLogicalOr",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockLogicalOr, false}},
+    {"valueBlockLogicalNot",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockLogicalNot, false}},
+    {"valueBlockNewFill",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockNewFill, false}},
+    {"valueBlockSize",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockSize, false}},
+    {"valueBlockNone",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockNone, false}},
+    {"cellFoldValues_F",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::cellFoldValues_F, false}},
+    {"cellFoldValues_P",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::cellFoldValues_P, false}},
+    {"cellBlockGetFlatValuesBlock",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::cellBlockGetFlatValuesBlock, false}},
 };
 
 /**
@@ -1149,6 +1174,8 @@ static stdx::unordered_map<std::string, InstrFn> kInstrFunctions = {
     {"isMinKey", InstrFn{1, generator<1, &vm::CodeFragment::appendIsMinKey>, false}},
     {"isMaxKey", InstrFn{1, generator<1, &vm::CodeFragment::appendIsMaxKey>, false}},
     {"isTimestamp", InstrFn{1, generator<1, &vm::CodeFragment::appendIsTimestamp>, false}},
+    {"valueBlockApplyLambda",
+     InstrFn{3, generatorLegacy<&vm::CodeFragment::appendValueBlockApplyLambda>, false}},
 };
 }  // namespace
 

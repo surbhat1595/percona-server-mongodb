@@ -56,7 +56,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/timeseries/bucket_spec.h"
 #include "mongo/util/assert_util.h"
 
@@ -82,13 +82,13 @@ public:
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     DocumentSourceInternalUnpackBucket(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                       BucketUnpacker bucketUnpacker,
+                                       timeseries::BucketUnpacker bucketUnpacker,
                                        int bucketMaxSpanSeconds,
                                        bool assumeNoMixedSchemaData = false,
                                        bool fixedBuckets = false);
 
     DocumentSourceInternalUnpackBucket(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                       BucketUnpacker bucketUnpacker,
+                                       timeseries::BucketUnpacker bucketUnpacker,
                                        int bucketMaxSpanSeconds,
                                        const boost::optional<BSONObj>& eventFilterBson,
                                        const boost::optional<BSONObj>& wholeBucketFilterBson,
@@ -161,10 +161,15 @@ public:
         return boost::none;
     };
 
-    const BucketUnpacker& bucketUnpacker() const {
+    const timeseries::BucketUnpacker& bucketUnpacker() const {
         return _bucketUnpacker;
     }
 
+    /**
+     * See ../query/timeseries/README.md for a description of all the rewrites implemented in this
+     * function. The README.md should be maintained in sync with this function. Please update the
+     * README accordingly.
+     */
     Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
                                                      Pipeline::SourceContainer* container) final;
 
@@ -194,7 +199,7 @@ public:
     /**
      * Convenience wrapper around BucketSpec::createPredicatesOnBucketLevelField().
      */
-    BucketSpec::BucketPredicate createPredicatesOnBucketLevelField(
+    timeseries::BucketSpec::BucketPredicate createPredicatesOnBucketLevelField(
         const MatchExpression* matchExpr) const;
 
     /**
@@ -307,6 +312,10 @@ private:
 
     bool haveComputedMetaField() const;
 
+    // Parses given 'eventFilterBson' to set '_eventFilter' and determines its dependencies
+    // and SBE compatibility.
+    void setEventFilter(BSONObj eventFilterBson, bool shouldOptimize);
+
     // If buckets contained a mixed type schema along some path, we have to push down special
     // predicates in order to ensure correctness.
     bool _assumeNoMixedSchemaData = false;
@@ -319,27 +328,29 @@ private:
     // the _id index, as _id is truncates to 32 bits
     bool _usesExtendedRange = false;
 
-    BucketUnpacker _bucketUnpacker;
+    timeseries::BucketUnpacker _bucketUnpacker;
     int _bucketMaxSpanSeconds;
 
     int _bucketMaxCount = 0;
     boost::optional<long long> _sampleSize;
 
-    // It's benefitial to do as much filtering at the bucket level as possible to avoid unpacking
+    // It's beneficial to do as much filtering at the bucket level as possible to avoid unpacking
     // buckets that wouldn't contribute to the results anyway. There is a generic mechanism that
     // allows to swap $match stages with this one (see 'getModifiedPaths()'). It lets us split out
     // and push down a filter on the metaField "as is". The remaining filters might cause creation
     // of additional bucket-level filters (see 'createPredicatesOnBucketLevelField()') that are
     // inserted before this stage while the original filter is incorporated into this stage as
     // '_eventFilter' (to be applied to each unpacked document) and/or '_wholeBucketFilter' for the
-    // cases when _all_ events in a bucket would match (currently, we only do this for the
-    // timeField).
+    // cases when _all_ events in a bucket would match so that the filter is evaluated only once
+    // rather than on all events from the bucket (currently, we only do this for the 'timeField').
     std::unique_ptr<MatchExpression> _eventFilter;
     BSONObj _eventFilterBson;
     DepsTracker _eventFilterDeps;
     std::unique_ptr<MatchExpression> _wholeBucketFilter;
     BSONObj _wholeBucketFilterBson;
 
+    // If after unpacking there are no stages referencing any fields (e.g. $count), unpack directly
+    // to BSON so that data doesn't need to be materialized to Document.
     bool _unpackToBson = false;
 
     bool _optimizedEndOfPipeline = false;
@@ -349,5 +360,6 @@ private:
 
     // Caches the SBE-compatibility status result of this stage.
     boost::optional<bool> _isSbeCompatible = boost::none;
+    boost::optional<SbeCompatibility> _isEventFilterSbeCompatible = boost::none;
 };
 }  // namespace mongo

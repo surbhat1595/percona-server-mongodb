@@ -247,7 +247,8 @@ TEST(PhysRewriterParallel, IndexPartitioning1) {
     auto phaseManager = makePhaseManager(
         {OptPhase::MemoSubstitutionPhase,
          OptPhase::MemoExplorationPhase,
-         OptPhase::MemoImplementationPhase},
+         OptPhase::MemoImplementationPhase,
+         OptPhase::ProjNormalize},
         prefixId,
         {{{"c1",
            createScanDef(
@@ -275,26 +276,28 @@ TEST(PhysRewriterParallel, IndexPartitioning1) {
     phaseManager.optimize(optimized);
     ASSERT_BETWEEN_AUTO(80, 140, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
-    const BSONObj& result = ExplainGenerator::explainBSONObj(optimized);
-
-    // Compare using BSON since the rid vars are currently unstable for this test.
-    ASSERT_BSON_PATH("\"Exchange\"", result, "child.nodeType");
-    ASSERT_BSON_PATH(
-        "{ type: \"Centralized\", disableExchanges: false }", result, "child.distribution");
-    ASSERT_BSON_PATH("\"GroupBy\"", result, "child.child.nodeType");
-    ASSERT_BSON_PATH("\"HashJoin\"", result, "child.child.child.nodeType");
-    ASSERT_BSON_PATH("\"Exchange\"", result, "child.child.child.leftChild.nodeType");
-    ASSERT_BSON_PATH("{ type: \"Replicated\", disableExchanges: false }",
-                     result,
-                     "child.child.child.leftChild.distribution");
-    ASSERT_BSON_PATH("\"IndexScan\"", result, "child.child.child.leftChild.child.nodeType");
-    ASSERT_BSON_PATH("\"index2\"", result, "child.child.child.leftChild.child.indexDefName");
-    ASSERT_BSON_PATH("\"Union\"", result, "child.child.child.rightChild.nodeType");
-    ASSERT_BSON_PATH("\"Evaluation\"", result, "child.child.child.rightChild.children.0.nodeType");
-    ASSERT_BSON_PATH(
-        "\"IndexScan\"", result, "child.child.child.rightChild.children.0.child.nodeType");
-    ASSERT_BSON_PATH(
-        "\"index1\"", result, "child.child.child.rightChild.children.0.child.indexDefName");
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT
+        "Root [{renamed_7}]\n"
+        "Exchange []\n"
+        "|   |   distribution: \n"
+        "|   |       type: Centralized\n"
+        "GroupBy [{renamed_3}]\n"
+        "|   aggregations: \n"
+        "|       [renamed_7]\n"
+        "|           Variable [renamed_1]\n"
+        "HashJoin [joinType: Inner]\n"
+        "|   |   Condition\n"
+        "|   |       renamed_0 = renamed_4\n"
+        "|   Union [{renamed_3, renamed_4}]\n"
+        "|   Evaluation [{renamed_4} = Variable [renamed_0]]\n"
+        "|   IndexScan [{'<indexKey> 0': renamed_3, '<rid>': renamed_0}, scanDefName: c1, "
+        "indexDefName: index1, interval: {>Const [0]}]\n"
+        "Exchange []\n"
+        "|   |   distribution: \n"
+        "|   |       type: Replicated\n"
+        "IndexScan [{'<indexKey> 0': renamed_1, '<rid>': renamed_0}, scanDefName: c1, "
+        "indexDefName: index2, interval: {>Const [1]}]\n",
+        optimized);
 }
 
 TEST(PhysRewriterParallel, LocalGlobalAgg) {
@@ -413,7 +416,7 @@ TEST(PhysRewriterParallel, LocalLimitSkip) {
     ASSERT_BETWEEN(5, 15, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_PROPS_V2_AUTO(
-        "Properties [cost: 0.00929774, localCost: 0, adjustedCE: 20]\n"
+        "Properties [cost: 0.00930515, localCost: 0, adjustedCE: 20]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 20\n"
@@ -430,7 +433,7 @@ TEST(PhysRewriterParallel, LocalLimitSkip) {
         "|       distribution: \n"
         "|           type: Centralized\n"
         "Root [{root}]\n"
-        "Properties [cost: 0.00929774, localCost: 0.00252777, adjustedCE: 30]\n"
+        "Properties [cost: 0.00930515, localCost: 0.00252964, adjustedCE: 30.03]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 1000\n"
@@ -456,7 +459,7 @@ TEST(PhysRewriterParallel, LocalLimitSkip) {
         "|       removeOrphans: \n"
         "|           false\n"
         "LimitSkip [limit: 20, skip: 10]\n"
-        "Properties [cost: 0.00676997, localCost: 0.003001, adjustedCE: 30]\n"
+        "Properties [cost: 0.00677551, localCost: 0.003004, adjustedCE: 30.03]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 1000\n"
@@ -483,7 +486,7 @@ TEST(PhysRewriterParallel, LocalLimitSkip) {
         "Exchange []\n"
         "|   |   distribution: \n"
         "|   |       type: Centralized\n"
-        "Properties [cost: 0.00376897, localCost: 0.00376897, adjustedCE: 30]\n"
+        "Properties [cost: 0.00377151, localCost: 0.00377151, adjustedCE: 30.03]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 1000\n"

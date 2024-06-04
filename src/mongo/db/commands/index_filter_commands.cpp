@@ -37,7 +37,6 @@
 #include <vector>
 
 #include <absl/container/node_hash_set.h>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -281,15 +280,12 @@ Status ClearFilters::clear(OperationContext* opCtx,
         findCommand->setProjection(entry.projection);
         findCommand->setCollation(entry.collation);
         const boost::intrusive_ptr<ExpressionContext> expCtx;
-        auto statusWithCQ =
-            CanonicalQuery::canonicalize(opCtx,
-                                         std::move(findCommand),
-                                         false,
-                                         expCtx,
-                                         extensionsCallback,
-                                         MatchExpressionParser::kAllowAllSpecialFeatures);
-        invariant(statusWithCQ.isOK());
-        std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
+        auto cq = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+            .expCtx = makeExpressionContext(opCtx, *findCommand),
+            .parsedFind = ParsedFindCommandParams{
+                .findCommand = std::move(findCommand),
+                .extensionsCallback = extensionsCallback,
+                .allowedFeatures = MatchExpressionParser::kAllowAllSpecialFeatures}});
 
         planCacheCommandKeys.insert(canonical_query_encoder::computeHash(
             canonical_query_encoder::encodeForPlanCacheCommand(*cq)));
@@ -391,8 +387,8 @@ Status SetFilter::set(OperationContext* opCtx,
     return Status::OK();
 }
 
-MONGO_REGISTER_COMMAND(ListFilters);
-MONGO_REGISTER_COMMAND(ClearFilters);
-MONGO_REGISTER_COMMAND(SetFilter);
+MONGO_REGISTER_COMMAND(ListFilters).forShard();
+MONGO_REGISTER_COMMAND(ClearFilters).forShard();
+MONGO_REGISTER_COMMAND(SetFilter).forShard();
 
 }  // namespace mongo

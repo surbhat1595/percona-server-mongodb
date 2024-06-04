@@ -29,7 +29,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <memory>
 #include <string>
@@ -147,7 +146,7 @@ public:
         return BasicCommand::AllowedOnSecondary::kNever;
     }
 };
-MONGO_REGISTER_COMMAND(CommitShardSplitCmd);
+MONGO_REGISTER_COMMAND(CommitShardSplitCmd).forShard();
 
 class AbortShardSplitCmd : public TypedCommand<AbortShardSplitCmd> {
 public:
@@ -223,7 +222,7 @@ public:
         return BasicCommand::AllowedOnSecondary::kNever;
     }
 };
-MONGO_REGISTER_COMMAND(AbortShardSplitCmd);
+MONGO_REGISTER_COMMAND(AbortShardSplitCmd).forShard();
 
 class ForgetShardSplitCmd : public TypedCommand<ForgetShardSplitCmd> {
 public:
@@ -298,7 +297,7 @@ public:
         return BasicCommand::AllowedOnSecondary::kNever;
     }
 };
-MONGO_REGISTER_COMMAND(ForgetShardSplitCmd);
+MONGO_REGISTER_COMMAND(ForgetShardSplitCmd).forShard();
 
 
 }  // namespace

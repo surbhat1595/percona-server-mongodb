@@ -60,6 +60,9 @@
 namespace mongo {
 namespace {
 
+using timeseries::BucketSpec;
+using timeseries::BucketUnpacker;
+
 constexpr auto kUserDefinedTimeName = "time"_sd;
 constexpr auto kUserDefinedMetaName = "myMeta"_sd;
 
@@ -110,7 +113,7 @@ public:
         BSONObjBuilder root;
         {
             BSONObjBuilder builder(root.subobjStart("control"_sd));
-            builder.append("version"_sd, 1);
+            builder.append("version"_sd, timeseries::kTimeseriesControlUncompressedVersion);
         }
         {
             BSONObjBuilder data(root.subobjStart("data"_sd));

@@ -36,6 +36,12 @@ feature_flags:
       default: false
       shouldBeFCVGated: false
 
+    featureFlagOptimizerPlanCache:
+      description: "Enables the plan cache for the Cascades-based query optimizer"
+      cpp_varname: gFeatureFlagOptimizerPlanCache
+      default: false
+      shouldBeFCVGated: false
+
     featureFlagColumnstoreIndexes:
       description: "Enables creation of a new columnstore index type"
       cpp_varname: gFeatureFlagColumnstoreIndexes
@@ -58,7 +64,8 @@ feature_flags:
     featureFlagQueryStats:
       description: "Feature flag for enabling full queryStats collection."
       cpp_varname: gFeatureFlagQueryStats
-      default: false
+      default: true
+      version: 7.2
       shouldBeFCVGated: true
 
     featureFlagQueryStatsFindCommand:
@@ -92,9 +99,7 @@ feature_flags:
       description: "Feature flag to enable vector search for public preview."
       cpp_varname: gFeatureFlagVectorSearchPublicPreview
       default: true
-      version: 7.1
-      # TODO SERVER-78294 Toggle this once we've backported the feature.
-      shouldBeFCVGated: true
+      shouldBeFCVGated: false
 
     featureFlagSearchInSbe:
       description: "Feature flag to enable $search execution in SBE"

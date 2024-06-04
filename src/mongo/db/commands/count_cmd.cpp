@@ -76,6 +76,7 @@
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/query/query_settings_gen.h"
 #include "mongo/db/query/view_response_formatter.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_level.h"
@@ -158,7 +159,7 @@ public:
                 Status::OK()};
     }
 
-    bool shouldAffectReadConcernCounter() const override {
+    bool shouldAffectReadOptionCounters() const override {
         return true;
     }
 
@@ -203,10 +204,7 @@ public:
 
         CountCommandRequest request(NamespaceStringOrUUID(NamespaceString{}));
         try {
-            request = CountCommandRequest::parse(
-                IDLParserContext(
-                    "count", false /* apiStrict */, opMsgRequest.getValidatedTenantId()),
-                opMsgRequest);
+            request = CountCommandRequest::parse(IDLParserContext("count"), opMsgRequest);
         } catch (...) {
             return exceptionToStatus();
         }
@@ -215,10 +213,11 @@ public:
             if (!request.getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                 processFLECountD(opCtx, nss, &request);
             }
-
-            CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+            stdx::lock_guard<Client> lk(*opCtx->getClient());
+            CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
         }
 
+        SerializationContext serializationCtx = request.getSerializationContext();
         if (ctx->getView()) {
             // Relinquish locks. The aggregation command will re-acquire them.
             ctx.reset();
@@ -228,26 +227,24 @@ public:
                 return viewAggregation.getStatus();
             }
 
-            auto viewAggCmd =
-                OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                    nss.dbName(), opMsgRequest.validatedTenancyScope, viewAggregation.getValue())
-                    .body;
+            auto viewAggCmd = OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                                  nss.dbName(),
+                                  opMsgRequest.validatedTenancyScope,
+                                  viewAggregation.getValue(),
+                                  serializationCtx)
+                                  .body;
             auto viewAggRequest = aggregation_request_helper::parseFromBSON(
                 opCtx,
                 nss,
                 viewAggCmd,
                 verbosity,
                 APIParameters::get(opCtx).getAPIStrict().value_or(false),
-                request.getSerializationContext());
+                serializationCtx);
 
             // An empty PrivilegeVector is acceptable because these privileges are only checked on
             // getMore and explain will not open a cursor.
-            return runAggregate(opCtx,
-                                viewAggRequest.getNamespace(),
-                                viewAggRequest,
-                                viewAggregation.getValue(),
-                                PrivilegeVector(),
-                                result);
+            return runAggregate(
+                opCtx, viewAggRequest, viewAggregation.getValue(), PrivilegeVector(), result);
         }
 
         const auto& collection = ctx->getCollection();
@@ -275,14 +272,13 @@ public:
         auto exec = std::move(statusWithPlanExecutor.getValue());
 
         auto bodyBuilder = result->getBodyBuilder();
-        Explain::explainStages(
-            exec.get(),
-            collection,
-            verbosity,
-            BSONObj(),
-            SerializationContext::stateCommandReply(request.getSerializationContext()),
-            cmdObj,
-            &bodyBuilder);
+        Explain::explainStages(exec.get(),
+                               collection,
+                               verbosity,
+                               BSONObj(),
+                               SerializationContext::stateCommandReply(serializationCtx),
+                               cmdObj,
+                               &bodyBuilder);
         return Status::OK();
     }
 
@@ -303,8 +299,11 @@ public:
         CurOpFailpointHelpers::waitWhileFailPointEnabled(
             &hangBeforeCollectionCount, opCtx, "hangBeforeCollectionCount", []() {}, nss);
 
+        auto sc = SerializationContext::stateCommandRequest();
+        sc.setTenantIdSource(auth::ValidatedTenancyScope::get(opCtx) != boost::none);
+
         auto request = CountCommandRequest::parse(
-            IDLParserContext("count", false /* apiStrict */, dbName.tenantId()), cmdObj);
+            IDLParserContext("count", false /* apiStrict */, dbName.tenantId(), sc), cmdObj);
         auto curOp = CurOp::get(opCtx);
         curOp->beginQueryPlanningTimer();
         if (shouldDoFLERewrite(request)) {
@@ -312,8 +311,8 @@ public:
             if (!request.getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                 processFLECountD(opCtx, nss, &request);
             }
-
-            curOp->debug().shouldOmitDiagnosticInformation = true;
+            stdx::lock_guard<Client> lk(*opCtx->getClient());
+            CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
         }
         if (request.getMirrored().value_or(false)) {
             const auto& invocation = CommandInvocation::get(opCtx);
@@ -334,6 +333,9 @@ public:
 
         if (ctx->getView()) {
             auto viewAggregation = countCommandAsAggregationCommand(request, nss);
+            const auto& requestSC = request.getSerializationContext();
+            SerializationContext aggRequestSC(
+                requestSC.getSource(), requestSC.getCallerType(), requestSC.getPrefix());
 
             // Relinquish locks. The aggregation command will re-acquire them.
             ctx.reset();
@@ -343,14 +345,17 @@ public:
             boost::optional<VTS> vts = boost::none;
             if (dbName.tenantId()) {
                 vts = VTS(dbName.tenantId().value(), VTS::TrustedForInnerOpMsgRequestTag{});
+                aggRequestSC.setTenantIdSource(true);
             }
-            auto aggRequest = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                dbName, vts, std::move(viewAggregation.getValue()));
 
+            auto aggRequest = OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                dbName, vts, std::move(viewAggregation.getValue()), aggRequestSC);
             BSONObj aggResult = CommandHelpers::runCommandDirectly(opCtx, aggRequest);
 
-            uassertStatusOK(
-                ViewResponseFormatter(aggResult).appendAsCountResponse(&result, dbName.tenantId()));
+            uassertStatusOK(ViewResponseFormatter(aggResult).appendAsCountResponse(
+                &result,
+                dbName.tenantId(),
+                SerializationContext::stateCommandReply(request.getSerializationContext())));
             return true;
         }
 
@@ -420,6 +425,7 @@ public:
             keyBob.append("hint", 1);
             keyBob.append("collation", 1);
             keyBob.append("shardVersion", 1);
+            keyBob.append("databaseVersion", 1);
             keyBob.append("encryptionInformation", 1);
 
             return keyBob.obj();
@@ -429,7 +435,7 @@ public:
         cmdObj.filterFieldsUndotted(bob, kMirrorableKeys, true);
     }
 };
-MONGO_REGISTER_COMMAND(CmdCount);
+MONGO_REGISTER_COMMAND(CmdCount).forShard();
 
 }  // namespace
 }  // namespace mongo

@@ -37,7 +37,6 @@
 // IWYU pragma: no_include "boost/move/detail/iterator_to_raw_pointer.hpp"
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -442,6 +441,7 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
         case STAGE_GROUP:
         case STAGE_IDHACK:
         case STAGE_MATCH:
+        case STAGE_REPLACE_ROOT:
         case STAGE_MOCK:
         case STAGE_MULTI_ITERATOR:
         case STAGE_MULTI_PLAN:
@@ -458,6 +458,7 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
         case STAGE_SENTINEL:
         case STAGE_COLUMN_SCAN:
         case STAGE_UPDATE:
+        case STAGE_UNWIND:
         case STAGE_SEARCH:
         case STAGE_WINDOW: {
             LOGV2_WARNING(4615604, "Can't build exec tree for node", "node"_attr = *root);

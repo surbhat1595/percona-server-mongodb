@@ -37,7 +37,6 @@
 #include <utility>
 
 #include <boost/filesystem/operations.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 
 #include "mongo/base/status_with.h"
@@ -132,7 +131,6 @@ void StorageRepairObserver::_touchRepairIncompleteFile() {
     if (fileStream.fail()) {
         auto ec = lastSystemError();
         LOGV2_FATAL_NOTRACE(50920,
-                            "Failed to write to file {file}: {error}",
                             "Failed to write to file",
                             "file"_attr = _repairIncompleteFilePath.generic_string(),
                             "error"_attr = errorMessage(ec));
@@ -149,7 +147,6 @@ void StorageRepairObserver::_removeRepairIncompleteFile() {
 
     if (ec) {
         LOGV2_FATAL_NOTRACE(50921,
-                            "Failed to remove file {file}: {error}",
                             "Failed to remove file",
                             "file"_attr = _repairIncompleteFilePath.generic_string(),
                             "error"_attr = ec.message());

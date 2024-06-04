@@ -137,8 +137,9 @@ public:
     /**
      * Makes a new CompileCtx suitable for preparing an sbe::PlanStage tree.
      */
-    std::unique_ptr<CompileCtx> makeCompileCtx() {
-        return std::make_unique<CompileCtx>(std::make_unique<RuntimeEnvironment>());
+    std::unique_ptr<CompileCtx> makeCompileCtx(
+        std::unique_ptr<RuntimeEnvironment> env = std::make_unique<RuntimeEnvironment>()) {
+        return std::make_unique<CompileCtx>(std::move(env));
     }
 
     /**
@@ -278,16 +279,19 @@ public:
                       value::Value expectedVal,
                       const MakeStageFn<value::SlotVector>& makeStageMulti);
 
+    value::SlotIdGenerator* getSlotIdGenerator() {
+        return _slotIdGenerator.get();
+    }
+
 protected:
     std::unique_ptr<PlanYieldPolicySBE> makeYieldPolicy() {
-        return std::make_unique<PlanYieldPolicySBE>(
+        return PlanYieldPolicySBE::make(
             operationContext(),
             PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
             operationContext()->getServiceContext()->getFastClockSource(),
             0,
             Milliseconds::zero(),
-            &_yieldable,
-            nullptr);
+            &_yieldable);
     }
 
 private:

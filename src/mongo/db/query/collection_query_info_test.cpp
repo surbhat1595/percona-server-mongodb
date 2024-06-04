@@ -127,13 +127,6 @@ public:
         MONGO_UNIMPLEMENTED;
     }
 
-    void setDropped() override {
-        MONGO_UNIMPLEMENTED;
-    }
-    bool isDropped() const override {
-        MONGO_UNIMPLEMENTED;
-    }
-
     bool isMultikey(OperationContext* opCtx, const CollectionPtr& collection) const override {
         MONGO_UNIMPLEMENTED;
     }
@@ -170,6 +163,11 @@ public:
     }
 
     const UpdateIndexData& getIndexedPaths() const override {
+        MONGO_UNIMPLEMENTED;
+    }
+
+    std::unique_ptr<const IndexCatalogEntry> getNormalizedEntry(
+        OperationContext* opCtx, const CollectionPtr& coll) const override {
         MONGO_UNIMPLEMENTED;
     }
 

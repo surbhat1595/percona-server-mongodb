@@ -78,7 +78,7 @@ using shard_key_pattern_query_util::QueryTargetingInfo;
 
 const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
 
-class ChunkManagerQueryTest : public CatalogCacheTestFixture {
+class ChunkManagerQueryTest : public RouterCatalogCacheTestFixture {
 protected:
     void runGetShardIdsForRangeTest(const BSONObj& shardKey,
                                     bool unique,
@@ -586,7 +586,7 @@ TEST_F(ChunkManagerQueryTest, SnapshotQueryWithMoreShardsThanLatestMetadata) {
     auto oldRoutingTable = RoutingTableHistory::makeNew(kNss,
                                                         uuid,
                                                         BSON("x" << 1),
-                                                        false, /*unsplittable*/
+                                                        false, /* unsplittable */
                                                         nullptr,
                                                         false,
                                                         epoch,
@@ -611,6 +611,7 @@ TEST_F(ChunkManagerQueryTest, SnapshotQueryWithMoreShardsThanLatestMetadata) {
                                   oldRoutingTable.makeUpdated(boost::none /* timeseriesFields */,
                                                               boost::none /* reshardingFields */,
                                                               true,
+                                                              false, /* unsplittable */
                                                               {chunk1})),
                               Timestamp(5, 0));
 

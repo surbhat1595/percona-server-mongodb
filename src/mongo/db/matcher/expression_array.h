@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <memory>
@@ -51,7 +50,7 @@
 #include "mongo/db/matcher/expression_visitor.h"
 #include "mongo/db/matcher/match_details.h"
 #include "mongo/db/matcher/path.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -108,7 +107,8 @@ public:
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts) const final;
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final;
 
     std::vector<std::unique_ptr<MatchExpression>>* getChildVector() final {
         return nullptr;
@@ -177,7 +177,8 @@ public:
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts) const final;
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final;
 
     std::vector<std::unique_ptr<MatchExpression>>* getChildVector() final {
         return &_subs;
@@ -253,7 +254,8 @@ public:
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts) const final;
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final;
 
     virtual bool equivalent(const MatchExpression* other) const;
 

@@ -47,7 +47,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -302,6 +301,19 @@ void _logOplogEntriesForInvalidResults(OperationContext* opCtx, ValidateResults*
     try {
         AutoGetOplog oplogRead(opCtx, OplogAccessMode::kRead);
         const auto& oplogCollection = oplogRead.getCollection();
+
+        if (!oplogCollection) {
+            for (auto it = results->recordTimestamps.rbegin();
+                 it != results->recordTimestamps.rend();
+                 it++) {
+                const auto& timestamp = *it;
+                LOGV2(8080900,
+                      "    Validation failed: Oplog entry timestamp for corrupted collection and "
+                      "index entry",
+                      "timestamp"_attr = timestamp);
+            }
+            return;
+        }
 
         // Log oplog entries in reverse from most recent timestamp to oldest.
         // Due to oplog truncation, if we fail to find any oplog entry for a particular timestamp,
@@ -566,7 +578,8 @@ Status validate(OperationContext* opCtx,
                 const AdditionalOptions& additionalOptions,
                 ValidateResults* results,
                 BSONObjBuilder* output,
-                bool logDiagnostics) {
+                bool logDiagnostics,
+                const SerializationContext& sc) {
     invariant(!opCtx->lockState()->isLocked() || storageGlobalParams.repair);
 
     // This is deliberately outside of the try-catch block, so that any errors thrown in the
@@ -579,8 +592,6 @@ Status validate(OperationContext* opCtx,
     uassertStatusOK(replCoord->checkCanServeReadsFor(
         opCtx, nss, ReadPreferenceSetting::get(opCtx).canRunOnSecondary()));
 
-    SerializationContext sc = SerializationContext::stateCommandReply();
-    sc.setTenantIdSource(auth::ValidatedTenancyScope::get(opCtx) != boost::none);
     output->append("ns", NamespaceStringUtil::serialize(validateState.nss(), sc));
 
     validateState.uuid().appendToBuilder(output, "uuid");

@@ -72,6 +72,7 @@
 #include "mongo/db/write_concern.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/idl/idl_parser.h"
+#include "mongo/platform/source_location.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/op_msg.h"
@@ -189,11 +190,8 @@ struct CommandHelpers {
      */
     static ResourcePattern resourcePatternForNamespace(const NamespaceString& ns);
 
+    static Command* findCommand(Service* service, StringData name);
     static Command* findCommand(OperationContext* opCtx, StringData name);
-
-    static Command* findCommand(StringData name) {
-        return findCommand(nullptr, name);
-    }
 
     /**
      * Helper for setting errmsg and ok field in command result object.
@@ -249,6 +247,10 @@ struct CommandHelpers {
                                          BSONObjBuilder* replyBuilder);
     static BSONObj appendGenericReplyFields(const BSONObj& replyObjWithGenericReplyFields,
                                             const BSONObj& reply);
+    /*
+     * Appends a generic WriteConcernOptions to a bson object
+     */
+    static BSONObj appendWCToObj(const BSONObj& cmdObj, WriteConcernOptions newWC);
 
     /**
      * Returns a copy of 'cmdObj' with a majority writeConcern appended.  If the command object does
@@ -356,7 +358,8 @@ struct CommandHelpers {
      * Verifies that command is allowed to run under a transaction in the given database or
      * namespaces, and throws if that verification doesn't pass.
      */
-    static void canUseTransactions(const std::vector<NamespaceString>& namespaces,
+    static void canUseTransactions(Service* service,
+                                   const std::vector<NamespaceString>& namespaces,
                                    StringData cmdName,
                                    bool allowTransactionsOnConfigDatabase);
 
@@ -525,10 +528,11 @@ public:
     }
 
     /**
-     * Override and return true if the readConcernCounters in serverStatus should not be incremented
-     * on behalf of this command.
+     * Override and return true if the readConcernCounters and readPreferenceCounters in
+     * serverStatus should be incremented on behalf of this command. This should be true for
+     * read operations.
      */
-    virtual bool shouldAffectReadConcernCounter() const {
+    virtual bool shouldAffectReadOptionCounters() const {
         return false;
     }
 
@@ -612,14 +616,14 @@ public:
      * Increment counter for how many times this command has executed.
      */
     void incrementCommandsExecuted() const {
-        _commandsExecuted.increment();
+        _commandsExecuted->increment();
     }
 
     /**
      * Increment counter for how many times this command has failed.
      */
     void incrementCommandsFailed() const {
-        _commandsFailed.increment();
+        _commandsFailed->increment();
     }
 
     /**
@@ -710,8 +714,8 @@ private:
     const std::vector<StringData> _aliases;
 
     // Counters for how many times this command has been executed and failed
-    CounterMetric _commandsExecuted;
-    CounterMetric _commandsFailed;
+    std::shared_ptr<CounterMetric> _commandsExecuted;
+    std::shared_ptr<CounterMetric> _commandsFailed;
 };
 
 /**
@@ -1385,15 +1389,8 @@ std::unique_ptr<CommandInvocation> TypedCommand<Derived>::parse(OperationContext
 }
 
 
-/**
- * See the 'globalCommandRegistry()' singleton accessor.
- */
 class CommandRegistry {
 public:
-    CommandRegistry() = default;
-    CommandRegistry(const CommandRegistry&) = delete;
-    CommandRegistry& operator=(const CommandRegistry&) = delete;
-
     /**
      * Invokes a callable `f` for each distinct `Command* c` in the registry, as `f(c)`.
      * A `Command*` may be mapped to multiple aliases, but these are omitted
@@ -1423,6 +1420,21 @@ private:
     StringMap<Command*> _commandNames;
 };
 
+CommandRegistry* getCommandRegistry(Service* service);
+
+/** Convenience overload. */
+inline CommandRegistry* getCommandRegistry(OperationContext* opCtx) {
+    return getCommandRegistry(opCtx->getService());
+}
+
+inline Command* CommandHelpers::findCommand(Service* service, StringData name) {
+    return getCommandRegistry(service)->findCommand(name);
+}
+
+inline Command* CommandHelpers::findCommand(OperationContext* opCtx, StringData name) {
+    return getCommandRegistry(opCtx)->findCommand(name);
+}
+
 /**
  * When CommandRegistry objects are initialized, they look into the global
  * CommandConstructionPlan to find the list of Command objects that need to
@@ -1436,7 +1448,10 @@ public:
         std::function<std::unique_ptr<Command>()> construct;
         const FeatureFlag* featureFlag = nullptr;
         bool testOnly = false;
+        boost::optional<ClusterRole> roles;
         const std::type_info* typeInfo = nullptr;
+        boost::optional<SourceLocation> location;
+        std::string expr;
     };
 
     class EntryBuilder;
@@ -1449,24 +1464,34 @@ public:
         return _entries;
     }
 
-    void execute(CommandRegistry* registry) const;
+    /**
+     * Adds to the specified `registry` an instance of all apppriate Command types in this plan.
+     * Appropriate is determined by the Entry data members, and by the specified `pred`.
+     *
+     * There are some server-wide criteria applied automatically:
+     *
+     *   - FeatureFlag-enabled commands are filtered out according to flag settings.
+     *
+     *   - testOnly registrations are only created if the server is in testOnly mode.
+     *
+     * Other criteria can be applied via the caller-supplied `pred`. A `Command`
+     * will only be created for an `entry` if the `pred(entry)` passes.
+     */
+    void execute(CommandRegistry* registry,
+                 Service* service,
+                 const std::function<bool(const Entry&)>& pred) const;
+
+    /**
+     * Calls `execute` with a predicate that enables Commands appropriate for
+     * the specified `service`.
+     */
+    void execute(CommandRegistry* registry, Service* service) const;
 
 private:
     std::vector<std::unique_ptr<Entry>> _entries;
 };
 
-/**
- * Returns the command registry for the service relevant to `opCtx`.
- */
-CommandRegistry* getCommandRegistry(OperationContext* opCtx);
-
-/**
- * Accessor to the command registry, an always-valid singleton.
- * Legacy compatibility. Prefer `getCommandRegistry(opCtx)`.
- */
-inline CommandRegistry* globalCommandRegistry() {
-    return getCommandRegistry(nullptr);
-}
+BSONObj toBSON(const CommandConstructionPlan::Entry& e);
 
 /**
  * CommandRegisterer objects attach entries to this instance at static-init
@@ -1501,6 +1526,31 @@ public:
 
     EntryBuilder() = default;
 
+    /**
+     * Role specification is mandatory for all EntryBuilders, through addRoles,
+     * forShard, and forRouter.
+     */
+    EntryBuilder addRoles(ClusterRole role) && {
+        _entry->roles = _entry->roles.value_or(ClusterRole::None);
+        for (auto&& r : {ClusterRole::ShardServer, ClusterRole::RouterServer})
+            if (role.has(r))
+                *_entry->roles += r;
+        return std::move(*this);
+    }
+
+    /** Add the shard server role. */
+    EntryBuilder forShard() && {
+        return std::move(*this).addRoles(ClusterRole::ShardServer);
+    }
+
+    /** Add the router server role. */
+    EntryBuilder forRouter() && {
+        return std::move(*this).addRoles(ClusterRole::RouterServer);
+    }
+
+    /**
+     * Denotes a test-only command. See docs/test_commands.md.
+     */
     EntryBuilder testOnly() && {
         _entry->testOnly = true;
         return std::move(*this);
@@ -1521,6 +1571,16 @@ public:
      */
     EntryBuilder setPlan(CommandConstructionPlan* plan) && {
         _plan = plan;
+        return std::move(*this);
+    }
+
+    EntryBuilder location(SourceLocation loc) && {
+        _entry->location = loc;
+        return std::move(*this);
+    }
+
+    EntryBuilder expr(std::string name) && {
+        _entry->expr = std::move(name);
         return std::move(*this);
     }
 
@@ -1548,10 +1608,13 @@ private:
  *
  *     MONGO_REGISTER_COMMAND(MyCommandType)
  *        .testOnly()
- *        .forFeatureFlag(&myFeatureFlag);
+ *        .forFeatureFlag(&myFeatureFlag)
+ *        .forShard();
  */
 #define MONGO_REGISTER_COMMAND(...)                                              \
     static auto MONGO_COMMAND_DUMMY_ID_(mongoRegisterCommand_dummy_, __LINE__) = \
-        *CommandConstructionPlan::EntryBuilder::make<__VA_ARGS__>()
+        *CommandConstructionPlan::EntryBuilder::make<__VA_ARGS__>()              \
+             .expr(#__VA_ARGS__)                                                 \
+             .location(MONGO_SOURCE_LOCATION_NO_FUNC())
 
 }  // namespace mongo

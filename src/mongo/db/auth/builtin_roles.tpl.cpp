@@ -34,7 +34,7 @@
 #include <map>
 
 #include "mongo/base/string_data.h"
-#include "mongo/base/string_data_comparator_interface.h"
+#include "mongo/base/string_data_comparator.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
@@ -60,7 +60,8 @@ void addPrivileges_${role.name}(PrivilegeVector* privileges, const DatabaseName&
 //#if $db is None
 //#echo 'dbName'
 //#else
-//#echo 'DatabaseNameUtil::deserialize(dbName.tenantId(), "' + $db + '"_sd)'
+//#echo 'DatabaseNameUtil::deserialize(dbName.tenantId(), "' + $db + '"_sd,'
+//#echo 'SerializationContext::stateDefault())'
 //#end if
 //#end def
 
@@ -165,7 +166,7 @@ const std::map<StringData, BuiltinRoleAttributes> kBuiltinRoleMap = {
 
 const stdx::unordered_set<RoleName> kAdminBuiltinRolesNoTenant = {
     //#for $role in $roles
-    RoleName("$role.name"_sd, DatabaseNameUtil::deserialize(boost::none, kAdminDB)),
+    RoleName("$role.name"_sd, DatabaseName::kAdmin.db()),
     //#end for
 };
 
@@ -173,7 +174,7 @@ const stdx::unordered_set<RoleName> kAdminBuiltinRolesNoTenant = {
 // and other authentication mechanisms and not used for storage.
 // Therefore, granting privileges on this database does not make sense.
 bool isValidDB(const DatabaseName& dbname) {
-    return NamespaceString::validDBName(dbname, NamespaceString::DollarInDbNameBehavior::Allow) &&
+    return DatabaseName::isValid(dbname, DatabaseName::DollarInDbNameBehavior::Allow) &&
         (!dbname.isExternalDB());
 }
 
@@ -209,7 +210,9 @@ stdx::unordered_set<RoleName> auth::getBuiltinRoleNamesForDB(const DatabaseName&
 
 void auth::generateUniversalPrivileges(PrivilegeVector* privileges,
                                        const boost::optional<TenantId>& tenantId) {
-    addPrivileges___system(privileges, DatabaseNameUtil::deserialize(tenantId, kAdminDB));
+    addPrivileges___system(
+        privileges,
+        DatabaseNameUtil::deserialize(tenantId, kAdminDB, SerializationContext::stateDefault()));
 }
 
 bool auth::addPrivilegesForBuiltinRole(const RoleName& role, PrivilegeVector* privileges) {

@@ -28,7 +28,6 @@
  */
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
@@ -71,8 +70,11 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/service_executor.h"
+#include "mongo/transport/session_manager_common.h"
 #include "mongo/transport/session_workflow.h"
 #include "mongo/transport/session_workflow_test_util.h"
+#include "mongo/transport/test_fixtures.h"
+#include "mongo/transport/transport_layer_manager_impl.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
 #include "mongo/util/assert_util.h"
@@ -231,9 +233,10 @@ public:
     void setUp() override {
         ServiceContextTest::setUp();
         auto sc = getServiceContext();
-        sc->setServiceEntryPoint(_makeServiceEntryPoint(sc));
+        sc->getService()->setServiceEntryPoint(_makeServiceEntryPoint());
+        ServiceExecutor::startupAll(sc);
+        _initTransportLayer(sc);
         initializeNewSession();
-        invariant(sep()->start());
         _threadPool->startup();
     }
 
@@ -241,29 +244,37 @@ public:
         ScopeGuard guard = [&] {
             ServiceContextTest::tearDown();
         };
-        // Normal shutdown is a noop outside of ASAN.
-        invariant(sep()->shutdownAndWait(Seconds{10}));
+        getServiceContext()->getTransportLayerManager()->shutdown();
         _threadPool->shutdown();
         _threadPool->join();
+        ServiceExecutor::shutdownAll(getServiceContext(), Seconds{10});
     }
 
     void initializeNewSession() {
         _session = std::make_shared<CustomMockSession>(this);
+        _session->getTransportLayerCb = [this] {
+            return _transportLayer;
+        };
     }
 
     /** Waits for the current Session and SessionWorkflow to end. */
     void joinSessions() {
-        ASSERT(sep()->waitForNoSessions(Seconds{1}));
+        ASSERT(sessionManager()->waitForNoSessions(Seconds{1}));
     }
 
     /** Launches a SessionWorkflow for the current session. */
     void startSession() {
         LOGV2(6742613, "Starting session");
-        sep()->startSession(_session);
+        sessionManager()->startSession(_session);
     }
 
     MockServiceEntryPoint* sep() {
-        return checked_cast<MockServiceEntryPoint*>(getServiceContext()->getServiceEntryPoint());
+        return checked_cast<MockServiceEntryPoint*>(
+            getServiceContext()->getService()->getServiceEntryPoint());
+    }
+
+    SessionManagerCommon* sessionManager() {
+        return _sessionManager;
     }
 
     /**
@@ -307,6 +318,9 @@ public:
     void expect() {
         asyncExpect<e>().get();
     }
+
+
+    std::function<void(Client*)> onClientDisconnectCb;
 
 private:
     class CustomMockSession : public CallbackMockSession {
@@ -352,9 +366,9 @@ private:
         return std::make_shared<ThreadPool>(std::move(options));
     }
 
-    std::unique_ptr<MockServiceEntryPoint> _makeServiceEntryPoint(ServiceContext* sc) {
-        auto sep = std::make_unique<MockServiceEntryPoint>(sc);
-        sep->handleRequestCb = [=, this](OperationContext* opCtx, const Message& msg) {
+    std::unique_ptr<MockServiceEntryPoint> _makeServiceEntryPoint() {
+        auto sep = std::make_unique<MockServiceEntryPoint>();
+        sep->handleRequestCb = [this](OperationContext* opCtx, const Message& msg) {
             if (!gInitialUseDedicatedThread) {
                 // Simulates an async command implemented under the borrowed
                 // thread model. The returned future will be fulfilled while
@@ -377,12 +391,55 @@ private:
             }
             return _onMockEvent<Event::sepHandleRequest>(std::tie(opCtx, msg));
         };
-        sep->onEndSessionCb = [=, this](const std::shared_ptr<Session>& session) {
-            _onMockEvent<Event::sepEndSession>(std::tie(session));
-        };
-        sep->derivedOnClientDisconnectCb = [&](Client*) {
-        };
         return sep;
+    }
+
+    class MockSessionManagerCommon : public SessionManagerCommon {
+    public:
+        using SessionManagerCommon::SessionManagerCommon;
+
+    protected:
+        std::string getClientThreadName(const Session& session) const override {
+            return "mock{}"_format(session.id());
+        }
+
+        void configureServiceExecutorContext(Client* client,
+                                             bool isPrivilegedSession) const override {
+            auto seCtx = std::make_unique<ServiceExecutorContext>();
+            seCtx->setThreadModel(gInitialUseDedicatedThread ? seCtx->kSynchronous : seCtx->kFixed);
+            seCtx->setCanUseReserved(isPrivilegedSession);
+            stdx::lock_guard lk(*client);
+            ServiceExecutorContext::set(client, std::move(seCtx));
+        }
+    };
+
+    class SWTObserver : public ClientTransportObserver {
+    public:
+        explicit SWTObserver(SessionWorkflowTest* test) : _test(test) {}
+        void onClientDisconnect(Client* client) override {
+            _test->_onMockEvent<Event::sepEndSession>(std::tie(client->session()));
+            if (_test->onClientDisconnectCb) {
+                _test->onClientDisconnectCb(client);
+            }
+        }
+
+    private:
+        SessionWorkflowTest* _test;
+    };
+
+    void _initTransportLayer(ServiceContext* svcCtx) {
+        auto sm =
+            std::make_unique<MockSessionManagerCommon>(svcCtx, std::make_unique<SWTObserver>(this));
+        _sessionManager = sm.get();
+
+        auto tl = std::make_unique<test::TransportLayerMockWithReactor>(std::move(sm));
+        _transportLayer = tl.get();
+        svcCtx->setTransportLayerManager(
+            std::make_unique<TransportLayerManagerImpl>(std::move(tl)));
+
+        auto tlm = svcCtx->getTransportLayerManager();
+        invariant(tlm->setup());
+        invariant(tlm->start());
     }
 
     /**
@@ -399,6 +456,8 @@ private:
     MockExpectationSlot _expect;
     std::shared_ptr<CustomMockSession> _session;
     std::shared_ptr<ThreadPool> _threadPool = _makeThreadPool();
+    test::TransportLayerMockWithReactor* _transportLayer{nullptr};
+    SessionManagerCommon* _sessionManager{nullptr};
 };
 
 TEST_F(SessionWorkflowTest, StartThenEndSession) {
@@ -420,7 +479,7 @@ TEST_F(SessionWorkflowTest, OneNormalCommand) {
 
 TEST_F(SessionWorkflowTest, OnClientDisconnectCalledOnCleanup) {
     int disconnects = 0;
-    sep()->derivedOnClientDisconnectCb = [&](Client*) {
+    onClientDisconnectCb = [&](Client*) {
         ++disconnects;
     };
     startSession();
@@ -429,6 +488,7 @@ TEST_F(SessionWorkflowTest, OnClientDisconnectCalledOnCleanup) {
     expect<Event::sepEndSession>();
     joinSessions();
     ASSERT_EQ(disconnects, 1);
+    onClientDisconnectCb = nullptr;
 }
 
 /** Repro of one formerly troublesome scenario generated by the StepRunner test below. */
@@ -654,7 +714,7 @@ public:
                     // before responding with a shutdown error.
                     auto pf = std::make_shared<PromiseAndFuture<void>>();
                     _fixture->injectMockResponse<event>([this, pf](auto&&...) {
-                        _fixture->sep()->endAllSessionsNoTagMask();
+                        _fixture->sessionManager()->endAllSessionsNoTagMask();
                         pf->promise.emplaceValue();
                         if constexpr (std::is_void_v<EventResultT<event>>) {
                             return;

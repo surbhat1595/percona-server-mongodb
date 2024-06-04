@@ -123,14 +123,6 @@ public:
 
     void setIsFrozen(bool newIsFrozen) final;
 
-    void setDropped() final {
-        _isDropped = true;
-    }
-
-    bool isDropped() const final {
-        return _isDropped;
-    }
-
     // --
 
     /**
@@ -186,6 +178,9 @@ public:
     const UpdateIndexData& getIndexedPaths() const final {
         return _shared->_indexedPaths;
     }
+
+    std::unique_ptr<const IndexCatalogEntry> getNormalizedEntry(
+        OperationContext* opCtx, const CollectionPtr& coll) const final;
 
 private:
     /**
@@ -245,7 +240,6 @@ private:
     bool _isReady;
     bool _isFrozen;
     bool _shouldValidateDocument;
-    bool _isDropped;  // Whether the index drop is committed.
 
     // Offset of this index within the Collection metadata. Used to improve lookups without having
     // to search for the index name accessing the collection metadata.

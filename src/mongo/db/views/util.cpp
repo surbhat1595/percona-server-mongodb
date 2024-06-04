@@ -29,7 +29,6 @@
 
 #include "mongo/db/views/util.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -46,7 +45,7 @@ void validateViewDefinitionBSON(OperationContext* opCtx,
                                 const DatabaseName& dbName) {
     // Internal callers should always pass in a valid 'dbName' against which to compare the
     // 'viewDefinition'.
-    invariant(NamespaceString::validDBName(dbName));
+    invariant(DatabaseName::isValid(dbName));
 
     bool valid = true;
 
@@ -58,10 +57,11 @@ void validateViewDefinitionBSON(OperationContext* opCtx,
     auto viewNameElem = viewDefinition["_id"];
     valid &= viewNameElem && viewNameElem.type() == BSONType::String;
 
-    auto viewName = NamespaceStringUtil::deserialize(dbName.tenantId(), viewNameElem.str());
+    auto viewName = NamespaceStringUtil::deserialize(
+        dbName.tenantId(), viewNameElem.str(), SerializationContext::stateDefault());
 
     bool viewNameIsValid = NamespaceString::validCollectionComponent(viewName) &&
-        NamespaceString::validDBName(viewName.dbName());
+        DatabaseName::isValid(viewName.dbName());
     valid &= viewNameIsValid;
 
     // Only perform validation via NamespaceString if the collection name has been determined to

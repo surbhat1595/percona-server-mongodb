@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -160,6 +159,10 @@ public:
                              const DatabaseName& dbName,
                              const BSONObj& cmdObj,
                              rpc::ReplyBuilderInterface* replyBuilder) final {
+        // Critical to observability and diagnosability, categorize as immediate priority.
+        ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+                                                            AdmissionContext::Priority::kImmediate);
+
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         const bool apiStrict = APIParameters::get(opCtx).getAPIStrict().value_or(false);
         auto cmd = HelloCommand::parse({"hello", apiStrict}, cmdObj);
@@ -188,6 +191,12 @@ public:
 
         // "hello" is exempt from error code rewrites.
         rpc::RewriteStateChangeErrors::setEnabled(opCtx, false);
+
+        // Negotiate compressors before logging metadata so we can include the result in the log
+        // line.
+        auto result = replyBuilder->getBodyBuilder();
+        MessageCompressorManager::forSession(opCtx->getClient()->session())
+            .serverNegotiate(cmd.getCompression(), &result);
 
         auto client = opCtx->getClient();
         if (ClientMetadata::tryFinalize(client)) {
@@ -222,7 +231,6 @@ public:
                     !clientTopologyVersion && !maxAwaitTimeMS);
         }
 
-        auto result = replyBuilder->getBodyBuilder();
         const auto* mongosTopCoord = MongosTopologyCoordinator::get(opCtx);
 
         auto mongosHelloResponse =
@@ -264,7 +272,7 @@ public:
 
         // Mongos tries to keep exactly the same version range of the server for which
         // it is compiled.
-        auto wireSpec = WireSpec::instance().get();
+        auto wireSpec = WireSpec::getWireSpec(opCtx->getServiceContext()).get();
         result.append(HelloCommandReply::kMaxWireVersionFieldName,
                       wireSpec->incomingExternalClient.maxWireVersion);
         result.append(HelloCommandReply::kMinWireVersionFieldName,
@@ -274,9 +282,6 @@ public:
                 kAutomationServiceDescriptorFieldName)) {
             sp->append(opCtx, &result, kAutomationServiceDescriptorFieldName, boost::none);
         }
-
-        MessageCompressorManager::forSession(opCtx->getClient()->session())
-            .serverNegotiate(cmd.getCompression(), &result);
 
         if (opCtx->isExhaust()) {
             LOGV2_DEBUG(23872, 3, "Using exhaust for hello protocol");
@@ -339,7 +344,7 @@ protected:
         return false;
     }
 };
-MONGO_REGISTER_COMMAND(CmdHello);
+MONGO_REGISTER_COMMAND(CmdHello).forRouter();
 
 class CmdIsMaster : public CmdHello {
 public:
@@ -354,7 +359,7 @@ protected:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CmdIsMaster);
+MONGO_REGISTER_COMMAND(CmdIsMaster).forRouter();
 
 }  // namespace
 }  // namespace mongo

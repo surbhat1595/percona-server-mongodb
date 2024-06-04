@@ -159,8 +159,10 @@ FLEQueryInterface::TagQueryType queryTypeTranslation(QECountInfoQueryTypeEnum ty
 
 QECountInfosReply getTagsLocal(OperationContext* opCtx,
                                const GetQueryableEncryptionCountInfo& request) {
-
-    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+    }
 
     auto nestedTokens = toNestedTokens(request.getTokens());
 
@@ -231,6 +233,6 @@ public:
         return {GetQueryableEncryptionCountInfo::kTokensFieldName};
     }
 };
-MONGO_REGISTER_COMMAND(GetQueryableEncryptionCountInfoCmd);
+MONGO_REGISTER_COMMAND(GetQueryableEncryptionCountInfoCmd).forShard();
 }  // namespace
 }  // namespace mongo

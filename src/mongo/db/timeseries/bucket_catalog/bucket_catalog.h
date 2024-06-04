@@ -91,21 +91,37 @@ enum class CombineWithInsertsFromOtherClients {
 };
 
 /**
- * Return type for the insert functions. See insert() and tryInsert() for more information.
+ * Return type indicating that a call to 'insert' or 'tryInsert' successfully staged the input
+ * measurement for insertion. See 'insert' and 'tryInsert' for more information.
  */
-class InsertResult {
+class SuccessfulInsertion {
 public:
-    InsertResult() = default;
-    InsertResult(InsertResult&&) = default;
-    InsertResult& operator=(InsertResult&&) = default;
-    InsertResult(const InsertResult&) = delete;
-    InsertResult& operator=(const InsertResult&) = delete;
+    SuccessfulInsertion() = default;
+    SuccessfulInsertion(SuccessfulInsertion&&) = default;
+    SuccessfulInsertion& operator=(SuccessfulInsertion&&) = default;
+    SuccessfulInsertion(const SuccessfulInsertion&) = delete;
+    SuccessfulInsertion& operator=(const SuccessfulInsertion&) = delete;
+    SuccessfulInsertion(std::shared_ptr<WriteBatch>&&, ClosedBuckets&&);
 
     std::shared_ptr<WriteBatch> batch;
     ClosedBuckets closedBuckets;
-    stdx::variant<std::monostate, OID, std::vector<BSONObj>> candidate;
-    uint64_t catalogEra = 0;
 };
+
+/**
+ * Return type indicating that a call to 'tryInsert' must retry after waiting for a conflicting
+ * operation to resolve. Caller should wait using 'waitToInsert'.
+ *
+ * In particular, if 'tryInsert' would have generated a 'ReopeningContext', but there is already an
+ * outstanding 'ReopeningRequest' or a prepared 'WriteBatch' for a bucket in the series (same
+ * metaField value), that represents a conflict.
+ */
+using InsertWaiter = stdx::variant<std::shared_ptr<WriteBatch>, std::shared_ptr<ReopeningRequest>>;
+
+/**
+ * Variant representing the possible outcomes of 'tryInsert' or 'insert'. See 'tryInsert' and
+ * 'insert' for more details.
+ */
+using InsertResult = stdx::variant<SuccessfulInsertion, ReopeningContext, InsertWaiter>;
 
 /**
  * Struct to hold a portion of the buckets managed by the catalog.
@@ -139,6 +155,11 @@ struct Stripe {
                         std::map<Date_t, ArchivedBucket, std::greater<Date_t>>,
                         BucketHasher>
         archivedBuckets;
+
+    // All series currently with outstanding reopening operations. Used to coordinate disk access
+    // between reopenings and regular writes to prevent stale reads and corrupted updates.
+    stdx::unordered_map<BucketKey, std::shared_ptr<ReopeningRequest>, BucketHasher>
+        outstandingReopeningRequests;
 };
 
 /**
@@ -149,9 +170,13 @@ public:
     static BucketCatalog& get(ServiceContext* svcCtx);
     static BucketCatalog& get(OperationContext* opCtx);
 
-    BucketCatalog() : stripes(numberOfStripes) {}
-    BucketCatalog(size_t numberOfStripes)
-        : numberOfStripes(numberOfStripes), stripes(numberOfStripes){};
+    BucketCatalog()
+        : stripes(numberOfStripes),
+          memoryUsageThreshold(getTimeseriesIdleBucketExpiryMemoryUsageThresholdBytes) {}
+    BucketCatalog(size_t numberOfStripes, std::function<uint64_t()> memoryUsageThreshold)
+        : numberOfStripes(numberOfStripes),
+          stripes(numberOfStripes),
+          memoryUsageThreshold(memoryUsageThreshold) {}
     BucketCatalog(const BucketCatalog&) = delete;
     BucketCatalog operator=(const BucketCatalog&) = delete;
 
@@ -176,6 +201,9 @@ public:
     // Approximate memory usage of the bucket catalog across all stripes.
     AtomicWord<uint64_t> memoryUsage;
 
+    // Memory usage threshold in bytes after which idle buckets will be expired.
+    std::function<uint64_t()> memoryUsageThreshold;
+
     // Cardinality of opened and archived buckets managed across all stripes.
     AtomicWord<uint32_t> numberOfActiveBuckets;
 };
@@ -194,23 +222,26 @@ BSONObj getMetadata(BucketCatalog& catalog, const BucketHandle& bucket);
  * Tries to insert 'doc' into a suitable bucket. If an open bucket is full (or has incompatible
  * schema), but is otherwise suitable, we will close it and open a new bucket. If we find no bucket
  * with matching data and a time range that can accommodate 'doc', we will not open a new bucket,
- * but rather let the caller know to search for an archived or closed bucket that can accommodate
- * 'doc'.
+ * but rather let the caller know to either
+ *  - search for an archived or closed bucket that can accommodate 'doc' by returning a
+ *    'ReopeningContext', or
+ *  - retry the insert after waiting on the returned 'InsertWaiter'.
  *
- * If a suitable bucket is found or opened, returns the WriteBatch into which 'doc' was inserted and
- * a list of any buckets that were closed to make space to insert 'doc'. Any caller who receives the
- * same batch may commit or abort the batch after claiming commit rights. See WriteBatch for more
- * details.
+ * If a suitable bucket is found or opened, returns a 'SuccessfulInsertion' containing the
+ * 'WriteBatch' into which 'doc' was inserted and a list of any buckets that were closed to make
+ * space to insert 'doc'. Any caller who receives the same batch may commit or abort the batch after
+ * claiming commit rights. See 'WriteBatch' for more details.
  *
- * If no suitable bucket is found or opened, returns an optional bucket ID. If set, the bucket ID
- * corresponds to an archived bucket which should be fetched; otherwise the caller should search for
- * a previously-closed bucket that can accommodate 'doc'. The caller should proceed to call 'insert'
- * to insert 'doc', passing any fetched bucket.
+ * If a 'ReopeningContext' is returned, it contains either a bucket ID, corresponding to an archived
+ * bucket which should be fetched, an aggregation pipeline that can be used to search for a
+ * previously-closed bucket that can accommodate 'doc', or (in hopefully rare cases) a monostate
+ * which requires no intermediate action, The caller should then proceed to call 'insert' to insert
+ * 'doc', passing any fetched bucket back as a member of the 'ReopeningContext'.
  */
 StatusWith<InsertResult> tryInsert(OperationContext* opCtx,
                                    BucketCatalog& catalog,
                                    const NamespaceString& ns,
-                                   const StringData::ComparatorInterface* comparator,
+                                   const StringDataComparator* comparator,
                                    const TimeseriesOptions& options,
                                    const BSONObj& doc,
                                    CombineWithInsertsFromOtherClients combine);
@@ -220,24 +251,31 @@ StatusWith<InsertResult> tryInsert(OperationContext* opCtx,
  * closed in order to make space to insert the document. Any caller who receives the same batch may
  * commit or abort the batch after claiming commit rights. See WriteBatch for more details.
  *
- * If 'bucketToReopen' is passed, we will reopen that bucket and attempt to add 'doc' to that
- * bucket. Otherwise we will attempt to find a suitable open bucket, or open a new bucket if none
- * exists.
+ * If 'reopeningContext' is passed with a bucket, we will reopen that bucket and attempt to add
+ * 'doc' to that bucket. Otherwise we will attempt to find a suitable open bucket, or open a new
+ * bucket if none exists.
  */
 StatusWith<InsertResult> insert(OperationContext* opCtx,
                                 BucketCatalog& catalog,
                                 const NamespaceString& ns,
-                                const StringData::ComparatorInterface* comparator,
+                                const StringDataComparator* comparator,
                                 const TimeseriesOptions& options,
                                 const BSONObj& doc,
                                 CombineWithInsertsFromOtherClients combine,
-                                BucketFindResult bucketFindResult = {});
+                                ReopeningContext* reopeningContext = nullptr);
+
+/**
+ * If a 'tryInsert' call returns a 'InsertWaiter' object, the caller should use this function to
+ * wait before repeating their attempt.
+ */
+void waitToInsert(InsertWaiter* waiter);
 
 /**
  * Prepares a batch for commit, transitioning it to an inactive state. Caller must already have
  * commit rights on batch. Returns OK if the batch was successfully prepared, or a status indicating
- * why the batch was previously aborted by another operation. If another batch is already prepared,
- * this operation will block waiting for it to complete.
+ * why the batch was previously aborted by another operation. If another batch is already prepared
+ * on the same bucket, or there is an outstanding 'ReopeningRequest' for the same series (metaField
+ * value), this operation will block waiting for it to complete.
  */
 Status prepareCommit(BucketCatalog& catalog, std::shared_ptr<WriteBatch> batch);
 
@@ -246,14 +284,17 @@ Status prepareCommit(BucketCatalog& catalog, std::shared_ptr<WriteBatch> batch);
  * must have been previously prepared.
  *
  * Returns bucket information of a bucket if one was closed.
+ *
+ * Debug builds will attempt to verify the resulting bucket contents on disk if passed an 'opCtx'.
  */
-boost::optional<ClosedBucket> finish(BucketCatalog& catalog,
+boost::optional<ClosedBucket> finish(OperationContext* opCtx,
+                                     BucketCatalog& catalog,
                                      std::shared_ptr<WriteBatch> batch,
                                      const CommitInfo& info);
 
 /**
- * Aborts the given write batch and any other outstanding batches on the same bucket, using the
- * provided status.
+ * Aborts the given write batch and any other outstanding (unprepared) batches on the same bucket,
+ * using the provided status.
  */
 void abort(BucketCatalog& catalog, std::shared_ptr<WriteBatch> batch, const Status& status);
 
@@ -303,5 +344,15 @@ void resetBucketOIDCounter();
 void appendExecutionStats(const BucketCatalog& catalog,
                           const NamespaceString& ns,
                           BSONObjBuilder& builder);
+
+/**
+ * Reports a number of measurements inserted that were committed by a different thread than the one
+ * that initially staged them. These measurements are considered to have benefitted from "group
+ * commit".
+ */
+void reportMeasurementsGroupCommitted(BucketCatalog& catalog,
+                                      const NamespaceString& ns,
+                                      int64_t count);
+
 
 }  // namespace mongo::timeseries::bucket_catalog

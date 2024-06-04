@@ -35,7 +35,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
@@ -77,7 +76,7 @@
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/plan_summary_stats.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/basic.h"
 #include "mongo/platform/compiler.h"
@@ -307,8 +306,9 @@ public:
                              boost::optional<BSONObj> mergeSortPatternIn = boost::none)
             : shardsStage(std::move(shardsStageIn)),
               mergeSortPattern(std::move(mergeSortPatternIn)) {
-            if (mergeStage)
+            if (mergeStage) {
                 mergingStages.emplace_back(std::move(mergeStage));
+            }
         }
 
         typedef std::function<bool(const DocumentSource&)> movePastFunctionType;
@@ -316,7 +316,7 @@ public:
         // parallel. For example, a partial $group before a subsequent global $group.
         boost::intrusive_ptr<DocumentSource> shardsStage = nullptr;
 
-        // A stage or stages which funciton to merge all the results together, or an empty list if
+        // A stage or stages which function to merge all the results together, or an empty list if
         // nothing is necessary after merging. For example, a $limit stage.
         std::list<boost::intrusive_ptr<DocumentSource>> mergingStages = {};
 

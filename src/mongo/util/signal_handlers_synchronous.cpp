@@ -31,7 +31,6 @@
 
 #include <boost/exception/diagnostic_information.hpp>
 #include <boost/exception/exception.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cerrno>
 #include <csignal>
 #include <cstring>
@@ -64,6 +63,7 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/debugger.h"
 #include "mongo/util/exit_code.h"
+#include "mongo/util/hex.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/stacktrace.h"
 #include "mongo/util/static_immortal.h"
@@ -307,6 +307,18 @@ extern "C" void abruptQuitAction(int signalNum, siginfo_t*, void*) {
     abruptQuit(signalNum);
 };
 
+// Must hold MallocFreeOStreamGuard to call
+void printSigInfo(const siginfo_t* siginfo) {
+    if (siginfo == nullptr) {
+        return;
+    }
+
+    mallocFreeOStream << "Dumping siginfo (si_code=" << siginfo->si_code
+                      << "): " << streamableHexdump(*siginfo);
+
+    writeMallocFreeStreamToLog();
+}
+
 extern "C" void abruptQuitWithAddrSignal(int signalNum, siginfo_t* siginfo, void* ucontext_erased) {
     // For convenient debugger access.
     [[maybe_unused]] auto ucontext = static_cast<const ucontext_t*>(ucontext_erased);
@@ -320,6 +332,8 @@ extern "C" void abruptQuitWithAddrSignal(int signalNum, siginfo_t* siginfo, void
     // logged. This is important because we may get here by jumping to an invalid address which
     // could cause unwinding the stack to break.
     writeMallocFreeStreamToLog();
+
+    printSigInfo(siginfo);
 
     printSignalAndBacktrace(signalNum);
     breakpoint();
@@ -371,7 +385,6 @@ void setupSynchronousSignalHandlers() {
         if (sigaction(spec.signal, &sa, nullptr) != 0) {
             int savedErr = errno;
             LOGV2_FATAL(31334,
-                        "Failed to install sigaction for signal {signal}: {error}",
                         "Failed to install sigaction for signal",
                         "signal"_attr = spec.signal,
                         "error"_attr = strerror(savedErr));

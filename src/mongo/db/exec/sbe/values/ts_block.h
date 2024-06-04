@@ -45,6 +45,7 @@
 #include "mongo/util/bufreader.h"
 
 namespace mongo::sbe::value {
+class TsBlock;
 /**
  * Evaluates paths on a time series bucket. The constructor input is a set of paths using the
  * Get/Traverse/Id primitives. When given a TS bucket, it evaluates each path on the block of
@@ -63,15 +64,17 @@ public:
      * Returns one CellBlock per path given in the constructor. A CellBlock represents all of the
      * values at a path, along with information on their position.
      */
-    std::vector<std::unique_ptr<CellBlock>> extractCellBlocks(const BSONObj& bucket);
+    std::pair<std::vector<std::unique_ptr<TsBlock>>, std::vector<std::unique_ptr<CellBlock>>>
+    extractCellBlocks(const BSONObj& bucket);
 
 private:
     std::vector<CellBlock::PathRequest> _pathReqs;
 
-    // Logically a pair of [path, idx] for the paths that are not top level. Each path appears in
-    // '_paths' vector.
-    std::vector<CellBlock::PathRequest> _nonTopLevelPathReqs;
-    std::vector<size_t> _nonTopLevelPathIdxes;
+    // Set of indexes in _pathReqs which are paths NOT of the form [Get <field> Id]. This includes
+    // paths like [Get <field> Traverse Id] as well as access to nested paths. Paths of the form
+    // [Get <field> Id] can be provided in a special/faster way, since the time series decoding API
+    // (currently) provides top-level fields only.
+    stdx::unordered_set<size_t> _nonTopLevelGetPathIdxes;
 
 
     StringData _timeField;
@@ -81,9 +84,6 @@ private:
     // A vector is needed in case multiple fields with the same prefix (e.g. a.b and a.c) are
     // requested.
     StringDataMap<std::vector<size_t>> _topLevelFieldToIdxes;
-
-    // The top level fields which have subsequent subfield access.
-    StringSet _topLevelFieldsWithSubfieldAccess;
 };
 
 /**
@@ -92,62 +92,87 @@ private:
  */
 class TsBlock : public ValueBlock {
 public:
-    // Note: This constructor is special and is only used by the TsCellBlock to create a TsBlock for
-    // a top-level field, where the 'ncells` is actually same as the number of values in this block.
-    TsBlock(size_t ncells, bool owned, TypeTags blockTag, Value blockVal);
+    // Note: This constructor is special and is only used by the TsCellBlockForTopLevelField to
+    // create a TsBlock for a top-level field, where the 'ncells` is actually same as the number of
+    // values in this block.
+    TsBlock(size_t ncells,
+            bool owned,
+            TypeTags blockTag,
+            Value blockVal,
+            bool isDense = false,
+            std::pair<TypeTags, Value> controlMin = {TypeTags::Nothing, Value{0u}},
+            std::pair<TypeTags, Value> controlMax = {TypeTags::Nothing, Value{0u}});
 
     // We don't have use cases for copy/move constructors and assignment operators and so disable
     // them until we have one.
     TsBlock(const TsBlock& other) = delete;
     TsBlock(TsBlock&& other) = delete;
-    TsBlock& operator=(const TsBlock& other) = delete;
-    TsBlock& operator=(TsBlock&& other) = delete;
 
     ~TsBlock() override;
 
     std::unique_ptr<ValueBlock> clone() const override;
+    std::unique_ptr<TsBlock> cloneStrongTyped() const;
 
-    DeblockedTagVals extract() override {
-        // Lazily deblocks the values, meaning that each value in this block is decoded into a
-        // separate tag and val pair so that it can be processed as a separate unit of value.
-        ensureDeblocked();
-        return {_deblockedTags.size(), &_deblockedTags[0], &_deblockedVals[0]};
+    DeblockedTagVals deblock(boost::optional<DeblockedTagValStorage>& storage) const override;
+
+    // Return whether or not any values of the field are arrays, otherwise return boost::none.
+    boost::optional<bool> tryHasNoArrays() {
+        if (isArray(_controlMin.first) || isArray(_controlMax.first)) {
+            return false;
+        } else if (_controlMin.first == _controlMax.first && !isArray(_controlMin.first) &&
+                   !isObject(_controlMin.first) && _controlMin.first != TypeTags::Nothing) {
+            // Checking !isArray after the initial if statement is redundant but this is the
+            // explicit condition we are using to see if a field cannot contain any array values.
+            return true;
+        }
+        return boost::none;
     }
 
     boost::optional<size_t> tryCount() const override {
         return _count;
     }
 
-private:
-    void ensureDeblocked() {
-        if (_deblockedTags.empty()) {
-            _deblockedTags.reserve(_count);
-            _deblockedVals.reserve(_count);
-
-            if (_blockTag == TypeTags::bsonObject) {
-                deblockFromBsonObj();
-            } else {
-                deblockFromBsonColumn();
-            }
+    std::pair<TypeTags, Value> tryMin() const override {
+        // Timeseries computes min and max for arrays/objects differently. As a result, the min/max
+        // value is not guaranteed to a member of the block so we choose not to expose it.
+        if (!isObject(_controlMin.first) && !isArray(_controlMin.first)) {
+            return _controlMin;
         }
+        return std::pair{TypeTags::Nothing, Value{0u}};
     }
+
+    std::pair<TypeTags, Value> tryMax() const override {
+        if (!isObject(_controlMax.first) && !isArray(_controlMax.first)) {
+            return _controlMax;
+        }
+        return std::pair{TypeTags::Nothing, Value{0u}};
+    }
+
+    boost::optional<bool> tryDense() const override {
+        return _isDense;
+    }
+
+private:
+    void ensureDeblocked(boost::optional<DeblockedTagValStorage>& storage) const;
 
     /**
      * Deblocks the values from a BSON object block.
      */
-    void deblockFromBsonObj();
+    void deblockFromBsonObj(std::vector<TypeTags>& deblockedTags,
+                            std::vector<Value>& deblockedVals) const;
 
     /**
      * Deblocks the values from a BSON column block.
      */
-    void deblockFromBsonColumn();
+    void deblockFromBsonColumn(std::vector<TypeTags>& deblockedTags,
+                               std::vector<Value>& deblockedVals) const;
 
-    // TsBlock owned by the TsCellBlock which in turn is owned by the TsBucketToCellBlockStage can
-    // be in a special unowned state of '_blockVal', where it is merely a view on the BSON provided
-    // by the stage tree below. This is done as an optimization to avoid copying all the data we
-    // read. Any TsBlocks created outside that stage (either via clone() or any other way) are fully
-    // owned, and have no pointers to outside data. So, we need to keep track of whether the
-    // underlying buffer '_blockVal' is owned or not via '_blockOwned'.
+    // TsBlock owned by the TsCellBlockForTopLevelField which in turn is owned by the
+    // TsBucketToCellBlockStage can be in a special unowned state of '_blockVal', where it is merely
+    // a view on the BSON provided by the stage tree below. This is done as an optimization to avoid
+    // copying all the data we read. Any TsBlocks created outside that stage (either via clone() or
+    // any other way) are fully owned, and have no pointers to outside data. So, we need to keep
+    // track of whether the underlying buffer '_blockVal' is owned or not via '_blockOwned'.
     //
     // If the '_blockVal' is not owned, this TsBlock is valid only as long as the underlying BSON.
     bool _blockOwned;
@@ -157,17 +182,19 @@ private:
     // The number of values in this block.
     size_t _count;
 
-    // Deblocked values may be examined on tags only for certain column operations, so we have two
-    // separate vectors for tags and vals to facilitate such operations.
-    std::vector<TypeTags> _deblockedTags;
-    std::vector<Value> _deblockedVals;
+    // true if all values in the block are non-nothing. Currently only true for timeField
+    bool _isDense;
+
+    // Store the min and max found in the control field of a bucket
+    std::pair<TypeTags, Value> _controlMin;
+    std::pair<TypeTags, Value> _controlMax;
 };
 
 /**
  * Implements CellBlock interface for timeseries buckets. Currently this class is only used for top
  * level fields. Subfields use a materialized cell block.
  */
-class TsCellBlock : public CellBlock {
+class TsCellBlockForTopLevelField : public CellBlock {
 public:
     /**
      * Constructor.
@@ -184,16 +211,24 @@ public:
      * top-level), not for the value of paths "foo.a" or "foo.b". The top-level path does not
      * require path navigation.
      */
-    TsCellBlock(size_t count, bool owned, TypeTags topLevelTag, Value topLevelVal);
+    TsCellBlockForTopLevelField(size_t count,
+                                bool owned,
+                                TypeTags topLevelTag,
+                                Value topLevelVal,
+                                bool isDense,
+                                std::pair<TypeTags, Value> controlMin,
+                                std::pair<TypeTags, Value> controlMax);
+
+    TsCellBlockForTopLevelField(TsBlock* block);
 
     // We don't have use cases for copy/move constructors and assignment operators and so disable
     // them until we have one.
-    TsCellBlock(const TsCellBlock& other) = delete;
-    TsCellBlock(TsCellBlock&&) = delete;
-    TsCellBlock& operator=(const TsCellBlock& other) = delete;
-    TsCellBlock& operator=(TsCellBlock&& other) = delete;
+    TsCellBlockForTopLevelField(const TsCellBlockForTopLevelField& other) = delete;
+    TsCellBlockForTopLevelField(TsCellBlockForTopLevelField&&) = delete;
+    TsCellBlockForTopLevelField& operator=(const TsCellBlockForTopLevelField& other) = delete;
+    TsCellBlockForTopLevelField& operator=(TsCellBlockForTopLevelField&& other) = delete;
 
-    ~TsCellBlock() override = default;
+    ~TsCellBlockForTopLevelField() override = default;
 
     ValueBlock& getValueBlock() override;
 
@@ -204,10 +239,11 @@ public:
     }
 
 private:
-    TypeTags _blockTag = TypeTags::Nothing;
-    Value _blockVal = Value(0);
+    TsCellBlockForTopLevelField(size_t count, std::unique_ptr<TsBlock> tsBlock);
 
-    TsBlock _tsBlock;
+    std::unique_ptr<TsBlock> _ownedTsBlock;
+    // If _ownedTsBlock is non-null, this points to _ownedTsBlock.
+    TsBlock* _unownedTsBlock;
 
     // For now this is always empty since only top-level fields are supported.
     std::vector<char> _positionInfo;

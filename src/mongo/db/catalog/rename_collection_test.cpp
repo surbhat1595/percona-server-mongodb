@@ -30,7 +30,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -497,7 +496,7 @@ UUID _getCollectionUuid(OperationContext* opCtx, const NamespaceString& nss) {
  */
 NamespaceString _getCollectionNssFromUUID(OperationContext* opCtx, const UUID& uuid) {
     const Collection* source = CollectionCatalog::get(opCtx)->lookupCollectionByUUID(opCtx, uuid);
-    return source ? source->ns() : NamespaceString();
+    return source ? source->ns() : NamespaceString::kEmpty;
 }
 
 /**

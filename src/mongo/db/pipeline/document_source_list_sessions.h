@@ -52,7 +52,7 @@
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/intrusive_counter.h"
@@ -109,10 +109,6 @@ public:
 
         bool isInitialSource() const final {
             return true;
-        }
-
-        bool allowedToPassthroughFromMongos() const final {
-            return _spec.getAllUsers();
         }
 
     private:

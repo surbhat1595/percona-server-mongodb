@@ -34,7 +34,6 @@
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -147,7 +146,7 @@ void killSessionTokens(OperationContext* opCtx,
          sessionKillTokens = std::move(sessionKillTokens)](auto status) mutable {
             invariant(status);
 
-            ThreadClient tc("Kill-Sessions", service);
+            ThreadClient tc("Kill-Sessions", service->getService(ClusterRole::ShardServer));
 
             // TODO(SERVER-74658): Please revisit if this thread could be made killable.
             {
@@ -566,9 +565,12 @@ void MongoDSessionCatalog::onStepUp(OperationContext* opCtx) {
         matcher, _ti->makeSessionWorkerFnForStepUp(&sessionKillTokens, &sessionsToReacquireLocks));
     killSessionTokens(opCtx, _ti.get(), std::move(sessionKillTokens));
 
-    {
+    if (sessionsToReacquireLocks.size() > 0) {
+        LOGV2(8083200, "Reacquiring locks for prepared transactions on step-up.");
         // Create a new opCtx because we need an empty locker to refresh the locks.
-        auto newClient = opCtx->getServiceContext()->makeClient("restore-prepared-txn");
+        auto newClient = opCtx->getServiceContext()
+                             ->getService(ClusterRole::ShardServer)
+                             ->makeClient("restore-prepared-txn");
 
         {
             stdx::lock_guard<Client> lk(*newClient.get());

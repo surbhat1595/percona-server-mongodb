@@ -5,6 +5,43 @@
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 /**
+ * Utility to return the 'queryPlanner' section of 'explain'.
+ */
+export function getQueryPlanner(explain) {
+    explain = getSingleNodeExplain(explain);
+    if ("queryPlanner" in explain) {
+        const qp = explain.queryPlanner;
+        // Sharded case.
+        if ("winningPlan" in qp && "shards" in qp.winningPlan) {
+            return qp.winningPlan.shards[0];
+        }
+        return qp;
+    }
+    assert(explain.hasOwnProperty("stages"), explain);
+    const stage = explain.stages[0];
+    assert(stage.hasOwnProperty("$cursor"), explain);
+    const cursorStage = stage.$cursor
+    assert(cursorStage.hasOwnProperty("queryPlanner"), explain);
+    return cursorStage.queryPlanner;
+}
+
+/**
+ * Returns the output from a single shard if 'explain' was obtained from an unsharded collection;
+ * returns 'explain' as is otherwise.
+ */
+export function getSingleNodeExplain(explain) {
+    if ("shards" in explain) {
+        const shards = explain.shards;
+        const shardNames = Object.keys(shards);
+        // There should only be one shard given that this function assumes that 'explain' was
+        // obtained from an unsharded collection.
+        assert.eq(shardNames.length, 1, explain);
+        return shards[shardNames[0]];
+    }
+    return explain;
+}
+
+/**
  * Returns a sub-element of the 'queryPlanner' explain output which represents a winning plan.
  */
 export function getWinningPlan(queryPlanner) {
@@ -20,15 +57,14 @@ export function getWinningPlan(queryPlanner) {
  * into account that the plan may or may not have agg stages.
  */
 export function getWinningPlanFromExplain(explain) {
-    if (explain.hasOwnProperty("shards")) {
+    if ("shards" in explain) {
         for (const shardName in explain.shards) {
-            getWinningPlan(explain.shards[shardName].stages[0]["$cursor"].queryPlanner);
+            let queryPlanner = getQueryPlanner(explain.shards[shardName]);
+            return getWinningPlan(queryPlanner);
         }
     }
 
-    const queryPlanner = explain.hasOwnProperty("queryPlanner)")
-        ? explain.queryPlanner
-        : explain.stages[0].$cursor.queryPlanner;
+    let queryPlanner = getQueryPlanner(explain);
     return getWinningPlan(queryPlanner);
 }
 
@@ -563,6 +599,7 @@ export function getFieldValueFromExplain(explainRes, getValueCallback) {
  * Get the 'planCacheKey' from 'explainRes'.
  */
 export function getPlanCacheKeyFromExplain(explainRes, db) {
+    explainRes = getSingleNodeExplain(explainRes);
     return getFieldValueFromExplain(explainRes, function(plannerOutput) {
         return FixtureHelpers.isMongos(db) && plannerOutput.hasOwnProperty("winningPlan") &&
                 plannerOutput.winningPlan.hasOwnProperty("shards")
@@ -585,16 +622,8 @@ export function getQueryHashFromExplain(explainRes, db) {
  * Helper to run a explain on the given query shape and get the "planCacheKey" from the explain
  * result.
  */
-export function getPlanCacheKeyFromShape({
-    query = {},
-    projection = {},
-    sort = {},
-    collation = {
-        locale: "simple"
-    },
-    collection,
-    db
-}) {
+export function getPlanCacheKeyFromShape(
+    {query = {}, projection = {}, sort = {}, collation = {}, collection, db}) {
     const explainRes = assert.commandWorked(
         collection.explain().find(query, projection).collation(collation).sort(sort).finish());
 
@@ -659,10 +688,70 @@ export function assertFetchFilter({coll, predicate, expectedFilter, nReturned}) 
 }
 
 /**
- * Assert that a pipeline runs with the engine that is passed in as a parameter.
+ * Asserts that a pipeline runs with the engine that is passed in as a parameter.
  */
 export function assertEngine(pipeline, engine, coll) {
     const explain = coll.explain().aggregate(pipeline);
     assert(explain.hasOwnProperty("explainVersion"), explain);
     assert.eq(explain.explainVersion, engine === "sbe" ? "2" : "1", explain);
+}
+
+/**
+ * Checks whether the explain output has a descendant with the given field.
+ * Return true if there is such a stage anywhere in the hierarchy of the explain output.
+ */
+function explainHasDescendant(explain, field) {
+    if (explain.hasOwnProperty("stages")) {
+        for (let j = 0; j < explain.stages.length; j++) {
+            let stageName = Object.keys(explain.stages[j]);
+            if (explainHasDescendant(explain.stages[j][stageName], field)) {
+                return true;
+            }
+        }
+    }
+
+    if (explain.hasOwnProperty("queryPlanner")) {
+        return explainHasDescendant(explain.queryPlanner, field);
+    }
+
+    if (explain.hasOwnProperty("winningPlan")) {
+        return explainHasDescendant(explain.winningPlan, field);
+    }
+
+    if (explain.hasOwnProperty(field)) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Recognizes the query engine used by the query (sbe/classic).
+ */
+export function getEngine(explain) {
+    if (explain.hasOwnProperty("explainVersion")) {
+        switch (explain.explainVersion) {
+            case "1":
+                return "classic";
+            case "2":
+                return "sbe";
+        }
+    }
+
+    if (explain.hasOwnProperty("shards")) {
+        for (const shardName in explain.shards) {
+            return getEngine(explain.shards[shardName]);
+        }
+    }
+
+    // there are cases where explain outputs does not provide "explainVersion"
+    let hasSbePlan = explainHasDescendant(explain, "slotBasedPlan");
+
+    const winningPlan = getWinningPlanFromExplain(explain);
+    let propertyExists = winningPlan.hasOwnProperty("queryPlan");
+
+    if (propertyExists || hasSbePlan) {
+        return "sbe"
+    } else {
+        return "classic";
+    }
 }

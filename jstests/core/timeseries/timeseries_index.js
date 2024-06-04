@@ -2,15 +2,15 @@
  * Tests index creation, index drops, list indexes, hide/unhide index on a time-series collection.
  *
  * @tags: [
- *   # This test depends on certain writes ending up in the same bucket. Stepdowns may result in
- *   # writes splitting between two primaries, and thus different buckets.
+ *   # This test depends on certain writes ending up in the same bucket. Stepdowns and tenant
+ *   # migrations may result in writes splitting between two primaries, and thus different buckets.
  *   does_not_support_stepdowns,
+ *   tenant_migration_incompatible,
  *   # We need a timeseries collection.
  *   requires_timeseries,
  * ]
  */
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 TimeseriesTest.run((insert) => {
@@ -63,9 +63,7 @@ TimeseriesTest.run((insert) => {
         assert.contains(bucketsColl.getName(), db.getCollectionNames());
 
         // When the collection is sharded, there is 1 extra index for the shard key.
-        // TODO SERVER-66438: Remove feature flag check.
-        const numExtraIndexes = (FixtureHelpers.isSharded(bucketsColl) ? 1 : 0) +
-            (FeatureFlagUtil.isPresentAndEnabled(db, "TimeseriesScalabilityImprovements") ? 1 : 0);
+        const numExtraIndexes = (FixtureHelpers.isSharded(bucketsColl) ? 1 : 0) + 1;
         {
             const indexes = bucketsColl.getIndexes();
             assert.eq(numExtraIndexes,
@@ -270,9 +268,7 @@ TimeseriesTest.run((insert) => {
     const bucketsColl = db.getCollection('system.buckets.' + coll.getName());
     assert.commandWorked(bucketsColl.createIndex({not_metadata: 1}),
                          'failed to create index: ' + tojson({not_metadata: 1}));
-    // TODO SERVER-66438: Remove feature flag check.
-    const numExtraIndexes = (FixtureHelpers.isSharded(bucketsColl) ? 1 : 0) +
-        (FeatureFlagUtil.isPresentAndEnabled(db, "TimeseriesScalabilityImprovements") ? 1 : 0);
+    const numExtraIndexes = (FixtureHelpers.isSharded(bucketsColl) ? 1 : 0) + 1;
     assert.eq(
         1 + numExtraIndexes, bucketsColl.getIndexes().length, tojson(bucketsColl.getIndexes()));
     assert.eq(0 + numExtraIndexes, coll.getIndexes().length, tojson(coll.getIndexes()));

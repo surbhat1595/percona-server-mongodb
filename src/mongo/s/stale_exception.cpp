@@ -29,7 +29,6 @@
 
 #include "mongo/s/stale_exception.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
@@ -51,7 +50,7 @@ MONGO_INIT_REGISTER_ERROR_EXTRA_INFO(StaleDbRoutingVersion);
 }  // namespace
 
 void StaleConfigInfo::serialize(BSONObjBuilder* bob) const {
-    bob->append("ns", NamespaceStringUtil::serialize(_nss));
+    bob->append("ns", NamespaceStringUtil::serialize(_nss, SerializationContext::stateDefault()));
     _received.serialize("vReceived", bob);
     if (_wanted)
         _wanted->serialize("vWanted", bob);
@@ -65,7 +64,8 @@ std::shared_ptr<const ErrorExtraInfo> StaleConfigInfo::parse(const BSONObj& obj)
     uassert(ErrorCodes::NoSuchKey, "The shardId field is missing", !shardId.empty());
 
     return std::make_shared<StaleConfigInfo>(
-        NamespaceStringUtil::deserialize(boost::none, obj["ns"].String()),
+        NamespaceStringUtil::deserialize(
+            boost::none, obj["ns"].String(), SerializationContext::stateDefault()),
         ShardVersion::parse(obj["vReceived"]),
         [&] {
             if (auto vWantedElem = obj["vWanted"])
@@ -76,7 +76,7 @@ std::shared_ptr<const ErrorExtraInfo> StaleConfigInfo::parse(const BSONObj& obj)
 }
 
 void StaleEpochInfo::serialize(BSONObjBuilder* bob) const {
-    bob->append("ns", NamespaceStringUtil::serialize(_nss));
+    bob->append("ns", NamespaceStringUtil::serialize(_nss, SerializationContext::stateDefault()));
     _received.serialize("vReceived", bob);
     _wanted.serialize("vWanted", bob);
 }
@@ -97,7 +97,10 @@ std::shared_ptr<const ErrorExtraInfo> StaleEpochInfo::parse(const BSONObj& obj) 
 
 
     return std::make_shared<StaleEpochInfo>(
-        NamespaceStringUtil::deserialize(boost::none, obj["ns"].String()), *received, *wanted);
+        NamespaceStringUtil::deserialize(
+            boost::none, obj["ns"].String(), SerializationContext::stateDefault()),
+        *received,
+        *wanted);
 }
 
 void StaleDbRoutingVersion::serialize(BSONObjBuilder* bob) const {

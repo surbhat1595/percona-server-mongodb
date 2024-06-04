@@ -31,7 +31,6 @@
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <iterator>
 #include <map>
@@ -106,7 +105,9 @@ getFCVAndClusterParametersFromConfigServer() {
     // refresher process and from getClusterParameter.
     // Allow this client to be killable. If interrupted, the exception will be caught and handled in
     // refreshParameters.
-    auto altClient = getGlobalServiceContext()->makeClient("clusterParameterRefreshTransaction");
+    auto altClient = getGlobalServiceContext()
+                         ->getService(ClusterRole::RouterServer)
+                         ->makeClient("clusterParameterRefreshTransaction");
 
     AlternativeClientRegion clientRegion(altClient);
     auto opCtx = cc().makeOperationContext();

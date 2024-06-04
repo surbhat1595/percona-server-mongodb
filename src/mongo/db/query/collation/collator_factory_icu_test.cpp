@@ -398,7 +398,7 @@ TEST(CollatorFactoryICUTest, MissingLocaleStringFailsToParse) {
     CollatorFactoryICU factory;
     auto collator = factory.makeFromBSON(BSONObj());
     ASSERT_NOT_OK(collator.getStatus());
-    ASSERT_EQ(collator.getStatus().code(), 40414);
+    ASSERT_EQ(collator.getStatus().code(), ErrorCodes::IDLFailedToParse);
 }
 
 TEST(CollatorFactoryICUTest, UnknownSpecFieldFailsToParse) {
@@ -702,7 +702,7 @@ TEST(CollatorFactoryICUTest, TooLargeStrengthFieldFailsToParse) {
                                               << "en_US"
                                               << "strength" << 2147483648LL));
     ASSERT_NOT_OK(collator.getStatus());
-    ASSERT_EQ(collator.getStatus().code(), 51024);
+    ASSERT_EQ(collator.getStatus().code(), ErrorCodes::BadValue);
 }
 
 TEST(CollatorFactoryICUTest, FractionalStrengthFieldFailsToParse) {
@@ -720,7 +720,7 @@ TEST(CollatorFactoryICUTest, NegativeStrengthFieldFailsToParse) {
                                               << "en_US"
                                               << "strength" << -1));
     ASSERT_NOT_OK(collator.getStatus());
-    ASSERT_EQ(collator.getStatus().code(), 51024);
+    ASSERT_EQ(collator.getStatus().code(), ErrorCodes::BadValue);
 }
 
 TEST(CollatorFactoryICUTest, InvalidIntegerStrengthFieldFailsToParse) {
@@ -729,7 +729,7 @@ TEST(CollatorFactoryICUTest, InvalidIntegerStrengthFieldFailsToParse) {
                                               << "en_US"
                                               << "strength" << 6));
     ASSERT_NOT_OK(collator.getStatus());
-    ASSERT_EQ(collator.getStatus().code(), 51024);
+    ASSERT_EQ(collator.getStatus().code(), ErrorCodes::BadValue);
 }
 
 TEST(CollatorFactoryICUTest, NonBoolNumericOrderingFieldFailsToParse) {

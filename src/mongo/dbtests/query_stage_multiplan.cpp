@@ -32,7 +32,6 @@
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <cstddef>
@@ -91,6 +90,7 @@
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_planner_test_lib.h"
+#include "mongo/db/query/query_settings_gen.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/stage_builder_util.h"
 #include "mongo/db/query/stage_types.h"
@@ -183,11 +183,9 @@ std::unique_ptr<CanonicalQuery> makeCanonicalQuery(OperationContext* opCtx,
                                                    BSONObj filter) {
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
     findCommand->setFilter(filter);
-    auto statusWithCQ = CanonicalQuery::canonicalize(opCtx, std::move(findCommand));
-    ASSERT_OK(statusWithCQ.getStatus());
-    unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
-    ASSERT(cq);
-    return cq;
+    return std::make_unique<CanonicalQuery>(
+        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx, *findCommand),
+                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
 }
 
 unique_ptr<PlanStage> getIxScanPlan(ExpressionContext* expCtx,
@@ -323,7 +321,7 @@ TEST_F(QueryStageMultiPlanTest, MPSCollectionScanVsHighlySelectiveIXScan) {
                                     std::move(sharedWs),
                                     std::move(mps),
                                     &coll,
-                                    PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                    PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                     QueryPlannerParams::DEFAULT);
     ASSERT_OK(statusWithPlanExecutor.getStatus());
     auto exec = std::move(statusWithPlanExecutor.getValue());
@@ -444,10 +442,9 @@ TEST_F(QueryStageMultiPlanTest, MPSBackupPlan) {
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
     findCommand->setFilter(BSON("a" << 1 << "b" << 1));
     findCommand->setSort(BSON("b" << 1));
-    auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(findCommand));
-    MONGO_verify(statusWithCQ.isOK());
-    unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
-    ASSERT(nullptr != cq.get());
+    auto cq = std::make_unique<CanonicalQuery>(
+        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
+                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     auto key = plan_cache_key_factory::make<PlanCacheKey>(*cq, collection.getCollection());
 
     // Force index intersection.
@@ -558,7 +555,9 @@ TEST_F(QueryStageMultiPlanTest, MPSExplainAllPlans) {
 
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
     findCommand->setFilter(BSON("x" << 1));
-    auto cq = uassertStatusOK(CanonicalQuery::canonicalize(opCtx(), std::move(findCommand)));
+    auto cq = std::make_unique<CanonicalQuery>(
+        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
+                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     unique_ptr<MultiPlanStage> mps =
         std::make_unique<MultiPlanStage>(_expCtx.get(), &ctx.getCollection(), cq.get());
 
@@ -567,12 +566,13 @@ TEST_F(QueryStageMultiPlanTest, MPSExplainAllPlans) {
     mps->addPlan(std::make_unique<QuerySolution>(), std::move(secondPlan), ws.get());
 
     // Making a PlanExecutor chooses the best plan.
-    auto exec = uassertStatusOK(plan_executor_factory::make(_expCtx,
-                                                            std::move(ws),
-                                                            std::move(mps),
-                                                            &ctx.getCollection(),
-                                                            PlanYieldPolicy::YieldPolicy::NO_YIELD,
-                                                            QueryPlannerParams::DEFAULT));
+    auto exec =
+        uassertStatusOK(plan_executor_factory::make(_expCtx,
+                                                    std::move(ws),
+                                                    std::move(mps),
+                                                    &ctx.getCollection(),
+                                                    PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
+                                                    QueryPlannerParams::DEFAULT));
 
     auto execImpl = dynamic_cast<PlanExecutorImpl*>(exec.get());
     ASSERT(execImpl);
@@ -630,12 +630,14 @@ TEST_F(QueryStageMultiPlanTest, MPSSummaryStats) {
     // Create the executor (Matching all documents).
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
     findCommand->setFilter(BSON("foo" << BSON("$gte" << 0)));
-    auto cq = uassertStatusOK(CanonicalQuery::canonicalize(opCtx(), std::move(findCommand)));
+    auto cq = std::make_unique<CanonicalQuery>(
+        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
+                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     auto exec = uassertStatusOK(getExecutor(opCtx(),
                                             &coll,
                                             std::move(cq),
                                             nullptr /* extractAndAttachPipelineStages */,
-                                            PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                            PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                             0));
 
     auto execImpl = dynamic_cast<PlanExecutorImpl*>(exec.get());
@@ -687,8 +689,9 @@ TEST_F(QueryStageMultiPlanTest, ShouldReportErrorIfExceedsTimeLimitDuringPlannin
 
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
     findCommand->setFilter(filterObj);
-    auto canonicalQuery =
-        uassertStatusOK(CanonicalQuery::canonicalize(opCtx(), std::move(findCommand)));
+    auto canonicalQuery = std::make_unique<CanonicalQuery>(
+        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
+                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     MultiPlanStage multiPlanStage(
         _expCtx.get(), &coll.getCollection(), canonicalQuery.get(), PlanCachingMode::NeverCache);
     multiPlanStage.addPlan(createQuerySolution(), std::move(ixScanRoot), sharedWs.get());
@@ -728,8 +731,9 @@ TEST_F(QueryStageMultiPlanTest, ShouldReportErrorIfKilledDuringPlanning) {
 
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
     findCommand->setFilter(BSON("foo" << BSON("$gte" << 0)));
-    auto canonicalQuery =
-        uassertStatusOK(CanonicalQuery::canonicalize(opCtx(), std::move(findCommand)));
+    auto canonicalQuery = std::make_unique<CanonicalQuery>(
+        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
+                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     MultiPlanStage multiPlanStage(
         _expCtx.get(), &coll.getCollection(), canonicalQuery.get(), PlanCachingMode::NeverCache);
     multiPlanStage.addPlan(createQuerySolution(), std::move(ixScanRoot), sharedWs.get());
@@ -773,8 +777,9 @@ TEST_F(QueryStageMultiPlanTest, AddsContextDuringException) {
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
     findCommand->setFilter(BSON("fake"
                                 << "query"));
-    auto canonicalQuery =
-        uassertStatusOK(CanonicalQuery::canonicalize(opCtx(), std::move(findCommand)));
+    auto canonicalQuery = std::make_unique<CanonicalQuery>(
+        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
+                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     MultiPlanStage multiPlanStage(
         _expCtx.get(), &ctx.getCollection(), canonicalQuery.get(), PlanCachingMode::NeverCache);
     unique_ptr<WorkingSet> sharedWs(new WorkingSet());

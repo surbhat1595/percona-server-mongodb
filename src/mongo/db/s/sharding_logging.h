@@ -48,11 +48,7 @@ namespace mongo {
  * Diagnostic logging of sharding metadata events (changelog and actionlog).
  */
 class ShardingLogging {
-
 public:
-    ShardingLogging();
-    ~ShardingLogging();
-
     /**
      * Retrieves the ShardingLogging instance associated with the current service/operation context.
      */
@@ -61,7 +57,7 @@ public:
 
     Status logAction(OperationContext* opCtx,
                      StringData what,
-                     StringData ns,
+                     const NamespaceString& ns,
                      const BSONObj& detail,
                      std::shared_ptr<Shard> configShard = nullptr,
                      ShardingCatalogClient* catalogClient = nullptr);
@@ -69,7 +65,7 @@ public:
     Status logChangeChecked(
         OperationContext* opCtx,
         StringData what,
-        StringData ns,
+        const NamespaceString& ns,
         const BSONObj& detail = BSONObj(),
         const WriteConcernOptions& writeConcern = ShardingCatalogClient::kMajorityWriteConcern,
         std::shared_ptr<Shard> configShard = nullptr,
@@ -78,7 +74,7 @@ public:
     void logChange(
         OperationContext* const opCtx,
         const StringData what,
-        const StringData ns,
+        const NamespaceString& ns,
         const BSONObj& detail = BSONObj(),
         const WriteConcernOptions& writeConcern = ShardingCatalogClient::kMajorityWriteConcern,
         std::shared_ptr<Shard> configShard = nullptr,
@@ -115,7 +111,7 @@ private:
     Status _log(OperationContext* opCtx,
                 StringData logCollName,
                 StringData what,
-                StringData operationNSS,
+                const NamespaceString& operationNSS,
                 const BSONObj& detail,
                 const WriteConcernOptions& writeConcern,
                 ShardingCatalogClient* catalogClient);

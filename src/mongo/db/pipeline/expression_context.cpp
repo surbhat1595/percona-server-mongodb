@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/bson/timestamp.h"
@@ -113,7 +112,7 @@ ExpressionContext::ExpressionContext(OperationContext* opCtx,
                         request.getNamespace(),
                         request.getLegacyRuntimeConstants(),
                         std::move(collator),
-                        std::move(processInterface),
+                        processInterface,
                         std::move(resolvedNamespaces),
                         std::move(collUUID),
                         request.getLet(),
@@ -162,8 +161,8 @@ ExpressionContext::ExpressionContext(
       variablesParseState(variables.useIdGenerator()),
       mayDbProfile(mayDbProfile),
       _collator(std::move(collator)),
-      _documentComparator(_collator.get()),
-      _valueComparator(_collator.get()),
+      _documentComparator(_collator.getCollator()),
+      _valueComparator(_collator.getCollator()),
       _resolvedNamespaces(std::move(resolvedNamespaces)) {
 
     if (runtimeConstants && runtimeConstants->getClusterTime().isNull()) {
@@ -206,8 +205,8 @@ ExpressionContext::ExpressionContext(
       variablesParseState(variables.useIdGenerator()),
       mayDbProfile(mayDbProfile),
       _collator(std::move(collator)),
-      _documentComparator(_collator.get()),
-      _valueComparator(_collator.get()) {
+      _documentComparator(_collator.getCollator()),
+      _valueComparator(_collator.getCollator()) {
     if (runtimeConstants) {
         variables.setLegacyRuntimeConstants(*runtimeConstants);
     }
@@ -215,6 +214,45 @@ ExpressionContext::ExpressionContext(
     jsHeapLimitMB = internalQueryJavaScriptHeapSizeLimitMB.load();
     if (letParameters)
         variables.seedVariablesWithLetParameters(this, *letParameters);
+}
+
+ExpressionContext::ExpressionContext(OperationContext* opCtx,
+                                     const NamespaceString& nss,
+                                     const boost::optional<BSONObj>& letParameters)
+    : explain(boost::none),
+      allowDiskUse(false),
+      ns(nss),
+      opCtx(opCtx),
+      jsHeapLimitMB(internalQueryJavaScriptHeapSizeLimitMB.load()),
+      mongoProcessInterface(std::make_shared<StubMongoProcessInterface>()),
+      timeZoneDatabase(opCtx && opCtx->getServiceContext()
+                           ? TimeZoneDatabase::get(opCtx->getServiceContext())
+                           : nullptr),
+      variablesParseState(variables.useIdGenerator()),
+      maxFeatureCompatibilityVersion(boost::none),  // Ensure all features are allowed.
+      mayDbProfile(true),
+      _collator(
+          nullptr),  // TODO SERVER-81604 Instantiate collator for makeBlankExpressionContext()
+      _documentComparator(_collator.getCollator()),
+      _valueComparator(_collator.getCollator()) {
+    variables.setDefaultRuntimeConstants(opCtx);
+    // Expression counters are reported in serverStatus to indicate how often clients use certain
+    // expressions/stages, so it's a side effect tied to parsing. We must stop expression counters
+    // before re-parsing to avoid adding to the counters more than once per a given query.
+    stopExpressionCounters();
+    if (letParameters)
+        variables.seedVariablesWithLetParameters(this, *letParameters);
+}
+
+boost::intrusive_ptr<ExpressionContext> ExpressionContext::makeBlankExpressionContext(
+    OperationContext* opCtx,
+    const NamespaceStringOrUUID& nssOrUUID,
+    boost::optional<BSONObj> shapifiedLet) {
+    // TODO SERVER-76087 We will likely want to set a flag here to stop $search from calling out
+    // to mongot.
+    const auto nss = nssOrUUID.isNamespaceString() ? nssOrUUID.nss() : NamespaceString{};
+    // This constructor is private, so we can't use `boost::make_instrusive()`.
+    return boost::intrusive_ptr<ExpressionContext>{new ExpressionContext(opCtx, nss, shapifiedLet)};
 }
 
 void ExpressionContext::checkForInterruptSlow() {
@@ -226,7 +264,7 @@ void ExpressionContext::checkForInterruptSlow() {
 
 ExpressionContext::CollatorStash::CollatorStash(ExpressionContext* const expCtx,
                                                 std::unique_ptr<CollatorInterface> newCollator)
-    : _expCtx(expCtx), _originalCollator(std::move(_expCtx->_collator)) {
+    : _expCtx(expCtx), _originalCollator(_expCtx->_collator.getCollatorShared()) {
     _expCtx->setCollator(std::move(newCollator));
 }
 
@@ -244,10 +282,15 @@ boost::intrusive_ptr<ExpressionContext> ExpressionContext::copyWith(
     NamespaceString ns,
     boost::optional<UUID> uuid,
     boost::optional<std::unique_ptr<CollatorInterface>> updatedCollator) const {
-
-    auto collator = updatedCollator
-        ? std::move(*updatedCollator)
-        : (_collator ? _collator->clone() : std::unique_ptr<CollatorInterface>{});
+    auto collator = [&]() {
+        if (updatedCollator) {
+            return std::move(*updatedCollator);
+        } else if (_collator.getCollator()) {
+            return _collator.getCollator()->clone();
+        } else {
+            return std::unique_ptr<CollatorInterface>();
+        }
+    }();
 
     auto expCtx = make_intrusive<ExpressionContext>(opCtx,
                                                     explain,
@@ -265,6 +308,10 @@ boost::intrusive_ptr<ExpressionContext> ExpressionContext::copyWith(
                                                     boost::none /* letParameters */,
                                                     mayDbProfile,
                                                     SerializationContext());
+
+    if (_collator.getIgnore()) {
+        expCtx->setIgnoreCollator();
+    }
 
     expCtx->inMongos = inMongos;
     expCtx->maxFeatureCompatibilityVersion = maxFeatureCompatibilityVersion;

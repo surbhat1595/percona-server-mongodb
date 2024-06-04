@@ -86,7 +86,7 @@ public:
                      const BSONObj& cmdObj,
                      BSONObjBuilder& result) {
 
-        auto wireSpec = WireSpec::instance().get();
+        auto wireSpec = WireSpec::getWireSpec(getGlobalServiceContext()).get();
 
         ClientMetadata::tryFinalize(opCtx->getClient());
         audit::logClientMetadata(opCtx->getClient());
@@ -109,7 +109,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CmdIsMaster);
+MONGO_REGISTER_COMMAND(CmdIsMaster).forShard();
 
 }  // namespace
 }  // namespace mongo

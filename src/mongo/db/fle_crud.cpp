@@ -31,7 +31,6 @@
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
@@ -69,7 +68,6 @@
 #include "mongo/db/logical_time.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
 #include "mongo/db/operation_time_tracker.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/ops/write_ops_gen.h"
@@ -152,6 +150,9 @@ void replyToResponse(OperationContext* opCtx,
             response->addToErrDetails(error);
         }
     }
+    if (auto& retriedStmtIds = replyBase->getRetriedStmtIds()) {
+        response->setRetriedStmtIds(*retriedStmtIds);
+    }
 
     // Update the OpTime for the reply to current OpTime
     //
@@ -176,6 +177,10 @@ void responseToReply(const BatchedCommandResponse& response,
     replyBase.setN(response.getN());
     if (response.isErrDetailsSet()) {
         replyBase.setWriteErrors(response.getErrDetails());
+    }
+
+    if (response.areRetriedStmtIdsSet()) {
+        replyBase.setRetriedStmtIds(response.getRetriedStmtIds());
     }
 }
 
@@ -331,20 +336,6 @@ EncryptionInformation makeEmptyProcessEncryptionInformation() {
     return encryptionInformation;
 }
 
-void assertTransactionCompatibilty(OperationContext* opCtx) {
-    // TODO SERVER-77506: On any node in a shard, we only permit snapshot transactions with QE
-    //
-    if (!serverGlobalParams.clusterRole.has(ClusterRole::None) &&
-        opCtx->inMultiDocumentTransaction()) {
-        auto readConcern = repl::ReadConcernArgs::get(opCtx);
-
-        uassert(7885501,
-                "Queryable Encryption operations are only permitted in transactions with "
-                "readConcern snapshot",
-                readConcern.getLevel() == repl::ReadConcernLevel::kSnapshotReadConcern);
-    }
-}
-
 }  // namespace
 
 using VTS = auth::ValidatedTenancyScope;
@@ -450,8 +441,11 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
     OperationContext* opCtx,
     const write_ops::InsertCommandRequest& insertRequest,
     GetTxnCallback getTxns) {
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+    }
 
-    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
     auto documents = insertRequest.getDocuments();
 
     std::vector<write_ops::WriteError> writeErrors;
@@ -459,6 +453,7 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
     uint32_t iter = 0;
     uint32_t numDocs = 0;
     write_ops::WriteCommandReplyBase writeBase;
+    std::vector<StmtId> retriedStmtIds;
 
     // This is an optimization for single-document unencrypted inserts.
     if (documents.size() == 1) {
@@ -468,8 +463,6 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
                 FLEBatchResult::kNotProcessed, write_ops::InsertCommandReply()};
         }
     }
-
-    assertTransactionCompatibilty(opCtx);
 
     for (auto& document : documents) {
         const auto& [swResult, reply] =
@@ -500,6 +493,9 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
                 break;
             }
         } else {
+            if (auto& stmtIds = reply->getRetriedStmtIds()) {
+                retriedStmtIds.insert(retriedStmtIds.end(), stmtIds->begin(), stmtIds->end());
+            }
             numDocs++;
         }
         iter++;
@@ -510,6 +506,9 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
     writeBase.setN(numDocs);
     if (!writeErrors.empty()) {
         writeBase.setWriteErrors(writeErrors);
+    }
+    if (!retriedStmtIds.empty()) {
+        writeBase.setRetriedStmtIds(std::move(retriedStmtIds));
     }
     returnReply.setWriteCommandReplyBase(writeBase);
 
@@ -522,9 +521,11 @@ write_ops::DeleteCommandReply processDelete(OperationContext* opCtx,
     {
         auto deletes = deleteRequest.getDeletes();
         uassert(6371302, "Only single document deletes are permitted", deletes.size() == 1);
+
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
     }
 
-    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
     std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxns(opCtx);
 
     auto reply = std::make_shared<write_ops::DeleteCommandReply>();
@@ -618,10 +619,10 @@ write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
                     updateOpEntry.getU().type() ==
                         write_ops::UpdateModification::Type::kReplacement);
 
-        assertTransactionCompatibilty(opCtx);
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
     }
 
-    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
     std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxns(opCtx);
 
     // The function that handles the transaction may outlive this function so we need to use
@@ -807,7 +808,7 @@ std::shared_ptr<ReplyType> constructDefaultReply() {
 
 template <>
 std::shared_ptr<write_ops::FindAndModifyCommandRequest> constructDefaultReply() {
-    return std::make_shared<write_ops::FindAndModifyCommandRequest>(NamespaceString());
+    return std::make_shared<write_ops::FindAndModifyCommandRequest>(NamespaceString::kEmpty);
 }
 
 /**
@@ -867,7 +868,11 @@ StatusWith<std::pair<ReplyType, OpMsgRequest>> processFindAndModifyRequest(
     GetTxnCallback getTxns,
     ProcessFindAndModifyCallback<ReplyType> processCallback) {
 
-    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+    }
+
     validateFindAndModifyRequest(findAndModifyRequest);
 
     std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxns(opCtx);
@@ -1156,7 +1161,10 @@ FLEBatchResult processFLEBatch(OperationContext* opCtx,
                                BatchedCommandResponse* response,
                                boost::optional<OID> targetEpoch) {
 
-    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+    }
 
     if (request.getWriteCommandRequestBase().getEncryptionInformation()->getCrudProcessed()) {
         return FLEBatchResult::kNotProcessed;
@@ -1165,20 +1173,9 @@ FLEBatchResult processFLEBatch(OperationContext* opCtx,
     if (request.getBatchType() == BatchedCommandRequest::BatchType_Insert) {
         auto insertRequest = request.getInsertRequest();
 
-        auto readConcern = repl::ReadConcernArgs::get(opCtx);
-
-        // TODO SERVER-77506 - Until SERVER-77506 is fixed, force snapshot readConcern for sharded
-        // transactions
-        if (!opCtx->inMultiDocumentTransaction()) {
-            repl::ReadConcernArgs::get(opCtx) =
-                repl::ReadConcernArgs(repl::ReadConcernLevel::kSnapshotReadConcern);
-        }
-
         auto [batchResult, insertReply] =
             processInsert(opCtx, insertRequest, &getTransactionWithRetriesForMongoS);
         if (batchResult == FLEBatchResult::kNotProcessed) {
-            // Restore the original read concern when this is not QE insert
-            repl::ReadConcernArgs::get(opCtx) = readConcern;
             return FLEBatchResult::kNotProcessed;
         }
 
@@ -1195,13 +1192,6 @@ FLEBatchResult processFLEBatch(OperationContext* opCtx,
         return FLEBatchResult::kProcessed;
 
     } else if (request.getBatchType() == BatchedCommandRequest::BatchType_Update) {
-
-        // TODO SERVER-77506 - Until SERVER-77506 is fixed, force snapshot readConcern for sharded
-        // transactions
-        if (!opCtx->inMultiDocumentTransaction()) {
-            repl::ReadConcernArgs::get(opCtx) =
-                repl::ReadConcernArgs(repl::ReadConcernLevel::kSnapshotReadConcern);
-        }
 
         auto updateRequest = request.getUpdateRequest();
 
@@ -1245,7 +1235,10 @@ std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(
         return expCtx;
     };
 
-    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+    }
 
     if (request.getBatchType() == BatchedCommandRequest::BatchType_Delete) {
         auto deleteRequest = request.getDeleteRequest();
@@ -1290,9 +1283,11 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
     FLEQueryInterface* queryImpl,
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest) {
 
-    assertTransactionCompatibilty(expCtx->opCtx);
+    {
+        stdx::lock_guard<Client> lk(*expCtx->opCtx->getClient());
+        CurOp::get(expCtx->opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+    }
 
-    CurOp::get(expCtx->opCtx)->debug().shouldOmitDiagnosticInformation = true;
     auto edcNss = findAndModifyRequest.getNamespace();
     auto ei = findAndModifyRequest.getEncryptionInformation().value();
 
@@ -1475,14 +1470,10 @@ FLEBatchResult processFLEFindAndModify(OperationContext* opCtx,
         return FLEBatchResult::kNotProcessed;
     }
 
-    // TODO SERVER-77506 - Until SERVER-77506 is fixed, force snapshot readConcern for sharded
-    // transactions
-    if (!opCtx->inMultiDocumentTransaction()) {
-        repl::ReadConcernArgs::get(opCtx) =
-            repl::ReadConcernArgs(repl::ReadConcernLevel::kSnapshotReadConcern);
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
     }
-
-    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
 
     // FLE2 Mongos CRUD operations loopback through MongoS with EncryptionInformation as
     // findAndModify so query can do any necessary transformations. But on the nested call, CRUD
@@ -1542,7 +1533,7 @@ uint64_t FLEQueryInterfaceImpl::countDocuments(const NamespaceString& nss) {
     // Since count() does not work in a transaction, call count() by bypassing the transaction api
     // Allow the thread to be killable. If interrupted, the call to runCommand will fail with the
     // interruption.
-    auto client = _serviceContext->makeClient("SEP-int-fle-crud");
+    auto client = _serviceContext->getService()->makeClient("SEP-int-fle-crud");
 
     AlternativeClientRegion clientRegion(client);
     auto opCtx = cc().makeOperationContext();
@@ -1883,7 +1874,7 @@ std::vector<std::vector<FLEEdgeCountInfo>> FLETagNoTXNQuery::getTags(
     // Pop off the current op context so we can get a fresh set of read concern settings
     // Allow the thread to be killable. If interrupted, the call to runCommand will fail with the
     // interruption.
-    auto client = _opCtx->getServiceContext()->makeClient("FLETagNoTXNQuery");
+    auto client = _opCtx->getServiceContext()->getService()->makeClient("FLETagNoTXNQuery");
 
     AlternativeClientRegion clientRegion(client);
     auto opCtx = cc().makeOperationContext();

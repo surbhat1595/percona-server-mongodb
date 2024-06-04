@@ -1,48 +1,26 @@
-// # TODO: SERVER-79909 Add multitenant support for aggregation commands using setQuerySettings -
-// remove 'tenant_migration_incompatible' and 'command_not_supported_in_serverless' flags
-
 // Tests query settings validation rules.
 // @tags: [
 //   directly_against_shardsvrs_incompatible,
 //   featureFlagQuerySettings,
-//   tenant_migration_incompatible,
-//   command_not_supported_in_serverless
+//   does_not_support_stepdowns,
+//   simulate_atlas_proxy_incompatible
 // ]
 //
 
-import {QuerySettingsUtils} from "jstests/core/libs/query_settings_utils.js";
+import {QuerySettingsUtils} from "jstests/libs/query_settings_utils.js";
 
-const adminDB = db.getSiblingDB("admin");
-const coll = db[jsTestName()];
+const collName = jsTestName();
 
-const utils = new QuerySettingsUtils(db, coll)
+const qsutils = new QuerySettingsUtils(db, collName)
 
-const queryA = {
-    find: coll.getName(),
-    $db: db.getName(),
-    filter: {a: 1}
-};
+// Set the 'clusterServerParameterRefreshIntervalSecs' value to 1 second for faster fetching of
+// 'querySettings' cluster parameter on mongos from the configsvr.
+const clusterParamRefreshSecs = qsutils.setClusterParamRefreshSecs(1);
+
 const querySettingsA = {
     indexHints: {allowedIndexes: ["a_1", {$natural: 1}]}
 };
-const nonExistentQueryShapeHash =
-    "0000000000000000000000000000000000000000000000000000000000000000";
-
-/**
- * Function used to reset the state of the DB after each test.
- */
-function removeAllQuerySettings() {
-    // Retrieve all querySettings hashes.
-    const hashes = adminDB.aggregate([{$querySettings: {}}]).toArray().map(el => el.queryShapeHash);
-
-    hashes.forEach(hash => {
-        // Remove query settings for each hash.
-        assert.commandWorked(adminDB.runCommand({removeQuerySettings: hash}));
-    });
-
-    // Check that no more querySettings exist.
-    assert.eq(adminDB.aggregate([{$querySettings: {}}]).toArray().length, 0);
-}
+const nonExistentQueryShapeHash = "0".repeat(64);
 
 {
     // Ensure that setQuerySettings command fails for invalid input.
@@ -54,7 +32,7 @@ function removeAllQuerySettings() {
         7746402);
     assert.commandFailedWithCode(
         db.adminCommand(
-            {setQuerySettings: utils.makeQueryInstance(), settings: {notAValid: "settings"}}),
+            {setQuerySettings: qsutils.makeFindQueryInstance(), settings: {notAValid: "settings"}}),
         40415);
 }
 
@@ -100,27 +78,21 @@ function removeAllQuerySettings() {
               }
               ), 7746602);
 
-    assert.commandWorked(db.adminCommand({
-        setQuerySettings: {
-            aggregate: "order",
-            $db: "someDb",
-            pipeline: [{
-            $lookup: {
-                from: "inventory",
-                localField: "item",
-                foreignField: "sku",
-                as: "inventory_docs"
-            }
-            }]
-        },
-        settings: {
-            "indexHints": {
-            "ns": { "db": "someDb", "coll": "inventory" },
-            "allowedIndexes": [{ "sku": 1 }]
-            }
-        }
-    }));
-    removeAllQuerySettings();
+    const queryInstance = {
+        aggregate: "order",
+        $db: "someDb",
+        pipeline: [{
+            $lookup:
+                {from: "inventory", localField: "item", foreignField: "sku", as: "inventory_docs"}
+        }]
+    };
+    const settings = {
+        "indexHints": {"ns": {"db": "someDb", "coll": "inventory"}, "allowedIndexes": [{"sku": 1}]}
+    };
+    assert.commandWorked(db.adminCommand({setQuerySettings: queryInstance, settings: settings}));
+    qsutils.assertQueryShapeConfiguration(
+        [qsutils.makeQueryShapeConfiguration(settings, queryInstance)]);
+    qsutils.removeAllQuerySettings();
 }
 
 {
@@ -143,41 +115,36 @@ function removeAllQuerySettings() {
     }),
                                  7746603);
 
-    assert.commandWorked(db.adminCommand({
-        setQuerySettings: {
-            aggregate: "order",
-            $db: "testDB",
-            pipeline: [{
-            $lookup: {
-                from: "inventory",
-                localField: "item",
-                foreignField: "sku",
-                as: "inventory_docs"
-            }
-            }]
-        },
-        settings:
-            {"indexHints": {"ns": {"db": "testDB", "coll": "order"}, "allowedIndexes": []}}
-    }));
-    removeAllQuerySettings();
+    const queryInstance = {
+        aggregate: "order",
+        $db: "testDB",
+        pipeline: [{
+            $lookup:
+                {from: "inventory", localField: "item", foreignField: "sku", as: "inventory_docs"}
+        }]
+    };
+    const settings = {
+        "indexHints": {"ns": {"db": "testDB", "coll": "order"}, "allowedIndexes": []}
+    };
+    assert.commandWorked(db.adminCommand({setQuerySettings: queryInstance, settings: settings}));
+    qsutils.assertQueryShapeConfiguration(
+        [qsutils.makeQueryShapeConfiguration(settings, queryInstance)]);
+    qsutils.removeAllQuerySettings();
 }
 
 {
     // Ensure that setQuerySettings command fails when multiple index hints refer to the same coll.
     assert.commandFailedWithCode(db.adminCommand({
-        setQuerySettings: {find: coll.getName(), filter: {a: 123}, $db: db.getName()},
+        setQuerySettings: {find: collName, filter: {a: 123}, $db: db.getName()},
         settings: {
             "indexHints": [
-                {
-                    "ns": {"db": db.getName(), "coll": coll.getName()},
-                    "allowedIndexes": [{"sku": 1}]
-                },
-                {
-                    "ns": {"db": db.getName(), "coll": coll.getName()},
-                    "allowedIndexes": [{"uks": 1}]
-                },
+                {"ns": {"db": db.getName(), "coll": collName}, "allowedIndexes": [{"sku": 1}]},
+                {"ns": {"db": db.getName(), "coll": collName}, "allowedIndexes": [{"uks": 1}]},
             ]
         }
     }),
                                  7746608);
 }
+
+// Reset the 'clusterServerParameterRefreshIntervalSecs' parameter to its initial value.
+clusterParamRefreshSecs.restore();

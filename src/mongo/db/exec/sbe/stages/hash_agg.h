@@ -45,6 +45,7 @@
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/util/debug_print.h"
+#include "mongo/db/exec/sbe/util/spilling.h"
 #include "mongo/db/exec/sbe/values/row.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
@@ -211,8 +212,17 @@ private:
      * values that can't be inlined) obtained by decoding the 'RecordId' keystring to a
      * 'MaterializedRow'. The values in the resulting 'MaterializedRow' may be pointers into
      * 'keyBuffer', so it is important that 'keyBuffer' outlive the row.
+     *
+     * This method is used when there is no collator.
      */
     SpilledRow deserializeSpilledRecord(const Record& record, BufBuilder& keyBuffer);
+
+    /**
+     * Given a 'record' from the record store and a 'collator', decodes it into a pair of
+     * materialized rows (one for the group-by key and another one for the agg value).
+     * Both the group-by key and the agg value are read from the data part of the record.
+     */
+    SpilledRow deserializeSpilledRecord(const Record& record, const CollatorInterface& collator);
 
     PlanState getNextSpilled();
 
@@ -297,7 +307,7 @@ private:
         internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.load();
 
     // A record store which is instantiated and written to in the case of spilling.
-    std::unique_ptr<TemporaryRecordStore> _recordStore;
+    std::unique_ptr<SpillingStore> _recordStore;
     std::unique_ptr<SeekableRecordCursor> _rsCursor;
 
     // A monotically increasing counter used to ensure uniqueness of 'RecordId' values. When

@@ -41,7 +41,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
@@ -62,6 +61,7 @@
 #include "mongo/db/s/drop_collection_coordinator.h"
 #include "mongo/db/s/drop_database_coordinator.h"
 #include "mongo/db/s/forwardable_operation_metadata.h"
+#include "mongo/db/s/migration_blocking_operation/migration_blocking_operation_coordinator.h"
 #include "mongo/db/s/move_primary_coordinator.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/refine_collection_shard_key_coordinator.h"
@@ -138,6 +138,9 @@ std::shared_ptr<ShardingDDLCoordinator> constructShardingDDLCoordinatorInstance(
             return std::make_shared<CleanupStructuredEncryptionDataCoordinator>(
                 service, std::move(initialState));
             break;
+        case DDLCoordinatorTypeEnum::kMigrationBlockingOperation:
+            return std::make_shared<MigrationBlockingOperationCoordinator>(service,
+                                                                           std::move(initialState));
         default:
             uasserted(ErrorCodes::BadValue,
                       str::stream()
@@ -197,6 +200,11 @@ ShardingDDLCoordinatorService::constructInstance(BSONObj initialState) {
         });
 
     return coord;
+}
+
+std::unique_ptr<ShardingDDLCoordinatorExternalState>
+ShardingDDLCoordinatorService::createExternalState() const {
+    return _externalStateFactory->create();
 }
 
 void ShardingDDLCoordinatorService::waitForCoordinatorsOfGivenTypeToComplete(
@@ -306,7 +314,12 @@ ShardingDDLCoordinatorService::getOrCreateInstance(OperationContext* opCtx, BSON
         uassert(ErrorCodes::IllegalOperation,
                 "Request sent without attaching database version",
                 clientDbVersion);
-        DatabaseShardingState::assertIsPrimaryShardForDb(opCtx, nss.dbName());
+        {
+            Lock::DBLock dbLock(opCtx, nss.dbName(), MODE_IS);
+            const auto scopedDss =
+                DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, nss.dbName());
+            scopedDss->assertIsPrimaryShardForDb(opCtx);
+        }
         coorMetadata.setDatabaseVersion(clientDbVersion);
     }
 

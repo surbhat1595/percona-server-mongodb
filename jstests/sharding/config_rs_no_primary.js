@@ -8,6 +8,11 @@ TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 TestData.skipCheckOrphans = true;
 TestData.skipCheckShardFilteringMetadata = true;
 
+// The routing table consistency check runs with 'snapshot' level readConcern. This readConcern
+// level cannot be satisfied without a replica set primary, which we won't have on the config server
+// because this test removes the config server primary.
+TestData.skipCheckRoutingTableConsistency = true;
+
 var st = new ShardingTest({
     shards: 1,
     config: 3,
@@ -58,8 +63,6 @@ var testOps = function(mongos) {
 
     jsTestLog("Doing ops that require metadata writes and thus should fail against: " + mongos);
     assert.writeError(mongos.getDB("newDB").foo.insert({a: 1}));
-    assert.commandFailed(
-        mongos.getDB('admin').runCommand({shardCollection: "test.foo", key: {a: 1}}));
 };
 
 testOps(mongos2);

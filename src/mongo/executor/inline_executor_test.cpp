@@ -218,7 +218,7 @@ TEST_F(InlineExecutorTest, MultipleSchedulers) {
 }
 
 TEST_F(InlineExecutorTest, Interruptible) {
-    auto client = getServiceContext()->makeClient("InlineExecutorTest");
+    auto client = getServiceContext()->getService()->makeClient("InlineExecutorTest");
     auto opCtx = client->makeOperationContext();
     opCtx->markKilled();
     ASSERT_THROWS_CODE(getInlineExecutor().run([] { return false; }, opCtx.get()),
@@ -328,6 +328,9 @@ TEST_F(SleepableExecutorTest, WithNetworkingBaton) {
         }
         void detachImpl() noexcept override {
             MONGO_UNIMPLEMENTED;
+        }
+        transport::TransportLayer* getTransportLayer() const override {
+            MONGO_UNIMPLEMENTED
         }
 
     private:

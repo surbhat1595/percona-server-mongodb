@@ -30,7 +30,6 @@
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -66,7 +65,8 @@ StatusWith<UpdateZoneKeyRangeRequest> UpdateZoneKeyRangeRequest::parseFromConfig
 }
 
 void UpdateZoneKeyRangeRequest::appendAsConfigCommand(BSONObjBuilder* cmdBuilder) {
-    cmdBuilder->append(kConfigsvrUpdateZoneKeyRange, NamespaceStringUtil::serialize(_ns));
+    cmdBuilder->append(kConfigsvrUpdateZoneKeyRange,
+                       NamespaceStringUtil::serialize(_ns, SerializationContext::stateDefault()));
     _range.append(cmdBuilder);
 
     if (_isRemove) {
@@ -86,7 +86,8 @@ StatusWith<UpdateZoneKeyRangeRequest> UpdateZoneKeyRangeRequest::_parseFromComma
         return parseNamespaceStatus;
     }
 
-    const auto ns = NamespaceStringUtil::deserialize(boost::none, rawNS);
+    const auto ns =
+        NamespaceStringUtil::deserialize(boost::none, rawNS, SerializationContext::stateDefault());
 
     if (!ns.isValid()) {
         return {ErrorCodes::InvalidNamespace,

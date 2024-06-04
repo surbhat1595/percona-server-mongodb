@@ -38,7 +38,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -52,6 +51,9 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/basic_types_gen.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/bulk_write_common.h"
+#include "mongo/db/commands/bulk_write_crud_op.h"
+#include "mongo/db/commands/bulk_write_gen.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/explain_gen.h"
@@ -92,6 +94,7 @@
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/s/cluster_commands_helpers.h"
+#include "mongo/s/collection_routing_info_targeter.h"
 #include "mongo/s/commands/cluster_explain.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/multi_statement_transaction_requests_sender.h"
@@ -119,13 +122,16 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeMetadataRefreshClusterQuery);
 constexpr auto kIdFieldName = "_id"_sd;
 
 struct ParsedCommandInfo {
+    NamespaceString nss;
     BSONObj query;
     BSONObj collation;
+    boost::optional<BSONObj> let;
     boost::optional<BSONObj> sort;
     bool upsert = false;
     int stmtId = kUninitializedStmtId;
     boost::optional<UpdateRequest> updateRequest;
     boost::optional<BSONObj> hint;
+    bool isTimeseriesNamespace = false;
 };
 
 struct AsyncRequestSenderResponseData {
@@ -151,20 +157,23 @@ BSONObj parseSortPattern(OperationContext* opCtx,
 }
 
 std::set<ShardId> getShardsToTarget(OperationContext* opCtx,
-                                    const ChunkManager& cm,
+                                    const CollectionRoutingInfo& cri,
                                     NamespaceString nss,
                                     const ParsedCommandInfo& parsedInfo) {
+    const auto& cm = cri.cm;
     std::set<ShardId> allShardsContainingChunksForNs;
-    uassert(ErrorCodes::NamespaceNotSharded, "The collection was dropped.", cm.isSharded());
+    uassert(ErrorCodes::NamespaceNotSharded, "The collection was dropped", cm.isSharded());
 
     auto query = parsedInfo.query;
     auto collation = parsedInfo.collation;
-    std::unique_ptr<CollatorInterface> collator;
-    if (!collation.isEmpty()) {
-        collator = uassertStatusOK(
-            CollatorFactoryInterface::get(opCtx->getServiceContext())->makeFromBSON(collation));
-    }
-    auto expCtx = make_intrusive<ExpressionContext>(opCtx, std::move(collator), nss);
+    auto expCtx =
+        makeExpressionContextWithDefaultsForTargeter(opCtx,
+                                                     nss,
+                                                     cri,
+                                                     collation,
+                                                     boost::none,  // explain
+                                                     parsedInfo.let,
+                                                     boost::none /* legacyRuntimeConstants */);
     getShardIdsForQuery(
         expCtx, query, collation, cm, &allShardsContainingChunksForNs, nullptr /* info */);
 
@@ -230,6 +239,8 @@ BSONObj createAggregateCmdObj(
         aggregate.setHint(parsedInfo.hint);
     }
 
+    aggregate.setLet(parsedInfo.let);
+
     aggregate.setPipeline([&]() {
         std::vector<BSONObj> pipeline;
         if (timeseriesFields) {
@@ -251,14 +262,67 @@ BSONObj createAggregateCmdObj(
     return aggregate.toBSON({});
 }
 
-ParsedCommandInfo parseWriteCommand(OperationContext* opCtx, const BSONObj& writeCmdObj) {
-    auto commandName = writeCmdObj.firstElementFieldNameStringData();
+ParsedCommandInfo parseWriteRequest(OperationContext* opCtx, const OpMsgRequest& writeReq) {
+    const auto& writeCmdObj = writeReq.body;
+    auto commandName = writeReq.getCommandName();
+
     ParsedCommandInfo parsedInfo;
-    if (commandName == write_ops::UpdateCommandRequest::kCommandName) {
+
+    // For bulkWrite request, we set the nss when we parse the bulkWrite command.
+    if (commandName != BulkWriteCommandRequest::kCommandName) {
+        parsedInfo.nss =
+            CommandHelpers::parseNsCollectionRequired(writeReq.getDbName(), writeCmdObj);
+    }
+
+    if (commandName == BulkWriteCommandRequest::kCommandName) {
+        auto bulkWriteRequest = BulkWriteCommandRequest::parse(
+            IDLParserContext("_clusterQueryWithoutShardKeyForBulkWrite"), writeCmdObj);
+        tassert(7298303,
+                "Only bulkWrite with a single op is allowed in _clusterQueryWithoutShardKey",
+                bulkWriteRequest.getOps().size() == 1);
+        auto op = BulkWriteCRUDOp(bulkWriteRequest.getOps()[0]);
+        tassert(7298304,
+                str::stream()
+                    << op.getType()
+                    << " is not a supported opType for bulkWrite in _clusterQueryWithoutShardKey",
+                op.getType() == BulkWriteCRUDOp::kUpdate ||
+                    op.getType() == BulkWriteCRUDOp::kDelete);
+        auto& nsInfo = bulkWriteRequest.getNsInfo()[op.getNsInfoIdx()];
+        parsedInfo.nss = nsInfo.getNs();
+        parsedInfo.isTimeseriesNamespace = nsInfo.getIsTimeseriesNamespace();
+        parsedInfo.let = bulkWriteRequest.getLet();
+        if (op.getType() == BulkWriteCRUDOp::kUpdate) {
+            // The update case.
+            auto updateOp = op.getUpdate();
+            parsedInfo.query = updateOp->getFilter();
+            parsedInfo.hint = updateOp->getHint();
+            if ((parsedInfo.upsert = updateOp->getUpsert())) {
+                parsedInfo.updateRequest =
+                    bulk_write_common::makeUpdateOpEntryFromUpdateOp(updateOp);
+                parsedInfo.updateRequest->setNamespaceString(parsedInfo.nss);
+            }
+            if (auto parsedCollation = updateOp->getCollation()) {
+                parsedInfo.collation = parsedCollation.value();
+            }
+        } else {
+            // The delete case.
+            auto deleteOp = op.getDelete();
+            parsedInfo.query = deleteOp->getFilter();
+            parsedInfo.hint = deleteOp->getHint();
+            if (auto parsedCollation = deleteOp->getCollation()) {
+                parsedInfo.collation = parsedCollation.value();
+            }
+        }
+        if (auto stmtIds = bulkWriteRequest.getStmtIds()) {
+            parsedInfo.stmtId = stmtIds->front();
+        }
+    } else if (commandName == write_ops::UpdateCommandRequest::kCommandName) {
         auto updateRequest = write_ops::UpdateCommandRequest::parse(
             IDLParserContext("_clusterQueryWithoutShardKeyForUpdate"), writeCmdObj);
         parsedInfo.query = updateRequest.getUpdates().front().getQ();
         parsedInfo.hint = updateRequest.getUpdates().front().getHint();
+        parsedInfo.let = updateRequest.getLet();
+        parsedInfo.isTimeseriesNamespace = updateRequest.getIsTimeseriesNamespace();
 
         // In the batch write path, when the request is reconstructed to be passed to
         // the two phase write protocol, only the stmtIds field is used.
@@ -279,6 +343,8 @@ ParsedCommandInfo parseWriteCommand(OperationContext* opCtx, const BSONObj& writ
             IDLParserContext("_clusterQueryWithoutShardKeyForDelete"), writeCmdObj);
         parsedInfo.query = deleteRequest.getDeletes().front().getQ();
         parsedInfo.hint = deleteRequest.getDeletes().front().getHint();
+        parsedInfo.let = deleteRequest.getLet();
+        parsedInfo.isTimeseriesNamespace = deleteRequest.getIsTimeseriesNamespace();
 
         // In the batch write path, when the request is reconstructed to be passed to
         // the two phase write protocol, only the stmtIds field is used.
@@ -302,6 +368,8 @@ ParsedCommandInfo parseWriteCommand(OperationContext* opCtx, const BSONObj& writ
             findAndModifyRequest.getSort() && !findAndModifyRequest.getSort()->isEmpty()
             ? findAndModifyRequest.getSort()
             : boost::none;
+        parsedInfo.let = findAndModifyRequest.getLet();
+        parsedInfo.isTimeseriesNamespace = findAndModifyRequest.getIsTimeseriesNamespace();
 
         if ((parsedInfo.upsert = findAndModifyRequest.getUpsert().get_value_or(false))) {
             parsedInfo.updateRequest = UpdateRequest{};
@@ -334,26 +402,25 @@ public:
                     "_clusterQueryWithoutShardKey can only be run on Mongos",
                     serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer));
 
-            LOGV2(6962300,
-                  "Running read phase for a write without a shard key.",
-                  "clientWriteRequest"_attr = request().getWriteCmd());
+            LOGV2_DEBUG(6962300,
+                        2,
+                        "Running read phase for a write without a shard key.",
+                        "clientWriteRequest"_attr = redact(request().getWriteCmd()));
 
             const auto writeCmdObj = request().getWriteCmd();
-
-            // Get all shard ids for shards that have chunks in the desired namespace.
-            const NamespaceString nss =
-                CommandHelpers::parseNsCollectionRequired(ns().dbName(), writeCmdObj);
-
-            hangBeforeMetadataRefreshClusterQuery.pauseWhileSet(opCtx);
-            const auto cri = uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, nss));
 
             // Parse into OpMsgRequest to append the $db field, which is required for command
             // parsing.
             const auto opMsgRequest = OpMsgRequest::fromDBAndBody(ns().dbName(), writeCmdObj);
-            auto parsedInfoFromRequest = parseWriteCommand(opCtx, opMsgRequest.body);
+            auto parsedInfoFromRequest = parseWriteRequest(opCtx, opMsgRequest);
+            const auto& nss = parsedInfoFromRequest.nss;
+
+            // Get all shard ids for shards that have chunks in the desired namespace.
+            hangBeforeMetadataRefreshClusterQuery.pauseWhileSet(opCtx);
+            const auto cri = uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, nss));
 
             auto allShardsContainingChunksForNs =
-                getShardsToTarget(opCtx, cri.cm, nss, parsedInfoFromRequest);
+                getShardsToTarget(opCtx, cri, nss, parsedInfoFromRequest);
 
             // If the request omits the collation use the collection default collation. If
             // the collection just has the simple collation, we can leave the collation as
@@ -365,14 +432,16 @@ public:
                 }
             }
 
-            const auto& timeseriesFields =
-                (cri.cm.isSharded() && cri.cm.getTimeseriesFields().has_value())
+            const auto& timeseriesFields = cri.cm.isSharded() &&
+                    cri.cm.getTimeseriesFields().has_value() &&
+                    parsedInfoFromRequest.isTimeseriesNamespace
                 ? cri.cm.getTimeseriesFields()
                 : boost::none;
             auto cmdObj =
                 createAggregateCmdObj(opCtx, parsedInfoFromRequest, nss, timeseriesFields);
 
             std::vector<AsyncRequestsSender::Request> requests;
+            requests.reserve(allShardsContainingChunksForNs.size());
             for (const auto& shardId : allShardsContainingChunksForNs) {
                 requests.emplace_back(shardId,
                                       appendShardVersion(cmdObj, cri.getShardVersion(shardId)));
@@ -491,24 +560,24 @@ public:
                 return explainRequest.getCommandParameter().getOwned();
             }();
 
-            // Get all shard ids for shards that have chunks in the desired namespace.
-            const NamespaceString nss =
-                CommandHelpers::parseNsCollectionRequired(ns().dbName(), writeCmdObj);
-            const auto cri = uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, nss));
-
             // Parse into OpMsgRequest to append the $db field, which is required for command
             // parsing.
             const auto opMsgRequestWriteCmd =
                 OpMsgRequest::fromDBAndBody(ns().dbName(), writeCmdObj);
-            auto parsedInfoFromRequest = parseWriteCommand(opCtx, opMsgRequestWriteCmd.body);
+            auto parsedInfoFromRequest = parseWriteRequest(opCtx, opMsgRequestWriteCmd);
+
+            // Get all shard ids for shards that have chunks in the desired namespace.
+            const auto& nss = parsedInfoFromRequest.nss;
+            const auto cri = uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, nss));
 
             auto allShardsContainingChunksForNs =
-                getShardsToTarget(opCtx, cri.cm, nss, parsedInfoFromRequest);
+                getShardsToTarget(opCtx, cri, nss, parsedInfoFromRequest);
             auto cmdObj = createAggregateCmdObj(opCtx, parsedInfoFromRequest, nss, boost::none);
 
             const auto aggExplainCmdObj = ClusterExplain::wrapAsExplain(cmdObj, verbosity);
 
             std::vector<AsyncRequestsSender::Request> requests;
+            requests.reserve(allShardsContainingChunksForNs.size());
             for (const auto& shardId : allShardsContainingChunksForNs) {
                 requests.emplace_back(
                     shardId, appendShardVersion(aggExplainCmdObj, cri.getShardVersion(shardId)));
@@ -588,7 +657,8 @@ public:
 };
 
 MONGO_REGISTER_COMMAND(ClusterQueryWithoutShardKeyCmd)
-    .requiresFeatureFlag(&feature_flags::gFeatureFlagUpdateOneWithoutShardKey);
+    .requiresFeatureFlag(&feature_flags::gFeatureFlagUpdateOneWithoutShardKey)
+    .forRouter();
 
 }  // namespace
 }  // namespace mongo

@@ -52,7 +52,7 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/projection_policies.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/string_map.h"
 
 namespace mongo::projection_executor {
@@ -201,6 +201,9 @@ protected:
 
     // Writes the given value to the output doc, replacing the existing value of 'field' if present.
     virtual void outputProjectedField(StringData field, Value val, MutableDocument* outDoc) const;
+
+    // Used to determine if the node is an inclusion or exclusion node.
+    virtual bool isIncluded() const = 0;
 
     StringMap<std::unique_ptr<ProjectionNode>> _children;
     StringMap<boost::intrusive_ptr<Expression>> _expressions;

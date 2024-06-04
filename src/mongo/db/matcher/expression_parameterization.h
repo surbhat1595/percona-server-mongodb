@@ -29,16 +29,17 @@
 
 #pragma once
 
+#include <absl/container/flat_hash_map.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <vector>
 
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/matcher/expression_array.h"
+#include "mongo/db/matcher/expression_hasher.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_type.h"
 #include "mongo/db/matcher/expression_visitor.h"
@@ -46,61 +47,205 @@
 #include "mongo/util/assert_util_core.h"
 
 namespace mongo {
+
+// Adaptive container for storing a mapping between assigned InputParamIds and parameterized
+// MatchExpressions. Uses a vector when 'size()' is below 'useMapThreshold', and builds a map
+// for faster lookups once 'size()' reaches the threshold.
+struct MatchExpressionInputParamIdContainer {
+    using InputParamId = MatchExpression::InputParamId;
+
+    MatchExpressionInputParamIdContainer(size_t useMapThreshold)
+        : _useMapThreshold(useMapThreshold) {}
+
+    // Moves the vector and clears other resources.
+    operator std::vector<const MatchExpression*>() && {
+        _expressionToInputParamIdMap.clear();
+        return std::move(_inputParamIdToExpressionVector);
+    }
+
+    // Caller must ensure that inputParamId is an increasing sequence of integers starting from 0.
+    InputParamId insert(const MatchExpression* expr, InputParamId paramId) {
+        _inputParamIdToExpressionVector.emplace_back(expr);
+
+        if (_usingMap) {
+            _expressionToInputParamIdMap.emplace(expr, paramId);
+        } else if (size() >= _useMapThreshold) {
+            // If size reaches given threshold, build a map for faster lookups.
+            for (size_t i = 0; i < _inputParamIdToExpressionVector.size(); i++) {
+                _expressionToInputParamIdMap.emplace(_inputParamIdToExpressionVector[i], i);
+            }
+            _usingMap = true;
+        }
+
+        return paramId;
+    }
+
+    boost::optional<InputParamId> find(const MatchExpression* expr) const {
+        tassert(7909201,
+                "Expected the map to be used for lookup as the number of input param ids "
+                "exceeds specified threshold.",
+                _usingMap == (size() >= _useMapThreshold));
+
+        // If available, use the map to search for an equivalent expression. Otherwise linearly
+        // search through the vector.
+        if (_usingMap) {
+            auto it = _expressionToInputParamIdMap.find(expr);
+            if (it != _expressionToInputParamIdMap.end()) {
+                return it->second;
+            }
+        } else {
+            auto it = std::find_if(
+                _inputParamIdToExpressionVector.begin(),
+                _inputParamIdToExpressionVector.end(),
+                [expr](const MatchExpression* m) -> bool { return m->equivalent(expr); });
+            if (it != _inputParamIdToExpressionVector.end()) {
+                return it - _inputParamIdToExpressionVector.begin();
+            }
+        }
+
+        return boost::none;
+    }
+
+    bool usingMap() const {
+        return _usingMap;
+    }
+
+    size_t size() const {
+        return _inputParamIdToExpressionVector.size();
+    }
+
+
+private:
+    const size_t _useMapThreshold;
+
+    bool _usingMap = false;
+
+    // Map from assigned InputParamId to parameterized MatchExpression. It can be safely represented
+    // as a vector because in 'MatchExpressionParameterizationVisitorContext' we control that
+    // inputParamId is an increasing sequence of integers starting from 0.
+    std::vector<const MatchExpression*> _inputParamIdToExpressionVector;
+
+    struct MatchExpressionsEqual {
+        bool operator()(const MatchExpression* expr1, const MatchExpression* expr2) const {
+            return expr1->equivalent(expr2);
+        }
+    };
+
+    absl::flat_hash_map<const MatchExpression*,
+                        InputParamId,
+                        MatchExpressionHasher,
+                        MatchExpressionsEqual>
+        _expressionToInputParamIdMap;
+};
+
 /**
- * A context to track assigned input parameter IDs for auto-parameterization.
+ * A context to track assigned input parameter IDs for auto-parameterization. Note that the
+ * parameterized MatchExpressions must outlive this class.
  */
 struct MatchExpressionParameterizationVisitorContext {
     using InputParamId = MatchExpression::InputParamId;
 
+    static constexpr size_t kUseMapThreshold = 50;
+
+    MatchExpressionParameterizationVisitorContext(
+        boost::optional<size_t> inputMaxParamCount = boost::none, InputParamId startingParamId = 0)
+        : maxParamCount(inputMaxParamCount), nextParamId(startingParamId) {}
+
     /**
-     * Assigns a parameter id to `expr` with the ability to reuse an already-assigned parameter id
+     * Reports whether the requested number of parameter IDs can be assigned within the
+     * 'maxParamCount' limit. Used by callers that need to parameterize all or none of the arguments
+     * of an expression because MatchExpressionSbePlanCacheKeySerializationVisitor visit() methods
+     * expect those to either be fully parameterized or unparameterized. This must set
+     * 'parameterized' to false if the requested IDs are not available, as the caller will then not
+     * parameterize any of its arguments, which means the query will not be fully parameterized
+     * even if we do not end up using all the allowed parameter IDs.
+     */
+    bool availableParamIds(int numIds) {
+        if (!parameterized) {
+            return false;
+        }
+        if (maxParamCount &&
+            (static_cast<size_t>(nextParamId) + static_cast<size_t>(numIds)) > *maxParamCount) {
+            parameterized = false;
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Assigns a parameter ID to `expr` with the ability to reuse an already-assigned parameter id
      * if `expr` is equivalent to an expression we have seen before. This is used to model
      * dependencies within a query (e.g. $or[{a:1}, {a:1, b:1}] --> $or[{a:P0}, {a:P0, b:P1}]) and
      * to reduce the number of parameters. The reusable parameters use the same vector for tracking
      * as the non-reusable to ensure uniqueness of the parameterId.
+     *
+     * If 'maxParamCount' was specified, this stops creating new parameters once that limit has been
+     * reached and returns boost::none instead.
      */
     boost::optional<InputParamId> nextReusableInputParamId(const MatchExpression* expr) {
-        // Check to see if the expression is in the 'map' already.
-        if (expr && !revertMode) {
-            auto it = std::find_if(
-                inputParamIdToExpressionMap.begin(),
-                inputParamIdToExpressionMap.end(),
-                [expr](const MatchExpression* m) -> bool { return m->equivalent(expr); });
-            if (it == inputParamIdToExpressionMap.end()) {
-                return nextInputParamId(expr);
-            }
-            return it - inputParamIdToExpressionMap.begin();
-        }
-        return boost::none;
-    }
-
-    boost::optional<InputParamId> nextInputParamId(const MatchExpression* expr) {
-        if (!revertMode) {
-            inputParamIdToExpressionMap.push_back(expr);
-            return inputParamIdToExpressionMap.size() - 1;
-        } else {
+        if (!parameterized) {
             return boost::none;
         }
+
+        if (!expr) {
+            return boost::none;
+        }
+
+        if (auto reusableParamId = inputParamIdToExpressionMap.find(expr); reusableParamId) {
+            return reusableParamId;
+        }
+
+        // Couldn't find a param id to reuse. Create a new one.
+        return nextInputParamId(expr);
     }
 
-    // Map to from assigned InputParamId to parameterised MatchExpression. Although it is called a
-    // map, it can be safely represented as a vector because in this class we control that
-    // inputParamId is an increasing sequence of integers starting from 0.
-    std::vector<const MatchExpression*> inputParamIdToExpressionMap;
+    /**
+     * Assigns a parameter ID to 'expr'. This is not only a helper for
+     * nextReusableInputParamId(); it is also called directly by visit() methods whose
+     * expressions are deemed non-shareable.
+     *
+     * If 'maxParamCount' was specified, this stops creating new parameters once that limit has
+     * been reached and returns boost::none instead.
+     */
+    boost::optional<InputParamId> nextInputParamId(const MatchExpression* expr) {
+        if (!parameterized) {
+            return boost::none;
+        }
+        if (maxParamCount && static_cast<size_t>(nextParamId) >= *maxParamCount) {
+            parameterized = false;
+            return boost::none;
+        }
 
-    // Whether instead of setting parameters on MatchExpression tree nodes, the visitor should
-    // clear them instead.
-    bool revertMode{false};
+        return inputParamIdToExpressionMap.insert(expr, nextParamId++);
+    }
+
+    // Map from assigned InputParamId to parameterized MatchExpression.
+    MatchExpressionInputParamIdContainer inputParamIdToExpressionMap{kUseMapThreshold};
+
+    // This is the maximumum number of MatchExpression parameters a single CanonicalQuery
+    // may have. A value of boost::none means unlimited.
+    boost::optional<size_t> maxParamCount;
+
+    // This is the next input parameter ID to assign. It may be initialized to a value > 0
+    // to enable a forest of match expressions to be parameterized by allowing each tree to
+    // continue parameter IDs from where the prior tree left off.
+    InputParamId nextParamId;
+
+    // This is changed to false if an attempt to parameterize ever failed (because it would
+    // exceed 'maxParamCount').
+    bool parameterized = true;
 };
 
 /**
- * An implementation of a MatchExpression visitor which assigns an optional input parameter ID to
- * each node which is eligible for auto-parameterization:
+ * An implementation of a MatchExpression visitor which assigns an optional input parameter
+ * ID to each node which is eligible for auto-parameterization:
  *  - BitsAllClearMatchExpression
  *  - BitsAllSetMatchExpression
  *  - BitsAnyClearMatchExpression
  *  - BitsAnySetMatchExpression
- *  - Comparison expressions, unless compared against MinKey, MaxKey, null or NaN value or array
+ *  - BitTestMatchExpression (two parameter IDs for the position and mask)
+ *  - Comparison expressions, unless compared against MinKey, MaxKey, null or NaN value or
+ * array
  *      - EqualityMatchExpression
  *      - GTEMatchExpression
  *      - GTMatchExpression
@@ -144,7 +289,8 @@ public:
     void visit(InternalExprLTMatchExpression* expr) final {}
     void visit(InternalExprLTEMatchExpression* expr) final {}
     void visit(InternalEqHashedKey* expr) final {
-        // Don't support parameterization of InternEqHashedKey because it is not implemented in SBE.
+        // Don't support parameterization of InternEqHashedKey because it is not implemented
+        // in SBE.
     }
     void visit(InternalSchemaAllElemMatchFromIndexMatchExpression* expr) final {}
     void visit(InternalSchemaAllowedPropertiesMatchExpression* expr) final {}

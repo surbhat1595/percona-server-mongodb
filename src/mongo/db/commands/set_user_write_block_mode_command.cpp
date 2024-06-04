@@ -141,7 +141,7 @@ public:
             return false;
         }
         NamespaceString ns() const override {
-            return NamespaceString();
+            return NamespaceString::kEmpty;
         }
         void doCheckAuthorization(OperationContext* opCtx) const override {
             uassert(ErrorCodes::Unauthorized,
@@ -155,6 +155,6 @@ public:
         Mutex _mutex = MONGO_MAKE_LATCH("SetUserWriteBlockModeCommand::_mutex");
     };
 };
-MONGO_REGISTER_COMMAND(SetUserWriteBlockModeCommand);
+MONGO_REGISTER_COMMAND(SetUserWriteBlockModeCommand).forShard();
 }  // namespace
 }  // namespace mongo

@@ -40,7 +40,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <ctime>
 #include <fmt/format.h>
@@ -470,8 +469,9 @@ OpTime ReplicationCoordinatorImpl::_getCurrentCommittedSnapshotOpTime_inlock() c
     return _currentCommittedSnapshot.value_or(OpTime());
 }
 
-void ReplicationCoordinatorImpl::appendDiagnosticBSON(mongo::BSONObjBuilder* bob) {
-    BSONObjBuilder eBuilder(bob->subobjStart("executor"));
+void ReplicationCoordinatorImpl::appendDiagnosticBSON(mongo::BSONObjBuilder* bob,
+                                                      StringData leafName) {
+    BSONObjBuilder eBuilder(bob->subobjStart(leafName));
     _replExecutor->appendDiagnosticBSON(&eBuilder);
 }
 
@@ -498,7 +498,6 @@ bool ReplicationCoordinatorImpl::_startLoadLocalConfig(
     StatusWith<LastVote> lastVote = _externalState->loadLocalLastVoteDocument(opCtx);
     if (!lastVote.isOK()) {
         LOGV2_FATAL_NOTRACE(40367,
-                            "Error loading local voted for document at startup; {error}",
                             "Error loading local voted for document at startup",
                             "error"_attr = lastVote.getStatus());
     }
@@ -521,7 +520,6 @@ bool ReplicationCoordinatorImpl::_startLoadLocalConfig(
             fassert(40424, initializingStatus);
         } else {
             LOGV2_FATAL_NOTRACE(40428,
-                                "Error loading local Rollback ID document at startup; {error}",
                                 "Error loading local Rollback ID document at startup",
                                 "error"_attr = status);
         }
@@ -534,7 +532,6 @@ bool ReplicationCoordinatorImpl::_startLoadLocalConfig(
     StatusWith<BSONObj> cfg = _externalState->loadLocalConfigDocument(opCtx);
     if (!cfg.isOK()) {
         LOGV2(21313,
-              "Did not find local replica set configuration document at startup;  {error}",
               "Did not find local replica set configuration document at startup",
               "error"_attr = cfg.getStatus());
         return true;
@@ -554,17 +551,12 @@ bool ReplicationCoordinatorImpl::_startLoadLocalConfig(
                 "documentation here: "
                 "https://docs.mongodb.com/manual/tutorial/resync-replica-set-member/");
         }
-        LOGV2_FATAL_NOTRACE(
-            28545,
-            "Locally stored replica set configuration does not parse; See "
-            "https://www.mongodb.com/docs/manual/reference/method/rs.reconfig/ "
-            "for more information about replica set reconfig. Got \"{error}\" while parsing "
-            "{config}",
-            "Locally stored replica set configuration does not parse; See "
-            "https://www.mongodb.com/docs/manual/reference/method/rs.reconfig/ "
-            "for more information about replica set reconfig",
-            "error"_attr = status,
-            "config"_attr = cfg.getValue());
+        LOGV2_FATAL_NOTRACE(28545,
+                            "Locally stored replica set configuration does not parse; See "
+                            "https://www.mongodb.com/docs/manual/reference/method/rs.reconfig/ "
+                            "for more information about replica set reconfig",
+                            "error"_attr = status,
+                            "config"_attr = cfg.getValue());
     }
 
     LOGV2(4280504, "Cleaning up any partially applied oplog batches & reading last op from oplog");
@@ -628,7 +620,6 @@ void ReplicationCoordinatorImpl::_finishLoadLocalConfig(
     if (!cbData.status.isOK()) {
         LOGV2_DEBUG(21314,
                     1,
-                    "Loading local replica set configuration failed due to {error}",
                     "Loading local replica set configuration failed",
                     "error"_attr = cbData.status);
         return;
@@ -642,19 +633,12 @@ void ReplicationCoordinatorImpl::_finishLoadLocalConfig(
             myIndex.getStatus() == ErrorCodes::InvalidReplicaSetConfig) {
             LOGV2_WARNING(21405,
                           "Locally stored replica set configuration does not have a valid entry "
-                          "for the current node; waiting for reconfig or remote heartbeat; Got "
-                          "\"{error}\" while validating {localConfig}",
-                          "Locally stored replica set configuration does not have a valid entry "
                           "for the current node; waiting for reconfig or remote heartbeat",
                           "error"_attr = myIndex.getStatus(),
                           "localConfig"_attr = localConfig.toBSON());
             myIndex = StatusWith<int>(-1);
         } else {
             LOGV2_ERROR(21415,
-                        "Locally stored replica set configuration is invalid; See "
-                        "https://www.mongodb.com/docs/manual/reference/method/rs.reconfig/ "
-                        "for more information about replica set reconfig. Got \"{error}\" "
-                        "while validating {localConfig}",
                         "Locally stored replica set configuration is invalid; See "
                         "https://www.mongodb.com/docs/manual/reference/method/rs.reconfig/ "
                         "for more information about replica set reconfig",
@@ -664,11 +648,12 @@ void ReplicationCoordinatorImpl::_finishLoadLocalConfig(
         }
     }
 
-    if (!_settings.isServerless() && localConfig.getReplSetName() != _settings.ourSetName()) {
+    // ourSetName can be empty if user didn't pass in --replSet. In that case, just use the local
+    // config.
+    if (!_settings.isServerless() && !_settings.shouldAutoInitiate() &&
+        localConfig.getReplSetName() != _settings.ourSetName()) {
+
         LOGV2_WARNING(21406,
-                      "Local replica set configuration document reports set name of "
-                      "{localConfigSetName}, but command line reports "
-                      "{commandLineSetName}; waiting for reconfig or remote heartbeat",
                       "Local replica set configuration document set name differs from command line "
                       "set name; waiting for reconfig or remote heartbeat",
                       "localConfigSetName"_attr = localConfig.getReplSetName(),
@@ -685,8 +670,6 @@ void ReplicationCoordinatorImpl::_finishLoadLocalConfig(
         if (!lastOpTimeAndWallTimeStatus.isOK()) {
             LOGV2_WARNING(
                 21407,
-                "Failed to load timestamp and/or wall clock time of most recently applied "
-                "operation: {error}",
                 "Failed to load timestamp and/or wall clock time of most recently applied "
                 "operation",
                 "error"_attr = lastOpTimeAndWallTimeStatus.getStatus());
@@ -758,7 +741,7 @@ void ReplicationCoordinatorImpl::_finishLoadLocalConfig(
         // Step down is impossible, so we don't need to wait for the returned event.
         _updateTerm_inlock(term);
     }
-    LOGV2(21320, "Current term is now {term}", "Updated term", "term"_attr = term);
+    LOGV2(21320, "Updated term", "term"_attr = term);
     ReplicaSetAwareServiceRegistry::get(_service).onSetCurrentConfig(opCtx.get());
     _performPostMemberStateUpdateAction(action);
 
@@ -823,10 +806,7 @@ void ReplicationCoordinatorImpl::_startInitialSync(
         LOGV2(4280514, "Initial sync started");
     } catch (const DBException& e) {
         auto status = e.toStatus();
-        LOGV2(21327,
-              "Initial Sync failed to start: {error}",
-              "Initial Sync failed to start",
-              "error"_attr = status);
+        LOGV2(21327, "Initial Sync failed to start", "error"_attr = status);
         if (ErrorCodes::CallbackCanceled == status || ErrorCodes::isShutdownError(status.code())) {
             return;
         }
@@ -839,22 +819,18 @@ void ReplicationCoordinatorImpl::_initialSyncerCompletionFunction(
     {
         stdx::unique_lock<Latch> lock(_mutex);
         if (opTimeStatus == ErrorCodes::CallbackCanceled) {
-            LOGV2(21324,
-                  "Initial Sync has been cancelled: {error}",
-                  "Initial Sync has been cancelled",
-                  "error"_attr = opTimeStatus.getStatus());
+            LOGV2(
+                21324, "Initial Sync has been cancelled", "error"_attr = opTimeStatus.getStatus());
             return;
         } else if (!opTimeStatus.isOK()) {
             if (_inShutdown || _inTerminalShutdown) {
                 LOGV2(21325,
-                      "Initial Sync failed during shutdown due to {error}",
                       "Initial Sync failed during shutdown",
                       "error"_attr = opTimeStatus.getStatus());
                 return;
             } else if (opTimeStatus == ErrorCodes::InvalidSyncSource &&
                        _initialSyncer->getInitialSyncMethod() != "logical") {
                 LOGV2(5780600,
-                      "Falling back to logical initial sync: {error}",
                       "Falling back to logical initial sync",
                       "error"_attr = opTimeStatus.getStatus());
                 lock.unlock();
@@ -913,10 +889,14 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx) 
 
     // Check to see if we need to do an initial sync.
     const auto lastOpTime = getMyLastAppliedOpTime();
-    const auto needsInitialSync =
-        lastOpTime.isNull() || _externalState->isInitialSyncFlagSet(opCtx);
+    const auto isInitialSyncFlagSet = _externalState->isInitialSyncFlagSet(opCtx);
+
+    const auto needsInitialSync = lastOpTime.isNull() || isInitialSyncFlagSet;
     if (!needsInitialSync) {
-        LOGV2(4280512, "No initial sync required. Attempting to begin steady replication");
+        LOGV2(4280512,
+              "No initial sync required. Attempting to begin steady replication",
+              "lastOpTime"_attr = lastOpTime,
+              "isInitialSyncFlagSet"_attr = isInitialSyncFlagSet);
         // Start steady replication, since we already have data.
         // ReplSetConfig has been installed, so it's either in STARTUP2 or REMOVED.
         auto memberState = getMemberState();
@@ -929,7 +909,10 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx) 
         return;
     }
 
-    LOGV2(4280513, "Initial sync required. Attempting to start initial sync...");
+    LOGV2(4280513,
+          "Initial sync required. Attempting to start initial sync...",
+          "lastOpTime"_attr = lastOpTime,
+          "isInitialSyncFlagSet"_attr = isInitialSyncFlagSet);
     // Do initial sync.
     if (!_externalState->getTaskExecutor()) {
         LOGV2(21323, "Not running initial sync during test");
@@ -943,6 +926,11 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx) 
 
 void ReplicationCoordinatorImpl::startup(OperationContext* opCtx,
                                          StorageEngine::LastShutdownState lastShutdownState) {
+    // Initialize the cached pointer to the oplog collection. We want to do this even as standalone
+    // so accesses to the cached pointer in replica set nodes started as standalone still work
+    // (mainly AutoGetOplog). In case the oplog doesn't exist, it is just initialized to null.
+    acquireOplogCollectionForLogging(opCtx);
+
     if (!_settings.isReplSet()) {
         if (ReplSettings::shouldRecoverFromOplogAsStandalone()) {
             uassert(ErrorCodes::InvalidOptions,
@@ -982,9 +970,6 @@ void ReplicationCoordinatorImpl::startup(OperationContext* opCtx,
 
     invariant(_settings.isReplSet());
     invariant(!ReplSettings::shouldRecoverFromOplogAsStandalone());
-
-    // Initialize the cached pointer to the oplog collection.
-    acquireOplogCollectionForLogging(opCtx);
 
     _storage->initializeStorageControlsForReplication(opCtx->getServiceContext());
 
@@ -1050,10 +1035,7 @@ void ReplicationCoordinatorImpl::enterTerminalShutdown() {
     if (initialSyncerCopy) {
         const auto status = initialSyncerCopy->shutdown();
         if (!status.isOK()) {
-            LOGV2_WARNING(6137700,
-                          "InitialSyncer shutdown failed: {error}",
-                          "InitialSyncer shutdown failed",
-                          "error"_attr = status);
+            LOGV2_WARNING(6137700, "InitialSyncer shutdown failed", "error"_attr = status);
         }
     }
 }
@@ -1085,7 +1067,8 @@ bool ReplicationCoordinatorImpl::inQuiesceMode() const {
     return _inQuiesceMode;
 }
 
-void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
+void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx,
+                                          BSONObjBuilder* shutdownTimeElapsedBuilder) {
     // Shutdown must:
     // * prevent new threads from blocking in awaitReplication
     // * wake up all existing threads blocking in awaitReplication
@@ -1095,8 +1078,14 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
         return;
     }
 
-    LOGV2(5074000, "Shutting down the replica set aware services.");
-    ReplicaSetAwareServiceRegistry::get(_service).onShutdown();
+    {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Shut down the replica set aware services",
+                                                shutdownTimeElapsedBuilder);
+        LOGV2(5074000, "Shutting down the replica set aware services.");
+        ReplicaSetAwareServiceRegistry::get(_service).onShutdown();
+    }
 
     LOGV2(21328, "Shutting down replication subsystems");
 
@@ -1114,11 +1103,19 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
         }
         if (_rsConfigState == kConfigStartingUp) {
             // Wait until we are finished starting up, so that we can cleanly shut everything down.
+            auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+                opCtx->getServiceContext()->getFastClockSource(),
+                "Wait for startup to complete before shutting down",
+                shutdownTimeElapsedBuilder);
             lk.unlock();
             _waitForStartUpComplete();
             lk.lock();
             fassert(18823, _rsConfigState != kConfigStartingUp);
         }
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Shut down replication",
+                                                shutdownTimeElapsedBuilder);
         _replicationWaiterList.setErrorAll_inlock(
             {ErrorCodes::ShutdownInProgress, "Replication is being shut down"});
         _opTimeWaiterList.setErrorAll_inlock(
@@ -1129,14 +1126,15 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
 
     // joining the replication executor is blocking so it must be run outside of the mutex
     if (initialSyncerCopy) {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Shut down initial syncer",
+                                                shutdownTimeElapsedBuilder);
         LOGV2_DEBUG(
             21329, 1, "ReplicationCoordinatorImpl::shutdown calling InitialSyncer::shutdown");
         const auto status = initialSyncerCopy->shutdown();
         if (!status.isOK()) {
-            LOGV2_WARNING(21410,
-                          "InitialSyncer shutdown failed: {error}",
-                          "InitialSyncer shutdown failed",
-                          "error"_attr = status);
+            LOGV2_WARNING(21410, "InitialSyncer shutdown failed", "error"_attr = status);
         }
         initialSyncerCopy->join();
         initialSyncerCopy.reset();
@@ -1145,6 +1143,10 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
     {
         stdx::unique_lock<Latch> lk(_mutex);
         if (_finishedDrainingPromise) {
+            auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+                opCtx->getServiceContext()->getFastClockSource(),
+                "Cancel wait for drain mode",
+                shutdownTimeElapsedBuilder);
             _finishedDrainingPromise->setError(
                 {ErrorCodes::InterruptedAtShutdown,
                  "Cancelling wait for drain mode to complete due to shutdown"});
@@ -1152,9 +1154,27 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
         }
     }
 
-    _externalState->shutdown(opCtx);
-    _replExecutor->shutdown();
-    _replExecutor->join();
+    {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Shut down external state",
+                                                shutdownTimeElapsedBuilder);
+        _externalState->shutdown(opCtx);
+    }
+    {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Shut down replication executor",
+                                                shutdownTimeElapsedBuilder);
+        _replExecutor->shutdown();
+    }
+    {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Join replication executor",
+                                                shutdownTimeElapsedBuilder);
+        _replExecutor->join();
+    }
 }
 
 const ReplSettings& ReplicationCoordinatorImpl::getSettings() const {
@@ -1740,8 +1760,6 @@ Status ReplicationCoordinatorImpl::_waitUntilOpTime(OperationContext* opCtx,
 
             LOGV2_DEBUG(21333,
                         3,
-                        "waitUntilOpTime: OpID {OpID} is waiting for OpTime "
-                        "{targetOpTime} until {deadline}",
                         "waitUntilOpTime is waiting for OpTime",
                         "OpID"_attr = opCtx->getOpID(),
                         "targetOpTime"_attr = targetOpTime,
@@ -1790,8 +1808,6 @@ Status ReplicationCoordinatorImpl::waitUntilMajorityOpTime(mongo::OperationConte
 
     LOGV2_DEBUG(21334,
                 1,
-                "waitUntilOpTime: waiting for optime:{targetOpTime} to be in a snapshot -- current "
-                "snapshot: {currentCommittedSnapshotOpTime}",
                 "waitUntilOpTime: waiting for target OpTime to be in a snapshot",
                 "targetOpTime"_attr = targetOpTime,
                 "currentCommittedSnapshotOpTime"_attr =
@@ -1799,7 +1815,6 @@ Status ReplicationCoordinatorImpl::waitUntilMajorityOpTime(mongo::OperationConte
 
     LOGV2_DEBUG(21335,
                 3,
-                "waitUntilOpTime: waiting for a new snapshot until {deadline}",
                 "waitUntilOpTime: waiting for a new snapshot",
                 "deadline"_attr = deadline.value_or(opCtx->getDeadline()));
 
@@ -1827,7 +1842,6 @@ Status ReplicationCoordinatorImpl::waitUntilMajorityOpTime(mongo::OperationConte
         // exists.
         LOGV2_DEBUG(21336,
                     3,
-                    "Got notified of new snapshot: {currentCommittedSnapshot}",
                     "Got notified of new snapshot",
                     "currentCommittedSnapshot"_attr = _currentCommittedSnapshot->toString());
     }
@@ -2057,8 +2071,6 @@ bool ReplicationCoordinatorImpl::_doneWaitingForReplication_inlock(
                 LOGV2_DEBUG(
                     21337,
                     1,
-                    "Required snapshot optime: {opTime} is not yet part of the current "
-                    "'committed' snapshot: {currentCommittedSnapshotOpTime}",
                     "Required snapshot optime is not yet part of the current 'committed' snapshot",
                     "opTime"_attr = opTime,
                     "currentCommittedSnapshotOpTime"_attr = _currentCommittedSnapshot);
@@ -2075,11 +2087,6 @@ bool ReplicationCoordinatorImpl::_doneWaitingForReplication_inlock(
                 LOGV2_DEBUG(
                     21338,
                     1,
-                    "Unable to satisfy the requested majority write concern at "
-                    "'committed' optime {opTime}. There are still drop pending collections "
-                    "(earliest drop optime: {earliestDropOpTime}) that have to be removed from "
-                    "storage before we can "
-                    "satisfy the write concern {writeConcern}",
                     "Unable to satisfy the requested majority write concern at 'committed' optime. "
                     "There are still drop pending collections that have to be removed from storage "
                     "before we can satisfy the write concern",
@@ -2158,8 +2165,6 @@ ReplicationCoordinator::StatusAndDuration ReplicationCoordinatorImpl::awaitRepli
     if (TestingProctor::instance().isEnabled() && !status.isOK()) {
         stdx::lock_guard lock(_mutex);
         LOGV2(21339,
-              "Replication failed for write concern: {writeConcern}, waiting for optime: {opTime}, "
-              "opID: {opID}, all_durable: {allDurable}, progress: {progress}",
               "Replication failed for write concern",
               "status"_attr = redact(status),
               "writeConcern"_attr = writeConcern.toBSON(),
@@ -2168,7 +2173,7 @@ ReplicationCoordinator::StatusAndDuration ReplicationCoordinatorImpl::awaitRepli
               "allDurable"_attr = _storage->getAllDurableTimestamp(_service),
               "progress"_attr = _getReplicationProgress(lock));
     }
-    return {std::move(status), duration_cast<Milliseconds>(timer.elapsed())};
+    return {status, duration_cast<Milliseconds>(timer.elapsed())};
 }
 
 SharedSemiFuture<void> ReplicationCoordinatorImpl::awaitReplicationAsyncNoWTimeout(
@@ -2324,10 +2329,7 @@ void ReplicationCoordinatorImpl::updateAndLogStateTransitionMetrics(
     bob.appendNumber("userOpsKilled", userOpsKilled.get());
     bob.appendNumber("userOpsRunning", userOpsRunning.get());
 
-    LOGV2(21340,
-          "State transition ops metrics: {metrics}",
-          "State transition ops metrics",
-          "metrics"_attr = bob.obj());
+    LOGV2(21340, "State transition ops metrics", "metrics"_attr = bob.obj());
 }
 
 long long ReplicationCoordinatorImpl::_calculateRemainingQuiesceTimeMillis() const {
@@ -2497,8 +2499,6 @@ std::shared_ptr<const HelloResponse> ReplicationCoordinatorImpl::awaitHelloRespo
     // Wait for a topology change with timeout set to deadline.
     LOGV2_DEBUG(21342,
                 1,
-                "Waiting for a hello response from a topology change or until deadline: "
-                "{deadline}. Current TopologyVersion counter is {currentTopologyVersionCounter}",
                 "Waiting for a hello response from a topology change or until deadline",
                 "deadline"_attr = deadline.value(),
                 "currentTopologyVersionCounter"_attr = topologyVersion.getCounter());
@@ -2713,7 +2713,7 @@ ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown::AutoGetRstlForStepUpSt
         printAllThreadStacksBlocking();
 #endif
 
-        fassertFailedNoTrace(7152000);
+        fassertFailed(7152000);
     });
     callReplCoordExit.dismiss();
 };
@@ -2729,7 +2729,8 @@ void ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown::_startKillOpThrea
 }
 
 void ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown::_killOpThreadFn() {
-    Client::initThread("RstlKillOpThread");
+    Client::initThread("RstlKillOpThread",
+                       getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
     invariant(!cc().isFromUserConnection());
 
@@ -3031,8 +3032,7 @@ void ReplicationCoordinatorImpl::_performElectionHandoff() {
     auto target = _rsConfig.getMemberAt(candidateIndex).getHostAndPort();
     executor::RemoteCommandRequest request(
         target, DatabaseName::kAdmin, BSON("replSetStepUp" << 1 << "skipDryRun" << true), nullptr);
-    LOGV2(
-        21347, "Handing off election to {target}", "Handing off election", "target"_attr = target);
+    LOGV2(21347, "Handing off election", "target"_attr = target);
 
     auto callbackHandleSW = _replExecutor->scheduleRemoteCommand(
         request, [target](const executor::TaskExecutor::RemoteCommandCallbackArgs& callbackData) {
@@ -3041,14 +3041,11 @@ void ReplicationCoordinatorImpl::_performElectionHandoff() {
             if (status.isOK()) {
                 LOGV2_DEBUG(21348,
                             1,
-                            "replSetStepUp request to {target} succeeded with response -- "
-                            "{response}",
                             "replSetStepUp request succeeded",
                             "target"_attr = target,
                             "response"_attr = callbackData.response.data);
             } else {
                 LOGV2(21349,
-                      "replSetStepUp request to {target} failed due to {error}",
                       "replSetStepUp request failed",
                       "target"_attr = target,
                       "error"_attr = status);
@@ -3058,8 +3055,6 @@ void ReplicationCoordinatorImpl::_performElectionHandoff() {
     auto callbackHandleStatus = callbackHandleSW.getStatus();
     if (!callbackHandleStatus.isOK()) {
         LOGV2_ERROR(21417,
-                    "Failed to schedule ReplSetStepUp request to {target} for election handoff: "
-                    "{error}",
                     "Failed to schedule replSetStepUp request for election handoff",
                     "target"_attr = target,
                     "error"_attr = callbackHandleStatus);
@@ -3560,8 +3555,6 @@ Status ReplicationCoordinatorImpl::setMaintenanceMode(OperationContext* opCtx, b
     int curMaintenanceCalls = _topCoord->getMaintenanceCount();
     if (activate) {
         LOGV2(21350,
-              "going into maintenance mode with {otherMaintenanceModeTasksInProgress} "
-              "other maintenance mode tasks in progress",
               "Going into maintenance mode",
               "otherMaintenanceModeTasksInProgress"_attr = curMaintenanceCalls);
         _topCoord->adjustMaintenanceCountBy(1);
@@ -3571,8 +3564,6 @@ Status ReplicationCoordinatorImpl::setMaintenanceMode(OperationContext* opCtx, b
         _topCoord->adjustMaintenanceCountBy(-1);
 
         LOGV2(21351,
-              "leaving maintenance mode ({otherMaintenanceModeTasksOngoing} other maintenance mode "
-              "tasks ongoing)",
               "Leaving maintenance mode",
               "otherMaintenanceModeTasksOngoing"_attr = curMaintenanceCalls - 1);
     } else {
@@ -3638,7 +3629,6 @@ Status ReplicationCoordinatorImpl::processReplSetReconfig(OperationContext* opCt
                                                           const ReplSetReconfigArgs& args,
                                                           BSONObjBuilder* resultObj) {
     LOGV2(21352,
-          "replSetReconfig admin command received from client; new config: {newConfig}",
           "replSetReconfig admin command received from client",
           "newConfig"_attr = args.newConfigObj);
 
@@ -3657,7 +3647,6 @@ Status ReplicationCoordinatorImpl::processReplSetReconfig(OperationContext* opCt
         } catch (const DBException& e) {
             auto status = e.toStatus();
             LOGV2_ERROR(21418,
-                        "replSetReconfig got {error} while parsing {newConfig}",
                         "replSetReconfig error parsing new config",
                         "error"_attr = status,
                         "newConfig"_attr = args.newConfigObj);
@@ -3780,10 +3769,8 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
                           "Cannot run replSetReconfig because the node is currently updating "
                           "its configuration");
         default:
-            LOGV2_FATAL(18914,
-                        "Unexpected _rsConfigState {_rsConfigState}",
-                        "Unexpected _rsConfigState",
-                        "_rsConfigState"_attr = int(_rsConfigState));
+            LOGV2_FATAL(
+                18914, "Unexpected _rsConfigState", "_rsConfigState"_attr = int(_rsConfigState));
     }
 
     LOGV2(6015313, "Replication config state is Steady, starting reconfig");
@@ -3832,9 +3819,6 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
         if (!leavingForceConfig && !isInitialReconfig &&
             !_doneWaitingForReplication_inlock(configOplogCommitmentOpTime, oplogWriteConcern)) {
             LOGV2(51816,
-                  "Oplog config commitment condition failed to be satisfied. The last committed "
-                  "optime in the previous config ({configOplogCommitmentOpTime}) is not committed "
-                  "in current config",
                   "Oplog config commitment condition failed to be satisfied. The last committed "
                   "optime in the previous config is not committed in current config",
                   "configOplogCommitmentOpTime"_attr = configOplogCommitmentOpTime);
@@ -3967,7 +3951,6 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
         validateConfigForReconfig(oldConfig, newConfig, force, allowSplitHorizonIP);
     if (!validateStatus.isOK()) {
         LOGV2_ERROR(21420,
-                    "replSetReconfig got {error} while validating {newConfig}",
                     "replSetReconfig error while validating new config",
                     "error"_attr = validateStatus,
                     "newConfig"_attr = newConfigObj,
@@ -4035,7 +4018,6 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
     }
 
     LOGV2(21353,
-          "replSetReconfig config object with {numMembers} members parses ok",
           "replSetReconfig config object parses ok",
           "numMembers"_attr = newConfig.getNumMembers());
 
@@ -4044,10 +4026,7 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
         status =
             checkQuorumForReconfig(_replExecutor.get(), newConfig, myIndex, _topCoord->getTerm());
         if (!status.isOK()) {
-            LOGV2_ERROR(21421,
-                        "replSetReconfig failed; {error}",
-                        "replSetReconfig failed",
-                        "error"_attr = status);
+            LOGV2_ERROR(21421, "replSetReconfig failed", "error"_attr = status);
             return status;
         }
     }
@@ -4070,10 +4049,8 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
             newConfig.toBSON(),
             !force && _readWriteAbility->canAcceptNonLocalWrites(opCtx) /* writeOplog */);
         if (!status.isOK()) {
-            LOGV2_ERROR(21422,
-                        "replSetReconfig failed to store config document; {error}",
-                        "replSetReconfig failed to store config document",
-                        "error"_attr = status);
+            LOGV2_ERROR(
+                21422, "replSetReconfig failed to store config document", "error"_attr = status);
             return status;
         }
     }
@@ -4108,8 +4085,6 @@ void ReplicationCoordinatorImpl::_finishReplSetReconfig(OperationContext* opCtx,
     // "kConfigReconfiguring" which prevents new elections from happening.
     if (electionFinishedEvent) {
         LOGV2(21354,
-              "Waiting for election to complete before finishing reconfig to config with "
-              "{configVersionAndTerm}",
               "Waiting for election to complete before finishing reconfig",
               "configVersionAndTerm"_attr = newConfig.getConfigVersionAndTerm());
         // Wait for the election to complete and the node's Role to be set to follower.
@@ -4419,15 +4394,19 @@ Status ReplicationCoordinatorImpl::processReplSetInitiate(OperationContext* opCt
     } catch (const DBException& e) {
         Status status = e.toStatus();
         LOGV2_ERROR(21423,
-                    "replSet initiate got {error} while parsing {config}",
                     "replSetInitiate error while parsing config",
                     "error"_attr = status,
                     "config"_attr = configObj);
         return Status(ErrorCodes::InvalidReplicaSetConfig, status.reason());
     }
 
+    if (_settings.shouldAutoInitiate() && newConfig.getReplSetName().empty()) {
+        auto overrideConfig = newConfig.getMutable();
+        overrideConfig.setReplSetName(UUID::gen().toString());
+        newConfig = ReplSetConfig(std::move(overrideConfig));
+    }
     // The setname is not provided as a command line argument in serverless mode.
-    if (!_settings.isServerless() && newConfig.getReplSetName() != _settings.ourSetName()) {
+    else if (!_settings.isServerless() && newConfig.getReplSetName() != _settings.ourSetName()) {
         static constexpr char errmsg[] =
             "Rejecting initiate with a set name that differs from command line set name";
         LOGV2_ERROR(21424,
@@ -4444,7 +4423,6 @@ Status ReplicationCoordinatorImpl::processReplSetInitiate(OperationContext* opCt
         validateConfigForInitiate(_externalState.get(), newConfig, opCtx->getServiceContext());
     if (!myIndex.isOK()) {
         LOGV2_ERROR(21425,
-                    "replSet initiate got {error} while validating {config}",
                     "replSetInitiate error while validating config",
                     "error"_attr = myIndex.getStatus(),
                     "config"_attr = configObj);
@@ -4452,7 +4430,6 @@ Status ReplicationCoordinatorImpl::processReplSetInitiate(OperationContext* opCt
     }
 
     LOGV2(21357,
-          "replSetInitiate config object with {numMembers} members parses ok",
           "replSetInitiate config object parses ok",
           "numMembers"_attr = newConfig.getNumMembers());
 
@@ -4462,17 +4439,13 @@ Status ReplicationCoordinatorImpl::processReplSetInitiate(OperationContext* opCt
         _replExecutor.get(), newConfig, myIndex.getValue(), OpTime::kInitialTerm);
 
     if (!status.isOK()) {
-        LOGV2_ERROR(21426,
-                    "replSetInitiate failed; {error}",
-                    "replSetInitiate failed",
-                    "error"_attr = status);
+        LOGV2_ERROR(21426, "replSetInitiate failed", "error"_attr = status);
         return status;
     }
 
     status = _externalState->initializeReplSetStorage(opCtx, newConfig.toBSON());
     if (!status.isOK()) {
         LOGV2_ERROR(21427,
-                    "replSetInitiate failed to store config document or create the oplog; {error}",
                     "replSetInitiate failed to store config document or create the oplog",
                     "error"_attr = status);
         return status;
@@ -4760,7 +4733,6 @@ ReplicationCoordinatorImpl::_updateMemberStateFromTopologyCoordinator(WithLock l
     }
 
     LOGV2(21358,
-          "transition to {newState} from {oldState}",
           "Replica set state transition",
           "newState"_attr = newState,
           "oldState"_attr = _memberState);
@@ -4805,7 +4777,6 @@ void ReplicationCoordinatorImpl::_performPostMemberStateUpdateAction(
             break;
         default:
             LOGV2_FATAL(26010,
-                        "Unknown post member state update action {action}",
                         "Unknown post member state update action",
                         "action"_attr = static_cast<int>(action));
     }
@@ -4936,8 +4907,6 @@ void ReplicationCoordinatorImpl::CatchupState::signalHeartbeatUpdate_inlock() {
     const auto myLastApplied = _repl->_getMyLastAppliedOpTime_inlock();
     if (*targetOpTime <= myLastApplied) {
         LOGV2(21364,
-              "Caught up to the latest optime known via heartbeats after becoming primary. Target "
-              "optime: {targetOpTime}. My Last Applied: {myLastApplied}",
               "Caught up to the latest optime known via heartbeats after becoming primary",
               "targetOpTime"_attr = *targetOpTime,
               "myLastApplied"_attr = myLastApplied);
@@ -4956,15 +4925,11 @@ void ReplicationCoordinatorImpl::CatchupState::signalHeartbeatUpdate_inlock() {
 
     ReplicationMetrics::get(getGlobalServiceContext()).setTargetCatchupOpTime(_targetOpTime);
 
-    LOGV2(21365,
-          "Heartbeats updated catchup target optime to {targetOpTime}",
-          "Heartbeats updated catchup target optime",
-          "targetOpTime"_attr = _targetOpTime);
+    LOGV2(21365, "Heartbeats updated catchup target optime", "targetOpTime"_attr = _targetOpTime);
     LOGV2(21366, "Latest known optime per replica set member");
     auto opTimesPerMember = _repl->_topCoord->latestKnownOpTimeSinceHeartbeatRestartPerMember();
     for (auto&& pair : opTimesPerMember) {
         LOGV2(21367,
-              "Member ID: {memberId}, latest known optime: {latestKnownOpTime}",
               "Latest known optime",
               "memberId"_attr = pair.first,
               "latestKnownOpTime"_attr = (pair.second ? (*pair.second).toString() : "unknown"));
@@ -4985,8 +4950,6 @@ void ReplicationCoordinatorImpl::CatchupState::signalHeartbeatUpdate_inlock() {
         const auto myLastApplied = _repl->_getMyLastAppliedOpTime_inlock();
         if (_targetOpTime <= myLastApplied) {
             LOGV2(21368,
-                  "Caught up to the latest known optime successfully after becoming primary. "
-                  "Target optime: {targetOpTime}. My Last Applied: {myLastApplied}",
                   "Caught up to the latest known optime successfully after becoming primary",
                   "targetOpTime"_attr = _targetOpTime,
                   "myLastApplied"_attr = myLastApplied);
@@ -5175,14 +5138,10 @@ ReplicationCoordinatorImpl::_setCurrentRSConfig(WithLock lk,
     // If the SplitHorizon has changed, reply to all waiting hellos with an error.
     _errorOnPromisesIfHorizonChanged(lk, opCtx, oldConfig, newConfig, _selfIndex, myIndex);
 
-    LOGV2(21392,
-          "New replica set config in use: {config}",
-          "New replica set config in use",
-          "config"_attr = _rsConfig.toBSON());
+    LOGV2(21392, "New replica set config in use", "config"_attr = _rsConfig.toBSON());
     _selfIndex = myIndex;
     if (_selfIndex >= 0) {
         LOGV2(21393,
-              "This node is {hostAndPort} in the config",
               "Found self in config",
               "hostAndPort"_attr = _rsConfig.getMemberAt(_selfIndex).getHostAndPort());
     } else {
@@ -5441,8 +5400,6 @@ void ReplicationCoordinatorImpl::resetLastOpTimesFromOplog(OperationContext* opC
     if (!lastOpTimeAndWallTimeStatus.getStatus().isOK()) {
         LOGV2_WARNING(21412,
                       "Failed to load timestamp and/or wall clock time of most recently applied "
-                      "operation; {error}",
-                      "Failed to load timestamp and/or wall clock time of most recently applied "
                       "operation",
                       "error"_attr = lastOpTimeAndWallTimeStatus.getStatus());
     } else {
@@ -5648,11 +5605,8 @@ void ReplicationCoordinatorImpl::_setStableTimestampForStorage(WithLock lk) {
     }
 
     // Set the stable timestamp and update the committed snapshot.
-    LOGV2_DEBUG(21396,
-                2,
-                "Setting replication's stable optime to {stableOpTime}",
-                "Setting replication's stable optime",
-                "stableOpTime"_attr = stableOpTime);
+    LOGV2_DEBUG(
+        21396, 2, "Setting replication's stable optime", "stableOpTime"_attr = stableOpTime);
 
     // As arbiters aren't data bearing nodes, the all durable timestamp does not get advanced. To
     // advance the all durable timestamp when setting the stable timestamp we use 'force=true'.
@@ -5709,8 +5663,6 @@ void ReplicationCoordinatorImpl::finishRecoveryIfEligible(OperationContext* opCt
         LOGV2_DEBUG(21397,
                     2,
                     "We cannot transition to SECONDARY state since we are not currently in "
-                    "RECOVERING state. Current state: {currentState}",
-                    "We cannot transition to SECONDARY state since we are not currently in "
                     "RECOVERING state",
                     "currentState"_attr = state.toString());
         return;
@@ -5730,9 +5682,6 @@ void ReplicationCoordinatorImpl::finishRecoveryIfEligible(OperationContext* opCt
     if (lastApplied < minValid) {
         LOGV2_DEBUG(21399,
                     2,
-                    "We cannot transition to SECONDARY state because our 'lastApplied' optime"
-                    " is less than the 'minValid' optime. minValid optime: {minValid}, lastApplied "
-                    "optime: {lastApplied}",
                     "We cannot transition to SECONDARY state because our 'lastApplied' optime"
                     " is less than the 'minValid' optime",
                     "minValid"_attr = minValid,
@@ -5760,8 +5709,6 @@ void ReplicationCoordinatorImpl::finishRecoveryIfEligible(OperationContext* opCt
     auto status = setFollowerMode(MemberState::RS_SECONDARY);
     if (!status.isOK()) {
         LOGV2_WARNING(21413,
-                      "Failed to transition into {targetState}. Current "
-                      "state: {currentState} {error}",
                       "Failed to perform replica set state transition",
                       "targetState"_attr = MemberState(MemberState::RS_SECONDARY),
                       "currentState"_attr = getMemberState(),
@@ -5965,7 +5912,13 @@ Status ReplicationCoordinatorImpl::processHeartbeatV1(const ReplSetHeartbeatArgs
     stdx::lock_guard<Latch> lk(_mutex);
 
     std::string replSetName = [&]() {
-        if (!_settings.isServerless()) {
+        if (_settings.shouldAutoInitiate()) {
+            // ourSetName is empty if this was in auto initiate mode.
+            uassert(8001600,
+                    "Auto bootstrapped replica set not yet initialized",
+                    _rsConfig.isInitialized());
+            return _rsConfig.getReplSetName().toString();
+        } else if (!_settings.isServerless()) {
             return _settings.ourSetName();
         } else {
             if (_rsConfig.isInitialized()) {
@@ -5996,8 +5949,6 @@ Status ReplicationCoordinatorImpl::processHeartbeatV1(const ReplSetHeartbeatArgs
         // is the only reason for a remote node to send this node a heartbeat request.
         if (!senderHost.empty() && _seedList.insert(senderHost).second) {
             LOGV2(21400,
-                  "Scheduling heartbeat to fetch a new config from: {senderHost} since we are not "
-                  "a member of our current config.",
                   "Scheduling heartbeat to fetch a new config since we are not "
                   "a member of our current config",
                   "senderHost"_attr = senderHost);
@@ -6141,7 +6092,6 @@ EventHandle ReplicationCoordinatorImpl::_updateTerm_inlock(
         }
         if (_topCoord->prepareForUnconditionalStepDown()) {
             LOGV2(21402,
-                  "stepping down from primary, because a new term has begun: {term}",
                   "Stepping down from primary, because a new term has begun",
                   "term"_attr = term);
             ReplicationMetrics::get(getServiceContext()).incrementNumStepDownsCausedByHigherTerm();

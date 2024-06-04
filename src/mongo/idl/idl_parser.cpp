@@ -168,7 +168,8 @@ std::string IDLParserContext::getElementPath(StringData fieldName) const {
 
 void IDLParserContext::throwDuplicateField(StringData fieldName) const {
     std::string path = getElementPath(fieldName);
-    uasserted(40413, str::stream() << "BSON field '" << path << "' is a duplicate field");
+    uasserted(ErrorCodes::IDLFailedToParse,
+              str::stream() << "BSON field '" << path << "' is a duplicate field");
 }
 
 void IDLParserContext::throwDuplicateField(const BSONElement& element) const {
@@ -177,7 +178,7 @@ void IDLParserContext::throwDuplicateField(const BSONElement& element) const {
 
 void IDLParserContext::throwMissingField(StringData fieldName) const {
     std::string path = getElementPath(fieldName);
-    uasserted(40414,
+    uasserted(ErrorCodes::IDLFailedToParse,
               str::stream() << "BSON field '" << path << "' is missing but a required field");
 }
 
@@ -194,20 +195,14 @@ void IDLParserContext::throwUnknownField(StringData fieldName) const {
     uasserted(40415, str::stream() << "BSON field '" << path << "' is an unknown field.");
 }
 
-void IDLParserContext::throwBadArrayFieldNumberValue(StringData value) const {
-    std::string path = getElementPath(StringData());
-    uasserted(40422,
-              str::stream() << "BSON array field '" << path << "' has an invalid value '" << value
-                            << "' for an array field name.");
-}
-
-void IDLParserContext::throwBadArrayFieldNumberSequence(std::uint32_t actualValue,
-                                                        std::uint32_t expectedValue) const {
-    std::string path = getElementPath(StringData());
-    uasserted(40423,
-              str::stream() << "BSON array field '" << path << "' has a non-sequential value '"
-                            << actualValue << "' for an array field name, expected value '"
-                            << expectedValue << "'.");
+void IDLParserContext::throwBadArrayFieldNumberSequence(StringData actual,
+                                                        StringData expected) const {
+    uasserted(
+        ErrorCodes::BadValue,
+        fmt::format("BSON array field '{}' has an invalid index field name: '{}', expected '{}'",
+                    getElementPath(StringData()),
+                    actual,
+                    expected));
 }
 
 void IDLParserContext::throwBadEnumValue(int enumValue) const {

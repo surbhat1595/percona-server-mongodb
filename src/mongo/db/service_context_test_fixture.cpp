@@ -32,6 +32,7 @@
 #include <utility>
 
 #include "mongo/client/replica_set_monitor_manager.h"
+#include "mongo/db/wire_version.h"
 #include "mongo/util/clock_source_mock.h"
 
 namespace mongo {
@@ -44,6 +45,7 @@ ScopedGlobalServiceContextForTest::ScopedGlobalServiceContextForTest() {
     }
 
     auto serviceContext = ServiceContext::make();
+    WireSpec::getWireSpec(serviceContext.get()).initialize(WireSpec::Specification{});
     setGlobalServiceContext(std::move(serviceContext));
 }
 
@@ -60,8 +62,17 @@ ServiceContext* ScopedGlobalServiceContextForTest::getServiceContext() {
     return getGlobalServiceContext();
 }
 
+Service* ScopedGlobalServiceContextForTest::getService() {
+    auto sc = getServiceContext();
+    // Just pick any service. Giving priority to Shard.
+    if (auto srv = sc->getService(ClusterRole::ShardServer))
+        return srv;
+    if (auto srv = sc->getService(ClusterRole::RouterServer))
+        return srv;
+    MONGO_UNREACHABLE;
+}
 
-ServiceContextTest::ServiceContextTest() : _threadClient(getServiceContext()) {}
+ServiceContextTest::ServiceContextTest() : _threadClient{getService()} {}
 
 ServiceContextTest::~ServiceContextTest() = default;
 

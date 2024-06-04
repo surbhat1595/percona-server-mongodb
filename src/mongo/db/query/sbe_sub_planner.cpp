@@ -30,7 +30,6 @@
 
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -72,6 +71,7 @@ CandidatePlans SubPlanner::plan(
         _yieldPolicy->clearRegisteredPlans();
 
         std::vector<std::pair<std::unique_ptr<PlanStage>, stage_builder::PlanStageData>> roots;
+        roots.reserve(solutions.size());
         for (auto&& solution : solutions) {
             roots.push_back(stage_builder::buildSlotBasedExecutableTree(
                 _opCtx, _collections, *cq, *solution, _yieldPolicy));
@@ -113,7 +113,7 @@ CandidatePlans SubPlanner::plan(
     auto compositeSolution = std::move(subplanSelectStat.getValue());
 
     // If some agg pipeline stages are being pushed down, extend the solution with them.
-    if (!_cq.pipeline().empty()) {
+    if (!_cq.cqPipeline().empty()) {
         compositeSolution = QueryPlanner::extendWithAggPipeline(
             _cq, std::move(compositeSolution), _queryParams.secondaryCollectionsInfo);
     }
@@ -145,7 +145,7 @@ CandidatePlans SubPlanner::planWholeQuery() const {
     // Only one possible plan. Build the stages from the solution.
     if (solutions.size() == 1) {
         // If some agg pipeline stages are being pushed down, extend the solution with them.
-        if (!_cq.pipeline().empty()) {
+        if (!_cq.cqPipeline().empty()) {
             solutions[0] = QueryPlanner::extendWithAggPipeline(
                 _cq, std::move(solutions[0]), _queryParams.secondaryCollectionsInfo);
         }
@@ -162,6 +162,7 @@ CandidatePlans SubPlanner::planWholeQuery() const {
     // Many solutions. Build a plan stage tree for each solution and create a multi planner to pick
     // the best, update the cache, and so on.
     std::vector<std::pair<std::unique_ptr<PlanStage>, stage_builder::PlanStageData>> roots;
+    roots.reserve(solutions.size());
     for (auto&& solution : solutions) {
         roots.push_back(stage_builder::buildSlotBasedExecutableTree(
             _opCtx, _collections, _cq, *solution, _yieldPolicy));

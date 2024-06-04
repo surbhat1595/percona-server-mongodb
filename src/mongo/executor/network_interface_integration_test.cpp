@@ -603,7 +603,7 @@ TEST_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadlineSooner) {
     constexpr auto requestTimeout = Milliseconds{1000};
 
     auto serviceContext = ServiceContext::make();
-    auto client = serviceContext->makeClient("NetworkClient");
+    auto client = serviceContext->getService()->makeClient("NetworkClient");
     auto opCtx = client->makeOperationContext();
 
     auto stopWatch = serviceContext->getPreciseClockSource()->makeStopWatch();
@@ -646,7 +646,7 @@ TEST_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadlineLater) {
     constexpr auto requestTimeout = Milliseconds{600};
 
     auto serviceContext = ServiceContext::make();
-    auto client = serviceContext->makeClient("NetworkClient");
+    auto client = serviceContext->getService()->makeClient("NetworkClient");
     auto opCtx = client->makeOperationContext();
 
     auto stopWatch = serviceContext->getPreciseClockSource()->makeStopWatch();
@@ -1019,7 +1019,7 @@ TEST_F(NetworkInterfaceInternalClientTest,
     auto helloHandshake = waitForHello();
 
     // Verify that the "hello" reply has the expected internalClient data.
-    auto wireSpec = WireSpec::instance().get();
+    auto wireSpec = WireSpec::getWireSpec(getGlobalServiceContext()).get();
     auto internalClientElem = helloHandshake.request["internalClient"];
     ASSERT_EQ(internalClientElem.type(), BSONType::Object);
     auto minWireVersionElem = internalClientElem.Obj()["minWireVersion"];

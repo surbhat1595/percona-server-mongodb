@@ -124,7 +124,7 @@ public:
         }
 
         NamespaceString ns() const override {
-            return NamespaceString();
+            return NamespaceString::kEmpty;
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
@@ -137,7 +137,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(SetChangeStreamStateCommand);
+MONGO_REGISTER_COMMAND(SetChangeStreamStateCommand).forShard();
 
 class GetChangeStreamStateCommand final : public TypedCommand<GetChangeStreamStateCommand> {
 public:
@@ -192,7 +192,7 @@ public:
         }
 
         NamespaceString ns() const override {
-            return NamespaceString();
+            return NamespaceString::kEmpty;
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
@@ -205,7 +205,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(GetChangeStreamStateCommand);
+MONGO_REGISTER_COMMAND(GetChangeStreamStateCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

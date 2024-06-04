@@ -27,9 +27,7 @@
  *    it in the license file.
  */
 
-
 #include <algorithm>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <fmt/format.h>
@@ -61,6 +59,7 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_component.h"
+#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/namespace_string_util.h"
@@ -98,12 +97,14 @@ bool isSupportedMergeMode(WhenMatched whenMatched, WhenNotMatched whenNotMatched
 }
 
 /**
- * Parses a $merge stage specification and resolves the target database name and collection name.
- * The $merge specification can be either a string or an object. If the target database name is not
- * explicitly specified, it will be defaulted to 'defaultDb'.
+ * Parses a $merge stage specification and resolves the target database name and collection
+ * name. The $merge specification can be either a string or an object. If the target database
+ * name is not explicitly specified, it will be defaulted to 'defaultDb'.
  */
-DocumentSourceMergeSpec parseMergeSpecAndResolveTargetNamespace(const BSONElement& spec,
-                                                                const DatabaseName& defaultDb) {
+DocumentSourceMergeSpec parseMergeSpecAndResolveTargetNamespace(
+    const BSONElement& spec,
+    const DatabaseName& defaultDb,
+    const SerializationContext& sc = SerializationContext::stateDefault()) {
     NamespaceString targetNss;
     DocumentSourceMergeSpec mergeSpec;
 
@@ -115,16 +116,17 @@ DocumentSourceMergeSpec parseMergeSpecAndResolveTargetNamespace(const BSONElemen
         targetNss = NamespaceStringUtil::deserialize(defaultDb, spec.valueStringData());
     } else {
         mergeSpec = DocumentSourceMergeSpec::parse(
-            IDLParserContext(kStageName, false /* apiStrict */, defaultDb.tenantId()),
+            IDLParserContext(kStageName, false /* apiStrict */, defaultDb.tenantId(), sc),
             spec.embeddedObject());
         targetNss = mergeSpec.getTargetNss();
         if (targetNss.coll().empty()) {
-            // If the $merge spec is an object, the target namespace can be specified as a string
-            // on an object value of the 'into' field. In case it was a string, we want to use the
-            // same semantics as above, that is, treat it as a collection name. This is different
-            // from the NamespaceString semantics which treats it as a database name. So, if the
-            // target namespace collection is empty, we'll use the default database name as a target
-            // database, and the provided namespace value as a collection name.
+            // If the $merge spec is an object, the target namespace can be specified as a
+            // string on an object value of the 'into' field. In case it was a string, we want
+            // to use the same semantics as above, that is, treat it as a collection name. This
+            // is different from the NamespaceString semantics which treats it as a database
+            // name. So, if the target namespace collection is empty, we'll use the default
+            // database name as a target database, and the provided namespace value as a
+            // collection name.
             targetNss = NamespaceStringUtil::deserialize(
                 defaultDb, targetNss.serializeWithoutTenantPrefix_UNSAFE());
         } else if (targetNss.dbSize() == 0) {
@@ -215,15 +217,14 @@ DocumentSourceMerge::DocumentSourceMerge(NamespaceString outputNs,
                                          boost::optional<std::vector<BSONObj>> pipeline,
                                          std::set<FieldPath> mergeOnFields,
                                          boost::optional<ChunkVersion> collectionPlacementVersion)
-    : DocumentSourceWriter(kStageName.rawData(), outputNs, expCtx) {
-    _mergeProcessor.emplace(MergeProcessor(std::move(outputNs),
-                                           expCtx,
-                                           whenMatched,
-                                           whenNotMatched,
-                                           std::move(letVariables),
-                                           std::move(pipeline),
-                                           std::move(mergeOnFields),
-                                           std::move(collectionPlacementVersion)));
+    : DocumentSourceWriter(kStageName.rawData(), outputNs, expCtx), _outputNs(std::move(outputNs)) {
+    _mergeProcessor.emplace(expCtx,
+                            whenMatched,
+                            whenNotMatched,
+                            std::move(letVariables),
+                            std::move(pipeline),
+                            std::move(mergeOnFields),
+                            std::move(collectionPlacementVersion));
 }
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceMerge::create(
@@ -297,7 +298,8 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceMerge::createFromBson(
             "{} only supports a string or object argument, not {}"_format(kStageName, spec.type()),
             spec.type() == BSONType::String || spec.type() == BSONType::Object);
 
-    auto mergeSpec = parseMergeSpecAndResolveTargetNamespace(spec, expCtx->ns.dbName());
+    auto mergeSpec = parseMergeSpecAndResolveTargetNamespace(
+        spec, expCtx->ns.dbName(), expCtx->serializationCtxt);
     auto targetNss = mergeSpec.getTargetNss();
     auto whenMatched =
         mergeSpec.getWhenMatched() ? mergeSpec.getWhenMatched()->mode : kDefaultWhenMatched;
@@ -319,51 +321,36 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceMerge::createFromBson(
 }
 
 StageConstraints DocumentSourceMerge::constraints(Pipeline::SplitState pipeState) const {
-    // A $merge to an unsharded collection should merge on the primary shard to perform local
-    // writes. A $merge to a sharded collection has no requirement, since each shard can perform its
-    // own portion of the write. We use 'kAnyShard' to direct it to execute on one of the shards in
-    // case some of the writes happen to end up being local.
-    //
-    // Note that this decision is inherently racy and subject to become stale. This is okay because
-    // either choice will work correctly, we are simply applying a heuristic optimization.
-    return {StreamType::kStreaming,
-            PositionRequirement::kLast,
-            pExpCtx->inMongos &&
-                    pExpCtx->mongoProcessInterface->isSharded(pExpCtx->opCtx, getOutputNs())
-                ? HostTypeRequirement::kAnyShard
-                : HostTypeRequirement::kPrimaryShard,
-            DiskUseRequirement::kWritesPersistentData,
-            FacetRequirement::kNotAllowed,
-            TransactionRequirement::kNotAllowed,
-            LookupRequirement::kNotAllowed,
-            UnionRequirement::kNotAllowed};
+    StageConstraints result{StreamType::kStreaming,
+                            PositionRequirement::kLast,
+                            HostTypeRequirement::kNone,
+                            DiskUseRequirement::kWritesPersistentData,
+                            FacetRequirement::kNotAllowed,
+                            TransactionRequirement::kNotAllowed,
+                            LookupRequirement::kNotAllowed,
+                            UnionRequirement::kNotAllowed};
+    if (pipeState == Pipeline::SplitState::kSplitForMerge) {
+        result.mergeShardId = _getMergeShardId();
+    }
+    return result;
 }
 
 boost::optional<DocumentSource::DistributedPlanLogic> DocumentSourceMerge::distributedPlanLogic() {
-    // It should always be faster to avoid splitting the pipeline if the output collection is
-    // sharded. If we avoid splitting the pipeline then each shard can perform the writes to the
-    // target collection in parallel.
-    //
-    // Note that this decision is inherently racy and subject to become stale. This is okay because
-    // either choice will work correctly, we are simply applying a heuristic optimization.
-    if (pExpCtx->mongoProcessInterface->isSharded(pExpCtx->opCtx, getOutputNs())) {
-        return boost::none;
-    }
-    return DocumentSourceWriter::distributedPlanLogic();
+    return _getMergeShardId() ? DocumentSourceWriter::distributedPlanLogic() : boost::none;
 }
 
 Value DocumentSourceMerge::serialize(const SerializationOptions& opts) const {
     DocumentSourceMergeSpec spec;
     spec.setTargetNss(getOutputNs());
+    const auto& letVariables = _mergeProcessor->getLetVariables();
     spec.setLet([&]() -> boost::optional<BSONObj> {
-        const auto& letVariables = _mergeProcessor->getLetVariables();
         if (!letVariables) {
             return boost::none;
         }
 
         BSONObjBuilder bob;
         for (auto&& [name, expr] : *letVariables) {
-            bob << name << expr->serialize(opts);
+            bob << opts.serializeFieldPathFromString(name) << expr->serialize(opts);
         }
         return bob.obj();
     }());
@@ -378,8 +365,8 @@ Value DocumentSourceMerge::serialize(const SerializationOptions& opts) const {
             auto expCtxWithLetVariables = pExpCtx->copyWith(pExpCtx->ns);
             if (spec.getLet()) {
                 BSONObjBuilder cleanLetSpecBuilder;
-                for (auto& elt : spec.getLet().value()) {
-                    cleanLetSpecBuilder.append(elt.fieldNameStringData(), BSONObj{});
+                for (auto&& [name, expr] : *letVariables) {
+                    cleanLetSpecBuilder.append(name, BSONObj{});
                 }
                 expCtxWithLetVariables->variables.seedVariablesWithLetParameters(
                     expCtxWithLetVariables.get(), cleanLetSpecBuilder.obj());
@@ -395,7 +382,7 @@ Value DocumentSourceMerge::serialize(const SerializationOptions& opts) const {
         return mergeOnFields;
     }());
     spec.setTargetCollectionVersion(_mergeProcessor->getCollectionPlacementVersion());
-    return Value(Document{{getSourceName(), spec.toBSON()}});
+    return Value(Document{{getSourceName(), spec.toBSON(opts)}});
 }
 
 std::pair<DocumentSourceMerge::BatchObject, int> DocumentSourceMerge::makeBatchObject(
@@ -411,7 +398,7 @@ std::pair<DocumentSourceMerge::BatchObject, int> DocumentSourceMerge::makeBatchO
 void DocumentSourceMerge::flush(BatchedCommandRequest bcr, BatchedObjects batch) {
     try {
         DocumentSourceWriteBlock writeBlock(pExpCtx->opCtx);
-        _mergeProcessor->flush(std::move(bcr), std::move(batch));
+        _mergeProcessor->flush(getOutputNs(), std::move(bcr), std::move(batch));
     } catch (const ExceptionFor<ErrorCodes::ImmutableField>& ex) {
         uassertStatusOKWithContext(ex.toStatus(),
                                    "$merge failed to update the matching document, did you "
@@ -457,6 +444,24 @@ void DocumentSourceMerge::waitWhileFailPointEnabled() {
                 "Hanging aggregation due to 'hangWhileBuildingDocumentSourceMergeBatch' failpoint");
         },
         getOutputNs());
+}
+
+boost::optional<ShardId> DocumentSourceMerge::_getMergeShardId() const {
+    // If output collection resides on a single shard, we should route $merge to it to perform local
+    // writes. Note that this decision is inherently racy and subject to become stale. This is okay
+    // because either choice will work correctly, we are simply applying a heuristic optimization.
+    auto [cm, _] = uassertStatusOK(Grid::get(pExpCtx->opCtx)
+                                       ->catalogCache()
+                                       ->getCollectionRoutingInfo(pExpCtx->opCtx, getOutputNs()));
+    if (cm.hasRoutingTable()) {
+        if (cm.isUnsplittable()) {
+            return cm.getMinKeyShardIdWithSimpleCollation();
+        } else {
+            return boost::none;
+        }
+    } else {
+        return cm.dbPrimary();
+    }
 }
 
 }  // namespace mongo

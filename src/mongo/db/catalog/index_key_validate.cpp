@@ -27,6 +27,7 @@
  *    it in the license file.
  */
 
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -40,7 +41,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/numeric/conversion/converter_policies.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -72,7 +72,6 @@
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/storage/storage_options.h"
-#include "mongo/db/ttl_collection_cache.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -102,9 +101,9 @@ namespace {
 // specification.
 MONGO_FAIL_POINT_DEFINE(skipIndexCreateFieldNameValidation);
 
-// When the skipTTLIndexExpireAfterSecondsValidation failpoint is enabled,
+// When the skipTTLIndexInvalidExpireAfterSecondsValidationForCreateIndex failpoint is enabled,
 // validation for TTL index 'expireAfterSeconds' will be disabled in certain codepaths.
-MONGO_FAIL_POINT_DEFINE(skipTTLIndexExpireAfterSecondsValidation);
+MONGO_FAIL_POINT_DEFINE(skipTTLIndexInvalidExpireAfterSecondsValidationForCreateIndex);
 
 static const std::set<StringData> allowedIdIndexFieldNames = {
     IndexDescriptor::kCollationFieldName,
@@ -353,7 +352,6 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& in
     bool hasIndexNameField = false;
     bool hasNamespaceField = false;
     bool isTTLIndexWithInvalidExpireAfterSeconds = false;
-    bool isTTLIndexWithNonIntExpireAfterSeconds = false;
     bool hasVersionField = false;
     bool hasCollationField = false;
     bool hasWeightsField = false;
@@ -516,7 +514,7 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& in
             // resolving the expression against a given namespace.
             auto simpleCollator = nullptr;
             boost::intrusive_ptr<ExpressionContext> expCtx(
-                new ExpressionContext(opCtx, simpleCollator, NamespaceString()));
+                new ExpressionContext(opCtx, simpleCollator, NamespaceString::kEmpty));
 
             // Special match expression features (e.g. $jsonSchema, $expr, ...) are not allowed in a
             // partialFilterExpression on index creation.
@@ -627,15 +625,12 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& in
                     str::stream() << "The field '" << indexSpecElemFieldName
                                   << "' must be a number, but got "
                                   << typeName(indexSpecElem.type())};
-        } else if (IndexDescriptor::kExpireAfterSecondsFieldName == indexSpecElemFieldName) {
-            auto swType = validateExpireAfterSeconds(
-                indexSpecElem, ValidateExpireAfterSecondsMode::kSecondaryTTLIndex);
-            if (!swType.isOK()) {
-                isTTLIndexWithInvalidExpireAfterSeconds = true;
-            } else if (extractExpireAfterSecondsType(swType) ==
-                       TTLCollectionCache::Info::ExpireAfterSecondsType::kNonInt) {
-                isTTLIndexWithNonIntExpireAfterSeconds = true;
-            }
+        } else if (IndexDescriptor::kExpireAfterSecondsFieldName == indexSpecElemFieldName &&
+                   !validateExpireAfterSeconds(indexSpecElem,
+                                               ValidateExpireAfterSecondsMode::kSecondaryTTLIndex)
+                        .isOK() &&
+                   !skipTTLIndexInvalidExpireAfterSecondsValidationForCreateIndex.shouldFail()) {
+            isTTLIndexWithInvalidExpireAfterSeconds = true;
         } else if (IndexDescriptor::kColumnStoreCompressorFieldName == indexSpecElemFieldName) {
             if (IndexNames::findPluginName(indexSpec.getObjectField(
                     IndexDescriptor::kKeyPatternFieldName)) != IndexNames::COLUMN) {
@@ -728,27 +723,16 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& in
         modifiedSpec = modifiedSpec.removeField(IndexDescriptor::kNamespaceFieldName);
     }
 
-    if (!skipTTLIndexExpireAfterSecondsValidation.shouldFail()) {
-        if (isTTLIndexWithInvalidExpireAfterSeconds) {
-            // We create a new index specification with the 'expireAfterSeconds' field set as
-            // kExpireAfterSecondsForInactiveTTLIndex if the current value is invalid. A similar
-            // treatment is done in repairIndexSpec(). This rewrites the 'expireAfterSeconds'
-            // value to be compliant with the 'safeInt' IDL type for the listIndexes response.
-            BSONObjBuilder builder;
-            builder.appendNumber(IndexDescriptor::kExpireAfterSecondsFieldName,
-                                 durationCount<Seconds>(kExpireAfterSecondsForInactiveTTLIndex));
-            auto obj = builder.obj();
-            modifiedSpec = modifiedSpec.addField(obj.firstElement());
-        }
-
-        if (isTTLIndexWithNonIntExpireAfterSeconds) {
-            BSONObjBuilder builder;
-            builder.appendNumber(
-                IndexDescriptor::kExpireAfterSecondsFieldName,
-                indexSpec[IndexDescriptor::kExpireAfterSecondsFieldName].safeNumberInt());
-            auto obj = builder.obj();
-            modifiedSpec = modifiedSpec.addField(obj.firstElement());
-        }
+    if (isTTLIndexWithInvalidExpireAfterSeconds) {
+        // We create a new index specification with the 'expireAfterSeconds' field set as
+        // kExpireAfterSecondsForInactiveTTLIndex if the current value is invalid. A similar
+        // treatment is done in repairIndexSpec(). This rewrites the 'expireAfterSeconds'
+        // value to be compliant with the 'safeInt' IDL type for the listIndexes response.
+        BSONObjBuilder builder;
+        builder.appendNumber(IndexDescriptor::kExpireAfterSecondsFieldName,
+                             durationCount<Seconds>(kExpireAfterSecondsForInactiveTTLIndex));
+        auto obj = builder.obj();
+        modifiedSpec = modifiedSpec.addField(obj.firstElement());
     }
 
     if (!hasVersionField) {
@@ -919,17 +903,17 @@ Status validateExpireAfterSeconds(std::int64_t expireAfterSeconds,
                               << "' option cannot be less than 0"};
     }
 
-    const std::string tooLargeErr = str::stream()
-        << "TTL index '" << IndexDescriptor::kExpireAfterSecondsFieldName
-        << "' option must be within an acceptable range, try a lower number";
-
     if (mode == ValidateExpireAfterSecondsMode::kSecondaryTTLIndex) {
         // Relax epoch restriction on TTL indexes. This allows us to export and import existing
         // TTL indexes with large values or NaN for the 'expireAfterSeconds' field.
         // Additionally, the 'expireAfterSeconds' for TTL indexes is defined as safeInt (int32_t)
         // in the IDL for listIndexes and collMod. See list_indexes.idl and coll_mod.idl.
         if (expireAfterSeconds > std::numeric_limits<std::int32_t>::max()) {
-            return {ErrorCodes::InvalidOptions, tooLargeErr};
+            return {ErrorCodes::InvalidOptions,
+                    str::stream() << "TTL index '" << IndexDescriptor::kExpireAfterSecondsFieldName
+                                  << "' option cannot be greater than max int32_t ("
+                                  << std::numeric_limits<std::int32_t>::max()
+                                  << ") for secondary indexes, found " << expireAfterSeconds};
         }
     } else {
         // Clustered collections with TTL.
@@ -942,18 +926,26 @@ Status validateExpireAfterSeconds(std::int64_t expireAfterSeconds,
         // of time series collections, we cluster the collection by an OID value, where the
         // timestamp portion is only a 32-bit unsigned integer offset of seconds since the epoch.
         if (expireAfterSeconds > std::numeric_limits<std::int64_t>::max() / 1000) {
-            return {ErrorCodes::InvalidOptions, tooLargeErr};
+            return {ErrorCodes::InvalidOptions,
+                    str::stream() << "TTL index '" << IndexDescriptor::kExpireAfterSecondsFieldName
+                                  << "' option cannot overflow int64_t when cast as milliseconds, "
+                                  << "found " << expireAfterSeconds};
         }
         auto expireAfterMillis = duration_cast<Milliseconds>(Seconds(expireAfterSeconds));
         if (expireAfterMillis > Date_t::now().toDurationSinceEpoch()) {
-            return {ErrorCodes::InvalidOptions, tooLargeErr};
+            return {ErrorCodes::InvalidOptions,
+                    str::stream() << "TTL index '" << IndexDescriptor::kExpireAfterSecondsFieldName
+                                  << "' option cannot exceed time since last epoch ("
+                                  << duration_cast<Seconds>(
+                                         Milliseconds(Date_t::now().toDurationSinceEpoch()))
+                                  << ") for time-series collections, found " << expireAfterSeconds};
         }
     }
     return Status::OK();
 }
 
-StatusWith<TTLCollectionCache::Info::ExpireAfterSecondsType> validateExpireAfterSeconds(
-    BSONElement expireAfterSeconds, ValidateExpireAfterSecondsMode mode) {
+Status validateExpireAfterSeconds(BSONElement expireAfterSeconds,
+                                  ValidateExpireAfterSecondsMode mode) {
     if (!expireAfterSeconds.isNumber()) {
         return {ErrorCodes::CannotCreateIndex,
                 str::stream() << "TTL index '" << IndexDescriptor::kExpireAfterSecondsFieldName
@@ -981,15 +973,7 @@ StatusWith<TTLCollectionCache::Info::ExpireAfterSecondsType> validateExpireAfter
         return {ErrorCodes::CannotCreateIndex, str::stream() << status.reason()};
     }
 
-    return expireAfterSeconds.type() == BSONType::NumberInt
-        ? TTLCollectionCache::Info::ExpireAfterSecondsType::kInt
-        : TTLCollectionCache::Info::ExpireAfterSecondsType::kNonInt;
-}
-
-TTLCollectionCache::Info::ExpireAfterSecondsType extractExpireAfterSecondsType(
-    const StatusWith<TTLCollectionCache::Info::ExpireAfterSecondsType>& swType) {
-    return swType.isOK() ? swType.getValue()
-                         : TTLCollectionCache::Info::ExpireAfterSecondsType::kInvalid;
+    return Status::OK();
 }
 
 bool isIndexTTL(const BSONObj& indexSpec) {
@@ -1001,11 +985,11 @@ Status validateIndexSpecTTL(const BSONObj& indexSpec) {
         return Status::OK();
     }
 
-    if (auto swType =
+    if (auto status =
             validateExpireAfterSeconds(indexSpec[IndexDescriptor::kExpireAfterSecondsFieldName],
                                        ValidateExpireAfterSecondsMode::kSecondaryTTLIndex);
-        !swType.isOK()) {
-        return swType.getStatus().withContext(str::stream() << ". Index spec: " << indexSpec);
+        !status.isOK()) {
+        return status.withContext(str::stream() << ". Index spec: " << indexSpec);
     }
 
     const BSONObj key = indexSpec["key"].Obj();

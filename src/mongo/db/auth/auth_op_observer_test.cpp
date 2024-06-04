@@ -33,7 +33,6 @@
 #include <set>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -161,10 +160,11 @@ TEST_F(AuthOpObserverTest, MultipleAboutToDeleteAndOnDelete) {
     WriteUnitOfWork wunit(opCtx.get());
     AutoGetCollection autoColl(opCtx.get(), nss, MODE_IX);
     OplogDeleteEntryArgs args;
+    auto doc = BSON("_id" << 1);
+    opObserver.aboutToDelete(opCtx.get(), *autoColl, doc, &args);
+    opObserver.onDelete(opCtx.get(), *autoColl, {}, doc, args);
     opObserver.aboutToDelete(opCtx.get(), *autoColl, BSON("_id" << 1), &args);
-    opObserver.onDelete(opCtx.get(), *autoColl, {}, args);
-    opObserver.aboutToDelete(opCtx.get(), *autoColl, BSON("_id" << 1), &args);
-    opObserver.onDelete(opCtx.get(), *autoColl, {}, args);
+    opObserver.onDelete(opCtx.get(), *autoColl, {}, doc, args);
 }
 
 DEATH_TEST_F(AuthOpObserverTest, AboutToDeleteMustPreceedOnDelete, "invariant") {
@@ -173,7 +173,8 @@ DEATH_TEST_F(AuthOpObserverTest, AboutToDeleteMustPreceedOnDelete, "invariant") 
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", "coll");
     AutoGetCollection autoColl(opCtx.get(), nss, MODE_IX);
     OplogDeleteEntryArgs args;
-    opObserver.onDelete(opCtx.get(), *autoColl, {}, args);
+    BSONObj doc;
+    opObserver.onDelete(opCtx.get(), *autoColl, {}, doc, args);
 }
 
 DEATH_TEST_F(AuthOpObserverTest, EachOnDeleteRequiresAboutToDelete, "invariant") {
@@ -181,9 +182,10 @@ DEATH_TEST_F(AuthOpObserverTest, EachOnDeleteRequiresAboutToDelete, "invariant")
     auto opCtx = cc().makeOperationContext();
     AutoGetCollection autoColl(opCtx.get(), _nss, MODE_IX);
     OplogDeleteEntryArgs args;
-    opObserver.aboutToDelete(opCtx.get(), *autoColl, {}, &args);
-    opObserver.onDelete(opCtx.get(), *autoColl, {}, args);
-    opObserver.onDelete(opCtx.get(), *autoColl, {}, args);
+    BSONObj doc;
+    opObserver.aboutToDelete(opCtx.get(), *autoColl, doc, &args);
+    opObserver.onDelete(opCtx.get(), *autoColl, {}, doc, args);
+    opObserver.onDelete(opCtx.get(), *autoColl, {}, doc, args);
 }
 
 }  // namespace

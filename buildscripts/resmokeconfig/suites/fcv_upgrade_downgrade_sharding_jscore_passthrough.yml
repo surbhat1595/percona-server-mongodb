@@ -71,11 +71,6 @@ selector:
   - src/mongo/db/modules/*/jstests/fle/fle_use_cases.js
   - src/mongo/db/modules/*/jstests/fle/fle_drivers_integration.js
 
-  # The test uses a resumeToken from previous calls so FCV change will make the token invalid and fail.
-  - jstests/core/resume_query_from_non_existent_record.js
-  - jstests/core/resume_query.js
-  - jstests/core/find_with_resume_after_param.js
-
   # Expected failure due to command count being not precise due to potential retry of index build.
   - jstests/core/operation_latency_histogram.js
 
@@ -110,6 +105,10 @@ selector:
   # TODO (SERVER-77910): Find out why spill_to_disk.js fails to spill to disk after FCV down.
   - jstests/aggregation/spill_to_disk.js
 
+  # TODO SERVER-80490: The test below requires a precise lock count that can get modified by concurrent
+  # setFCV operations. The exclusion can be removed once the linked ticket is fixed.
+  - jstests/core/top.js
+
   exclude_with_any_tags:
   - assumes_standalone_mongod
   - assumes_against_mongod_not_mongos
@@ -122,10 +121,15 @@ selector:
   - featureFlagFLE2CleanupCommand
   # TODO SERVER-71537: Remove Feature Flag for PM-412.
   - featureFlagQuerySettings
+  # TODO: SERVER-66393 Remove Feature Flag for PM-2919.
+  - featureFlagTimeseriesUpdatesSupport
   # Transactions are aborted upon fcv upgrade or downgrade.
   - uses_transactions
-  # Exclude tests with the latest fcv.
+  # Exclude tests that require a specific fcv.
   - requires_fcv_71
+  - requires_fcv_72
+  # Exclude tests that are not compatible with upgrade/downgrade.
+  - cannot_run_during_upgrade_downgrade
 
 executor:
   archive:
@@ -157,5 +161,3 @@ executor:
         enableTestCommands: 1
         disableTransitionFromLatestToLastContinuous: False
     num_rs_nodes_per_shard: 2
-    enable_sharding:
-    - test

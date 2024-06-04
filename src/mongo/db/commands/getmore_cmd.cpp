@@ -41,7 +41,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -657,8 +656,8 @@ public:
                 }
 
                 curOp->debug().queryFramework = exec->getQueryFramework();
-                curOp->debug().shouldOmitDiagnosticInformation =
-                    cursorPin->shouldOmitDiagnosticInformation();
+                curOp->setShouldOmitDiagnosticInformation_inlock(
+                    lk, cursorPin->shouldOmitDiagnosticInformation());
 
                 // Update the genericCursor stored in curOp with the new cursor stats.
                 curOp->setGenericCursor_inlock(cursorPin->toGenericCursor());
@@ -929,7 +928,7 @@ public:
         return false;
     }
 };
-MONGO_REGISTER_COMMAND(GetMoreCmd);
+MONGO_REGISTER_COMMAND(GetMoreCmd).forShard();
 
 }  // namespace
 }  // namespace mongo

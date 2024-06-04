@@ -40,7 +40,6 @@
 #include <type_traits>
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/data_cursor.h"
 #include "mongo/base/data_view.h"
@@ -647,7 +646,6 @@ void BuilderBase<BufferT>::_appendAllElementsForIndexing(const BSONObj& obj,
     BSONObjIterator it(obj);
     while (auto elem = it.next()) {
         appendBSONElement(elem);
-        dassert(elem.fieldNameSize() < 3);  // fieldNameSize includes the NUL
     }
     appendDiscriminator(discriminator);
 }

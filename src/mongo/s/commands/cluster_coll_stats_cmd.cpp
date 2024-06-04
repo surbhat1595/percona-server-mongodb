@@ -37,7 +37,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -374,7 +373,6 @@ public:
                     }
                 } else {
                     LOGV2(22749,
-                          "Unexpected field for mongos collStats: {fieldName}",
                           "Unexpected field for mongos collStats",
                           "fieldName"_attr = e.fieldName());
                 }
@@ -383,7 +381,8 @@ public:
             shardStats.append(shardId.toString(), scaleIndividualShardStatistics(res, scale));
         }
 
-        result.append("ns", NamespaceStringUtil::serialize(nss));
+        result.append("ns",
+                      NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
 
         for (const auto& countEntry : counts) {
             if (fieldIsAnyOf(countEntry.first,
@@ -424,7 +423,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CollectionStats);
+MONGO_REGISTER_COMMAND(CollectionStats).forRouter();
 
 }  // namespace
 }  // namespace mongo

@@ -139,7 +139,6 @@ class _FixtureConfig(object):
         self.NO_JOURNAL = config.NO_JOURNAL
         self.STORAGE_ENGINE = config.STORAGE_ENGINE
         self.STORAGE_ENGINE_CACHE_SIZE = config.STORAGE_ENGINE_CACHE_SIZE
-        self.TRANSPORT_LAYER = config.TRANSPORT_LAYER
         self.WT_COLL_CONFIG = config.WT_COLL_CONFIG
         self.WT_ENGINE_CONFIG = config.WT_ENGINE_CONFIG
         self.WT_INDEX_CONFIG = config.WT_INDEX_CONFIG
@@ -152,3 +151,5 @@ class _FixtureConfig(object):
         self.MONGOS_SET_PARAMETERS = config.MONGOS_SET_PARAMETERS
         self.DBPATH_PREFIX = config.DBPATH_PREFIX
         self.DEFAULT_DBPATH_PREFIX = config.DEFAULT_DBPATH_PREFIX
+        self.DOCKER_COMPOSE_BUILD_IMAGES = config.DOCKER_COMPOSE_BUILD_IMAGES
+        self.NOOP_MONGO_D_S_PROCESSES = config.NOOP_MONGO_D_S_PROCESSES

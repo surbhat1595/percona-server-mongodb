@@ -30,7 +30,6 @@
 #include <memory>
 #include <mutex>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/client.h"
@@ -56,7 +55,7 @@ std::string ClusterCursorCleanupJob::name() const {
 }
 
 void ClusterCursorCleanupJob::run() {
-    ThreadClient tc(name(), getGlobalServiceContext());
+    ThreadClient tc(name(), getGlobalServiceContext()->getService());
     auto* const client = Client::getCurrent();
     auto* const manager = Grid::get(client->getServiceContext())->getCursorManager();
     invariant(manager);

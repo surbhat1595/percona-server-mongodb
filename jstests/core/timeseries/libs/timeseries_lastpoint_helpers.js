@@ -16,12 +16,16 @@ export function getEquivalentNumbers() {
 }
 
 export function verifyLastpoint({tsColl, observerColl, pipeline, precedingFilter, expectStage}) {
+    jsTestLog(`Verifying last point for indexes: ${tojson(tsColl.getIndexes())} and pipeline: ${
+        tojson(pipeline)}`);
+
     // Verify lastpoint optmization.
     const explain = tsColl.explain().aggregate(pipeline);
     expectStage({explain, precedingFilter});
 
     // Assert that the time-series aggregation results match that of the observer collection.
     const expected = observerColl.aggregate(pipeline).toArray();
+
     const actual = tsColl.aggregate(pipeline).toArray();
     assertArrayEq({actual, expected});
 }
@@ -172,15 +176,7 @@ export function expectDistinctScan({explain}) {
     assert.eq(getAggPlanStage(explain, "SORT"), null, explain);
 }
 
-export function expectCollScan({explain, precedingFilter, noSortInCursor}) {
-    if (noSortInCursor) {
-        // We need a separate sort stage.
-        assert.eq(getAggPlanStage(explain, "SORT"), null, explain);
-    } else {
-        // $sort can be pushed into the cursor layer.
-        assert.neq(getAggPlanStage(explain, "SORT"), null, explain);
-    }
-
+export function expectCollScan({explain, precedingFilter}) {
     // At the bottom, there should be a COLLSCAN.
     const collScanStage = getAggPlanStage(explain, "COLLSCAN");
     assert.neq(collScanStage, null, explain);

@@ -41,7 +41,6 @@
 #include <boost/multi_index/indexed_by.hpp>
 #include <boost/multi_index_container_fwd.hpp>
 #include <boost/operators.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/tuple/tuple.hpp>
 #include <cstddef>
 #include <functional>
@@ -49,7 +48,7 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/string_data_comparator_interface.h"
+#include "mongo/base/string_data_comparator.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/document_value/value_comparator.h"

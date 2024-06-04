@@ -12,6 +12,10 @@ esac
 
 TOOLCHAIN_ROOT=/opt/mongodbtoolchain/v4
 
+archive_fail() {
+    echo "Error: archive [${1}] not found." >&2
+}
+
 if [[ "${machine}" = "Cygwin" ]]; then
     out_dir="/cygdrive/c/setup_script_output.txt"
     desktop_dir="/cygdrive/c/Users/Administrator/Desktop"
@@ -55,10 +59,13 @@ if [[ "${machine}" = "Cygwin" ]]; then
             mkdir -p ${COREDUMP_ARCHIVE_TARGET}
             tar -xzvf ${COREDUMP_ARCHIVE} -C ${COREDUMP_ARCHIVE_TARGET}
             cp -r ${COREDUMP_ARCHIVE_TARGET}/* ${desktop_dir}
+        else
+            archive_fail "core dump"
         fi
 
         # logic for core dumps individually uploaded and gzipped
-        for filename in /cygdrive/z/data/mci/artifacts-*/dump_*.mdmp.gz;
+        filenames=$(find /cygdrive/z/data/mci/artifacts-* -name 'dump_*.mdmp.gz' -o -name 'mongod.*.mdmp.gz')
+        for filename in ${filenames[@]};
         do
             COREDUMP_ARCHIVE=$(readlink -f ${filename} 2>/dev/null)
             COREDUMP_ARCHIVE_BASENAME=$(basename ${COREDUMP_ARCHIVE})
@@ -70,6 +77,18 @@ if [[ "${machine}" = "Cygwin" ]]; then
             DECOMPRESSED_NAME=$(basename ${COREDUMP_ARCHIVE_BASENAME} .gz)
             cp ${COREDUMP_ARCHIVE_TARGET}/${DECOMPRESSED_NAME} ${desktop_dir}
         done
+
+        echo -e "\n=> Extracting Binaries and symbols to Desktop."
+        BIN_ARCHIVE=$(ls /cygdrive/z/data/mci/artifacts-*archive_dist_test*/mongo-*.zip 2>/dev/null)
+        if [[ -f $BIN_ARCHIVE ]]; then
+            BIN_ARCHIVE_PARENT=$(dirname ${BIN_ARCHIVE})
+            BIN_ARCHIVE_TARGET=${BIN_ARCHIVE_PARENT}/extracted_binaries
+            unzip -n ${BIN_ARCHIVE} -d ${BIN_ARCHIVE_TARGET}
+            cp ${BIN_ARCHIVE_TARGET}/dist-test/bin/mongo{,d,s}.pdb ${desktop_dir}
+            cp ${BIN_ARCHIVE_TARGET}/dist-test/bin/mongo{,d,s}.exe ${desktop_dir}
+        else
+            archive_fail "bin"
+        fi
 
         if [[ -z $(ls ${COREDUMP_ARCHIVE_TARGET}/dump* 2>/dev/null) ]]; then
             echo "No core dumps found."
@@ -127,10 +146,6 @@ fi' >> .bash_profile
     # As the name suggests, pretty printers. Primarily for boost::optional<T>
     git clone git@github.com:mongodb-forks/Boost-Pretty-Printer.git --branch mongodb-stable &
 
-    archive_fail() {
-        echo "Error: archive [${1}] not found." >&2
-    }
-
     # Discover and unarchive necessary files and source code. This will put mongo binaries and their
     # partner .debug files in the same `debug/bin` directory. The `bin` directory will later be symbolic
     # linked into the top-level (`debug`) directory. Shared library files and their debug symbols will
@@ -180,7 +195,15 @@ fi' >> .bash_profile
         ln -s ${SRC_DIR}/buildscripts buildscripts
 
         # Install pymongo to get the bson library for pretty-printers.
-        ${TOOLCHAIN_ROOT}/bin/pip3 install -r ${SRC_DIR}/etc/pip/dev-requirements.txt &
+        # This is copied from evergreen/functions/venv_setup.sh
+        if [ "Windows_NT" = "$OS" ]; then
+           ${TOOLCHAIN_ROOT}/bin/python3 -m pip install "poetry==1.5.1" "charset-normalizer==2.0.12"
+        else
+           ${TOOLCHAIN_ROOT}/bin/python3 -m pip install "poetry==1.5.1"
+        fi
+        pushd ${SRC_DIR}
+        ${TOOLCHAIN_ROOT}/bin/python3 -m poetry install --no-root --sync &
+        popd
     else
         archive_fail "src"
     fi
@@ -218,55 +241,12 @@ fi' >> .bash_profile
     find bin -type f -perm -o=x -exec ln -s {} . \;
 
     # This script checks a bin for the dwarf version and then generates an index if the bin does not already have an index. eu-readelf is used in place of readelf as it is much faster.
-    cat > add_index.sh <<EOF
+    cat > create_index.sh <<EOF
 #!/bin/bash
 
 set -o pipefail
 
-target_dir="\$(dirname \${1})"
-
-dwarf_version="\$($TOOLCHAIN_ROOT/bin/eu-readelf --debug-dump=info \$1 | grep --line-buffered -E '^\s+Version:' | head -1 | awk -F, '{print(\$1)}' | awk '{print(\$2)}')"
-
-if [[ \$dwarf_version == 5 ]]
-then
-    $TOOLCHAIN_ROOT/bin/gdb --batch-silent --quiet --nx --eval-command "save gdb-index -dwarf-5 \$target_dir" \$1
-    if [ -f \${1}.debug_names ]
-    then
-        $TOOLCHAIN_ROOT/bin/objcopy --dump-section .debug_str=\${1}.debug_str.new \$1
-        cat \${1}.debug_str >>\${1}.debug_str.new
-        $TOOLCHAIN_ROOT/bin/objcopy --add-section .debug_names=\${1}.debug_names --set-section-flags .debug_names=readonly --update-section .debug_str=\${1}.debug_str.new \${1} \${1}
-        rm -f \${1}.debug_names \${1}.debug_str.new \${1}.debug_str
-    fi
-
-elif [[ \$dwarf_version == 4 ]]
-then
-    $TOOLCHAIN_ROOT/bin/gdb --batch-silent --quiet --nx --eval-command "save gdb-index \$target_dir" \$1
-    if [ -f \${1}.gdb-index ]
-    then
-        $TOOLCHAIN_ROOT/bin/objcopy --add-section .gdb_index=\${1}.gdb-index --set-section-flags .gdb_index=readonly \${1} \${1}
-        rm -f \${1}.gdb-index
-    fi
-
-else
-    echo "Can't determine debug info for \$1"
-fi
-EOF
-
-    # After creating the index file in a separate debug file, the debuglink CRC
-    # is no longer value, this will simply recreate the debuglink and therefore
-    # update the CRC to match.
-    cat > recalc_debuglink.sh <<EOF
-#!/bin/bash
-
-set -o pipefail
-
-debuglink="\$($TOOLCHAIN_ROOT/bin/eu-readelf -S \$1 | grep '.gnu_debuglink')"
-
-if [ ! -z "\$debuglink" ]
-then
-    $TOOLCHAIN_ROOT/bin/objcopy --remove-section ".gnu_debuglink" \$1
-	$TOOLCHAIN_ROOT/bin/objcopy --add-gnu-debuglink "$(basename \$1).debug" \$1
-fi
+$TOOLCHAIN_ROOT/bin/gdb --batch-silent --quiet -nx --init-eval-command "set index-cache enabled on" \$1
 EOF
 
 # this script creates a symlink in the toolchain lib/debug directory which is in the
@@ -286,13 +266,12 @@ mkdir -p \$gdb_debug_dir
 ln -s \$PWD/\$1 \$gdb_debug_dir/\$gdb_debug_file
 EOF
 
-    chmod +x ./add_index.sh
-    chmod +x ./recalc_debuglink.sh
+    chmod +x ./create_index.sh
     chmod +x ./create_build_id_links.sh
     cpus=$(getconf _NPROCESSORS_ONLN)
 
-    find bin lib -type f -perm -o=x | xargs --max-args=1 --max-procs=$cpus ./add_index.sh
-    find bin lib -type f -perm -o=x | xargs --max-args=1 --max-procs=$cpus ./recalc_debuglink.sh
+    # pre-create the index to the index cache so it is available when the user goes to use gdb
+    find bin lib -type f -perm -o=x | xargs --max-args=1 --max-procs=$cpus ./create_index.sh
 
     # This script constructs symblinks based off the build-id so GDB can skip the crc check
     # normally performed during .gnu_debuglink loading.
@@ -311,6 +290,7 @@ set pagination off
 set print object on
 set print static-members off
 set print pretty on
+set index-cache enabled on
 
 python
 import sys

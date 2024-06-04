@@ -136,13 +136,15 @@ protected:
         if (hint) {
             findCommand->setHint(*hint);
         }
-        auto cq = uassertStatusOK(CanonicalQuery::canonicalize(opCtx(), std::move(findCommand)));
+        auto cq = std::make_unique<CanonicalQuery>(
+            CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
+                                 .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
 
         auto exec = uassertStatusOK(getExecutor(opCtx(),
                                                 &_coll,
                                                 std::move(cq),
                                                 nullptr /* extractAndAttachPipelineStages */,
-                                                PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                                PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                                 QueryPlannerParams::RETURN_OWNED_DATA));
 
         _source = DocumentSourceCursor::create(MultipleCollectionAccessor(_coll),
@@ -343,7 +345,7 @@ TEST_F(DocumentSourceCursorTest, TailableAwaitDataCursorShouldErrorAfterTimeout)
         return;
     }
 
-    // Make sure the collection exists, otherwise we'll default to a NO_YIELD yield policy.
+    // Make sure the collection exists, otherwise we'll default to an INTERRUPT_ONLY yield policy.
     const bool capped = true;
     const long long cappedSize = 1024;
     ASSERT_TRUE(client.createCollection(nss, cappedSize, capped));
@@ -365,8 +367,9 @@ TEST_F(DocumentSourceCursorTest, TailableAwaitDataCursorShouldErrorAfterTimeout)
     findCommand->setFilter(filter);
     query_request_helper::setTailableMode(TailableModeEnum::kTailableAndAwaitData,
                                           findCommand.get());
-    auto canonicalQuery = unittest::assertGet(
-        CanonicalQuery::canonicalize(opCtx(), std::move(findCommand), false, nullptr));
+    auto canonicalQuery = std::make_unique<CanonicalQuery>(
+        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
+                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     auto planExecutor =
         uassertStatusOK(plan_executor_factory::make(std::move(canonicalQuery),
                                                     std::move(workingSet),
@@ -390,7 +393,7 @@ TEST_F(DocumentSourceCursorTest, TailableAwaitDataCursorShouldErrorAfterTimeout)
 }
 
 TEST_F(DocumentSourceCursorTest, NonAwaitDataCursorShouldErrorAfterTimeout) {
-    // Make sure the collection exists, otherwise we'll default to a NO_YIELD yield policy.
+    // Make sure the collection exists, otherwise we'll default to an INTERRUPT_ONLY yield policy.
     ASSERT_TRUE(client.createCollection(nss));
     client.insert(nss, BSON("a" << 1));
 
@@ -407,8 +410,9 @@ TEST_F(DocumentSourceCursorTest, NonAwaitDataCursorShouldErrorAfterTimeout) {
                                                            matchExpression.get());
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
     findCommand->setFilter(filter);
-    auto canonicalQuery = unittest::assertGet(
-        CanonicalQuery::canonicalize(opCtx(), std::move(findCommand), false, nullptr));
+    auto canonicalQuery = std::make_unique<CanonicalQuery>(
+        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
+                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     auto planExecutor =
         uassertStatusOK(plan_executor_factory::make(std::move(canonicalQuery),
                                                     std::move(workingSet),
@@ -439,7 +443,7 @@ TEST_F(DocumentSourceCursorTest, TailableAwaitDataCursorShouldErrorAfterBeingKil
         return;
     }
 
-    // Make sure the collection exists, otherwise we'll default to a NO_YIELD yield policy.
+    // Make sure the collection exists, otherwise we'll default to an INTERRUPT_ONLY yield policy.
     const bool capped = true;
     const long long cappedSize = 1024;
     ASSERT_TRUE(client.createCollection(nss, cappedSize, capped));
@@ -461,8 +465,9 @@ TEST_F(DocumentSourceCursorTest, TailableAwaitDataCursorShouldErrorAfterBeingKil
     findCommand->setFilter(filter);
     query_request_helper::setTailableMode(TailableModeEnum::kTailableAndAwaitData,
                                           findCommand.get());
-    auto canonicalQuery = unittest::assertGet(
-        CanonicalQuery::canonicalize(opCtx(), std::move(findCommand), false, nullptr));
+    auto canonicalQuery = std::make_unique<CanonicalQuery>(
+        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
+                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     auto planExecutor = uassertStatusOK(
         plan_executor_factory::make(std::move(canonicalQuery),
                                     std::move(workingSet),
@@ -485,7 +490,7 @@ TEST_F(DocumentSourceCursorTest, TailableAwaitDataCursorShouldErrorAfterBeingKil
 }
 
 TEST_F(DocumentSourceCursorTest, NormalCursorShouldErrorAfterBeingKilled) {
-    // Make sure the collection exists, otherwise we'll default to a NO_YIELD yield policy.
+    // Make sure the collection exists, otherwise we'll default to an INTERRUPT_ONLY yield policy.
     ASSERT_TRUE(client.createCollection(nss));
     client.insert(nss, BSON("a" << 1));
 
@@ -502,8 +507,9 @@ TEST_F(DocumentSourceCursorTest, NormalCursorShouldErrorAfterBeingKilled) {
                                                            matchExpression.get());
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
     findCommand->setFilter(filter);
-    auto canonicalQuery = unittest::assertGet(
-        CanonicalQuery::canonicalize(opCtx(), std::move(findCommand), false, nullptr));
+    auto canonicalQuery = std::make_unique<CanonicalQuery>(
+        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
+                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     auto planExecutor = uassertStatusOK(
         plan_executor_factory::make(std::move(canonicalQuery),
                                     std::move(workingSet),

@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <mutex>
 #include <string>
@@ -84,6 +83,8 @@
 
 namespace mongo {
 namespace {
+
+MONGO_FAIL_POINT_DEFINE(hangAfterEstablishCappedSnapshot);
 
 const boost::optional<int> kDoNotChangeProfilingLevel = boost::none;
 
@@ -193,6 +194,10 @@ void establishCappedSnapshotIfNeeded(OperationContext* opCtx,
     auto coll = catalog->lookupCollectionByNamespaceOrUUID(opCtx, nsOrUUID);
     if (coll && coll->usesCappedSnapshots()) {
         CappedSnapshots::get(opCtx).establish(opCtx, coll);
+        if (MONGO_unlikely(hangAfterEstablishCappedSnapshot.shouldFail())) {
+            LOGV2(7996000, "Hanging after establishing capped snapshot");
+            hangAfterEstablishCappedSnapshot.pauseWhileSet(opCtx);
+        }
     }
 }
 
@@ -966,7 +971,7 @@ AutoGetCollectionForReadCommandBase<AutoGetCollectionForReadType>::
       _statsTracker(boost::in_place_init_if,
                     nsOrUUID.isNamespaceString(),
                     opCtx,
-                    nsOrUUID.isNamespaceString() ? nsOrUUID.nss() : NamespaceString(),
+                    nsOrUUID.isNamespaceString() ? nsOrUUID.nss() : NamespaceString::kEmpty,
                     Top::LockType::ReadLocked,
                     logMode,
                     CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nsOrUUID.dbName()),
@@ -1029,7 +1034,8 @@ OldClientContext::OldClientContext(OperationContext* opCtx,
     }
 
     stdx::lock_guard<Client> lk(*_opCtx->getClient());
-    currentOp->enter_inlock(nss,
+    currentOp->enter_inlock(nss.isTimeseriesBucketsCollection() ? nss.getTimeseriesViewNamespace()
+                                                                : nss,
                             CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(_db->name()));
 }
 
@@ -1160,6 +1166,22 @@ void assertReadConcernSupported(const CollectionPtr& coll,
                                 const repl::ReadConcernArgs& readConcernArgs,
                                 const RecoveryUnit::ReadSource& readSource) {
     const auto readConcernLevel = readConcernArgs.getLevel();
+    NamespaceString ns = coll->ns();
+
+    // Pre-images and change collection tables prune old content using untimestamped truncates. A
+    // read establishing a snapshot at a point in time (PIT) may see data inconsistent with that
+    // PIT: data that should have been present at that PIT will be missing if it was truncated,
+    // since a non-truncated operation effectively overwrites history.
+    uassert(7829600,
+            "Reading with readConcern snapshot from pre-images collection is "
+            "not supported",
+            !ns.isChangeStreamPreImagesCollection() ||
+                readConcernLevel != repl::ReadConcernLevel::kSnapshotReadConcern);
+    uassert(7829601,
+            "Reading with readConcern snapshot from change collection is "
+            "not supported",
+            !ns.isChangeCollection() ||
+                readConcernLevel != repl::ReadConcernLevel::kSnapshotReadConcern);
     // Ban snapshot reads on capped collections.
     uassert(ErrorCodes::SnapshotUnavailable,
             "Reading from capped collections with readConcern snapshot is not supported",
@@ -1172,8 +1194,7 @@ void assertReadConcernSupported(const CollectionPtr& coll,
     // they are allowed to return arbitrarily stale data. We allow kNoTimestamp and kLastApplied
     // reads because they must be from internal readers given the snapshot/majority readConcern
     // (e.g. for session checkout).
-
-    if (coll->ns() == NamespaceString::kSessionTransactionsTableNamespace &&
+    if (ns == NamespaceString::kSessionTransactionsTableNamespace &&
         readSource != RecoveryUnit::ReadSource::kNoTimestamp &&
         readSource != RecoveryUnit::ReadSource::kLastApplied &&
         ((readConcernLevel == repl::ReadConcernLevel::kSnapshotReadConcern &&

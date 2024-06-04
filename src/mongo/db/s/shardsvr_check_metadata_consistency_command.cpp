@@ -109,6 +109,8 @@
 namespace mongo {
 namespace {
 
+constexpr StringData kDDLLockReason = "checkMetadataConsistency"_sd;
+
 /*
  * Retrieve from config server the list of databases for which this shard is primary for.
  */
@@ -132,9 +134,8 @@ std::vector<DatabaseType> getDatabasesThisShardIsPrimaryFor(OperationContext* op
     }
     if (thisShardId == ShardId::kConfigServerId) {
         // Config database
-        databases.emplace_back(DatabaseName::kConfig.db().toString(),
-                               ShardId::kConfigServerId,
-                               DatabaseVersion::makeFixed());
+        databases.emplace_back(
+            DatabaseName::kConfig, ShardId::kConfigServerId, DatabaseVersion::makeFixed());
     }
     return databases;
 }
@@ -212,13 +213,15 @@ public:
             // Need to retrieve a list of databases which this shard is primary for and run the
             // command on each of them.
             for (const auto& db : getDatabasesThisShardIsPrimaryFor(opCtx)) {
-                const auto dbNss =
-                    NamespaceStringUtil::deserialize(boost::none, db.getName(), nss.coll());
+                const auto dbNss = NamespaceStringUtil::deserialize(db.getDbName(), nss.coll());
                 ScopedSetShardRole scopedSetShardRole(opCtx,
                                                       dbNss,
                                                       boost::none /* shardVersion */,
                                                       db.getVersion() /* databaseVersion */);
                 try {
+                    DDLLockManager::ScopedDatabaseDDLLock dbDDLLock{
+                        opCtx, dbNss.dbName(), kDDLLockReason, MODE_S};
+
                     auto dbCursors = _establishCursorOnParticipants(opCtx, dbNss);
                     cursors.insert(cursors.end(),
                                    std::make_move_iterator(dbCursors.begin()),
@@ -237,11 +240,23 @@ public:
         }
 
         Response _runDatabaseLevel(OperationContext* opCtx, const NamespaceString& nss) {
-            return _mergeCursors(opCtx, nss, _establishCursorOnParticipants(opCtx, nss));
+            auto dbCursors = [&]() {
+                DDLLockManager::ScopedDatabaseDDLLock dbDDLLock{
+                    opCtx, nss.dbName(), kDDLLockReason, MODE_S};
+                return _establishCursorOnParticipants(opCtx, nss);
+            }();
+
+            return _mergeCursors(opCtx, nss, std::move(dbCursors));
         }
 
         Response _runCollectionLevel(OperationContext* opCtx, const NamespaceString& nss) {
-            return _mergeCursors(opCtx, nss, _establishCursorOnParticipants(opCtx, nss));
+            auto collCursors = [&]() {
+                DDLLockManager::ScopedCollectionDDLLock dbDDLLock{
+                    opCtx, nss, kDDLLockReason, MODE_S};
+                return _establishCursorOnParticipants(opCtx, nss);
+            }();
+
+            return _mergeCursors(opCtx, nss, std::move(collCursors));
         }
 
         /*
@@ -271,10 +286,6 @@ public:
             participantRequest.setCursor(request().getCursor());
             requests.emplace_back(ShardId::kConfigServerId,
                                   appendOpKey(configOpKey, configRequest.toBSON({})));
-
-            // Take a DDL lock on the database
-            const DDLLockManager::ScopedDatabaseDDLLock dbDDLLock{
-                opCtx, nss.dbName(), "checkMetadataConsistency", MODE_S};
 
             return establishCursors(opCtx,
                                     Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),
@@ -356,7 +367,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(ShardsvrCheckMetadataConsistencyCommand);
+MONGO_REGISTER_COMMAND(ShardsvrCheckMetadataConsistencyCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

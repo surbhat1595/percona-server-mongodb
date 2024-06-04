@@ -7,6 +7,7 @@ import os
 import os.path
 import random
 import shlex
+import subprocess
 import sys
 import textwrap
 import time
@@ -33,6 +34,7 @@ from buildscripts.resmokelib.run import runtime_recorder
 from buildscripts.resmokelib.run import list_tags
 from buildscripts.resmokelib.run.runtime_recorder import compare_start_time
 from buildscripts.resmokelib.suitesconfig import get_suite_files
+from buildscripts.resmokelib.testing.docker_cluster_image_builder import build_images
 from buildscripts.resmokelib.testing.suite import Suite
 from buildscripts.resmokelib.utils.dictionary import get_dict_value
 
@@ -212,6 +214,10 @@ class TestRunner(Subcommand):
 
     def run_tests(self):
         """Run the suite and tests specified."""
+        # This code path should only execute when resmoke is running from a workload container.
+        if config.REQUIRES_WORKLOAD_CONTAINER_SETUP:
+            self._setup_workload_container()
+
         self._resmoke_logger.info("verbatim resmoke.py invocation: %s",
                                   " ".join([shlex.quote(arg) for arg in sys.argv]))
         self._check_for_mongo_processes()
@@ -254,6 +260,31 @@ class TestRunner(Subcommand):
             if suites:
                 reportfile.write(suites)
 
+    def _setup_workload_container(self):
+        """Perform any setup needed to run this resmoke suite from within the workload container."""
+        # Right now, this is only needed to setup jstestfuzz suites. We do a simple check
+        # of the 'roots' and generate jstestfuzz test files if they are expected.
+        #
+        # If this expands, we should definitely do this more intelligently.
+        # ie: run the exact bash scripts from the corresponding evergreen task defintion
+        #     so that everything is setup exactly how it would be in Evergreen.
+
+        jstestfuzz_repo_dir = "/mongo/jstestfuzz"
+        jstests_dir = "/mongo/jstests"
+        jstestfuzz_tests_dir = "/mongo/jstestfuzz/out"
+
+        # Currently, you can only run one suite at a time from within a workload container
+        suite = self._get_suites()[0]
+        if "jstestfuzz/out/*.js" in suite.get_selector_config().get("roots", []) and not any(
+                filename.endswith(".js") for filename in os.listdir(jstestfuzz_tests_dir)):
+            subprocess.run([
+                "./src/scripts/npm_run.sh",
+                "jstestfuzz",
+                "--",
+                "--jsTestsDir",
+                jstests_dir,
+            ], cwd=jstestfuzz_repo_dir, stdout=sys.stdout, stderr=sys.stderr, check=True)
+
     def _run_suite(self, suite: Suite):
         """Run a test suite."""
         self._log_suite_config(suite)
@@ -271,7 +302,7 @@ class TestRunner(Subcommand):
             print("Skipping local invocation because evergreen task id was not provided.")
             return
 
-        evg_conf = parse_evergreen_file("etc/evergreen.yml")
+        evg_conf = parse_evergreen_file(config.EVERGREEN_PROJECT_CONFIG_PATH)
 
         suite = self._get_suites()[0]
         suite_name = config.ORIGIN_SUITE or suite.get_name()
@@ -502,7 +533,12 @@ class TestRunner(Subcommand):
         execute_suite_span = trace.get_current_span()
         execute_suite_span.set_attributes(attributes=suite.get_suite_otel_attributes())
         self._shuffle_tests(suite)
-        if not suite.tests:
+
+        # During "docker image build", we are not actually running any tests, so we do not care if there are no tests.
+        # Specifically, when building the images for a jstestfuzz external SUT the jstestfuzz test files will not exist yet -- but we still want to
+        # build the external SUT infrastructure. The jstestfuzz tests will be generated at runtime via the `_setup_workload_container` method when
+        # actually running resmoke from within the workload container against the jstestfuzz external SUT.
+        if not config.DOCKER_COMPOSE_BUILD_IMAGES and not suite.tests:
             self._exec_logger.info("Skipping %s, no tests to run", suite.test_kind)
             suite.return_code = 0
             execute_suite_span.set_status(StatusCode.OK)
@@ -515,7 +551,13 @@ class TestRunner(Subcommand):
         try:
             executor = testing.executor.TestSuiteExecutor(
                 self._exec_logger, suite, archive_instance=self._archive, **executor_config)
-            executor.run()
+            # If this is a "docker compose build", we just build the docker compose images for
+            # this resmoke configuration and exit.
+            if config.DOCKER_COMPOSE_BUILD_IMAGES:
+                build_images(suite.get_name(), executor._jobs[0].fixture)
+                suite.return_code = 0
+            else:
+                executor.run()
         except (errors.UserInterrupt, errors.LoggerRuntimeConfigError) as err:
             self._exec_logger.error("Encountered an error when running %ss of suite %s: %s",
                                     suite.test_kind, suite.get_display_name(), err)
@@ -578,7 +620,7 @@ class TestRunner(Subcommand):
         except errors.InvalidMatrixSuiteError as err:
             self._resmoke_logger.error("Failed to get matrix suite: %s", str(err))
             self.exit(1)
-        except errors.ResmokeError as err:
+        except errors.TestExcludedFromSuiteError as err:
             self._resmoke_logger.error(
                 "Cannot run excluded test in suite config. Use '--force-excluded-tests' to override: %s",
                 str(err))
@@ -829,6 +871,35 @@ class RunPlugin(PluginInterface):
                   " run."))
 
         parser.add_argument(
+            "--dockerComposeBuildImages", dest="docker_compose_build_images",
+            metavar="IMAGE1,IMAGE2,IMAGE3", help=
+            ("Comma separated list of base images to build for running resmoke against an External System Under Test:"
+             " (1) `workload`: Your mongo repo with a python development environment setup."
+             " (2) `mongo-binaries`: The `mongo`, `mongod`, `mongos` binaries to run tests with."
+             " (3) `config`: The target suite's `docker-compose.yml` file, startup scripts & configuration."
+             " All three images are needed to successfully setup an External System Under Test."
+             " This will not run any tests. It will just build the images and generate"
+             " the `docker-compose.yml` configuration to set up the External System Under Test for the desired suite."
+             ))
+
+        parser.add_argument(
+            "--dockerComposeBuildEnv", dest="docker_compose_build_env",
+            choices=["local", "evergreen"], default="local", help=
+            ("Set the environment where this `--dockerComposeBuildImages` is happening -- defaults to: `local`."
+             ))
+
+        parser.add_argument(
+            "--dockerComposeTag", dest="docker_compose_tag", metavar="TAG", default="development",
+            help=("The `tag` name to use for images built during a `--dockerComposeBuildImages`."))
+
+        parser.add_argument(
+            "--externalSUT", dest="external_sut", action="store_true", default=False, help=
+            ("This option should only be used when running resmoke against an External System Under Test."
+             " The External System Under Test should be setup via the command generated after"
+             " running: `buildscripts/resmoke.py run --suite [suite_name] ... --dockerComposeBuildImages"
+             " config,workload,mongo-binaries`."))
+
+        parser.add_argument(
             "--sanityCheck", action="store_true", dest="sanity_check", help=
             "Truncate the test queue to 1 item, just in order to verify the suite is properly set up."
         )
@@ -995,38 +1066,7 @@ class RunPlugin(PluginInterface):
         parser.add_argument("--tagFile", action="append", dest="tag_files", metavar="TAG_FILES",
                             help="One or more YAML files that associate tests and tags.")
 
-        parser.add_argument(
-            "--otelTraceId",
-            dest="otel_trace_id",
-            type=str,
-            default=os.environ.get("OTEL_TRACE_ID", None),
-            help="Open Telemetry Trace ID",
-        )
-
-        parser.add_argument(
-            "--otelParentId",
-            dest="otel_parent_id",
-            type=str,
-            default=os.environ.get("OTEL_PARENT_ID", None),
-            help="Open Telemetry Parent ID",
-        )
-
-        otel_collector_endpoint = os.environ.get("OTEL_COLLECTOR_ENDPOINT", None)
-        parser.add_argument(
-            "--otelCollectorEndpoint",
-            dest="otel_collector_endpoint",
-            type=str,
-            default=otel_collector_endpoint,
-            help="Open Collector Endpoint",
-        )
-
-        parser.add_argument(
-            "--otelCollectorFile",
-            dest="otel_collector_file",
-            type=str,
-            default="" if otel_collector_endpoint else "build/metrics.json",
-            help="Open Collector Files",
-        )
+        configure_resmoke.add_otel_args(parser)
 
         mongodb_server_options = parser.add_argument_group(
             title=_MONGODB_SERVER_OPTIONS_TITLE,
@@ -1104,10 +1144,6 @@ class RunPlugin(PluginInterface):
         mongodb_server_options.add_argument(
             "--wiredTigerIndexConfigString", dest="wt_index_config", metavar="CONFIG",
             help="Sets the WiredTiger index configuration setting for all mongod's.")
-
-        mongodb_server_options.add_argument("--transportLayer", dest="transport_layer",
-                                            metavar="TRANSPORT",
-                                            help="The transport layer used by jstests")
 
         mongodb_server_options.add_argument(
             "--fuzzMongodConfigs", dest="fuzz_mongod_configs",
@@ -1259,6 +1295,10 @@ class RunPlugin(PluginInterface):
 
         evergreen_options.add_argument("--versionId", dest="version_id", metavar="VERSION_ID",
                                        help="Sets the version ID of the task.")
+
+        evergreen_options.add_argument(
+            "--projectConfigPath", dest="evg_project_config_path",
+            help="Sets the path to evergreen project configuration yaml.")
 
         benchmark_options = parser.add_argument_group(
             title=_BENCHMARK_ARGUMENT_TITLE,

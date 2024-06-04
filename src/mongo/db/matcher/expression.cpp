@@ -38,6 +38,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/matcher/expression_parameterization.h"
+#include "mongo/db/matcher/expression_simplifier.h"
 #include "mongo/db/matcher/schema/json_schema_parser.h"
 #include "mongo/db/query/tree_walker.h"
 
@@ -110,6 +111,41 @@ MatchExpression::MatchExpression(MatchType type, clonable_ptr<ErrorAnnotation> a
     : _errorAnnotation(std::move(annotation)), _matchType(type) {}
 
 // static
+std::unique_ptr<MatchExpression> MatchExpression::optimize(
+    std::unique_ptr<MatchExpression> expression, bool enableSimplification) {
+    // If the disableMatchExpressionOptimization failpoint is enabled, optimizations are skipped
+    // and the expression is left unmodified.
+    if (MONGO_unlikely(disableMatchExpressionOptimization.shouldFail())) {
+        return expression;
+    }
+
+    auto optimizer = expression->getOptimizer();
+
+    try {
+        auto optimizedExpr = optimizer(std::move(expression));
+        const bool isTriviallySimple = optimizedExpr->numChildren() == 0 ||
+            (optimizedExpr->numChildren() == 1 && optimizedExpr->getChild(0)->numChildren() == 0);
+        if (enableSimplification && !isTriviallySimple &&
+            internalQueryEnableBooleanExpressionsSimplifier.load()) {
+            ExpressionSimlifierSettings settings{
+                static_cast<size_t>(internalQueryMaximumNumberOfUniquePredicatesToSimplify.load()),
+                static_cast<size_t>(internalQueryMaximumNumberOfMintermsInSimplifier.load()),
+                internalQueryMaxSizeFactorToSimplify.load(),
+                internalQueryDoNotOpenContainedOrsInSimplifier.load(),
+                /*applyQuineMcCluskey*/ true};
+            auto simplifiedExpr = simplifyMatchExpression(optimizedExpr.get(), settings);
+            if (simplifiedExpr) {
+                return std::move(*simplifiedExpr);
+            }
+        }
+        return optimizedExpr;
+    } catch (DBException& ex) {
+        ex.addContext("Failed to optimize expression");
+        throw;
+    }
+}
+
+// static
 void MatchExpression::sortTree(MatchExpression* tree) {
     for (size_t i = 0; i < tree->numChildren(); ++i) {
         sortTree(tree->getChild(i));
@@ -122,31 +158,35 @@ void MatchExpression::sortTree(MatchExpression* tree) {
 }
 
 // static
+std::unique_ptr<MatchExpression> MatchExpression::normalize(std::unique_ptr<MatchExpression> tree,
+                                                            bool enableSimplification) {
+    tree = optimize(std::move(tree), enableSimplification);
+    sortTree(tree.get());
+    return tree;
+}
+
+// static
 std::vector<const MatchExpression*> MatchExpression::parameterize(
-    MatchExpression* tree, boost::optional<size_t> maxParameterCount, bool* parameterized) {
-    if (parameterized != nullptr) {
-        *parameterized = true;
-    }
-    MatchExpressionParameterizationVisitorContext context{};
+    MatchExpression* tree,
+    boost::optional<size_t> maxParamCount,
+    InputParamId startingParamId,
+    bool* parameterized) {
+    MatchExpressionParameterizationVisitorContext context{maxParamCount, startingParamId};
     MatchExpressionParameterizationVisitor visitor{&context};
     MatchExpressionParameterizationWalker walker{&visitor};
     tree_walker::walk<false, MatchExpression>(tree, &walker);
 
-    // If the number of parameters exceed the maxParameterCount limit, we need to clear all ParamIds
-    // that were set on expression nodes.
-    //
-    // The alternative could be to count the parameters first and then set the ParamIds, but that
-    // would result in performing always two passes, rather than just one pass in a happy case.
-    if (maxParameterCount && context.inputParamIdToExpressionMap.size() > *maxParameterCount) {
-        if (parameterized != nullptr) {
-            *parameterized = false;
-        }
-        context.revertMode = true;
-        context.inputParamIdToExpressionMap.clear();
-        tree_walker::walk<false, MatchExpression>(tree, &walker);
+    // If the caller provided a non-null 'parameterized' argument, set this output.
+    if (parameterized != nullptr) {
+        *parameterized = context.parameterized;
     }
 
     return std::move(context.inputParamIdToExpressionMap);
+}
+
+// static
+std::vector<const MatchExpression*> MatchExpression::unparameterize(MatchExpression* tree) {
+    return MatchExpression::parameterize(tree, 0);
 }
 
 std::string MatchExpression::toString() const {

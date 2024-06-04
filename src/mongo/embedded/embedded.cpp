@@ -42,7 +42,6 @@
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -104,6 +103,8 @@
 #include "mongo/platform/process_id.h"
 #include "mongo/scripting/dbdirectclient_factory.h"
 #include "mongo/transport/service_entry_point.h"
+#include "mongo/transport/transport_layer_manager_impl.h"
+#include "mongo/transport/transport_layer_mock.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/exit.h"
@@ -119,22 +120,25 @@ namespace mongo {
 namespace embedded {
 namespace {
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(WireSpec, ("EndStartupOptionHandling"))(InitializerContext*) {
-    // The featureCompatibilityVersion behavior defaults to the downgrade behavior while the
-    // in-memory version is unset.
-    WireSpec::Specification spec;
-    spec.incomingInternalClient.minWireVersion = RELEASE_2_4_AND_BEFORE;
-    spec.incomingInternalClient.maxWireVersion = LATEST_WIRE_VERSION;
-    spec.outgoing.minWireVersion = SUPPORTS_OP_MSG;
-    spec.outgoing.maxWireVersion = LATEST_WIRE_VERSION;
-    spec.isInternalClient = true;
-
-    WireSpec::instance().initialize(std::move(spec));
-}
-
 // Noop, to fulfill dependencies for other initializers.
 MONGO_INITIALIZER_GENERAL(ForkServer, ("EndStartupOptionHandling"), ("default"))
 (InitializerContext* context) {}
+
+namespace {
+ServiceContext::ConstructorActionRegisterer registerWireSpec{
+    "RegisterWireSpec", [](ServiceContext* service) {
+        // The featureCompatibilityVersion behavior defaults to the downgrade behavior while the
+        // in-memory version is unset.
+        WireSpec::Specification spec;
+        spec.incomingInternalClient.minWireVersion = RELEASE_2_4_AND_BEFORE;
+        spec.incomingInternalClient.maxWireVersion = LATEST_WIRE_VERSION;
+        spec.outgoing.minWireVersion = SUPPORTS_OP_MSG;
+        spec.outgoing.maxWireVersion = LATEST_WIRE_VERSION;
+        spec.isInternalClient = true;
+
+        WireSpec::getWireSpec(service).initialize(std::move(spec));
+    }};
+}  // namespace
 
 void setUpCatalog(ServiceContext* serviceContext) {
     DatabaseHolder::set(serviceContext, std::make_unique<DatabaseHolderImpl>());
@@ -187,7 +191,7 @@ using logv2::LogComponent;
 
 void shutdown(ServiceContext* srvContext) {
     {
-        ThreadClient tc(srvContext);
+        ThreadClient tc(srvContext->getService());
         auto const client = Client::getCurrent();
         auto const serviceContext = client->getServiceContext();
 
@@ -213,7 +217,8 @@ void shutdown(ServiceContext* srvContext) {
 
         LogicalSessionCache::set(serviceContext, nullptr);
 
-        repl::ReplicationCoordinator::get(serviceContext)->shutdown(shutdownOpCtx.get());
+        repl::ReplicationCoordinator::get(serviceContext)
+            ->shutdown(shutdownOpCtx.get(), nullptr /* shutdownTimeElapsedBuilder */);
         IndexBuildsCoordinator::get(serviceContext)->shutdown(shutdownOpCtx.get());
 
         // Global storage engine may not be started in all cases before we exit
@@ -241,7 +246,7 @@ ServiceContext* initialize(const char* yaml_config) {
     ScopeGuard giGuard([] { mongo::runGlobalDeinitializers().ignore(); });
     setGlobalServiceContext(ServiceContext::make());
 
-    Client::initThread("initandlisten");
+    Client::initThread("initandlisten", getGlobalServiceContext()->getService());
 
     // TODO(SERVER-74659): Please revisit if this thread could be made killable.
     {
@@ -253,7 +258,10 @@ ServiceContext* initialize(const char* yaml_config) {
     ScopeGuard clientGuard([] { Client::releaseCurrent(); });
 
     auto serviceContext = getGlobalServiceContext();
-    serviceContext->setServiceEntryPoint(std::make_unique<ServiceEntryPointEmbedded>());
+    serviceContext->getService()->setServiceEntryPoint(
+        std::make_unique<ServiceEntryPointEmbedded>());
+    serviceContext->setTransportLayerManager(std::make_unique<transport::TransportLayerManagerImpl>(
+        std::make_unique<transport::TransportLayerMock>()));
 
     auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
     opObserverRegistry->addObserver(

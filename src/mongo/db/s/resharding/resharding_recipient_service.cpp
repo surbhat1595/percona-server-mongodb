@@ -35,7 +35,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <mutex>
@@ -305,7 +304,8 @@ ReshardingRecipientService::RecipientStateMachine::RecipientStateMachine(
       _critSecReason(BSON("command"
                           << "resharding_recipient"
                           << "collection"
-                          << NamespaceStringUtil::serialize(_metadata.getSourceNss()))),
+                          << NamespaceStringUtil::serialize(_metadata.getSourceNss(),
+                                                            SerializationContext::stateDefault()))),
       _isAlsoDonor([&]() {
           auto myShardId = _externalState->myShardId(_serviceContext);
           return std::find_if(_donorShards.begin(),
@@ -415,6 +415,23 @@ ReshardingRecipientService::RecipientStateMachine::_notifyCoordinatorAndAwaitDec
             auto opCtx = factory.makeOperationContext(&cc());
             if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
                     serverGlobalParams.featureCompatibility)) {
+                {
+                    AutoGetCollection coll(opCtx.get(), _metadata.getTempReshardingNss(), MODE_IS);
+                    if (coll) {
+                        _recipientCtx.setTotalNumDocuments(coll->numRecords(opCtx.get()));
+                        _recipientCtx.setTotalDocumentSize(coll->dataSize(opCtx.get()));
+                        if (coll->isClustered()) {
+                            // There is an implicit 'clustered' index on a clustered collection.
+                            // Increment the total index count similar to storage stats:
+                            // https://github.com/10gen/mongo/blob/29d8030f8aa7f3bc119081007fb09777daffc591/src/mongo/db/stats/storage_stats.cpp#L249C1-L251C22
+                            _recipientCtx.setNumOfIndexes(
+                                coll->getIndexCatalog()->numIndexesTotal() + 1);
+                        } else {
+                            _recipientCtx.setNumOfIndexes(
+                                coll->getIndexCatalog()->numIndexesTotal());
+                        }
+                    }
+                }
                 _metrics->fillRecipientCtxOnCompletion(_recipientCtx);
             }
             return _updateCoordinator(opCtx.get(), executor, factory);
@@ -734,7 +751,7 @@ void ReshardingRecipientService::RecipientStateMachine::
         // resharding operation to the target cluster. The only information we have is the shard
         // key, but all other fields must either be default-valued or are ignored by C2C.
         // TODO SERVER-66671: The 'createCollRequest' should include the full contents of the
-        // CreateCollectionRequest rather than just the 'shardKey' field.
+        // ShardsvrCreateCollectionRequest rather than just the 'shardKey' field.
         const auto createCollRequest = BSON("shardKey" << _metadata.getReshardingKey().toBSON());
         notifyChangeStreamsOnShardCollection(opCtx.get(),
                                              _metadata.getTempReshardingNss(),
@@ -757,8 +774,9 @@ ReshardingRecipientService::RecipientStateMachine::_makeDataReplication(Operatio
     _externalState->refreshCatalogCache(opCtx, _metadata.getSourceNss());
 
     auto myShardId = _externalState->myShardId(opCtx->getServiceContext());
+
     auto [sourceChunkMgr, _] =
-        _externalState->getShardedCollectionRoutingInfo(opCtx, _metadata.getSourceNss());
+        _externalState->getTrackedCollectionRoutingInfo(opCtx, _metadata.getSourceNss());
 
     // The metrics map can already be pre-populated if it was recovered from disk.
     if (_applierMetricsMap.empty()) {
@@ -1056,6 +1074,26 @@ void ReshardingRecipientService::RecipientStateMachine::_cleanupReshardingCollec
             dropCollectionShardingIndexCatalog(opCtx.get(), _metadata.getTempReshardingNss());
         }
 
+        {
+            // We need to do this even though the feature flag is not on because the resharding can
+            // be aborted by setFCV downgrade, when the FCV is already in downgrading and the
+            // feature flag is treated as off.
+            auto* indexBuildsCoordinator = IndexBuildsCoordinator::get(opCtx.get());
+            std::string abortReason(str::stream()
+                                    << "Index builds on "
+                                    << _metadata.getTempReshardingNss().toStringForErrorMsg()
+                                    << " are aborted because resharding is aborted");
+            indexBuildsCoordinator->abortCollectionIndexBuilds(opCtx.get(),
+                                                               _metadata.getTempReshardingNss(),
+                                                               _metadata.getReshardingUUID(),
+                                                               abortReason);
+            // abortCollectionIndexBuilds can return on index commit/abort without waiting the index
+            // build done, so we need to explicitly wait here to make sure there is no building
+            // index after this point.
+            indexBuildsCoordinator->awaitNoIndexBuildInProgressForCollection(
+                opCtx.get(), _metadata.getReshardingUUID());
+        }
+
         resharding::data_copy::ensureCollectionDropped(
             opCtx.get(), _metadata.getTempReshardingNss(), _metadata.getReshardingUUID());
     }
@@ -1108,10 +1146,8 @@ void ReshardingRecipientService::RecipientStateMachine::_transitionToCreatingCol
     const CancelableOperationContextFactory& factory) {
     auto newRecipientCtx = _recipientCtx;
     newRecipientCtx.setState(RecipientStateEnum::kCreatingCollection);
-    _transitionState(std::move(newRecipientCtx),
-                     std::move(cloneDetails),
-                     std::move(startConfigTxnCloneTime),
-                     factory);
+    _transitionState(
+        std::move(newRecipientCtx), std::move(cloneDetails), startConfigTxnCloneTime, factory);
 }
 
 void ReshardingRecipientService::RecipientStateMachine::_transitionToCloning(
@@ -1224,7 +1260,7 @@ ExecutorFuture<void> ReshardingRecipientService::RecipientStateMachine::_updateC
     repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
     auto clientOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
     return WaitForMajorityService::get(opCtx->getServiceContext())
-        .waitUntilMajority(clientOpTime, CancellationToken::uncancelable())
+        .waitUntilMajorityForWrite(clientOpTime, CancellationToken::uncancelable())
         .thenRunOn(**executor)
         .then([this, &factory] {
             auto opCtx = factory.makeOperationContext(&cc());

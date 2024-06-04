@@ -388,6 +388,16 @@ struct WindowStats : public SpecificStats {
     void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
         visitor->visit(this);
     }
+
+    // Whether the window buffer was spilled.
+    bool usedDisk{false};
+    // The number of times that the entire window buffer was spilled.
+    long long spills{0};
+    // The number of individual records spilled to disk.
+    long long spilledRecords{0};
+    // An estimate, in bytes, of the size of the final spill table after all spill events have taken
+    // place.
+    long long spilledDataStorageSize{0};
 };
 
 /**
@@ -405,6 +415,27 @@ struct PlanStatsNumReadsVisitor : PlanStatsVisitorBase<true> {
     }
 
     size_t numReads = 0;
+};
+
+struct SearchStats : public SpecificStats {
+    std::unique_ptr<SpecificStats> clone() const final {
+        return std::make_unique<SearchStats>(*this);
+    }
+
+    uint64_t estimateObjectSizeInBytes() const final {
+        return sizeof(*this);
+    }
+
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
+    long long msWaitingForMongot{0};
+    long long batchNum{0};
 };
 
 /**

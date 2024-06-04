@@ -36,7 +36,6 @@
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
@@ -52,7 +51,7 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/db/exec/sbe/abt/named_slots.h"
+#include "mongo/db/exec/sbe/abt/slots_provider.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
 #include "mongo/db/exec/sbe/stages/exchange.h"
@@ -72,6 +71,7 @@
 #include "mongo/db/exec/sbe/stages/unique.h"
 #include "mongo/db/exec/sbe/stages/unwind.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/abt/match_expression_visitor.h"
 #include "mongo/db/query/optimizer/algebra/operator.h"
 #include "mongo/db/query/optimizer/algebra/polyvalue.h"
 #include "mongo/db/query/optimizer/comparison_op.h"
@@ -208,11 +208,20 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(
     std::unique_ptr<sbe::EExpression> lhs,
     std::unique_ptr<sbe::EExpression> rhs) {
 
+    if (op.op() == Operations::EqMember) {
+        // We directly translate BinaryOp [EqMember] to the SBE function isMember.
+        sbe::EExpression::Vector isMemberArgs;
+        isMemberArgs.push_back(std::move(lhs));
+        isMemberArgs.push_back(std::move(rhs));
+
+        return sbe::makeE<sbe::EFunction>("isMember", std::move(isMemberArgs));
+    }
+
     sbe::EPrimBinary::Op sbeOp = getEPrimBinaryOp(op.op());
 
     if (sbe::EPrimBinary::isComparisonOp(sbeOp)) {
         boost::optional<sbe::value::SlotId> collatorSlot =
-            _namedSlots.getSlotIfExists("collator"_sd);
+            _providedSlots.getSlotIfExists("collator"_sd);
         if (collatorSlot) {
             return sbe::makeE<sbe::EPrimBinary>(
                 sbeOp, std::move(lhs), std::move(rhs), sbe::makeE<sbe::EVariable>(*collatorSlot));
@@ -236,6 +245,12 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(
     std::unique_ptr<sbe::EExpression> thenBranch,
     std::unique_ptr<sbe::EExpression> elseBranch) {
     return sbe::makeE<sbe::EIf>(std::move(cond), std::move(thenBranch), std::move(elseBranch));
+}
+
+std::unique_ptr<sbe::EExpression> makeFillEmptyNull(std::unique_ptr<sbe::EExpression> e) {
+    return sbe::makeE<sbe::EPrimBinary>(sbe::EPrimBinary::fillEmpty,
+                                        std::move(e),
+                                        sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Null, 0));
 }
 
 /*
@@ -270,41 +285,40 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::handleShardFilterFuncti
             "the shard key",
             fn.nodes().size() == shardKeyPaths.size());
     std::vector<std::string> fields;
-    std::vector<sbe::MakeObjSpec::FieldInfo> fieldInfos;
+    std::vector<sbe::MakeObjSpec::FieldAction> fieldActions;
     sbe::EExpression::Vector projectValues;
 
     size_t argIdx = 0;
     for (auto& i : shardKeyPaths) {
         fields.emplace_back(PathStringify::stringify(i._path));
-        fieldInfos.emplace_back(argIdx);
+        fieldActions.emplace_back(argIdx);
         ++argIdx;
     }
 
-    // Fill out the values with SlotId variables. The specified slot will supply the values
-    // corresponding to the shard key.
+    // Each argument corresponds to one component of the shard key. This loop lowers an expression
+    // for each component. The ShardFilterer expects the BSONObj of the shard key to have values for
+    // each component of the shard key; since shard components may be missing, we must wrap the
+    // expression in a fillEmpty to coerce a missing shard key component to an explicit null. For
+    // example, if the shard key is {a: 1, b: 1} and the document is {b: 123}, the object we will
+    // generate is {a: null, b: 123}.
     for (const ABT& node : fn.nodes()) {
-        // If the child of FunctionCall['shardFilter'] is a Variable, look up the variable in the
-        // slot map.
-        if (node.is<Variable>()) {
-            projectValues.push_back(_varResolver(node.cast<Variable>()->name()));
-        } else {
-            // Otherwise, lower the expression to be referenced by the 'shardFilter' function call.
-            SBEExpressionLowering exprLower{_env, _varResolver, _namedSlots};
-            projectValues.push_back(exprLower.optimize(node));
-        }
+        projectValues.push_back(makeFillEmptyNull(this->optimize(node)));
     }
 
-    auto fieldBehavior = sbe::MakeObjSpec::FieldBehavior::kOpen;
+    auto fieldsScope = FieldListScope::kOpen;
     auto makeObjSpec =
         sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::makeObjSpec,
                                    sbe::value::bitcastFrom<sbe::MakeObjSpec*>(new sbe::MakeObjSpec(
-                                       fieldBehavior, std::move(fields), std::move(fieldInfos))));
+                                       fieldsScope, std::move(fields), std::move(fieldActions))));
 
     auto makeObjRoot = sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Nothing, 0);
+    auto hasInputFieldsExpr = sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Boolean,
+                                                         sbe::value::bitcastFrom<bool>(false));
     sbe::EExpression::Vector makeObjArgs;
-    makeObjArgs.reserve(2 + projectValues.size());
+    makeObjArgs.reserve(3 + projectValues.size());
     makeObjArgs.push_back(std::move(makeObjSpec));
     makeObjArgs.push_back(std::move(makeObjRoot));
+    makeObjArgs.push_back(std::move(hasInputFieldsExpr));
     std::move(projectValues.begin(), projectValues.end(), std::back_inserter(makeObjArgs));
 
     auto shardKeyBSONObjExpression =
@@ -312,7 +326,7 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::handleShardFilterFuncti
 
     // Prepare the FunctionCall expression.
     sbe::EExpression::Vector argVector;
-    argVector.push_back(sbe::makeE<sbe::EVariable>(_namedSlots.getSlot(kshardFiltererSlotName)));
+    argVector.push_back(sbe::makeE<sbe::EVariable>(_providedSlots.getSlot(kshardFiltererSlotName)));
     argVector.push_back(std::move(shardKeyBSONObjExpression));
     return sbe::makeE<sbe::EFunction>(name, std::move(argVector));
 }
@@ -376,6 +390,30 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(
         return handleShardFilterFunctionCall(fn, args, name);
     }
 
+    if (name == parameterFunctionName) {
+        uassert(8128700, "Invalid number of arguments to getParam()", fn.nodes().size() == 2);
+        const auto* paramId = fn.nodes().at(0).cast<Constant>();
+        auto paramIdVal = paramId->getValueInt32();
+
+        auto slotId = [&]() {
+            auto it = _inputParamToSlotMap.find(paramIdVal);
+            if (it != _inputParamToSlotMap.end()) {
+                // This input parameter id has already been tied to a particular runtime environment
+                // slot. Just return that slot to the caller. This can happen if a query planning
+                // optimization or rewrite chose to clone one of the input expressions from the
+                // user's query.
+                return it->second;
+            }
+
+            auto newSlotId = _providedSlots.registerSlot(
+                sbe::value::TypeTags::Nothing, 0, false /* owned */, &_slotIdGenerator);
+            _inputParamToSlotMap.emplace(paramIdVal, newSlotId);
+            return newSlotId;
+        }();
+
+        return sbe::makeE<sbe::EVariable>(slotId);
+    }
+
     // TODO - this is an open question how to do the name mappings.
     if (name == "$sum") {
         name = "sum";
@@ -397,7 +435,7 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(
 }
 
 sbe::value::SlotVector SBENodeLowering::convertProjectionsToSlots(
-    const SlotVarMap& slotMap, const ProjectionNameVector& projectionNames) {
+    const SlotVarMap& slotMap, const ProjectionNameVector& projectionNames) const {
     sbe::value::SlotVector result;
     for (const ProjectionName& projectionName : projectionNames) {
         auto it = slotMap.find(projectionName);
@@ -410,7 +448,9 @@ sbe::value::SlotVector SBENodeLowering::convertProjectionsToSlots(
 }
 
 sbe::value::SlotVector SBENodeLowering::convertRequiredProjectionsToSlots(
-    const SlotVarMap& slotMap, const NodeProps& props, const sbe::value::SlotVector& toExclude) {
+    const SlotVarMap& slotMap,
+    const NodeProps& props,
+    const sbe::value::SlotVector& toExclude) const {
     using namespace properties;
 
     sbe::value::SlotSet toExcludeSet;
@@ -432,6 +472,13 @@ sbe::value::SlotVector SBENodeLowering::convertRequiredProjectionsToSlots(
         }
     }
     return result;
+}
+
+PlanNodeId SBENodeLowering::getPlanNodeId(const Node& node) const {
+    if (auto it = _nodeToGroupPropsMap.find(&node); it != _nodeToGroupPropsMap.cend()) {
+        return it->second._planNodeId;
+    };
+    return 0;
 }
 
 std::unique_ptr<sbe::PlanStage> SBENodeLowering::optimize(
@@ -513,16 +560,16 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const EvaluationNode& n,
 
     sbe::SlotExprPairVector projects;
 
+    const auto& groupProps = _nodeToGroupPropsMap.at(&n);
     for (size_t idx = 0; idx < exprs.size(); ++idx) {
-        auto expr = lowerExpression(exprs[idx], slotMap, &_nodeToGroupPropsMap.at(&n));
+        auto expr = lowerExpression(exprs[idx], slotMap, &groupProps);
         auto slot = _slotIdGenerator.generate();
 
         mapProjToSlot(slotMap, names[idx], slot);
         projects.emplace_back(slot, std::move(expr));
     }
 
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
-    return sbe::makeS<sbe::ProjectStage>(std::move(input), std::move(projects), planNodeId);
+    return sbe::makeS<sbe::ProjectStage>(std::move(input), std::move(projects), getPlanNodeId(n));
 }
 
 std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const FilterNode& n,
@@ -531,7 +578,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const FilterNode& n,
                                                       const ABT& child,
                                                       const ABT& filter) {
     auto input = generateInternal(child, slotMap, ridSlot);
-    const auto groupProps = _nodeToGroupPropsMap.at(&n);
+    const auto& groupProps = _nodeToGroupPropsMap.at(&n);
     auto expr = lowerExpression(filter, slotMap, &groupProps);
     const PlanNodeId planNodeId = groupProps._planNodeId;
 
@@ -553,9 +600,8 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const LimitSkipNode& n,
                                                       const ABT& child) {
     auto input = generateInternal(child, slotMap, ridSlot);
 
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
     return sbe::makeS<sbe::LimitSkipStage>(
-        std::move(input), n.getProperty().getLimit(), n.getProperty().getSkip(), planNodeId);
+        std::move(input), n.getProperty().getLimit(), n.getProperty().getSkip(), getPlanNodeId(n));
 }
 
 std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const ExchangeNode& n,
@@ -710,8 +756,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const UniqueNode& n,
         keySlots.push_back(it->second);
     }
 
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
-    return sbe::makeS<sbe::UniqueStage>(std::move(input), std::move(keySlots), planNodeId);
+    return sbe::makeS<sbe::UniqueStage>(std::move(input), std::move(keySlots), getPlanNodeId(n));
 }
 
 std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SpoolProducerNode& n,
@@ -732,7 +777,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SpoolProducerNode& n
         vals.push_back(it->second);
     }
 
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
+    const PlanNodeId planNodeId = getPlanNodeId(n);
     switch (n.getType()) {
         case SpoolProducerType::Eager:
             return sbe::makeS<sbe::SpoolEagerProducerStage>(
@@ -759,7 +804,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SpoolConsumerNode& n
         vals.push_back(slot);
     }
 
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
+    const PlanNodeId planNodeId = getPlanNodeId(n);
     switch (n.getType()) {
         case SpoolConsumerType::Stack:
             return sbe::makeS<sbe::SpoolConsumerStage<true /*isStack*/>>(
@@ -809,8 +854,9 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const GroupByNode& n,
     sbe::AggExprVector aggs;
     aggs.reserve(exprs.size());
 
+    const auto& groupProps = _nodeToGroupPropsMap.at(&n);
     for (size_t idx = 0; idx < exprs.size(); ++idx) {
-        auto expr = lowerExpression(exprs[idx], slotMap, &_nodeToGroupPropsMap.at(&n));
+        auto expr = lowerExpression(exprs[idx], slotMap, &groupProps);
         auto slot = _slotIdGenerator.generate();
 
         mapProjToSlot(slotMap, names[idx], slot);
@@ -819,11 +865,11 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const GroupByNode& n,
         aggs.push_back({slot, sbe::AggExprPair{nullptr, std::move(expr)}});
     }
 
-    boost::optional<sbe::value::SlotId> collatorSlot = _namedSlots.getSlotIfExists("collator"_sd);
+    boost::optional<sbe::value::SlotId> collatorSlot =
+        _providedSlots.getSlotIfExists("collator"_sd);
     // Unused
     sbe::value::SlotVector seekKeysSlots;
 
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
     return sbe::makeS<sbe::HashAggStage>(std::move(input),
                                          std::move(gbs),
                                          std::move(aggs),
@@ -836,7 +882,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const GroupByNode& n,
                                          // is permitted here, we will need to generate merging
                                          // expressions during lowering.
                                          sbe::makeSlotExprPairVec() /*mergingExprs*/,
-                                         planNodeId);
+                                         groupProps._planNodeId);
 }
 
 std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const NestedLoopJoinNode& n,
@@ -878,7 +924,6 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const NestedLoopJoinNode& 
         }
     }();
 
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
     return sbe::makeS<sbe::LoopJoinStage>(std::move(outerStage),
                                           std::move(innerStage),
                                           std::move(outerProjects),
@@ -886,7 +931,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const NestedLoopJoinNode& 
                                           std::move(innerProjects),
                                           std::move(expr),
                                           joinType,
-                                          planNodeId);
+                                          getPlanNodeId(n));
 }
 
 std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const HashJoinNode& n,
@@ -912,8 +957,8 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const HashJoinNode& n,
     auto outerKeys = convertProjectionsToSlots(slotMap, n.getRightKeys());
     auto outerProjects = convertRequiredProjectionsToSlots(slotMap, rightProps, outerKeys);
 
-    boost::optional<sbe::value::SlotId> collatorSlot = _namedSlots.getSlotIfExists("collator"_sd);
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
+    boost::optional<sbe::value::SlotId> collatorSlot =
+        _providedSlots.getSlotIfExists("collator"_sd);
     return sbe::makeS<sbe::HashJoinStage>(std::move(outerStage),
                                           std::move(innerStage),
                                           std::move(outerKeys),
@@ -921,7 +966,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const HashJoinNode& n,
                                           std::move(innerKeys),
                                           std::move(innerProjects),
                                           collatorSlot,
-                                          planNodeId);
+                                          getPlanNodeId(n));
 }
 
 std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const MergeJoinNode& n,
@@ -947,7 +992,6 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const MergeJoinNode& n,
     auto innerKeys = convertProjectionsToSlots(slotMap, n.getRightKeys());
     auto innerProjects = convertRequiredProjectionsToSlots(slotMap, rightProps, innerKeys);
 
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
     return sbe::makeS<sbe::MergeJoinStage>(std::move(outerStage),
                                            std::move(innerStage),
                                            std::move(outerKeys),
@@ -955,7 +999,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const MergeJoinNode& n,
                                            std::move(innerKeys),
                                            std::move(innerProjects),
                                            std::move(sortDirs),
-                                           planNodeId);
+                                           getPlanNodeId(n));
 }
 
 
@@ -1014,13 +1058,12 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SortedMergeNode& n,
         outputVals.push_back(outputSlot);
     }
 
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
     return sbe::makeS<sbe::SortedMergeStage>(std::move(loweredChildren),
                                              std::move(inputKeys),
                                              std::move(keyDirs),
                                              std::move(inputVals),
                                              std::move(outputVals),
-                                             planNodeId);
+                                             getPlanNodeId(n));
 }
 
 std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const UnionNode& n,
@@ -1065,9 +1108,8 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const UnionNode& n,
         outputVals.push_back(outputSlot);
     }
 
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
     return sbe::makeS<sbe::UnionStage>(
-        std::move(loweredChildren), std::move(inputVals), std::move(outputVals), planNodeId);
+        std::move(loweredChildren), std::move(inputVals), std::move(outputVals), getPlanNodeId(n));
 }
 
 std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const UnwindNode& n,
@@ -1091,9 +1133,12 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const UnwindNode& n,
     mapProjToSlot(slotMap, n.getProjectionName(), outputSlot, true /*canOverwrite*/);
     mapProjToSlot(slotMap, n.getPIDProjectionName(), outputPidSlot);
 
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
-    return sbe::makeS<sbe::UnwindStage>(
-        std::move(input), inputSlot, outputSlot, outputPidSlot, n.getRetainNonArrays(), planNodeId);
+    return sbe::makeS<sbe::UnwindStage>(std::move(input),
+                                        inputSlot,
+                                        outputSlot,
+                                        outputPidSlot,
+                                        n.getRetainNonArrays(),
+                                        getPlanNodeId(n));
 }
 
 void SBENodeLowering::generateSlots(SlotVarMap& slotMap,
@@ -1113,24 +1158,11 @@ void SBENodeLowering::generateSlots(SlotVarMap& slotMap,
         mapProjToSlot(slotMap, *projName, rootSlot.value());
     }
 
-    // Soring is not essential. Here we sort only for SBE plan stability.
-    std::map<FieldNameType, ProjectionName> ordered;
-    for (const auto& entry : fieldProjectionMap._fieldProjections) {
-        ordered.insert(entry);
-    }
-    for (const auto& [fieldName, projectionName] : ordered) {
+    for (const auto& [fieldName, projectionName] : fieldProjectionMap._fieldProjections) {
         vars.push_back(_slotIdGenerator.generate());
         mapProjToSlot(slotMap, projectionName, vars.back());
         fields.push_back(fieldName.value().toString());
     }
-}
-
-static NamespaceStringOrUUID parseFromScanDef(const ScanDefinition& def) {
-    const auto& dbName = def.getOptionsMap().at("database");
-    const auto& uuidStr = def.getOptionsMap().at("uuid");
-    // TODO SERVER-79427 we should no longer deserialize in this method since NamespaceStringOrUUID
-    // should be part of the ScanDefinition.
-    return {DatabaseNameUtil::deserialize(boost::none, dbName), UUID::parse(uuidStr).getValue()};
 }
 
 
@@ -1148,16 +1180,17 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const PhysicalScanNode& n,
     sbe::value::SlotVector vars;
     generateSlots(slotMap, n.getFieldProjectionMap(), scanRidSlot, rootSlot, fields, vars);
 
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
+    const PlanNodeId planNodeId = getPlanNodeId(n);
     if (typeSpec == "mongod") {
-        NamespaceStringOrUUID nss = parseFromScanDef(def);
+        tassert(8423400, "ScanDefinition must have a UUID", def.getUUID().has_value());
+        const UUID& uuid = def.getUUID().get();
 
         // Unused.
         boost::optional<sbe::value::SlotId> seekRecordIdSlot;
 
         sbe::ScanCallbacks callbacks({}, {}, {});
         if (n.useParallelScan()) {
-            return sbe::makeS<sbe::ParallelScanStage>(nss.uuid(),
+            return sbe::makeS<sbe::ParallelScanStage>(uuid,
                                                       rootSlot,
                                                       scanRidSlot,
                                                       boost::none,
@@ -1182,7 +1215,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const PhysicalScanNode& n,
             MONGO_UNREACHABLE;
         }();
         return sbe::makeS<sbe::ScanStage>(
-            nss.uuid(),
+            uuid,
             rootSlot,
             scanRidSlot,
             boost::none,
@@ -1209,8 +1242,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const PhysicalScanNode& n,
 
 std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(
     const CoScanNode& n, SlotVarMap& slotMap, boost::optional<sbe::value::SlotId>& ridSlot) {
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
-    return sbe::makeS<sbe::CoScanStage>(planNodeId);
+    return sbe::makeS<sbe::CoScanStage>(getPlanNodeId(n));
 }
 
 std::unique_ptr<sbe::EExpression> SBENodeLowering::convertBoundsToExpr(
@@ -1264,7 +1296,8 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const IndexScanNode& n,
     tassert(6624232, "Collection must exist to lower IndexScan", scanDef.exists());
     const IndexDefinition& indexDef = scanDef.getIndexDefs().at(indexDefName);
 
-    NamespaceStringOrUUID nss = parseFromScanDef(scanDef);
+    tassert(8423399, "ScanDefinition must have a UUID", scanDef.getUUID().has_value());
+    const UUID& uuid = scanDef.getUUID().get();
 
     boost::optional<sbe::value::SlotId> scanRidSlot;
     boost::optional<sbe::value::SlotId> rootSlot;
@@ -1306,12 +1339,9 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const IndexScanNode& n,
             "Invalid bounds combination",
             lowerBoundExpr != nullptr || upperBoundExpr == nullptr);
 
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
-
     // Unused.
     boost::optional<sbe::value::SlotId> resultSlot;
-
-    return sbe::makeS<sbe::SimpleIndexScanStage>(nss.uuid(),
+    return sbe::makeS<sbe::SimpleIndexScanStage>(uuid,
                                                  indexDefName,
                                                  !reverse,
                                                  resultSlot,
@@ -1323,7 +1353,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const IndexScanNode& n,
                                                  std::move(lowerBoundExpr),
                                                  std::move(upperBoundExpr),
                                                  _yieldPolicy,
-                                                 planNodeId);
+                                                 getPlanNodeId(n));
 }
 
 std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SeekNode& n,
@@ -1336,7 +1366,9 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SeekNode& n,
 
     auto& typeSpec = def.getOptionsMap().at("type");
     tassert(6624236, "SeekNode only supports mongod collections", typeSpec == "mongod");
-    NamespaceStringOrUUID nss = parseFromScanDef(def);
+
+    tassert(8423398, "ScanDefinition must have a UUID", def.getUUID().has_value());
+    const UUID& uuid = def.getUUID().get();
 
     boost::optional<sbe::value::SlotId> seekRidSlot;
     boost::optional<sbe::value::SlotId> rootSlot;
@@ -1347,8 +1379,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SeekNode& n,
     boost::optional<sbe::value::SlotId> seekRecordIdSlot = slotMap.at(n.getRIDProjectionName());
 
     sbe::ScanCallbacks callbacks({}, {}, {});
-    const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
-    return sbe::makeS<sbe::ScanStage>(nss.uuid(),
+    return sbe::makeS<sbe::ScanStage>(uuid,
                                       rootSlot,
                                       seekRidSlot,
                                       boost::none,
@@ -1363,8 +1394,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SeekNode& n,
                                       boost::none /* maxRecordIdSlot */,
                                       true /*forward*/,
                                       _yieldPolicy,
-                                      planNodeId,
+                                      getPlanNodeId(n),
                                       callbacks);
 }
-
 }  // namespace mongo::optimizer

@@ -30,7 +30,6 @@
 #include <absl/container/flat_hash_set.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <map>
 
@@ -73,7 +72,7 @@ namespace mongo::sbe {
 CandidatePlans CachedSolutionPlanner::plan(
     std::vector<std::unique_ptr<QuerySolution>> solutions,
     std::vector<std::pair<std::unique_ptr<PlanStage>, stage_builder::PlanStageData>> roots) {
-    if (!_cq.pipeline().empty()) {
+    if (!_cq.cqPipeline().empty()) {
         // We'd like to check if there is any foreign collection in the hash_lookup stage that is no
         // longer eligible for using a hash_lookup plan. In this case we invalidate the cache and
         // immediately replan without ever running a trial period.
@@ -240,7 +239,7 @@ CandidatePlans CachedSolutionPlanner::replan(bool shouldCache, std::string reaso
     auto solutions = uassertStatusOK(std::move(statusWithMultiPlanSolns));
 
     if (solutions.size() == 1) {
-        if (!_cq.pipeline().empty()) {
+        if (!_cq.cqPipeline().empty()) {
             auto secondaryCollectionsInfo =
                 fillOutSecondaryCollectionsInformation(_opCtx, _collections, &_cq);
             solutions[0] = QueryPlanner::extendWithAggPipeline(

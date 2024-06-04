@@ -131,7 +131,8 @@ public:
                       Date_t startTime,
                       ClockSource* clockSource,
                       ShardingDataTransformCumulativeMetrics* cumulativeMetrics,
-                      State state);
+                      State state,
+                      ProvenanceEnum provenance = ProvenanceEnum::kReshardCollection);
 
     ~ReshardingMetrics();
 
@@ -159,10 +160,26 @@ public:
 
     template <typename T>
     static auto initializeFrom(const T& document, ServiceContext* serviceContext) {
-        return initializeFrom(
-            document,
-            serviceContext->getFastClockSource(),
-            ShardingDataTransformCumulativeMetrics::getForResharding(serviceContext));
+        auto cumulativeMetrics = [&] {
+            auto provenance = document.getCommonReshardingMetadata().getProvenance().value_or(
+                ProvenanceEnum::kReshardCollection);
+            switch (provenance) {
+                case ProvenanceEnum::kMoveCollection:
+                    return ShardingDataTransformCumulativeMetrics::getForMoveCollection(
+                        serviceContext);
+                case ProvenanceEnum::kBalancerMoveCollection:
+                    return ShardingDataTransformCumulativeMetrics::getForBalancerMoveCollection(
+                        serviceContext);
+                case ProvenanceEnum::kUnshardCollection:
+                    return ShardingDataTransformCumulativeMetrics::getForUnshardCollection(
+                        serviceContext);
+                case ProvenanceEnum::kReshardCollection:
+                    return ShardingDataTransformCumulativeMetrics::getForResharding(serviceContext);
+            }
+            MONGO_UNREACHABLE;
+        }();
+
+        return initializeFrom(document, serviceContext->getFastClockSource(), cumulativeMetrics);
     }
 
     template <typename StateOrStateVariant>
@@ -185,6 +202,15 @@ public:
     // Update donor and recipient related metrics in _recipientCtx so the coordinator can get them.
     void fillDonorCtxOnCompletion(DonorShardContext& donorCtx);
     void fillRecipientCtxOnCompletion(RecipientShardContext& recipientCtx);
+
+    void onStarted();
+    void onSuccess();
+    void onFailure();
+    void onCanceled();
+
+    void setIsSameKeyResharding(bool isSameKeyResharding);
+    void setIndexesToBuild(int64_t numIndexes);
+    void setIndexesBuilt(int64_t numIndexes);
 
 protected:
     boost::optional<Milliseconds> getRecipientHighEstimateRemainingTimeMillis() const override;
@@ -260,8 +286,13 @@ private:
 
     AtomicWord<bool> _ableToEstimateRemainingRecipientTime;
 
+    AtomicWord<bool> _isSameKeyResharding;
+    AtomicWord<int64_t> _indexesToBuild;
+    AtomicWord<int64_t> _indexesBuilt;
+
     ShardingDataTransformInstanceMetrics::UniqueScopedObserver _scopedObserver;
     ReshardingMetricsFieldNameProvider* _reshardingFieldNames;
+    const ProvenanceEnum _provenance;
 };
 
 }  // namespace mongo

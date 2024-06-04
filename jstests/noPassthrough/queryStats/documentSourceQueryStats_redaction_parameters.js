@@ -78,7 +78,7 @@ function runTest(conn) {
     assertAdminDBErrCodeAndErrMsgContains(
         coll,
         pipeline,
-        40414,
+        ErrorCodes.IDLFailedToParse,
         "BSON field '$queryStats.transformIdentifiers.algorithm' is missing but a required field");
 
     // TransformIdentifiers with algorithm but missing hmacKey throws error.
@@ -102,7 +102,6 @@ function runTest(conn) {
 const conn = MongoRunner.runMongod({
     setParameter: {
         internalQueryStatsRateLimit: -1,
-        featureFlagQueryStats: true,
     }
 });
 runTest(conn);

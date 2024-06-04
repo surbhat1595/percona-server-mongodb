@@ -47,7 +47,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 
 namespace mongo {
 
@@ -77,7 +77,7 @@ public:
     StageConstraints constraints(Pipeline::SplitState pipeState) const override {
         StageConstraints constraints{StreamType::kStreaming,
                                      PositionRequirement::kFirst,
-                                     HostTypeRequirement::kLocalOnly,
+                                     HostTypeRequirement::kRunOnceAnyNode,
                                      DiskUseRequirement::kNoDiskUse,
                                      FacetRequirement::kNotAllowed,
                                      TransactionRequirement::kAllowed,
@@ -103,7 +103,7 @@ public:
     }
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() override {
-        return boost::none;
+        return DistributedPlanLogic{nullptr, this, boost::none};
     }
 
     template <class... Args>

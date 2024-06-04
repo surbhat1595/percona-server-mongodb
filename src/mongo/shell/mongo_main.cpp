@@ -57,7 +57,6 @@
 #include <boost/log/sinks/text_ostream_backend.hpp>
 #include <boost/log/utility/formatting_ostream_fwd.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/make_shared_object.hpp>
 #include <boost/smart_ptr/shared_ptr.hpp>
 // IWYU pragma: no_include "boost/system/detail/error_code.hpp"
@@ -76,6 +75,7 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/client/authenticate.h"
+#include "mongo/client/dbclient_session.h"
 #include "mongo/client/mongo_uri.h"
 #include "mongo/client/sasl_aws_client_options.h"
 #include "mongo/client/sasl_oidc_client_params.h"
@@ -105,6 +105,7 @@
 #include "mongo/stdx/utility.h"
 #include "mongo/transport/asio/asio_transport_layer.h"
 #include "mongo/transport/transport_layer.h"
+#include "mongo/transport/transport_layer_manager_impl.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/ctype.h"
 #include "mongo/util/duration.h"
@@ -115,6 +116,7 @@
 #include "mongo/util/net/ocsp/ocsp_manager.h"
 #include "mongo/util/password.h"
 #include "mongo/util/pcre.h"
+#include "mongo/util/periodic_runner_factory.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/signal_handlers.h"
 #include "mongo/util/str.h"
@@ -122,6 +124,11 @@
 #include "mongo/util/time_support.h"
 #include "mongo/util/version.h"
 #include "mongo/util/version/releases.h"
+
+#ifdef MONGO_CONFIG_GRPC
+#include "mongo/transport/grpc/grpc_transport_layer.h"
+#include "mongo/transport/grpc/grpc_transport_layer_impl.h"
+#endif
 
 #ifdef _WIN32
 #include <io.h>
@@ -164,9 +171,12 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SetFeatureCompatibilityVersionLatest,
         multiversion::GenericFCV::kLatest);
 }
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(WireSpec, ("EndStartupOptionHandling"))(InitializerContext*) {
-    WireSpec::instance().initialize(WireSpec::Specification{});
-}
+namespace {
+ServiceContext::ConstructorActionRegisterer registerWireSpec{
+    "RegisterWireSpec", [](ServiceContext* service) {
+        WireSpec::getWireSpec(service).initialize(WireSpec::Specification{});
+    }};
+}  // namespace
 
 const auto kAuthParam = "authSource"s;
 
@@ -762,20 +772,15 @@ int mongo_main(int argc, char* argv[]) {
         // TODO This should use a TransportLayerManager or TransportLayerFactory
         auto serviceContext = getGlobalServiceContext();
 
+        // Set up the periodic runner for background job execution. This is required to be running
+        // before the transport layer is initialized.
+        auto runner = makePeriodicRunner(serviceContext);
+        serviceContext->setPeriodicRunner(std::move(runner));
+
 #ifdef MONGO_CONFIG_SSL
         OCSPManager::start(serviceContext);
 #endif
         shell_utils::ProgramRegistry::create(serviceContext);
-
-        transport::AsioTransportLayer::Options opts;
-        opts.enableIPv6 = shellGlobalParams.enableIPv6;
-        opts.mode = transport::AsioTransportLayer::Options::kEgress;
-
-        serviceContext->setTransportLayer(
-            std::make_unique<transport::AsioTransportLayer>(opts, nullptr));
-        auto tlPtr = serviceContext->getTransportLayer();
-        uassertStatusOK(tlPtr->setup());
-        uassertStatusOK(tlPtr->start());
 
         // hide password from ps output
         redactPasswordOptions(argc, argv);
@@ -818,6 +823,42 @@ int mongo_main(int argc, char* argv[]) {
         parsedURI.setOptionIfNecessary("authSource"s, shellGlobalParams.authenticationDatabase);
         parsedURI.setOptionIfNecessary("gssapiServiceName"s, shellGlobalParams.gssapiServiceName);
         parsedURI.setOptionIfNecessary("gssapiHostName"s, shellGlobalParams.gssapiHostName);
+// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
+#ifdef MONGO_CONFIG_GRPC
+        parsedURI.setOptionIfNecessary("gRPC"s, shellGlobalParams.gRPC ? "true" : "false");
+#endif
+
+        // Configure the correct TL based on URI options.
+        std::unique_ptr<transport::TransportLayer> tl;
+#ifdef MONGO_CONFIG_GRPC
+        if (parsedURI.isGRPC() || shellGlobalParams.gRPC) {
+            // Create the client metadata.
+            boost::optional<std::string> appname = parsedURI.getAppName();
+            BSONObjBuilder bob;
+            uassertStatusOK(DBClientSession::appendClientMetadata(
+                appname.value_or(MongoURI::kDefaultTestRunnerAppName), &bob));
+            auto metadataDoc = bob.obj();
+
+            transport::grpc::GRPCTransportLayer::Options grpcOpts;
+            grpcOpts.enableEgress = true;
+            grpcOpts.clientMetadata = metadataDoc.getObjectField(kMetadataDocumentName).getOwned();
+            tl = std::make_unique<transport::grpc::GRPCTransportLayerImpl>(
+                serviceContext, grpcOpts, nullptr);
+        } else
+#endif
+        {
+            transport::AsioTransportLayer::Options opts;
+            opts.enableIPv6 = shellGlobalParams.enableIPv6;
+            opts.mode = transport::AsioTransportLayer::Options::kEgress;
+            tl = std::make_unique<transport::AsioTransportLayer>(opts, nullptr);
+        }
+        serviceContext->setTransportLayerManager(
+            std::make_unique<transport::TransportLayerManagerImpl>(std::move(tl)));
+
+        auto tlPtr = serviceContext->getTransportLayerManager();
+        uassertStatusOK(tlPtr->setup());
+        uassertStatusOK(tlPtr->start());
+
 #ifdef MONGO_CONFIG_SSL
         if (!awsIam::saslAwsClientGlobalParams.awsSessionToken.empty()) {
             parsedURI.setOptionIfNecessary("authmechanismproperties"s,

@@ -119,7 +119,7 @@ public:
         }
 
         NamespaceString ns() const override {
-            return NamespaceString();
+            return NamespaceString::kEmpty;
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
@@ -136,7 +136,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(SetFeatureCompatibilityVersionCmd);
+MONGO_REGISTER_COMMAND(SetFeatureCompatibilityVersionCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

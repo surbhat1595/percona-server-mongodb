@@ -2,6 +2,7 @@
  * Test that _getNextSessionMods filters out unrelated oplog entries.
  * @tags: [uses_transactions, uses_prepare_transaction]
  */
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {chunkBoundsUtil} from "jstests/sharding/libs/chunk_bounds_util.js";
 import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
 
@@ -22,17 +23,22 @@ let ns = dbName + "." + collName;
 let configDB = st.s.getDB('config');
 let testDB = st.s.getDB(dbName);
 
-assert.commandWorked(st.s.adminCommand({enableSharding: dbName}));
-st.ensurePrimaryShard(dbName, st.shard1.shardName);
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard1.shardName}));
 assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {x: 'hashed'}}));
 
-let chunkDocs = findChunksUtil.findChunksByNs(configDB, ns).toArray();
-let shardChunkBounds = chunkBoundsUtil.findShardChunkBounds(chunkDocs);
-
-// Use docs that are expected to go to the same shards but different chunks.
+// TODO SERVER-81884: update once 8.0 becomes last LTS.
+if (FeatureFlagUtil.isPresentAndEnabled(testDB,
+                                        "OneChunkPerShardEmptyCollectionWithHashedShardKey")) {
+    // Docs are expected to go to the same shards but different chunks.
+    assert.commandWorked(st.s.adminCommand({split: ns, middle: {x: convertShardKeyToHashed(10)}}));
+}
 let docs = [{x: -1000}, {x: 10}];
 let shards = [];
 let docChunkBounds = [];
+
+let chunkDocs = findChunksUtil.findChunksByNs(configDB, ns).toArray();
+let shardChunkBounds = chunkBoundsUtil.findShardChunkBounds(chunkDocs);
 
 docs.forEach(function(doc) {
     let hashDoc = {x: convertShardKeyToHashed(doc.x)};

@@ -36,7 +36,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/numeric/conversion/converter_policies.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/accumulator_sum_value_enum.h"
@@ -669,7 +668,9 @@ void ByteCode::aggMergeStdDevsImpl(value::Array* accumulator,
     // We've already handled the case where 'newCount' is zero above. This means that 'totalCount'
     // must be positive, and prevents us from ever dividing by zero in the subsequent calculation.
     int64_t totalCount = oldCount + newCount;
-    if (delta != 0) {
+    // If oldCount is zero, we should avoid needless calcuations, because they may damage floating
+    // point precision.
+    if (delta != 0 && oldCount != 0) {
         newMean = ((oldCount * oldMean) + (newCount * newMean)) / totalCount;
         newM2 += delta * delta *
             (static_cast<double>(oldCount) * static_cast<double>(newCount) / totalCount);
@@ -1224,7 +1225,7 @@ std::pair<value::TypeTags, value::Value> ByteCode::compare3way(
     value::Value lhsValue,
     value::TypeTags rhsTag,
     value::Value rhsValue,
-    const StringData::ComparatorInterface* comparator) {
+    const StringDataComparator* comparator) {
     if (lhsTag == value::TypeTags::Nothing || rhsTag == value::TypeTags::Nothing) {
         return {value::TypeTags::Nothing, 0};
     }
@@ -1242,7 +1243,7 @@ std::pair<value::TypeTags, value::Value> ByteCode::compare3way(value::TypeTags l
         return {value::TypeTags::Nothing, 0};
     }
 
-    auto comparator = static_cast<StringData::ComparatorInterface*>(getCollatorView(collValue));
+    auto comparator = static_cast<StringDataComparator*>(getCollatorView(collValue));
 
     return value::compareValue(lhsTag, lhsValue, rhsTag, rhsValue, comparator);
 }

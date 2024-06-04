@@ -15,6 +15,8 @@ import stat
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 import uuid
 from datetime import datetime
 from glob import glob
@@ -1098,6 +1100,19 @@ env_vars.Add(
 )
 
 env_vars.Add(
+    'BAZEL_FLAGS',
+    help='Flags specific to bazel to pass through to the underlying bazel build command.',
+    default="",
+)
+
+env_vars.Add(
+    'BAZEL_INTEGRATION_DEBUG',
+    help='Enable SCons/Bazel integration debug output',
+    converter=functools.partial(bool_var_converter, var='BAZEL_INTEGRATION_DEBUG'),
+    default="0",
+)
+
+env_vars.Add(
     'DSYMUTIL',
     help='Path to the dsymutil utility',
 )
@@ -1505,6 +1520,17 @@ env_vars.Add(
 )
 
 env_vars.Add(
+    'GDB_PPTEST_PYONLY',
+    help='''Set the boolean (on/off true/false 1/0) to enable SCons to only emit the .py files
+    needed for testing GDB pretty printers.
+
+    Useful for when the executable files for testing GDB pretty printers are more rapidly built
+    using Ninja and the install-dist-test target (separately from SCons).''',
+    converter=functools.partial(bool_var_converter, var='GDB_PPTEST_PYONLY'),
+    default='False',
+)
+
+env_vars.Add(
     'ENABLE_OOM_RETRY',
     help=
     'Set the boolean (auto, on/off true/false 1/0) to enable retrying a compile or link commands from "out of memory" failures.',
@@ -1548,13 +1574,6 @@ env_vars.Add(
     help='Controls build verbosity (auto, on/off true/false 1/0)',
     default='auto',
 )
-
-env_vars.Add(
-    PathVariable(
-        'VALIDATE_ENV_SCRIPT',
-        help='''Path of a python script to validate the mongo workspace for common issues.
-        An example script is located at buildscripts/validate_env.py
-        ''', default=None, validator=PathVariable.PathIsFile))
 
 env_vars.Add(
     'WINDOWS_OPENSSL_BIN',
@@ -1805,40 +1824,8 @@ else:
         env.FatalError(f"Error setting VERBOSE variable: {e}")
 env.AddMethod(lambda env: env['VERBOSE'], 'Verbose')
 
-
-def CheckDevEnv(context):
-    context.Message('Checking if dev env is valid... ')
-    context.sconf.cached = 0
-    if env.get('VALIDATE_ENV_SCRIPT'):
-        proc = subprocess.run(
-            [sys.executable, env.File('$VALIDATE_ENV_SCRIPT').get_path()], capture_output=True,
-            text=True)
-        context.Log(proc.stdout)
-        context.Log(proc.stderr)
-        context.sconf.lastTarget = Value(proc.stdout + proc.stderr)
-        result = proc.returncode == 0
-        context.Result(result)
-        if env.Verbose():
-            print(proc.stdout)
-    else:
-        context.Result("skipped")
-        result = True
-    return result
-
-
 env.Append(
     LINKFLAGS=['${_concat(COMPILER_EXEC_PREFIX_OPT, LINKFLAGS_COMPILER_EXEC_PREFIX, "", __env__)}'])
-
-devenv_check = Configure(
-    env,
-    help=False,
-    custom_tests={
-        'CheckDevEnv': CheckDevEnv,
-    },
-)
-if not devenv_check.CheckDevEnv():
-    env.ConfError(f"Failed to validate dev env:\n{devenv_check.lastTarget.get_contents().decode()}")
-devenv_check.Finish()
 
 # Normalize the ICECC_DEBUG option
 try:
@@ -2221,6 +2208,7 @@ elif use_libunwind == "auto":
     use_libunwind = can_use_libunwind
 
 use_vendored_libunwind = use_libunwind and not use_system_libunwind
+env['USE_VENDORED_LIBUNWIND'] = use_vendored_libunwind
 if use_system_libunwind and not use_libunwind:
     print("Error: --use-system-libunwind requires --use-libunwind")
     Exit(1)
@@ -2422,8 +2410,6 @@ if link_model.startswith("dynamic"):
                     return []
 
                 env['LIBDEPS_TAG_EXPANSIONS'].append(libdeps_tags_expand_incomplete)
-
-env.Tool('integrate_bazel')
 
 if optBuild != "off":
     env.SetConfigHeaderDefine("MONGO_CONFIG_OPTIMIZED_BUILD")
@@ -6545,6 +6531,11 @@ if has_option("cache"):
         addNoCacheEmitter(env['BUILDERS']['SharedLibrary'])
         addNoCacheEmitter(env['BUILDERS']['SharedArchive'])
         addNoCacheEmitter(env['BUILDERS']['LoadableModule'])
+
+# load the tool late to make sure we can copy over any new
+# emitters/scanners we may have created in the SConstruct when
+# we go to make stand in bazel builders for the various scons builders
+env.Tool('integrate_bazel')
 
 env.SConscript(
     dirs=[

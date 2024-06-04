@@ -43,12 +43,16 @@
  */
 
 namespace mongo {
+
+class DeleteRequest;
+class UpdateRequest;
+
 namespace bulk_write_common {
 
 /**
  * Validates the given bulkWrite command request and throws if the request is malformed.
  */
-void validateRequest(const BulkWriteCommandRequest& req);
+void validateRequest(const BulkWriteCommandRequest& req, bool isRouter);
 
 /**
  * Get the privileges needed to perform the given bulkWrite command.
@@ -76,6 +80,31 @@ write_ops::InsertCommandRequest makeInsertCommandRequestForFLE(
     const mongo::NamespaceInfoEntry& nsInfoEntry);
 
 /**
+ * Helper function to build an UpdateOpEntry based off the BulkWriteUpdateOp passed in.
+ */
+write_ops::UpdateOpEntry makeUpdateOpEntryFromUpdateOp(const BulkWriteUpdateOp* op);
+
+/**
+ * Helper function to build an UpdateRequest based off the BulkWriteUpdateOp passed in and its
+ * namespace and top-level 'let' parameter.
+ */
+UpdateRequest makeUpdateRequestFromUpdateOp(OperationContext* opCtx,
+                                            const NamespaceInfoEntry& nsEntry,
+                                            const BulkWriteUpdateOp* op,
+                                            const StmtId& stmtId,
+                                            const boost::optional<BSONObj>& letParameters);
+
+/**
+ * Helper function to build a DeleteRequest based off the BulkWriteDeleteOp passed in and its
+ * namespace and top-level 'let' parameter.
+ */
+DeleteRequest makeDeleteRequestFromDeleteOp(OperationContext* opCtx,
+                                            const NamespaceInfoEntry& nsEntry,
+                                            const BulkWriteDeleteOp* op,
+                                            const StmtId& stmtId,
+                                            const boost::optional<BSONObj>& letParameters);
+
+/**
  * Helper function to build an UpdateCommandRequest based off the update operation in the bulkWrite
  * request at index currentOpIdx.
  */
@@ -90,5 +119,8 @@ write_ops::DeleteCommandRequest makeDeleteCommandRequestForFLE(
     const BulkWriteDeleteOp* op,
     const BulkWriteCommandRequest& req,
     const mongo::NamespaceInfoEntry& nsInfoEntry);
+
+BulkWriteCommandRequest makeSingleOpBulkWriteCommandRequest(
+    const BulkWriteCommandRequest& bulkWriteReq, size_t opIdx);
 }  // namespace bulk_write_common
 }  // namespace mongo

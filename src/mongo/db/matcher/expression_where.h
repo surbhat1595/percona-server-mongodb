@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <utility>
 
@@ -49,7 +48,7 @@ class OperationContext;
 
 class WhereMatchExpression final : public WhereMatchExpressionBase {
 public:
-    WhereMatchExpression(OperationContext* opCtx, WhereParams params, StringData dbName);
+    WhereMatchExpression(OperationContext* opCtx, WhereParams params, const DatabaseName& dbName);
 
     bool matches(const MatchableDocument* doc, MatchDetails* details = nullptr) const final;
 

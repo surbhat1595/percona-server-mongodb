@@ -31,7 +31,6 @@
 
 #include <absl/container/node_hash_map.h>
 #include <algorithm>
-#include <boost/preprocessor/control/iif.hpp>
 #include <iterator>
 #include <type_traits>
 #include <typeinfo>
@@ -377,7 +376,9 @@ bool MongosProcessInterface::fieldsHaveSupportingUniqueIndex(
     // this is any shard that currently owns at least one chunk. This helper sends database and/or
     // shard versions to ensure this router is not stale, but will not automatically retry if either
     // version is stale.
-    auto response = loadIndexesFromAuthoritativeShard(expCtx->opCtx, nss);
+    const auto cri = uassertStatusOK(
+        Grid::get(expCtx->opCtx)->catalogCache()->getCollectionRoutingInfo(expCtx->opCtx, nss));
+    auto response = loadIndexesFromAuthoritativeShard(expCtx->opCtx, nss, cri);
 
     // If the namespace does not exist, then the field paths *must* be _id only.
     if (response.getStatus() == ErrorCodes::NamespaceNotFound) {

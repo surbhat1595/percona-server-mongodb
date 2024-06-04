@@ -32,7 +32,7 @@ global:
 imports:
   - "mongo/db/basic_types.idl"
   - "mongo/db/query/index_hint.idl"
-  - "mongo/db/query/query_shape_hash.idl"
+  - "mongo/db/query/query_shape/query_shape_hash.idl"
 
 enums:
   QueryEngineVersion:
@@ -42,7 +42,7 @@ enums:
     type: string
     values:
       kV1: "v1" # Classic + Multiplanner
-      kV2: "v2" # Nebari + Multiplanner
+      kV2: "v2" # SBE + Multiplanner
 
 structs:
   Namespace:

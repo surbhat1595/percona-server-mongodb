@@ -50,7 +50,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -204,10 +203,6 @@ void fassertOnRepeatedExecution(const LogicalSessionId& lsid,
                                 const repl::OpTime& secondOpTime) {
     LOGV2_FATAL(
         40526,
-        "Statement id {stmtId} from transaction [ {lsid}:{txnNumberAndRetryCounter} ] was "
-        "committed once with opTime {firstCommitOpTime} and a second time with opTime { "
-        "secondCommitOpTime}. This indicates possible data corruption or server bug and the "
-        "process will be terminated.",
         "Statement from transaction was committed twice. This indicates possible data corruption "
         "or server bug and the process will be terminated",
         "stmtId"_attr = stmtId,
@@ -282,15 +277,6 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
         auto originalReadConcern =
             std::exchange(repl::ReadConcernArgs::get(opCtx), repl::ReadConcernArgs());
         ON_BLOCK_EXIT([&] { repl::ReadConcernArgs::get(opCtx) = std::move(originalReadConcern); });
-
-        // It's possible that this no-timestamp read may occur as the node is in the process of
-        // transitioning to secondary. This is safe as no writes based on this read will be able to
-        // occur. Thus, skip enforcing constraints in order to satisfy the assertion about
-        // performing reads on a secondary with no timestamp.
-        ON_BLOCK_EXIT([opCtx, enforceConstraints = opCtx->isEnforcingConstraints()] {
-            opCtx->setEnforceConstraints(enforceConstraints);
-        });
-        opCtx->setEnforceConstraints(false);
 
         AutoGetCollectionForRead autoRead(opCtx,
                                           NamespaceString::kSessionTransactionsTableNamespace);
@@ -656,7 +642,9 @@ TransactionParticipant::getOldestActiveTimestamp(Timestamp stableTimestamp) {
     // timestamp. Use a short timeout: another thread might have the global lock e.g. to shut down
     // the server, and it both blocks this thread from querying config.transactions and waits for
     // this thread to terminate.
-    auto client = getGlobalServiceContext()->makeClient("OldestActiveTxnTimestamp");
+    auto client = getGlobalServiceContext()
+                      ->getService(ClusterRole::ShardServer)
+                      ->makeClient("OldestActiveTxnTimestamp");
 
     AlternativeClientRegion acr(client);
 
@@ -999,6 +987,8 @@ void TransactionParticipant::Participant::_beginMultiDocumentTransaction(
             tickSource,
             now,
             *o().transactionExpireDate);
+        o(lk).readConcernArgs = repl::ReadConcernArgs::get(opCtx);
+
         invariant(p().transactionOperations.isEmpty());
     }
 }
@@ -1690,8 +1680,6 @@ TransactionParticipant::Participant::prepareTransaction(
             // It is illegal for aborting a prepared transaction to fail for any reason, so we crash
             // instead.
             LOGV2_FATAL_CONTINUE(22525,
-                                 "Caught exception during abort of prepared transaction "
-                                 "{txnNumber} on {lsid}: {error}",
                                  "Caught exception during abort of prepared transaction",
                                  "txnNumber"_attr = opCtx->getTxnNumber(),
                                  "lsid"_attr = _sessionId().toBSON(),
@@ -2084,8 +2072,6 @@ void TransactionParticipant::Participant::commitPreparedTransaction(
         // It is illegal for committing a prepared transaction to fail for any reason, other than an
         // invalid command, so we crash instead.
         LOGV2_FATAL_CONTINUE(22526,
-                             "Caught exception during commit of prepared transaction {txnNumber} "
-                             "on {lsid}: {error}",
                              "Caught exception during commit of prepared transaction",
                              "txnNumber"_attr = opCtx->getTxnNumber(),
                              "lsid"_attr = _sessionId().toBSON(),
@@ -2094,9 +2080,10 @@ void TransactionParticipant::Participant::commitPreparedTransaction(
     }
 }
 
-void TransactionParticipant::Participant::_commitStorageTransaction(OperationContext* opCtx) {
+void TransactionParticipant::Participant::_commitStorageTransaction(OperationContext* opCtx,
+                                                                    bool isSplitPreparedTxn) {
     invariant(opCtx->getWriteUnitOfWork());
-    invariant(opCtx->lockState()->isRSTLLocked());
+    invariant(opCtx->lockState()->isRSTLLocked() || isSplitPreparedTxn);
     opCtx->getWriteUnitOfWork()->commit();
     opCtx->setWriteUnitOfWork(nullptr);
 
@@ -2113,7 +2100,7 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
     OperationContext* userOpCtx,
     repl::SplitPrepareSessionManager* splitPrepareManager,
     const Timestamp& commitTimestamp,
-    const Timestamp& durableTimestamp) {
+    const Timestamp& durableTimestamp) noexcept {
 
     const auto& userSessionId = _sessionId();
     const auto& userTxnNumber = o().activeTxnNumberAndRetryCounter.getTxnNumber();
@@ -2129,7 +2116,9 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
             hangInCommitSplitPreparedTxnOnPrimary.pauseWhileSet();
         }
 
-        auto splitClientOwned = userOpCtx->getServiceContext()->makeClient("tempSplitClient");
+        auto splitClientOwned = userOpCtx->getServiceContext()
+                                    ->getService(ClusterRole::ShardServer)
+                                    ->makeClient("tempSplitClient");
         auto splitOpCtx = splitClientOwned->makeOperationContext();
 
         AlternativeClientRegion acr(splitClientOwned);
@@ -2148,12 +2137,10 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
         newTxnParticipant.beginOrContinueTransactionUnconditionally(
             splitOpCtx.get(), {*(splitOpCtx->getTxnNumber())});
 
-        // This function is called while userOpCtx's lockState is under an UninterruptibleLockGuard,
-        // because once entering "committing with prepare" we cannot throw an exception, and
-        // therefore our lock acquisitions cannot be interruptible. We need to set an
-        // UninterruptibleLockGuard on newTxnParticipant's locker (this will be swapped into
-        // splitOpCtx's locker in unstashTransactionResources) in order to prevent the split
-        // transaction's lock acquisitions from being interruptible.
+        // We cannot throw exceptions in the middle of committing multiple split transactions,
+        // and therefore our lock acquisitions cannot be interruptible. We also must set the
+        // UninterruptibleLockGuard before unstashTransactionResources because this function
+        // can throw when reacquiring locks and tickets.
         UninterruptibleLockGuard noInterrupt(                   // NOLINT
             newTxnParticipant.o().txnResourceStash->locker());  // NOLINT
         newTxnParticipant.unstashTransactionResources(splitOpCtx.get(), "commitTransaction");
@@ -2162,8 +2149,11 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
         splitOpCtx->recoveryUnit()->setDurableTimestamp(durableTimestamp);
 
         {
-            Lock::GlobalLock rstl(splitOpCtx.get(), LockMode::MODE_IX);
-            newTxnParticipant._commitStorageTransaction(splitOpCtx.get());
+            // Commit the storage transaction. We do not need to acquire RSTL here since the
+            // original transaction is already holding RSTL in IX mode. We also should not
+            // try to acquire RSTL again because that could deadlock with stepdown.
+            newTxnParticipant._commitStorageTransaction(splitOpCtx.get(),
+                                                        true /* isSplitPreparedTxn */);
             auto operationCount = newTxnParticipant.p().transactionOperations.numOperations();
             auto oplogOperationBytes =
                 newTxnParticipant.p().transactionOperations.getTotalOperationBytes();
@@ -2279,7 +2269,7 @@ void TransactionParticipant::Participant::_abortActiveTransaction(
 
     auto* splitPrepareManager =
         repl::ReplicationCoordinator::get(opCtx)->getSplitPrepareSessionManager();
-    bool isSplitPreparedTxn = opCtx->writesAreReplicated() &&
+    bool haveSplitPreparedTxns = opCtx->writesAreReplicated() &&
         splitPrepareManager->isSessionSplit(_sessionId(),
                                             o().activeTxnNumberAndRetryCounter.getTxnNumber());
 
@@ -2301,7 +2291,7 @@ void TransactionParticipant::Participant::_abortActiveTransaction(
 
         // If we are a primary aborting a transaction that was split into smaller prepared
         // transactions, cascade the abort.
-        if (isSplitPreparedTxn) {
+        if (haveSplitPreparedTxns) {
             _abortSplitPreparedTxnOnPrimary(opCtx, splitPrepareManager);
         }
 
@@ -2325,8 +2315,6 @@ void TransactionParticipant::Participant::_abortActiveTransaction(
             LOGV2_FATAL_CONTINUE(
                 22527,
                 "Caught exception during abort of transaction that must write abort oplog "
-                "entry {txnNumber} on {lsid}: {error}",
-                "Caught exception during abort of transaction that must write abort oplog "
                 "entry",
                 "txnNumber"_attr = opCtx->getTxnNumber(),
                 "lsid"_attr = _sessionId().toBSON(),
@@ -2341,7 +2329,7 @@ void TransactionParticipant::Participant::_abortActiveTransaction(
         // is not cleaning up some internal TransactionParticipant state, updating metrics, or
         // logging the end of the transaction. That will either be cleaned up in the
         // ServiceEntryPoint's abortGuard or when the next transaction begins.
-        invariant(!isSplitPreparedTxn);
+        invariant(!haveSplitPreparedTxns);
         _cleanUpTxnResourceOnOpCtx(opCtx, TerminationCause::kAborted);
         opObserver->onTransactionAbort(opCtx, boost::none);
         _finishAbortingActiveTransaction(opCtx, expectedStates);
@@ -2349,7 +2337,7 @@ void TransactionParticipant::Participant::_abortActiveTransaction(
 }
 
 void TransactionParticipant::Participant::_abortSplitPreparedTxnOnPrimary(
-    OperationContext* userOpCtx, repl::SplitPrepareSessionManager* splitPrepareManager) {
+    OperationContext* userOpCtx, repl::SplitPrepareSessionManager* splitPrepareManager) noexcept {
 
     const auto& userSessionId = _sessionId();
     const auto& userTxnNumber = o().activeTxnNumberAndRetryCounter.getTxnNumber();
@@ -2359,7 +2347,9 @@ void TransactionParticipant::Participant::_abortSplitPreparedTxnOnPrimary(
     for (const repl::SplitSessionInfo& sessionInfo :
          splitPrepareManager->getSplitSessions(userSessionId, userTxnNumber).get()) {
 
-        auto splitClientOwned = userOpCtx->getServiceContext()->makeClient("tempSplitClient");
+        auto splitClientOwned = userOpCtx->getServiceContext()
+                                    ->getService(ClusterRole::ShardServer)
+                                    ->makeClient("tempSplitClient");
         auto splitOpCtx = splitClientOwned->makeOperationContext();
 
         AlternativeClientRegion acr(splitClientOwned);
@@ -2377,8 +2367,24 @@ void TransactionParticipant::Participant::_abortSplitPreparedTxnOnPrimary(
             TransactionParticipant::get(splitOpCtx.get());
         newTxnParticipant.beginOrContinueTransactionUnconditionally(
             splitOpCtx.get(), {*(splitOpCtx->getTxnNumber())});
+
+        // We cannot throw exceptions in the middle of aborting multiple split transactions,
+        // and therefore our lock acquisitions cannot be interruptible. We also must set the
+        // UninterruptibleLockGuard before unstashTransactionResources because this function
+        // can throw when reacquiring locks and tickets.
+        UninterruptibleLockGuard noInterrupt(                   // NOLINT
+            newTxnParticipant.o().txnResourceStash->locker());  // NOLINT
         newTxnParticipant.unstashTransactionResources(splitOpCtx.get(), "abortTransaction");
-        newTxnParticipant.abortTransaction(splitOpCtx.get());
+
+        {
+            // Abort the storage transaction. We do not need to acquire RSTL here since the
+            // original transaction is already holding RSTL in IX mode. We also should not
+            // try to acquire RSTL again because that could deadlock with stepdown.
+            newTxnParticipant._cleanUpTxnResourceOnOpCtx(
+                splitOpCtx.get(), TerminationCause::kAborted, true /* isSplitPreparedTxn */);
+            newTxnParticipant._finishAbortingActiveTransaction(splitOpCtx.get(),
+                                                               TransactionState::kPrepared);
+        }
 
         checkedOutSession->checkIn(splitOpCtx.get(), OperationContextSession::CheckInReason::kDone);
     }
@@ -2450,7 +2456,7 @@ void TransactionParticipant::Participant::_abortTransactionOnSession(OperationCo
 }
 
 void TransactionParticipant::Participant::_cleanUpTxnResourceOnOpCtx(
-    OperationContext* opCtx, TerminationCause terminationCause) {
+    OperationContext* opCtx, TerminationCause terminationCause, bool isSplitPreparedTxn) {
     // Log the transaction if its duration is longer than the slowMS command threshold.
     _logSlowTransaction(
         opCtx,
@@ -2461,10 +2467,13 @@ void TransactionParticipant::Participant::_cleanUpTxnResourceOnOpCtx(
 
     // Reset the WUOW. We should be able to abort empty transactions that don't have WUOW.
     if (opCtx->getWriteUnitOfWork()) {
-        // We could have failed trying to get the initial global lock; in that case we will have a
-        // WriteUnitOfWork but not have allocated the storage transaction.  That is the only case
-        // where it is legal to abort a unit of work without the RSTL.
-        invariant(opCtx->lockState()->isRSTLLocked() || !opCtx->recoveryUnit()->isActive());
+        // There are two cases that are legal to abort a unit of work without RSTL:
+        // 1. We are aborting a split prepared transaction, in which case the RSTL is held by
+        //    the original prepared transaction.
+        // 2. We have failed trying to get the initial global lock, in which case we will have
+        //    a WriteUnitOfWork but not have allocated the storage transaction.
+        invariant(opCtx->lockState()->isRSTLLocked() || isSplitPreparedTxn ||
+                  !opCtx->recoveryUnit()->isActive());
         opCtx->setWriteUnitOfWork(nullptr);
     }
 
@@ -2549,7 +2558,7 @@ void TransactionParticipant::Observer::reportUnstashedState(OperationContext* op
     // of the TransactionParticipant.
     if (!o().txnResourceStash) {
         BSONObjBuilder transactionBuilder;
-        _reportTransactionStats(opCtx, &transactionBuilder, repl::ReadConcernArgs::get(opCtx));
+        _reportTransactionStats(opCtx, &transactionBuilder, o().readConcernArgs);
         builder->append("transaction", transactionBuilder.obj());
     }
 }
@@ -2682,7 +2691,9 @@ void TransactionParticipant::TransactionState::transitionTo(StateFlag newState,
 }
 
 void TransactionParticipant::Observer::_reportTransactionStats(
-    OperationContext* opCtx, BSONObjBuilder* builder, repl::ReadConcernArgs readConcernArgs) const {
+    OperationContext* opCtx,
+    BSONObjBuilder* builder,
+    const repl::ReadConcernArgs& readConcernArgs) const {
     const auto tickSource = opCtx->getServiceContext()->getTickSource();
     o().transactionMetricsObserver.getSingleTransactionStats().report(
         builder, readConcernArgs, tickSource, tickSource->getTicks());
@@ -2946,15 +2957,12 @@ void TransactionParticipant::Participant::_setNewTxnNumberAndRetryCounter(
             "Cannot change transaction number while the session has a prepared transaction",
             !o().txnState.isInSet(TransactionState::kPrepared));
 
-    LOGV2_FOR_TRANSACTION(
-        23984,
-        4,
-        "New transaction started with txnNumber: {txnNumberAndRetryCounter} on session with lsid "
-        "{lsid}",
-        "New transaction started",
-        "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
-        "lsid"_attr = _sessionId(),
-        "apiParameters"_attr = APIParameters::get(opCtx).toBSON());
+    LOGV2_FOR_TRANSACTION(23984,
+                          4,
+                          "New transaction started",
+                          "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
+                          "lsid"_attr = _sessionId(),
+                          "apiParameters"_attr = APIParameters::get(opCtx).toBSON());
 
     // Abort the existing transaction if it's not prepared, committed, or aborted.
     if (o().txnState.isInProgress()) {

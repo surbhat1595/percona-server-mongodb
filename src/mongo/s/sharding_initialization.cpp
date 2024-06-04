@@ -29,7 +29,6 @@
 
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <string>
 #include <utility>
@@ -310,8 +309,8 @@ void preCacheMongosRoutingInfo(OperationContext* opCtx) {
     auto allDbs = catalogClient->getAllDBs(opCtx, repl::ReadConcernLevel::kMajorityReadConcern);
 
     for (auto& db : allDbs) {
-        for (auto& coll : catalogClient->getAllShardedCollectionsForDb(
-                 opCtx, db.getName(), repl::ReadConcernLevel::kMajorityReadConcern)) {
+        for (auto& coll : catalogClient->getCollectionNamespacesForDb(
+                 opCtx, db.getDbName(), repl::ReadConcernLevel::kMajorityReadConcern)) {
             auto resp = catalogCache->getCollectionRoutingInfoWithRefresh(opCtx, coll);
             if (!resp.isOK()) {
                 LOGV2_WARNING(6203600,

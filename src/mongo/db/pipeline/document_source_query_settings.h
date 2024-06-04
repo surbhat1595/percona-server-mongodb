@@ -41,6 +41,7 @@ namespace mongo {
 class DocumentSourceQuerySettings final {
 public:
     static constexpr StringData kStageName = "$querySettings"_sd;
+    static constexpr StringData kDebugQueryShapeFieldName = "debugQueryShape"_sd;
 
     class LiteParsed final : public LiteParsedDocumentSource {
     public:
@@ -66,7 +67,10 @@ public:
             return _privileges;
         }
 
-        bool allowedToPassthroughFromMongos() const {
+        /**
+         * Returns true as the desugared pipeline begins with a $queue stage.
+         */
+        bool startsWithQueue() const final {
             return true;
         }
 

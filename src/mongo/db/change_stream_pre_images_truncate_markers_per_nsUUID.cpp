@@ -31,7 +31,6 @@
 
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -238,8 +237,10 @@ bool PreImagesTruncateMarkersPerNsUUID::_hasExcessMarkers(OperationContext* opCt
     return isExpired(opCtx, _tenantId, oldestMarker.lastRecord, oldestMarker.wallTime);
 }
 
-bool PreImagesTruncateMarkersPerNsUUID::_hasPartialMarkerExpired(OperationContext* opCtx) const {
-    const auto& [highestSeenRecordId, highestSeenWallTime] = getPartialMarker();
+bool PreImagesTruncateMarkersPerNsUUID::_hasPartialMarkerExpired(
+    OperationContext* opCtx,
+    const RecordId& highestSeenRecordId,
+    const Date_t& highestSeenWallTime) const {
     return isExpired(opCtx, _tenantId, highestSeenRecordId, highestSeenWallTime);
 }
 }  // namespace mongo

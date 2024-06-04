@@ -68,10 +68,6 @@ namespace {
 
 ConnectionString fixtureConnectionString{};
 
-MONGO_INITIALIZER(WireSpec)(InitializerContext*) {
-    WireSpec::instance().initialize(WireSpec::Specification{});
-}
-
 }  // namespace
 
 namespace mongo {
@@ -83,6 +79,13 @@ ConnectionString getFixtureConnectionString() {
 
 }  // namespace unittest
 }  // namespace mongo
+
+namespace {
+ServiceContext::ConstructorActionRegisterer registerWireSpec{
+    "RegisterWireSpec", [](ServiceContext* service) {
+        WireSpec::getWireSpec(service).initialize(WireSpec::Specification{});
+    }};
+}  // namespace
 
 int main(int argc, char** argv) {
     setupSynchronousSignalHandlers();

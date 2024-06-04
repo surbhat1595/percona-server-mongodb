@@ -53,7 +53,6 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/role_name.h"
-#include "mongo/db/auth/security_token_gen.h"
 #include "mongo/db/auth/user.h"
 #include "mongo/db/auth/validated_tenancy_scope.h"
 #include "mongo/db/client.h"
@@ -98,16 +97,16 @@ protected:
         authzManager->setAuthEnabled(true);
         AuthorizationManager::set(getServiceContext(), std::move(authzManager));
 
-        client = getServiceContext()->makeClient("test");
+        client = getServiceContext()->getService()->makeClient("test");
     }
 
-    BSONObj makeSecurityToken(const UserName& userName) {
-        constexpr auto authUserFieldName = auth::SecurityToken::kAuthenticatedUserFieldName;
-        auto authUser = userName.toBSON(true /* serialize token */);
-        ASSERT_EQ(authUser["tenant"_sd].type(), jstOID);
+    std::string makeSecurityToken(const UserName& userName,
+                                  ValidatedTenancyScope::TenantProtocol protocol =
+                                      ValidatedTenancyScope::TenantProtocol::kDefault) {
         using VTS = auth::ValidatedTenancyScope;
-        return VTS(BSON(authUserFieldName << authUser), VTS::TokenForTestingTag{})
-            .getOriginalToken();
+        return VTS(userName, "secret"_sd, protocol, VTS::TokenForTestingTag{})
+            .getOriginalToken()
+            .toString();
     }
 
     ServiceContext::UniqueClient client;
@@ -137,6 +136,8 @@ TEST_F(ValidatedTenancyScopeTestFixture, MultitenancySupportWithTenantOK) {
 TEST_F(ValidatedTenancyScopeTestFixture, MultitenancySupportWithSecurityTokenOK) {
     RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
+    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
+                                                          "secret");
 
     const TenantId kTenantId(OID::gen());
     auto body = BSON("ping" << 1);
@@ -145,6 +146,7 @@ TEST_F(ValidatedTenancyScopeTestFixture, MultitenancySupportWithSecurityTokenOK)
 
     auto validated = ValidatedTenancyScope::create(client.get(), body, token);
     ASSERT_TRUE(validated != boost::none);
+    ASSERT_TRUE(validated->hasTenantId());
     ASSERT_TRUE(validated->tenantId() == kTenantId);
     ASSERT_TRUE(validated->hasAuthenticatedUser());
     ASSERT_TRUE(validated->authenticatedUser() == user);
@@ -171,7 +173,7 @@ TEST_F(ValidatedTenancyScopeTestFixture, MultitenancySupportWithTenantNOK) {
 
     ASSERT_THROWS_CODE(
         ValidatedTenancyScope(client.get(), TenantId(kOid)), DBException, ErrorCodes::Unauthorized);
-    ASSERT_THROWS_CODE(ValidatedTenancyScope::create(client.get(), body, {}),
+    ASSERT_THROWS_CODE(ValidatedTenancyScope::create(client.get(), body, ""_sd),
                        DBException,
                        ErrorCodes::Unauthorized);
 }
@@ -196,6 +198,75 @@ TEST_F(ValidatedTenancyScopeTestFixture, MultitenancySupportWithTenantAndSecurit
     AuthorizationSessionImplTestHelper::grantUseTenant(*(client.get()));
     ASSERT_THROWS_CODE(
         ValidatedTenancyScope::create(client.get(), body, token), DBException, 6545800);
+}
+
+TEST_F(ValidatedTenancyScopeTestFixture, NoScopeKey) {
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
+
+    UserName user("user", "admin", TenantId(OID::gen()));
+    auto token = makeSecurityToken(user);
+    ASSERT_THROWS_CODE_AND_WHAT(
+        ValidatedTenancyScope(client.get(), token),
+        DBException,
+        ErrorCodes::OperationFailed,
+        "Unable to validate test tokens when testOnlyValidatedTenancyScopeKey is not provided");
+}
+
+TEST_F(ValidatedTenancyScopeTestFixture, WrongScopeKey) {
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
+    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
+                                                          "password");  // != "secret"
+
+    UserName user("user", "admin", TenantId(OID::gen()));
+    auto token = makeSecurityToken(user);
+    ASSERT_THROWS_CODE_AND_WHAT(ValidatedTenancyScope(client.get(), token),
+                                DBException,
+                                ErrorCodes::Unauthorized,
+                                "Token signature invalid");
+}
+
+TEST_F(ValidatedTenancyScopeTestFixture, SecurityTokenDoesNotExpectPrefix) {
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
+    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
+                                                          "secret");
+
+    auto kOid = OID::gen();
+    const TenantId kTenantId(kOid);
+    auto body = BSON("ping" << 1);
+    UserName user("user", "admin", kTenantId);
+    auto token = makeSecurityToken(user, ValidatedTenancyScope::TenantProtocol::kDefault);
+    auto validated = ValidatedTenancyScope::create(client.get(), body, token);
+
+    ASSERT_TRUE(validated->tenantId() == kTenantId);
+    ASSERT_FALSE(validated->isFromAtlasProxy());
+
+    token = makeSecurityToken(user, ValidatedTenancyScope::TenantProtocol::kAtlasProxy);
+    ASSERT_THROWS_CODE(
+        ValidatedTenancyScope::create(client.get(), body, token), DBException, 8054401);
+}
+
+TEST_F(ValidatedTenancyScopeTestFixture, SecurityTokenHasPrefixExpectPrefix) {
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
+    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
+                                                          "secret");
+
+    auto kOid = OID::gen();
+    const TenantId kTenantId(kOid);
+    auto body = BSON("ping" << 1);
+    UserName user("user", "admin", kTenantId);
+    auto token = makeSecurityToken(user, ValidatedTenancyScope::TenantProtocol::kAtlasProxy);
+    auto validated = ValidatedTenancyScope::create(client.get(), body, token);
+
+    ASSERT_TRUE(validated->tenantId() == kTenantId);
+    ASSERT_TRUE(validated->isFromAtlasProxy());
+
+    token = makeSecurityToken(user, ValidatedTenancyScope::TenantProtocol::kDefault);
+    ASSERT_THROWS_CODE(
+        ValidatedTenancyScope::create(client.get(), body, token), DBException, 8054401);
 }
 
 }  // namespace

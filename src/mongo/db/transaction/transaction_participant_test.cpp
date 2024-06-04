@@ -151,6 +151,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
         kNss,                          // namespace
         boost::none,                   // uuid
         boost::none,                   // fromMigrate
+        boost::none,                   // checkExistenceForDiffInsert
         0,                             // version
         object,                        // o
         boost::none,                   // o2
@@ -392,7 +393,7 @@ protected:
 
     void runFunctionFromDifferentOpCtx(std::function<void(OperationContext*)> func) {
         // Create a new client (e.g. for migration) and opCtx.
-        auto newClientOwned = getServiceContext()->makeClient("newClient");
+        auto newClientOwned = getServiceContext()->getService()->makeClient("newClient");
         AlternativeClientRegion acr(newClientOwned);
         auto newOpCtx = cc().makeOperationContext();
         func(newOpCtx.get());
@@ -528,7 +529,7 @@ TEST_F(TxnParticipantTest, TransactionThrowsLockTimeoutIfLockIsUnavailable) {
      */
 
     auto service = opCtx()->getServiceContext();
-    auto newClientOwned = service->makeClient("newTransactionClient");
+    auto newClientOwned = service->getService()->makeClient("newTransactionClient");
     auto newClient = newClientOwned.get();
     Client::setCurrent(std::move(newClientOwned));
 
@@ -1992,7 +1993,7 @@ TEST_F(TxnParticipantTest, InterruptedSessionsCannotBePrepared) {
     unittest::Barrier barrier(2);
 
     auto future = stdx::async(stdx::launch::async, [this, &barrier] {
-        ThreadClient tc(getServiceContext());
+        ThreadClient tc(getServiceContext()->getService());
         auto sideOpCtx = tc->makeOperationContext();
         auto killToken = catalog()->killSession(_sessionId);
         barrier.countDownAndWait();
@@ -3211,9 +3212,6 @@ TEST_F(TransactionsMetricsTest, ReportUnstashedResources) {
     ASSERT(opCtx()->lockState());
     ASSERT(opCtx()->recoveryUnit());
 
-    const auto autocommit = false;
-    auto sessionCheckout = checkOutSession();
-
     repl::ReadConcernArgs readConcernArgs;
     ASSERT_OK(
         readConcernArgs.initialize(BSON("find"
@@ -3221,6 +3219,9 @@ TEST_F(TransactionsMetricsTest, ReportUnstashedResources) {
                                         << BSON(repl::ReadConcernArgs::kLevelFieldName
                                                 << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
+
+    const auto autocommit = false;
+    auto sessionCheckout = checkOutSession();
 
     // Perform initial unstash which sets up a WriteUnitOfWork.
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -3275,7 +3276,7 @@ TEST_F(TransactionsMetricsTest, ReportUnstashedResourcesForARetryableWrite) {
     ASSERT(opCtx()->lockState());
     ASSERT(opCtx()->recoveryUnit());
 
-    auto clientOwned = getServiceContext()->makeClient("client");
+    auto clientOwned = getServiceContext()->getService()->makeClient("client");
     AlternativeClientRegion acr(clientOwned);
     auto opCtxHolder = cc().makeOperationContext();
     auto opCtx = opCtxHolder.get();
@@ -5846,7 +5847,7 @@ TEST_F(ShardTxnParticipantTest, CannotModifyParentLsidOfNonChildSession) {
 TEST_F(ShardTxnParticipantTest,
        TxnRetryCounterShouldNotThrowIfWeContinueATransactionAfterDisablingFeatureFlag) {
     // We swap in a new opCtx in order to set a new active txnRetryCounter for this test.
-    auto newClientOwned = getServiceContext()->makeClient("newClient");
+    auto newClientOwned = getServiceContext()->getService()->makeClient("newClient");
     AlternativeClientRegion acr(newClientOwned);
     auto newOpCtx = cc().makeOperationContext();
 
@@ -5877,7 +5878,7 @@ TEST_F(ShardTxnParticipantTest,
 }
 
 TEST_F(TxnParticipantTest, UnstashTransactionAfterActiveTxnNumberHasChanged) {
-    auto clientOwned = getServiceContext()->makeClient("client");
+    auto clientOwned = getServiceContext()->getService()->makeClient("client");
     AlternativeClientRegion acr(clientOwned);
     auto opCtxHolder = cc().makeOperationContext();
     auto opCtx = opCtxHolder.get();
@@ -5894,7 +5895,7 @@ TEST_F(TxnParticipantTest, UnstashTransactionAfterActiveTxnNumberHasChanged) {
     }
 
     {
-        auto sideClientOwned = getServiceContext()->makeClient("sideClient");
+        auto sideClientOwned = getServiceContext()->getService()->makeClient("sideClient");
         AlternativeClientRegion acr(sideClientOwned);
         auto sideOpCtx = cc().makeOperationContext();
 
@@ -5920,7 +5921,7 @@ TEST_F(TxnParticipantTest, UnstashTransactionAfterActiveTxnNumberHasChanged) {
 }
 
 TEST_F(TxnParticipantTest, UnstashRetryableWriteAfterActiveTxnNumberHasChanged) {
-    auto clientOwned = getServiceContext()->makeClient("client");
+    auto clientOwned = getServiceContext()->getService()->makeClient("client");
     AlternativeClientRegion acr(clientOwned);
     auto opCtxHolder = cc().makeOperationContext();
     auto opCtx = opCtxHolder.get();
@@ -5938,7 +5939,7 @@ TEST_F(TxnParticipantTest, UnstashRetryableWriteAfterActiveTxnNumberHasChanged) 
     }
 
     {
-        auto sideClientOwned = getServiceContext()->makeClient("sideClient");
+        auto sideClientOwned = getServiceContext()->getService()->makeClient("sideClient");
         AlternativeClientRegion acr(sideClientOwned);
         auto sideOpCtx = cc().makeOperationContext();
 
@@ -5964,7 +5965,7 @@ TEST_F(TxnParticipantTest, UnstashRetryableWriteAfterActiveTxnNumberHasChanged) 
 }
 
 TEST_F(TxnParticipantTest, UnstashTransactionAfterActiveTxnNumberNoLongerCorrespondsToTransaction) {
-    auto clientOwned = getServiceContext()->makeClient("client");
+    auto clientOwned = getServiceContext()->getService()->makeClient("client");
     AlternativeClientRegion acr(clientOwned);
     auto opCtxHolder = cc().makeOperationContext();
     auto opCtx = opCtxHolder.get();
@@ -5983,7 +5984,7 @@ TEST_F(TxnParticipantTest, UnstashTransactionAfterActiveTxnNumberNoLongerCorresp
     }
 
     {
-        auto sideClientOwned = getServiceContext()->makeClient("sideClient");
+        auto sideClientOwned = getServiceContext()->getService()->makeClient("sideClient");
         AlternativeClientRegion acr(sideClientOwned);
         auto sideOpCtx = cc().makeOperationContext();
 
@@ -6010,7 +6011,7 @@ TEST_F(TxnParticipantTest, UnstashTransactionAfterActiveTxnNumberNoLongerCorresp
 
 TEST_F(TxnParticipantTest,
        UnstashRetryableWriteAfterActiveTxnNumberNoLongerCorrespondsToRetryableWrite) {
-    auto clientOwned = getServiceContext()->makeClient("client");
+    auto clientOwned = getServiceContext()->getService()->makeClient("client");
     AlternativeClientRegion acr(clientOwned);
     auto opCtxHolder = cc().makeOperationContext();
     auto opCtx = opCtxHolder.get();
@@ -6030,7 +6031,7 @@ TEST_F(TxnParticipantTest,
     }
 
     {
-        auto sideClientOwned = getServiceContext()->makeClient("sideClient");
+        auto sideClientOwned = getServiceContext()->getService()->makeClient("sideClient");
         AlternativeClientRegion acr(sideClientOwned);
         auto sideOpCtx = cc().makeOperationContext();
 

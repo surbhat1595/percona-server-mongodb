@@ -38,7 +38,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -306,7 +305,7 @@ protected:
     void addOplogEntryOnTestNS(ResumeTokenData tokenData) {
         _mock->push_back(Document{{"ns", kTestNs},
                                   {"ts", tokenData.clusterTime},
-                                  {"_id", ResumeToken(std::move(tokenData)).toDocument()}});
+                                  {"_id", ResumeToken(tokenData).toDocument()}});
     }
 
     /**

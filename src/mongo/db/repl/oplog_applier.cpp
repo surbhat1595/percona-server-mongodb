@@ -37,7 +37,6 @@
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
@@ -126,11 +125,8 @@ void OplogApplier::enqueue(OperationContext* opCtx,
                            OplogBuffer::Batch::const_iterator end) {
     static Occasionally sampler;
     if (sampler.tick()) {
-        LOGV2_DEBUG(21226,
-                    2,
-                    "oplog buffer has {oplogBufferSizeBytes} bytes",
-                    "Oplog buffer size",
-                    "oplogBufferSizeBytes"_attr = _oplogBuffer->getSize());
+        LOGV2_DEBUG(
+            21226, 2, "Oplog buffer size", "oplogBufferSizeBytes"_attr = _oplogBuffer->getSize());
     }
     _oplogBuffer->push(opCtx, begin, end);
 }
@@ -181,7 +177,8 @@ std::unique_ptr<ThreadPool> makeReplWriterPool(int threadCount,
         replWriterMinThreadCount < threadCount ? replWriterMinThreadCount : threadCount;
     options.maxThreads = static_cast<size_t>(threadCount);
     options.onCreateThread = [isKillableByStepdown](const std::string&) {
-        Client::initThread(getThreadName());
+        Client::initThread(getThreadName(),
+                           getGlobalServiceContext()->getService(ClusterRole::ShardServer));
         auto client = Client::getCurrent();
         AuthorizationSession::get(*client)->grantInternalAuthorization(client);
 

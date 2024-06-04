@@ -21,8 +21,12 @@ import {ReshardingTest} from "jstests/sharding/libs/resharding_test_fixture.js";
 const makeConfigsvrReshardCollectionThread = (configsvrConnString, ns) => {
     return new Thread((configsvrConnString, ns) => {
         const configsvr = new Mongo(configsvrConnString);
-        assert.commandWorked(configsvr.adminCommand(
-            {_configsvrReshardCollection: ns, key: {newKey: 1}, writeConcern: {w: "majority"}}));
+        assert.commandWorked(configsvr.adminCommand({
+            _configsvrReshardCollection: ns,
+            key: {newKey: 1},
+            writeConcern: {w: "majority"},
+            provenance: "reshardCollection"
+        }));
     }, configsvrConnString, ns);
 };
 

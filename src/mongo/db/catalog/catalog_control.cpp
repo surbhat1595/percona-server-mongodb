@@ -39,7 +39,6 @@
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -114,6 +113,8 @@ void reopenAllDatabasesAndReloadCollectionCatalog(OperationContext* opCtx,
                     catalogWriter.value()->lookupCollectionByUUIDForMetadataWrite(
                         opCtx, collection->uuid());
                 writableCollection->setMinimumValidSnapshot(minValid);
+                // Update the pointer in the outer scope as we just requested a writable instance
+                collection = writableCollection;
             }
 
             if (collection->getTimeseriesOptions()) {
@@ -284,7 +285,6 @@ void openCatalog(OperationContext* opCtx,
 
         for (const auto& indexName : entry.second.first) {
             LOGV2(20275,
-                  "openCatalog: rebuilding index: collection: {collNss}, index: {indexName}",
                   "openCatalog: rebuilding index",
                   logAttrs(collNss),
                   "index"_attr = indexName);

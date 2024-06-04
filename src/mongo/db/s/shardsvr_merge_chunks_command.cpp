@@ -169,7 +169,8 @@ public:
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
         return NamespaceStringUtil::deserialize(dbName.tenantId(),
-                                                CommandHelpers::parseNsFullyQualified(cmdObj));
+                                                CommandHelpers::parseNsFullyQualified(cmdObj),
+                                                SerializationContext::stateDefault());
     }
 
     bool adminOnly() const override {
@@ -243,7 +244,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(MergeChunksCommand);
+MONGO_REGISTER_COMMAND(MergeChunksCommand).forShard();
 
 BSONField<std::string> MergeChunksCommand::nsField("mergeChunks");
 BSONField<std::vector<BSONObj>> MergeChunksCommand::boundsField("bounds");

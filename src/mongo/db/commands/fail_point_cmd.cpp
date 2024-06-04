@@ -50,7 +50,9 @@
 namespace mongo {
 
 /**
- * Command for modifying installed fail points.
+ * Test-only command for modifying installed fail points.
+ *
+ * Requires the 'enableTestCommands' server parameter to be set. See docs/test_commands.md.
  *
  * Format
  * {
@@ -177,6 +179,6 @@ public:
     }
 };
 
-MONGO_REGISTER_COMMAND(WaitForFailPointCommand);
-MONGO_REGISTER_COMMAND(FaultInjectCmd).testOnly();
+MONGO_REGISTER_COMMAND(WaitForFailPointCommand).forRouter().forShard();
+MONGO_REGISTER_COMMAND(FaultInjectCmd).testOnly().forRouter().forShard();
 }  // namespace mongo

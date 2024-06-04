@@ -112,9 +112,9 @@ public:
 
         // Create a plan executor to hold it
         auto findCommand = std::make_unique<FindCommandRequest>(nss);
-        auto statusWithCQ = CanonicalQuery::canonicalize(&_opCtx, std::move(findCommand));
-        ASSERT_OK(statusWithCQ.getStatus());
-        std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
+        auto cq = std::make_unique<CanonicalQuery>(
+            CanonicalQueryParams{.expCtx = _expCtx.get(),
+                                 .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
 
         // Takes ownership of 'ws', 'scan', and 'cq'.
         auto statusWithPlanExecutor =
@@ -122,7 +122,7 @@ public:
                                         std::move(ws),
                                         std::move(scan),
                                         &collection(),
-                                        PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                        PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                         QueryPlannerParams::DEFAULT);
 
         ASSERT_OK(statusWithPlanExecutor.getStatus());
@@ -141,7 +141,7 @@ public:
                                           startKey,
                                           endKey,
                                           BoundInclusion::kIncludeBothStartAndEndKeys,
-                                          PlanYieldPolicy::YieldPolicy::NO_YIELD);
+                                          PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
     }
 
     int N() {

@@ -34,6 +34,7 @@
 #include "mongo/db/dbmessage.h"
 #include "mongo/transport/mock_session.h"
 #include "mongo/transport/service_entry_point_impl.h"
+#include "mongo/transport/session_manager_common.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/transport/transport_layer_mock.h"
 
@@ -108,33 +109,14 @@ public:
 
 class MockServiceEntryPoint : public ServiceEntryPointImpl {
 public:
-    explicit MockServiceEntryPoint(ServiceContext* svcCtx) : ServiceEntryPointImpl(svcCtx) {}
+    using ServiceEntryPointImpl::ServiceEntryPointImpl;
 
     Future<DbResponse> handleRequest(OperationContext* opCtx,
                                      const Message& request) noexcept override {
         return handleRequestCb(opCtx, request);
     }
 
-    void onEndSession(const std::shared_ptr<Session>& handle) override {
-        onEndSessionCb(handle);
-    }
-
-    void derivedOnClientDisconnect(Client* client) override {
-        derivedOnClientDisconnectCb(client);
-    }
-
-    void configureServiceExecutorContext(ServiceContext::UniqueClient& client,
-                                         bool isPrivilegedSession) override {
-        if (configureServiceExecutorContextCb)
-            configureServiceExecutorContextCb(client, isPrivilegedSession);
-        else
-            ServiceEntryPointImpl::configureServiceExecutorContext(client, isPrivilegedSession);
-    }
-
     std::function<Future<DbResponse>(OperationContext*, const Message&)> handleRequestCb;
-    std::function<void(const std::shared_ptr<Session>)> onEndSessionCb;
-    std::function<void(Client*)> derivedOnClientDisconnectCb;
-    std::function<void(ServiceContext::UniqueClient&, bool)> configureServiceExecutorContextCb;
 };
 
 }  // namespace transport

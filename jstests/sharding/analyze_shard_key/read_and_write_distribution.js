@@ -443,8 +443,6 @@ function waitForSampledQueries(conn, ns, shardKey, testCase) {
             (numShardKeyUpdates >= testCase.metrics.writeDistribution.numShardKeyUpdates);
     });
 
-    jsTest.log("??? res " + tojson(res));
-
     return res;
 }
 
@@ -571,8 +569,8 @@ const mongosSetParametersOpts = {
         setUpCollectionFn: (dbName, collName, isShardedColl) => {
             const ns = dbName + "." + collName;
 
-            assert.commandWorked(st.s0.adminCommand({enableSharding: dbName}));
-            st.ensurePrimaryShard(dbName, st.shard0.name);
+            assert.commandWorked(
+                st.s0.adminCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
 
             if (isShardedColl) {
                 // Set up the sharded collection. Make it have three chunks:
@@ -621,7 +619,7 @@ const mongosSetParametersOpts = {
     st.stop();
 }
 
-{
+if (!jsTestOptions().useAutoBootstrapProcedure) {  // TODO: SERVER-80318 Remove block
     jsTest.log("Verify that on a replica set the analyzeShardKey command returns correct read " +
                "and write distribution metrics");
 

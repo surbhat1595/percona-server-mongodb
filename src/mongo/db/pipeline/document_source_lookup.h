@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
@@ -73,7 +72,7 @@
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
@@ -299,6 +298,14 @@ public:
 
     const NamespaceString& getFromNs() const {
         return _fromNs;
+    }
+
+    const boost::intrusive_ptr<DocumentSourceUnwind>& getUnwindSource() const {
+        return _unwindSrc;
+    }
+
+    const boost::optional<BSONObj>& getAdditionalFilter() const {
+        return _additionalFilter;
     }
 
 protected:

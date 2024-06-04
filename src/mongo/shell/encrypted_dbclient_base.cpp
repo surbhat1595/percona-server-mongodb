@@ -30,7 +30,6 @@
 #include <absl/container/node_hash_map.h>
 #include <algorithm>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
@@ -145,8 +144,8 @@ std::string EncryptedDBClientBase::getServerAddress() const {
     return _conn->getServerAddress();
 }
 
-void EncryptedDBClientBase::_call(Message& toSend, Message& response, std::string* actualServer) {
-    _conn->call(toSend, response, actualServer);
+Message EncryptedDBClientBase::_call(Message& toSend, std::string* actualServer) {
+    return _conn->call(toSend, actualServer);
 }
 
 void EncryptedDBClientBase::say(Message& toSend, bool isRetry, std::string* actualServer) {
@@ -281,7 +280,8 @@ EncryptedDBClientBase::RunCommandReturn EncryptedDBClientBase::handleEncryptionR
     auto commandName = request.getCommandName().toString();
     const DatabaseName dbName = request.body.hasField("$tenant")
         ? DatabaseNameUtil::deserialize(TenantId(request.body["$tenant"].OID()),
-                                        request.getDatabase())
+                                        request.getDatabase(),
+                                        request.getSerializationContext())
         : DatabaseName::createDatabaseName_forTest(boost::none, request.getDatabase());
 
     if (std::find(kEncryptedCommands.begin(), kEncryptedCommands.end(), StringData(commandName)) ==
@@ -891,7 +891,7 @@ void createCollectionObject(JSContext* cx,
     JS::RootedValueArray<2> databaseArgs(cx);
 
     databaseArgs[0].setObject(client.toObject());
-    mozjs::ValueReader(cx, databaseArgs[1]).fromStringData(ns.db_deprecated());
+    mozjs::ValueReader(cx, databaseArgs[1]).fromStringData(ns.dbName().toString_forTest());
     scope->getProto<mozjs::DBInfo>().newInstance(databaseArgs, &databaseRV);
 
     invariant(databaseRV.isObject());

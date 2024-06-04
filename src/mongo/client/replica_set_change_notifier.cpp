@@ -31,7 +31,6 @@
 #include <mutex>
 
 #include <absl/container/node_hash_map.h>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/client/replica_set_change_notifier.h"
 #include "mongo/logv2/log.h"
@@ -52,11 +51,7 @@ void ReplicaSetChangeNotifier::_addListener(std::shared_ptr<Listener> listener) 
 }
 
 void ReplicaSetChangeNotifier::onFoundSet(const std::string& name) noexcept {
-    LOGV2_DEBUG(20158,
-                2,
-                "Signaling found set {replicaSet}",
-                "Signaling found set",
-                "replicaSet"_attr = name);
+    LOGV2_DEBUG(20158, 2, "Signaling found set", "replicaSet"_attr = name);
 
     stdx::unique_lock<Latch> lk(_mutex);
 
@@ -73,11 +68,7 @@ void ReplicaSetChangeNotifier::onFoundSet(const std::string& name) noexcept {
 }
 
 void ReplicaSetChangeNotifier::onPossibleSet(ConnectionString connectionString) noexcept {
-    LOGV2_DEBUG(20159,
-                2,
-                "Signaling possible set {connectionString}",
-                "Signaling possible set",
-                "connectionString"_attr = connectionString);
+    LOGV2_DEBUG(20159, 2, "Signaling possible set", "connectionString"_attr = connectionString);
 
     const auto& name = connectionString.getSetName();
 
@@ -108,7 +99,6 @@ void ReplicaSetChangeNotifier::onConfirmedSet(ConnectionString connectionString,
                                               std::set<HostAndPort> passives) noexcept {
     LOGV2_DEBUG(20160,
                 2,
-                "Signaling confirmed set {connectionString} with primary {primary}",
                 "Signaling confirmed set with primary",
                 "connectionString"_attr = connectionString,
                 "primary"_attr = primary);
@@ -138,11 +128,7 @@ void ReplicaSetChangeNotifier::onConfirmedSet(ConnectionString connectionString,
 }
 
 void ReplicaSetChangeNotifier::onDroppedSet(const std::string& name) noexcept {
-    LOGV2_DEBUG(20161,
-                2,
-                "Signaling dropped set {replicaSet}",
-                "Signaling dropped set",
-                "replicaSet"_attr = name);
+    LOGV2_DEBUG(20161, 2, "Signaling dropped set", "replicaSet"_attr = name);
 
     stdx::unique_lock<Latch> lk(_mutex);
 

@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <cstdint>
 #include <limits>
@@ -137,6 +136,11 @@ namespace mongo {
 
 namespace {
 const auto getTTLMonitor = ServiceContext::declareDecoration<std::unique_ptr<TTLMonitor>>();
+
+// TODO (SERVER-64506): support change streams' pre- and post-images.
+bool isBatchingEnabled(const CollectionPtr& collectionPtr) {
+    return ttlMonitorBatchDeletes.load() && !collectionPtr->isChangeStreamPreAndPostImagesEnabled();
+}
 
 // When batching is enabled, returns BatchedDeleteStageParams that limit the amount of work done in
 // a delete such that it is possible not all expired documents will be removed. Returns nullptr
@@ -335,6 +339,7 @@ private:
         ttlMonitor->onStepUp(opCtx);
     }
     void onStepDown() override {}
+    void onRollback() override {}
     void onBecomeArbiter() override {}
     inline std::string getServiceName() const override final {
         return "TTLMonitorService";
@@ -407,7 +412,7 @@ void TTLMonitor::updateSleepSeconds(Seconds newSeconds) {
 }
 
 void TTLMonitor::run() {
-    ThreadClient tc(name(), getGlobalServiceContext());
+    ThreadClient tc(name(), getGlobalServiceContext()->getService(ClusterRole::ShardServer));
     AuthorizationSession::get(cc())->grantInternalAuthorization(&cc());
 
     while (true) {
@@ -453,8 +458,9 @@ void TTLMonitor::run() {
 
         try {
             const auto opCtxPtr = cc().makeOperationContext();
-            writeConflictRetry(
-                opCtxPtr.get(), "TTL pass", NamespaceString(), [&] { _doTTLPass(opCtxPtr.get()); });
+            writeConflictRetry(opCtxPtr.get(), "TTL pass", NamespaceString::kEmpty, [&] {
+                _doTTLPass(opCtxPtr.get());
+            });
         } catch (const DBException& ex) {
             LOGV2_WARNING(22537,
                           "TTLMonitor was interrupted, waiting before doing another pass",
@@ -663,7 +669,8 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
             auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
             ExecutorFuture<void>(executor)
                 .then([serviceContext = opCtx->getServiceContext(), nss, staleInfo] {
-                    ThreadClient tc("TTLShardVersionRecovery", serviceContext);
+                    ThreadClient tc("TTLShardVersionRecovery",
+                                    serviceContext->getService(ClusterRole::ShardServer));
                     auto uniqueOpCtx = tc->makeOperationContext();
                     auto opCtx = uniqueOpCtx.get();
 
@@ -751,17 +758,18 @@ bool TTLMonitor::_deleteExpiredWithIndex(OperationContext* opCtx,
     BSONObj query = BSON(keyFieldName << BSON("$gte" << kDawnOfTime << "$lte" << expirationDate));
     auto findCommand = std::make_unique<FindCommandRequest>(collection.nss());
     findCommand->setFilter(query);
-    auto canonicalQuery = CanonicalQuery::canonicalize(opCtx, std::move(findCommand));
-    invariant(canonicalQuery.getStatus());
+    auto canonicalQuery = std::make_unique<CanonicalQuery>(
+        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx, *findCommand),
+                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
 
     auto params = std::make_unique<DeleteStageParams>();
     params->isMulti = true;
-    params->canonicalQuery = canonicalQuery.getValue().get();
+    params->canonicalQuery = canonicalQuery.get();
 
     // Maintain a consistent view of whether batching is enabled - batching depends on
     // parameters that can be set at runtime, and it is illegal to try to get
     // BatchedDeleteStageStats from a non-batched delete.
-    const bool batchingEnabled = ttlMonitorBatchDeletes.load();
+    const bool batchingEnabled = isBatchingEnabled(collection.getCollectionPtr());
 
     Timer timer;
     auto exec = InternalPlanner::deleteWithIndexScan(opCtx,
@@ -834,7 +842,7 @@ bool TTLMonitor::_deleteExpiredWithCollscan(OperationContext* opCtx,
     // Maintain a consistent view of whether batching is enabled - batching depends on
     // parameters that can be set at runtime, and it is illegal to try to get
     // BatchedDeleteStageStats from a non-batched delete.
-    const bool batchingEnabled = ttlMonitorBatchDeletes.load();
+    const bool batchingEnabled = isBatchingEnabled(collection.getCollectionPtr());
 
     // Deletes records using a bounded collection scan from the beginning of time to the
     // expiration time (inclusive).
@@ -919,7 +927,7 @@ void TTLMonitor::onStepUp(OperationContext* opCtx) {
                     continue;
                 }
 
-                if (!info.isExpireAfterSecondsInvalid() && !info.isExpireAfterSecondsNonInt()) {
+                if (!info.isExpireAfterSecondsInvalid()) {
                     continue;
                 }
 
@@ -936,32 +944,8 @@ void TTLMonitor::onStepUp(OperationContext* opCtx) {
                 // would be used by listIndexes() to convert a NaN value in the catalog.
                 CollModIndex collModIndex;
                 collModIndex.setName(StringData{indexName});
-                if (info.isExpireAfterSecondsInvalid()) {
-                    collModIndex.setExpireAfterSeconds(mongo::durationCount<Seconds>(
-                        index_key_validate::kExpireAfterSecondsForInactiveTTLIndex));
-                } else if (info.isExpireAfterSecondsNonInt()) {
-                    const auto coll = acquireCollection(
-                        opCtx,
-                        CollectionAcquisitionRequest::fromOpCtx(
-                            opCtx, *nss, AcquisitionPrerequisites::OperationType::kWrite),
-                        MODE_X);
-
-                    if (!coll.exists() || coll.uuid() != uuid) {
-                        continue;
-                    }
-                    const auto& collectionPtr = coll.getCollectionPtr();
-
-                    if (!collectionPtr->isIndexPresent(indexName)) {
-                        ttlCollectionCache.deregisterTTLIndexByName(uuid, indexName);
-                        continue;
-                    }
-
-                    BSONObj spec = collectionPtr->getIndexSpec(indexName);
-                    auto expireAfterSeconds =
-                        spec[IndexDescriptor::kExpireAfterSecondsFieldName].safeNumberInt();
-
-                    collModIndex.setExpireAfterSeconds(expireAfterSeconds);
-                }
+                collModIndex.setExpireAfterSeconds(mongo::durationCount<Seconds>(
+                    index_key_validate::kExpireAfterSecondsForInactiveTTLIndex));
                 CollMod collModCmd{*nss};
                 collModCmd.getCollModRequest().setIndex(collModIndex);
 

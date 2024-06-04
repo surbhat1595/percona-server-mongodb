@@ -6,11 +6,11 @@
  *  requires_fcv_71,
  *  requires_sharding,
  *  uses_transactions,
+ *  assumes_balancer_off,
  * ]
  */
 import "jstests/libs/parallelTester.js";
 
-import {assertAlways} from "jstests/concurrency/fsm_libs/assert.js";
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {
     $config as $baseConfig
@@ -18,6 +18,8 @@ import {
 
 export const $config = extendWorkload($baseConfig, function($config, $super) {
     $config.startState = "init";
+    $config.iterations = 25;
+    $config.threadCount = 5;
 
     // Use a CountDownLatch as if it were a std::atomic<long long> shared between all of the
     // threads. The collection name is suffixed with the current this.latch.getCount() value
@@ -45,9 +47,9 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         for (let i = this.latchCount; i >= 0; --i) {
             const latchCollName = collName + '_' + i;
             let coll = db.getCollection(latchCollName);
-            assertAlways.commandWorked(
+            assert.commandWorked(
                 db.adminCommand({shardCollection: coll.getFullName(), key: this.defaultShardKey}));
-            assertAlways.commandWorked(coll.createIndex(this.newShardKey));
+            assert.commandWorked(coll.createIndex(this.newShardKey));
             $super.setup.apply(this, [db, latchCollName, cluster]);
         }
     };
@@ -74,7 +76,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
                 key: this.newShardKey
             };
 
-            assertAlways.commandWorked(db.adminCommand(cmdObj));
+            assert.commandWorked(db.adminCommand(cmdObj));
         } catch (e) {
             // There is a race that could occur where two threads run refineCollectionShardKey
             // concurrently on the same collection. Since the epoch of the collection changes,
@@ -106,38 +108,36 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
     };
 
     $config.transitions = {
-        init:
-            {refineCollectionShardKey: 0.25, updateOne: 0.25, deleteOne: 0.25, findAndModify: 0.25},
+        init: {updateOne: 0.33, deleteOne: 0.33, findAndModify: 0.34},
         updateOne: {
-            refineCollectionShardKey: 0.2,
-            updateOne: 0.2,
-            deleteOne: 0.2,
-            findAndModify: 0.2,
-            flushRouterConfig: 0.2
+            refineCollectionShardKey: 0.05,
+            updateOne: 0.3,
+            deleteOne: 0.3,
+            findAndModify: 0.3,
+            flushRouterConfig: 0.05
         },
         deleteOne: {
-            refineCollectionShardKey: 0.2,
-            updateOne: 0.2,
-            deleteOne: 0.2,
-            findAndModify: 0.2,
-            flushRouterConfig: 0.2
+            refineCollectionShardKey: 0.05,
+            updateOne: 0.3,
+            deleteOne: 0.3,
+            findAndModify: 0.3,
+            flushRouterConfig: 0.05
         },
         findAndModify: {
-            refineCollectionShardKey: 0.2,
-            updateOne: 0.2,
-            deleteOne: 0.2,
-            findAndModify: 0.2,
-            flushRouterConfig: 0.2
+            refineCollectionShardKey: 0.05,
+            updateOne: 0.3,
+            deleteOne: 0.3,
+            findAndModify: 0.3,
+            flushRouterConfig: 0.05
         },
         refineCollectionShardKey: {
-            refineCollectionShardKey: 0.2,
-            updateOne: 0.2,
-            deleteOne: 0.2,
-            findAndModify: 0.2,
-            flushRouterConfig: 0.2
+            refineCollectionShardKey: 0.05,
+            updateOne: 0.3,
+            deleteOne: 0.3,
+            findAndModify: 0.3,
+            flushRouterConfig: 0.05
         },
-        flushRouterConfig:
-            {refineCollectionShardKey: 0.25, updateOne: 0.25, deleteOne: 0.25, findAndModify: 0.25},
+        flushRouterConfig: {updateOne: 0.33, deleteOne: 0.33, findAndModify: 0.34},
     };
 
     return $config;

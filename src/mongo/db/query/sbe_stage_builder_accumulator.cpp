@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -601,8 +600,23 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildCombinePartialAggsMergeObjec
 }
 
 std::vector<std::unique_ptr<sbe::EExpression>> buildInitializeAccumulatorMulti(
-    std::unique_ptr<sbe::EExpression> maxSizeExpr, sbe::value::FrameIdGenerator& frameIdGenerator) {
-    // Create an array of four elements [value holder, max size, memory used, memory limit].
+    StringDataMap<std::unique_ptr<sbe::EExpression>> argExprs,
+    sbe::value::FrameIdGenerator& frameIdGenerator) {
+
+    auto it = argExprs.find(AccArgs::kMaxSize);
+    tassert(8070612,
+            str::stream() << "Expected a '" << AccArgs::kMaxSize << "' argument",
+            it != argExprs.end());
+    auto maxSizeExpr = std::move(it->second);
+
+    it = argExprs.find(AccArgs::kIsGroupAccum);
+    tassert(8070613,
+            str::stream() << "Expected a '" << AccArgs::kIsGroupAccum << "' argument",
+            it != argExprs.end());
+    auto isGroupAccumExpr = std::move(it->second);
+
+    // Create an array of four elements [value holder, max size, memory used, memory limit,
+    // isGroupAccum].
     std::vector<std::unique_ptr<sbe::EExpression>> aggs;
     auto maxAccumulatorBytes = internalQueryTopNAccumulatorBytes.load();
     if (auto* maxSizeConstExpr = maxSizeExpr->as<sbe::EConstant>()) {
@@ -618,7 +632,8 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildInitializeAccumulatorMulti(
                                     makeInt64Constant(0),
                                     makeConstant(convertTag, convertVal),
                                     makeInt32Constant(0),
-                                    makeInt32Constant(maxAccumulatorBytes)));
+                                    makeInt32Constant(maxAccumulatorBytes),
+                                    std::move(isGroupAccumExpr)));
     } else {
         auto localBind = makeLocalBind(
             &frameIdGenerator,
@@ -635,7 +650,8 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildInitializeAccumulatorMulti(
                                  makeInt64Constant(0),
                                  maxSizeConvertVar.clone(),
                                  makeInt32Constant(0),
-                                 makeInt32Constant(maxAccumulatorBytes)),
+                                 makeInt32Constant(maxAccumulatorBytes),
+                                 std::move(isGroupAccumExpr)),
                     makeFail(7548607,
                              "parameter 'n' must be coercible to a positive 64-bit integer"));
             },
@@ -766,7 +782,7 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildAccumulatorTopBottomN(
 
     std::vector<std::unique_ptr<sbe::EExpression>> aggs;
     aggs.push_back(makeFunction(isAccumulatorTopN(expr) ? "aggTopN" : "aggBottomN",
-                                std::move(key),
+                                makeFunction("setToArray", std::move(key)),
                                 std::move(value),
                                 std::move(sortSpec)));
     return aggs;
@@ -890,11 +906,13 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildAccumulatorMinMaxN(
     std::vector<std::unique_ptr<sbe::EExpression>> aggs;
     auto aggExprName = expr.name == AccumulatorMaxN::kName ? "aggMaxN" : "aggMinN";
     if (collatorSlot) {
-        aggs.push_back(
-            makeFunction(std::move(aggExprName), std::move(arg), makeVariable(*collatorSlot)));
+        aggs.push_back(makeFunction(std::move(aggExprName),
+                                    makeFunction("setToArray", std::move(arg)),
+                                    makeVariable(*collatorSlot)));
 
     } else {
-        aggs.push_back(makeFunction(std::move(aggExprName), std::move(arg)));
+        aggs.push_back(
+            makeFunction(std::move(aggExprName), makeFunction("setToArray", std::move(arg))));
     }
     return aggs;
 }
@@ -1123,34 +1141,13 @@ std::unique_ptr<sbe::EExpression> buildFinalizeIntegral(
     return makeFunction("aggIntegralFinalize", makeVariable(slots[0]));
 }
 
-std::vector<std::unique_ptr<sbe::EExpression>> buildInitializeDerivative(
-    std::unique_ptr<sbe::EExpression> unitExpr, sbe::value::FrameIdGenerator& frameIdGenerator) {
-    std::vector<std::unique_ptr<sbe::EExpression>> aggs;
-    aggs.push_back(makeFunction("aggDerivativeInit", std::move(unitExpr)));
-    return aggs;
-}
-
 std::vector<std::unique_ptr<sbe::EExpression>> buildAccumulatorDerivative(
     const AccumulationExpression& expr,
     StringDataMap<std::unique_ptr<sbe::EExpression>> args,
     boost::optional<sbe::value::SlotId> collatorSlot,
     sbe::value::FrameIdGenerator& frameIdGenerator) {
-    tassert(7996810, "Incorrect number of arguments", args.size() == 2);
-
-    auto it = args.find(AccArgs::kInput);
-    tassert(7996811,
-            str::stream() << "Window function expects '" << AccArgs::kInput << "' argument",
-            it != args.end());
-    auto input = std::move(it->second);
-
-    it = args.find(AccArgs::kSortBy);
-    tassert(7996812,
-            str::stream() << "Window function expects '" << AccArgs::kSortBy << "' argument",
-            it != args.end());
-    auto sortBy = std::move(it->second);
-
     std::vector<std::unique_ptr<sbe::EExpression>> exprs;
-    exprs.push_back(makeFunction("aggDerivativeAdd", std::move(input), std::move(sortBy)));
+    exprs.push_back(makeFunction("sum", makeInt64Constant(1)));
     return exprs;
 }
 
@@ -1158,10 +1155,116 @@ std::unique_ptr<sbe::EExpression> buildFinalizeDerivative(
     StageBuilderState& state,
     const AccumulationExpression& expr,
     const sbe::value::SlotVector& slots,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> args,
     boost::optional<sbe::value::SlotId> collatorSlot,
     sbe::value::FrameIdGenerator& frameIdGenerator) {
-    tassert(7996813, "Incorrect number of arguments", slots.size() == 1);
-    return makeFunction("aggDerivativeFinalize", makeVariable(slots[0]));
+    tassert(8085504, "Expected a single slot", slots.size() == 1);
+    auto it = args.find(AccArgs::kUnit);
+    tassert(7993403,
+            str::stream() << "Window function expects '" << AccArgs::kUnit << "' argument",
+            it != args.end());
+    auto unit = std::move(it->second);
+
+    it = args.find(AccArgs::kDerivativeInputFirst);
+    tassert(7993404,
+            str::stream() << "Window function expects '" << AccArgs::kDerivativeInputFirst
+                          << "' argument",
+            it != args.end());
+    auto inputFirst = std::move(it->second);
+
+    it = args.find(AccArgs::kDerivativeSortByFirst);
+    tassert(7993405,
+            str::stream() << "Window function expects '" << AccArgs::kDerivativeSortByFirst
+                          << "' argument",
+            it != args.end());
+    auto sortByFirst = std::move(it->second);
+
+    it = args.find(AccArgs::kDerivativeInputLast);
+    tassert(7993406,
+            str::stream() << "Window function expects '" << AccArgs::kDerivativeInputLast
+                          << "' argument",
+            it != args.end());
+    auto inputLast = std::move(it->second);
+
+    it = args.find(AccArgs::kDerivativeSortByLast);
+    tassert(7993407,
+            str::stream() << "Window function expects '" << AccArgs::kDerivativeSortByLast
+                          << "' argument",
+            it != args.end());
+    auto sortByLast = std::move(it->second);
+
+    return sbe::makeE<sbe::EIf>(
+        makeBinaryOp(
+            sbe::EPrimBinary::logicAnd,
+            makeFunction("exists", makeVariable(slots[0])),
+            makeBinaryOp(sbe::EPrimBinary::greater, makeVariable(slots[0]), makeInt64Constant(0))),
+        makeFunction("aggDerivativeFinalize",
+                     std::move(unit),
+                     std::move(inputFirst),
+                     std::move(sortByFirst),
+                     std::move(inputLast),
+                     std::move(sortByLast)),
+        makeNullConstant());
+}
+
+std::vector<std::unique_ptr<sbe::EExpression>> buildInitializeLinearFill(
+    std::unique_ptr<sbe::EExpression> unitExpr, sbe::value::FrameIdGenerator& frameIdGenerator) {
+    std::vector<std::unique_ptr<sbe::EExpression>> aggs;
+    aggs.push_back(makeFunction("newArray",
+                                makeNullConstant(),
+                                makeNullConstant(),
+                                makeNullConstant(),
+                                makeNullConstant(),
+                                makeNullConstant(),
+                                makeInt64Constant(0)));
+    return aggs;
+}
+
+std::vector<std::unique_ptr<sbe::EExpression>> buildAccumulatorLinearFill(
+    const AccumulationExpression& expr,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> args,
+    boost::optional<sbe::value::SlotId> collatorSlot,
+    sbe::value::FrameIdGenerator& frameIdGenerator) {
+    tassert(7971210, "Incorrect number of arguments", args.size() == 2);
+
+    auto it = args.find(AccArgs::kInput);
+    tassert(7971211,
+            str::stream() << "Window function expects '" << AccArgs::kInput << "' argument",
+            it != args.end());
+    auto input = std::move(it->second);
+
+    it = args.find(AccArgs::kSortBy);
+    tassert(7971212,
+            str::stream() << "Window function expects '" << AccArgs::kSortBy << "' argument",
+            it != args.end());
+    auto sortBy = std::move(it->second);
+
+    std::vector<std::unique_ptr<sbe::EExpression>> exprs;
+    exprs.push_back(
+        makeFunction("aggLinearFillAdd", makeFillEmptyNull(std::move(input)), std::move(sortBy)));
+    return exprs;
+}
+
+std::unique_ptr<sbe::EExpression> buildFinalizeLinearFill(
+    StageBuilderState& state,
+    const AccumulationExpression& expr,
+    const sbe::value::SlotVector& inputSlots,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> args,
+    boost::optional<sbe::value::SlotId> collatorSlot,
+    sbe::value::FrameIdGenerator& frameIdGenerator) {
+    tassert(7971213,
+            str::stream() << "Expected one input slot for finalization of " << expr.name
+                          << ", got: " << inputSlots.size(),
+            inputSlots.size() == 1);
+    auto inputVar = makeVariable(inputSlots[0]);
+
+    auto it = args.find(AccArgs::kSortBy);
+    tassert(7971214,
+            str::stream() << "Window function expects '" << AccArgs::kSortBy << "' argument",
+            it != args.end());
+    auto sortBy = std::move(it->second);
+
+    return makeFunction("aggLinearFillFinalize", std::move(inputVar), std::move(sortBy));
 }
 
 template <int N>
@@ -1238,6 +1341,7 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildAccumulator(
         {AccumulatorCovariancePop::kName, &buildAccumulatorCovariance},
         {AccumulatorIntegral::kName, &buildAccumulatorIntegral},
         {window_function::ExpressionDerivative::kName, &buildAccumulatorDerivative},
+        {window_function::ExpressionLinearFill::kName, &buildAccumulatorLinearFill},
     };
 
     auto accExprName = acc.expr.name;
@@ -1360,7 +1464,6 @@ std::unique_ptr<sbe::EExpression> buildFinalize(StageBuilderState& state,
         {AccumulatorRank::kName, &buildFinalizeRank},
         {AccumulatorDenseRank::kName, &buildFinalizeRank},  // same as $rank
         {AccumulatorIntegral::kName, &buildFinalizeIntegral},
-        {window_function::ExpressionDerivative::kName, &buildFinalizeDerivative},
         {AccumulatorLocf::kName, nullptr},
         {AccumulatorDocumentNumber::kName, nullptr},
     };
@@ -1398,6 +1501,8 @@ std::unique_ptr<sbe::EExpression> buildFinalize(
         {AccumulatorTopBottomN<kBottom, true /* single */>::getName(), &buildFinalizeTopBottom},
         {AccumulatorTopBottomN<kTop, false /* single */>::getName(), &buildFinalizeTopBottomN},
         {AccumulatorTopBottomN<kBottom, false /* single */>::getName(), &buildFinalizeTopBottomN},
+        {window_function::ExpressionDerivative::kName, &buildFinalizeDerivative},
+        {window_function::ExpressionLinearFill::kName, &buildFinalizeLinearFill},
     };
 
     auto accExprName = acc.expr.name;
@@ -1433,6 +1538,34 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildInitialize(
         {AccumulatorMergeObjects::kName, &emptyInitializer<1>},
         {AccumulatorStdDevPop::kName, &emptyInitializer<1>},
         {AccumulatorStdDevSamp::kName, &emptyInitializer<1>},
+        {AccumulatorCovarianceSamp::kName, &emptyInitializer<1>},
+        {AccumulatorCovariancePop::kName, &emptyInitializer<1>},
+        {AccumulatorExpMovingAvg::kName, &buildInitializeExpMovingAvg},
+        {AccumulatorLocf::kName, &emptyInitializer<1>},
+        {AccumulatorDocumentNumber::kName, &emptyInitializer<1>},
+        {AccumulatorRank::kName, &emptyInitializer<1>},
+        {AccumulatorDenseRank::kName, &emptyInitializer<1>},
+        {AccumulatorIntegral::kName, &buildInitializeIntegral},
+        {window_function::ExpressionDerivative::kName, &emptyInitializer<1>},
+        {window_function::ExpressionLinearFill::kName, &buildInitializeLinearFill},
+    };
+
+    auto accExprName = acc.expr.name;
+    uassert(7567300,
+            str::stream() << "Unsupported Accumulator in SBE accumulator builder: " << accExprName,
+            kAccumulatorBuilders.find(accExprName) != kAccumulatorBuilders.end());
+
+    return std::invoke(kAccumulatorBuilders.at(accExprName), std::move(initExpr), frameIdGenerator);
+}
+
+std::vector<std::unique_ptr<sbe::EExpression>> buildInitialize(
+    const AccumulationStatement& acc,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> argExprs,
+    sbe::value::FrameIdGenerator& frameIdGenerator) {
+    using BuildInitializeFn = std::function<std::vector<std::unique_ptr<sbe::EExpression>>(
+        StringDataMap<std::unique_ptr<sbe::EExpression>>, sbe::value::FrameIdGenerator&)>;
+
+    static const StringDataMap<BuildInitializeFn> kAccumulatorBuilders = {
         {AccumulatorFirstN::kName, &buildInitializeAccumulatorMulti},
         {AccumulatorLastN::kName, &buildInitializeAccumulatorMulti},
         {AccumulatorTopBottomN<kTop, true /* single */>::getName(),
@@ -1445,22 +1578,13 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildInitialize(
          &buildInitializeAccumulatorMulti},
         {AccumulatorMaxN::kName, &buildInitializeAccumulatorMulti},
         {AccumulatorMinN::kName, &buildInitializeAccumulatorMulti},
-        {AccumulatorCovarianceSamp::kName, &emptyInitializer<1>},
-        {AccumulatorCovariancePop::kName, &emptyInitializer<1>},
-        {AccumulatorExpMovingAvg::kName, &buildInitializeExpMovingAvg},
-        {AccumulatorLocf::kName, &emptyInitializer<1>},
-        {AccumulatorDocumentNumber::kName, &emptyInitializer<1>},
-        {AccumulatorRank::kName, &emptyInitializer<1>},
-        {AccumulatorDenseRank::kName, &emptyInitializer<1>},
-        {AccumulatorIntegral::kName, &buildInitializeIntegral},
-        {window_function::ExpressionDerivative::kName, &buildInitializeDerivative},
     };
 
     auto accExprName = acc.expr.name;
-    uassert(7567300,
+    uassert(8070614,
             str::stream() << "Unsupported Accumulator in SBE accumulator builder: " << accExprName,
             kAccumulatorBuilders.find(accExprName) != kAccumulatorBuilders.end());
 
-    return std::invoke(kAccumulatorBuilders.at(accExprName), std::move(initExpr), frameIdGenerator);
+    return std::invoke(kAccumulatorBuilders.at(accExprName), std::move(argExprs), frameIdGenerator);
 }
 }  // namespace mongo::stage_builder

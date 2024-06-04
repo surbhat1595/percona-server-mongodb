@@ -33,7 +33,6 @@
 #include <algorithm>
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
 #include <fmt/format.h>
@@ -144,7 +143,9 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
     //     }
     // }
     stages.emplace_back(DocumentSourceMatch::create(
-        Doc{{CollectionType::kNssFieldName, NamespaceStringUtil::serialize(nss)}}.toBson(),
+        Doc{{CollectionType::kNssFieldName,
+             NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())}}
+            .toBson(),
         expCtx));
 
     // 2. Two $unionWith stages guarded by a mutually exclusive condition on whether the refresh is
@@ -269,9 +270,10 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
         return Doc{
             {"coll", CollectionType::ConfigNS.coll()},
             {"pipeline",
-             Arr{Value{Doc{
-                     {"$match",
-                      Doc{{CollectionType::kNssFieldName, NamespaceStringUtil::serialize(nss)}}}}},
+             Arr{Value{Doc{{"$match",
+                            Doc{{CollectionType::kNssFieldName,
+                                 NamespaceStringUtil::serialize(
+                                     nss, SerializationContext::stateDefault())}}}}},
                  Value{Doc{{"$match", Doc{{CollectionType::kEpochFieldName, lastmodEpochMatch}}}}},
                  Value{Doc{{"$lookup", lookupPipeline}}},
                  Value{Doc{{"$unwind", Doc{{"path", "$" + chunksLookupOutputFieldName}}}}},
@@ -315,7 +317,9 @@ AggregateCommandRequest makeCollectionAndIndexesAggregation(OperationContext* op
     //     }
     // }
     stages.emplace_back(DocumentSourceMatch::create(
-        Doc{{CollectionType::kNssFieldName, NamespaceStringUtil::serialize(nss)}}.toBson(),
+        Doc{{CollectionType::kNssFieldName,
+             NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())}}
+            .toBson(),
         expCtx));
 
     // 2. Retrieve config.csrs.indexes entries with the same uuid as the one from the
@@ -339,6 +343,75 @@ AggregateCommandRequest makeCollectionAndIndexesAggregation(OperationContext* op
 
     stages.emplace_back(DocumentSourceLookUp::createFromBson(
         Doc{{"$lookup", lookupPipeline}}.toBson().firstElement(), expCtx));
+
+    auto pipeline = Pipeline::create(std::move(stages), expCtx);
+    auto serializedPipeline = pipeline->serializeToBson();
+    return AggregateCommandRequest(CollectionType::ConfigNS, std::move(serializedPipeline));
+}
+
+AggregateCommandRequest makeUnsplittableCollectionsDataShardAggregation(
+    OperationContext* opCtx,
+    const DatabaseName& dbName,
+    const std::vector<ShardId>& excludedShards) {
+    auto expCtx = make_intrusive<ExpressionContext>(opCtx, nullptr, CollectionType::ConfigNS);
+    StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
+    resolvedNamespaces[CollectionType::ConfigNS.coll()] = {CollectionType::ConfigNS,
+                                                           std::vector<BSONObj>()};
+    resolvedNamespaces[NamespaceString::kConfigsvrChunksNamespace.coll()] = {
+        NamespaceString::kConfigsvrChunksNamespace, std::vector<BSONObj>()};
+    expCtx->setResolvedNamespaces(resolvedNamespaces);
+
+    using Doc = Document;
+    using Arr = std::vector<Value>;
+
+    Pipeline::SourceContainer stages;
+
+    // 1. Match config.collections entries with database name = dbName
+    // {
+    //     $match: {
+    //         _id: {$regex: dbName.*, unsplittable: true}
+    //     }
+    // }
+    const auto db =
+        DatabaseNameUtil::serialize(dbName, SerializationContext::stateCommandRequest());
+    stages.emplace_back(DocumentSourceMatch::create(
+        BSON(CollectionType::kNssFieldName << BSON("$regex"
+                                                   << "^{}\\."_format(pcre_util::quoteMeta(db)))
+                                           << CollectionType::kUnsplittableFieldName << true),
+        expCtx));
+
+    // 2. Retrieve config.chunks entries with the same uuid as the one from the
+    // config.collections document.
+    //
+    // The $lookup stage gets the config.chunks documents and puts them in a field called
+    // "chunks" in the document produced during stage 1.
+    //
+    // {
+    //      $lookup: {
+    //          from: "chunks",
+    //          as: "chunks",
+    //          localField: "uuid",
+    //          foreignField: "uuid"
+    //      }
+    // }
+    const Doc lookupPipeline{{"from", NamespaceString::kConfigsvrChunksNamespace.coll()},
+                             {"as", "chunks"_sd},
+                             {"localField", CollectionType::kUuidFieldName},
+                             {"foreignField", CollectionType::kUuidFieldName}};
+
+    stages.emplace_back(DocumentSourceLookUp::createFromBson(
+        Doc{{"$lookup", lookupPipeline}}.toBson().firstElement(), expCtx));
+
+    // 3. Filter only the collection entries where the chunk has the shard field equal to shardId.
+    // {
+    //      $match: {
+    //          chunks.shard: {$nin: <excludedShards>}
+    //      }
+    // }
+    BSONObjBuilder ninBuilder;
+    ninBuilder.append("$nin", excludedShards);
+    stages.emplace_back(
+        DocumentSourceMatch::create(Doc{{"chunks.shard", ninBuilder.obj()}}.toBson(), expCtx));
 
     auto pipeline = Pipeline::create(std::move(stages), expCtx);
     auto serializedPipeline = pipeline->serializeToBson();
@@ -392,32 +465,29 @@ ShardingCatalogClientImpl::ShardingCatalogClientImpl(std::shared_ptr<Shard> over
 ShardingCatalogClientImpl::~ShardingCatalogClientImpl() = default;
 
 DatabaseType ShardingCatalogClientImpl::getDatabase(OperationContext* opCtx,
-                                                    StringData dbName,
+                                                    const DatabaseName& dbName,
                                                     repl::ReadConcernLevel readConcernLevel) {
     uassert(ErrorCodes::InvalidNamespace,
-            str::stream() << dbName << " is not a valid db name",
-            NamespaceString::validDBName(dbName, NamespaceString::DollarInDbNameBehavior::Allow));
+            str::stream() << dbName.toStringForErrorMsg() << " is not a valid db name",
+            DatabaseName::isValid(dbName, DatabaseName::DollarInDbNameBehavior::Allow));
 
     // The admin database is always hosted on the config server.
-    if (dbName == DatabaseName::kAdmin.db()) {
-        return DatabaseType(
-            dbName.toString(), ShardId::kConfigServerId, DatabaseVersion::makeFixed());
+    if (dbName.isAdminDB()) {
+        return DatabaseType(dbName, ShardId::kConfigServerId, DatabaseVersion::makeFixed());
     }
 
     // The config database's primary shard is always config, and it is always sharded.
-    if (dbName == DatabaseName::kConfig.db()) {
-        return DatabaseType(
-            dbName.toString(), ShardId::kConfigServerId, DatabaseVersion::makeFixed());
+    if (dbName.isConfigDB()) {
+        return DatabaseType(dbName, ShardId::kConfigServerId, DatabaseVersion::makeFixed());
     }
 
-    auto result =
-        _fetchDatabaseMetadata(opCtx, dbName.toString(), kConfigReadSelector, readConcernLevel);
+    auto result = _fetchDatabaseMetadata(opCtx, dbName, kConfigReadSelector, readConcernLevel);
     if (result == ErrorCodes::NamespaceNotFound) {
         // If we failed to find the database metadata on the 'nearest' config server, try again
         // against the primary, in case the database was recently created.
         return uassertStatusOK(
                    _fetchDatabaseMetadata(opCtx,
-                                          dbName.toString(),
+                                          dbName,
                                           ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                                           readConcernLevel))
             .value;
@@ -448,18 +518,20 @@ std::vector<DatabaseType> ShardingCatalogClientImpl::getAllDBs(OperationContext*
 
 StatusWith<repl::OpTimeWith<DatabaseType>> ShardingCatalogClientImpl::_fetchDatabaseMetadata(
     OperationContext* opCtx,
-    const std::string& dbName,
+    const DatabaseName& dbName,
     const ReadPreferenceSetting& readPref,
     repl::ReadConcernLevel readConcernLevel) {
-    invariant(dbName != DatabaseName::kAdmin.db() && dbName != DatabaseName::kConfig.db());
+    invariant(!dbName.isAdminDB() && !dbName.isConfigDB());
 
-    auto findStatus = _exhaustiveFindOnConfig(opCtx,
-                                              readPref,
-                                              readConcernLevel,
-                                              NamespaceString::kConfigDatabasesNamespace,
-                                              BSON(DatabaseType::kNameFieldName << dbName),
-                                              BSONObj(),
-                                              boost::none);
+    auto findStatus =
+        _exhaustiveFindOnConfig(opCtx,
+                                readPref,
+                                readConcernLevel,
+                                NamespaceString::kConfigDatabasesNamespace,
+                                BSON(DatabaseType::kDbNameFieldName << DatabaseNameUtil::serialize(
+                                         dbName, SerializationContext::stateCommandRequest())),
+                                BSONObj(),
+                                boost::none);
     if (!findStatus.isOK()) {
         return findStatus.getStatus();
     }
@@ -467,7 +539,7 @@ StatusWith<repl::OpTimeWith<DatabaseType>> ShardingCatalogClientImpl::_fetchData
     const auto& docsWithOpTime = findStatus.getValue();
     if (docsWithOpTime.value.empty()) {
         return {ErrorCodes::NamespaceNotFound,
-                str::stream() << "database " << dbName << " not found"};
+                str::stream() << "database " << dbName.toStringForErrorMsg() << " not found"};
     }
 
     invariant(docsWithOpTime.value.size() == 1);
@@ -561,14 +633,15 @@ CollectionType ShardingCatalogClientImpl::getCollection(OperationContext* opCtx,
                                                         const NamespaceString& nss,
                                                         repl::ReadConcernLevel readConcernLevel) {
     auto collDoc =
-        uassertStatusOK(_exhaustiveFindOnConfig(opCtx,
-                                                kConfigReadSelector,
-                                                readConcernLevel,
-                                                CollectionType::ConfigNS,
-                                                BSON(CollectionType::kNssFieldName
-                                                     << NamespaceStringUtil::serialize(nss)),
-                                                BSONObj(),
-                                                1))
+        uassertStatusOK(_exhaustiveFindOnConfig(
+                            opCtx,
+                            kConfigReadSelector,
+                            readConcernLevel,
+                            CollectionType::ConfigNS,
+                            BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(
+                                     nss, SerializationContext::stateDefault())),
+                            BSONObj(),
+                            1))
             .value;
     uassert(ErrorCodes::NamespaceNotFound,
             str::stream() << "collection " << nss.toStringForErrorMsg() << " not found",
@@ -595,15 +668,19 @@ CollectionType ShardingCatalogClientImpl::getCollection(OperationContext* opCtx,
 
     return CollectionType(collDoc[0]);
 }
-
-std::vector<CollectionType> ShardingCatalogClientImpl::getCollections(
+std::vector<CollectionType> ShardingCatalogClientImpl::getShardedCollections(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     repl::ReadConcernLevel readConcernLevel,
     const BSONObj& sort) {
     BSONObjBuilder b;
-    if (!dbName.empty())
-        b.appendRegex(CollectionType::kNssFieldName, "^{}\\."_format(pcre_util::quoteMeta(dbName)));
+    if (!dbName.isEmpty()) {
+        const auto db =
+            DatabaseNameUtil::serialize(dbName, SerializationContext::stateCommandRequest());
+        b.appendRegex(CollectionType::kNssFieldName, "^{}\\."_format(pcre_util::quoteMeta(db)));
+    }
+
+    b.append(CollectionType::kUnsplittableFieldName, BSON("$ne" << true));
 
     auto collDocs = uassertStatusOK(_exhaustiveFindOnConfig(opCtx,
                                                             kConfigReadSelector,
@@ -621,9 +698,67 @@ std::vector<CollectionType> ShardingCatalogClientImpl::getCollections(
     return collections;
 }
 
-std::vector<NamespaceString> ShardingCatalogClientImpl::getAllShardedCollectionsForDb(
+std::vector<CollectionType> ShardingCatalogClientImpl::getCollections(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
+    repl::ReadConcernLevel readConcernLevel,
+    const BSONObj& sort) {
+    BSONObjBuilder b;
+    if (!dbName.isEmpty()) {
+        const auto db =
+            DatabaseNameUtil::serialize(dbName, SerializationContext::stateCommandRequest());
+        b.appendRegex(CollectionType::kNssFieldName, "^{}\\."_format(pcre_util::quoteMeta(db)));
+    }
+
+    auto collDocs = uassertStatusOK(_exhaustiveFindOnConfig(opCtx,
+                                                            kConfigReadSelector,
+                                                            readConcernLevel,
+                                                            CollectionType::ConfigNS,
+                                                            b.obj(),
+                                                            sort,
+                                                            boost::none))
+                        .value;
+    std::vector<CollectionType> collections;
+    collections.reserve(collDocs.size());
+    for (const BSONObj& obj : collDocs)
+        collections.emplace_back(obj);
+
+    return collections;
+}
+
+std::vector<NamespaceString> ShardingCatalogClientImpl::getShardedCollectionNamespacesForDb(
+    OperationContext* opCtx,
+    const DatabaseName& dbName,
+    repl::ReadConcernLevel readConcern,
+    const BSONObj& sort) {
+    BSONObjBuilder b;
+    const auto db =
+        DatabaseNameUtil::serialize(dbName, SerializationContext::stateCommandRequest());
+    b.appendRegex(CollectionType::kNssFieldName, "^{}\\."_format(pcre_util::quoteMeta(db)));
+    b.append(CollectionTypeBase::kUnsplittableFieldName, BSON("$ne" << true));
+
+    auto collDocs = uassertStatusOK(_exhaustiveFindOnConfig(opCtx,
+                                                            kConfigReadSelector,
+                                                            readConcern,
+                                                            CollectionType::ConfigNS,
+                                                            b.obj(),
+                                                            sort,
+                                                            boost::none))
+                        .value;
+
+    std::vector<NamespaceString> collections;
+    collections.reserve(collDocs.size());
+    for (const BSONObj& obj : collDocs) {
+        auto coll = CollectionTypeBase::parse(IDLParserContext("getShardedCollectionsForDb"), obj);
+        collections.emplace_back(coll.getNss());
+    }
+
+    return collections;
+}
+
+std::vector<NamespaceString> ShardingCatalogClientImpl::getCollectionNamespacesForDb(
+    OperationContext* opCtx,
+    const DatabaseName& dbName,
     repl::ReadConcernLevel readConcern,
     const BSONObj& sort) {
     auto collectionsOnConfig = getCollections(opCtx, dbName, readConcern, sort);
@@ -635,6 +770,58 @@ std::vector<NamespaceString> ShardingCatalogClientImpl::getAllShardedCollections
     }
 
     return collectionsToReturn;
+}
+
+std::vector<NamespaceString> ShardingCatalogClientImpl::getUnsplittableCollectionNamespacesForDb(
+    OperationContext* opCtx,
+    const DatabaseName& dbName,
+    repl::ReadConcernLevel readConcern,
+    const BSONObj& sort) {
+    BSONObjBuilder b;
+    const auto db =
+        DatabaseNameUtil::serialize(dbName, SerializationContext::stateCommandRequest());
+    b.appendRegex(CollectionType::kNssFieldName, "^{}\\."_format(pcre_util::quoteMeta(db)));
+    b.append(CollectionTypeBase::kUnsplittableFieldName, true);
+
+    auto collDocs = uassertStatusOK(_exhaustiveFindOnConfig(opCtx,
+                                                            kConfigReadSelector,
+                                                            readConcern,
+                                                            CollectionType::ConfigNS,
+                                                            b.obj(),
+                                                            sort,
+                                                            boost::none))
+                        .value;
+
+    std::vector<NamespaceString> collections;
+    collections.reserve(collDocs.size());
+    for (const BSONObj& obj : collDocs) {
+        auto coll =
+            CollectionTypeBase::parse(IDLParserContext("getAllUnsplittableCollectionsForDb"), obj);
+        collections.emplace_back(coll.getNss());
+    }
+
+    return collections;
+}
+
+std::vector<NamespaceString>
+ShardingCatalogClientImpl::getUnsplittableCollectionNamespacesForDbOutsideOfShards(
+    OperationContext* opCtx,
+    const DatabaseName& dbName,
+    const std::vector<ShardId>& excludedShards,
+    repl::ReadConcernLevel readConcern) {
+    auto aggRequest =
+        makeUnsplittableCollectionsDataShardAggregation(opCtx, dbName, excludedShards);
+    std::vector<BSONObj> collectionEntries =
+        Grid::get(opCtx)->catalogClient()->runCatalogAggregation(
+            opCtx, aggRequest, repl::ReadConcernArgs(readConcern));
+    std::vector<NamespaceString> collectionNames;
+    collectionNames.reserve(collectionEntries.size());
+    for (const auto& coll : collectionEntries) {
+        auto nssField = coll.getField(CollectionType::kNssFieldName);
+        collectionNames.push_back(NamespaceStringUtil::deserialize(
+            boost::none, nssField.String(), SerializationContext::stateDefault()));
+    }
+    return collectionNames;
 }
 
 StatusWith<BSONObj> ShardingCatalogClientImpl::getGlobalSettings(OperationContext* opCtx,
@@ -703,7 +890,7 @@ StatusWith<VersionType> ShardingCatalogClientImpl::getConfigVersion(
     return versionTypeResult.getValue();
 }
 
-StatusWith<std::vector<std::string>> ShardingCatalogClientImpl::getDatabasesForShard(
+StatusWith<std::vector<DatabaseName>> ShardingCatalogClientImpl::getDatabasesForShard(
     OperationContext* opCtx, const ShardId& shardId) {
     auto findStatus =
         _exhaustiveFindOnConfig(opCtx,
@@ -718,16 +905,19 @@ StatusWith<std::vector<std::string>> ShardingCatalogClientImpl::getDatabasesForS
     }
 
     const std::vector<BSONObj>& values = findStatus.getValue().value;
-    std::vector<std::string> dbs;
+    std::vector<DatabaseName> dbs;
     dbs.reserve(values.size());
     for (const BSONObj& obj : values) {
         std::string dbName;
-        Status status = bsonExtractStringField(obj, DatabaseType::kNameFieldName, &dbName);
+        Status status = bsonExtractStringField(obj, DatabaseType::kDbNameFieldName, &dbName);
         if (!status.isOK()) {
             return status;
         }
 
-        dbs.push_back(std::move(dbName));
+        // TODO SERVER-80466 use the IDL parser instead of parsing BSON objects from
+        // _exhaustiveFindOnConfig returned values.
+        dbs.push_back(DatabaseNameUtil::deserialize(
+            boost::none, std::move(dbName), SerializationContext::stateDefault()));
     }
 
     return dbs;
@@ -866,14 +1056,14 @@ ShardingCatalogClientImpl::getCollectionAndShardingIndexCatalogEntries(
 
 StatusWith<std::vector<TagsType>> ShardingCatalogClientImpl::getTagsForCollection(
     OperationContext* opCtx, const NamespaceString& nss) {
-    auto findStatus =
-        _exhaustiveFindOnConfig(opCtx,
-                                kConfigReadSelector,
-                                repl::ReadConcernLevel::kMajorityReadConcern,
-                                TagsType::ConfigNS,
-                                BSON(TagsType::ns(NamespaceStringUtil::serialize(nss))),
-                                BSON(TagsType::min() << 1),
-                                boost::none);  // no limit
+    auto findStatus = _exhaustiveFindOnConfig(opCtx,
+                                              kConfigReadSelector,
+                                              repl::ReadConcernLevel::kMajorityReadConcern,
+                                              TagsType::ConfigNS,
+                                              BSON(TagsType::ns(NamespaceStringUtil::serialize(
+                                                  nss, SerializationContext::stateDefault()))),
+                                              BSON(TagsType::min() << 1),
+                                              boost::none);  // no limit
     if (!findStatus.isOK()) {
         return findStatus.getStatus().withContext("Failed to load tags");
     }
@@ -896,7 +1086,7 @@ StatusWith<std::vector<TagsType>> ShardingCatalogClientImpl::getTagsForCollectio
 }
 
 std::vector<NamespaceString> ShardingCatalogClientImpl::getAllNssThatHaveZonesForDatabase(
-    OperationContext* opCtx, const StringData& dbName) {
+    OperationContext* opCtx, const DatabaseName& dbName) {
     auto expCtx =
         make_intrusive<ExpressionContext>(opCtx, nullptr /*collator*/, TagsType::ConfigNS);
     StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
@@ -914,7 +1104,10 @@ std::vector<NamespaceString> ShardingCatalogClientImpl::getAllNssThatHaveZonesFo
     //          {$group: {_id : "$ns"}}
     //      ])
     //
-    const std::string regex = "^" + pcre_util::quoteMeta(dbName) + "\\..*";
+    const std::string regex = "^" +
+        pcre_util::quoteMeta(DatabaseNameUtil::serialize(
+            dbName, SerializationContext::stateCommandRequest())) +
+        "\\..*";
     auto matchStageBson = BSON("ns" << BSON("$regex" << regex));
     auto matchStage = DocumentSourceMatch::createFromBson(
         Document{{"$match", std::move(matchStageBson)}}.toBson().firstElement(), expCtx);
@@ -942,9 +1135,10 @@ std::vector<NamespaceString> ShardingCatalogClientImpl::getAllNssThatHaveZonesFo
 
     // Parse the result
     std::vector<NamespaceString> nssList;
+    nssList.reserve(aggResult.size());
     for (const auto& doc : aggResult) {
-        nssList.push_back(
-            NamespaceStringUtil::deserialize(boost::none, doc.getField("_id").String()));
+        nssList.push_back(NamespaceStringUtil::deserialize(
+            boost::none, doc.getField("_id").String(), SerializationContext::stateDefault()));
     }
     return nssList;
 }
@@ -1329,7 +1523,7 @@ HistoricalPlacement ShardingCatalogClientImpl::getShardsThatOwnDataAtClusterTime
         return getHistoricalPlacement(opCtx, clusterTime, boost::none);
     }
 
-    ConfigsvrGetHistoricalPlacement request(NamespaceString(), clusterTime);
+    ConfigsvrGetHistoricalPlacement request(NamespaceString::kEmpty, clusterTime);
     request.setTargetWholeCluster(true);
     return _fetchPlacementMetadata(opCtx, std::move(request));
 }
@@ -1471,7 +1665,8 @@ HistoricalPlacement ShardingCatalogClientImpl::getHistoricalPlacement(
     // 1. Get all the history entries prior to the requested time concerning either the collection
     // or the parent database.
     const auto& kMarkerNss = NamespaceStringUtil::serialize(
-        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker);
+        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker,
+        SerializationContext::stateDefault());
     auto matchStage = [&]() {
         bool isClusterSearch = !nss.has_value();
         if (isClusterSearch)

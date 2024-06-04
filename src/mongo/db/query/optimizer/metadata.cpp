@@ -31,7 +31,6 @@
 
 #include <absl/container/node_hash_map.h>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -40,6 +39,7 @@
 #include "mongo/db/query/optimizer/algebra/operator.h"
 #include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
 #include "mongo/db/query/optimizer/syntax/path.h"
+#include "mongo/db/query/optimizer/utils/path_utils.h"
 #include "mongo/util/assert_util.h"
 
 
@@ -121,8 +121,12 @@ void MultikeynessTrie::add(const ABT& path) {
     merge(MultikeynessTrie::fromIndexPath(path));
 }
 
-bool IndexCollationEntry::operator==(const IndexCollationEntry& other) const {
-    return _path == other._path && _op == other._op;
+void IndexedFieldPaths::add(const ABT& path) {
+    _indexPathSet.insert(path);
+}
+
+bool IndexedFieldPaths::isIndexed(const ABT& path) const {
+    return _indexPathSet.find(path) != _indexPathSet.cend();
 }
 
 IndexCollationEntry::IndexCollationEntry(ABT path, CollationOp op)
@@ -185,25 +189,34 @@ PSRExpr::Node& IndexDefinition::getPartialReqMap() {
 }
 
 ScanDefinition::ScanDefinition()
-    : ScanDefinition({} /*options*/,
+    : ScanDefinition({}, /*dbName*/
+                     {}, /*UUID*/
+                     {} /*options*/,
                      {} /*indexDefs*/,
                      {} /*nonMultiKeyPathSet*/,
                      {DistributionType::Centralized},
                      true /*exists*/,
                      boost::none /*ce*/,
-                     {} /*shardingMetadata*/) {}
+                     {} /*shardingMetadata*/,
+                     {} /*indexedFieldPaths*/) {}
 
-ScanDefinition::ScanDefinition(ScanDefOptions options,
+ScanDefinition::ScanDefinition(DatabaseName dbName,
+                               boost::optional<UUID> uuid,
+                               ScanDefOptions options,
                                opt::unordered_map<std::string, IndexDefinition> indexDefs,
                                MultikeynessTrie multikeynessTrie,
                                DistributionAndPaths distributionAndPaths,
                                const bool exists,
                                boost::optional<CEType> ce,
-                               ShardingMetadata shardingMetadata)
+                               ShardingMetadata shardingMetadata,
+                               IndexedFieldPaths indexedFieldPaths)
     : _options(std::move(options)),
       _distributionAndPaths(std::move(distributionAndPaths)),
+      _dbName(std::move(dbName)),
+      _uuid(std::move(uuid)),
       _indexDefs(std::move(indexDefs)),
       _multikeynessTrie(std::move(multikeynessTrie)),
+      _indexedFieldPaths(std::move(indexedFieldPaths)),
       _exists(exists),
       _ce(std::move(ce)),
       _shardingMetadata(std::move(shardingMetadata)) {}
@@ -216,6 +229,14 @@ const DistributionAndPaths& ScanDefinition::getDistributionAndPaths() const {
     return _distributionAndPaths;
 }
 
+const DatabaseName& ScanDefinition::getDatabaseName() const {
+    return _dbName;
+}
+
+const boost::optional<UUID>& ScanDefinition::getUUID() const {
+    return _uuid;
+}
+
 const opt::unordered_map<std::string, IndexDefinition>& ScanDefinition::getIndexDefs() const {
     return _indexDefs;
 }
@@ -226,6 +247,10 @@ opt::unordered_map<std::string, IndexDefinition>& ScanDefinition::getIndexDefs()
 
 const MultikeynessTrie& ScanDefinition::getMultikeynessTrie() const {
     return _multikeynessTrie;
+}
+
+const IndexedFieldPaths& ScanDefinition::getIndexedFieldPaths() const {
+    return _indexedFieldPaths;
 }
 
 bool ScanDefinition::exists() const {
@@ -241,7 +266,13 @@ ShardingMetadata::ShardingMetadata() : ShardingMetadata({}, false) {}
 ShardingMetadata::ShardingMetadata(IndexCollationSpec shardKey, bool mayContainOrphans)
     : _shardKey(shardKey),
       _mayContainOrphans(mayContainOrphans),
-      _topLevelShardKeyFieldNames(computeTopLevelShardKeyFields(shardKey)) {}
+      _topLevelShardKeyFieldNames(computeTopLevelShardKeyFields(shardKey)) {
+    for (auto&& entry : _shardKey) {
+        tassert(8054101,
+                "Encountered unexpected PathTraverse in definition of shard key",
+                !checkPathContainsTraverse(entry._path));
+    }
+}
 
 const ShardingMetadata& ScanDefinition::shardingMetadata() const {
     return _shardingMetadata;

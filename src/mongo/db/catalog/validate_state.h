@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -101,6 +100,11 @@ public:
 
     bool isFullIndexValidation() const {
         return isFullValidation() || _mode == ValidateMode::kForegroundFullIndexOnly;
+    }
+
+    bool shouldDecompressBSONColumn() const {
+        return isFullValidation() || _mode == ValidateMode::kBackgroundCheckBSON ||
+            _mode == ValidateMode::kForegroundCheckBSON;
     }
 
     BSONValidateMode getBSONValidateMode() const {
@@ -214,6 +218,10 @@ public:
         return _enforceTimeseriesBucketsAreAlwaysCompressed;
     }
 
+    bool warnOnSchemaValidation() const {
+        return _warnOnSchemaValidation;
+    }
+
     boost::optional<Timestamp> getValidateTimestamp() {
         return _validateTs;
     }
@@ -260,6 +268,7 @@ private:
     bool _timeseriesDataInconsistency = false;
     bool _BSONDataNonConformant = false;
     bool _enforceTimeseriesBucketsAreAlwaysCompressed = false;
+    bool _warnOnSchemaValidation = false;
 
     boost::optional<Lock::GlobalLock> _globalLock;
     boost::optional<AutoGetDb> _databaseLock;

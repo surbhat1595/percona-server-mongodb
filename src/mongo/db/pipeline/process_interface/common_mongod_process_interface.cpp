@@ -33,7 +33,6 @@
 #include <absl/container/flat_hash_map.h>
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <cstddef>
 #include <limits>
@@ -192,7 +191,8 @@ void listDurableCatalog(OperationContext* opCtx,
         }
 
         BSONObjBuilder builder;
-        builder.append("db", DatabaseNameUtil::serialize(ns.dbName()));
+        builder.append(
+            "db", DatabaseNameUtil::serialize(ns.dbName(), SerializationContext::stateDefault()));
         builder.append("name", ns.coll());
         builder.append("type", "collection");
         if (!shardName.empty()) {
@@ -225,10 +225,10 @@ std::vector<Document> CommonMongodProcessInterface::getIndexStats(OperationConte
         return indexStats;
     }
 
-    auto indexStatsMap =
-        CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
+    const auto& indexStatsMap =
+        CollectionIndexUsageTrackerDecoration::get(collection.getCollection().get())
             .getUsageStats();
-    for (auto&& indexStatsMapIter : *indexStatsMap) {
+    for (auto&& indexStatsMapIter : indexStatsMap) {
         auto indexName = indexStatsMapIter.first;
         auto stats = indexStatsMapIter.second;
         MutableDocument doc;
@@ -320,13 +320,17 @@ std::deque<BSONObj> CommonMongodProcessInterface::listCatalog(OperationContext* 
             while (auto record = cursor->next()) {
                 BSONObj obj = record->data.releaseToBson();
 
-                NamespaceString ns(NamespaceStringUtil::deserialize(svns.nss().tenantId(),
-                                                                    obj.getStringField("_id")));
+                NamespaceString ns(
+                    NamespaceStringUtil::deserialize(svns.nss().tenantId(),
+                                                     obj.getStringField("_id"),
+                                                     SerializationContext::stateDefault()));
                 NamespaceString viewOnNs(
                     NamespaceStringUtil::deserialize(ns.dbName(), obj.getStringField("viewOn")));
 
                 BSONObjBuilder builder;
-                builder.append("db", DatabaseNameUtil::serialize(ns.dbName()));
+                builder.append(
+                    "db",
+                    DatabaseNameUtil::serialize(ns.dbName(), SerializationContext::stateDefault()));
                 builder.append("name", ns.coll());
                 if (viewOnNs.isTimeseriesBucketsCollection()) {
                     builder.append("type", "timeseries");
@@ -347,35 +351,36 @@ std::deque<BSONObj> CommonMongodProcessInterface::listCatalog(OperationContext* 
 }
 
 boost::optional<BSONObj> CommonMongodProcessInterface::getCatalogEntry(
-    OperationContext* opCtx, const NamespaceString& ns) const {
-    Lock::GlobalLock globalLock{opCtx, MODE_IS};
+    OperationContext* opCtx,
+    const NamespaceString& ns,
+    const boost::optional<UUID>& collUUID) const {
 
-    auto rs = DurableCatalog::get(opCtx)->getRecordStore();
-    if (!rs) {
+    // Perform an aquisition. This will verify that the collection still exists at the given
+    // read concern. If it doesn't and the aggregation has specified a UUID then this acquisition
+    // will fail.
+    auto acquisition =
+        acquireCollectionMaybeLockFree(opCtx,
+                                       CollectionAcquisitionRequest::fromOpCtx(
+                                           opCtx, ns, AcquisitionPrerequisites::kRead, collUUID));
+
+    if (!acquisition.exists()) {
         return boost::none;
     }
 
-    auto cursor = rs->getCursor(opCtx);
-    while (auto record = cursor->next()) {
-        auto obj = record->data.toBson();
-        if (NamespaceStringUtil::parseFromStringExpectTenantIdInMultitenancyMode(
-                obj.getStringField("ns")) != ns) {
-            continue;
-        }
+    auto obj = DurableCatalog::get(opCtx)->getCatalogEntry(
+        opCtx, acquisition.getCollectionPtr()->getCatalogId());
 
-        BSONObjBuilder builder;
-        builder.append("db", DatabaseNameUtil::serialize(ns.dbName()));
-        builder.append("name", ns.coll());
-        builder.append("type", "collection");
-        if (auto shardName = getShardName(opCtx); !shardName.empty()) {
-            builder.append("shard", shardName);
-        }
-        builder.appendElements(obj);
-
-        return builder.obj();
+    BSONObjBuilder builder;
+    builder.append("db",
+                   DatabaseNameUtil::serialize(ns.dbName(), SerializationContext::stateDefault()));
+    builder.append("name", ns.coll());
+    builder.append("type", "collection");
+    if (auto shardName = getShardName(opCtx); !shardName.empty()) {
+        builder.append("shard", shardName);
     }
+    builder.appendElements(obj);
 
-    return boost::none;
+    return builder.obj();
 }
 
 void CommonMongodProcessInterface::appendLatencyStats(OperationContext* opCtx,
@@ -427,7 +432,7 @@ Status CommonMongodProcessInterface::appendQueryExecStats(OperationContext* opCt
         collection->getCollectionOptions().encryptedFieldConfig || nss.isFLE2StateCollection();
     if (!redactForQE) {
         auto collectionScanStats =
-            CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
+            CollectionIndexUsageTrackerDecoration::get(collection.getCollection().get())
                 .getCollectionScanStats();
 
         dassert(collectionScanStats.collectionScans <=
@@ -469,11 +474,16 @@ CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline(ownedPipeline,
                                                         PipelineDeleter(expCtx->opCtx));
 
-    boost::optional<DocumentSource*> firstStage = pipeline->getSources().empty()
-        ? boost::optional<DocumentSource*>{}
-        : pipeline->getSources().front().get();
+    Pipeline::SourceContainer& sources = pipeline->getSources();
+    boost::optional<DocumentSource*> firstStage =
+        sources.empty() ? boost::optional<DocumentSource*>{} : sources.front().get();
     invariant(!firstStage || !dynamic_cast<DocumentSourceCursor*>(*firstStage));
-    if (firstStage && !(*firstStage)->constraints().requiresInputDocSource) {
+
+    bool skipRequiresInputDocSourceCheck =
+        PipelineD::isSearchPresentAndEligibleForSbe(pipeline.get());
+
+    if (!skipRequiresInputDocSourceCheck && firstStage &&
+        !(*firstStage)->constraints().requiresInputDocSource) {
         // There's no need to attach a cursor here.
         getSearchHelpers(expCtx->opCtx->getServiceContext())
             ->prepareSearchForNestedPipeline(pipeline.get());
@@ -608,9 +618,12 @@ BackupCursorExtendState CommonMongodProcessInterface::extendBackupCursor(
 
 std::vector<BSONObj> CommonMongodProcessInterface::getMatchingPlanCacheEntryStats(
     OperationContext* opCtx, const NamespaceString& nss, const MatchExpression* matchExp) const {
-    const auto serializer = [](const auto& entry) {
+    const auto serializer = [](const auto& key, const auto& entry) {
         BSONObjBuilder out;
         Explain::planCacheEntryToBSON(entry, &out);
+        if (auto querySettings = key.querySettings().toBSON(); !querySettings.isEmpty()) {
+            out.append("querySettings"_sd, querySettings);
+        }
         return out.obj();
     };
 
@@ -698,9 +711,7 @@ BSONObj CommonMongodProcessInterface::_reportCurrentOpForClient(
     OperationContext* clientOpCtx = client->getOperationContext();
 
     if (clientOpCtx) {
-        bool omitAndRedactInformation =
-            CurOp::get(clientOpCtx)->debug().shouldOmitDiagnosticInformation;
-        if (omitAndRedactInformation) {
+        if (CurOp::get(clientOpCtx)->getShouldOmitDiagnosticInformation()) {
             return builder.obj();
         }
 
@@ -835,8 +846,10 @@ BSONObj CommonMongodProcessInterface::_convertRenameToInternalRename(
 
     BSONObjBuilder newCmd;
     newCmd.append("internalRenameIfOptionsAndIndexesMatch", 1);
-    newCmd.append("from", NamespaceStringUtil::serialize(sourceNs));
-    newCmd.append("to", NamespaceStringUtil::serialize(targetNs));
+    newCmd.append("from",
+                  NamespaceStringUtil::serialize(sourceNs, SerializationContext::stateDefault()));
+    newCmd.append("to",
+                  NamespaceStringUtil::serialize(targetNs, SerializationContext::stateDefault()));
     newCmd.append("collectionOptions", originalCollectionOptions);
     BSONArrayBuilder indexArrayBuilder(newCmd.subarrayStart("indexes"));
     for (auto&& index : originalIndexes) {
@@ -854,17 +867,26 @@ void CommonMongodProcessInterface::_handleTimeseriesCreateError(const DBExceptio
     // specification as the time-series view we wanted to create, we should not throw an
     // error. The user is allowed to overwrite an existing time-series collection when
     // entering this function.
-    auto view = CollectionCatalog::get(opCtx)->lookupView(opCtx, ns);
-    // Confirming the error is NamespaceExists and that there is a time-series view in that
-    // namespace.
-    if (ex.code() != ErrorCodes::NamespaceExists || !view || !view->timeseries()) {
+
+    // Confirming the error is NamespaceExists
+    if (ex.code() != ErrorCodes::NamespaceExists) {
         throw;
     }
-    // Confirming the time-series options of the existing view are the same as expected.
-    auto timeseriesOpts = mongo::timeseries::getTimeseriesOptions(opCtx, ns, true);
+    auto timeseriesOpts = _getTimeseriesOptions(opCtx, ns);
+    // Confirming there is a time-series view in that namespace and the time-series options of the
+    // existing view are the same as expected.
     if (!timeseriesOpts || !mongo::timeseries::optionsAreEqual(timeseriesOpts.value(), userOpts)) {
         throw;
     }
+}
+
+boost::optional<TimeseriesOptions> CommonMongodProcessInterface::_getTimeseriesOptions(
+    OperationContext* opCtx, const NamespaceString& ns) {
+    auto view = CollectionCatalog::get(opCtx)->lookupView(opCtx, ns);
+    if (!view || !view->timeseries()) {
+        return boost::none;
+    }
+    return mongo::timeseries::getTimeseriesOptions(opCtx, ns, true /*convertToBucketsNamespace*/);
 }
 
 void CommonMongodProcessInterface::writeRecordsToRecordStore(

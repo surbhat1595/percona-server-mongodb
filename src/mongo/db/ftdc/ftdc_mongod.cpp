@@ -64,7 +64,8 @@ Status validateCollectionStatsNamespaces(const std::vector<std::string> value,
                                          const boost::optional<TenantId>& tenantId) {
     try {
         for (const auto& nsStr : value) {
-            const auto ns = NamespaceStringUtil::deserialize(tenantId, nsStr);
+            const auto ns = NamespaceStringUtil::deserialize(
+                tenantId, nsStr, SerializationContext::stateDefault());
 
             if (!ns.isValid()) {
                 return Status(ErrorCodes::BadValue,
@@ -156,7 +157,7 @@ void registerMongoDCollectors(FTDCController* controller) {
 
 }  // namespace
 
-void startMongoDFTDC() {
+void startMongoDFTDC(ServiceContext* serviceContext) {
     auto dir = getFTDCDirectoryPathParameter();
 
     if (dir.empty()) {
@@ -164,11 +165,14 @@ void startMongoDFTDC() {
         dir /= kFTDCDefaultDirectory.toString();
     }
 
-    startFTDC(dir, FTDCStartMode::kStart, registerMongoDCollectors);
+    startFTDC(serviceContext->getService(ClusterRole::ShardServer),
+              dir,
+              FTDCStartMode::kStart,
+              registerMongoDCollectors);
 }
 
-void stopMongoDFTDC() {
-    stopFTDC();
+void stopMongoDFTDC(ServiceContext* serviceContext) {
+    stopFTDC(serviceContext->getService(ClusterRole::ShardServer));
 }
 
 }  // namespace mongo

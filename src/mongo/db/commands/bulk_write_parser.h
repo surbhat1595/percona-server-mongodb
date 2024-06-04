@@ -85,6 +85,9 @@ public:
     }
 
     void setOk(double value) {
+        if (_cached) {
+            _cached = boost::none;
+        }
         validateOk(value);
         _ok = std::move(value);
         _hasOk = true;
@@ -98,6 +101,9 @@ public:
     }
 
     void setIdx(std::int32_t value) {
+        if (_cached) {
+            _cached = boost::none;
+        }
         validateIdx(value);
         _idx = std::move(value);
         _hasIdx = true;
@@ -113,6 +119,9 @@ public:
     }
 
     void setN(boost::optional<std::int32_t> value) {
+        if (_cached) {
+            _cached = boost::none;
+        }
         _n = std::move(value);
     }
 
@@ -124,6 +133,9 @@ public:
     }
 
     void setNModified(boost::optional<std::int32_t> value) {
+        if (_cached) {
+            _cached = boost::none;
+        }
         _nModified = std::move(value);
     }
 
@@ -135,10 +147,16 @@ public:
     }
 
     void setUpserted(boost::optional<IDLAnyTypeOwned> value) {
+        if (_cached) {
+            _cached = boost::none;
+        }
         _upserted = std::move(value);
     }
 
     void setUpserted(boost::optional<mongo::write_ops::Upserted> value) {
+        if (_cached) {
+            _cached = boost::none;
+        }
         if (!value) {
             _upserted = boost::none;
             return;
@@ -157,7 +175,16 @@ public:
     }
 
     void setStatus(const Status status) {
+        if (_cached) {
+            _cached = boost::none;
+        }
         _status = std::move(status);
+    }
+
+    // Approximate size in bytes
+    int32_t getApproximateSize() const {
+        int32_t res = serialize().objsize();
+        return res;
     }
 
 protected:
@@ -177,6 +204,7 @@ private:
     Status _status = Status::OK();
     bool _hasOk : 1;
     bool _hasIdx : 1;
+    mutable boost::optional<BSONObj> _cached;
 };
 
 }  // namespace mongo

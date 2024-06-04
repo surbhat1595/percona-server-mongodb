@@ -110,7 +110,9 @@ public:
                 const auto reason = request().getReason().get_value_or(
                     BSON("command"
                          << "ShardSvrParticipantBlockCommand"
-                         << "ns" << NamespaceStringUtil::serialize(ns())));
+                         << "ns"
+                         << NamespaceStringUtil::serialize(ns(),
+                                                           SerializationContext::stateDefault())));
                 auto blockType = request().getBlockType().get_value_or(
                     CriticalSectionBlockTypeEnum::kReadsAndWrites);
 
@@ -138,8 +140,9 @@ public:
 
             auto txnParticipant = TransactionParticipant::get(opCtx);
             if (txnParticipant) {
-                auto newClient =
-                    getGlobalServiceContext()->makeClient("ShardSvrParticipantBlockCmdClient");
+                auto newClient = getGlobalServiceContext()
+                                     ->getService(ClusterRole::ShardServer)
+                                     ->makeClient("ShardSvrParticipantBlockCmdClient");
                 AlternativeClientRegion acr(newClient);
                 auto cancelableOperationContext = CancelableOperationContext(
                     cc().makeOperationContext(),
@@ -185,7 +188,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(ShardSvrParticipantBlockCommand);
+MONGO_REGISTER_COMMAND(ShardSvrParticipantBlockCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

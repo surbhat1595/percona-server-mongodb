@@ -1348,6 +1348,8 @@ TEST(LogicalRewriter, NotPushdownToplevelSuccess) {
         }},
         boost::none /*costModel*/,
         DebugInfo::kDefaultForTests);
+    phaseManager.getHints()._enableNotPushdown = true;
+
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -1401,6 +1403,9 @@ TEST(LogicalRewriter, NotPushdownToplevelFailureMultikey) {
         }},
         boost::none /*costModel*/,
         DebugInfo::kDefaultForTests);
+    phaseManager.getHints()._enableNotPushdown = true;
+
+
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -1447,6 +1452,8 @@ TEST(LogicalRewriter, NotPushdownComposeA) {
                                          Metadata{{{"coll", createScanDef({}, {})}}},
                                          boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
+    phaseManager.getHints()._enableNotPushdown = true;
+
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -1512,6 +1519,8 @@ TEST(LogicalRewriter, NotPushdownComposeABothPathsCannotBeNegated) {
                                          Metadata{{{"coll", createScanDef({}, {})}}},
                                          boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
+    phaseManager.getHints()._enableNotPushdown = true;
+
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -1571,6 +1580,8 @@ TEST(LogicalRewriter, NotPushdownComposeM) {
                                          Metadata{{{"coll", createScanDef({}, {})}}},
                                          boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
+    phaseManager.getHints()._enableNotPushdown = true;
+
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -1622,6 +1633,8 @@ TEST(LogicalRewriter, NotPushdownPathConstant) {
                                          Metadata{{{"coll", createScanDef({}, {})}}},
                                          boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
+    phaseManager.getHints()._enableNotPushdown = true;
+
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -1657,6 +1670,8 @@ TEST(LogicalRewriter, NotPushdownPathConstantNested) {
                                          Metadata{{{"coll", createScanDef({}, {})}}},
                                          boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
+    phaseManager.getHints()._enableNotPushdown = true;
+
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -1699,6 +1714,8 @@ TEST(LogicalRewriter, NotPushdownPathConstantNotsAreCancelled) {
                                          Metadata{{{"coll", createScanDef({}, {})}}},
                                          boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
+    phaseManager.getHints()._enableNotPushdown = true;
+
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -1739,6 +1756,8 @@ TEST(LogicalRewriter, NotPushdownPathDefault) {
                                          Metadata{{{"coll", createScanDef({}, {})}}},
                                          boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
+    phaseManager.getHints()._enableNotPushdown = true;
+
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -1775,6 +1794,9 @@ TEST(LogicalRewriter, NotPushdownPathDefaultNested) {
                                          Metadata{{{"coll", createScanDef({}, {})}}},
                                          boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
+    phaseManager.getHints()._enableNotPushdown = true;
+
+
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -1880,6 +1902,8 @@ TEST(LogicalRewriter, NotPushdownUnderLambdaSuccess) {
         }},
         boost::none /*costModel*/,
         DebugInfo::kDefaultForTests);
+    phaseManager.getHints()._enableNotPushdown = true;
+
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -1944,6 +1968,8 @@ TEST(LogicalRewriter, NotPushdownUnderLambdaKeepOuterTraverse) {
         }},
         boost::none /*costModel*/,
         DebugInfo::kDefaultForTests);
+    phaseManager.getHints()._enableNotPushdown = true;
+
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -2009,6 +2035,8 @@ TEST(LogicalRewriter, NotPushdownUnderLambdaFailsWithFreeVar) {
                                          }},
                                          boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
+    phaseManager.getHints()._enableNotPushdown = true;
+
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -2723,29 +2751,19 @@ TEST(LogicalRewriter, EmptyArrayIndexBounds) {
 }
 
 TEST(LogicalRewriter, IsArrayConstantFolding) {
-    auto rootNode =
-        NodeBuilder{}
-            .root("p0")
-            .filter(
-                _evalf(_get("c",
-                            _traverse1(_cmp(
-                                "EqMember",
-                                _carray(std::pair{sbe::value::TypeTags::NumberDouble,
-                                                  sbe::value::bitcastFrom<double>(17.0000)},
-                                        std::pair{sbe::value::TypeTags::NumberDouble,
-                                                  sbe::value::bitcastFrom<double>(19.0000)},
-                                        std::pair{sbe::value::TypeTags::NumberDouble,
-                                                  sbe::value::bitcastFrom<double>(23.0000)},
-                                        std::pair{sbe::value::TypeTags::NumberDouble,
-                                                  sbe::value::bitcastFrom<double>(34.0000)},
-                                        std::pair{sbe::value::TypeTags::NumberDouble,
-                                                  sbe::value::bitcastFrom<double>(35.0000)},
-                                        std::pair{sbe::value::TypeTags::NumberDouble,
-                                                  sbe::value::bitcastFrom<double>(42.0000)},
-                                        std::pair{sbe::value::TypeTags::StringSmall,
-                                                  sbe::value::makeSmallString("abc"_sd).second})))),
-                       "p0"_var))
-            .finish(_scan("p0", "coll"));
+    auto rootNode = NodeBuilder{}
+                        .root("p0")
+                        .filter(_evalf(_get("c",
+                                            _traverse1(_cmp("EqMember",
+                                                            _carray("17.0000"_cdouble,
+                                                                    "19.0000"_cdouble,
+                                                                    "23.0000"_cdouble,
+                                                                    "34.0000"_cdouble,
+                                                                    "35.0000"_cdouble,
+                                                                    "42.0000"_cdouble,
+                                                                    "abc"_cstr)))),
+                                       "p0"_var))
+                        .finish(_scan("p0", "coll"));
 
     auto prefixId = PrefixId::createForTests();
     auto phaseManager = makePhaseManager({OptPhase::PathLower, OptPhase::ConstEvalPost},
@@ -2765,7 +2783,7 @@ TEST(LogicalRewriter, IsArrayConstantFolding) {
         "|   FunctionCall [traverseF]\n"
         "|   |   |   Const [false]\n"
         "|   |   LambdaAbstraction [valCmp_0]\n"
-        "|   |   FunctionCall [isMember]\n"
+        "|   |   BinaryOp [EqMember]\n"
         "|   |   |   Const [[17, 19, 23, 34, 35, 42, \"abc\"]]\n"
         "|   |   Variable [valCmp_0]\n"
         "|   FunctionCall [getField]\n"

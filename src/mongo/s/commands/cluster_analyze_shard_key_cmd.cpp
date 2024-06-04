@@ -32,7 +32,6 @@
 #include <set>
 #include <string>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -226,7 +225,7 @@ public:
         return "Returns metrics for evaluating a shard key for a collection.";
     }
 };
-MONGO_REGISTER_COMMAND(AnalyzeShardKeyCmd);
+MONGO_REGISTER_COMMAND(AnalyzeShardKeyCmd).forRouter();
 
 }  // namespace
 

@@ -43,6 +43,7 @@ import {
     getPlanCacheKeyFromPipeline,
     getPlanCacheKeyFromShape,
     getPlanStage,
+    getSingleNodeExplain,
     getWinningPlan,
     isClusteredIxscan,
     isCollscan,
@@ -55,8 +56,10 @@ import {
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
-const coll = db.jstests_index_filter_commands;
+// Flag indicating if index filter commands are running through the query settings interface.
+var isIndexFiltersToQuerySettings = TestData.isIndexFiltersToQuerySettings || false;
 
+const coll = db.jstests_index_filter_commands;
 coll.drop();
 
 // Setup the data so that plans will not tie given the indices and query
@@ -214,6 +217,7 @@ assert.commandWorked(coll.runCommand('planCacheSetFilter', {query: queryID, inde
 var explain = coll.explain("executionStats").find(queryID).finish();
 assert.commandWorked(explain);
 
+explain = getSingleNodeExplain(explain);
 const winningPlan = getWinningPlan(explain.queryPlanner);
 const collectionIsClustered = ClusteredCollectionUtil.areAllCollectionsClustered(db.getMongo());
 if (collectionIsClustered) {
@@ -239,26 +243,20 @@ if (!FixtureHelpers.isMongos(db)) {
 
         // No filter.
         coll.getPlanCache().clear();
-        assert.eq(
-            false, coll.find({z: 1}).explain(verbosity).queryPlanner.indexFilterSet, verbosity);
-        assert.eq(false,
-                  coll.find(queryA1, projectionA1)
-                      .sort(sortA1)
-                      .explain(verbosity)
-                      .queryPlanner.indexFilterSet,
-                  verbosity);
+        explain = getSingleNodeExplain(coll.find({z: 1}).explain(verbosity));
+        assert.eq(false, explain.queryPlanner.indexFilterSet, explain);
+        explain =
+            getSingleNodeExplain(coll.find(queryA1, projectionA1).sort(sortA1).explain(verbosity));
+        assert.eq(false, explain.queryPlanner.indexFilterSet, explain);
 
         // With one filter set.
         assert.commandWorked(
             coll.runCommand('planCacheSetFilter', {query: {z: 1}, indexes: [{z: 1}]}));
-        assert.eq(
-            true, coll.find({z: 1}).explain(verbosity).queryPlanner.indexFilterSet, verbosity);
-        assert.eq(false,
-                  coll.find(queryA1, projectionA1)
-                      .sort(sortA1)
-                      .explain(verbosity)
-                      .queryPlanner.indexFilterSet,
-                  verbosity);
+        explain = getSingleNodeExplain(coll.find({z: 1}).explain(verbosity));
+        assert.eq(true, explain.queryPlanner.indexFilterSet, explain);
+        explain =
+            getSingleNodeExplain(coll.find(queryA1, projectionA1).sort(sortA1).explain(verbosity));
+        assert.eq(false, explain.queryPlanner.indexFilterSet, verbosity);
 
         // With two filters set.
         assert.commandWorked(coll.runCommand('planCacheSetFilter', {
@@ -267,14 +265,11 @@ if (!FixtureHelpers.isMongos(db)) {
             sort: sortA1,
             indexes: [indexA1B1, indexA1C1]
         }));
-        assert.eq(
-            true, coll.find({z: 1}).explain(verbosity).queryPlanner.indexFilterSet, verbosity);
-        assert.eq(true,
-                  coll.find(queryA1, projectionA1)
-                      .sort(sortA1)
-                      .explain(verbosity)
-                      .queryPlanner.indexFilterSet,
-                  verbosity);
+        explain = getSingleNodeExplain(coll.find({z: 1}).explain(verbosity));
+        assert.eq(true, explain.queryPlanner.indexFilterSet, explain);
+        explain =
+            getSingleNodeExplain(coll.find(queryA1, projectionA1).sort(sortA1).explain(verbosity))
+        assert.eq(true, explain.queryPlanner.indexFilterSet, verbosity);
     });
 } else {
     clearFilters(coll, shape);
@@ -300,11 +295,11 @@ assert.commandWorked(coll.runCommand('planCacheSetFilter',
 // Ensure that index key patterns in planCacheSetFilter select any index with a matching key
 // pattern.
 
-explain = coll.find(queryAA).explain();
+explain = getSingleNodeExplain(coll.find(queryAA).explain());
 assert(isIxscan(db, getWinningPlan(explain.queryPlanner)),
        "Expected index scan: " + tojson(explain));
 
-explain = coll.find(queryAA).collation(collationEN).explain();
+explain = getSingleNodeExplain(coll.find(queryAA).collation(collationEN).explain());
 assert(isIxscan(db, getWinningPlan(explain.queryPlanner)),
        "Expected index scan: " + tojson(explain));
 
@@ -313,7 +308,7 @@ assert(isIxscan(db, getWinningPlan(explain.queryPlanner)),
 assert.commandWorked(coll.runCommand('planCacheSetFilter',
                                      {query: queryAA, collation: collationEN, indexes: ["a_1"]}));
 
-explain = coll.find(queryAA).collation(collationEN).explain();
+explain = getSingleNodeExplain(coll.find(queryAA).collation(collationEN).explain());
 assert(isCollscan(db, getWinningPlan(explain.queryPlanner)),
        "Expected collscan: " + tojson(explain));
 
@@ -336,11 +331,16 @@ assert.commandWorked(
 filters = getFilters();
 assert.eq(0, filters.length, tojson(filters));
 
+// The code below tests specifics of index filter implementation and therefore are not run in
+// 'index_filters_to_query_settings' suite.
+if (isIndexFiltersToQuerySettings) {
+    quit();
+}
+
 //
 // Test that planCacheSetFilter and planCacheClearFilters do not allow queries containing $expr with
 // unbound variables.
 //
-
 assert(coll.drop());
 assert.commandWorked(coll.insert({a: "a"}));
 assert.commandWorked(coll.createIndex(indexA1, {name: "a_1"}));
@@ -406,6 +406,7 @@ if (checkSBEEnabled(db)) {
     // INLJ heuristics always prefer an index with a narrower key pattern.
     explain = coll.explain().aggregate(pipeline);
     assert.commandWorked(explain);
+    explain = getSingleNodeExplain(explain);
 
     let lookupStage = getPlanStage(explain, "EQ_LOOKUP");
     assert.neq(null, lookupStage, explain);
@@ -446,7 +447,7 @@ if (checkSBEEnabled(db)) {
     // outer side honoured the index filter.
     explain = coll.explain().aggregate(pipeline);
     assert.commandWorked(explain);
-
+    explain = getSingleNodeExplain(explain);
     lookupStage = getPlanStage(explain, "EQ_LOOKUP");
     assert.neq(null, lookupStage, explain);
     assert.eq(lookupStage.strategy, "IndexedLoopJoin", explain);

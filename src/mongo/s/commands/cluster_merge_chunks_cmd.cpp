@@ -96,7 +96,8 @@ public:
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
         return NamespaceStringUtil::deserialize(dbName.tenantId(),
-                                                CommandHelpers::parseNsFullyQualified(cmdObj));
+                                                CommandHelpers::parseNsFullyQualified(cmdObj),
+                                                SerializationContext::stateDefault());
     }
 
     bool adminOnly() const override {
@@ -158,6 +159,12 @@ public:
         auto const [cm, _] =
             Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfo(opCtx, nss);
 
+        if (cm.isUnsplittable()) {
+            uasserted(ErrorCodes::NamespaceNotSharded,
+                      str::stream() << "Can't execute mergeChunks on unsharded collection "
+                                    << nss.toStringForErrorMsg());
+        }
+
         if (!cm.getShardKeyPattern().isShardKey(minKey) ||
             !cm.getShardKeyPattern().isShardKey(maxKey)) {
             errmsg = str::stream()
@@ -208,7 +215,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(ClusterMergeChunksCommand);
+MONGO_REGISTER_COMMAND(ClusterMergeChunksCommand).forRouter();
 
 BSONField<std::string> ClusterMergeChunksCommand::nsField("mergeChunks");
 BSONField<std::vector<BSONObj>> ClusterMergeChunksCommand::boundsField("bounds");

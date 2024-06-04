@@ -113,7 +113,7 @@ class ReshardingDonorOplogIterTest : public ShardServerTestFixture {
 public:
     repl::MutableOplogEntry makeInsertOplog(Timestamp ts, BSONObj doc) {
         ReshardingDonorOplogId oplogId(ts, ts);
-        return makeOplog(_crudNss, _uuid, repl::OpTypeEnum::kInsert, std::move(doc), {}, oplogId);
+        return makeOplog(_crudNss, _uuid, repl::OpTypeEnum::kInsert, doc, {}, oplogId);
     }
 
     repl::MutableOplogEntry makeFinalOplog(Timestamp ts) {
@@ -155,7 +155,8 @@ public:
         // recipient's primary-only service is set up.
         executor::ThreadPoolMock::Options threadPoolOptions;
         threadPoolOptions.onCreateThread = [] {
-            Client::initThread("TestReshardingDonorOplogIterator");
+            Client::initThread("TestReshardingDonorOplogIterator",
+                               getGlobalServiceContext()->getService());
         };
 
         auto executor = executor::makeThreadPoolTestExecutor(
@@ -186,7 +187,7 @@ public:
         // destructor has run. Otherwise `executor` could end up outliving the ServiceContext and
         // triggering an invariant due to the task executor's thread having a Client still.
         return ExecutorFuture(executor)
-            .then([iter, executor, factory] {
+            .then([iter, executor, factory]() mutable {
                 return iter->getNextBatch(
                     std::move(executor), CancellationToken::uncancelable(), factory);
             })
@@ -195,7 +196,7 @@ public:
     }
 
     ServiceContext::UniqueClient makeKillableClient() {
-        auto client = getServiceContext()->makeClient("ReshardingDonorOplogIterator");
+        auto client = getServiceContext()->getService()->makeClient("ReshardingDonorOplogIterator");
         return client;
     }
 
@@ -286,7 +287,7 @@ TEST_F(ReshardingDonorOplogIterTest, ExhaustWithIncomingInserts) {
         Future<void> awaitInsert(const ReshardingDonorOplogId& lastSeen) override {
             ++numCalls;
 
-            auto client = _serviceContext->makeClient("onAwaitInsertCalled");
+            auto client = _serviceContext->getService()->makeClient("onAwaitInsertCalled");
             AlternativeClientRegion acr(client);
             auto opCtx = cc().makeOperationContext();
             _onAwaitInsertCalled(opCtx.get(), numCalls);

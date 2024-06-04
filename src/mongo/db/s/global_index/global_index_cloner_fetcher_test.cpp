@@ -46,6 +46,7 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_mock.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog_cache_mock.h"
@@ -94,10 +95,10 @@ public:
                                 std::move(shard));
         }
 
-        auto rt = RoutingTableHistory::makeNew(_ns,
-                                               _collUUID,
+        auto rt = RoutingTableHistory::makeNew(tempReshardingNs(),
+                                               UUID::gen(),
                                                shardKeyPattern.getKeyPattern(),
-                                               false, /*unsplittable*/
+                                               false, /* unsplittable */
                                                nullptr,
                                                false,
                                                epoch,
@@ -115,6 +116,10 @@ public:
 
     const NamespaceString& ns() const {
         return _ns;
+    }
+
+    NamespaceString tempReshardingNs() const {
+        return resharding::constructTemporaryReshardingNss(_ns.db_forSharding(), _collUUID);
     }
 
     const UUID& indexUUID() const {
@@ -145,13 +150,15 @@ TEST_F(GlobalIndexClonerFetcherTest, FetcherSortsById) {
     std::deque<DocumentSource::GetNextResult> configData{
         Doc(fromjson("{_id: {uniq: {$minKey: 1}}, max: {uniq: 0}, shard: 'myShardName'}")),
         Doc(fromjson("{_id: {uniq: 0}, max: {uniq: {$maxKey: 1}}, shard: 'shardA' }"))};
-    getCatalogCacheMock()->setChunkManagerReturnValue(createChunkManager(sk, configData));
+
+    getCatalogCacheMock()->setCollectionReturnValue(
+        tempReshardingNs(), CollectionRoutingInfo(createChunkManager(sk, configData), boost::none));
 
     GlobalIndexClonerFetcher fetcher(
         ns(), collUUID(), indexUUID(), shardA(), {}, sourceShardKeyPattern, globalIndexPattern);
 
     auto [rawPipeline, expCtx] = fetcher.makeRawPipeline(operationContext());
-    auto pipeline = Pipeline::parse(std::move(rawPipeline), std::move(expCtx));
+    auto pipeline = Pipeline::parse(rawPipeline, expCtx);
 
     std::deque<DocumentSource::GetNextResult> mockResults;
     mockResults.emplace_back(Doc(BSON("_id" << 2 << "sKey" << -300 << "uniq" << 30)));
@@ -188,13 +195,14 @@ TEST_F(GlobalIndexClonerFetcherTest, DocsThatDontBelongToThisShardAreFileteredOu
     std::deque<DocumentSource::GetNextResult> configData{
         Doc(fromjson("{_id: {uniq: {$minKey: 1}}, max: {uniq: 0}, shard: 'myShardName'}")),
         Doc(fromjson("{_id: {uniq: 0}, max: {uniq: {$maxKey: 1}}, shard: 'shardA' }"))};
-    getCatalogCacheMock()->setChunkManagerReturnValue(createChunkManager(sk, configData));
+    getCatalogCacheMock()->setCollectionReturnValue(
+        tempReshardingNs(), CollectionRoutingInfo(createChunkManager(sk, configData), boost::none));
 
     GlobalIndexClonerFetcher fetcher(
         ns(), collUUID(), indexUUID(), shardA(), {}, sourceShardKeyPattern, globalIndexPattern);
 
     auto [rawPipeline, expCtx] = fetcher.makeRawPipeline(operationContext());
-    auto pipeline = Pipeline::parse(std::move(rawPipeline), std::move(expCtx));
+    auto pipeline = Pipeline::parse(rawPipeline, expCtx);
 
     std::deque<DocumentSource::GetNextResult> mockResults;
     mockResults.emplace_back(Doc(BSON("_id" << 3 << "sKey" << -300 << "uniq" << 30)));
@@ -228,13 +236,14 @@ TEST_F(GlobalIndexClonerFetcherTest, CorrectlyTransformCompoundKeyPatterns) {
                      "shard: 'myShardName'}")),
         Doc(fromjson("{_id: {uniqA: 0, uniqB: 0}, max: {uniqA: {$maxKey: 1}, uniqB: {$maxKey: 1}}, "
                      "shard: 'shardA' }"))};
-    getCatalogCacheMock()->setChunkManagerReturnValue(createChunkManager(sk, configData));
+    getCatalogCacheMock()->setCollectionReturnValue(
+        tempReshardingNs(), CollectionRoutingInfo(createChunkManager(sk, configData), boost::none));
 
     GlobalIndexClonerFetcher fetcher(
         ns(), collUUID(), indexUUID(), shardA(), {}, sourceShardKeyPattern, globalIndexPattern);
 
     auto [rawPipeline, expCtx] = fetcher.makeRawPipeline(operationContext());
-    auto pipeline = Pipeline::parse(std::move(rawPipeline), std::move(expCtx));
+    auto pipeline = Pipeline::parse(rawPipeline, expCtx);
 
     std::deque<DocumentSource::GetNextResult> mockResults;
     mockResults.emplace_back(Doc(BSON("_id" << 3 << "sKeyA" << -300 << "sKeyB"
@@ -283,13 +292,14 @@ TEST_F(GlobalIndexClonerFetcherTest, IdGlobalIdxPattern) {
     std::deque<DocumentSource::GetNextResult> configData{
         Doc(fromjson("{_id: {_id: {$minKey: 1}}, max: {_id: 0}, shard: 'myShardName'}")),
         Doc(fromjson("{_id: {_id: 0}, max: {_id: {$maxKey: 1}}, shard: 'shardA' }"))};
-    getCatalogCacheMock()->setChunkManagerReturnValue(createChunkManager(sk, configData));
+    getCatalogCacheMock()->setCollectionReturnValue(
+        tempReshardingNs(), CollectionRoutingInfo(createChunkManager(sk, configData), boost::none));
 
     GlobalIndexClonerFetcher fetcher(
         ns(), collUUID(), indexUUID(), shardA(), {}, sourceShardKeyPattern, globalIndexPattern);
 
     auto [rawPipeline, expCtx] = fetcher.makeRawPipeline(operationContext());
-    auto pipeline = Pipeline::parse(std::move(rawPipeline), std::move(expCtx));
+    auto pipeline = Pipeline::parse(rawPipeline, expCtx);
 
     std::deque<DocumentSource::GetNextResult> mockResults;
     mockResults.emplace_back(Doc(BSON("_id" << 3 << "sKey" << -300)));
@@ -320,14 +330,15 @@ TEST_F(GlobalIndexClonerFetcherTest, ShardKeyPatternHasID) {
     std::deque<DocumentSource::GetNextResult> configData{
         Doc(fromjson("{_id: {uniq: {$minKey: 1}}, max: {uniq: 0}, shard: 'myShardName'}")),
         Doc(fromjson("{_id: {uniq: 0}, max: {uniq: {$maxKey: 1}}, shard: 'shardA' }"))};
-    getCatalogCacheMock()->setChunkManagerReturnValue(createChunkManager(sk, configData));
+    getCatalogCacheMock()->setCollectionReturnValue(
+        tempReshardingNs(), CollectionRoutingInfo(createChunkManager(sk, configData), boost::none));
 
     GlobalIndexClonerFetcher fetcher(
         ns(), collUUID(), indexUUID(), shardA(), {}, sourceShardKeyPattern, globalIndexPattern);
 
 
     auto [rawPipeline, expCtx] = fetcher.makeRawPipeline(operationContext());
-    auto pipeline = Pipeline::parse(std::move(rawPipeline), std::move(expCtx));
+    auto pipeline = Pipeline::parse(rawPipeline, expCtx);
 
     std::deque<DocumentSource::GetNextResult> mockResults;
     mockResults.emplace_back(Doc(BSON("_id" << 3 << "uniq" << 300)));
@@ -358,13 +369,14 @@ TEST_F(GlobalIndexClonerFetcherTest, DocsWithIncompleteFieldsCanStillBeFetched) 
     std::deque<DocumentSource::GetNextResult> configData{
         Doc(fromjson("{_id: {a: {$minKey: 1}, b: {$minKey: 1}}, max: {a: {$maxKey: 1}, b: "
                      "{$maxKey: 1}}, shard: 'shardA'}"))};
-    getCatalogCacheMock()->setChunkManagerReturnValue(createChunkManager(sk, configData));
+    getCatalogCacheMock()->setCollectionReturnValue(
+        tempReshardingNs(), CollectionRoutingInfo(createChunkManager(sk, configData), boost::none));
 
     GlobalIndexClonerFetcher fetcher(
         ns(), collUUID(), indexUUID(), shardA(), {}, sourceShardKeyPattern, globalIndexPattern);
 
     auto [rawPipeline, expCtx] = fetcher.makeRawPipeline(operationContext());
-    auto pipeline = Pipeline::parse(std::move(rawPipeline), std::move(expCtx));
+    auto pipeline = Pipeline::parse(rawPipeline, expCtx);
 
     std::deque<DocumentSource::GetNextResult> mockResults;
     mockResults.emplace_back(Doc(BSON("_id" << 2 << "sKey" << 200 << "a" << 20)));
@@ -399,13 +411,14 @@ TEST_F(GlobalIndexClonerFetcherTest, CanFetchDocumentsWithIncompleteShardKey) {
     std::deque<DocumentSource::GetNextResult> configData{
         Doc(fromjson("{_id: {uniq: {$minKey: 1}}, max: {uniq: {$maxKey: 1}}, "
                      "shard: 'shardA'}"))};
-    getCatalogCacheMock()->setChunkManagerReturnValue(createChunkManager(sk, configData));
+    getCatalogCacheMock()->setCollectionReturnValue(
+        tempReshardingNs(), CollectionRoutingInfo(createChunkManager(sk, configData), boost::none));
 
     GlobalIndexClonerFetcher fetcher(
         ns(), collUUID(), indexUUID(), shardA(), {}, sourceShardKeyPattern, globalIndexPattern);
 
     auto [rawPipeline, expCtx] = fetcher.makeRawPipeline(operationContext());
-    auto pipeline = Pipeline::parse(std::move(rawPipeline), std::move(expCtx));
+    auto pipeline = Pipeline::parse(rawPipeline, expCtx);
 
     std::deque<DocumentSource::GetNextResult> mockResults;
     mockResults.emplace_back(Doc(BSON("_id" << 1 << "sKeyA" << 1 << "uniq" << 10)));
@@ -436,13 +449,14 @@ TEST_F(GlobalIndexClonerFetcherTest, CanFetchDocumentsWithDottedShardKey) {
     std::deque<DocumentSource::GetNextResult> configData{
         Doc(fromjson("{_id: {uniq: {$minKey: 1}}, max: {uniq: {$maxKey: 1}}, "
                      "shard: 'shardA'}"))};
-    getCatalogCacheMock()->setChunkManagerReturnValue(createChunkManager(sk, configData));
+    getCatalogCacheMock()->setCollectionReturnValue(
+        tempReshardingNs(), CollectionRoutingInfo(createChunkManager(sk, configData), boost::none));
 
     GlobalIndexClonerFetcher fetcher(
         ns(), collUUID(), indexUUID(), shardA(), {}, sourceShardKeyPattern, globalIndexPattern);
 
     auto [rawPipeline, expCtx] = fetcher.makeRawPipeline(operationContext());
-    auto pipeline = Pipeline::parse(std::move(rawPipeline), std::move(expCtx));
+    auto pipeline = Pipeline::parse(rawPipeline, expCtx);
 
     std::deque<DocumentSource::GetNextResult> mockResults;
     mockResults.emplace_back(Doc(BSON("_id" << 1 << "x" << BSON("a" << -1) << "uniq" << 10)));
@@ -473,13 +487,14 @@ TEST_F(GlobalIndexClonerFetcherTest, CanFetchDocumentsWithDottedIdInShardKey) {
     std::deque<DocumentSource::GetNextResult> configData{
         Doc(fromjson("{_id: {uniq: {$minKey: 1}}, max: {uniq: {$maxKey: 1}}, "
                      "shard: 'shardA'}"))};
-    getCatalogCacheMock()->setChunkManagerReturnValue(createChunkManager(sk, configData));
+    getCatalogCacheMock()->setCollectionReturnValue(
+        tempReshardingNs(), CollectionRoutingInfo(createChunkManager(sk, configData), boost::none));
 
     GlobalIndexClonerFetcher fetcher(
         ns(), collUUID(), indexUUID(), shardA(), {}, sourceShardKeyPattern, globalIndexPattern);
 
     auto [rawPipeline, expCtx] = fetcher.makeRawPipeline(operationContext());
-    auto pipeline = Pipeline::parse(std::move(rawPipeline), std::move(expCtx));
+    auto pipeline = Pipeline::parse(rawPipeline, expCtx);
 
     std::deque<DocumentSource::GetNextResult> mockResults;
     mockResults.emplace_back(Doc(BSON("_id" << BSON("a" << 1 << "b" << -1) << "uniq" << 10)));
@@ -511,7 +526,8 @@ TEST_F(GlobalIndexClonerFetcherTest, FetcherShouldSkipDocsIfResumeIdIsSet) {
     ShardKeyPattern sk{globalIndexPattern};
     std::deque<DocumentSource::GetNextResult> configData{
         Doc(fromjson("{_id: {uniq: {$minKey: 1}}, max: {uniq: {$maxKey: 1}}, shard: 'shardA'}"))};
-    getCatalogCacheMock()->setChunkManagerReturnValue(createChunkManager(sk, configData));
+    getCatalogCacheMock()->setCollectionReturnValue(
+        tempReshardingNs(), CollectionRoutingInfo(createChunkManager(sk, configData), boost::none));
 
     GlobalIndexClonerFetcher fetcher(
         ns(), collUUID(), indexUUID(), shardA(), {}, sourceShardKeyPattern, globalIndexPattern);
@@ -528,7 +544,7 @@ TEST_F(GlobalIndexClonerFetcherTest, FetcherShouldSkipDocsIfResumeIdIsSet) {
 
     fetcher.setResumeId(Value(kRequiresEscapingBSON));
     auto [rawPipeline, expCtx] = fetcher.makeRawPipeline(operationContext());
-    auto pipeline = Pipeline::parse(std::move(rawPipeline), std::move(expCtx));
+    auto pipeline = Pipeline::parse(rawPipeline, expCtx);
 
     {
         auto mockSource = DocumentSourceMock::createForTest(mockResults, pipeline->getContext());

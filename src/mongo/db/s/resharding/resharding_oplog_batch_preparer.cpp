@@ -36,7 +36,6 @@
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/data_range.h"
 #include "mongo/base/error_codes.h"
@@ -53,7 +52,6 @@
 #include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/murmur3.h"
 #include "mongo/util/str.h"
 
 namespace mongo {
@@ -290,14 +288,8 @@ void ReshardingOplogBatchPreparer::_appendCrudOpToWriterVector(const OplogEntry*
                                                                WriterVectors& writerVectors) const {
     BSONElementComparator elementHasher{BSONElementComparator::FieldNamesMode::kIgnore,
                                         _defaultCollator.get()};
-
-    const size_t idHash = elementHasher.hash(op->getIdElement());
-
-    // View 'idHash' as an array of 8 bytes.
-    ConstDataRange dataRange{reinterpret_cast<const char*>(&idHash), sizeof(idHash)};
-    uint32_t hash = murmur3<sizeof(uint32_t)>(dataRange, 0 /*seed*/);
-
-    _appendOpToWriterVector(hash, op, writerVectors);
+    const auto idHash = elementHasher.hash(op->getIdElement());
+    _appendOpToWriterVector(absl::HashOf(idHash), op, writerVectors);
 }
 
 void ReshardingOplogBatchPreparer::_appendSessionOpToWriterVector(
@@ -306,7 +298,7 @@ void ReshardingOplogBatchPreparer::_appendSessionOpToWriterVector(
     _appendOpToWriterVector(lsidHasher(lsid), op, writerVectors);
 }
 
-void ReshardingOplogBatchPreparer::_appendOpToWriterVector(std::uint32_t hash,
+void ReshardingOplogBatchPreparer::_appendOpToWriterVector(size_t hash,
                                                            const OplogEntry* op,
                                                            WriterVectors& writerVectors) const {
     auto& writer = writerVectors[hash % writerVectors.size()];

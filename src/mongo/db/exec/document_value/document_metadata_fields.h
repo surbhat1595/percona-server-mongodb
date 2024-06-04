@@ -35,7 +35,6 @@
 #include <memory>
 #include <utility>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/util/builder.h"
@@ -80,6 +79,7 @@ public:
         kTimeseriesBucketMaxTime,
         kSearchSortValues,
         kVectorSearchScore,
+        kSearchSequenceToken,
 
         // New fields must be added before the kNumFields sentinel.
         kNumFields
@@ -356,6 +356,20 @@ public:
         _holder->vectorSearchScore = vectorSearchScore;
     }
 
+    bool hasSearchSequenceToken() const {
+        return _holder && _holder->metaFields.test(MetaType::kSearchSequenceToken);
+    }
+
+    Value getSearchSequenceToken() const {
+        invariant(hasSearchSequenceToken());
+        return _holder->searchSequenceToken;
+    }
+
+    void setSearchSequenceToken(Value details) {
+        _setCommon(MetaType::kSearchSequenceToken);
+        _holder->searchSequenceToken = details;
+    }
+
     void serializeForSorter(BufBuilder& buf) const;
 
     bool isModified() const {
@@ -403,6 +417,7 @@ private:
         Date_t timeseriesBucketMaxTime;
         BSONObj searchSortValues;
         double vectorSearchScore{0.0};
+        Value searchSequenceToken;
     };
 
     // Null until the first setter is called, at which point a MetadataHolder struct is allocated.

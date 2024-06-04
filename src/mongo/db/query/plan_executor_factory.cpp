@@ -28,7 +28,6 @@
  */
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <variant>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -147,7 +146,9 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     NamespaceString nss,
     std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
     bool planIsFromCache,
-    bool generatedByBonsai) {
+    bool generatedByBonsai,
+    std::unique_ptr<RemoteCursorMap> remoteCursors,
+    std::unique_ptr<RemoteExplainVector> remoteExplains) {
     auto&& [rootStage, data] = root;
     LOGV2_DEBUG(4822860,
                 5,
@@ -171,7 +172,9 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
                  std::move(nss),
                  false /*isOpen*/,
                  std::move(yieldPolicy),
-                 generatedByBonsai),
+                 generatedByBonsai,
+                 std::move(remoteCursors),
+                 std::move(remoteExplains)),
              PlanExecutor::Deleter{opCtx}}};
 }
 

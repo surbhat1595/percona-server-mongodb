@@ -11,8 +11,7 @@ var mongos = st.s0;
 var shard0 = st.shard0.shardName;
 var shard1 = st.shard1.shardName;
 
-assert.commandWorked(mongos.adminCommand({enableSharding: kDbName}));
-st.ensurePrimaryShard(kDbName, shard0);
+assert.commandWorked(mongos.adminCommand({enableSharding: kDbName, primaryShard: shard0}));
 
 // Fail if invalid namespace.
 assert.commandFailed(mongos.adminCommand({moveChunk: '', find: {_id: 1}, to: shard1}));
@@ -23,6 +22,22 @@ assert.commandFailed(mongos.adminCommand({moveChunk: 'a.b', find: {_id: 1}, to: 
 // Fail if collection is unsharded.
 assert.commandFailed(
     mongos.adminCommand({moveChunk: kDbName + '.xxx', find: {_id: 1}, to: shard1}));
+
+assert.commandFailedWithCode(
+    st.rs0.getPrimary().adminCommand(
+        {setParameter: 1, chunkMigrationFetcherMaxBufferedSizeBytesPerThread: -5}),
+    ErrorCodes.InvalidOptions);
+
+assert.commandFailedWithCode(
+    st.rs0.getPrimary().adminCommand(
+        {setParameter: 1, chunkMigrationFetcherMaxBufferedSizeBytesPerThread: 1000}),
+    ErrorCodes.InvalidOptions);
+
+assert.commandWorked(st.rs0.getPrimary().adminCommand(
+    {setParameter: 1, chunkMigrationFetcherMaxBufferedSizeBytesPerThread: 20 * 1024 * 1024}));
+
+assert.commandWorked(st.rs0.getPrimary().adminCommand(
+    {setParameter: 1, chunkMigrationFetcherMaxBufferedSizeBytesPerThread: 0}));
 
 function testHashed() {
     var ns = kDbName + '.fooHashed';

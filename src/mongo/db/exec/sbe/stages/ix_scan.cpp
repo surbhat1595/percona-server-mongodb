@@ -32,7 +32,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <utility>
 
 #include "mongo/base/error_codes.h"
@@ -187,7 +186,7 @@ void IndexScanStageBase::restoreCollectionAndIndex() {
     auto desc = _coll.getPtr()->getIndexCatalog()->findIndexByIdent(_opCtx, indexIdent);
     uassert(ErrorCodes::QueryPlanKilled,
             str::stream() << "query plan killed :: index '" << _indexName << "' dropped",
-            desc && !desc->getEntry()->isDropped());
+            desc);
 
     // Re-obtain the index entry pointer that was set to null during yield preparation. It is safe
     // to access the index entry when the query is active, as its validity is protected by at least
@@ -299,7 +298,7 @@ PlanState IndexScanStageBase::getNext() {
     // state in case it yields as the state will be completely overwritten after the call.
     disableSlotAccess();
 
-    checkForInterrupt(_opCtx);
+    checkForInterruptAndYield(_opCtx);
 
     do {
         switch (_scanState) {

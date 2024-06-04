@@ -39,7 +39,6 @@
 #include <vector>
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -430,6 +429,7 @@ void QueryAnalysisSampler::_incrementCounters(OperationContext* opCtx,
         case SampledCommandNameEnum::kUpdate:
         case SampledCommandNameEnum::kDelete:
         case SampledCommandNameEnum::kFindAndModify:
+        case SampledCommandNameEnum::kBulkWrite:
             QueryAnalysisSampleTracker::get(opCtx).incrementWrites(opCtx, nss);
             break;
         default:

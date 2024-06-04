@@ -135,7 +135,7 @@ public:
      *  - NamespaceNotFound - database does not exist
      */
     virtual DatabaseType getDatabase(OperationContext* opCtx,
-                                     StringData db,
+                                     const DatabaseName& db,
                                      repl::ReadConcernLevel readConcernLevel) = 0;
 
     /**
@@ -167,6 +167,18 @@ public:
         repl::ReadConcernLevel readConcernLevel = repl::ReadConcernLevel::kMajorityReadConcern) = 0;
 
     /**
+     * Retrieves all collections under a specified database (or in the system) which are sharded. If
+     * the dbName parameter is empty, returns all sharded collections.
+     *
+     * @param sort Fields to use for sorting the results. If empty, no sorting is performed.
+     */
+    virtual std::vector<CollectionType> getShardedCollections(
+        OperationContext* opCtx,
+        const DatabaseName& db,
+        repl::ReadConcernLevel readConcernLevel = repl::ReadConcernLevel::kMajorityReadConcern,
+        const BSONObj& sort = BSONObj()) = 0;
+
+    /**
      * Retrieves all collections under a specified database (or in the system). If the dbName
      * parameter is empty, returns all collections.
      *
@@ -174,7 +186,7 @@ public:
      */
     virtual std::vector<CollectionType> getCollections(
         OperationContext* opCtx,
-        StringData db,
+        const DatabaseName& db,
         repl::ReadConcernLevel readConcernLevel = repl::ReadConcernLevel::kMajorityReadConcern,
         const BSONObj& sort = BSONObj()) = 0;
 
@@ -185,19 +197,59 @@ public:
      *
      * Throws exception on errors.
      */
-    virtual std::vector<NamespaceString> getAllShardedCollectionsForDb(
+    virtual std::vector<NamespaceString> getShardedCollectionNamespacesForDb(
         OperationContext* opCtx,
-        StringData dbName,
+        const DatabaseName& dbName,
         repl::ReadConcernLevel readConcern,
         const BSONObj& sort = BSONObj()) = 0;
+
+    /**
+     * Returns the set of collections tracked for the specified database, regardless of being
+     * sharded or not. Goes directly to the config server's metadata, without checking the local
+     * cache so it should not be used in frequently called code paths.
+     *
+     * Throws exception on errors.
+     */
+    virtual std::vector<NamespaceString> getCollectionNamespacesForDb(
+        OperationContext* opCtx,
+        const DatabaseName& dbName,
+        repl::ReadConcernLevel readConcern,
+        const BSONObj& sort = BSONObj()) = 0;
+
+    /**
+     * Returns the set of collections for the specified database, which have been marked as
+     * unsplittable. Goes directly to the config server's metadata, without checking the local cache
+     * so it should not be used in frequently called code paths.
+     *
+     * Throws exception on errors.
+     */
+    virtual std::vector<NamespaceString> getUnsplittableCollectionNamespacesForDb(
+        OperationContext* opCtx,
+        const DatabaseName& dbName,
+        repl::ReadConcernLevel readConcern,
+        const BSONObj& sort = BSONObj()) = 0;
+
+    /**
+     * Returns the set of collections for the specified database, which have been marked as
+     * unsplittable excluding those whose data shard is in the list of shards to ignore. Goes
+     * directly to the config server's metadata, without checking the local cache so it should not
+     * be used in frequently called code paths.
+     *
+     * Throws exception on errors.
+     */
+    virtual std::vector<NamespaceString> getUnsplittableCollectionNamespacesForDbOutsideOfShards(
+        OperationContext* opCtx,
+        const DatabaseName& dbName,
+        const std::vector<ShardId>& excludedShards,
+        repl::ReadConcernLevel readConcern) = 0;
 
     /**
      * Retrieves all databases for a shard.
      *
      * Returns a !OK status if an error occurs.
      */
-    virtual StatusWith<std::vector<std::string>> getDatabasesForShard(OperationContext* opCtx,
-                                                                      const ShardId& shardId) = 0;
+    virtual StatusWith<std::vector<DatabaseName>> getDatabasesForShard(OperationContext* opCtx,
+                                                                       const ShardId& shardId) = 0;
 
     /**
      * Gets the requested number of chunks (of type ChunkType) that satisfy a query.
@@ -259,7 +311,7 @@ public:
      * Retrieves all namespaces that have zones associated with a database.
      */
     virtual std::vector<NamespaceString> getAllNssThatHaveZonesForDatabase(
-        OperationContext* opCtx, const StringData& dbName) = 0;
+        OperationContext* opCtx, const DatabaseName& dbName) = 0;
 
     /**
      * Retrieves all shards in this sharded cluster.

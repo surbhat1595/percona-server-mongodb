@@ -41,7 +41,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -111,7 +110,7 @@ public:
     SemiFuture<CollectionAndChangedChunks> getChunksSince(const NamespaceString& nss,
                                                           ChunkVersion version) override;
 
-    SemiFuture<DatabaseType> getDatabase(StringData dbName) override;
+    SemiFuture<DatabaseType> getDatabase(const DatabaseName& dbName) override;
 
     void waitForCollectionFlush(OperationContext* opCtx, const NamespaceString& nss) override;
 
@@ -350,8 +349,7 @@ private:
         // completed. Must be used in conjunction with the loader's mutex.
         std::shared_ptr<stdx::condition_variable> _activeTaskCompletedCondVar;
     };
-    // TODO SERVER-80342 change string type to DatabaseName.
-    typedef std::map<std::string, DbTaskList> DbTaskLists;
+    typedef std::map<DatabaseName, DbTaskList> DbTaskLists;
 
     typedef std::map<NamespaceString, CollAndChunkTaskList> CollAndChunkTaskLists;
 
@@ -388,7 +386,8 @@ private:
      * has caught up to the primary's.
      * Returns the database version from this node's persisted metadata store.
      */
-    StatusWith<DatabaseType> _runSecondaryGetDatabase(OperationContext* opCtx, StringData dbName);
+    StatusWith<DatabaseType> _runSecondaryGetDatabase(OperationContext* opCtx,
+                                                      const DatabaseName& dbName);
 
     /**
      * Refreshes db version from the config server's metadata store, and schedules maintenance
@@ -401,7 +400,7 @@ private:
      * Only run on the shard primary.
      */
     StatusWith<DatabaseType> _schedulePrimaryGetDatabase(OperationContext* opCtx,
-                                                         StringData dbName,
+                                                         const DatabaseName& dbName,
                                                          long long termScheduled);
 
     /**
@@ -449,7 +448,7 @@ private:
                                                             CollAndChunkTask task);
 
     void _ensureMajorityPrimaryAndScheduleDbTask(OperationContext* opCtx,
-                                                 StringData dbName,
+                                                 const DatabaseName& dbName,
                                                  DBTask task);
     /**
      * Schedules tasks in the 'nss' task list to execute until the task list is depleted.
@@ -458,7 +457,7 @@ private:
      */
     void _runCollAndChunksTasks(const NamespaceString& nss);
 
-    void _runDbTasks(StringData dbName);
+    void _runDbTasks(const DatabaseName& dbName);
 
     /**
      * Executes the task at the front of the task list for 'nss'. The task will either drop 'nss's
@@ -468,7 +467,7 @@ private:
      */
     void _updatePersistedCollAndChunksMetadata(OperationContext* opCtx, const NamespaceString& nss);
 
-    void _updatePersistedDbMetadata(OperationContext* opCtx, StringData dbName);
+    void _updatePersistedDbMetadata(OperationContext* opCtx, const DatabaseName& dbName);
 
     /**
      * Sends _flushRoutingTableCacheUpdates to the primary to force it to refresh its routing table

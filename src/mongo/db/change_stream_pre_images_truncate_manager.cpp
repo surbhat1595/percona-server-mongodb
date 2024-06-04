@@ -35,7 +35,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cmath>
 #include <deque>
 #include <type_traits>
@@ -68,6 +67,7 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/debug_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/timer.h"
 
@@ -313,7 +313,7 @@ void distributeUnaccountedBytesAndRecords(
                                          tenantTruncateMarkers);
 }
 
-PreImagesTruncateManager::TenantTruncateMarkers getInitialTruncateMarkersForTenantScanning(
+PreImagesTruncateManager::TenantTruncateMarkers generateTruncateMarkersForTenantScanning(
     OperationContext* opCtx,
     boost::optional<TenantId> tenantId,
     const CollectionAcquisition& preImagesCollection) {
@@ -361,7 +361,7 @@ PreImagesTruncateManager::TenantTruncateMarkers getInitialTruncateMarkersForTena
     return truncateMap;
 }
 
-PreImagesTruncateManager::TenantTruncateMarkers getInitialTruncateMarkersForTenantSampling(
+PreImagesTruncateManager::TenantTruncateMarkers generateTruncateMarkersForTenantSampling(
     OperationContext* opCtx,
     boost::optional<TenantId> tenantId,
     const CollectionAcquisition& preImagesCollection,
@@ -390,7 +390,7 @@ PreImagesTruncateManager::TenantTruncateMarkers getInitialTruncateMarkersForTena
               "samples collected does not match the desired number of samples",
               "samplesTaken"_attr = totalSamples,
               "samplesDesired"_attr = numSamples);
-        return getInitialTruncateMarkersForTenantScanning(opCtx, tenantId, preImagesCollection);
+        return generateTruncateMarkersForTenantScanning(opCtx, tenantId, preImagesCollection);
     }
 
     ////////////////////////////////////////////////////////////////
@@ -421,7 +421,7 @@ PreImagesTruncateManager::TenantTruncateMarkers getInitialTruncateMarkersForTena
 // cumulatively, the total 'dataSize' and 'numRecords' captured by the set of
 // 'TenantTruncateMarkers' should reflect the actual 'dataSize' and 'numRecords' reported by the
 // SizeStorer.
-PreImagesTruncateManager::TenantTruncateMarkers getInitialTruncateMarkersForTenant(
+PreImagesTruncateManager::TenantTruncateMarkers generateTruncateMarkersForTenant(
     OperationContext* opCtx,
     boost::optional<TenantId> tenantId,
     const CollectionAcquisition& preImageCollection) {
@@ -446,7 +446,7 @@ PreImagesTruncateManager::TenantTruncateMarkers getInitialTruncateMarkersForTena
         case CollectionTruncateMarkers::MarkersCreationMethod::EmptyCollection:
             // Default to scanning since 'dataSize' and 'numRecords' could be incorrect.
         case CollectionTruncateMarkers::MarkersCreationMethod::Scanning:
-            return getInitialTruncateMarkersForTenantScanning(opCtx, tenantId, preImageCollection);
+            return generateTruncateMarkersForTenantScanning(opCtx, tenantId, preImageCollection);
         case CollectionTruncateMarkers::MarkersCreationMethod::Sampling: {
             // Use the collection's average record size to estimate the number of records in
             // each marker, and thus estimate the combined size of the records.
@@ -454,7 +454,7 @@ PreImagesTruncateManager::TenantTruncateMarkers getInitialTruncateMarkersForTena
             double estimatedRecordsPerMarker = std::ceil(minBytesPerMarker / avgRecordSize);
             double estimatedBytesPerMarker = estimatedRecordsPerMarker * avgRecordSize;
 
-            return getInitialTruncateMarkersForTenantSampling(
+            return generateTruncateMarkersForTenantSampling(
                 opCtx,
                 tenantId,
                 preImageCollection,
@@ -534,6 +534,39 @@ Timestamp getMaxTSEligibleForTruncate(OperationContext* opCtx) {
         Timestamp(opCtx->getServiceContext()->getStorageEngine()->getAllDurableTimestamp());
     auto lastAppliedOpTime = repl::ReplicationCoordinator::get(opCtx)->getMyLastAppliedOpTime();
     return std::min(lastAppliedOpTime.getTimestamp(), allDurable);
+}
+
+// Dumps the contents of 'installedTruncateMarkersSnapshot' and 'highestRecordIdAndWallTimeSamples'.
+// If there is an 'nsUUID' reported in the 'installedTruncateMarkers' with no corresponding entry in
+// 'highestSampledRecords', something went wrong during initialization.
+BSONObj dumpInstalledMarkersAndHighestRecordSamples(
+    const NsUUIDToSamplesMap& highestRecordIdAndWallTimeSamples,
+    const PreImagesTruncateManager::TenantTruncateMarkers* installedTruncateMarkersSnapshot) {
+    BSONObjBuilder b;
+    {
+        BSONArrayBuilder samplesArrayBuilder;
+        for (const auto& [nsUUID, nsUUIDHighestRidAndWallTime] :
+             highestRecordIdAndWallTimeSamples) {
+            const auto& [highestRid, highestWallTime] = nsUUIDHighestRidAndWallTime[0];
+            BSONObjBuilder sampleBuilder;
+            sampleBuilder.append("nsUUID", nsUUID.toString());
+            sampleBuilder.append("ts",
+                                 change_stream_pre_image_util::getPreImageTimestamp(highestRid));
+            sampleBuilder.append("wallTime", highestWallTime);
+            samplesArrayBuilder.append(sampleBuilder.obj());
+        }
+        b.appendArray("highestSampledRecords", samplesArrayBuilder.obj());
+    }
+    {
+        BSONArrayBuilder truncateMarkerNsUUIDsArrayBuilder;
+        for (const auto& [nsUUID, _] : *installedTruncateMarkersSnapshot) {
+            BSONObjBuilder truncateMarkerDebugBuilder;
+            truncateMarkerDebugBuilder.append("nsUUID", nsUUID.toString());
+            truncateMarkerNsUUIDsArrayBuilder.append(truncateMarkerDebugBuilder.obj());
+        }
+        b.appendArray("installedTruncateMarkers", truncateMarkerNsUUIDsArrayBuilder.obj());
+    }
+    return b.obj();
 }
 }  // namespace
 
@@ -673,49 +706,85 @@ void PreImagesTruncateManager::_registerAndInitialiseMarkersForTenant(
     OperationContext* opCtx,
     boost::optional<TenantId> tenantId,
     const CollectionAcquisition& preImagesCollection) {
-    // First register the 'tenantId' in the '_tenantMap' without any truncate markers. This allows
-    // for concurrent inserts to be temporarily create their own truncate markers while
-    // initialisation proceeds.
+    // (A) Register the 'tenantId' in the '_tenantMap' so inserts for namespaces created between (A)
+    // and (C) are tracked in 'tenantMapEntry'.
     auto tenantMapEntry = _tenantMap.getOrEmplace(tenantId);
-    auto initialisedTenantTruncateMarkers =
-        getInitialTruncateMarkersForTenant(opCtx, tenantId, preImagesCollection);
 
+    // (B) Generate the initial set of truncate markers for the tenant.
+    auto generatedTruncateMarkers =
+        generateTruncateMarkersForTenant(opCtx, tenantId, preImagesCollection);
+
+    // (C) Install the generated truncate markers into the 'tenantMapEntry'.
     tenantMapEntry->updateWith(
         [&](const PreImagesTruncateManager::TenantTruncateMarkers& tenantMapEntryPlaceHolder) {
             // Critical section where no other threads can modify the 'tenantMapEntry'.
 
-            // If the 'tenantMapEntryPlaceHolder' contains markers for an 'nsUUID' not
-            // captured in the 'initialisedTenantTruncateMarkers', it is safe to append them to the
-            // resulting map entry. Otherwise, they will be overwritten since initalisation is best
-            // effort and there are no guarantees the data tracked is completely correct, only that
-            // it will eventually be correct once the inital truncate markers created are truncated.
             for (const auto& [nsUUID, nsTruncateMarkers] : tenantMapEntryPlaceHolder) {
-                if (initialisedTenantTruncateMarkers.find(nsUUID) ==
-                    initialisedTenantTruncateMarkers.end()) {
-                    initialisedTenantTruncateMarkers.emplace(nsUUID, nsTruncateMarkers);
+                if (generatedTruncateMarkers.find(nsUUID) == generatedTruncateMarkers.end()) {
+                    // Add this 'nsUUID' which was not present in (B)'s snapshot and was intercepted
+                    // between (A) and (C).
+                    LOGV2_DEBUG(8204001,
+                                0,
+                                "Appending pre-image truncate markers created for a namespace not "
+                                "captured during truncate marker generation",
+                                "nsUUID"_attr = nsUUID,
+                                "tenantId"_attr = tenantId);
+
+                    generatedTruncateMarkers.emplace(nsUUID, nsTruncateMarkers);
                 }
             }
-            return initialisedTenantTruncateMarkers;
+
+            // Overwrite truncate markers created in 'tenantMapEntryPlaceHolder' whose
+            // nsUUIDs are already accounted for in 'generatedTruncateMarkers' - as
+            // 'generatedTruncateMarkers' account for all the pre-images pre-dating the short
+            // generation period.
+            //
+            // Merging two sets of truncate markers would create unnecessary complexity in the best
+            // effort process.
+            return generatedTruncateMarkers;
         });
 
-    // Partial marker expiration relies on the highest recordId and wallTime seen for each 'nsUUID'
-    // to be greater than or equal to those of the latest pre-image inserted for the 'nsUUID'. Since
-    // concurrent inserts during initialisation are not guaranteed to be captured by the truncate
-    // markers now placed in the '_tenantMap', perform a forward pass to ensure each 'nsUUID' has an
-    // accurate highest recordId and wallTime.
-    //
-    // This step is also necessary for markers generated through samples, which are produced with
-    // default highest recordId and wallTimes up to this point.
+    // (D) Finalize the truncate markers by ensuring they have up-to-date highest RecordId and wall
+    // times.
+    auto snapShottedTruncateMarkers = tenantMapEntry->getUnderlyingSnapshot();
+
+    // We must refresh the snapshot and update the highest seen RecordId and wall time for each
+    // nsUUID to ensure all inserts concurrent with marker generation are eventually truncated.
+    // Example:
+    //      (i) SnapshotA is used to create 'generatedTruncateMarkers'.
+    //      (ii) PreImage100 is inserted into  NsUUID1 - the insert isn't visible
+    //      in SnapshotA.
+    //      (iii) There aren't any other inserts into NsUUID1. The highest wall time and RecordId
+    //      for NsUUID1 MUST be updated so the markers track PreImage100, and know to eventually
+    //      truncate it.
+    opCtx->recoveryUnit()->abandonSnapshot();
+
     auto rs = preImagesCollection.getCollectionPtr()->getRecordStore();
     NsUUIDToSamplesMap highestRecordIdAndWallTimeSamples;
     sampleLastRecordPerNsUUID(opCtx, rs, highestRecordIdAndWallTimeSamples);
-    auto snapShottedTruncateMarkers = tenantMapEntry->getUnderlyingSnapshot();
+
     for (auto& [nsUUID, truncateMarkersForNsUUID] : *snapShottedTruncateMarkers) {
         // At this point, truncation could not possible occur yet, so the lastRecordIdAndWallTimes
         // is expected to always contain an entry for the 'nsUUID'.
         auto nsUUIDHighestRidAndWallTime = highestRecordIdAndWallTimeSamples.find(nsUUID);
-        invariant(nsUUIDHighestRidAndWallTime != highestRecordIdAndWallTimeSamples.end());
+        if (nsUUIDHighestRidAndWallTime == highestRecordIdAndWallTimeSamples.end()) {
+            // Pre-images inserted on the nsUUID won't be removed until either a new pre-image for
+            // the nsUUID is inserted or the server is restarted. This should only be possible if
+            // there were no pre-images for the nsUUID before the snapshot used to sample the
+            // highest RecordId and wall time.
+            const auto stateDump = kDebugBuild
+                ? dumpInstalledMarkersAndHighestRecordSamples(highestRecordIdAndWallTimeSamples,
+                                                              snapShottedTruncateMarkers.get())
+                : BSONObj();
+            LOGV2_WARNING(8204000,
+                          "Unable to update the highest seen RecordId and wall time for truncate "
+                          "markers on nsUUID during initialization",
+                          "nsUUID"_attr = nsUUID.toString(),
+                          "tenantId"_attr = tenantId,
+                          "details"_attr = stateDump);
 
+            dassert(nsUUIDHighestRidAndWallTime != highestRecordIdAndWallTimeSamples.end());
+        }
         auto [highestRid, highestWallTime] = nsUUIDHighestRidAndWallTime->second[0];
         truncateMarkersForNsUUID->updatePartialMarkerForInitialisation(
             opCtx, 0, highestRid, highestWallTime, 0);

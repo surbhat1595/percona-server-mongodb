@@ -34,7 +34,6 @@
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
@@ -112,12 +111,16 @@ std::string DBDirectClient::getServerAddress() const {
 
 // Returned version should match the incoming connections restrictions.
 int DBDirectClient::getMinWireVersion() {
-    return WireSpec::instance().get()->incomingExternalClient.minWireVersion;
+    return WireSpec::getWireSpec(_opCtx->getServiceContext())
+        .get()
+        ->incomingExternalClient.minWireVersion;
 }
 
 // Returned version should match the incoming connections restrictions.
 int DBDirectClient::getMaxWireVersion() {
-    return WireSpec::instance().get()->incomingExternalClient.maxWireVersion;
+    return WireSpec::getWireSpec(_opCtx->getServiceContext())
+        .get()
+        ->incomingExternalClient.maxWireVersion;
 }
 
 bool DBDirectClient::isReplicaSetMember() const {
@@ -144,14 +147,14 @@ DbResponse loopbackBuildResponse(OperationContext* const opCtx, Message& toSend)
     toSend.header().setId(nextMessageId());
     toSend.header().setResponseToMsgId(0);
     IgnoreAPIParametersBlock ignoreApiParametersBlock(opCtx);
-    return opCtx->getServiceContext()->getServiceEntryPoint()->handleRequest(opCtx, toSend).get();
+    return opCtx->getService()->getServiceEntryPoint()->handleRequest(opCtx, toSend).get();
 }
 }  // namespace
 
-void DBDirectClient::_call(Message& toSend, Message& response, string* actualServer) {
+Message DBDirectClient::_call(Message& toSend, string* actualServer) {
     auto dbResponse = loopbackBuildResponse(_opCtx, toSend);
     invariant(!dbResponse.response.empty());
-    response = std::move(dbResponse.response);
+    return std::move(dbResponse.response);
 }
 
 void DBDirectClient::say(Message& toSend, bool isRetry, string* actualServer) {

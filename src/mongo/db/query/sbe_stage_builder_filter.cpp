@@ -32,7 +32,6 @@
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -151,7 +150,7 @@ struct MatchExpressionVisitorContext {
     };
 
     MatchExpressionVisitorContext(StageBuilderState& state,
-                                  boost::optional<sbe::value::SlotId> rootSlot,
+                                  boost::optional<TypedSlot> rootSlot,
                                   const MatchExpression* root,
                                   const PlanStageSlots* slots,
                                   bool isFilterOverIxscan)
@@ -160,7 +159,7 @@ struct MatchExpressionVisitorContext {
             7097201, "Expected 'rootSlot' or 'slots' to be defined", rootSlot || slots != nullptr);
 
         // Set up the top-level MatchFrame.
-        emplaceFrame(state, rootSlot);
+        emplaceFrame(state, rootSlot ? rootSlot->slotId : boost::optional<sbe::value::SlotId>());
     }
 
     SbExpr done() {
@@ -204,7 +203,7 @@ struct MatchExpressionVisitorContext {
 
     // The current context must be initialized either with a slot that contains the root
     // document ('rootSlot') or with the set of kField slots ('slots').
-    boost::optional<sbe::value::SlotId> rootSlot;
+    boost::optional<TypedSlot> rootSlot;
     const PlanStageSlots* slots = nullptr;
     bool isFilterOverIxscan = false;
 };
@@ -221,7 +220,7 @@ enum class LeafTraversalMode {
 };
 
 SbExpr generateTraverseF(SbExpr inputExpr,
-                         boost::optional<sbe::value::SlotId> topLevelFieldSlot,
+                         boost::optional<TypedSlot> topLevelFieldSlot,
                          const sbe::MatchPath& fp,
                          FieldIndex level,
                          sbe::value::FrameIdGenerator* frameIdGenerator,
@@ -249,7 +248,7 @@ SbExpr generateTraverseF(SbExpr inputExpr,
     auto lambdaParam = SbExpr{SbVar{lambdaFrameId, 0}};
 
     SbExpr fieldExpr = topLevelFieldSlot
-        ? b.makeVariable(*topLevelFieldSlot)
+        ? b.makeVariable(topLevelFieldSlot->slotId)
         : b.makeFunction("getField", inputExpr.clone(), b.makeStrConstant(fp.getPart(level)));
 
     if (childIsLeafWithEmptyName) {
@@ -358,7 +357,7 @@ void generatePredicate(MatchExpressionVisitorContext* context,
     const bool isFieldPathOnRootDoc = context->framesCount() == 1;
     auto* slots = context->slots;
 
-    boost::optional<sbe::value::SlotId> topLevelFieldSlot;
+    boost::optional<TypedSlot> topLevelFieldSlot;
     if (isFieldPathOnRootDoc && slots) {
         // If we are generating a filter over an index scan, search for a kField slot that
         // corresponds to the full path 'path'.
@@ -367,14 +366,31 @@ void generatePredicate(MatchExpressionVisitorContext* context,
             if (auto slot = slots->getIfExists(name); slot) {
                 // We found a kField slot that matches. We don't need to perform any traversal;
                 // we can just evaluate the predicate on the slot directly and return.
-                frame.pushExpr(makePredicate(*slot));
+                frame.pushExpr(makePredicate(slot->slotId));
                 return;
             }
         }
 
-        // Search for a kField slot whose path matches the first part of 'path'.
-        topLevelFieldSlot =
-            slots->getIfExists(std::make_pair(PlanStageSlots::kField, path.getPart(0)));
+        // Check if this operation is supposed to work only on the array elements and that the
+        // navigation of the full path has been made available via the dedicated slot type; in this
+        // case generate a special version of traverseF that doesn't have a runtime counterpart and
+        // can only be processed by the block vectorizer.
+        if (auto slot = slots->getIfExists(
+                std::make_pair(PlanStageSlots::kFilterCellField, path.dottedField()));
+            slot && mode == LeafTraversalMode::kArrayElementsOnly) {
+            SbExprBuilder b(context->state);
+            auto lambdaFrameId = context->state.frameIdGenerator->generate();
+            auto traverseFExpr = b.makeFunction(
+                "blockTraverseFPlaceholder"_sd,
+                b.makeVariable(slot->slotId),
+                b.makeLocalLambda(lambdaFrameId, makePredicate(SbExpr{SbVar{lambdaFrameId, 0}})));
+            frame.pushExpr(std::move(traverseFExpr));
+            return;
+        } else {
+            // Search for a kField slot whose path matches the first part of 'path'.
+            topLevelFieldSlot =
+                slots->getIfExists(std::make_pair(PlanStageSlots::kField, path.getPart(0)));
+        }
     }
 
     tassert(7097205,
@@ -957,32 +973,84 @@ public:
         generatePredicate(_context, *expr->fieldRef(), makePredicate, traversalMode, hasNull);
     }
 
-    // The following are no-ops. The internal expr comparison match expression are produced
-    // internally by rewriting an $expr expression to an AND($expr, $_internalExpr[OP]), which can
-    // later be eliminated by via a conversion into EXACT index bounds, or remains present. In the
-    // latter case we can simply ignore it, as the result of AND($expr, $_internalExpr[OP]) is equal
-    // to just $expr.
-    //
-    // TODO SERVER-62058: This is a correct implementation for the time-series loose filter since
-    // the event filter should be able to filter out non-matching results but will not be
-    // performant. But this is an incorrect implementation for the time-series tight filter since
-    // if the tight filter evalutes to 'true', then the event filter will not be evaluated at all.
-    // Implement the exact behavior for the better performance of the loose filter and the
-    // correctness of the tight filter.
+    void translateExprComparison(const ComparisonMatchExpressionBase* expr, bool mustExecute) {
+        /**
+         * Since InternalExpr* are permitted to return false positives, we simply compile this to an
+         * always "true" expression. In practice, most of the time when an InternalExpr is not
+         * marked with 'mustExecute' it is accompanied by a more precise check which removes the
+         * false positives.
+         */
+        if (!mustExecute) {
+            generateAlwaysBoolean(_context, true);
+            return;
+        }
+
+        ExpressionCompare::CmpOp cmp = [&]() {
+            switch (expr->matchType()) {
+                case MatchExpression::MatchType::INTERNAL_EXPR_EQ:
+                    return ExpressionCompare::CmpOp::EQ;
+                case MatchExpression::MatchType::INTERNAL_EXPR_GT:
+                    return ExpressionCompare::CmpOp::GT;
+                case MatchExpression::MatchType::INTERNAL_EXPR_GTE:
+                    return ExpressionCompare::CmpOp::GTE;
+                case MatchExpression::MatchType::INTERNAL_EXPR_LT:
+                    return ExpressionCompare::CmpOp::LT;
+                case MatchExpression::MatchType::INTERNAL_EXPR_LTE:
+                    return ExpressionCompare::CmpOp::LTE;
+                default:
+                    // Only $expr expressions supported.
+                    MONGO_UNREACHABLE_TASSERT(6205800);
+            }
+        }();
+
+        auto expCtx = _context->state.expCtx;
+        invariant(expCtx);
+
+        auto fieldPathExpr = ExpressionFieldPath::createPathFromString(
+            expCtx.get(), expr->fieldRef()->dottedField().toString(), expCtx->variablesParseState);
+        auto translatedFieldPathExpr = generateExpression(
+            _context->state, fieldPathExpr.get(), _context->rootSlot, _context->slots);
+
+        SbExprBuilder b(_context->state);
+        auto frameId = _context->state.frameIdGenerator->generate();
+        auto newVar = b.makeVariable(frameId, 0);
+
+        auto cmpExpr = ExpressionCompare::create(
+            expCtx.get(),
+            cmp,
+            fieldPathExpr,
+            ExpressionConstant::create(expCtx.get(), Value(expr->getData())));
+
+        auto translatedCmpExpr =
+            generateExpression(_context->state, cmpExpr.get(), _context->rootSlot, _context->slots);
+
+        auto isArrayExpr = b.makeIf(b.makeFillEmptyTrue(b.makeFunction("isArray", newVar.clone())),
+                                    b.makeBoolConstant(true),
+                                    std::move(translatedCmpExpr));
+
+        auto cmpWArrayCheckExpr = b.makeLet(
+            frameId, SbExpr::makeSeq(std::move(translatedFieldPathExpr)), std::move(isArrayExpr));
+
+        auto& frame = _context->topFrame();
+        // Convert the result of the '{$expr: ..}' expression to a boolean value.
+        frame.pushExpr(
+            b.makeFillEmptyFalse(b.makeFunction("coerceToBool"_sd, std::move(cmpWArrayCheckExpr))));
+    }
+
     void visit(const InternalExprEqMatchExpression* expr) final {
-        generateAlwaysBoolean(_context, true);
+        translateExprComparison(expr, expr->mustExecute());
     }
     void visit(const InternalExprGTMatchExpression* expr) final {
-        generateAlwaysBoolean(_context, true);
+        translateExprComparison(expr, expr->mustExecute());
     }
     void visit(const InternalExprGTEMatchExpression* expr) final {
-        generateAlwaysBoolean(_context, true);
+        translateExprComparison(expr, expr->mustExecute());
     }
     void visit(const InternalExprLTMatchExpression* expr) final {
-        generateAlwaysBoolean(_context, true);
+        translateExprComparison(expr, expr->mustExecute());
     }
     void visit(const InternalExprLTEMatchExpression* expr) final {
-        generateAlwaysBoolean(_context, true);
+        translateExprComparison(expr, expr->mustExecute());
     }
 
     void visit(const InternalEqHashedKey* expr) final {}
@@ -1191,7 +1259,7 @@ private:
 
 SbExpr generateFilter(StageBuilderState& state,
                       const MatchExpression* root,
-                      boost::optional<sbe::value::SlotId> rootSlot,
+                      boost::optional<TypedSlot> rootSlot,
                       const PlanStageSlots* slots,
                       const std::vector<std::string>& keyFields,
                       bool isFilterOverIxscan) {

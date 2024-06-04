@@ -36,7 +36,6 @@
 #include <absl/container/node_hash_map.h>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/bson/bsonelement.h"
@@ -81,6 +80,13 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::optimizer {
+
+
+boost::optional<optimizer::SelectivityType> ABTRecorder::estimateSelectivity(
+    const Metadata& /*metadata*/, const int64_t /*sampleSize*/, const PlanAndProps& planAndProps) {
+    _nodes.push_back(planAndProps._node);
+    return SelectivityType{0.0};
+}
 
 std::unique_ptr<mongo::Pipeline, mongo::PipelineDeleter> parsePipeline(
     const std::vector<BSONObj>& rawPipeline, NamespaceString nss, OperationContext* opCtx) {
@@ -155,7 +161,7 @@ std::vector<BSONObj> runSBEAST(OperationContext* opCtx,
     OPTIMIZER_DEBUG_LOG(
         6264807, 5, "SBE translated ABT", "explain"_attr = ExplainGenerator::explainV2(tree));
 
-    auto phaseManager = makePhaseManager(OptPhaseManager::getAllRewritesSet(),
+    auto phaseManager = makePhaseManager(OptPhaseManager::getAllProdRewrites(),
                                          prefixId,
                                          {{}},
                                          boost::none /*costModel*/,
@@ -172,10 +178,16 @@ std::vector<BSONObj> runSBEAST(OperationContext* opCtx,
     boost::optional<sbe::value::SlotId> ridSlot;
     auto runtimeEnv = std::make_unique<sbe::RuntimeEnvironment>();
     sbe::value::SlotIdGenerator ids;
+    sbe::InputParamToSlotMap inputParamToSlotMap;
 
     auto env = VariableEnvironment::build(planAndProps._node);
-    SBENodeLowering g{
-        env, *runtimeEnv, ids, phaseManager.getMetadata(), planAndProps._map, ScanOrder::Forward};
+    SBENodeLowering g{env,
+                      *runtimeEnv,
+                      ids,
+                      inputParamToSlotMap,
+                      phaseManager.getMetadata(),
+                      planAndProps._map,
+                      ScanOrder::Forward};
     auto sbePlan = g.optimize(planAndProps._node, map, ridSlot);
     ASSERT_EQ(1, map.size());
     tassert(6624260, "Unexpected rid slot", !ridSlot);
@@ -249,5 +261,6 @@ std::vector<BSONObj> runPipeline(OperationContext* opCtx,
 
     return results;
 }
+
 
 }  // namespace mongo::optimizer

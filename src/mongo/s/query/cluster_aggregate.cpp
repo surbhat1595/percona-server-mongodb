@@ -32,7 +32,6 @@
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
@@ -71,7 +70,7 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/explain_common.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/query_stats/aggregate_key_generator.h"
+#include "mongo/db/query/query_stats/agg_key_generator.h"
 #include "mongo/db/query/query_stats/key_generator.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/tailable_mode_gen.h"
@@ -105,6 +104,7 @@
 namespace mongo {
 
 constexpr unsigned ClusterAggregate::kMaxViewRetries;
+using sharded_agg_helpers::PipelineDataSource;
 
 namespace {
 
@@ -127,6 +127,7 @@ auto resolveInvolvedNamespaces(const stdx::unordered_set<NamespaceString>& invol
 boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
     OperationContext* opCtx,
     const AggregateCommandRequest& request,
+    const boost::optional<CollectionRoutingInfo>& cri,
     BSONObj collationObj,
     boost::optional<UUID> uuid,
     StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces,
@@ -151,6 +152,10 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
         uuid);
 
     mergeCtx->inMongos = true;
+
+    if ((!cri || !cri->cm.hasRoutingTable()) && collationObj.isEmpty()) {
+        mergeCtx->setIgnoreCollator();
+    }
 
     // Serialize the 'AggregateCommandRequest' and save it so that the original command can be
     // reconstructed for dispatch to a new shard, which is sometimes necessary for change streams
@@ -292,24 +297,20 @@ std::unique_ptr<Pipeline, PipelineDeleter> parsePipelineAndRegisterQueryStats(
     AggregateCommandRequest& request,
     boost::optional<CollectionRoutingInfo> cri,
     bool hasChangeStream,
-    bool shouldDoFLERewrite) {
-    // Populate the collection UUID and the appropriate collation to use.
-    auto [collationObj, uuid] = [&]() -> std::pair<BSONObj, boost::optional<UUID>> {
-        // If this is a change stream, take the user-defined collation if one exists, or an
-        // empty BSONObj otherwise. Change streams never inherit the collection's default
-        // collation, and since collectionless aggregations generally run on the 'admin'
-        // database, the standard logic would attempt to resolve its non-existent UUID and
-        // collation by sending a specious 'listCollections' command to the config servers.
-        if (hasChangeStream) {
-            return {request.getCollation().value_or(BSONObj()), boost::none};
-        }
-
-        return cluster_aggregation_planner::getCollationAndUUID(
-            opCtx,
-            cri ? boost::make_optional(cri->cm) : boost::none,
-            executionNss,
-            request.getCollation().value_or(BSONObj()));
-    }();
+    bool shouldDoFLERewrite,
+    bool requiresCollationForParsingUnshardedAggregate) {
+    // Populate the collation. If this is a change stream, take the user-defined collation if one
+    // exists, or an empty BSONObj otherwise. Change streams never inherit the collection's default
+    // collation, and since collectionless aggregations generally run on the 'admin'
+    // database, the standard logic would attempt to resolve its non-existent UUID and
+    // collation by sending a specious 'listCollections' command to the config servers.
+    auto collationObj = hasChangeStream ? request.getCollation().value_or(BSONObj())
+                                        : cluster_aggregation_planner::getCollation(
+                                              opCtx,
+                                              cri ? boost::make_optional(cri->cm) : boost::none,
+                                              executionNss,
+                                              request.getCollation().value_or(BSONObj()),
+                                              requiresCollationForParsingUnshardedAggregate);
 
     // Build an ExpressionContext for the pipeline. This instantiates an appropriate collator,
     // includes all involved namespaces, and creates a shared MongoProcessInterface for use by
@@ -317,8 +318,9 @@ std::unique_ptr<Pipeline, PipelineDeleter> parsePipelineAndRegisterQueryStats(
     boost::intrusive_ptr<ExpressionContext> expCtx =
         makeExpressionContext(opCtx,
                               request,
+                              cri,
                               collationObj,
-                              uuid,
+                              boost::none /* uuid */,
                               resolveInvolvedNamespaces(involvedNamespaces),
                               hasChangeStream);
 
@@ -326,7 +328,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> parsePipelineAndRegisterQueryStats(
     // Skip query stats recording for queryable encryption queries.
     if (!shouldDoFLERewrite) {
         query_stats::registerRequest(opCtx, executionNss, [&]() {
-            return std::make_unique<query_stats::AggregateKeyGenerator>(
+            return std::make_unique<query_stats::AggKey>(
                 request, *pipeline, expCtx, involvedNamespaces, executionNss);
         });
     }
@@ -389,7 +391,12 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
     auto hasChangeStream = liteParsedPipeline.hasChangeStream();
     auto involvedNamespaces = liteParsedPipeline.getInvolvedNamespaces();
     auto shouldDoFLERewrite = ::mongo::shouldDoFLERewrite(request);
-    auto startsWithDocuments = liteParsedPipeline.startsWithDocuments();
+    auto startsWithQueue = liteParsedPipeline.startsWithQueue();
+    auto requiresCollationForParsingUnshardedAggregate =
+        liteParsedPipeline.requiresCollationForParsingUnshardedAggregate();
+    auto pipelineDataSource = hasChangeStream ? PipelineDataSource::kChangeStream
+        : startsWithQueue                     ? PipelineDataSource::kQueue
+                                              : PipelineDataSource::kNormal;
 
     // If the routing table is not already taken by the higher level, fill it now.
     if (!cri) {
@@ -420,8 +427,26 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
 
         if (executionNsRoutingInfoStatus.isOK()) {
             cri = executionNsRoutingInfoStatus.getValue();
-        } else if (!((hasChangeStream || startsWithDocuments) &&
+        } else if (!((hasChangeStream || startsWithQueue) &&
                      executionNsRoutingInfoStatus == ErrorCodes::NamespaceNotFound)) {
+            // To achieve parity with mongod-style responses, parse and validate the query
+            // even though the namespace is not found.
+            try {
+                auto pipeline = parsePipelineAndRegisterQueryStats(
+                    opCtx,
+                    involvedNamespaces,
+                    namespaces.executionNss,
+                    request,
+                    cri,
+                    hasChangeStream,
+                    shouldDoFLERewrite,
+                    requiresCollationForParsingUnshardedAggregate);
+                pipeline->validateCommon(false);
+            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+                // ignore redundant NamespaceNotFound errors.
+            }
+
+            // if validation is ok, just return empty result
             appendEmptyResultSetWithStatus(
                 opCtx, namespaces.requestedNss, executionNsRoutingInfoStatus.getStatus(), result);
             return Status::OK();
@@ -430,13 +455,15 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
 
     boost::intrusive_ptr<ExpressionContext> expCtx;
     const auto pipelineBuilder = [&]() {
-        auto pipeline = parsePipelineAndRegisterQueryStats(opCtx,
-                                                           involvedNamespaces,
-                                                           namespaces.executionNss,
-                                                           request,
-                                                           cri,
-                                                           hasChangeStream,
-                                                           shouldDoFLERewrite);
+        auto pipeline =
+            parsePipelineAndRegisterQueryStats(opCtx,
+                                               involvedNamespaces,
+                                               namespaces.executionNss,
+                                               request,
+                                               cri,
+                                               hasChangeStream,
+                                               shouldDoFLERewrite,
+                                               requiresCollationForParsingUnshardedAggregate);
         expCtx = pipeline->getContext();
 
         // If the aggregate command supports encrypted collections, do rewrites of the pipeline to
@@ -449,32 +476,33 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                                                std::move(pipeline));
                 request.getEncryptionInformation()->setCrudProcessed(true);
             }
-
-            CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+            stdx::lock_guard<Client> lk(*opCtx->getClient());
+            CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
         }
 
-        pipeline->optimizePipeline();
+        // Optimize the pipeline if:
+        // - We have a valid routing table.
+        // - We know the collection's collation.
+        // - We have a change stream or need to do a FLE rewrite.
+        // This is because the results of optimization may depend on knowing the collation.
+        // TODO SERVER-81991: Determine whether this is necessary once all unsharded collections are
+        // tracked as unsplittable collections in the sharding catalog.
+        if ((cri && cri->cm.hasRoutingTable()) || requiresCollationForParsingUnshardedAggregate ||
+            hasChangeStream || shouldDoFLERewrite) {
+            pipeline->optimizePipeline();
 
-        // Validate the pipeline post-optimization.
-        const bool alreadyOptimized = true;
-        pipeline->validateCommon(alreadyOptimized);
-
+            // Validate the pipeline post-optimization.
+            const bool alreadyOptimized = true;
+            pipeline->validateCommon(alreadyOptimized);
+        }
         return pipeline;
     };
 
-    // The pipeline is not allowed to passthrough if any stage is not allowed to passthrough or if
-    // the pipeline needs to undergo FLE rewriting first.
-    auto allowedToPassthrough =
-        liteParsedPipeline.allowedToPassthroughFromMongos() && !shouldDoFLERewrite;
     auto targeter = cluster_aggregation_planner::AggregationTargeter::make(
         opCtx,
-        namespaces.executionNss,
         pipelineBuilder,
         cri,
-        involvedNamespaces,
-        hasChangeStream,
-        startsWithDocuments,
-        allowedToPassthrough,
+        pipelineDataSource,
         request.getPassthroughToShard().has_value());
 
     uassert(
@@ -486,17 +514,27 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                 cluster_aggregation_planner::AggregationTargeter::TargetingPolicy::kMongosRequired);
 
     if (!expCtx) {
-        // When the AggregationTargeter chooses a "passthrough" or "specific shard only"
-        // policy, it does not call the 'pipelineBuilder' function, so we've yet to construct an
-        // expression context or register query stats. Because this is a passthrough, we only need a
-        // bare minimum expression context on mongos.
-        invariant(targeter.policy ==
-                      cluster_aggregation_planner::AggregationTargeter::kPassthrough ||
-                  targeter.policy ==
-                      cluster_aggregation_planner::AggregationTargeter::kSpecificShardOnly);
+        // When the AggregationTargeter chooses a "specific shard only" policy, it does not call
+        // the 'pipelineBuilder' function, so we've yet to construct an expression context or
+        // register query stats. Because this is a passthrough, we only need a bare minimum
+        // expression context on mongos.
+        tassert(7972400,
+                "Expected to have a 'kSpecificShardOnly' targetting policy",
+                targeter.policy ==
+                    cluster_aggregation_planner::AggregationTargeter::kSpecificShardOnly);
 
-        expCtx = make_intrusive<ExpressionContext>(
-            opCtx, nullptr, namespaces.executionNss, boost::none, request.getLet());
+        std::unique_ptr<CollatorInterface> collation = nullptr;
+        if (auto collationObj = request.getCollation()) {
+            // This will be null if attempting to build an interface for the simple collator.
+            collation = uassertStatusOK(CollatorFactoryInterface::get(opCtx->getServiceContext())
+                                            ->makeFromBSON(*collationObj));
+        }
+
+        expCtx = make_intrusive<ExpressionContext>(opCtx,
+                                                   std::move(collation),
+                                                   namespaces.executionNss,
+                                                   boost::none /* runtimeConstants */,
+                                                   request.getLet());
         expCtx->addResolvedNamespaces(involvedNamespaces);
 
         // Skip query stats recording for queryable encryption queries.
@@ -506,7 +544,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
             // query_stats::registerRequest.
             query_stats::registerRequest(opCtx, namespaces.executionNss, [&]() {
                 auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
-                return std::make_unique<query_stats::AggregateKeyGenerator>(
+                return std::make_unique<query_stats::AggKey>(
                     request, *pipeline, expCtx, involvedNamespaces, namespaces.executionNss);
             });
         }
@@ -519,21 +557,6 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
 
     auto status = [&]() {
         switch (targeter.policy) {
-            case cluster_aggregation_planner::AggregationTargeter::TargetingPolicy::kPassthrough: {
-                // A pipeline with $changeStream should never be allowed to passthrough.
-                invariant(!hasChangeStream);
-                const bool eligibleForSampling = !request.getExplain();
-                return cluster_aggregation_planner::runPipelineOnPrimaryShard(
-                    expCtx,
-                    namespaces,
-                    targeter.cri->cm,
-                    request.getExplain(),
-                    aggregation_request_helper::serializeToCommandDoc(request),
-                    privileges,
-                    eligibleForSampling,
-                    result);
-            }
-
             case cluster_aggregation_planner::AggregationTargeter::TargetingPolicy::
                 kMongosRequired: {
                 // If this is an explain write the explain output and return.
@@ -567,8 +590,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                     namespaces,
                     privileges,
                     result,
-                    hasChangeStream,
-                    startsWithDocuments,
+                    pipelineDataSource,
                     eligibleForSampling);
             }
             case cluster_aggregation_planner::AggregationTargeter::TargetingPolicy::
@@ -580,14 +602,6 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                         "per shard cursor pipeline must contain $changeStream",
                         hasChangeStream);
 
-                // Make sure the rest of the pipeline can be pushed down.
-                auto pipeline = request.getPipeline();
-                std::vector<BSONObj> nonChangeStreamPart(pipeline.begin() + 1, pipeline.end());
-                LiteParsedPipeline nonChangeStreamLite(request.getNamespace(), nonChangeStreamPart);
-                uassert(6273802,
-                        "$_passthroughToShard specified with a stage that is not allowed to "
-                        "passthrough from mongos",
-                        nonChangeStreamLite.allowedToPassthroughFromMongos());
                 ShardId shardId(std::string(request.getPassthroughToShard()->getShard()));
 
                 // This is an aggregation pipeline started internally, so it is not eligible for
@@ -597,12 +611,10 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                 return cluster_aggregation_planner::runPipelineOnSpecificShardOnly(
                     expCtx,
                     namespaces,
-                    boost::none,
                     request.getExplain(),
                     aggregation_request_helper::serializeToCommandDoc(request),
                     privileges,
                     shardId,
-                    true /* forPerShardCursor */,
                     eligibleForSampling,
                     result);
             }

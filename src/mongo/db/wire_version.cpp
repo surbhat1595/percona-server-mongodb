@@ -29,38 +29,50 @@
 
 
 #include <limits>
-#include <mutex>
 #include <new>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/util/bson_extract.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/static_immortal.h"
+#include "mongo/util/decorable.h"
 #include "mongo/util/str.h"
-#include "mongo/util/thread_safety_context.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
 
 namespace mongo {
 
-WireSpec& WireSpec::instance() {
-    static StaticImmortal<WireSpec> instance;
-    return *instance;
+namespace {
+auto wireSpecDecoration = ServiceContext::declareDecoration<WireSpec>();
+}  // namespace
+
+WireSpec& WireSpec::getWireSpec(ServiceContext* sc) {
+    return (*sc)[wireSpecDecoration];
 }
 
-void WireSpec::appendInternalClientWireVersion(WireVersionInfo wireVersionInfo,
-                                               BSONObjBuilder* builder) {
-    BSONObjBuilder subBuilder(builder->subobjStart("internalClient"));
-    WireVersionInfo::appendToBSON(wireVersionInfo, &subBuilder);
+void WireSpec::appendInternalClientWireVersionIfNeeded(BSONObjBuilder* builder) {
+    bool isInternalClient;
+    WireVersionInfo outgoing;
+
+    {
+        stdx::lock_guard<Latch> lk(_mutex);
+        fassert(ErrorCodes::NotYetInitialized, isInitialized());
+        isInternalClient = _spec->isInternalClient;
+        outgoing = _spec->outgoing;
+    }
+
+    if (isInternalClient) {
+        BSONObjBuilder subBuilder(builder->subobjStart("internalClient"));
+        WireVersionInfo::appendToBSON(outgoing, &subBuilder);
+    }
 }
 
 BSONObj specToBSON(const WireSpec::Specification& spec) {
@@ -70,7 +82,7 @@ BSONObj specToBSON(const WireSpec::Specification& spec) {
 }
 
 void WireSpec::initialize(Specification spec) {
-    invariant(ThreadSafetyContext::getThreadSafetyContext()->isSingleThreaded());
+    stdx::lock_guard<Latch> lk(_mutex);
     fassert(ErrorCodes::AlreadyInitialized, !isInitialized());
     BSONObj newSpec = specToBSON(spec);
     _spec = std::make_shared<Specification>(std::move(spec));
@@ -92,7 +104,7 @@ void WireSpec::reset(Specification spec) {
         4915702, "Updated wire specification", "oldSpec"_attr = oldSpec, "newSpec"_attr = newSpec);
 }
 
-std::shared_ptr<const WireSpec::Specification> WireSpec::get() const {
+std::shared_ptr<const WireSpec::Specification> WireSpec::get() {
     stdx::lock_guard<Latch> lk(_mutex);
     fassert(ErrorCodes::NotYetInitialized, isInitialized());
     return _spec;

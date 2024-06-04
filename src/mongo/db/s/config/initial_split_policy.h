@@ -64,24 +64,6 @@ struct SplitPolicyParams {
 
 class InitialSplitPolicy {
 public:
-    /**
-     * Returns the optimization strategy for building initial chunks based on the input parameters
-     * and the collection state.
-     *
-     * If dataShard is specified, isUnsplittable must be true, because we can only select the shard
-     * that will hold the data for unsplittable collections.
-     */
-    static std::unique_ptr<InitialSplitPolicy> calculateOptimizationStrategy(
-        OperationContext* opCtx,
-        const ShardKeyPattern& shardKeyPattern,
-        std::int64_t numInitialChunks,
-        bool presplitHashedZones,
-        const std::vector<TagsType>& tags,
-        size_t numShards,
-        bool collectionIsEmpty,
-        bool isUnsplittable,
-        boost::optional<ShardId> dataShard);
-
     virtual ~InitialSplitPolicy() {}
 
     /**
@@ -170,15 +152,13 @@ public:
     /**
      * Constructor used when generating split points for a hashed-prefix shard key.
      */
-    SplitPointsBasedSplitPolicy(const ShardKeyPattern& shardKeyPattern,
-                                size_t numShards,
-                                size_t numInitialChunks) {
-        // If 'numInitialChunks' was not specified, use default value.
-        numInitialChunks = numInitialChunks ? numInitialChunks : numShards * 2;
-        _splitPoints = calculateHashedSplitPoints(shardKeyPattern, BSONObj(), numInitialChunks);
-        _numContiguousChunksPerShard =
-            std::max(numInitialChunks / numShards, static_cast<size_t>(1));
-    }
+    SplitPointsBasedSplitPolicy(
+        const ShardKeyPattern& shardKeyPattern,
+        size_t numShards,
+        boost::optional<std::vector<ShardId>> availableShardIds = boost::none,
+        // TODO SERVER-82611: get rid of the `numInitialChunks` argument.
+        // The `numInitialChunks` parameter was deprecated in SERVER-74747 and should not be used.
+        boost::optional<size_t> numInitialChunks = boost::none);
 
     ShardCollectionConfig createFirstChunks(OperationContext* opCtx,
                                             const ShardKeyPattern& shardKeyPattern,
@@ -195,6 +175,7 @@ public:
 private:
     std::vector<BSONObj> _splitPoints;
     size_t _numContiguousChunksPerShard;
+    boost::optional<std::vector<ShardId>> _availableShardIds;
 };
 
 /**
@@ -211,7 +192,9 @@ public:
         std::vector<std::pair<ShardId, size_t>> chunkDistribution;
     };
 
-    AbstractTagsBasedSplitPolicy(OperationContext* opCtx, std::vector<TagsType> tags);
+    AbstractTagsBasedSplitPolicy(OperationContext* opCtx,
+                                 std::vector<TagsType> tags,
+                                 boost::optional<std::vector<ShardId>> availableShardIds);
 
     ShardCollectionConfig createFirstChunks(OperationContext* opCtx,
                                             const ShardKeyPattern& shardKeyPattern,
@@ -234,6 +217,7 @@ public:
 private:
     const std::vector<TagsType> _tags;
     StringMap<std::vector<ShardId>> _tagToShardIds;
+    boost::optional<std::vector<ShardId>> _availableShardIds;
 };
 
 /**
@@ -241,8 +225,11 @@ private:
  */
 class SingleChunkPerTagSplitPolicy : public AbstractTagsBasedSplitPolicy {
 public:
-    SingleChunkPerTagSplitPolicy(OperationContext* opCtx, std::vector<TagsType> tags)
-        : AbstractTagsBasedSplitPolicy(opCtx, tags) {}
+    SingleChunkPerTagSplitPolicy(
+        OperationContext* opCtx,
+        std::vector<TagsType> tags,
+        boost::optional<std::vector<ShardId>> availableShardIds = boost::none)
+        : AbstractTagsBasedSplitPolicy(opCtx, tags, availableShardIds) {}
 
     SplitInfo buildSplitInfoForTag(TagsType tag, const ShardKeyPattern& shardKeyPattern) override;
 
@@ -258,11 +245,15 @@ private:
  */
 class PresplitHashedZonesSplitPolicy : public AbstractTagsBasedSplitPolicy {
 public:
-    PresplitHashedZonesSplitPolicy(OperationContext* opCtx,
-                                   const ShardKeyPattern& shardKeyPattern,
-                                   std::vector<TagsType> tags,
-                                   size_t numInitialChunks,
-                                   bool isCollectionEmpty);
+    PresplitHashedZonesSplitPolicy(
+        OperationContext* opCtx,
+        const ShardKeyPattern& shardKeyPattern,
+        std::vector<TagsType> tags,
+        bool isCollectionEmpty,
+        boost::optional<std::vector<ShardId>> availableShardIds = boost::none,
+        // TODO SERVER-82611: get rid of the `numInitialChunks` argument.
+        // The `numInitialChunks` parameter was deprecated in SERVER-74747 and should not be used.
+        boost::optional<size_t> numInitialChunks = boost::none);
 
     SplitInfo buildSplitInfoForTag(TagsType tag, const ShardKeyPattern& shardKeyPattern) override;
 

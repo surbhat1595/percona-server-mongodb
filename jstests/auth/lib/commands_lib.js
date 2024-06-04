@@ -247,6 +247,23 @@ export const authCommandsLib = {
           ]
         },
         {
+          testname: "abortUnshardCollection",
+          command: {abortUnshardCollection: "test.x"},
+          skipUnlessSharded: true,
+          skipTest: (conn) => {
+            return !TestData.setParameters.featureFlagUnshardCollection;
+          },
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: Object.extend({enableSharding: 1}, roles_clusterManager),
+                privileges:
+                [{resource: {db: "test", collection: "x"}, actions: ["unshardCollection"]}],
+                  expectFail: true
+              },
+          ]
+        },
+        {
           testname: "_clusterQueryWithoutShardKey",
           command: {
               _clusterQueryWithoutShardKey: 1,
@@ -6704,24 +6721,18 @@ export const authCommandsLib = {
           ]
         },
         {
-          // Test that only clusterManager has permission to run $queryStats without transformation
+          // Test that clusterMonitor has permission to run $queryStats without transformation
           testname: "testQueryStatsReadPrivilege",
           command: {aggregate: 1, pipeline: [{$queryStats: {}}], cursor: {}},
           skipSharded: false,
-          skipTest: (conn) => {
-              return !TestData.setParameters.featureFlagQueryStats && !TestData.setParameters.featureFlagQueryStatsFindCommand;
-          },
-          testcases: [{runOnDb: adminDbName, roles: roles_clusterManager}]
+          testcases: [{runOnDb: adminDbName, roles: roles_monitoring}]
         },
         {
-          // Test that only clusterManager has permission to run $queryStats with transformation
+          // Test that clusterMonitor has permission to run $queryStats with transformation
           testname: "testQueryStatsReadTransformedPrivilege",
           command: {aggregate: 1, pipeline: [{$queryStats: {transformIdentifiers: {algorithm: "hmac-sha-256", hmacKey: BinData(8, "MjM0NTY3ODkxMDExMTIxMzE0MTUxNjE3MTgxOTIwMjE=")}}}], cursor: {}},
           skipSharded: false,
-          skipTest: (conn) => {
-              return !TestData.setParameters.featureFlagQueryStats && !TestData.setParameters.featureFlagQueryStatsFindCommand;
-          },
-          testcases: [{runOnDb: adminDbName, roles: roles_clusterManager}]
+          testcases: [{runOnDb: adminDbName, roles: roles_monitoring}]
         },
         {
           testname: "top",
@@ -6742,7 +6753,7 @@ export const authCommandsLib = {
           command: {unshardCollection: "test.x", toShard: "unshard_collection-rs"},
           skipUnlessSharded: true,
           skipTest: (conn) => {
-              return !TestData.setParameters.featureFlagMoveCollection;
+              return !TestData.setParameters.featureFlagUnshardCollection;
           },
           testcases: [
               {
@@ -7259,9 +7270,10 @@ export const authCommandsLib = {
               apiParameters: {version: "1", strict: true}
           },
           setup: function(db) {
-              assert.commandWorked(db.getSiblingDB(firstDbName).createCollection("test"));
-              assert.commandWorked(db.getSiblingDB(secondDbName).createCollection("test"));
-              assert.commandWorked(db.getSiblingDB("ThirdDB").createCollection("test"));
+              const collName = "validate_db_metadata_command_specific_db"
+              assert.commandWorked(db.getSiblingDB(firstDbName).createCollection(collName));
+              assert.commandWorked(db.getSiblingDB(secondDbName).createCollection(collName));
+              assert.commandWorked(db.getSiblingDB("ThirdDB").createCollection(collName));
           },
           teardown: function(db) {
               assert.commandWorked(db.getSiblingDB(firstDbName).dropDatabase());
@@ -7292,8 +7304,9 @@ export const authCommandsLib = {
           testname: "validate_db_metadata_command_all_dbs",
           command: {validateDBMetadata: 1, apiParameters: {version: "1", strict: true}},
           setup: function(db) {
-              assert.commandWorked(db.getSiblingDB(firstDbName).createCollection("test"));
-              assert.commandWorked(db.getSiblingDB(secondDbName).createCollection("test"));
+              const collName = "validate_db_metadata_command_all_dbs"
+              assert.commandWorked(db.getSiblingDB(firstDbName).createCollection(collName));
+              assert.commandWorked(db.getSiblingDB(secondDbName).createCollection(collName));
           },
           teardown: function(db) {
               assert.commandWorked(db.getSiblingDB(firstDbName).dropDatabase());

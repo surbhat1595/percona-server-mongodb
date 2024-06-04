@@ -176,7 +176,7 @@ public:
         _net = network.get();
         executor::ThreadPoolMock::Options thread_pool_options;
         thread_pool_options.onCreateThread = [] {
-            Client::initThread("TenantOplogApplier");
+            Client::initThread("TenantOplogApplier", getGlobalServiceContext()->getService());
         };
         _executor = makeSharedThreadPoolTestExecutor(std::move(network), thread_pool_options);
         _executor->startup();
@@ -688,10 +688,6 @@ TEST_F(TenantOplogApplierTest, ApplyInsert_Success) {
 }
 
 TEST_F(TenantOplogApplierTest, ApplyInserts_Grouped) {
-    // TODO(SERVER-50256): remove nss_workaround, which is used to work around a bug where
-    // the first operation assigned to a worker cannot be grouped.
-    NamespaceString nss_workaround =
-        NamespaceString::createNamespaceString_forTest(_dbName.toStringWithTenantId_forTest(), "a");
     NamespaceString nss1 = NamespaceString::createNamespaceString_forTest(
         _dbName.toStringWithTenantId_forTest(), "bar");
     NamespaceString nss2 = NamespaceString::createNamespaceString_forTest(
@@ -709,7 +705,6 @@ TEST_F(TenantOplogApplierTest, ApplyInserts_Grouped) {
     entries.push_back(makeInsertOplogEntry(5, nss1, uuid1));
     entries.push_back(makeInsertOplogEntry(6, nss1, uuid1));
     entries.push_back(makeInsertOplogEntry(7, nss1, uuid1));
-    entries.push_back(makeInsertOplogEntry(8, nss_workaround, UUID::gen()));
     _opObserver->onInsertsFn =
         [&](OperationContext* opCtx, const NamespaceString& nss, const std::vector<BSONObj>& docs) {
             if (nss == nss1) {
@@ -839,10 +834,13 @@ TEST_F(TenantOplogApplierTest, ApplyDelete_DatabaseMissing) {
                                     _dbName.toStringWithTenantId_forTest(), "bar"),
                                 UUID::gen());
     bool onDeleteCalled = false;
-    _opObserver->onDeleteFn =
-        [&](OperationContext* opCtx, const CollectionPtr&, StmtId, const OplogDeleteEntryArgs&) {
-            onDeleteCalled = true;
-        };
+    _opObserver->onDeleteFn = [&](OperationContext* opCtx,
+                                  const CollectionPtr&,
+                                  StmtId,
+                                  const BSONObj&,
+                                  const OplogDeleteEntryArgs&) {
+        onDeleteCalled = true;
+    };
     pushOps({entry});
     auto writerPool = makeTenantMigrationWriterPool();
 
@@ -872,10 +870,13 @@ TEST_F(TenantOplogApplierTest, ApplyDelete_CollectionMissing) {
                                     _dbName.toStringWithTenantId_forTest(), "bar"),
                                 UUID::gen());
     bool onDeleteCalled = false;
-    _opObserver->onDeleteFn =
-        [&](OperationContext* opCtx, const CollectionPtr&, StmtId, const OplogDeleteEntryArgs&) {
-            onDeleteCalled = true;
-        };
+    _opObserver->onDeleteFn = [&](OperationContext* opCtx,
+                                  const CollectionPtr&,
+                                  StmtId,
+                                  const BSONObj&,
+                                  const OplogDeleteEntryArgs&) {
+        onDeleteCalled = true;
+    };
     pushOps({entry});
     auto writerPool = makeTenantMigrationWriterPool();
 
@@ -904,10 +905,13 @@ TEST_F(TenantOplogApplierTest, ApplyDelete_DocumentMissing) {
     auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
     auto entry = makeOplogEntry(OpTypeEnum::kDelete, nss, uuid, BSON("_id" << 0));
     bool onDeleteCalled = false;
-    _opObserver->onDeleteFn =
-        [&](OperationContext* opCtx, const CollectionPtr&, StmtId, const OplogDeleteEntryArgs&) {
-            onDeleteCalled = true;
-        };
+    _opObserver->onDeleteFn = [&](OperationContext* opCtx,
+                                  const CollectionPtr&,
+                                  StmtId,
+                                  const BSONObj&,
+                                  const OplogDeleteEntryArgs&) {
+        onDeleteCalled = true;
+    };
     pushOps({entry});
     auto writerPool = makeTenantMigrationWriterPool();
 
@@ -940,6 +944,7 @@ TEST_F(TenantOplogApplierTest, ApplyDelete_Success) {
     _opObserver->onDeleteFn = [&](OperationContext* opCtx,
                                   const CollectionPtr& coll,
                                   StmtId,
+                                  const BSONObj&,
                                   const OplogDeleteEntryArgs& args) {
         onDeleteCalled = true;
         ASSERT_TRUE(opCtx);

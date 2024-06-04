@@ -72,7 +72,7 @@ private:
 executor::ThreadPoolMock::Options MultiApplierTest::makeThreadPoolMockOptions() const {
     executor::ThreadPoolMock::Options options;
     options.onCreateThread = []() {
-        Client::initThread("MultiApplierTest");
+        Client::initThread("MultiApplierTest", getGlobalServiceContext()->getService());
     };
     return options;
 }
@@ -92,13 +92,14 @@ OplogEntry makeOplogEntry(int ts) {
                               NamespaceString::createNamespaceString_forTest("a.a"),  // namespace
                               boost::none,                                            // uuid
                               boost::none,                                            // fromMigrate
-                              OplogEntry::kOplogVersion,                              // version
-                              BSONObj(),                                              // o
-                              boost::none,                                            // o2
-                              {},                                                     // sessionInfo
-                              boost::none,                                            // upsert
-                              Date_t(),       // wall clock time
-                              {},             // statement ids
+                              boost::none,                // checkExistenceForDiffInsert
+                              OplogEntry::kOplogVersion,  // version
+                              BSONObj(),                  // o
+                              boost::none,                // o2
+                              {},                         // sessionInfo
+                              boost::none,                // upsert
+                              Date_t(),                   // wall clock time
+                              {},                         // statement ids
                               boost::none,    // optime of previous write within same transaction
                               boost::none,    // pre-image optime
                               boost::none,    // post-image optime

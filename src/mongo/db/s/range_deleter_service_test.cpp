@@ -89,13 +89,13 @@ void RangeDeleterServiceTest::setUp() {
     }
 
     {
-        AutoGetCollection autoColl(opCtx, nsCollA, MODE_IX);
+        AutoGetCollection autoColl(opCtx, nsCollA, MODE_X);
         uuidCollA = autoColl.getCollection()->uuid();
         nssWithUuid[uuidCollA] = nsCollA;
         _setFilteringMetadataByUUID(opCtx, uuidCollA);
     }
     {
-        AutoGetCollection autoColl(opCtx, nsCollB, MODE_IX);
+        AutoGetCollection autoColl(opCtx, nsCollB, MODE_X);
         uuidCollB = autoColl.getCollection()->uuid();
         nssWithUuid[uuidCollB] = nsCollB;
         _setFilteringMetadataByUUID(opCtx, uuidCollB);
@@ -132,7 +132,7 @@ void RangeDeleterServiceTest::_setFilteringMetadataByUUID(OperationContext* opCt
                             RoutingTableHistory::makeNew(nss,
                                                          uuid,
                                                          kShardKeyPattern,
-                                                         false, /*unsplittable*/
+                                                         false, /* unsplittable */
                                                          nullptr,
                                                          false,
                                                          epoch,
@@ -147,7 +147,6 @@ void RangeDeleterServiceTest::_setFilteringMetadataByUUID(OperationContext* opCt
         return CollectionMetadata(std::move(cm), ShardId("this"));
     }();
 
-    AutoGetCollection autoColl(opCtx, nss, LockMode::MODE_X);
     CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss)
         ->setFilteringMetadata(opCtx, metadata);
 }

@@ -55,7 +55,7 @@
 #include "mongo/db/matcher/match_details.h"
 #include "mongo/db/matcher/matcher_type_set.h"
 #include "mongo/db/matcher/path.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/idl/idl_parser.h"
 
 namespace mongo {
@@ -102,7 +102,8 @@ public:
     }
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts) const final {
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final {
         bob->appendArray(name(), _typeSet.toBSONArray());
     }
 
@@ -265,7 +266,8 @@ public:
     }
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts) const final {
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final {
         if (opts.literalPolicy == LiteralSerializationPolicy::kUnchanged) {
             bob->append(name(), _binDataSubType);
         } else {

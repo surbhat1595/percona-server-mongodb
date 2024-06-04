@@ -85,7 +85,7 @@ struct DistributionAndPaths {
 struct IndexCollationEntry {
     IndexCollationEntry(ABT path, CollationOp op);
 
-    bool operator==(const IndexCollationEntry& other) const;
+    bool operator==(const IndexCollationEntry& other) const = default;
 
     ABT _path;
     CollationOp _op;
@@ -130,6 +130,18 @@ struct MultikeynessTrie {
     // An empty trie doesn't know whether anything is multikey.
     // 'true' means "not sure" while 'false' means "definitely no arrays".
     bool isMultiKey = true;
+};
+
+/**
+ * Metadata for indexed field paths. Allows fast index path lookup with an unordered set.
+ */
+class IndexedFieldPaths {
+public:
+    void add(const ABT& path);
+    bool isIndexed(const ABT& path) const;
+
+private:
+    IndexPathSet _indexPathSet;
 };
 
 /**
@@ -233,22 +245,31 @@ class ScanDefinition {
 public:
     ScanDefinition();
 
-    ScanDefinition(ScanDefOptions options,
+    ScanDefinition(DatabaseName dbName,
+                   boost::optional<UUID> uuid,
+                   ScanDefOptions options,
                    IndexDefinitions indexDefs,
                    MultikeynessTrie multikeynessTrie,
                    DistributionAndPaths distributionAndPaths,
                    bool exists,
                    boost::optional<CEType> ce,
-                   ShardingMetadata shardingMetadata);
+                   ShardingMetadata shardingMetadata,
+                   IndexedFieldPaths indexedFieldPaths);
 
     const ScanDefOptions& getOptionsMap() const;
 
     const DistributionAndPaths& getDistributionAndPaths() const;
 
+    const DatabaseName& getDatabaseName() const;
+
+    const boost::optional<UUID>& getUUID() const;
+
     const opt::unordered_map<std::string, IndexDefinition>& getIndexDefs() const;
     opt::unordered_map<std::string, IndexDefinition>& getIndexDefs();
 
     const MultikeynessTrie& getMultikeynessTrie() const;
+
+    const IndexedFieldPaths& getIndexedFieldPaths() const;
 
     bool exists() const;
 
@@ -257,9 +278,13 @@ public:
     const ShardingMetadata& shardingMetadata() const;
     ShardingMetadata& shardingMetadata();
 
+    const NamespaceStringOrUUID& getNamespaceStringOrUUID() const;
+
 private:
     ScanDefOptions _options;
     DistributionAndPaths _distributionAndPaths;
+    DatabaseName _dbName;
+    boost::optional<UUID> _uuid;
 
     /**
      * Indexes associated with this collection.
@@ -267,6 +292,8 @@ private:
     opt::unordered_map<std::string, IndexDefinition> _indexDefs;
 
     MultikeynessTrie _multikeynessTrie;
+
+    IndexedFieldPaths _indexedFieldPaths;
 
     /**
      * True if the collection exists.

@@ -31,7 +31,6 @@
 
 #include "mongo/db/audit_interface.h"
 #include "mongo/db/service_context.h"
-#include <boost/preprocessor/control/iif.hpp>
 
 #include <boost/optional/optional.hpp>
 
@@ -236,7 +235,7 @@ void logCreateCollection(Client* client, const NamespaceString& nsname) {
 
 void logCreateView(Client* client,
                    const NamespaceString& nsname,
-                   StringData viewOn,
+                   const NamespaceString& viewOn,
                    BSONArray pipeline,
                    ErrorCodes::Error code) {
     AuditInterface::get(client->getServiceContext())
@@ -262,7 +261,7 @@ void logDropCollection(Client* client, const NamespaceString& nsname) {
 
 void logDropView(Client* client,
                  const NamespaceString& nsname,
-                 StringData viewOn,
+                 const NamespaceString& viewOn,
                  const std::vector<BSONObj>& pipeline,
                  ErrorCodes::Error code) {
     AuditInterface::get(client->getServiceContext())
@@ -291,12 +290,17 @@ void logRemoveShard(Client* client, StringData shardname) {
     AuditInterface::get(client->getServiceContext())->logRemoveShard(client, shardname);
 }
 
-void logShardCollection(Client* client, StringData ns, const BSONObj& keyPattern, bool unique) {
+void logShardCollection(Client* client,
+                        const NamespaceString& ns,
+                        const BSONObj& keyPattern,
+                        bool unique) {
     AuditInterface::get(client->getServiceContext())
         ->logShardCollection(client, ns, keyPattern, unique);
 }
 
-void logRefineCollectionShardKey(Client* client, StringData ns, const BSONObj& keyPattern) {
+void logRefineCollectionShardKey(Client* client,
+                                 const NamespaceString& ns,
+                                 const BSONObj& keyPattern) {
     AuditInterface::get(client->getServiceContext())
         ->logRefineCollectionShardKey(client, ns, keyPattern);
 }

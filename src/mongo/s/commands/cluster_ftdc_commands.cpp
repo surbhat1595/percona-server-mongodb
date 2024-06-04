@@ -103,12 +103,13 @@ public:
 
         result.append(
             "data",
-            FTDCController::get(opCtx->getServiceContext())->getMostRecentPeriodicDocument());
+            FTDCController::get(opCtx->getServiceContext()->getService(ClusterRole::RouterServer))
+                ->getMostRecentPeriodicDocument());
 
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(GetDiagnosticDataCommand);
+MONGO_REGISTER_COMMAND(GetDiagnosticDataCommand).forRouter();
 
 }  // namespace
 }  // namespace mongo

@@ -111,12 +111,7 @@ namespace {
 
 bool collectionHasSimpleCollation(OperationContext* opCtx, const NamespaceString& nss) {
     auto catalogCache = Grid::get(opCtx)->catalogCache();
-    auto [sourceChunkMgr, _] = uassertStatusOK(catalogCache->getCollectionRoutingInfo(opCtx, nss));
-
-    uassert(ErrorCodes::NamespaceNotSharded,
-            str::stream() << "Expected collection " << nss.toStringForErrorMsg()
-                          << " to be sharded",
-            sourceChunkMgr.isSharded());
+    auto [sourceChunkMgr, _] = catalogCache->getTrackedCollectionRoutingInfo(opCtx, nss);
 
     return !sourceChunkMgr.getDefaultCollator();
 }
@@ -132,10 +127,10 @@ ReshardingCollectionCloner::ReshardingCollectionCloner(ReshardingMetrics* metric
                                                        Timestamp atClusterTime,
                                                        NamespaceString outputNss)
     : _metrics(metrics),
-      _reshardingUUID(std::move(reshardingUUID)),
+      _reshardingUUID(reshardingUUID),
       _newShardKeyPattern(std::move(newShardKeyPattern)),
       _sourceNss(std::move(sourceNss)),
-      _sourceUUID(std::move(sourceUUID)),
+      _sourceUUID(sourceUUID),
       _recipientShard(std::move(recipientShard)),
       _atClusterTime(atClusterTime),
       _outputNss(std::move(outputNss)) {}
@@ -154,7 +149,8 @@ ReshardingCollectionCloner::makeRawPipeline(
     auto tempNss =
         resharding::constructTemporaryReshardingNss(_sourceNss.db_forSharding(), _sourceUUID);
     auto tempCacheChunksNss = NamespaceString::makeGlobalConfigCollection(
-        "cache.chunks." + NamespaceStringUtil::serialize(tempNss));
+        "cache.chunks." +
+        NamespaceStringUtil::serialize(tempNss, SerializationContext::stateDefault()));
     resolvedNamespaces[tempCacheChunksNss.coll()] = {tempCacheChunksNss, std::vector<BSONObj>{}};
 
     // Pipeline::makePipeline() ignores the collation set on the AggregationRequest (or lack
@@ -224,7 +220,8 @@ ReshardingCollectionCloner::makeRawNaturalOrderPipeline(
     auto tempNss =
         resharding::constructTemporaryReshardingNss(_sourceNss.db_forSharding(), _sourceUUID);
     auto tempCacheChunksNss = NamespaceString::makeGlobalConfigCollection(
-        "cache.chunks." + NamespaceStringUtil::serialize(tempNss));
+        "cache.chunks." +
+        NamespaceStringUtil::serialize(tempNss, SerializationContext::stateDefault()));
     resolvedNamespaces[tempCacheChunksNss.coll()] = {tempCacheChunksNss, std::vector<BSONObj>{}};
 
     auto expCtx = make_intrusive<ExpressionContext>(opCtx,
@@ -279,6 +276,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> ReshardingCollectionCloner::_targetAg
                                 << repl::readConcernLevels::kSnapshotName
                                 << repl::ReadConcernArgs::kAtClusterTimeFieldName
                                 << _atClusterTime));
+
     // The read preference on the request is merely informational (e.g. for profiler entries) -- the
     // pipeline's opCtx setting is actually used when sending the request.
     auto readPref = ReadPreferenceSetting{ReadPreference::Nearest};
@@ -293,7 +291,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> ReshardingCollectionCloner::_targetAg
                                  // We use the hint as an implied sort for $mergeCursors because
                                  // the aggregation pipeline synthesizes the necessary $sortKeys
                                  // fields in the result set.
-                                 return Pipeline::makePipeline(request, std::move(expCtx), hint);
+                                 return Pipeline::makePipeline(request, expCtx, hint);
                              });
 }
 
@@ -307,16 +305,20 @@ public:
         WriteCallback;
 
     ReshardingCloneFetcher(std::shared_ptr<executor::TaskExecutor> executor,
+                           std::shared_ptr<executor::TaskExecutor> cleanupExecutor,
                            CancellationToken cancelToken,
                            sharded_agg_helpers::DispatchShardPipelineResults dispatchResults,
                            int batchSizeLimitBytes,
                            int numWriteThreads)
         : _executor(std::move(executor)),
+          _cleanupExecutor(std::move(cleanupExecutor)),
           _cancelSource(cancelToken),
           _factory(_cancelSource.token(), _executor),
           _dispatchResults(std::move(dispatchResults)),
           _numWriteThreads(numWriteThreads),
-          _queues(_numWriteThreads) {
+          _queues(_numWriteThreads),
+          _activeCursors(0),
+          _openConsumers(0) {
         constexpr int kQueueDepthPerDonor = 2;
         MultiProducerSingleConsumerQueue<QueueData>::Options qOptions;
         qOptions.maxQueueDepth = _dispatchResults.remoteCursors.size() * kQueueDepthPerDonor;
@@ -325,8 +327,25 @@ public:
         }
     }
 
+    ~ReshardingCloneFetcher() {
+        _cancelSource.cancel();
+        for (auto& queue : _queues) {
+            queue->closeProducerEnd();
+            queue->closeConsumerEnd();
+        }
+        {
+            stdx::unique_lock lk(_mutex);
+            _allProducerConsumerClosed.wait(
+                lk, [this]() { return _openConsumers == 0 && _activeCursors == 0; });
+        }
+    }
+
     void setUpWriterThreads(WriteCallback cb) {
         for (int i = 0; i < _numWriteThreads; i++) {
+            {
+                std::lock_guard lk(_mutex);
+                _openConsumers++;
+            }
             // Set up writer threads.
             auto writerFuture =
                 Future<void>::makeReady()
@@ -338,15 +357,16 @@ public:
                         // This loop will end by interrupt when the producer end closes.
                         while (true) {
                             auto qData = _queues[i]->pop(opCtx.get());
-                            auto cursorResponse = uassertStatusOK(
-                                CursorResponse::parseFromBSON(std::move(qData.data)));
+                            auto cursorResponse =
+                                uassertStatusOK(CursorResponse::parseFromBSON(qData.data));
                             cb(opCtx.get(),
                                cursorResponse,
                                txnNumber,
                                _shardIds[qData.donorIndex],
-                               std::move(qData.donorHost));
+                               qData.donorHost);
                         }
                     })
+                    .thenRunOn(_cleanupExecutor)
                     .onError([this, i](Status status) {
                         LOGV2_DEBUG(7763601,
                                     2,
@@ -362,6 +382,12 @@ public:
                             // If consumers fail, ensure that producers waiting on the queue
                             // exit rather than hanging.
                             _queues[i]->closeConsumerEnd();
+                        }
+                    })
+                    .onCompletion([this](Status status) {
+                        std::unique_lock lk(_mutex);
+                        if (--_openConsumers == 0) {
+                            _allProducerConsumerClosed.notify_all();
                         }
                     });
             _writerFutures.emplace_back(std::move(writerFuture));
@@ -406,11 +432,14 @@ public:
 
     void setupReaderThreads(OperationContext* opCtx) {
         auto& remoteCursors = _dispatchResults.remoteCursors;
-        _activeCursors = int(remoteCursors.size());
         // Network commands can start immediately, so reserve here to avoid the
         // vector being resized while setting up.
         _shardIds.reserve(remoteCursors.size());
         for (int i = 0; i < int(remoteCursors.size()); i++) {
+            {
+                std::lock_guard lk(_mutex);
+                _activeCursors++;
+            }
             auto& cursor = _dispatchResults.remoteCursors[i];
             GetMoreCommandRequest getMoreRequest(
                 cursor->getCursorResponse().getCursorId(),
@@ -444,11 +473,7 @@ public:
                         // future-enabled scheduleRemoteExhaustCommand works -- the future will be
                         // fulfilled when there are no more responses forthcoming.  When we enable
                         // exhaust we can remove the AsyncTry.
-                        return AsyncTry([this,
-                                         &cursor,
-                                         &cursorHost,
-                                         i,
-                                         cmdObj = std::move(cmdObj)] {
+                        return AsyncTry([this, &cursor, &cursorHost, i, cmdObj = cmdObj] {
                                    auto opCtx = cc().makeOperationContext();
                                    executor::RemoteCommandRequest request(
                                        cursorHost,
@@ -456,8 +481,7 @@ public:
                                        cmdObj,
                                        opCtx.get());
                                    return _executor
-                                       ->scheduleRemoteCommand(std::move(request),
-                                                               _cancelSource.token())
+                                       ->scheduleRemoteCommand(request, _cancelSource.token())
                                        .then([this, &cursorHost, i](
                                                  executor::TaskExecutor::ResponseStatus response) {
                                            response.moreToCome = response.status.isOK() &&
@@ -474,6 +498,7 @@ public:
                             })
                             .on(_executor, _cancelSource.token());
                     })
+                    .thenRunOn(_cleanupExecutor)
                     .onCompletion(
                         [this](
                             StatusWith<executor::TaskExecutor::ResponseStatus> swResponseStatus) {
@@ -491,6 +516,7 @@ public:
                                 for (auto& queue : _queues) {
                                     queue->closeProducerEnd();
                                 }
+                                _allProducerConsumerClosed.notify_all();
                             }
                             return swResponseStatus;
                         });
@@ -511,6 +537,7 @@ public:
 
 private:
     std::shared_ptr<executor::TaskExecutor> _executor;
+    std::shared_ptr<executor::TaskExecutor> _cleanupExecutor;
     CancellationSource _cancelSource;
     CancelableOperationContextFactory _factory;
     sharded_agg_helpers::DispatchShardPipelineResults _dispatchResults;
@@ -532,14 +559,17 @@ private:
 
     Mutex _mutex = MONGO_MAKE_LATCH("ReshardingCloneFetcher::_mutex");
     int _activeCursors;                  // (M)
+    int _openConsumers;                  // (M)
     Status _finalResult = Status::OK();  // (M)
     AtomicWord<bool> _failPointHit;
+    stdx::condition_variable _allProducerConsumerClosed;
 };
 
 void ReshardingCollectionCloner::_runOnceWithNaturalOrder(
     OperationContext* opCtx,
     std::shared_ptr<MongoProcessInterface> mongoProcessInterface,
     std::shared_ptr<executor::TaskExecutor> executor,
+    std::shared_ptr<executor::TaskExecutor> cleanupExecutor,
     CancellationToken cancelToken) {
     auto resumeData = resharding::data_copy::getRecipientResumeData(opCtx, _reshardingUUID);
     LOGV2_DEBUG(7763604,
@@ -589,12 +619,13 @@ void ReshardingCollectionCloner::_runOnceWithNaturalOrder(
     request.setRequestResumeToken(true);
     request.setHint(BSON("$natural" << 1));
 
-    auto pipeline = Pipeline::makePipeline(rawPipeline, std::move(expCtx), pipelineOpts);
+    auto pipeline = Pipeline::makePipeline(rawPipeline, expCtx, pipelineOpts);
 
     const Document serializedCommand = aggregation_request_helper::serializeToCommandDoc(request);
     auto readConcern = BSON(repl::ReadConcernArgs::kLevelFieldName
                             << repl::readConcernLevels::kSnapshotName
-                            << repl::ReadConcernArgs::kAtClusterTimeFieldName << _atClusterTime);
+                            << repl::ReadConcernArgs::kAtClusterTimeFieldName << _atClusterTime
+                            << repl::ReadConcernArgs::kWaitLastStableRecoveryTimestamp << true);
     request.setReadConcern(readConcern);
 
     // The read preference on the request is merely informational (e.g. for profiler entries) -- the
@@ -605,8 +636,7 @@ void ReshardingCollectionCloner::_runOnceWithNaturalOrder(
 
     auto dispatchResults =
         sharded_agg_helpers::dispatchShardPipeline(serializedCommand,
-                                                   false /* hasChangeStream */,
-                                                   false /* startsWithDocuments */,
+                                                   sharded_agg_helpers::PipelineDataSource::kNormal,
                                                    false /* eligibleForSampling */,
                                                    std::move(pipeline),
                                                    boost::none /* explain */,
@@ -642,6 +672,7 @@ void ReshardingCollectionCloner::_runOnceWithNaturalOrder(
 
     ReshardingCloneFetcher reshardingCloneFetcher(
         std::move(executor),
+        std::move(cleanupExecutor),
         cancelToken,
         std::move(dispatchResults),
         resharding::gReshardingCollectionClonerBatchSizeInBytes.load(),
@@ -655,13 +686,20 @@ void ReshardingCollectionCloner::_runOnceWithNaturalOrder(
                     const HostAndPort& donorHost) {
                  auto cursorBatch = cursorResponse.getBatch();
                  std::vector<InsertStatement> batch;
+                 batch.reserve(cursorBatch.size());
                  for (auto&& obj : cursorBatch) {
                      batch.emplace_back(obj);
                  }
                  auto resumeToken = cursorResponse.getPostBatchResumeToken();
                  if (!resumeToken)
                      resumeToken = BSONObj();
-                 writeOneBatch(opCtx, txnNumber, batch, shardId, donorHost, *resumeToken);
+                 writeOneBatch(opCtx,
+                               txnNumber,
+                               batch,
+                               shardId,
+                               donorHost,
+                               *resumeToken,
+                               true /*useNaturalOrderCloner*/);
              })
         .get();
 }
@@ -742,17 +780,17 @@ void ReshardingCollectionCloner::writeOneBatch(OperationContext* opCtx,
                                                std::vector<InsertStatement>& batch,
                                                ShardId donorShard,
                                                HostAndPort donorHost,
-                                               BSONObj resumeToken) {
+                                               BSONObj resumeToken,
+                                               bool useNaturalOrderCloner) {
     Timer batchInsertTimer;
     int bytesInserted = resharding::data_copy::withOneStaleConfigRetry(opCtx, [&] {
         // ReshardingOpObserver depends on the collection metadata being known when processing
         // writes to the temporary resharding collection. We attach shard version IGNORED to the
         // insert operations and retry once on a StaleConfig error to allow the collection metadata
         // information to be recovered.
-        auto [_, sii] = uassertStatusOK(
-            Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, _outputNss));
-        if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
-                serverGlobalParams.featureCompatibility)) {
+        auto [_, sii] =
+            Grid::get(opCtx)->catalogCache()->getTrackedCollectionRoutingInfo(opCtx, _outputNss);
+        if (useNaturalOrderCloner) {
             return resharding::data_copy::insertBatchTransactionally(opCtx,
                                                                      _outputNss,
                                                                      sii,
@@ -790,19 +828,27 @@ SemiFuture<void> ReshardingCollectionCloner::run(
     };
 
     auto chainCtx = std::make_shared<ChainContext>();
+    auto reshardingImprovementsEnabled = resharding::gFeatureFlagReshardingImprovements.isEnabled(
+        serverGlobalParams.featureCompatibility);
 
-    return resharding::WithAutomaticRetry([this, chainCtx, factory, executor, cancelToken] {
+    return resharding::WithAutomaticRetry([this,
+                                           chainCtx,
+                                           factory,
+                                           executor,
+                                           cleanupExecutor,
+                                           cancelToken,
+                                           reshardingImprovementsEnabled] {
                reshardingCollectionClonerPauseBeforeAttempt.pauseWhileSet();
-               if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
-                       serverGlobalParams.featureCompatibility)) {
+               if (reshardingImprovementsEnabled) {
                    auto opCtx = factory.makeOperationContext(&cc());
-                   // We can run into StaleConfig errors when cloning collections. To make it safer
-                   // during retry, we retry the whole cloning process and rely on the resume token
-                   // to be correct.
+                   // We can run into StaleConfig errors when cloning collections. To make it
+                   // safer during retry, we retry the whole cloning process and rely on the
+                   // resume token to be correct.
                    resharding::data_copy::withOneStaleConfigRetry(opCtx.get(), [&] {
                        _runOnceWithNaturalOrder(opCtx.get(),
                                                 MongoProcessInterface::create(opCtx.get()),
                                                 executor,
+                                                cleanupExecutor,
                                                 cancelToken);
                    });
                    // If we got here, we succeeded and there is no more to come.  Otherwise
@@ -856,8 +902,9 @@ SemiFuture<void> ReshardingCollectionCloner::run(
         // been destructed.
         .onCompletion([chainCtx](Status status) {
             if (chainCtx->pipeline) {
-                auto client =
-                    cc().getServiceContext()->makeClient("ReshardingCollectionClonerCleanupClient");
+                auto client = cc().getServiceContext()
+                                  ->getService(ClusterRole::ShardServer)
+                                  ->makeClient("ReshardingCollectionClonerCleanupClient");
 
                 // TODO(SERVER-74658): Please revisit if this thread could be made killable.
                 {

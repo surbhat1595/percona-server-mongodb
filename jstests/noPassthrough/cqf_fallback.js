@@ -111,6 +111,27 @@ assertNotSupportedByBonsai({find: coll.getName(), filter: {$alwaysFalse: 1}}, tr
 assertNotSupportedByBonsai(
     {aggregate: coll.getName(), pipeline: [{$match: {$alwaysFalse: 1}}], cursor: {}}, true);
 
+// Test $match against null. When field paths are dotted, these have testOnly support. When the
+// field paths are not dotted, these are fully supported.
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {'a': {$eq: null}}});
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {'a': {$lte: null}}});
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {'a': {$gt: null}}});
+assertSupportedByBonsaiFully(
+    {aggregate: coll.getName(), pipeline: [{$match: {a: {$eq: null}}}], cursor: {}});
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {a: {$in: [1, 2, null, 3]}}})
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {a: {$elemMatch: {b: null}}}});
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {'a.c': {$elemMatch: {b: null}}}});
+
+assertNotSupportedByBonsai({find: coll.getName(), filter: {'a.b': {$eq: null}}}, true);
+assertNotSupportedByBonsai({find: coll.getName(), filter: {'a.b': {$lte: null}}}, true);
+assertNotSupportedByBonsai({find: coll.getName(), filter: {'a.b': {$gt: null}}}, true);
+assertNotSupportedByBonsai(
+    {aggregate: coll.getName(), pipeline: [{$match: {'a.b.c': {$eq: null}}}], cursor: {}}, true);
+assertNotSupportedByBonsai({find: coll.getName(), filter: {'a.b': {$in: [1, 2, null, 3]}}}, true);
+assertNotSupportedByBonsai({find: coll.getName(), filter: {a: {$elemMatch: {'b.c': null}}}}, true);
+assertNotSupportedByBonsai({find: coll.getName(), filter: {'a.c': {$elemMatch: {'b.c': null}}}},
+                           true);
+
 // Test $match on _id; these have only experimental support.
 assertSupportedByBonsaiExperimentally({find: coll.getName(), filter: {_id: 1}});
 assertSupportedByBonsaiExperimentally(
@@ -454,11 +475,18 @@ assertSupportedByBonsaiFully(
 assertSupportedByBonsaiFully(
     {aggregate: coll.getName(), pipeline: [], cursor: {}, hint: {$natural: -1}});
 
-// Queries on a collection with a hashed index are unsupported.
+// Queries on a collection with a hashed index are supported.
 coll.drop();
 assert.commandWorked(coll.createIndex({"_id": "hashed"}));
-assertNotSupportedByBonsai({find: coll.getName(), filter: {}}, false);
-assertNotSupportedByBonsai({aggregate: coll.getName(), pipeline: [], cursor: {}}, false);
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {}});
+assertSupportedByBonsaiFully({aggregate: coll.getName(), pipeline: [], cursor: {}});
+
+// Queries on a collection with a hashed index that reference _id only experimentally supported,
+// tryBonsai falls back to classic engine
+assertSupportedByBonsaiExperimentally({find: coll.getName(), filter: {_id: 1}}, false);
+assertSupportedByBonsaiExperimentally(
+    {aggregate: coll.getName(), pipeline: [{$match: {_id: 1}}], cursor: {}});
+assertSupportedByBonsaiFully({find: coll.getName(), filter: {a: 1}});
 
 // Query with $natural on a collection with a hashed index on _id is only eligible for CQF with a
 // $natural hint.
@@ -575,11 +603,10 @@ MongoRunner.stopMongod(conn);
 // Restart the mongod and verify that we never use the bonsai optimizer if the feature flag is not
 // set.
 
-// To do this, we modify the TestData directly; this ensures we disable the feature flag even if
-// a variant has enabled it be default.
-TestData.setParameters.featureFlagCommonQueryFramework = false;
-TestData.setParameters.internalQueryFrameworkControl = 'trySbeEngine';
-conn = MongoRunner.runMongod();
+conn = MongoRunner.runMongod({
+    setParameter:
+        {featureFlagCommonQueryFramework: false, internalQueryFrameworkControl: "trySbeEngine"}
+});
 assert.neq(null, conn, "mongod was unable to start up");
 
 db = conn.getDB("test");
@@ -623,22 +650,34 @@ MongoRunner.stopMongod(conn);
 // test commands are off.
 TestData.enableTestCommands = false;
 try {
-    conn = MongoRunner.runMongod(
-        {setParameter: {internalQueryFrameworkControl: "tryBonsaiExperimental"}});
+    conn = MongoRunner.runMongod({
+        setParameter: {
+            featureFlagCommonQueryFramework: false,
+            internalQueryFrameworkControl: "tryBonsaiExperimental"
+        }
+    });
     MongoRunner.stopMongod(conn);
     assert(false, "MongoD was able to start up when it should have failed");
-} catch (_) {
+} catch (e) {
     // This is expected.
+    assert.eq(e.returnCode,
+              ErrorCodes.BadValue,
+              "Expected a BadValue error, but encountered: " + e.message);
 }
 
 // Show that we can't start a mongod with the framework control set to tryBonsai
 // when the feature flag is off.
-TestData.setParameters.featureFlagCommonQueryFramework = false;
 TestData.enableTestCommands = true;
 try {
-    conn = MongoRunner.runMongod({setParameter: {internalQueryFrameworkControl: "tryBonsai"}});
+    conn = MongoRunner.runMongod({
+        setParameter:
+            {featureFlagCommonQueryFramework: false, internalQueryFrameworkControl: "tryBonsai"}
+    });
     MongoRunner.stopMongod(conn);
     assert(false, "MongoD was able to start up when it should have failed");
-} catch (_) {
+} catch (e) {
     // This is expected.
+    assert.eq(e.returnCode,
+              ErrorCodes.BadValue,
+              "Expected a BadValue error, but encountered: " + e.message);
 }

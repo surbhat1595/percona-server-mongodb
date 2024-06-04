@@ -40,7 +40,7 @@
 #include "mongo/base/data_cursor.h"
 #include "mongo/base/parse_number.h"
 #include "mongo/base/static_assert.h"
-#include "mongo/base/string_data_comparator_interface.h"
+#include "mongo/base/string_data_comparator.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/generator_extended_canonical_2_0_0.h"
@@ -50,6 +50,7 @@
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
+#include "mongo/util/decimal_counter.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/str.h"
@@ -287,7 +288,7 @@ int compareElementStringValues(const BSONElement& leftStr, const BSONElement& ri
 int BSONElement::compareElements(const BSONElement& l,
                                  const BSONElement& r,
                                  ComparisonRulesSet rules,
-                                 const StringData::ComparatorInterface* comparator) {
+                                 const StringDataComparator* comparator) {
     switch (l.type()) {
         case BSONType::EOO:
         case BSONType::Undefined:  // EOO and Undefined are same canonicalType
@@ -438,35 +439,26 @@ int BSONElement::compareElements(const BSONElement& l,
     MONGO_UNREACHABLE;
 }
 
-/** transform a BSON array into a vector of BSONElements.
-    we match array # positions with their vector position, and ignore
-    any fields with non-numeric field names.
-    */
 std::vector<BSONElement> BSONElement::Array() const {
     chk(mongo::Array);
-    std::vector<BSONElement> v;
-    BSONObjIterator i(Obj());
-    while (i.more()) {
-        BSONElement e = i.next();
-        const char* f = e.fieldName();
 
-        unsigned u;
-        Status status = NumberParser{}(f, &u);
-        if (status.isOK()) {
-            MONGO_verify(u < 1000000);
-            if (u >= v.size())
-                v.resize(u + 1);
-            v[u] = e;
-        } else {
-            // ignore?
-        }
+    std::vector<BSONElement> v;
+    DecimalCounter<std::uint32_t> counter(0);
+    for (auto element : Obj()) {
+        auto fieldName = element.fieldNameStringData();
+        uassert(ErrorCodes::BadValue,
+                fmt::format(
+                    "Invalid array index field name: \"{}\", expected \"{}\"", fieldName, counter),
+                fieldName == counter);
+        counter++;
+        v.push_back(element);
     }
     return v;
 }
 
 int BSONElement::woCompare(const BSONElement& elem,
                            ComparisonRulesSet rules,
-                           const StringData::ComparatorInterface* comparator) const {
+                           const StringDataComparator* comparator) const {
     if (type() != elem.type()) {
         int lt = (int)canonicalType();
         int rt = (int)elem.canonicalType();

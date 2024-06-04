@@ -35,7 +35,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
@@ -154,7 +153,6 @@ repl::OpTime persistParticipantListBlocking(
     const std::vector<ShardId>& participantList) {
     LOGV2_DEBUG(22463,
                 3,
-                "{sessionId}:{txnNumberAndRetryCounter} Going to write participant list",
                 "Going to write participant list",
                 "sessionId"_attr = lsid,
                 "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter);
@@ -195,7 +193,7 @@ repl::OpTime persistParticipantListBlocking(
             // Update with participant list.
             TransactionCoordinatorDocument doc;
             doc.setId(std::move(sessionInfo));
-            doc.setParticipants(std::move(participantList));
+            doc.setParticipants(participantList);
             entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(doc.toBSON()));
 
             entry.setUpsert(true);
@@ -469,7 +467,6 @@ repl::OpTime persistDecisionBlocking(OperationContext* opCtx,
 
     LOGV2_DEBUG(22469,
                 3,
-                "{sessionId}:{txnNumberAndRetryCounter} Wrote decision {decision}",
                 "Wrote decision",
                 "sessionId"_attr = lsid,
                 "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
@@ -491,8 +488,11 @@ Future<repl::OpTime> persistDecision(txn::AsyncWorkScheduler& scheduler,
         [](const StatusWith<repl::OpTime>& s) { return shouldRetryPersistingCoordinatorState(s); },
         [&scheduler, lsid, txnNumberAndRetryCounter, participants, decision, affectedNamespaces] {
             return scheduler.scheduleWork(
-                [lsid, txnNumberAndRetryCounter, participants, decision, affectedNamespaces](
-                    OperationContext* opCtx) {
+                [lsid,
+                 txnNumberAndRetryCounter,
+                 participants = participants,
+                 decision,
+                 affectedNamespaces = affectedNamespaces](OperationContext* opCtx) mutable {
                     // Do not acquire a storage ticket in order to avoid unnecessary serialization
                     // with other prepared transactions that are holding a storage ticket
                     // themselves; see SERVER-60682.
@@ -606,7 +606,6 @@ void deleteCoordinatorDocBlocking(OperationContext* opCtx,
                                   const TxnNumberAndRetryCounter& txnNumberAndRetryCounter) {
     LOGV2_DEBUG(22472,
                 3,
-                "{sessionId}:{txnNumberAndRetryCounter} Going to delete coordinator doc",
                 "Going to delete coordinator doc",
                 "sessionId"_attr = lsid,
                 "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter);
@@ -671,7 +670,6 @@ void deleteCoordinatorDocBlocking(OperationContext* opCtx,
 
     LOGV2_DEBUG(22474,
                 3,
-                "{sessionId}:{txnNumberAndRetryCounter} Deleted coordinator doc",
                 "Deleted coordinator doc",
                 "sessionId"_attr = lsid,
                 "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter);
@@ -752,8 +750,6 @@ Future<PrepareResponse> sendPrepareToShard(ServiceContext* service,
          operationContextFn] {
             LOGV2_DEBUG(22476,
                         3,
-                        "{sessionId}:{txnNumberAndRetryCounter} Coordinator going to send command "
-                        "{command} to {localOrRemote} shard {shardId}",
                         "Coordinator going to send command to shard",
                         "sessionId"_attr = lsid,
                         "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
@@ -788,7 +784,6 @@ Future<PrepareResponse> sendPrepareToShard(ServiceContext* service,
                                                    << ", which is not an expected behavior. "
                                                       "Interpreting the response as vote to abort");
                             LOGV2(22477,
-                                  "{sessionId}:{txnNumberAndRetryCounter} {error}",
                                   "Coordinator received error from transaction participant",
                                   "sessionId"_attr = lsid,
                                   "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
@@ -801,9 +796,6 @@ Future<PrepareResponse> sendPrepareToShard(ServiceContext* service,
                         LOGV2_DEBUG(
                             22478,
                             3,
-                            "{sessionId}:{txnNumberAndRetryCounter} Coordinator shard received a "
-                            "vote to commit from shard {shardId} with prepareTimestamp: "
-                            "{prepareTimestamp}",
                             "Coordinator shard received a vote to commit from participant shard",
                             "sessionId"_attr = lsid,
                             "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
@@ -821,8 +813,6 @@ Future<PrepareResponse> sendPrepareToShard(ServiceContext* service,
 
                     LOGV2_DEBUG(22479,
                                 3,
-                                "{sessionId}:{txnNumberAndRetryCounter} Coordinator shard received "
-                                "{error} from shard {shardId} for {command}",
                                 "Coordinator shard received response from shard",
                                 "sessionId"_attr = lsid,
                                 "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
@@ -858,14 +848,11 @@ Future<PrepareResponse> sendPrepareToShard(ServiceContext* service,
 
     return std::move(f).onError<ErrorCodes::TransactionCoordinatorReachedAbortDecision>(
         [lsid, txnNumberAndRetryCounter, shardId](const Status& status) {
-            LOGV2_DEBUG(
-                22480,
-                3,
-                "{sessionId}:{txnNumberAndRetryCounter} Prepare stopped retrying due to retrying "
-                "being cancelled",
-                "Prepare stopped retrying due to retrying being cancelled",
-                "sessionId"_attr = lsid,
-                "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter);
+            LOGV2_DEBUG(22480,
+                        3,
+                        "Prepare stopped retrying due to retrying being cancelled",
+                        "sessionId"_attr = lsid,
+                        "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter);
             return PrepareResponse{shardId,
                                    boost::none,
                                    boost::none,
@@ -900,8 +887,6 @@ Future<void> sendDecisionToShard(ServiceContext* service,
          commandObj = commandObj.getOwned()] {
             LOGV2_DEBUG(22481,
                         3,
-                        "{sessionId}:{txnNumberAndRetryCounter} Coordinator going to send command "
-                        "{command} to {localOrRemote} shard {shardId}",
                         "Coordinator going to send command to shard",
                         "sessionId"_attr = lsid,
                         "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
@@ -923,17 +908,14 @@ Future<void> sendDecisionToShard(ServiceContext* service,
                         status = wcStatus;
                     }
 
-                    LOGV2_DEBUG(
-                        22482,
-                        3,
-                        "{sessionId}:{txnNumberAndRetryCounter}  Coordinator shard received "
-                        "{status} in response to {command} from shard {shardId}",
-                        "Coordinator shard received response from shard",
-                        "sessionId"_attr = lsid,
-                        "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
-                        "status"_attr = status,
-                        "command"_attr = commandObj,
-                        "shardId"_attr = shardId);
+                    LOGV2_DEBUG(22482,
+                                3,
+                                "Coordinator shard received response from shard",
+                                "sessionId"_attr = lsid,
+                                "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
+                                "status"_attr = status,
+                                "command"_attr = commandObj,
+                                "shardId"_attr = shardId);
 
                     if (ErrorCodes::isVoteAbortError(status.code())) {
                         // Interpret voteAbort errors as an ack.

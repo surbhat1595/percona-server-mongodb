@@ -31,7 +31,6 @@
 
 #include <algorithm>
 #include <boost/intrusive_ptr.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
@@ -113,7 +112,7 @@ public:
     }
 
     /**
-     * Returns true if this object has exclusive access to the underlying buffer.
+     * Returns false if this object has exclusive access to the underlying buffer.
      * (That is, reference count == 1).
      */
     bool isShared() const {

@@ -183,6 +183,11 @@ class Suite(object):
 
         :return: Number of jobs to start.
         """
+        # If we are building images for an external SUT, we are not actually running
+        # any tests & just need a single "job" to create a resmoke fixture to base the
+        # external SUT off of.
+        if _config.DOCKER_COMPOSE_BUILD_IMAGES:
+            return 1
         num_jobs_to_start = self.options.num_jobs
         num_tests = self._get_num_test_runs()
 
@@ -427,9 +432,6 @@ class Suite(object):
     def is_matrix_suite(self):
         return "matrix_suite" in self.get_config()
 
-    def is_antithesis_suite(self):
-        return "antithesis" in self.get_config()
-
     def get_description(self):
         if "description" not in self.get_config():
             return None
@@ -442,7 +444,6 @@ class Suite(object):
         NUM_JOBS_TO_START = "suite_num_jobs_to_start"
         NUM_TIMES_TO_REPEAT_TESTS = "suite_num_times_to_repeat_tests"
         IS_MATRIX_SUITE = "suite_is_matrix_suite"
-        IS_ANTITHESIS_SUITE = "suite_is_antithesis_suite"
         KIND = "suite_kind"
         RETURN_CODE = "suite_return_code"
         RETURN_STATUS = "suite_return_status"
@@ -455,7 +456,6 @@ class Suite(object):
             Suite.METRIC_NAMES.NUM_JOBS_TO_START: self.get_num_jobs_to_start(),
             Suite.METRIC_NAMES.NUM_TIMES_TO_REPEAT_TESTS: self.get_num_times_to_repeat_tests(),
             Suite.METRIC_NAMES.IS_MATRIX_SUITE: self.is_matrix_suite(),
-            Suite.METRIC_NAMES.IS_ANTITHESIS_SUITE: self.is_antithesis_suite(),
         }
         # Note '' and 0 we want to return and those are both falsey
         if self.test_kind is not None:

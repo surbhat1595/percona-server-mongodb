@@ -41,7 +41,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -281,8 +280,10 @@ void CurOp::reportCurrentOpForClient(const boost::intrusive_ptr<ExpressionContex
         serializeAuthenticatedUsers("effectiveUsers"_sd);
     }
 
+    infoBuilder->appendBool("isFromUserConnection", client->isFromUserConnection());
+
     if (const auto seCtx = transport::ServiceExecutorContext::get(client)) {
-        infoBuilder->append("threaded"_sd, seCtx->useDedicatedThread());
+        infoBuilder->append("threaded"_sd, seCtx->usesDedicatedThread());
     }
 
     if (clientOpCtx) {
@@ -387,18 +388,15 @@ void CurOp::setEndOfOpMetrics(long long nreturned) {
     // set with the final executionTime in completeAndLogOperation, but for query stats collection
     // we want it set before incrementing cursor metrics using OpDebug's AdditiveMetrics. The value
     // set here will be overwritten later in completeAndLogOperation.
-    if (_debug.queryStatsStoreKeyHash) {
+    if (_debug.queryStatsKeyHash) {
         _debug.additiveMetrics.executionTime = elapsedTimeExcludingPauses();
     }
 }
 
 void CurOp::setMessage_inlock(StringData message) {
     if (_progressMeter.isActive()) {
-        LOGV2_ERROR(20527,
-                    "Changing message from {old} to {new}",
-                    "Updating message",
-                    "old"_attr = redact(_message),
-                    "new"_attr = redact(message));
+        LOGV2_ERROR(
+            20527, "Updating message", "old"_attr = redact(_message), "new"_attr = redact(message));
         MONGO_verify(!_progressMeter.isActive());
     }
     _message = message.toString();  // copy
@@ -482,7 +480,7 @@ static constexpr size_t appendMaxElementSize = 50 * 1024;
 
 bool shouldOmitDiagnosticInformation(CurOp* curop) {
     do {
-        if (curop->debug().shouldOmitDiagnosticInformation) {
+        if (curop->getShouldOmitDiagnosticInformation()) {
             return true;
         }
 
@@ -492,7 +490,7 @@ bool shouldOmitDiagnosticInformation(CurOp* curop) {
     return false;
 }
 
-bool CurOp::completeAndLogOperation(logv2::LogComponent component,
+bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
                                     std::shared_ptr<const ProfileFilter> filter,
                                     boost::optional<size_t> responseLength,
                                     boost::optional<long long> slowMsOverride,
@@ -540,7 +538,7 @@ bool CurOp::completeAndLogOperation(logv2::LogComponent component,
         // settings.
         bool shouldSample;
         std::tie(shouldLogSlowOp, shouldSample) = shouldLogSlowOpWithSampling(
-            opCtx, component, Milliseconds(executionTimeMillis), Milliseconds(slowMs));
+            opCtx, logOptions.component(), Milliseconds(executionTimeMillis), Milliseconds(slowMs));
 
         shouldProfileAtLevel1 = shouldLogSlowOp && shouldSample;
     }
@@ -578,7 +576,7 @@ bool CurOp::completeAndLogOperation(logv2::LogComponent component,
                     opCtx->recoveryUnit()->computeOperationStatisticsSinceLastCall();
             } catch (const DBException& ex) {
                 LOGV2_WARNING_OPTIONS(20526,
-                                      {component},
+                                      logOptions,
                                       "Failed to gather storage statistics for slow operation",
                                       "opId"_attr = opCtx->getOpID(),
                                       "error"_attr = redact(ex));
@@ -603,7 +601,7 @@ bool CurOp::completeAndLogOperation(logv2::LogComponent component,
         _debug.report(
             opCtx, (lockerInfo ? &lockerInfo->stats : nullptr), operationMetricsPtr, &attr);
 
-        LOGV2_OPTIONS(51803, {component}, "Slow query", attr);
+        LOGV2_OPTIONS(51803, logOptions, "Slow query", attr);
 
         _checkForFailpointsAfterCommandLogged();
     }
@@ -618,7 +616,7 @@ bool CurOp::completeAndLogOperation(logv2::LogComponent component,
 }
 
 std::string CurOp::getNS() const {
-    return NamespaceStringUtil::serialize(_nss);
+    return NamespaceStringUtil::serialize(_nss, SerializationContext::stateDefault());
 }
 
 // Failpoints after commands are logged.
@@ -658,6 +656,7 @@ Command::ReadWriteType CurOp::getReadWriteType() const {
         case LogicalOp::opGetMore:
         case LogicalOp::opQuery:
             return Command::ReadWriteType::kRead;
+        case LogicalOp::opBulkWrite:
         case LogicalOp::opUpdate:
         case LogicalOp::opInsert:
         case LogicalOp::opDelete:
@@ -769,7 +768,7 @@ void CurOp::reportState(BSONObjBuilder* builder,
     builder->append("op", logicalOpToString(_logicalOp));
     builder->append("ns", NamespaceStringUtil::serialize(_nss, serializationContext));
 
-    bool omitAndRedactInformation = CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation;
+    bool omitAndRedactInformation = getShouldOmitDiagnosticInformation();
     builder->append("redacted", omitAndRedactInformation);
 
     // When the currentOp command is run, it returns a single response object containing all current
@@ -802,7 +801,7 @@ void CurOp::reportState(BSONObjBuilder* builder,
     }
 
 
-    // Omit information for for QE user collections, QE state collections and QE user operations.
+    // Omit information for QE user collections, QE state collections and QE user operations.
     if (omitAndRedactInformation) {
         return;
     }
@@ -965,7 +964,9 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("type", networkOpToString(networkOp));
     }
 
+    pAttrs->add("isFromUserConnection", client->isFromUserConnection());
     pAttrs->addDeepCopy("ns", toStringForLogging(curop.getNSS()));
+    pAttrs->addDeepCopy("collectionType", getCollectionType(curop.getNSS()));
 
     if (client) {
         if (auto clientMetadata = ClientMetadata::get(client)) {
@@ -1138,17 +1139,17 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("locks", locks.obj());
     }
 
-    auto userAcquisitionStats = curop.getReadOnlyUserAcquisitionStats();
-    if (userAcquisitionStats->shouldUserCacheAcquisitionStatsReport()) {
+    auto userAcquisitionStats = curop.getUserAcquisitionStats();
+    if (userAcquisitionStats->shouldReportUserCacheAccessStats()) {
         BSONObjBuilder userCacheAcquisitionStatsBuilder;
-        userAcquisitionStats->userCacheAcquisitionStatsReport(
+        userAcquisitionStats->reportUserCacheAcquisitionStats(
             &userCacheAcquisitionStatsBuilder, opCtx->getServiceContext()->getTickSource());
         pAttrs->add("authorization", userCacheAcquisitionStatsBuilder.obj());
     }
 
-    if (userAcquisitionStats->shouldLDAPOperationStatsReport()) {
+    if (userAcquisitionStats->shouldReportLDAPOperationStats()) {
         BSONObjBuilder ldapOperationStatsBuilder;
-        userAcquisitionStats->ldapOperationStatsReport(&ldapOperationStatsBuilder,
+        userAcquisitionStats->reportLdapOperationStats(&ldapOperationStatsBuilder,
                                                        opCtx->getServiceContext()->getTickSource());
         pAttrs->add("LDAPOperations", ldapOperationStatsBuilder.obj());
     }
@@ -1318,16 +1319,16 @@ void OpDebug::append(OperationContext* opCtx,
     }
 
     {
-        auto userAcquisitionStats = curop.getReadOnlyUserAcquisitionStats();
-        if (userAcquisitionStats->shouldUserCacheAcquisitionStatsReport()) {
+        auto userAcquisitionStats = curop.getUserAcquisitionStats();
+        if (userAcquisitionStats->shouldReportUserCacheAccessStats()) {
             BSONObjBuilder userCacheAcquisitionStatsBuilder(b.subobjStart("authorization"));
-            userAcquisitionStats->userCacheAcquisitionStatsReport(
+            userAcquisitionStats->reportUserCacheAcquisitionStats(
                 &userCacheAcquisitionStatsBuilder, opCtx->getServiceContext()->getTickSource());
         }
 
-        if (userAcquisitionStats->shouldLDAPOperationStatsReport()) {
+        if (userAcquisitionStats->shouldReportLDAPOperationStats()) {
             BSONObjBuilder ldapOperationStatsBuilder;
-            userAcquisitionStats->ldapOperationStatsReport(
+            userAcquisitionStats->reportLdapOperationStats(
                 &ldapOperationStatsBuilder, opCtx->getServiceContext()->getTickSource());
         }
     }
@@ -1631,17 +1632,17 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
     });
 
     addIfNeeded("authorization", [](auto field, auto args, auto& b) {
-        auto userAcquisitionStats = args.curop.getReadOnlyUserAcquisitionStats();
-        if (userAcquisitionStats->shouldUserCacheAcquisitionStatsReport()) {
+        auto userAcquisitionStats = args.curop.getUserAcquisitionStats();
+        if (userAcquisitionStats->shouldReportUserCacheAccessStats()) {
             BSONObjBuilder userCacheAcquisitionStatsBuilder(b.subobjStart(field));
-            userAcquisitionStats->userCacheAcquisitionStatsReport(
+            userAcquisitionStats->reportUserCacheAcquisitionStats(
                 &userCacheAcquisitionStatsBuilder,
                 args.opCtx->getServiceContext()->getTickSource());
         }
 
-        if (userAcquisitionStats->shouldLDAPOperationStatsReport()) {
+        if (userAcquisitionStats->shouldReportLDAPOperationStats()) {
             BSONObjBuilder ldapOperationStatsBuilder(b.subobjStart(field));
-            userAcquisitionStats->ldapOperationStatsReport(
+            userAcquisitionStats->reportLdapOperationStats(
                 &ldapOperationStatsBuilder, args.opCtx->getServiceContext()->getTickSource());
         }
     });
@@ -1843,7 +1844,8 @@ static void appendResolvedViewsInfoImpl(
         const std::vector<BSONObj>& pipeline = kv.second.second;
 
         BSONObjBuilder aView;
-        aView.append("viewNamespace", NamespaceStringUtil::serialize(viewNss));
+        aView.append("viewNamespace",
+                     NamespaceStringUtil::serialize(viewNss, SerializationContext::stateDefault()));
 
         BSONArrayBuilder dependenciesArr(aView.subarrayStart("dependencyChain"));
         for (const auto& nss : dependencies) {
@@ -1871,6 +1873,48 @@ void OpDebug::appendResolvedViewsInfo(BSONObjBuilder& builder) const {
     BSONArrayBuilder resolvedViewsArr(builder.subarrayStart("resolvedViews"));
     appendResolvedViewsInfoImpl(resolvedViewsArr, this->resolvedViews);
     resolvedViewsArr.doneFast();
+}
+
+std::string OpDebug::getCollectionType(const NamespaceString& nss) const {
+    if (nss.isEmpty()) {
+        return "none";
+    } else if (!resolvedViews.empty()) {
+        auto dependencyItr = resolvedViews.find(nss);
+        // 'resolvedViews' might be populated if any other collection as a part of the query is on a
+        // view. However, it will not have associated dependencies.
+        if (dependencyItr == resolvedViews.end()) {
+            return "normal";
+        }
+        const std::vector<NamespaceString>& dependencies = dependencyItr->second.first;
+
+        auto nssIterInDeps = std::find(dependencies.begin(), dependencies.end(), nss);
+        tassert(7589000,
+                str::stream() << "The view with ns: " << nss.toStringForErrorMsg()
+                              << ", should have a valid dependency.",
+                nssIterInDeps != (dependencies.end() - 1) && nssIterInDeps != dependencies.end());
+
+        // The underlying namespace for the view/timeseries collection is the next namespace in the
+        // dependency chain. If the view depends on a timeseries buckets collection, then it is a
+        // timeseries collection, otherwise it is a regular view.
+        const NamespaceString& underlyingNss = *std::next(nssIterInDeps);
+        if (underlyingNss.isTimeseriesBucketsCollection()) {
+            return "timeseries";
+        }
+        return "view";
+    } else if (nss.isTimeseriesBucketsCollection()) {
+        return "timeseriesBuckets";
+    } else if (nss.isSystem()) {
+        return "system";
+    } else if (nss.isConfigDB()) {
+        return "config";
+    } else if (nss.isAdminDB()) {
+        return "admin";
+    } else if (nss.isLocalDB()) {
+        return "local";
+    } else if (nss.isNormalCollection()) {
+        return "normal";
+    }
+    return "unknown";
 }
 
 namespace {

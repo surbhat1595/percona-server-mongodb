@@ -32,6 +32,7 @@
 #include <cstddef>
 #include <deque>
 #include <memory>
+#include <string>
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -44,11 +45,49 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/hierarchical_acquisition.h"
 
-namespace mongo {
-namespace transport {
-
+namespace mongo::transport {
 /** Transitional for differential benchmarking of ServiceExecutorSynchronous refactor */
 #define TRANSITIONAL_SERVICE_EXECUTOR_SYNCHRONOUS_HAS_RESERVE 0
+
+namespace service_executor_synchronous_detail {
+
+/**
+ * Provides common functionality for ServiceExecutorSynchronous and ServiceExecutorInline.
+ */
+class ServiceExecutorSyncImpl : public ServiceExecutor {
+public:
+    ~ServiceExecutorSyncImpl();
+
+    void start() override;
+    Status shutdown(Milliseconds timeout) override;
+
+    /**
+     * The first time a Task is scheduled on the returned TaskRunner,
+     * a queue is created such that the first Task and any subsequent Tasks
+     * scheduled into it are executed in order.
+     */
+    std::unique_ptr<TaskRunner> makeTaskRunner() override;
+
+    size_t getRunningThreads() const override;
+
+    void appendStats(BSONObjBuilder* bob) const override;
+
+    StringData getName() const override {
+        return "ServiceExecutorSynchronous"_sd;
+    }
+
+protected:
+    enum class RunTaskInline : bool {};
+    explicit ServiceExecutorSyncImpl(RunTaskInline runTaskInline, std::string statsFieldName);
+
+private:
+    class SharedState;
+    std::shared_ptr<SharedState> _sharedState;
+
+    const std::string _statsFieldName;
+};
+
+}  // namespace service_executor_synchronous_detail
 
 /**
  * Creates a fresh worker thread for each top-level scheduled task. Any tasks
@@ -59,44 +98,23 @@ namespace transport {
  * of which schedules its successor before returning. The entire chain of
  * operations, and nothing else, executes on the same worker thread.
  */
-class ServiceExecutorSynchronous final : public ServiceExecutor {
+class ServiceExecutorSynchronous
+    : public service_executor_synchronous_detail::ServiceExecutorSyncImpl {
 public:
-    /** Returns the ServiceExecutorSynchronous decoration on `ctx`. */
+    ServiceExecutorSynchronous() : ServiceExecutorSyncImpl(RunTaskInline{false}, "passthrough") {}
     static ServiceExecutorSynchronous* get(ServiceContext* ctx);
-
-    explicit ServiceExecutorSynchronous(ServiceContext*);
-
-    ~ServiceExecutorSynchronous();
-
-    Status start() override;
-    Status shutdown(Milliseconds timeout) override;
-
-    std::unique_ptr<TaskRunner> makeTaskRunner() override;
-
-    size_t getRunningThreads() const override;
-
-    void appendStats(BSONObjBuilder* bob) const override;
-
-private:
-    class SharedState;
-
-    /**
-     * The behavior of `schedule` depends on whether the calling thread is a
-     * worker thread spawned by a previous `schedule` call.
-     *
-     * If a nonworker thread schedules a task, a worker thread is spawned, and
-     * the task is transferred to the new worker thread's queue.
-     *
-     * If a worker thread schedules a task, the task is pushed to the back of its
-     * queue. The worker thread exits when the queue becomes empty.
-     */
-    void _schedule(Task task);
-
-    void _runOnDataAvailable(const std::shared_ptr<Session>& session, Task onCompletionCallback);
-
-
-    std::shared_ptr<SharedState> _sharedState;
 };
 
-}  // namespace transport
-}  // namespace mongo
+/**
+ * Behaves similarly to ServiceExecutorSynchronous above,
+ * however the task queue is run on the same thread as called the scheduler initially.
+ * Thus, unlike ServiceExecutorSynchronous, the initial call to TaskRunner::schedule()
+ * will appear to block on the entire queue of Tasks until completion.
+ */
+class ServiceExecutorInline : public service_executor_synchronous_detail::ServiceExecutorSyncImpl {
+public:
+    ServiceExecutorInline() : ServiceExecutorSyncImpl(RunTaskInline{true}, "inline") {}
+    static ServiceExecutorInline* get(ServiceContext*);
+};
+
+}  // namespace mongo::transport

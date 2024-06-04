@@ -36,7 +36,6 @@
 #include <boost/none.hpp>
 #include <boost/none_t.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <algorithm>
@@ -107,11 +106,11 @@
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/decorable.h"
-#include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/pcre.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/util/testing_proctor.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
 #include "mongo/util/version.h"
@@ -126,8 +125,6 @@ using std::string;
 using std::vector;
 
 namespace {
-
-MONGO_FAIL_POINT_DEFINE(overrideBalanceRoundInterval);
 
 const Milliseconds kBalanceRoundDefaultInterval(10 * 1000);
 
@@ -151,11 +148,17 @@ public:
 
     void setSucceeded(int numCandidateChunks,
                       int numChunksMoved,
-                      int numImbalancedCachedCollections) {
+                      int numImbalancedCachedCollections,
+                      Milliseconds selectionTime,
+                      Milliseconds throttleTime,
+                      Milliseconds migrationTime) {
         invariant(!_errMsg);
         _numCandidateChunks = numCandidateChunks;
         _numChunksMoved = numChunksMoved;
         _numImbalancedCachedCollections = numImbalancedCachedCollections;
+        _selectionTime = selectionTime;
+        _throttleTime = throttleTime;
+        _migrationTime = migrationTime;
     }
 
     void setFailed(const string& errMsg) {
@@ -173,12 +176,20 @@ public:
             builder.append("candidateChunks", _numCandidateChunks);
             builder.append("chunksMoved", _numChunksMoved);
             builder.append("imbalancedCachedCollections", _numImbalancedCachedCollections);
+            BSONObjBuilder timeInfo{builder.subobjStart("times"_sd)};
+            timeInfo.append("selectionTimeMillis"_sd, _selectionTime.count());
+            timeInfo.append("throttleTimeMillis"_sd, _throttleTime.count());
+            timeInfo.append("migrationTimeMillis"_sd, _migrationTime.count());
+            timeInfo.done();
         }
         return builder.obj();
     }
 
 private:
     const Timer _executionTimer;
+    Milliseconds _selectionTime;
+    Milliseconds _throttleTime;
+    Milliseconds _migrationTime;
 
     // Set only on success
     int _numCandidateChunks{0};
@@ -437,6 +448,12 @@ Status Balancer::moveRange(OperationContext* opCtx,
     const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
     auto coll =
         catalogClient->getCollection(opCtx, nss, repl::ReadConcernLevel::kMajorityReadConcern);
+
+    if (coll.getUnsplittable())
+        return {ErrorCodes::NamespaceNotSharded,
+                str::stream() << "Can't execute moveRange on unsharded collection "
+                              << nss.toStringForErrorMsg()};
+
     const auto maxChunkSize = getMaxChunkSizeBytes(opCtx, coll);
 
     const auto fromShardId = [&]() {
@@ -488,13 +505,8 @@ void Balancer::report(OperationContext* opCtx, BSONObjBuilder* builder) {
 }
 
 void Balancer::_consumeActionStreamLoop() {
-    Client::initThread("BalancerSecondary");
-
-    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnkillableByStepdown(lk);
-    }
+    Client::initThread("BalancerSecondary",
+                       getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
     auto opCtx = cc().makeOperationContext();
     executor::ScopedTaskExecutor executor(
@@ -678,7 +690,7 @@ void Balancer::_mainThread() {
         _joinCond.notify_all();
     });
 
-    Client::initThread("Balancer");
+    Client::initThread("Balancer", getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
     // TODO(SERVER-74658): Please revisit if this thread could be made killable.
     {
@@ -702,13 +714,10 @@ void Balancer::_mainThread() {
     while (!_terminationRequested()) {
         Status refreshStatus = balancerConfig->refreshAndCheck(opCtx.get());
         if (!refreshStatus.isOK()) {
-            LOGV2_WARNING(
-                21876,
-                "Balancer settings could not be loaded because of {error} and will be retried in "
-                "{backoffInterval}",
-                "Got error while refreshing balancer settings, will retry with a backoff",
-                "backoffInterval"_attr = Milliseconds(kInitBackoffInterval),
-                "error"_attr = refreshStatus);
+            LOGV2_WARNING(21876,
+                          "Got error while refreshing balancer settings, will retry with a backoff",
+                          "backoffInterval"_attr = Milliseconds(kInitBackoffInterval),
+                          "error"_attr = refreshStatus);
 
             _sleepFor(opCtx.get(), kInitBackoffInterval);
             continue;
@@ -740,10 +749,7 @@ void Balancer::_mainThread() {
 
             Status refreshStatus = balancerConfig->refreshAndCheck(opCtx.get());
             if (!refreshStatus.isOK()) {
-                LOGV2_WARNING(21877,
-                              "Skipping balancing round due to {error}",
-                              "Skipping balancing round",
-                              "error"_attr = refreshStatus);
+                LOGV2_WARNING(21877, "Skipping balancing round", "error"_attr = refreshStatus);
                 _endRound(opCtx.get(), kBalanceRoundDefaultInterval);
                 continue;
             }
@@ -770,22 +776,12 @@ void Balancer::_mainThread() {
                 continue;
             }
 
-            if (!_autoMergerPolicy->isEnabled() && balancerConfig->shouldBalanceForAutoMerge()) {
+            if (balancerConfig->shouldBalanceForAutoMerge()) {
                 _autoMergerPolicy->enable();
             }
 
-            boost::optional<Milliseconds> forcedBalancerRoundInterval(boost::none);
-            overrideBalanceRoundInterval.execute([&](const BSONObj& data) {
-                forcedBalancerRoundInterval = Milliseconds(data["intervalMs"].numberInt());
-                LOGV2(21864,
-                      "overrideBalanceRoundInterval: using customized balancing interval",
-                      "balancerInterval"_attr = *forcedBalancerRoundInterval);
-            });
-
             LOGV2_DEBUG(21860,
                         1,
-                        "Start balancing round. waitForDelete: {waitForDelete}, "
-                        "secondaryThrottle: {secondaryThrottle}",
                         "Start balancing round",
                         "waitForDelete"_attr = balancerConfig->waitForDelete(),
                         "secondaryThrottle"_attr = balancerConfig->getSecondaryThrottle().toBSON());
@@ -804,16 +800,20 @@ void Balancer::_mainThread() {
             // The current configuration is allowing the balancer to perform operations.
             // Unblock the secondary thread if needed.
             _actionStreamCondVar.notify_all();
+
+            // Split chunk to match zones boundaries
             {
                 Status status = _splitChunksIfNeeded(opCtx.get());
                 if (!status.isOK()) {
-                    LOGV2_WARNING(21878,
-                                  "Failed to split chunks due to {error}",
-                                  "Failed to split chunks",
-                                  "error"_attr = status);
+                    LOGV2_WARNING(21878, "Failed to split chunks", "error"_attr = status);
                 } else {
                     LOGV2_DEBUG(21861, 1, "Done enforcing zone range boundaries.");
                 }
+            }
+
+            // Select and migrate chunks
+            {
+                Timer selectionTimer;
 
                 const std::vector<ClusterStatistics::ShardStatistics> shardStats =
                     uassertStatusOK(_clusterStats->getStats(opCtx.get()));
@@ -836,36 +836,53 @@ void Balancer::_mainThread() {
                                                               shardStats,
                                                               &availableShards,
                                                               _imbalancedCollectionsCache.get()));
+                const Milliseconds selectionTimeMillis{selectionTimer.millis()};
 
                 if (chunksToRebalance.empty() && chunksToDefragment.empty()) {
                     LOGV2_DEBUG(21862, 1, "No need to move any chunk");
                     _balancedLastTime = 0;
                     LOGV2_DEBUG(21863, 1, "End balancing round");
+                    // Set to 100ms when executed in context of a test
                     _endRound(opCtx.get(),
-                              forcedBalancerRoundInterval ? *forcedBalancerRoundInterval
-                                                          : kBalanceRoundDefaultInterval);
+                              TestingProctor::instance().isEnabled()
+                                  ? Milliseconds(100)
+                                  : kBalanceRoundDefaultInterval);
                 } else {
-                    auto timeSinceLastMigration = Date_t::now() - lastMigrationTime;
-                    _sleepFor(opCtx.get(),
-                              forcedBalancerRoundInterval
-                                  ? *forcedBalancerRoundInterval - timeSinceLastMigration
-                                  : Milliseconds(balancerMigrationsThrottlingMs.load()) -
-                                      timeSinceLastMigration);
 
+                    // Sleep according to the migration throttling settings
+                    const auto throttleTimeMillis = [&] {
+                        const auto& minRoundinterval =
+                            Milliseconds(balancerMigrationsThrottlingMs.load());
+
+                        const auto timeSinceLastMigration = Date_t::now() - lastMigrationTime;
+                        if (timeSinceLastMigration < minRoundinterval) {
+                            return minRoundinterval - timeSinceLastMigration;
+                        }
+                        return Milliseconds::zero();
+                    }();
+                    _sleepFor(opCtx.get(), throttleTimeMillis);
+
+                    // Migrate chunks
+                    Timer migrationTimer;
                     _balancedLastTime =
                         _moveChunks(opCtx.get(), chunksToRebalance, chunksToDefragment);
                     lastMigrationTime = Date_t::now();
+                    const Milliseconds migrationTimeMillis{migrationTimer.millis()};
 
+                    // Complete round
                     roundDetails.setSucceeded(
                         static_cast<int>(chunksToRebalance.size() + chunksToDefragment.size()),
                         _balancedLastTime,
-                        _imbalancedCollectionsCache->size());
+                        _imbalancedCollectionsCache->size(),
+                        selectionTimeMillis,
+                        throttleTimeMillis,
+                        migrationTimeMillis);
 
                     auto catalogManager = ShardingCatalogManager::get(opCtx.get());
                     ShardingLogging::get(opCtx.get())
                         ->logAction(opCtx.get(),
                                     "balancer.round",
-                                    "",
+                                    NamespaceString::kEmpty,
                                     roundDetails.toBSON(),
                                     catalogManager->localConfigShard(),
                                     catalogManager->localCatalogClient())
@@ -878,10 +895,7 @@ void Balancer::_mainThread() {
                 }
             }
         } catch (const DBException& e) {
-            LOGV2(21865,
-                  "caught exception while doing balance: {error}",
-                  "Error while doing balance",
-                  "error"_attr = e);
+            LOGV2(21865, "Error while doing balance", "error"_attr = e);
 
             // Just to match the opening statement if in log level 1
             LOGV2_DEBUG(21866, 1, "End balancing round");
@@ -893,7 +907,7 @@ void Balancer::_mainThread() {
             ShardingLogging::get(opCtx.get())
                 ->logAction(opCtx.get(),
                             "balancer.round",
-                            "",
+                            NamespaceString::kEmpty,
                             roundDetails.toBSON(),
                             catalogManager->localConfigShard(),
                             catalogManager->localCatalogClient())
@@ -926,13 +940,8 @@ void Balancer::_applyStreamingActionResponseToPolicy(const BalancerStreamAction&
                                                      const BalancerStreamActionResponse& response,
                                                      ActionsStreamPolicy* policy) {
     invariant(_outstandingStreamingOps.addAndFetch(-1) >= 0);
-    ThreadClient tc("BalancerSecondaryThread::applyActionResponse", getGlobalServiceContext());
-
-    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(*tc.get());
-        tc.get()->setSystemOperationUnkillableByStepdown(lk);
-    }
+    ThreadClient tc("BalancerSecondaryThread::applyActionResponse",
+                    getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
     auto opCtx = tc->makeOperationContext();
     policy->applyActionResult(opCtx.get(), action, response);
@@ -1003,8 +1012,6 @@ bool Balancer::_checkOIDs(OperationContext* opCtx) {
                 oids[x] = shardId;
             } else {
                 LOGV2(21868,
-                      "error: 2 machines have {oidMachine} as oid machine piece: {firstShardId} "
-                      "and {secondShardId}",
                       "Two machines have the same oidMachine value",
                       "oidMachine"_attr = x,
                       "firstShardId"_attr = shardId,
@@ -1035,10 +1042,7 @@ bool Balancer::_checkOIDs(OperationContext* opCtx) {
                 return false;
             }
         } else {
-            LOGV2(21869,
-                  "warning: oidMachine not set on: {shard}",
-                  "warning: oidMachine not set on shard",
-                  "shard"_attr = s->toString());
+            LOGV2(21869, "warning: oidMachine not set on shard", "shard"_attr = s->toString());
         }
     }
 
@@ -1072,10 +1076,9 @@ Status Balancer::_splitChunksIfNeeded(OperationContext* opCtx) {
             splitInfo.splitKeys);
         if (!splitStatus.isOK()) {
             LOGV2_WARNING(21879,
-                          "Failed to split chunk {splitInfo} {error}",
                           "Failed to split chunk",
                           "splitInfo"_attr = redact(splitInfo.toString()),
-                          "error"_attr = redact(splitStatus.getStatus()));
+                          "error"_attr = redact(splitStatus));
         }
     }
 
@@ -1159,7 +1162,6 @@ int Balancer::_moveChunks(OperationContext* opCtx,
             ++numChunksProcessed;
 
             LOGV2(21871,
-                  "Migration {migrateInfo} failed with {error}, going to try splitting the chunk",
                   "Migration failed, going to try splitting the chunk",
                   "migrateInfo"_attr = redact(migrateInfo.toString()),
                   "error"_attr = redact(status));
@@ -1195,7 +1197,6 @@ int Balancer::_moveChunks(OperationContext* opCtx,
         }
 
         LOGV2(21872,
-              "Migration {migrateInfo} failed with {error}",
               "Migration failed",
               "migrateInfo"_attr = redact(migrateInfo.toString()),
               "error"_attr = redact(status));

@@ -9,6 +9,21 @@ export function checkCascadesOptimizerEnabled(theDB) {
     return val == "tryBonsai" || val == "tryBonsaiExperimental" || val == "forceBonsai";
 }
 
+// TODO SERVER-82185: Remove this once M2-eligibility checker + E2E parameterization implemented
+export function checkPlanCacheParameterization(theDB) {
+    return false;
+}
+
+/**
+ * Utility for checking if the experimental Cascades optimizer code path is enabled (checks
+ * framework control for M4+).
+ */
+export function checkExperimentalCascadesOptimizerEnabled(theDB) {
+    const val = theDB.adminCommand({getParameter: 1, internalQueryFrameworkControl: 1})
+                    .internalQueryFrameworkControl;
+    return val == "tryBonsaiExperimental" || val == "forceBonsai";
+}
+
 /**
  * Utility for checking if the Cascades optimizer feature flag is on.
  */
@@ -323,6 +338,10 @@ export function navigateToPlanPath(doc, path) {
     return navigateToPath(doc, "queryPlanner.winningPlan.optimizerPlan." + path);
 }
 
+function navigateToNonOptimizerPlanPath(doc, path) {
+    return navigateToPath(doc, "queryPlanner.winningPlan.queryPlan." + path);
+}
+
 export function navigateToRootNode(doc) {
     return navigateToPath(doc, "queryPlanner.winningPlan.optimizerPlan");
 }
@@ -343,6 +362,10 @@ export function assertValueOnPath(value, doc, path) {
 
 export function assertValueOnPlanPath(value, doc, path) {
     assertValueOnPathFn(value, doc, path, navigateToPlanPath);
+}
+
+export function assertValueOnNonOptimizerPlanPath(value, doc, path) {
+    assertValueOnPathFn(value, doc, path, navigateToNonOptimizerPlanPath);
 }
 
 export function runWithParams(keyValPairs, fn) {

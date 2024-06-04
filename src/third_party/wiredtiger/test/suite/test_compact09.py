@@ -26,45 +26,147 @@
 # ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 # OTHER DEALINGS IN THE SOFTWARE.
 
-import wiredtiger, wttest
+import time
+import wttest
+from wiredtiger import stat
+
+megabyte = 1024 * 1024
 
 # test_compact09.py
-# Verify compaction for in-memory and readonly databases is not allowed.
+# This test creates tables with the first 90% of keys deleted.
+#
+# It checks that background compaction only compacts a table when it is not part of the exclude
+# list.
 class test_compact09(wttest.WiredTigerTestCase):
-    uri = 'file:test_compact09'
+    create_params = 'key_format=i,value_format=S,allocation_size=4KB,leaf_page_max=32KB,'
+    conn_config = 'cache_size=100MB,statistics=(all),debug_mode=(background_compact)'
+    uri_prefix = 'table:test_compact09'
+    
+    table_numkv = 100 * 1000
+    n_tables = 2
+    value_size = 1024 # The value should be small enough so that we don't create overflow pages.
 
-    def background_compaction(self):
-        self.session.compact(None, 'background=true')
-    def foreground_compaction(self):
-        self.session.compact(self.uri, None)
+    def delete_range(self, uri, num_keys):
+        c = self.session.open_cursor(uri, None)
+        for i in range(num_keys):
+            c.set_key(i)
+            c.remove()
+        c.close()
 
+    def get_bg_compaction_running(self):
+        stat_cursor = self.session.open_cursor('statistics:', None, None)
+        compact_running = stat_cursor[stat.conn.background_compact_running][2]
+        stat_cursor.close()
+        return compact_running
+
+    def get_bg_compaction_files_excluded(self):
+        stat_cursor = self.session.open_cursor('statistics:', None, None)
+        files = stat_cursor[stat.conn.background_compact_exclude][2]
+        stat_cursor.close()
+        return files
+    
+    def get_files_compacted(self):
+        files_compacted = 0
+        for i in range(self.n_tables):
+            uri = f'{self.uri_prefix}_{i}'
+            if self.get_pages_rewritten(uri) > 0:
+                files_compacted += 1
+        return files_compacted
+
+    def get_pages_rewritten(self, uri):
+        stat_cursor = self.session.open_cursor('statistics:' + uri, None, None)
+        pages_rewritten = stat_cursor[stat.dsrc.btree_compact_pages_rewritten][2]
+        stat_cursor.close()
+        return pages_rewritten
+
+    def populate(self, uri, num_keys, value_size):
+        c = self.session.open_cursor(uri, None)
+        for k in range(num_keys):
+            c[k] = ('%07d' % k) + '_' + 'abcd' * ((value_size // 4) - 2)
+        c.close()
+
+    def turn_off_bg_compact(self):
+        self.session.compact(None, 'background=false')
+        compact_running = self.get_bg_compaction_running()
+        while compact_running:
+            time.sleep(1)
+            compact_running = self.get_bg_compaction_running()
+        self.assertEqual(compact_running, 0)
+
+    def turn_on_bg_compact(self, config):
+        self.session.compact(None, config)
+        compact_running = self.get_bg_compaction_running()
+        while not compact_running:
+            time.sleep(1)
+            compact_running = self.get_bg_compaction_running()
+        self.assertEqual(compact_running, 1)
+
+    # Test the exclude list functionality of the background compaction server. 
     def test_compact09(self):
+        # FIXME-WT-11399
+        if self.runningHook('tiered'):
+            self.skipTest("this test does not yet work with tiered storage")
 
-        # Create a table.
-        self.session.create(self.uri, None)
-
-        # Create an inmemory database.
-        self.reopen_conn(config='in_memory=true')
-
-        # Foreground compaction.
-        with self.expectedStdoutPattern('Compact does not work for in-memory databases'):
-           self.foreground_compaction()
-        # Background compaction.
-        with self.expectedStdoutPattern('Background compact cannot be configured for in-memory or readonly databases'):
-            self.assertRaisesException(wiredtiger.WiredTigerError,
-                lambda: self.background_compaction())
+        # Create and populate tables.
+        for i in range(self.n_tables):
+            uri = self.uri_prefix + f'_{i}'
+            self.session.create(uri, self.create_params)
+            self.populate(uri, self.table_numkv, self.value_size)
         
-        # Reopen in readonly mode.
-        self.reopen_conn(config='in_memory=false,readonly=true')
+        # Write to disk.
+        self.session.checkpoint()
+
+        # Delete the first 90%.
+        for i in range(self.n_tables):
+            uri = self.uri_prefix + f'_{i}'
+            self.delete_range(uri, 90 * self.table_numkv // 100)
+
+        # Write to disk.
+        self.session.checkpoint()
+
+        # Enable background compaction and exclude the two tables.
+        exclude_list = f'["{self.uri_prefix}_0.wt", "{self.uri_prefix}_1.wt"]'
+        config = f'background=true,free_space_target=1MB,exclude={exclude_list}'
+        self.turn_on_bg_compact(config)
         
-        # Foreground compaction.
-        self.assertRaisesWithMessage(wiredtiger.WiredTigerError,
-            lambda: self.foreground_compaction(),
-            '/Operation not supported/')
-        # Background compaction.
-        self.assertRaisesWithMessage(wiredtiger.WiredTigerError,
-            lambda: self.background_compaction(),
-            '/Operation not supported/')
+        # Background compaction should exclude all files.
+        while self.get_bg_compaction_files_excluded() < self.n_tables:
+            time.sleep(1)
+        assert self.get_files_compacted() == 0
+        num_files_excluded = self.get_bg_compaction_files_excluded()
+        assert num_files_excluded == self.n_tables
+
+        # Stop the background compaction server.
+        self.turn_off_bg_compact()
+
+        # Enable background compaction and exclude only one table.
+        exclude_list = f'["{self.uri_prefix}_0.wt"]'
+        config = f'background=true,free_space_target=1MB,exclude={exclude_list}'
+        self.turn_on_bg_compact(config)
+
+        # Background compaction should exclude only one file now. Since the stats are cumulative, we
+        # need to take into account the previous check.
+        while self.get_bg_compaction_files_excluded() < num_files_excluded + 1:
+            time.sleep(1)
+        assert self.get_bg_compaction_files_excluded() == num_files_excluded + 1
+
+        # We should now start compacting the second table.
+        while self.get_files_compacted() == 0:
+            time.sleep(1)
+        assert self.get_files_compacted() == 1
+
+        # Make sure we have compacted the right table.
+        uri = self.uri_prefix + '_0'
+        self.assertEqual(self.get_pages_rewritten(uri), 0)
+        uri = self.uri_prefix + '_1'
+        self.assertGreater(self.get_pages_rewritten(uri), 0)
+        
+        # Stop the background compaction server.
+        self.turn_off_bg_compact()
+
+        # Background compaction may be have been inspecting a table when disabled which is
+        # considered as an interruption, ignore that message.
+        self.ignoreStdoutPatternIfExists('background compact interrupted by application')
 
 if __name__ == '__main__':
     wttest.run()

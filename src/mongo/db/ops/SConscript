@@ -59,6 +59,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/curop_metrics',
         '$BUILD_DIR/mongo/db/dbhelpers',
         '$BUILD_DIR/mongo/db/introspect',
+        '$BUILD_DIR/mongo/db/query/query_settings_manager',
         '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         '$BUILD_DIR/mongo/db/record_id_helpers',
         '$BUILD_DIR/mongo/db/repl/oplog',
@@ -137,6 +138,18 @@ env.Library(
         '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
         '$BUILD_DIR/mongo/db/update/update_driver',
         'parsed_update_array_filters',
+    ],
+)
+
+env.Library(
+    target='delete_request_idl',
+    source='delete_request.idl',
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/pipeline/runtime_constants_idl',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/server_base',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
     ],
 )
 

@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <climits>
 #include <fmt/format.h>
 #include <memory>
@@ -164,7 +163,7 @@ void schemaValidationFailed(CollectionValidation::ValidateState* state,
 
     // When testing is enabled, only warn about non-compliant documents to prevent test failures.
     if (TestingProctor::instance().isEnabled() ||
-        Collection::SchemaValidationResult::kWarn == result) {
+        Collection::SchemaValidationResult::kWarn == result || state->warnOnSchemaValidation()) {
         results->warnings.push_back(kSchemaValidationFailedReason);
     } else if (Collection::SchemaValidationResult::kError == result) {
         results->errors.push_back(kSchemaValidationFailedReason);
@@ -173,8 +172,14 @@ void schemaValidationFailed(CollectionValidation::ValidateState* state,
 }
 
 // Checks that 'control.count' matches the actual number of measurements in a closed bucket.
-Status _validateTimeseriesCount(const BSONObj& control, int bucketCount, int version) {
-    if (version == 1) {
+Status _validateTimeseriesCount(const BSONObj& control,
+                                int bucketCount,
+                                int version,
+                                bool shouldDecompressBSON) {
+    // Skips the check if a bucket is compressed, but we are not in a validate mode that will
+    // decompress the bucket to actually go through the measurements.
+    if (version == timeseries::kTimeseriesControlUncompressedVersion ||
+        (version == timeseries::kTimeseriesControlCompressedVersion && !shouldDecompressBSON)) {
         return Status::OK();
     }
     long long controlCount;
@@ -221,7 +226,8 @@ Status _validateTimeSeriesIdTimestamp(const CollectionPtr& collection, const BSO
  * Checks the value of the bucket's version.
  */
 Status _validateTimeseriesControlVersion(const BSONObj& recordBson, int bucketVersion) {
-    if (bucketVersion != 1 && bucketVersion != 2) {
+    if (bucketVersion != timeseries::kTimeseriesControlUncompressedVersion &&
+        bucketVersion != timeseries::kTimeseriesControlCompressedVersion) {
         return Status(
             ErrorCodes::BadValue,
             fmt::format("Invalid value for 'control.version'. Expected 1 or 2, but got {}.",
@@ -234,10 +240,12 @@ Status _validateTimeseriesControlVersion(const BSONObj& recordBson, int bucketVe
  * Checks if the bucket's version matches the types of 'data' fields.
  */
 Status _validateTimeseriesDataFieldTypes(const BSONElement& dataField, int bucketVersion) {
-    auto dataType = bucketVersion == 1 ? BSONType::Object : BSONType::BinData;
+    auto dataType = (bucketVersion == timeseries::kTimeseriesControlUncompressedVersion)
+        ? BSONType::Object
+        : BSONType::BinData;
     // Checks that open buckets have 'Object' type and closed buckets have 'BinData Column' type.
     auto isCorrectType = [&](BSONElement el) {
-        if (bucketVersion == 1) {
+        if (bucketVersion == timeseries::kTimeseriesControlUncompressedVersion) {
             return el.type() == BSONType::Object;
         } else {
             return el.type() == BSONType::BinData && el.binDataType() == BinDataType::Column;
@@ -262,7 +270,14 @@ Status _validateTimeSeriesMinMax(const CollectionPtr& coll,
                                  timeseries::bucket_catalog::MinMax& minmax,
                                  const BSONElement& controlMin,
                                  const BSONElement& controlMax,
-                                 StringData fieldName) {
+                                 StringData fieldName,
+                                 int version,
+                                 bool shouldDecompressBSON) {
+    // Skips the check if a bucket is compressed, but we are not in a validate mode that will
+    // decompress the bucket to actually go through the measurements.
+    if (version == timeseries::kTimeseriesControlCompressedVersion && !shouldDecompressBSON) {
+        return Status::OK();
+    }
     auto min = minmax.min();
     auto max = minmax.max();
     auto checkMinAndMaxMatch = [&]() {
@@ -314,9 +329,10 @@ Status _validateTimeSeriesDataTimeField(const CollectionPtr& coll,
                                         const BSONElement& controlMax,
                                         StringData fieldName,
                                         int version,
-                                        int* bucketCount) {
+                                        int* bucketCount,
+                                        bool shouldDecompressBSON) {
     timeseries::bucket_catalog::MinMax minmax;
-    if (version == 1) {
+    if (version == timeseries::kTimeseriesControlUncompressedVersion) {
         for (const auto& metric : timeField.Obj()) {
             if (metric.type() != BSONType::Date) {
                 return Status(ErrorCodes::BadValue,
@@ -335,35 +351,44 @@ Status _validateTimeSeriesDataTimeField(const CollectionPtr& coll,
             minmax.update(metric.wrap(fieldName), boost::none, coll->getDefaultCollator());
             ++(*bucketCount);
         }
-    } else {
-        BSONColumn col{timeField};
-        Date_t prevTimestamp = Date_t::min();
-        for (const auto& metric : col) {
-            if (!metric.eoo()) {
-                if (metric.type() != BSONType::Date) {
-                    return Status(
-                        ErrorCodes::BadValue,
-                        fmt::format("Time-series bucket '{}' field is not a Date", fieldName));
-                }
-                // Checks the time values are sorted in increasing order for compressed buckets.
-                Date_t curTimestamp = metric.Date();
-                if (curTimestamp >= prevTimestamp) {
-                    prevTimestamp = curTimestamp;
+    } else if (shouldDecompressBSON) {
+        // Only decompress the bucket if we are in full validation mode, kBackgroundCheckBSON mode,
+        // or kForegroundCheckBSON mode since this is a relatively expensive operation.
+        try {
+            BSONColumn col{timeField};
+            Date_t prevTimestamp = Date_t::min();
+            for (const auto& metric : col) {
+                if (!metric.eoo()) {
+                    if (metric.type() != BSONType::Date) {
+                        return Status(
+                            ErrorCodes::BadValue,
+                            fmt::format("Time-series bucket '{}' field is not a Date", fieldName));
+                    }
+                    // Checks the time values are sorted in increasing order for compressed buckets.
+                    Date_t curTimestamp = metric.Date();
+                    if (curTimestamp >= prevTimestamp) {
+                        prevTimestamp = curTimestamp;
+                    } else {
+                        return Status(
+                            ErrorCodes::BadValue,
+                            fmt::format("Time-series bucket '{}' field is not in ascending order",
+                                        fieldName));
+                    }
+                    minmax.update(metric.wrap(fieldName), boost::none, coll->getDefaultCollator());
+                    ++(*bucketCount);
                 } else {
-                    return Status(
-                        ErrorCodes::BadValue,
-                        fmt::format("Time-series bucket '{}' field is not in ascending order",
-                                    fieldName));
+                    return Status(ErrorCodes::BadValue,
+                                  "Time-series bucket has missing time fields");
                 }
-                minmax.update(metric.wrap(fieldName), boost::none, coll->getDefaultCollator());
-                ++(*bucketCount);
-            } else {
-                return Status(ErrorCodes::BadValue, "Time-series bucket has missing time fields");
             }
+        } catch (DBException& e) {
+            return Status(ErrorCodes::InvalidBSON,
+                          str::stream() << "Exception occurred while decompressing a BSON column: "
+                                        << e.toString());
         }
     }
-
-    if (Status status = _validateTimeSeriesMinMax(coll, minmax, controlMin, controlMax, fieldName);
+    if (Status status = _validateTimeSeriesMinMax(
+            coll, minmax, controlMin, controlMax, fieldName, version, shouldDecompressBSON);
         !status.isOK()) {
         return status;
     }
@@ -381,9 +406,10 @@ Status _validateTimeSeriesDataField(const CollectionPtr& coll,
                                     const BSONElement& controlMax,
                                     StringData fieldName,
                                     int version,
-                                    int bucketCount) {
+                                    int bucketCount,
+                                    bool shouldDecompressBSON) {
     timeseries::bucket_catalog::MinMax minmax;
-    if (version == 1) {
+    if (version == timeseries::kTimeseriesControlUncompressedVersion) {
         // Checks that indices are in increasing order and within the correct range.
         int prevIdx = INT_MIN;
         for (const auto& metric : dataField.Obj()) {
@@ -412,16 +438,25 @@ Status _validateTimeSeriesDataField(const CollectionPtr& coll,
             minmax.update(metric.wrap(fieldName), boost::none, coll->getDefaultCollator());
             prevIdx = idx;
         }
-    } else {
-        BSONColumn col{dataField};
-        for (const auto& metric : col) {
-            if (!metric.eoo()) {
-                minmax.update(metric.wrap(fieldName), boost::none, coll->getDefaultCollator());
+    } else if (shouldDecompressBSON) {
+        // Only decompress the bucket if we are in full validation mode, kBackgroundCheckBSON mode,
+        // or kForegroundCheckBSON mode since this is a relatively expensive operation.
+        try {
+            BSONColumn col{dataField};
+            for (const auto& metric : col) {
+                if (!metric.eoo()) {
+                    minmax.update(metric.wrap(fieldName), boost::none, coll->getDefaultCollator());
+                }
             }
+        } catch (DBException& e) {
+            return Status(ErrorCodes::InvalidBSON,
+                          str::stream() << "Exception occurred while decompressing a BSON column: "
+                                        << e.toString());
         }
     }
 
-    if (Status status = _validateTimeSeriesMinMax(coll, minmax, controlMin, controlMax, fieldName);
+    if (Status status = _validateTimeSeriesMinMax(
+            coll, minmax, controlMin, controlMax, fieldName, version, shouldDecompressBSON);
         !status.isOK()) {
         return status;
     }
@@ -431,7 +466,8 @@ Status _validateTimeSeriesDataField(const CollectionPtr& coll,
 
 Status _validateTimeSeriesDataFields(const CollectionPtr& coll,
                                      const BSONObj& recordBson,
-                                     int bucketVersion) {
+                                     int bucketVersion,
+                                     bool shouldDecompressBSON) {
     BSONObj data = recordBson.getField(timeseries::kBucketDataFieldName).Obj();
     BSONObj control = recordBson.getField(timeseries::kBucketControlFieldName).Obj();
     BSONObj controlMin = control.getField(timeseries::kBucketControlMinFieldName).Obj();
@@ -479,12 +515,14 @@ Status _validateTimeSeriesDataFields(const CollectionPtr& coll,
                                                          controlMaxFields[timeFieldName],
                                                          timeFieldName,
                                                          bucketVersion,
-                                                         &bucketCount);
+                                                         &bucketCount,
+                                                         shouldDecompressBSON);
         !status.isOK()) {
         return status;
     }
 
-    if (Status status = _validateTimeseriesCount(control, bucketCount, bucketVersion);
+    if (Status status =
+            _validateTimeseriesCount(control, bucketCount, bucketVersion, shouldDecompressBSON);
         !status.isOK()) {
         return status;
     }
@@ -504,7 +542,8 @@ Status _validateTimeSeriesDataFields(const CollectionPtr& coll,
                                                              controlMaxFields[fieldName],
                                                              fieldName,
                                                              bucketVersion,
-                                                             bucketCount);
+                                                             bucketCount,
+                                                             shouldDecompressBSON);
                 !status.isOK()) {
                 return status;
             }
@@ -519,7 +558,8 @@ Status _validateTimeSeriesDataFields(const CollectionPtr& coll,
  */
 Status _validateTimeSeriesBucketRecord(const CollectionPtr& collection,
                                        const BSONObj& recordBson,
-                                       ValidateResults* results) {
+                                       ValidateResults* results,
+                                       bool shouldDecompressBSON) {
     int bucketVersion = recordBson.getField(timeseries::kBucketControlFieldName)
                             .Obj()
                             .getIntField(timeseries::kBucketControlVersionFieldName);
@@ -533,7 +573,8 @@ Status _validateTimeSeriesBucketRecord(const CollectionPtr& collection,
         return status;
     }
 
-    if (Status status = _validateTimeSeriesDataFields(collection, recordBson, bucketVersion);
+    if (Status status = _validateTimeSeriesDataFields(
+            collection, recordBson, bucketVersion, shouldDecompressBSON);
         !status.isOK()) {
         return status;
     }
@@ -768,7 +809,8 @@ void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
                 _enforceTimeseriesBucketsAreAlwaysCompressed(recordBson, results);
 
                 // Checks for time-series collection consistency.
-                Status bucketStatus = _validateTimeSeriesBucketRecord(coll, recordBson, results);
+                Status bucketStatus = _validateTimeSeriesBucketRecord(
+                    coll, recordBson, results, _validateState->shouldDecompressBSONColumn());
                 // This log id should be kept in sync with the associated warning messages that are
                 // returned to the client.
                 if (!bucketStatus.isOK()) {

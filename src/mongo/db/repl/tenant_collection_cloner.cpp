@@ -31,7 +31,6 @@
 #include <absl/container/node_hash_map.h>
 #include <boost/cstdint.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <fmt/format.h>
 #include <list>
@@ -121,7 +120,7 @@ TenantCollectionCloner::TenantCollectionCloner(const NamespaceString& sourceNss,
           "TenantCollectionCloner"_sd, sharedData, source, client, storageInterface, dbPool),
       _sourceNss(sourceNss),
       _collectionOptions(collectionOptions),
-      _sourceDbAndUuid(NamespaceString()),
+      _sourceDbAndUuid(NamespaceString::kEmpty),
       _collectionClonerBatchSize(collectionClonerBatchSize),
       _countStage("count", this, &TenantCollectionCloner::countStage),
       _checkIfDonorCollectionIsEmptyStage(
@@ -136,14 +135,15 @@ TenantCollectionCloner::TenantCollectionCloner(const NamespaceString& sourceNss,
                      kProgressMeterSecondsBetween,
                      kProgressMeterCheckInterval,
                      "documents copied",
-                     str::stream() << NamespaceStringUtil::serialize(_sourceNss)
+                     str::stream() << NamespaceStringUtil::serialize(
+                                          _sourceNss, SerializationContext::stateDefault())
                                    << " tenant collection clone progress"),
       _tenantId(tenantId) {
     invariant(sourceNss.isValid());
     invariant(sourceNss.isNamespaceForTenant(tenantId));
     invariant(collectionOptions.uuid);
     _sourceDbAndUuid = NamespaceStringOrUUID(sourceNss.dbName(), *collectionOptions.uuid);
-    _stats.ns = NamespaceStringUtil::serialize(sourceNss);
+    _stats.ns = NamespaceStringUtil::serialize(sourceNss, SerializationContext::stateDefault());
 }
 
 BaseCloner::ClonerStages TenantCollectionCloner::getStages() {

@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -59,6 +58,10 @@ namespace mongo {
  * A FailPoint is a hook mechanism allowing testing behavior to occur at prearranged
  * execution points in the server code. They can be activated and deactivated, and
  * configured to hold data.
+ *
+ * Failpoints are only available when set on the command line with
+ * '--setParameter enableTestCommands=1'.
+ * See FailPointRegistry::registerAllFailPointsAsServerParameters & docs/test_commands.md.
  *
  * A FailPoint is usually defined by the MONGO_FAIL_POINT_DEFINE(name) macro,
  * which arranges for it to be added to the global failpoint registry.

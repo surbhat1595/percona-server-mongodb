@@ -87,6 +87,9 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 namespace mongo {
+
+using sharded_agg_helpers::PipelineDataSource;
+
 namespace {
 
 Rarely _sampler;
@@ -97,8 +100,19 @@ auto makeExpressionContext(OperationContext* opCtx,
                            boost::optional<ExplainOptions::Verbosity> verbosity) {
     // Populate the collection UUID and the appropriate collation to use.
     auto nss = parsedMr.getNamespace();
-    auto [collationObj, uuid] = cluster_aggregation_planner::getCollationAndUUID(
-        opCtx, cm, nss, parsedMr.getCollation().get_value_or(BSONObj()));
+
+    // An aggregation against an unsharded collection which features a $merge (i.e. a mapReduce
+    // command with an out option configured to 'reduce' or 'merge') would normally need to
+    // contact the primary shard to obtain the collection default collation. However, this is not
+    // necessary for mapReduce commands because we will always be merging on the _id field. As such,
+    // the collection default collation has no impact on the selection of fields to merge on.
+    const auto requiresCollationForParsingUnshardedAggregate = false;
+    auto collationObj =
+        cluster_aggregation_planner::getCollation(opCtx,
+                                                  cm,
+                                                  nss,
+                                                  parsedMr.getCollation().get_value_or(BSONObj()),
+                                                  requiresCollationForParsingUnshardedAggregate);
 
     std::unique_ptr<CollatorInterface> resolvedCollator;
     if (!collationObj.isEmpty()) {
@@ -111,14 +125,13 @@ auto makeExpressionContext(OperationContext* opCtx,
     StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
     resolvedNamespaces.try_emplace(nss.coll(), nss, std::vector<BSONObj>{});
     if (parsedMr.getOutOptions().getOutputType() != OutputType::InMemory) {
-        auto outNss = NamespaceString();
-        if (auto hasOutDB = parsedMr.getOutOptions().getDatabaseName()) {
-            outNss = NamespaceStringUtil::deserialize(
-                boost::none, *hasOutDB, parsedMr.getOutOptions().getCollectionName());
-        } else {
-            outNss = NamespaceStringUtil::deserialize(parsedMr.getNamespace().dbName(),
-                                                      parsedMr.getOutOptions().getCollectionName());
-        }
+        auto outNss = parsedMr.getOutOptions().getDatabaseName()
+            ? NamespaceStringUtil::deserialize(boost::none,
+                                               *(parsedMr.getOutOptions().getDatabaseName()),
+                                               parsedMr.getOutOptions().getCollectionName(),
+                                               SerializationContext::stateDefault())
+            : NamespaceStringUtil::deserialize(parsedMr.getNamespace().dbName(),
+                                               parsedMr.getOutOptions().getCollectionName());
         resolvedNamespaces.try_emplace(outNss.coll(), outNss, std::vector<BSONObj>{});
     }
     auto runtimeConstants = Variables::generateRuntimeConstants(opCtx);
@@ -130,7 +143,7 @@ auto makeExpressionContext(OperationContext* opCtx,
         opCtx,
         verbosity,
         false,  // fromMongos
-        false,  // needsmerge
+        false,  // needsMerge
         true,   // allowDiskUse
         parsedMr.getBypassDocumentValidation().get_value_or(false),
         true,  // isMapReduceCommand
@@ -145,6 +158,9 @@ auto makeExpressionContext(OperationContext* opCtx,
         false  // mayDbProfile: false because mongos has no profile collection.
     );
     expCtx->inMongos = true;
+    if (!cm.hasRoutingTable() && collationObj.isEmpty()) {
+        expCtx->setIgnoreCollator();
+    }
     return expCtx;
 }
 
@@ -189,15 +205,13 @@ bool runAggregationMapReduce(OperationContext* opCtx,
     auto parsedMr = MapReduceCommandRequest::parse(
         IDLParserContext("mapReduce", false /* apiStrict */, dbName.tenantId()), cmd);
     stdx::unordered_set<NamespaceString> involvedNamespaces{parsedMr.getNamespace()};
-    auto hasOutDB = parsedMr.getOutOptions().getDatabaseName();
-    auto resolvedOutNss = NamespaceString();
-    if (auto hasOutDB = parsedMr.getOutOptions().getDatabaseName()) {
-        resolvedOutNss = NamespaceStringUtil::deserialize(
-            boost::none, *hasOutDB, parsedMr.getOutOptions().getCollectionName());
-    } else {
-        resolvedOutNss = NamespaceStringUtil::deserialize(
-            parsedMr.getNamespace().dbName(), parsedMr.getOutOptions().getCollectionName());
-    }
+    auto resolvedOutNss = parsedMr.getOutOptions().getDatabaseName()
+        ? NamespaceStringUtil::deserialize(boost::none,
+                                           *(parsedMr.getOutOptions().getDatabaseName()),
+                                           parsedMr.getOutOptions().getCollectionName(),
+                                           SerializationContext::stateDefault())
+        : NamespaceStringUtil::deserialize(parsedMr.getNamespace().dbName(),
+                                           parsedMr.getOutOptions().getCollectionName());
 
     if (_sampler.tick()) {
         LOGV2_WARNING(5725800,
@@ -229,13 +243,9 @@ bool runAggregationMapReduce(OperationContext* opCtx,
 
     auto targeter =
         cluster_aggregation_planner::AggregationTargeter::make(opCtx,
-                                                               parsedMr.getNamespace(),
                                                                pipelineBuilder,
                                                                cri,
-                                                               involvedNamespaces,
-                                                               false,   // hasChangeStream
-                                                               false,   // startsWithDocuments
-                                                               false,   // allowedToPassthrough
+                                                               PipelineDataSource::kNormal,
                                                                false);  // perShardCursor
     try {
         switch (targeter.policy) {
@@ -244,7 +254,6 @@ bool runAggregationMapReduce(OperationContext* opCtx,
                 // Pipelines generated from mapReduce should never be required to run on mongos.
                 MONGO_UNREACHABLE_TASSERT(31291);
             }
-            case cluster_aggregation_planner::AggregationTargeter::TargetingPolicy::kPassthrough:
             case cluster_aggregation_planner::AggregationTargeter::TargetingPolicy::kAnyShard: {
                 if (verbosity) {
                     explain_common::generateServerInfo(&result);
@@ -262,8 +271,7 @@ bool runAggregationMapReduce(OperationContext* opCtx,
                     namespaces,
                     privileges,
                     &tempResults,
-                    false /* hasChangeStream */,
-                    false /* startsWithDocuments */,
+                    PipelineDataSource::kNormal,
                     expCtx->eligibleForSampling()));
                 break;
             }

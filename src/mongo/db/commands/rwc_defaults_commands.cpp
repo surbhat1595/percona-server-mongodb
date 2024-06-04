@@ -169,10 +169,7 @@ public:
             }
 
             updatePersistedDefaultRWConcernDocument(opCtx, newDefaults);
-            LOGV2(20498,
-                  "Successfully set RWC defaults to {value}",
-                  "Successfully set RWC defaults",
-                  "value"_attr = newDefaults);
+            LOGV2(20498, "Successfully set RWC defaults", "value"_attr = newDefaults);
 
             // Refresh to populate the cache with the latest defaults.
             rwcDefaults.refreshIfNecessary(opCtx);
@@ -198,7 +195,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(SetDefaultRWConcernCommand);
+MONGO_REGISTER_COMMAND(SetDefaultRWConcernCommand).forShard();
 
 class GetDefaultRWConcernCommand : public TypedCommand<GetDefaultRWConcernCommand> {
 public:
@@ -252,7 +249,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(GetDefaultRWConcernCommand);
+MONGO_REGISTER_COMMAND(GetDefaultRWConcernCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

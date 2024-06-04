@@ -38,7 +38,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -128,7 +127,9 @@ void profile(OperationContext* opCtx, NetworkOp op) {
     try {
         // We create a new opCtx so that we aren't interrupted by having the original operation
         // killed or timed out. Those are the case we want to have profiling data.
-        auto newClient = opCtx->getServiceContext()->makeClient("profiling");
+        auto newClient = opCtx->getServiceContext()
+                             ->getService(ClusterRole::ShardServer)
+                             ->makeClient("profiling");
         auto newCtx = newClient->makeOperationContext();
 
         // TODO(SERVER-74657): Please revisit if this thread could be made killable.
@@ -164,10 +165,8 @@ void profile(OperationContext* opCtx, NetworkOp op) {
                 DatabaseHolder::get(newCtx.get())->getDb(newCtx.get(), dbProfilingNS.dbName());
             if (!db) {
                 // Database disappeared.
-                LOGV2(20700,
-                      "note: not profiling because db went away for {namespace}",
-                      "note: not profiling because db went away for namespace",
-                      logAttrs(ns));
+                LOGV2(
+                    20700, "note: not profiling because db went away for namespace", logAttrs(ns));
                 return;
             }
 
@@ -191,8 +190,6 @@ void profile(OperationContext* opCtx, NetworkOp op) {
         wuow.commit();
     } catch (const AssertionException& assertionEx) {
         LOGV2_WARNING(20703,
-                      "Caught Assertion while trying to profile {operation} against "
-                      "{namespace}: {assertion}",
                       "Caught Assertion while trying to profile operation",
                       "operation"_attr = networkOpToString(op),
                       logAttrs(ns),
@@ -222,10 +219,7 @@ Status createProfileCollection(OperationContext* opCtx, Database* db) {
         }
 
         // system.profile namespace doesn't exist; create it
-        LOGV2(20701,
-              "Creating profile collection: {namespace}",
-              "Creating profile collection",
-              logAttrs(dbProfilingNS));
+        LOGV2(20701, "Creating profile collection", logAttrs(dbProfilingNS));
 
         CollectionOptions collectionOptions;
         collectionOptions.capped = true;

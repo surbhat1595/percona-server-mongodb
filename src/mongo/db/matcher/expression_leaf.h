@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -59,7 +58,7 @@
 #include "mongo/db/matcher/match_details.h"
 #include "mongo/db/matcher/path.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
@@ -70,30 +69,29 @@ namespace mongo {
 class CollatorInterface;
 
 /**
- *  A struct primarily used to make input parameters for makePredicate() function. The
- * 'MatchExprType' helps in determining which MatchExpression to make in makePredicate() function.
+ * Makes a conjunction of the given predicates
  */
-template <typename MatchExprType, typename ValueType = BSONElement>
-struct MatchExprPredicate {
-    MatchExprPredicate(StringData path_, ValueType value_) : path(path_), value(value_){};
-    StringData path;
-    ValueType value;
-};
+template <typename... Ts>
+inline auto makeAnd(Ts&&... pack) {
+    auto predicates = makeVector<std::unique_ptr<MatchExpression>>(std::forward<Ts>(pack)...);
+    return std::make_unique<AndMatchExpression>(std::move(predicates));
+}
 
 /**
- * Helper function to make $and predicates based on the set of predicates passed as parameters.
+ * Makes a disjunction of the given predicates.
+ *
+ * - The result is non-null; it may be an OrMatchExpression with zero children.
+ * - Any trivially-false arguments are omitted.
+ * - If only one argument is nontrivial, returns that argument rather than adding an extra
+ *   OrMatchExpression around it.
  */
-template <typename T, typename ValueType, typename... Targs, typename... ValueTypeArgs>
-std::unique_ptr<MatchExpression> makePredicate(
-    MatchExprPredicate<T, ValueType> predicate,
-    MatchExprPredicate<Targs, ValueTypeArgs>... predicates) {
-    if constexpr (sizeof...(predicates) > 0) {
-        return std::make_unique<AndMatchExpression>(makeVector<std::unique_ptr<MatchExpression>>(
-            std::make_unique<T>(predicate.path, predicate.value),
-            (std::make_unique<Targs>(predicates.path, predicates.value))...));
-    } else {
-        return std::make_unique<T>(predicate.path, predicate.value);
-    }
+template <typename... Ts>
+inline auto makeOr(Ts&&... pack) {
+    auto predicates = makeVector<std::unique_ptr<MatchExpression>>(std::forward<Ts>(pack)...);
+    auto newEnd = std::remove_if(
+        predicates.begin(), predicates.end(), [](auto& node) { return node->isTriviallyFalse(); });
+    predicates.erase(newEnd, predicates.end());
+    return std::make_unique<OrMatchExpression>(std::move(predicates));
 }
 
 class LeafMatchExpression : public PathMatchExpression {
@@ -183,7 +181,8 @@ public:
     virtual void debugString(StringBuilder& debug, int indentationLevel = 0) const;
 
     virtual void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                               const SerializationOptions& opts) const;
+                                               const SerializationOptions& opts = {},
+                                               bool includePath = true) const;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -542,7 +541,8 @@ public:
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts) const final;
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final;
 
     void serializeToBSONTypeRegex(BSONObjBuilder* out) const;
 
@@ -625,7 +625,8 @@ public:
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts) const final;
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -693,7 +694,8 @@ public:
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts) const final;
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -732,7 +734,8 @@ public:
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts) const final;
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -899,7 +902,8 @@ public:
     virtual void debugString(StringBuilder& debug, int indentationLevel) const;
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts) const final;
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final;
 
     virtual bool equivalent(const MatchExpression* other) const;
 
@@ -967,7 +971,7 @@ private:
     // Used to perform bit tests against numbers using a single bitwise operation.
     uint64_t _bitMask = 0;
 
-    // When this expression is parameterized, we require two parmeter markers, not one: a parameter
+    // When this expression is parameterized, we require two parameter markers, not one: a parameter
     // marker for the vector of bit positions and a second for the bitmask. The runtime plan
     // needs both values so that it can operate against either BinData or numerical inputs.
     boost::optional<InputParamId> _bitPositionsParamId;

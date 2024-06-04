@@ -1,11 +1,11 @@
 """Configure the command line input for the resmoke 'run' subcommand."""
 
+import argparse
 import collections
 import configparser
 import datetime
 import os
 import os.path
-import distutils.spawn
 from pathlib import Path
 import sys
 import platform
@@ -13,6 +13,7 @@ import random
 import glob
 import textwrap
 import shlex
+import shutil
 import traceback
 from typing import Dict, Optional
 
@@ -30,6 +31,7 @@ from buildscripts.idl import gen_all_feature_flag_list
 from buildscripts.resmokelib import config as _config
 from buildscripts.resmokelib import utils
 from buildscripts.resmokelib import mongo_fuzzer_configs
+from buildscripts.util.read_config import read_config_file
 
 BASE_16_TO_INT = 16
 
@@ -37,7 +39,7 @@ BASE_16_TO_INT = 16
 def validate_and_update_config(parser, args):
     """Validate inputs and update config module."""
     _validate_options(parser, args)
-    _update_config_vars(args)
+    _update_config_vars(parser, args)
     _update_symbolizer_secrets()
     _validate_config(parser)
     _set_logging_config()
@@ -135,7 +137,7 @@ def _validate_config(parser):
             parser.error("--recordWith is only supported on x86 and x86_64 Linux distributions")
             return
 
-        resolved_path = distutils.spawn.find_executable(_config.UNDO_RECORDER_PATH)
+        resolved_path = shutil.which(_config.UNDO_RECORDER_PATH)
         if resolved_path is None:
             parser.error(
                 f"Cannot find the UndoDB live-record binary '{_config.UNDO_RECORDER_PATH}'. Check that it exists and is executable"
@@ -160,32 +162,33 @@ def _find_resmoke_wrappers():
 
 
 def _set_up_tracing(
-        otel_collector_endpoint: Optional[str],
-        otel_collector_file: Optional[str],
+        otel_collector_dir: Optional[str],
         trace_id: Optional[str],
         parent_span_id: Optional[str],
         extra_context: Optional[Dict[str, object]],
 ) -> bool:
-    """Try to set up otel tracing. On success return True. On failure return False."""
+    """Try to set up otel tracing. On success return True. On failure return False.
+
+    This method does 4 things.
+    1. If a user has passed in a grpc OTel endpoint then we set up an OTLPSpanExporter to send OTEL metrics to that endpoint.
+    2. If a user passes in a filename to store OTel metrics in then we are going to export metrics to that file. It is perfectly valid to have an OTel metrics endpoint and a OTel metrics file. We use a custom exporter `FileSpanExporter` to write data to the passed in file.
+    3. If a user passes in a parent trace id and a child trace id we assume both of those. This allows us to tie resmoke metrics to a parent metric.
+    4. If a user passes in extra_baggage, we add these "global" values to our baggage. This allows us to propagate these values to all child spans in resmoke using our custom span processor `BatchedBaggageSpanProcessor`.
+    """
 
     success = True
     # Service name is required for most backends
     resource = Resource(attributes={SERVICE_NAME: "resmoke"})
 
     provider = TracerProvider(resource=resource)
-    if otel_collector_endpoint and sys.platform != "darwin":
-        # TODO: EVG-20576
-        # We can remove this and export to a file when EVG-20576 is merged
-        # This will remove our dependency on grpc
-        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-        processor = BatchedBaggageSpanProcessor(OTLPSpanExporter(endpoint=otel_collector_endpoint))
-        provider.add_span_processor(processor)
-
-    if otel_collector_file:
+    if otel_collector_dir:
         try:
-            otel_collector_file_path = Path(otel_collector_file)
-            otel_collector_file_path.parent.mkdir(parents=True, exist_ok=True)
-            processor = BatchedBaggageSpanProcessor(FileSpanExporter(otel_collector_file_path))
+            otel_collector_dir = Path(otel_collector_dir)
+            otel_collector_dir.mkdir(parents=True, exist_ok=True)
+            # Make the file easy to read when ran locally.
+            pretty_print = _config.EVERGREEN_TASK_ID is None
+            processor = BatchedBaggageSpanProcessor(
+                FileSpanExporter(otel_collector_dir, pretty_print))
             provider.add_span_processor(processor)
         except OSError:
             traceback.print_exc()
@@ -210,7 +213,7 @@ def _set_up_tracing(
     return success
 
 
-def _update_config_vars(values):
+def _update_config_vars(parser, values):
     """Update the variables of the config module."""
 
     config = _config.DEFAULTS.copy()
@@ -295,8 +298,8 @@ be invoked as either:
     _config.EXCLUDE_WITH_ANY_TAGS.extend(
         utils.default_if_none(_tags_from_list(config.pop("exclude_with_any_tags")), []))
 
-    force_disabled_flags = yaml.safe_load(
-        open("buildscripts/resmokeconfig/fully_disabled_feature_flags.yml"))
+    with open("buildscripts/resmokeconfig/fully_disabled_feature_flags.yml") as fully_disabled_ffs:
+        force_disabled_flags = yaml.safe_load(fully_disabled_ffs)
 
     _config.EXCLUDE_WITH_ANY_TAGS.extend(force_disabled_flags)
 
@@ -419,9 +422,23 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     if _config.SUITE_FILES is not None:
         _config.SUITE_FILES = _config.SUITE_FILES.split(",")
     _config.TAG_FILES = config.pop("tag_files")
-    _config.TRANSPORT_LAYER = config.pop("transport_layer")
     _config.USER_FRIENDLY_OUTPUT = config.pop("user_friendly_output")
     _config.SANITY_CHECK = config.pop("sanity_check")
+    _config.DOCKER_COMPOSE_BUILD_IMAGES = config.pop("docker_compose_build_images")
+    if _config.DOCKER_COMPOSE_BUILD_IMAGES is not None:
+        _config.DOCKER_COMPOSE_BUILD_IMAGES = _config.DOCKER_COMPOSE_BUILD_IMAGES.split(",")
+    _config.DOCKER_COMPOSE_BUILD_ENV = config.pop("docker_compose_build_env")
+    _config.DOCKER_COMPOSE_TAG = config.pop("docker_compose_tag")
+    _config.EXTERNAL_SUT = config.pop("external_sut")
+
+    # This is set to True when:
+    # (1) We are building images for an External SUT, OR ...
+    # (2) We are running resmoke against an External SUT
+    _config.NOOP_MONGO_D_S_PROCESSES = _config.DOCKER_COMPOSE_BUILD_IMAGES is not None or _config.EXTERNAL_SUT
+
+    # When running resmoke against an External SUT, we are expected to be in
+    # the workload container -- which may require additional setup before running tests.
+    _config.REQUIRES_WORKLOAD_CONTAINER_SETUP = _config.EXTERNAL_SUT
 
     # Internal testing options.
     _config.INTERNAL_PARAMS = config.pop("internal_params")
@@ -440,17 +457,16 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     _config.EVERGREEN_TASK_DOC = config.pop("task_doc")
     _config.EVERGREEN_VARIANT_NAME = config.pop("variant_name")
     _config.EVERGREEN_VERSION_ID = config.pop("version_id")
+    _config.EVERGREEN_PROJECT_CONFIG_PATH = config.pop("evg_project_config_path")
 
     # otel info
     _config.OTEL_TRACE_ID = config.pop("otel_trace_id")
     _config.OTEL_PARENT_ID = config.pop("otel_parent_id")
-    _config.OTEL_COLLECTOR_ENDPOINT = config.pop("otel_collector_endpoint")
-    _config.OTEL_COLLECTOR_FILE = config.pop("otel_collector_file")
+    _config.OTEL_COLLECTOR_DIR = config.pop("otel_collector_dir")
 
     try:
         setup_success = _set_up_tracing(
-            _config.OTEL_COLLECTOR_ENDPOINT,
-            _config.OTEL_COLLECTOR_FILE,
+            _config.OTEL_COLLECTOR_DIR,
             _config.OTEL_TRACE_ID,
             _config.OTEL_PARENT_ID,
             extra_context={
@@ -510,6 +526,9 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     # Config Dir options.
     _config.CONFIG_DIR = config.pop("config_dir")
 
+    # Directory with jstests option
+    _config.JSTESTS_DIR = config.pop("jstests_dir")
+
     # Configure evergreen task documentation
     if _config.EVERGREEN_TASK_NAME:
         task_name = utils.get_task_name_without_suffix(_config.EVERGREEN_TASK_NAME,
@@ -533,6 +552,10 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
         # Treat `resmoke run @to_replay` as `resmoke run --replayFile to_replay`
         if len(test_files) == 1 and test_files[0].startswith("@"):
             to_replay = test_files[0][1:]
+        elif len(test_files) > 1 and any(test_file.startswith("@") for test_file in test_files):
+            parser.error(
+                "Cannot use @replay with additional test files listed on the command line invocation."
+            )
         elif replay_file:
             to_replay = replay_file
 
@@ -635,3 +658,49 @@ def _update_symbolizer_secrets():
     yml_data = utils.load_yaml_file(_config.EXPANSIONS_FILE)
     _config.SYMBOLIZER_CLIENT_SECRET = yml_data.get("symbolizer_client_secret")
     _config.SYMBOLIZER_CLIENT_ID = yml_data.get("symbolizer_client_id")
+
+
+def add_otel_args(parser: argparse.ArgumentParser):
+    parser.add_argument(
+        "--otelTraceId",
+        dest="otel_trace_id",
+        type=str,
+        default=os.environ.get("OTEL_TRACE_ID", None),
+        help="Open Telemetry Trace ID",
+    )
+
+    parser.add_argument(
+        "--otelParentId",
+        dest="otel_parent_id",
+        type=str,
+        default=os.environ.get("OTEL_PARENT_ID", None),
+        help="Open Telemetry Parent ID",
+    )
+
+    parser.add_argument(
+        "--otelCollectorDir",
+        dest="otel_collector_dir",
+        type=str,
+        default=os.environ.get("OTEL_COLLECTOR_DIR", "build/metrics/"),
+        help="Open Collector Files",
+    )
+
+
+def detect_evergreen_config(parsed_args: argparse.Namespace,
+                            expansions_file: str = "../expansions.yml"):
+    if not os.path.exists(expansions_file):
+        return
+
+    expansions = read_config_file(expansions_file)
+
+    parsed_args.build_id = expansions.get("build_id", None)
+    parsed_args.distro_id = expansions.get("distro_id", None)
+    parsed_args.execution_number = expansions.get("execution", None)
+    parsed_args.project_name = expansions.get("project", None)
+    parsed_args.git_revision = expansions.get("revision", None)
+    parsed_args.revision_order_id = expansions.get("revision_order_id", None)
+    parsed_args.task_id = expansions.get("task_id", None)
+    parsed_args.task_name = expansions.get("task_name", None)
+    parsed_args.variant_name = expansions.get("build_variant", None)
+    parsed_args.version_id = expansions.get("version_id", None)
+    parsed_args.evg_project_config_path = expansions.get("evergreen_config_file_path", None)

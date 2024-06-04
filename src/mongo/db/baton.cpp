@@ -32,7 +32,6 @@
 #include <utility>
 #include <vector>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -93,10 +92,6 @@ public:
         return _baton->networking();
     }
 
-    void markKillOnClientDisconnect() noexcept override {
-        MONGO_UNREACHABLE;
-    }
-
     void run(ClockSource* clkSource) noexcept override {
         invariant(!_isDead);
 
@@ -122,6 +117,14 @@ public:
         _isDead = true;
 
         _runJobs(std::move(lk), kDetached);
+    }
+
+    Future<void> waitUntil(Date_t expiration, const CancellationToken& token) noexcept override {
+        if (stdx::lock_guard lk(_mutex); _isDead) {
+            return kDetached;
+        }
+
+        return _baton->waitUntil(expiration, token);
     }
 
 private:

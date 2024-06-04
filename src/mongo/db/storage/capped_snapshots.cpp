@@ -31,7 +31,6 @@
 
 #include <absl/container/node_hash_map.h>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <utility>
 
 #include <boost/optional/optional.hpp>
@@ -55,16 +54,21 @@ CappedSnapshots& CappedSnapshots::get(OperationContext* opCtx) {
 }
 
 
-void CappedSnapshots::establish(OperationContext* opCtx, const Collection* coll) {
+void CappedSnapshots::establish(OperationContext* opCtx,
+                                const Collection* coll,
+                                bool isNewCollection) {
     invariant(!opCtx->recoveryUnit()->isActive() ||
-              opCtx->lockState()->isCollectionLockedForMode(coll->ns(), MODE_X));
+              opCtx->lockState()->isCollectionLockedForMode(coll->ns(), MODE_X) || isNewCollection);
 
 
-    auto snapshot = coll->takeCappedVisibilitySnapshot();
+    auto snapshot =
+        isNewCollection ? CappedVisibilitySnapshot() : coll->takeCappedVisibilitySnapshot();
     _setSnapshot(coll->getRecordStore()->getIdent(), std::move(snapshot));
 }
 
-void CappedSnapshots::establish(OperationContext* opCtx, const CollectionPtr& coll) {
+void CappedSnapshots::establish(OperationContext* opCtx,
+                                const CollectionPtr& coll,
+                                bool isNewCollection) {
     establish(opCtx, coll.get());
 }
 
@@ -74,6 +78,11 @@ boost::optional<CappedVisibilitySnapshot> CappedSnapshots::getSnapshot(StringDat
         return boost::none;
     }
     return it->second;
+}
+
+boost::optional<CappedVisibilitySnapshot> CappedSnapshots::getSnapshot(
+    const Collection* coll) const {
+    return getSnapshot(coll->getRecordStore()->getIdent());
 }
 
 void CappedSnapshots::_setSnapshot(StringData ident, CappedVisibilitySnapshot snapshot) {

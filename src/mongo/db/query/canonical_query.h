@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <memory>
 #include <string>
@@ -60,6 +59,7 @@
 #include "mongo/db/query/projection.h"
 #include "mongo/db/query/projection_policies.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/query_settings_gen.h"
 #include "mongo/db/query/sort_pattern.h"
 #include "mongo/db/query/stage_types.h"
 #include "mongo/util/assert_util.h"
@@ -69,61 +69,55 @@ namespace mongo {
 
 class OperationContext;
 
+struct CanonicalQueryParams {
+    boost::intrusive_ptr<ExpressionContext> expCtx;
+    stdx::variant<std::unique_ptr<ParsedFindCommand>, ParsedFindCommandParams> parsedFind;
+    std::vector<std::unique_ptr<InnerPipelineStageInterface>> pipeline = {};
+    bool explain = false;
+    bool isCountLike = false;
+    bool isSearchQuery = false;
+};
+
+boost::intrusive_ptr<ExpressionContext> makeExpressionContext(OperationContext* opCtx,
+                                                              FindCommandRequest& findCommand);
+
 class CanonicalQuery {
 public:
     // A type that encodes the notion of query shape suitable for use with the plan cache. Encodes
     // the query's match, projection, sort, etc. potentially with some constants removed or replaced
     // with parameter markers.
     typedef std::string QueryShapeString;
+
     // A second encoding of query shape similar to 'QueryShapeString' above, except designed to work
     // with index filters and the 'planCacheClear' command. A caller can encode a query into an
     // 'PlanCacheCommandKey' in order to look for for matching index filters that should apply to
     // the query, or plan cache entries to which the 'planCacheClear' command should be applied.
     typedef std::string PlanCacheCommandKey;
 
-    /**
-     * If parsing succeeds, returns a std::unique_ptr<CanonicalQuery> representing the parsed
-     * query (which will never be NULL).  If parsing fails, returns an error Status.
-     *
-     * 'opCtx' must point to a valid OperationContext, but 'opCtx' does not need to outlive the
-     * returned CanonicalQuery.
-     */
-    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
-        OperationContext* opCtx,
-        std::unique_ptr<FindCommandRequest> findCommand,
-        bool explain = false,
-        const boost::intrusive_ptr<ExpressionContext>& expCtx = nullptr,
-        const ExtensionsCallback& extensionsCallback = ExtensionsCallbackNoop(),
-        MatchExpressionParser::AllowedFeatureSet allowedFeatures =
-            MatchExpressionParser::kDefaultSpecialFeatures,
-        const ProjectionPolicies& projectionPolicies = ProjectionPolicies::findProjectionPolicies(),
-        std::vector<std::unique_ptr<InnerPipelineStageInterface>> pipeline = {},
-        bool isCountLike = false);
+    CanonicalQuery(CanonicalQueryParams&& params);
 
     /**
-     * Creates a CanonicalQuery from a ParsedFindCommand. Uses 'expCtx->opCtx', which must be valid.
+     * Deprecated factory method for creating CanonicalQuery.
      */
-    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
-        boost::intrusive_ptr<ExpressionContext> expCtx,
-        std::unique_ptr<ParsedFindCommand> parsedFind,
-        bool explain = false,
-        std::vector<std::unique_ptr<InnerPipelineStageInterface>> pipeline = {},
-        bool isCountLike = false);
-
-    /**
-     * For testing or for internal clients to use.
-     */
+    static StatusWith<std::unique_ptr<CanonicalQuery>> make(CanonicalQueryParams&& params);
 
     /**
      * Used for creating sub-queries from an existing CanonicalQuery.
      *
-     * 'root' must be an expression in baseQuery.root().
+     * 'matchExpr' must be an expression in baseQuery.getPrimaryMatchExpression().
      *
      * Does not take ownership of 'root'.
      */
-    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(OperationContext* opCtx,
-                                                                    const CanonicalQuery& baseQuery,
-                                                                    MatchExpression* root);
+    CanonicalQuery(OperationContext* opCtx,
+                   const CanonicalQuery& baseQuery,
+                   MatchExpression* matchExpr);
+
+    /**
+     * Deprecated factory method for creating CanonicalQuery.
+     */
+    static StatusWith<std::unique_ptr<CanonicalQuery>> make(OperationContext* opCtx,
+                                                            const CanonicalQuery& baseQuery,
+                                                            MatchExpression* matchExpr);
 
     /**
      * Returns true if "query" describes an exact-match query on _id.
@@ -136,12 +130,6 @@ public:
      */
     static Status isValidNormalized(const MatchExpression* root);
 
-    /**
-     * For internal use only - but public for accessibility for make_unique(). You must go through
-     * canonicalize to create a CanonicalQuery.
-     */
-    CanonicalQuery() {}
-
     NamespaceString nss() const {
         invariant(_findCommand->getNamespaceOrUUID().isNamespaceString());
         return _findCommand->getNamespaceOrUUID().nss();
@@ -150,8 +138,8 @@ public:
     //
     // Accessors for the query
     //
-    MatchExpression* root() const {
-        return _root.get();
+    MatchExpression* getPrimaryMatchExpression() const {
+        return _primaryMatchExpression.get();
     }
     const BSONObj& getQueryObj() const {
         return _findCommand->getFilter();
@@ -262,6 +250,14 @@ public:
         return _inputParamIdToExpressionMap;
     }
 
+    bool getDisablePlanCache() const {
+        return _disablePlanCache;
+    }
+
+    boost::optional<size_t> getMaxMatchExpressionParams() const {
+        return _maxMatchExpressionParams;
+    }
+
     void setExplain(bool explain) {
         _explain = explain;
     }
@@ -286,12 +282,16 @@ public:
         return _expCtx.get();
     }
 
-    void setPipeline(std::vector<std::unique_ptr<InnerPipelineStageInterface>> pipeline) {
-        _pipeline = std::move(pipeline);
+    void setCqPipeline(std::vector<std::unique_ptr<InnerPipelineStageInterface>> cqPipeline) {
+        _cqPipeline = std::move(cqPipeline);
     }
 
-    const std::vector<std::unique_ptr<InnerPipelineStageInterface>>& pipeline() const {
-        return _pipeline;
+    const std::vector<std::unique_ptr<InnerPipelineStageInterface>>& cqPipeline() const {
+        return _cqPipeline;
+    }
+
+    std::vector<std::unique_ptr<InnerPipelineStageInterface>>& cqPipeline() {
+        return _cqPipeline;
     }
 
     /**
@@ -322,36 +322,43 @@ public:
      * '_isUncacheableSbe' member for more details.
      */
     bool isUncacheableSbe() const {
-        if (_isUncacheableSbe) {
-            return true;
-        }
+        return _isUncacheableSbe;
+    }
 
-        // If a $match stage is pushed down into '_pipeline', the plan is treated as uncacheable for
-        // SBE as the binding code to replace the original parameters with those from the current
-        // query has not been implemented yet.
-        //
-        // TODO SERVER-78817 remove this block when binding is implemented. If there are no other
-        // checks left besides '_isUncacheableSbe', change the method to return '_isUncacheableSbe'.
-        for (std::size_t stage = 0; stage < _pipeline.size(); ++stage) {
-            if (dynamic_cast<DocumentSourceMatch*>(_pipeline[stage]->documentSource())) {
-                return true;
-            }
-        }
+    // Tests whether a 'matchExpr' from this query should be parameterized for the SBE plan cache.
+    // There is no reason to do so if the execution plan will not be cached.
+    bool shouldParameterizeSbe(MatchExpression* matchExpr) const;
 
-        return false;
+    /**
+     * Add parameters for match expressions that were pushed down via '_cqPipeline'.
+     */
+    void addMatchParams(const std::vector<const MatchExpression*>& newParams) {
+        _inputParamIdToExpressionMap.insert(
+            _inputParamIdToExpressionMap.end(), newParams.begin(), newParams.end());
+    }
+
+    int numParams() {
+        return _inputParamIdToExpressionMap.size();
+    }
+
+    // Return true if the cqPipeline starts with $search or $searchMeta.
+    bool isSearchQuery() const {
+        return _isSearchQuery;
     }
 
 private:
-    Status init(boost::intrusive_ptr<ExpressionContext> expCtx,
+    void initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
                 std::unique_ptr<ParsedFindCommand> parsedFind,
-                std::vector<std::unique_ptr<InnerPipelineStageInterface>> pipeline,
-                bool isCountLike);
+                std::vector<std::unique_ptr<InnerPipelineStageInterface>> cqPipeline,
+                bool isCountLike,
+                bool isSearchQuery);
 
     boost::intrusive_ptr<ExpressionContext> _expCtx;
 
     std::unique_ptr<FindCommandRequest> _findCommand;
 
-    std::unique_ptr<MatchExpression> _root;
+    // The match expression at the base of the query tree.
+    std::unique_ptr<MatchExpression> _primaryMatchExpression;
 
     boost::optional<projection_ast::Projection> _proj;
 
@@ -359,7 +366,7 @@ private:
 
     // A query can include a post-processing pipeline here. Logically it is applied after all the
     // other operations (filter, sort, project, skip, limit).
-    std::vector<std::unique_ptr<InnerPipelineStageInterface>> _pipeline;
+    std::vector<std::unique_ptr<InnerPipelineStageInterface>> _cqPipeline;
 
     // Keeps track of what metadata has been explicitly requested.
     QueryMetadataBitSet _metadataDeps;
@@ -387,8 +394,15 @@ private:
     // ids, even if the optimizer detects that they are not going to be consumed downstream.
     bool _forceGenerateRecordId = false;
 
+    // Tells whether plan caching is disabled.
+    bool _disablePlanCache = false;
+
     // A map from assigned InputParamId's to parameterised MatchExpression's.
     std::vector<const MatchExpression*> _inputParamIdToExpressionMap;
+
+    // This limits the number of MatchExpression parameters we create for the CanonicalQuery before
+    // stopping. (We actually stop at this + 1.) A value of boost::none means unlimited.
+    boost::optional<size_t> _maxMatchExpressionParams = boost::none;
 
     // "True" for queries that after doing a scan of an index can produce an empty document and
     // still be correct. For example, this applies to queries like [{$match: {x: 42}}, {$count:
@@ -404,6 +418,8 @@ private:
     // predicates (usally > 512). This flag can be reused for additional do-not-cache conditions in
     // the future.
     bool _isUncacheableSbe = false;
+
+    bool _isSearchQuery = false;
 };
 
 }  // namespace mongo

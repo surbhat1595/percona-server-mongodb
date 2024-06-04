@@ -103,8 +103,10 @@ public:
         using InvocationBase::InvocationBase;
 
         Reply typedRun(OperationContext* opCtx) {
-
-            CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+            {
+                stdx::lock_guard<Client> lk(*opCtx->getClient());
+                CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+            }
 
             auto compactCoordinator =
                 [&]() -> std::shared_ptr<ShardingDDLCoordinatorService::Instance> {
@@ -176,7 +178,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(_shardsvrCompactStructuredEncryptionDataCommand);
+MONGO_REGISTER_COMMAND(_shardsvrCompactStructuredEncryptionDataCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

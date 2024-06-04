@@ -31,7 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
 #include <algorithm>
@@ -150,7 +149,7 @@ private:
 auto makeExecutor() {
     executor::ThreadPoolMock::Options options;
     options.onCreateThread = [] {
-        Client::initThread("executor", nullptr);
+        Client::initThread("executor", getGlobalServiceContext()->getService());
     };
     auto net = std::make_unique<executor::NetworkInterfaceMock>();
     return executor::makeSharedThreadPoolTestExecutor(std::move(net), std::move(options));
@@ -284,7 +283,7 @@ void CoordinatorCommitMonitorTest::mockRemaingOperationTimesCommandForRecipients
 
 TEST_F(CoordinatorCommitMonitorTest, ComputesMinAndMaxRemainingTimes) {
     auto future = launchAsync([this] {
-        ThreadClient tc(getServiceContext());
+        ThreadClient tc(getServiceContext()->getService());
         return getCommitMonitor()->queryRemainingOperationTimeForRecipients();
     });
 

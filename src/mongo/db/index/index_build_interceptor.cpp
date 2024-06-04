@@ -31,7 +31,6 @@
 #include <algorithm>
 #include <boost/container/flat_set.hpp>
 #include <boost/container/vector.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <limits>
 #include <mutex>
@@ -463,6 +462,7 @@ Status IndexBuildInterceptor::_finishSideWrite(OperationContext* opCtx,
         });
 
     std::vector<Record> records;
+    records.reserve(toInsert.size());
     for (auto& doc : toInsert) {
         records.emplace_back(Record{RecordId(),  // The storage engine will assign its own RecordId
                                                  // when we pass one that is null.

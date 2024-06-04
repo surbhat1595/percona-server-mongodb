@@ -36,7 +36,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
@@ -272,17 +271,20 @@ PlanStage::StageState BatchedDeleteStage::_deleteBatch(WorkingSetID* out) {
         return PlanStage::NEED_TIME;
     }
 
-    handlePlanStageYield(
+    const auto saveRet = handlePlanStageYield(
         expCtx(),
         "BatchedDeleteStage saveState",
         [&] {
             child()->saveState();
-            return PlanStage::NEED_TIME /* unused */;
+            return PlanStage::NEED_TIME;
         },
         [&] {
             // yieldHandler
-            std::terminate();
+            _prepareToRetryDrainAfterYield(out, {});
         });
+    if (saveRet != PlanStage::NEED_TIME) {
+        return saveRet;
+    }
 
     std::set<WorkingSetID> recordsToSkip;
     unsigned int docsDeleted = 0;

@@ -74,8 +74,8 @@
 namespace mongo {
 
 void ClusterCommandTestFixture::setUp() {
-    CatalogCacheTestFixture::setUp();
-    CatalogCacheTestFixture::setupNShards(numShards);
+    RouterCatalogCacheTestFixture::setUp();
+    RouterCatalogCacheTestFixture::setupNShards(numShards);
 
     Grid::get(getServiceContext())->setShardingInitialized();
 
@@ -140,7 +140,7 @@ DbResponse ClusterCommandTestFixture::runCommand(BSONObj cmd) {
     FailPointEnableBlock skipAppendingReqFields("allowSkippingAppendRequiredFieldsToResponse");
 
     // Create a new client/operation context per command
-    auto client = getServiceContext()->makeClient("ClusterCmdClient");
+    auto client = getServiceContext()->getService()->makeClient("ClusterCmdClient");
     auto opCtx = client->makeOperationContext();
 
     {
@@ -148,7 +148,7 @@ DbResponse ClusterCommandTestFixture::runCommand(BSONObj cmd) {
         // execution of the command by the client thread.
         stdx::lock_guard lk(*client.get());
         auto seCtx = std::make_unique<transport::ServiceExecutorContext>();
-        seCtx->setUseDedicatedThread(true);
+        seCtx->setThreadModel(seCtx->kSynchronous);
         transport::ServiceExecutorContext::set(client.get(), std::move(seCtx));
     }
 

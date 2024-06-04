@@ -41,7 +41,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <string>
 #include <utility>
@@ -74,21 +73,49 @@ typedef long long ConnectionId;
 
 /**
  * The database's concept of an outside "client".
- * */
+ */
 class Client final : public Decorable<Client> {
 public:
     /**
+     * These tags classify the connections associated with Clients and reasons to keep them open.
+     * When closing connections, these tags can be used to filter out the type of connections that
+     * should be kept open.
+     *
+     * Clients that are not yet classified yet are marked as kPending. The classification occurs
+     * during the processing of "hello" commands.
+     */
+    using TagMask = uint32_t;
+
+    // Client's connections should be closed.
+    static constexpr TagMask kEmptyTagMask = 0;
+
+    // Client's connection should be kept open on replication member rollback or removal.
+    static constexpr TagMask kKeepOpen = 1;
+
+    // Client is internal and their max wire version is not less than the max wire version of
+    // this server. Connection should be kept open.
+    static constexpr TagMask kLatestVersionInternalClientKeepOpen = 2;
+
+    // Client is external and connection should be kept open.
+    static constexpr TagMask kExternalClientKeepOpen = 4;
+
+    // Client has not been classified yet and should be kept open.
+    static constexpr TagMask kPending = 1 << 31;
+
+    /** Used as a placeholder argument to avoid specifying a session. */
+    static std::shared_ptr<transport::Session> noSession() {
+        return {};
+    }
+
+    /**
      * Creates a Client object and stores it in TLS for the current thread.
      *
-     * An unowned pointer to a transport::Session may optionally be provided. If 'session'
-     * is non-null, then it will be used to augment the thread name, and for reporting purposes.
-     *
-     * If provided, session's ref count will be bumped by this Client.
+     * If `session` is non-null, then it will be used to augment the thread name
+     * and for reporting purposes. Its ref count will be bumped by this Client.
      */
-    static void initThread(StringData desc, std::shared_ptr<transport::Session> session = nullptr);
     static void initThread(StringData desc,
-                           ServiceContext* serviceContext,
-                           std::shared_ptr<transport::Session> session);
+                           Service* service,
+                           std::shared_ptr<transport::Session> session = noSession());
 
     /**
      * Moves client into the thread_local for this thread. After this call, Client::getCurrent
@@ -125,10 +152,17 @@ public:
     }
 
     /**
+     * Returns the Service that owns this client.
+     */
+    Service* getService() const {
+        return _service;
+    }
+
+    /**
      * Returns the ServiceContext that owns this client session context.
      */
     ServiceContext* getServiceContext() const {
-        return _serviceContext;
+        return getService()->getServiceContext();
     }
 
     /**
@@ -206,9 +240,31 @@ public:
     }
 
     /**
-     * Used to mark system operations that are not allowed to be killed by the stepdown process.
-     * This should only be called once per Client and only from system connections. The Client
-     * should be locked by the caller.
+     * Used to mark system operations that are not allowed to be killed by the stepdown
+     * thread. This should only be called once per Client and only from system connections. The
+     * Client should be locked by the caller. We should minimize the usage of this function because
+     * improper usage could lead to a deadlock. More context comes as follows.
+     *
+     * How does this kill operation process work?
+     * To be more clear, the kill operation is actually an interruption. In order to get the RSTL
+     * lock during stepUp/stepDown, the replication coordinator will start a RstlKillOpThread to
+     * interrupt all threads that may block it for the RSTL lock. The RstlKillOpThread will loop
+     * through all threads and find out the threads that have ever taken a global lock in S/X/IX
+     * mode. It will interrupt these threads by interrupting their opCtx, which will cause an
+     * InterruptedDueToReplStateChange error to be thrown when the thread checks interruption on the
+     * opCtx. In addition to those threads hold global locks, a thread could also be interrupted if
+     * it is explicitly marked as alwaysInterruptAtStepDownOrUp or waiting on prepare conflicts.
+     *
+     * What should I consider if I introduced a new thread?
+     * - Whether the new thread ever takes any global lock in S/IX/X mode? If not, the stepdown
+     *   thread won't interrupt the new thread so we should leave it as killable. Even if the thread
+     *   takes global lock, the best practice should be making the new thread killable and handle
+     *   the interruption properly.
+     * - It's always better to write the code in a way that can catch the
+     *   InterruptedDueToReplStateChange error and recover from there. This helps make the thread
+     *   killable in a safer way and can prevent deadlock from unkillable thread.
+     * - If the thread has to be unkillable, it would be helpful to leave the reason in a comment so
+     *   if it becomes an issue, it will be easier to find the cause.
      */
     void setSystemOperationUnkillableByStepdown(WithLock) {
         // This can only be changed once for system operations.
@@ -218,7 +274,7 @@ public:
     }
 
     /**
-     * Used to determine whether a system operation is allowed to be killed by the stepdown process.
+     * Used to determine whether a system operation is allowed to be killed by the stepdown thread.
      * The Client should be locked by the caller.
      */
     bool canKillSystemOperationInStepdown(WithLock) const {
@@ -281,12 +337,53 @@ public:
         _isInternalClient = isInternalClient;
     }
 
+    /**
+     * Sets the error code that operations associated with this client will be killed with if the
+     * underlying ingress session disconnects.
+     */
+    void setDisconnectErrorCode(ErrorCodes::Error code) {
+        _disconnectErrorCode = code;
+    }
+
+    ErrorCodes::Error getDisconnectErrorCode() {
+        return _disconnectErrorCode;
+    }
+
+    /**
+     * Atomically set all of the connection tags specified in the 'tagsToSet' bit field. If the
+     * 'kPending' tag is set, indicating that no tags have yet been specified for the connection,
+     * this function also clears that tag as part of the same atomic operation.
+     *
+     * The 'kPending' tag is only for new connections; callers should not set it directly.
+     */
+    void setTags(TagMask tagsToSet);
+
+    /**
+     * Atomically clears all of the connection tags specified in the 'tagsToUnset' bit field. If
+     * the 'kPending' tag is set, indicating that no tags have yet been specified for the session,
+     * this function also clears that tag as part of the same atomic operation.
+     */
+    void unsetTags(TagMask tagsToUnset);
+
+    /**
+     * Loads the connection tags, passes them to 'mutateFunc' and then stores the result of that
+     * call as the new connection tags, all in one atomic operation.
+     *
+     * In order to ensure atomicity, 'mutateFunc' may get called multiple times, so it should not
+     * perform expensive computations or operations with side effects.
+     *
+     * If the 'kPending' tag is set originally, mutateTags() will unset it regardless of the result
+     * of the 'mutateFunc' call. The 'kPending' tag is only for new connections; callers should
+     * never try to set it.
+     */
+    void mutateTags(const std::function<TagMask(TagMask)>& mutateFunc);
+
+    TagMask getTags() const;
+
 private:
     friend class ServiceContext;
     friend class ThreadClient;
-    explicit Client(std::string desc,
-                    ServiceContext* serviceContext,
-                    std::shared_ptr<transport::Session> session);
+    Client(std::string desc, Service* service, std::shared_ptr<transport::Session> session);
 
     /**
      * Sets the active operation context on this client to "opCtx".
@@ -295,7 +392,7 @@ private:
         _opCtx = opCtx;
     }
 
-    ServiceContext* const _serviceContext;
+    Service* _service;
     const std::shared_ptr<transport::Session> _session;
 
     // Description for the client (e.g. conn8)
@@ -328,6 +425,10 @@ private:
 
     // Indicates that this client is internal to the cluster.
     bool _isInternalClient{false};
+
+    ErrorCodes::Error _disconnectErrorCode = ErrorCodes::ClientDisconnect;
+
+    AtomicWord<TagMask> _tags;
 };
 
 /**
@@ -343,10 +444,30 @@ private:
  */
 class ThreadClient {
 public:
-    explicit ThreadClient(ServiceContext* serviceContext);
-    explicit ThreadClient(StringData desc,
-                          ServiceContext* serviceContext,
-                          std::shared_ptr<transport::Session> session = nullptr);
+    /**
+     * The overload set for this constructor bears some explanation.
+     * The primary fully-populated parameter list is:
+     *     StringData desc
+     *     Service* service
+     *     std::shared_ptr<transport::Session> session
+     *
+     * However, a full set of 2 variations on this constructor are accepted.
+     *
+     * A) The `desc` can be omitted, and will default to `getThreadName()`.
+     *
+     * B) The `session` can be omitted, and will default to `Client::noSession()`.
+     */
+    ThreadClient(StringData desc, Service* service, std::shared_ptr<transport::Session> session);
+
+    /** A) Repeat, with `desc` omitted. */
+    ThreadClient(Service* service, std::shared_ptr<transport::Session> session)
+        : ThreadClient(getThreadName(), service, std::move(session)) {}
+
+    /** B) Repeat all previous constructors, with `session` omitted. */
+    ThreadClient(StringData desc, Service* service)
+        : ThreadClient{desc, service, Client::noSession()} {}
+    explicit ThreadClient(Service* service) : ThreadClient{service, Client::noSession()} {}
+
     ~ThreadClient();
     ThreadClient(const ThreadClient&) = delete;
     ThreadClient(ThreadClient&&) = delete;

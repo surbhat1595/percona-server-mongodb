@@ -65,7 +65,7 @@ namespace mongo {
 
 class AsyncDBClient : public std::enable_shared_from_this<AsyncDBClient> {
 public:
-    explicit AsyncDBClient(const HostAndPort& peer,
+    explicit AsyncDBClient(HostAndPort peer,
                            std::shared_ptr<transport::Session> session,
                            ServiceContext* svcCtx)
         : _peer(std::move(peer)), _session(std::move(session)), _svcCtx(svcCtx) {}
@@ -117,7 +117,6 @@ public:
     void end();
 
     const HostAndPort& remote() const;
-    const HostAndPort& local() const;
     static constexpr Seconds kSlowConnAcquiredToWireLogSuppresionPeriod{5};
 
 private:

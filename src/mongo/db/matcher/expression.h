@@ -33,7 +33,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -57,7 +56,7 @@
 #include "mongo/db/matcher/matchable.h"
 #include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
@@ -314,23 +313,10 @@ public:
      *   - a pointer to a new MatchExpression.
      *
      * The value of 'expression' must not be nullptr.
+     * 'enableSimplification' parameter controls Boolean Expression Simplifier.
      */
-    static std::unique_ptr<MatchExpression> optimize(std::unique_ptr<MatchExpression> expression) {
-        // If the disableMatchExpressionOptimization failpoint is enabled, optimizations are skipped
-        // and the expression is left unmodified.
-        if (MONGO_unlikely(disableMatchExpressionOptimization.shouldFail())) {
-            return expression;
-        }
-
-        auto optimizer = expression->getOptimizer();
-
-        try {
-            return optimizer(std::move(expression));
-        } catch (DBException& ex) {
-            ex.addContext("Failed to optimize expression");
-            throw;
-        }
-    }
+    static std::unique_ptr<MatchExpression> optimize(std::unique_ptr<MatchExpression> expression,
+                                                     bool enableSimplification = true);
 
     /**
      * Traverses expression tree post-order. Sorts children at each non-leaf node by (MatchType,
@@ -341,18 +327,17 @@ public:
     /**
      * Convenience method which normalizes a MatchExpression tree by optimizing and then sorting it.
      */
-    static std::unique_ptr<MatchExpression> normalize(std::unique_ptr<MatchExpression> tree) {
-        tree = optimize(std::move(tree));
-        sortTree(tree.get());
-        return tree;
-    }
+    static std::unique_ptr<MatchExpression> normalize(std::unique_ptr<MatchExpression> tree,
+                                                      bool enableSimplification = true);
 
     /**
      * Assigns an optional input parameter ID to each node which is eligible for
      * auto-parameterization.
      * - tree - The MatchExpression to be parameterized.
-     * - maxParameterCount - Optional maximum number of parameters that can be created. If the
+     * - maxParamCount - Optional maximum number of parameters that can be created. If the
      *   number of parameters would exceed this value, no parameterization will be performed.
+     * - startingParamId - Optional first parameter ID to use. This enables parameterizing a forest
+     *   of match expressions, where each tree continues IDs where the prior one left off.
      * - parameterized - Optional output argument. If non-null, the method sets this output to
      *   indicate whether parameterization was actually done.
      *
@@ -361,8 +346,15 @@ public:
      */
     static std::vector<const MatchExpression*> parameterize(
         MatchExpression* tree,
-        boost::optional<size_t> maxParameterCount = boost::none,
+        boost::optional<size_t> maxParamCount = boost::none,
+        InputParamId startingParamId = 0,
         bool* parameterized = nullptr);
+
+    /**
+     * Sets max param count in MatchExpression::parameterize to 0, clearing MatchExpression
+     * auto-parameterization before CanonicalQuery to ABT translation.
+     */
+    static std::vector<const MatchExpression*> unparameterize(MatchExpression* tree);
 
     MatchExpression(MatchType type, clonable_ptr<ErrorAnnotation> annotation = nullptr);
     virtual ~MatchExpression() {}
@@ -516,16 +508,31 @@ public:
      * If 'options.literalPolicy' is set to 'kToDebugTypeString', the result is no longer expected
      * to re-parse, since we will put strings in places where strings may not be accpeted
      * syntactically (e.g. a number is always expected, as in with the $mod expression).
+     *
+     * includePath:
+     * If set to false, serializes without including the path. For example {a: {$gt: 2}} would
+     * serialize as just {$gt: 2}.
+     *
+     * It is expected that most callers want to set 'includePath' to true to get a correct
+     * serialization. Internally, we may set this to false if we have a situation where an outer
+     * expression serializes a path and we don't want to repeat the path in the inner expression.
+
+     * For example in {a: {$elemMatch: {$eq: 2}}} the "a" is serialized by the $elemMatch, and
+     * should not be serialized by the EQ child.
+     * The $elemMatch will serialize {a: {$elemMatch: <recurse>}} and the EQ will serialize just
+     * {$eq: 2} instead of its usual {a: {$eq: 2}}.
      */
-    virtual void serialize(BSONObjBuilder* out, const SerializationOptions& options) const = 0;
+    virtual void serialize(BSONObjBuilder* out,
+                           const SerializationOptions& options = {},
+                           bool includePath = true) const = 0;
 
     /**
      * Convenience method which serializes this MatchExpression to a BSONObj. See the override with
      * a BSONObjBuilder* argument for details.
      */
-    BSONObj serialize(const SerializationOptions& options = {}) const {
+    BSONObj serialize(const SerializationOptions& options = {}, bool includePath = true) const {
         BSONObjBuilder bob;
-        serialize(&bob, options);
+        serialize(&bob, options, includePath);
         return bob.obj();
     }
 

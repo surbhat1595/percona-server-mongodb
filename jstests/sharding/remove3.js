@@ -1,5 +1,5 @@
 // Validates the remove/drain shard functionality when there is data on the shard being removed
-import {removeShard} from "jstests/sharding/libs/remove_shard_util.js";
+import {moveOutSessionChunks, removeShard} from "jstests/sharding/libs/remove_shard_util.js";
 
 // TODO SERVER-50144 Remove this and allow orphan checking.
 // This test calls removeShard which can leave docs in config.rangeDeletions in state "pending",
@@ -8,8 +8,8 @@ TestData.skipCheckOrphans = true;
 
 var st = new ShardingTest({name: "remove_shard3", shards: 2, mongos: 2});
 
-assert.commandWorked(st.s0.adminCommand({enableSharding: 'TestDB'}));
-st.ensurePrimaryShard('TestDB', st.shard0.shardName);
+assert.commandWorked(
+    st.s0.adminCommand({enableSharding: 'TestDB', primaryShard: st.shard0.shardName}));
 assert.commandWorked(st.s0.adminCommand({shardCollection: 'TestDB.Coll', key: {_id: 1}}));
 assert.commandWorked(st.s0.adminCommand({split: 'TestDB.Coll', middle: {_id: 0}}));
 
@@ -34,6 +34,8 @@ assert.eq('ongoing', removeRes.state);
 // Move the one chunk off st.shard1.shardName
 assert.commandWorked(st.s0.adminCommand(
     {moveChunk: 'TestDB.Coll', find: {_id: 1}, to: st.shard0.shardName, _waitForDelete: true}));
+
+moveOutSessionChunks(st, st.shard1.shardName, st.shard0.shardName);
 
 // Remove shard must succeed now
 removeShard(st, st.shard1.shardName);

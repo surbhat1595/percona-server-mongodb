@@ -35,7 +35,6 @@
 
 #include <absl/container/node_hash_map.h>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -91,6 +90,22 @@
 #include "mongo/util/str.h"
 
 namespace mongo::optimizer {
+namespace {
+/**
+ * Return the minimum or maximum value for the "class" of values represented by the input
+ * constant. Used to support type bracketing. Takes into account both the type tag and value of
+ * the input constant.
+ * Return format is <min/max value, bool inclusive>
+ */
+std::pair<boost::optional<ABT>, bool> getMinMaxBoundForValue(const bool isMin,
+                                                             const sbe::value::TypeTags& tag,
+                                                             const sbe::value::Value& val) {
+    if (sbe::value::isNaN(tag, val)) {
+        return {Constant::fromDouble(std::numeric_limits<double>::quiet_NaN()), true};
+    }
+    return getMinMaxBoundForType(isMin, tag);
+}
+}  // namespace
 
 class ABTMatchExpressionPreVisitor : public SelectiveMatchExpressionVisitorBase<true> {
     using SelectiveMatchExpressionVisitorBase<true>::visit;
@@ -242,11 +257,30 @@ public:
         if (arrTraversePtr->size() == 1) {
             const auto [tagSingle, valSingle] = sbe::value::copyValue(
                 arrTraversePtr->getAt(0).first, arrTraversePtr->getAt(0).second);
-            result = make<PathCompare>(Operations::Eq, make<Constant>(tagSingle, valSingle));
+
+            if (expr->getInputParamId())
+                result =
+                    make<FunctionCall>(parameterFunctionName,
+                                       makeSeq(make<Constant>(sbe::value::TypeTags::NumberInt32,
+                                                              *expr->getInputParamId()),
+                                               make<Constant>(sbe::value::TypeTags::NumberInt32,
+                                                              static_cast<int>(tagSingle))));
+            else
+                result = make<Constant>(tagSingle, valSingle);
+            result = make<PathCompare>(Operations::Eq, std::move(result));
         } else {
-            result =
-                make<PathCompare>(Operations::EqMember, make<Constant>(tagTraverse, valTraverse));
-            arrGuard.reset();
+            if (expr->getInputParamId()) {
+                result =
+                    make<FunctionCall>(parameterFunctionName,
+                                       makeSeq(make<Constant>(sbe::value::TypeTags::NumberInt32,
+                                                              *expr->getInputParamId()),
+                                               make<Constant>(sbe::value::TypeTags::NumberInt32,
+                                                              static_cast<int>(tagTraverse))));
+            } else {
+                result = make<Constant>(tagTraverse, valTraverse);
+                arrGuard.reset();
+            }
+            result = make<PathCompare>(Operations::EqMember, std::move(result));
         }
 
         if (addNullPathDefault) {
@@ -449,13 +483,23 @@ public:
         assertSupportedPathExpression(expr);
 
         const ProjectionName lambdaProjName{_ctx.getNextId("lambda_sizeMatch")};
-        ABT result = make<PathLambda>(make<LambdaAbstraction>(
+        auto result = [&]() {
+            if (expr->getInputParamId())
+                return make<FunctionCall>(
+                    parameterFunctionName,
+                    makeSeq(
+                        make<Constant>(sbe::value::TypeTags::NumberInt32, *expr->getInputParamId()),
+                        make<Constant>(sbe::value::TypeTags::NumberInt32,
+                                       static_cast<int>(sbe::value::TypeTags::NumberInt32))));
+            else
+                return Constant::int64(expr->getData());
+        }();
+        result = make<PathLambda>(make<LambdaAbstraction>(
             lambdaProjName,
             make<BinaryOp>(
                 Operations::Eq,
                 make<FunctionCall>("getArraySize", makeSeq(make<Variable>(lambdaProjName))),
-                Constant::int64(expr->getData()))));
-
+                std::move(result))));
         if (shouldGeneratePath(expr)) {
             result = translateFieldRef(*(expr->fieldRef()), std::move(result));
         }
@@ -551,7 +595,15 @@ private:
         assertSupportedPathExpression(expr);
 
         auto [tag, val] = sbe::value::makeValue(Value(expr->getData()));
-        ABT result = make<PathCompare>(op, make<Constant>(tag, val));
+        auto result = ABT{make<PathIdentity>()};
+        if (expr->getInputParamId())
+            result = make<FunctionCall>(
+                parameterFunctionName,
+                makeSeq(make<Constant>(sbe::value::TypeTags::NumberInt32, *expr->getInputParamId()),
+                        make<Constant>(sbe::value::TypeTags::NumberInt32, static_cast<int>(tag))));
+        else
+            result = make<Constant>(tag, val);
+        result = make<PathCompare>(op, std::move(result));
 
         bool tagNullMatchMissingField =
             tag == sbe::value::TypeTags::Null && (op == Operations::Lte || op == Operations::Gte);
@@ -559,7 +611,7 @@ private:
         switch (op) {
             case Operations::Lt:
             case Operations::Lte: {
-                auto&& [constant, inclusive] = getMinMaxBoundForType(true /*isMin*/, tag);
+                auto&& [constant, inclusive] = getMinMaxBoundForValue(true /*isMin*/, tag, val);
                 if (constant) {
                     maybeComposePath(result,
                                      make<PathCompare>(inclusive ? Operations::Gte : Operations::Gt,
@@ -577,7 +629,7 @@ private:
 
             case Operations::Gt:
             case Operations::Gte: {
-                auto&& [constant, inclusive] = getMinMaxBoundForType(false /*isMin*/, tag);
+                auto&& [constant, inclusive] = getMinMaxBoundForValue(false /*isMin*/, tag, val);
                 if (constant) {
                     maybeComposePath(result,
                                      make<PathCompare>(inclusive ? Operations::Lte : Operations::Lt,

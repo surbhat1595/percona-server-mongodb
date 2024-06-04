@@ -35,19 +35,19 @@
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/db/timeseries/bucket_catalog/bucket_catalog_helpers.h"
+#include "mongo/db/timeseries/metadata.h"
 
 namespace mongo::timeseries::bucket_catalog {
 
 BucketMetadata::BucketMetadata(BSONElement elem,
-                               const StringData::ComparatorInterface* comparator,
+                               const StringDataComparator* comparator,
                                boost::optional<StringData> trueMetaFieldName)
     : _metadataElement(elem), _comparator(comparator) {
     if (_metadataElement) {
         BSONObjBuilder objBuilder;
         // We will get an object of equal size, just with reordered fields.
         objBuilder.bb().reserveBytes(_metadataElement.size());
-        normalizeMetadata(&objBuilder, _metadataElement, trueMetaFieldName);
+        metadata::normalize(_metadataElement, objBuilder, trueMetaFieldName);
         _metadata = objBuilder.obj();
     }
     // Updates the BSONElement to refer to the copied BSONObj.
@@ -70,7 +70,7 @@ StringData BucketMetadata::getMetaField() const {
     return StringData(_metadataElement.fieldName());
 }
 
-const StringData::ComparatorInterface* BucketMetadata::getComparator() const {
+const StringDataComparator* BucketMetadata::getComparator() const {
     return _comparator;
 }
 

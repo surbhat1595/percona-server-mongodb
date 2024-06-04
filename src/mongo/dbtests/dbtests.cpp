@@ -32,7 +32,6 @@
  */
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <string>
 #include <utility>
@@ -64,6 +63,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_entry_point_mongod.h"
+#include "mongo/db/session_manager_mongod.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/wire_version.h"
@@ -71,7 +71,7 @@
 #include "mongo/dbtests/framework.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/transport/service_entry_point.h"
-#include "mongo/transport/transport_layer_manager.h"
+#include "mongo/transport/transport_layer_manager_impl.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/util/assert_util_core.h"
 #include "mongo/util/clock_source.h"
@@ -90,23 +90,26 @@ namespace {
 const auto kIndexVersion = IndexDescriptor::IndexVersion::kV2;
 }  // namespace
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(WireSpec, ("EndStartupOptionHandling"))(InitializerContext*) {
-    WireSpec::Specification spec;
+namespace {
+ServiceContext::ConstructorActionRegisterer registerWireSpec{
+    "RegisterWireSpec", [](ServiceContext* service) {
+        WireSpec::Specification spec;
 
-    // Accept from any version external client.
-    spec.incomingExternalClient.minWireVersion = RELEASE_2_4_AND_BEFORE;
-    spec.incomingExternalClient.maxWireVersion = LATEST_WIRE_VERSION;
+        // Accept from any version external client.
+        spec.incomingExternalClient.minWireVersion = RELEASE_2_4_AND_BEFORE;
+        spec.incomingExternalClient.maxWireVersion = LATEST_WIRE_VERSION;
 
-    // Accept from internal clients of the same version, as in upgrade
-    // featureCompatibilityVersion.
-    spec.incomingInternalClient.minWireVersion = LATEST_WIRE_VERSION;
-    spec.incomingInternalClient.maxWireVersion = LATEST_WIRE_VERSION;
+        // Accept from internal clients of the same version, as in upgrade
+        // featureCompatibilityVersion.
+        spec.incomingInternalClient.minWireVersion = LATEST_WIRE_VERSION;
+        spec.incomingInternalClient.maxWireVersion = LATEST_WIRE_VERSION;
 
-    // Connect to servers of the same version, as in upgrade featureCompatibilityVersion.
-    spec.outgoing.minWireVersion = LATEST_WIRE_VERSION;
-    spec.outgoing.maxWireVersion = LATEST_WIRE_VERSION;
+        // Connect to servers of the same version, as in upgrade featureCompatibilityVersion.
+        spec.outgoing.minWireVersion = LATEST_WIRE_VERSION;
+        spec.outgoing.maxWireVersion = LATEST_WIRE_VERSION;
 
-    WireSpec::instance().initialize(std::move(spec));
+        WireSpec::getWireSpec(service).initialize(std::move(spec));
+    }};
 }
 
 Status createIndex(OperationContext* opCtx, StringData ns, const BSONObj& keys, bool unique) {
@@ -203,7 +206,7 @@ WriteContextForTests::WriteContextForTests(OperationContext* opCtx, StringData n
     : _opCtx(opCtx), _nss(NamespaceString::createNamespaceString_forTest(ns)) {
     // Lock the database and collection
     _autoDb.emplace(opCtx, _nss.dbName(), MODE_IX);
-    _collLock.emplace(opCtx, _nss, MODE_IX);
+    _collLock.emplace(opCtx, _nss, MODE_X);
 
     const bool doShardVersionCheck = false;
 
@@ -211,13 +214,6 @@ WriteContextForTests::WriteContextForTests(OperationContext* opCtx, StringData n
     auto db = _autoDb->ensureDbExists(opCtx);
     invariant(db, _nss.toStringForErrorMsg());
     invariant(db == _clientContext->db());
-
-    // If the collection exists, there is no need to lock into stronger mode
-    if (getCollection())
-        return;
-
-    invariant(db == _clientContext->db());
-    _collLock.emplace(opCtx, _nss, MODE_X);
 }
 
 }  // namespace dbtests
@@ -237,7 +233,7 @@ int dbtestsMain(int argc, char** argv) {
     setGlobalServiceContext(ServiceContext::make());
 
     const auto service = getGlobalServiceContext();
-    service->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongod>(service));
+    service->getService()->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongod>());
 
     auto fastClock = std::make_unique<ClockSourceMock>();
     // Timestamps are split into two 32-bit integers, seconds and "increments". Currently (but
@@ -254,8 +250,8 @@ int dbtestsMain(int argc, char** argv) {
     CursorManager::get(service)->setPreciseClockSource(preciseClock.get());
     service->setPreciseClockSource(std::move(preciseClock));
 
-    service->setTransportLayer(
-        transport::TransportLayerManager::makeAndStartDefaultEgressTransportLayer());
+    service->setTransportLayerManager(
+        transport::TransportLayerManagerImpl::makeAndStartDefaultEgressTransportLayer());
 
     repl::ReplicationCoordinator::set(
         service,

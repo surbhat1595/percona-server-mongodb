@@ -38,6 +38,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/storage/backup_block.h"
 #include "mongo/db/storage/storage_engine.h"
@@ -101,7 +102,7 @@ public:
                                   uint8_t* out,
                                   size_t outLen,
                                   size_t* resultLen,
-                                  boost::optional<std::string> dbName);
+                                  boost::optional<DatabaseName> dbName);
 
     /**
      * Transform temporary data that has been spilled to disk back into readable form. If dbName
@@ -115,7 +116,7 @@ public:
                                     uint8_t* out,
                                     size_t outLen,
                                     size_t* resultLen,
-                                    boost::optional<std::string> dbName);
+                                    boost::optional<DatabaseName> dbName);
 
     /**
      * Inform the encryption storage system to prepare its data such that its files can be copied

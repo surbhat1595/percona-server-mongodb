@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/utility/in_place_factory.hpp>  // IWYU pragma: keep
 #include <iterator>
 #include <list>
@@ -237,7 +236,8 @@ void checkPlacementVersion(OperationContext* opCtx,
                            const PlacementConcern& placementConcern) {
     const auto& receivedDbVersion = placementConcern.dbVersion;
     if (receivedDbVersion) {
-        DatabaseShardingState::assertMatchingDbVersion(opCtx, nss.dbName(), *receivedDbVersion);
+        const auto scopedDss = DatabaseShardingState::acquireShared(opCtx, nss.dbName());
+        scopedDss->assertMatchingDbVersion(opCtx, *receivedDbVersion);
     }
 
     const auto& receivedShardVersion = placementConcern.shardVersion;
@@ -302,12 +302,9 @@ SnapshotedServices acquireServicesSnapshot(OperationContext* opCtx,
     auto collOrView = acquireLocalCollectionOrView(opCtx, catalog, prerequisites);
     const auto& nss = prerequisites.nss;
 
-    const bool isPlacementConcernVersioned =
-        placementConcern.dbVersion || placementConcern.shardVersion;
-
     const auto scopedCSS = CollectionShardingState::acquire(opCtx, nss);
     auto collectionDescription =
-        scopedCSS->getCollectionDescription(opCtx, isPlacementConcernVersioned);
+        scopedCSS->getCollectionDescription(opCtx, placementConcern.shardVersion.has_value());
 
     invariant(!collectionDescription.isSharded() || placementConcern.shardVersion);
     auto optOwnershipFilter = collectionDescription.isSharded()
@@ -472,8 +469,8 @@ void validateRequests(const std::vector<CollectionOrViewAcquisitionRequest>& acq
             uassert(ErrorCodes::InvalidNamespace,
                     str::stream() << "Invalid db name "
                                   << ar.nssOrUUID.dbName().toStringForErrorMsg(),
-                    NamespaceString::validDBName(ar.nssOrUUID.dbName(),
-                                                 NamespaceString::DollarInDbNameBehavior::Allow));
+                    DatabaseName::isValid(ar.nssOrUUID.dbName(),
+                                          DatabaseName::DollarInDbNameBehavior::Allow));
         } else {
             MONGO_UNREACHABLE;
         }
@@ -524,6 +521,7 @@ bool supportsLockFreeRead(OperationContext* opCtx) {
         !opCtx->lockState()->isWriteLocked() &&
         !(opCtx->recoveryUnit()->isActive() && !opCtx->isLockFreeReadsOp());
 }
+
 }  // namespace
 
 CollectionOrViewAcquisitionRequest CollectionOrViewAcquisitionRequest::fromOpCtx(
@@ -879,18 +877,21 @@ void SnapshotAttempt::openStorageSnapshot() {
     // required for a collection that uses capped snapshots (i.e. a collection that is
     // unreplicated and capped) is:
     //  * The present read operation is reading without a timestamp (since unreplicated
-    //  collections
-    //    don't support timestamped reads), and
+    //  collections don't support timestamped reads), and
     //  * When opening the storage snapshot (and thus when establishing the capped snapshot),
-    //  there
-    //    was a DDL operation pending on the namespace or UUID requested for this read (because
-    //    this is the only time we need to construct a Collection object from the durable
-    //    catalog for an untimestamped read).
+    //  there was a DDL operation pending on the namespace or UUID requested for this read (because
+    //  this is the only time we need to construct a Collection object from the durable catalog for
+    //  an untimestamped read).
     //
     // Because DDL operations require a collection X lock, there cannot have been any ongoing
     // concurrent writes to the collection while establishing the capped snapshot. This means
     // that if there was a capped snapshot, it should not have contained any uncommitted writes,
     // and so the _lowestUncommittedRecord must be null.
+    //
+    // The exception to the above is collection creation, which only requires an IX lock. Concurrent
+    // readers will have to open a Collection object from the durable catalog, and at that point it
+    // is assumed safe to establish an empty CappedSnapshot (even if the storage snapshot is already
+    // open) and cause a reader's cursor to return no data.
     for (auto& nssOrUUID : _acquisitionRequests) {
         establishCappedSnapshotIfNeeded(_opCtx, *_catalogBeforeSnapshot, nssOrUUID);
     }

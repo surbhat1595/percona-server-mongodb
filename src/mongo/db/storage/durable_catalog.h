@@ -37,7 +37,6 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -350,9 +349,7 @@ private:
 
     std::string _newInternalIdent(StringData identStem);
 
-    std::string _newRand() {
-        return str::stream() << SecureRandom().nextInt64();
-    }
+    std::string _newRand();
 
     /**
      * Helper which constructs a DurableCatalogEntry given 'catalogId' and 'obj'.

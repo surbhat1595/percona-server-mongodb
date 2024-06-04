@@ -11,6 +11,7 @@
  *  incompatible_with_concurrency_simultaneous,
  * ]
  */
+import {interruptedQueryErrors} from "jstests/concurrency/fsm_libs/assert.js";
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {RetryableWritesUtil} from "jstests/libs/retryable_writes_util.js";
@@ -18,9 +19,6 @@ import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {
     AnalyzeShardKeyUtil
 } from "jstests/sharding/analyze_shard_key/libs/analyze_shard_key_util.js";
-
-const aggregateInterruptErrors =
-    [ErrorCodes.CursorNotFound, ErrorCodes.CursorKilled, ErrorCodes.QueryPlanKilled];
 
 const kBaseConfig = {
     threadCount: 1,
@@ -605,6 +603,25 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
             res.readDistribution.sampleSize.total + res.writeDistribution.sampleSize.total;
         this.previousNumSampledQueries = currentNumSampledQueries;
 
+        if (isFinal) {
+            // Sanity check sampleSize to make sure we collected non-zero metrics for each of the
+            // commands.
+            for (const readCmd of ['find', 'aggregate', 'count', 'distinct']) {
+                assert.gt(res.readDistribution.sampleSize[readCmd],
+                          0,
+                          () => "Expected sampleSize for '" + readCmd +
+                              "' to be greater than zero: " +
+                              tojson(this.truncateAnalyzeShardKeyResponseForLogging(res)));
+            }
+            for (const writeCmd of ['update', 'delete', 'findAndModify']) {
+                assert.gt(res.writeDistribution.sampleSize[writeCmd],
+                          0,
+                          () => "Expected sampleSize for '" + writeCmd +
+                              "' to be greater than zero: " +
+                              tojson(this.truncateAnalyzeShardKeyResponseForLogging(res)));
+            }
+        }
+
         if (this.shouldValidateReadDistribution(res.readDistribution.sampleSize)) {
             assertReadMetricsDiff(res.readDistribution.percentageOfSingleShardReads,
                                   this.readDistribution.percentageOfSingleShardReads);
@@ -906,8 +923,7 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
         // the filtering metadata which would be used for the cursor. Interrupts such as
         // stepdowns can cause a getMore command get fail as a result of the cursor being killed.
         this.expectedAggregateInterruptErrors =
-            cluster.isSharded() && TestData.runningWithShardStepdowns ? aggregateInterruptErrors
-                                                                      : [];
+            cluster.isSharded() && TestData.runningWithShardStepdowns ? interruptedQueryErrors : [];
 
         this.generateShardKeyOptions(cluster);
         this.generateDocumentOptions(cluster);
@@ -1292,6 +1308,7 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
         listSampledQueries: {
             analyzeShardKey: 0.2,
             enableQuerySampling: 0.1,
+            find: 0.1,
             aggregate: 0.1,
             count: 0.1,
             distinct: 0.1,

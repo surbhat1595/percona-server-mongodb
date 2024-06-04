@@ -133,7 +133,7 @@ QUERY_UTIL_NAMED_ENUM_DEFINE(DistributionType, DISTRIBUTIONTYPE_NAMES);
 struct FieldProjectionMap {
     boost::optional<ProjectionName> _ridProjection;
     boost::optional<ProjectionName> _rootProjection;
-    opt::unordered_map<FieldNameType, ProjectionName, FieldNameType::Hasher> _fieldProjections;
+    std::map<FieldNameType, ProjectionName> _fieldProjections;
 
     bool operator==(const FieldProjectionMap& other) const;
 };
@@ -227,6 +227,9 @@ constexpr SelectivityType operator/(const CEType v1, const CEType v2) {
     return {v1._value / v2._value};
 }
 
+// Constant to correct for the difference between CE estimates which don't contain orphans and
+// physical execution of plans which will encounter orphans if shard filtering has not occurred.
+inline constexpr double kOrphansCardinalityFudgeFactor = 1.001;
 
 class CostType {
     static constexpr double kPrecision = 0.00000001;
@@ -334,10 +337,21 @@ struct QueryHints {
     // prevent issues arising from yielding.
     bool _disableYieldingTolerantPlans = true;
 
+    // Controls if we permit the optimization to remove Not operators by pushing them
+    // down toward the leaves of an ABT.
+    bool _enableNotPushdown = false;
+
+    // Controls if we force sampling CE to fall back on heuristic for filter node.
+    bool _forceSamplingCEFallBackForFilterNode = true;
+
     // Controls the minimum and maximum number of equalityPrefixes we generate for a candidate
     // index. The minimum bound is only used for testing and in production should remain set to 1.
     size_t _minIndexEqPrefixes = 1;
     size_t _maxIndexEqPrefixes = 1;
+
+    // Rather than sampling a fully random set of documents, sample N documents (5 by default)
+    // randomly and scan sequentially from each of them for the rest.
+    int32_t _numSamplingChunks = 5;
 };
 
 }  // namespace mongo::optimizer

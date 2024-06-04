@@ -6,6 +6,8 @@ import {
     testAccumAgainstGroup
 } from "jstests/aggregation/extras/window_function_helpers.js";
 
+import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
+
 const coll = db[jsTestName()];
 coll.drop();
 
@@ -91,3 +93,89 @@ result = coll.runCommand({
     }
 });
 assert.commandFailedWithCode(result, ErrorCodes.FailedToParse, "'window' field must be an object");
+
+// A default value of NULL is returned if the expression is constant and the window is empty.
+result = coll.aggregate([
+                 {
+                     $setWindowFields: {
+                         sortBy: {x: 1},
+                         output: {
+                             last: {$last: "VAL", window: {documents: [2, 3]}},
+                         }
+                     }
+                 },
+                 {$unset: "_id"},
+             ])
+             .toArray();
+assert.sameMembers(result, [
+    {x: 1, y: 5, last: 'VAL'},
+    {x: 2, y: 4, last: 'VAL'},
+    {x: 3, y: 6, last: null},
+    {x: 4, y: 5, last: null},
+]);
+
+result = coll.aggregate([
+                 {
+                     $setWindowFields: {
+                         sortBy: {x: 1},
+                         output: {
+                             last: {$last: "VAL", window: {documents: [-3, -2]}},
+                         }
+                     }
+                 },
+                 {$unset: "_id"},
+             ])
+             .toArray();
+assert.sameMembers(result, [
+    {x: 1, y: 5, last: null},
+    {x: 2, y: 4, last: null},
+    {x: 3, y: 6, last: 'VAL'},
+    {x: 4, y: 5, last: 'VAL'},
+]);
+
+// Assert NULL is returned if field is missing
+coll.drop();
+assert.commandWorked(coll.insert([
+    {_id: 1, x: 1, y: 3},
+    {_id: 2, x: 1},
+    {_id: 3, x: 2, y: 6},
+    {_id: 4, x: 2, y: 5},
+]));
+result = coll.aggregate([
+                 {
+                     $setWindowFields: {
+                         sortBy: {_id: 1},
+                         partitionBy: "$x",
+                         output: {
+                             last: {$last: "$y", window: {documents: [-1, 1]}},
+                         }
+                     }
+                 },
+             ])
+             .toArray();
+assert.sameMembers(result, [
+    {_id: 1, x: 1, y: 3, last: null},
+    {_id: 2, x: 1, last: null},
+    {_id: 3, x: 2, y: 6, last: 5},
+    {_id: 4, x: 2, y: 5, last: 5},
+]);
+
+// Re-run query with unbounded window
+result = coll.aggregate([
+                 {
+                     $setWindowFields: {
+                         sortBy: {_id: 1},
+                         partitionBy: "$x",
+                         output: {
+                             last: {$last: "$y", window: {}},
+                         }
+                     }
+                 },
+             ])
+             .toArray();
+assert.sameMembers(result, [
+    {_id: 1, x: 1, y: 3, last: null},
+    {_id: 2, x: 1, last: null},
+    {_id: 3, x: 2, y: 6, last: 5},
+    {_id: 4, x: 2, y: 5, last: 5},
+]);

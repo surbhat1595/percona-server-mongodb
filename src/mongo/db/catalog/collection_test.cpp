@@ -172,7 +172,7 @@ TEST_F(CollectionTest, CappedNotifierWaitUntilAsynchronousNotifyAll) {
 
     auto before = Date_t::now();
     stdx::thread thread([this, before, prevVersion, &notifier] {
-        ThreadClient client(getServiceContext());
+        ThreadClient client(getServiceContext()->getService());
         auto opCtx = cc().makeOperationContext();
         notifier->waitUntil(opCtx.get(), prevVersion, before + Milliseconds(25));
         auto after = Date_t::now();
@@ -197,7 +197,7 @@ TEST_F(CollectionTest, CappedNotifierWaitUntilAsynchronousKill) {
 
     auto before = Date_t::now();
     stdx::thread thread([this, before, prevVersion, &notifier] {
-        ThreadClient client(getServiceContext());
+        ThreadClient client(getServiceContext()->getService());
         auto opCtx = cc().makeOperationContext();
         notifier->waitUntil(opCtx.get(), prevVersion, before + Milliseconds(25));
         auto after = Date_t::now();
@@ -224,7 +224,7 @@ TEST_F(CollectionTest, CappedNotifierWaitUntilInterrupt) {
     auto& clientToInterrupt = cc();
     auto before = Date_t::now();
     stdx::thread thread([this, before, prevVersion, &notifier, &clientToInterrupt] {
-        ThreadClient client(getServiceContext());
+        ThreadClient client(getServiceContext()->getService());
         auto opCtx = cc().makeOperationContext();
         notifier->waitUntil(opCtx.get(), prevVersion, before + Milliseconds(25));
         auto after = Date_t::now();
@@ -813,7 +813,7 @@ TEST_F(CatalogTestFixture, CappedVisibilityEmptyInitialState) {
         return uassertStatusOK(rs->insertRecord(opCtx, data.c_str(), data.size(), Timestamp()));
     };
 
-    auto longLivedClient = getServiceContext()->makeClient("longLived");
+    auto longLivedClient = getServiceContext()->getService()->makeClient("longLived");
     auto longLivedOpCtx = longLivedClient->makeOperationContext();
     WriteUnitOfWork longLivedWUOW(longLivedOpCtx.get());
 
@@ -874,7 +874,7 @@ TEST_F(CatalogTestFixture, CappedVisibilityNonEmptyInitialState) {
         return uassertStatusOK(rs->insertRecord(opCtx, data.c_str(), data.size(), Timestamp()));
     };
 
-    auto longLivedClient = getServiceContext()->makeClient("longLived");
+    auto longLivedClient = getServiceContext()->getService()->makeClient("longLived");
     auto longLivedOpCtx = longLivedClient->makeOperationContext();
 
     RecordId initialId;
@@ -966,7 +966,7 @@ TEST_F(CollectionTest, CappedCursorRollover) {
     }
 
     // Setup the cursor that should rollover.
-    auto otherClient = getServiceContext()->makeClient("otherClient");
+    auto otherClient = getServiceContext()->getService()->makeClient("otherClient");
     auto otherOpCtx = otherClient->makeOperationContext();
     auto cursor = rs->getCursor(otherOpCtx.get());
     ASSERT(cursor->next());

@@ -33,7 +33,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <memory>
 #include <string>
@@ -615,6 +614,7 @@ public:
     void onBecomeArbiter() final {}
     void onStepUpComplete(OperationContext*, long long term) final;
     void onStepDown() final;
+    void onRollback() final {}
     inline std::string getServiceName() const override final {
         return "PrimaryOnlyServiceRegistry";
     }

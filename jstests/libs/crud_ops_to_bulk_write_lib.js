@@ -5,42 +5,6 @@
 export const BulkWriteUtils = (function() {
     const commandsToBulkWriteOverride = new Set(["insert", "update", "delete"]);
 
-    const commandsToAlwaysFlushBulkWrite = new Set([
-        "aggregate",
-        "mapreduce",
-        "authenticate",
-        "logout",
-        "applyops",
-        "checkshardingindex",
-        "cleanuporphaned",
-        "cleanupreshardcollection",
-        "commitreshardcollection",
-        "movechunk",
-        "moveprimary",
-        "moverange",
-        "mergechunks",
-        "refinecollectionshardkey",
-        "split",
-        "splitvector",
-        "killallsessions",
-        "killallsessionsbypattern",
-        "dropconnections",
-        "filemd5",
-        "fsync",
-        "fsyncunlock",
-        "killop",
-        "setfeaturecompatibilityversion",
-        "shutdown",
-        "currentop",
-        "listdatabases",
-        "listcollections",
-        "committransaction",
-        "aborttransaction",
-        "preparetransaction",
-        "endsessions",
-        "killsessions"
-    ]);
-
     let numOpsPerResponse = [];
     let nsInfos = [];
     let bufferedOps = [];
@@ -51,10 +15,6 @@ export const BulkWriteUtils = (function() {
 
     function canProcessAsBulkWrite(cmdName) {
         return commandsToBulkWriteOverride.has(cmdName);
-    }
-
-    function commandToFlushBulkWrite(cmdName) {
-        return commandsToAlwaysFlushBulkWrite.has(cmdName);
     }
 
     function resetBulkWriteBatch() {
@@ -73,9 +33,10 @@ export const BulkWriteUtils = (function() {
 
     function getBulkWriteState() {
         return {
+            nsInfos: nsInfos,
             bypassDocumentValidation: bypassDocumentValidation,
             letObj: letObj,
-            ordered: ordered
+            ordered: ordered,
         };
     }
 
@@ -84,7 +45,7 @@ export const BulkWriteUtils = (function() {
     }
 
     function flushCurrentBulkWriteBatch(
-        conn, originalRunCommand, makeRunCommandArgs, additionalParameters = {}) {
+        conn, lsid, originalRunCommand, makeRunCommandArgs, additionalParameters = {}) {
         // Should not be possible to reach if bypassDocumentValidation is not set.
         assert(bypassDocumentValidation != null);
 
@@ -96,19 +57,22 @@ export const BulkWriteUtils = (function() {
             "bypassDocumentValidation": bypassDocumentValidation,
         };
 
+        if (wc != null) {
+            bulkWriteCmd["writeConcern"] = wc;
+        }
+
         if (letObj != null) {
             bulkWriteCmd["let"] = letObj;
         }
 
-        if (wc != null) {
-            bulkWriteCmd["writeConcern"] = wc;
+        if (lsid) {
+            bulkWriteCmd["lsid"] = lsid;
         }
 
         // Add in additional parameters to the bulkWrite command.
         bulkWriteCmd = {...bulkWriteCmd, ...additionalParameters};
 
-        let resp = {};
-        resp = originalRunCommand.apply(conn, makeRunCommandArgs(bulkWriteCmd, "admin"));
+        let resp = originalRunCommand.apply(conn, makeRunCommandArgs(bulkWriteCmd, "admin"));
 
         let response = convertBulkWriteResponse(bulkWriteCmd, resp);
         let finalResponse = response;
@@ -127,7 +91,6 @@ export const BulkWriteUtils = (function() {
                 }
             }
             bulkWriteCmd.ops = bufferedOps;
-
             resp = originalRunCommand.apply(conn, makeRunCommandArgs(bulkWriteCmd, "admin"));
             response = convertBulkWriteResponse(bulkWriteCmd, resp);
             finalResponse = finalResponse.concat(response);
@@ -211,12 +174,12 @@ export const BulkWriteUtils = (function() {
                                 resp["upserted"] = [];
                             }
                             // Need to add the index of the upserted doc.
-                            current.upserted["index"] = cursorIdx;
-                            resp["upserted"].push(current.upserted);
+                            resp["upserted"].push({index: cursorIdx, ...current.upserted});
                         }
                     }
 
                     ["writeConcernError",
+                     "retriedStmtIds",
                      "opTime",
                      "$clusterTime",
                      "electionId",
@@ -238,7 +201,8 @@ export const BulkWriteUtils = (function() {
         return responses;
     }
 
-    function getNsInfoIdx(nsInfoEntry, collectionUUID, encryptionInformation) {
+    function getNsInfoIdx(
+        nsInfoEntry, collectionUUID, encryptionInformation, isTimeseriesNamespace) {
         let idx = nsInfos.findIndex((element) => element.ns == nsInfoEntry);
         if (idx == -1) {
             idx = nsInfos.length;
@@ -248,6 +212,9 @@ export const BulkWriteUtils = (function() {
             }
             if (encryptionInformation) {
                 nsInfo["encryptionInformation"] = encryptionInformation;
+            }
+            if (isTimeseriesNamespace) {
+                nsInfo["isTimeseriesNamespace"] = isTimeseriesNamespace;
             }
             nsInfos.push(nsInfo);
         }
@@ -288,13 +255,7 @@ export const BulkWriteUtils = (function() {
     function processDeleteOp(nsInfoIdx, cmdObj, deleteCmd) {
         let op = {"delete": nsInfoIdx, "filter": deleteCmd.q, "multi": deleteCmd.limit == 0};
 
-        ["sampleId"].forEach(property => {
-            if (cmdObj.hasOwnProperty(property)) {
-                op[property] = cmdObj[property];
-            }
-        });
-
-        ["collation", "hint"].forEach(property => {
+        ["sampleId", "collation", "hint"].forEach(property => {
             if (deleteCmd.hasOwnProperty(property)) {
                 op[property] = deleteCmd[property];
             }
@@ -322,8 +283,10 @@ export const BulkWriteUtils = (function() {
         }
 
         let nsInfoEntry = dbName + "." + cmdObj[cmdName];
-        let nsInfoIdx =
-            getNsInfoIdx(nsInfoEntry, cmdObj.collectionUUID, cmdObj.encryptionInformation);
+        let nsInfoIdx = getNsInfoIdx(nsInfoEntry,
+                                     cmdObj.collectionUUID,
+                                     cmdObj.encryptionInformation,
+                                     cmdObj.isTimeseriesNamespace);
 
         let numOps = 0;
 
@@ -357,7 +320,6 @@ export const BulkWriteUtils = (function() {
         getNsInfoIdx: getNsInfoIdx,
         flushCurrentBulkWriteBatch: flushCurrentBulkWriteBatch,
         resetBulkWriteBatch: resetBulkWriteBatch,
-        commandToFlushBulkWrite: commandToFlushBulkWrite,
         canProcessAsBulkWrite: canProcessAsBulkWrite,
         getCurrentBatchSize: getCurrentBatchSize,
         getBulkWriteState: getBulkWriteState,

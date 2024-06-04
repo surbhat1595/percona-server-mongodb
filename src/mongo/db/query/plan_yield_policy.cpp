@@ -31,7 +31,6 @@
 #include <boost/optional/optional.hpp>
 #include <utility>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/db/catalog/collection_uuid_mismatch_info.h"
 #include "mongo/db/concurrency/exception_util.h"
@@ -62,7 +61,6 @@ PlanYieldPolicy::PlanYieldPolicy(
     stdx::visit(OverloadedVisitor{[&](const Yieldable* collectionPtr) {
                                       invariant(!collectionPtr || collectionPtr->yieldable() ||
                                                 policy == YieldPolicy::WRITE_CONFLICT_RETRY_ONLY ||
-                                                policy == YieldPolicy::NO_YIELD ||
                                                 policy == YieldPolicy::INTERRUPT_ONLY ||
                                                 policy == YieldPolicy::ALWAYS_TIME_OUT ||
                                                 policy == YieldPolicy::ALWAYS_MARK_KILLED);
@@ -88,11 +86,10 @@ PlanYieldPolicy::YieldPolicy PlanYieldPolicy::getPolicyOverrideForOperation(
     }
 
     // If the state of our locks held is not yieldable at all, we will assume this is an internal
-    // operation that should not be interrupted or yielded.
-    // TODO: SERVER-76238 Evaluate if we can make everything INTERRUPT_ONLY instead.
+    // operation that will not yield.
     if (!opCtx->lockState()->canSaveLockState() &&
         (desired == YieldPolicy::YIELD_AUTO || desired == YieldPolicy::YIELD_MANUAL)) {
-        return YieldPolicy::NO_YIELD;
+        return YieldPolicy::INTERRUPT_ONLY;
     }
 
     return desired;
@@ -140,11 +137,7 @@ Status PlanYieldPolicy::yieldOrInterrupt(OperationContext* opCtx,
             // Saving and restoring can modify '_yieldable', so we make a copy before we start.
             const auto yieldable = _yieldable;
 
-            try {
-                saveState(opCtx);
-            } catch (const StorageUnavailableException&) {
-                MONGO_UNREACHABLE;
-            }
+            saveState(opCtx);
 
             boost::optional<ScopeGuard<std::function<void()>>> exitGuard;
             if (useExperimentalCommitTxnBehavior()) {
@@ -187,7 +180,7 @@ Status PlanYieldPolicy::yieldOrInterrupt(OperationContext* opCtx,
                 _callbacks->handledWriteConflict(opCtx);
             }
             logWriteConflictAndBackoff(
-                attempt, "query yield", e.reason(), NamespaceStringOrUUID(NamespaceString()));
+                attempt, "query yield", e.reason(), NamespaceStringOrUUID(NamespaceString::kEmpty));
             // Retry the yielding process.
         } catch (...) {
             // Errors other than write conflicts don't get retried, and should instead result in

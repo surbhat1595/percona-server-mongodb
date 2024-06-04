@@ -107,11 +107,13 @@ public:
     /**
      * Serializes each subexpression sequentially in a BSONArray.
      */
-    void serialize(BSONObjBuilder* builder, const SerializationOptions& opts) const final {
+    void serialize(BSONObjBuilder* builder,
+                   const SerializationOptions& opts = {},
+                   bool includePath = true) const final {
         BSONArrayBuilder exprArray(builder->subarrayStart(name()));
         for (const auto& expr : _expressions) {
             BSONObjBuilder exprBuilder(exprArray.subobjStart());
-            expr->serialize(&exprBuilder, opts);
+            expr->serialize(&exprBuilder, opts, includePath);
             exprBuilder.doneFast();
         }
         exprArray.doneFast();
@@ -160,7 +162,10 @@ private:
                 // Since 'subExpression' is a reference to a member of the
                 // FixedArityMatchExpression's child array, this assignment replaces the original
                 // child with the optimized child.
-                subExpression = MatchExpression::optimize(std::move(subExpression));
+                // The Boolean simplifier is disabled since we don't want to simplify
+                // sub-expressions, but simplify the whole expression instead.
+                subExpression = MatchExpression::optimize(std::move(subExpression),
+                                                          /* enableSimplification */ false);
             }
 
             return expression;

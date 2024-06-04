@@ -74,7 +74,7 @@ class OpObserver;
 class ServiceEntryPoint;
 
 namespace transport {
-class TransportLayer;
+class TransportLayerManager;
 }  // namespace transport
 
 /**
@@ -142,6 +142,57 @@ private:
  */
 using OperationKey = UUID;
 
+class Service;
+namespace service_context_detail {
+/**
+ * A synchronized owning pointer to avoid setters racing with getters.
+ * This only guarantees that getters receive a coherent value, and
+ * not that the pointer is still valid.
+ *
+ * The kernel of operations is `set` and and `get`, others ops are sugar.
+ */
+template <typename T>
+class SyncUnique {
+public:
+    SyncUnique() = default;
+    explicit SyncUnique(std::unique_ptr<T> p) {
+        set(std::move(p));
+    }
+
+    ~SyncUnique() {
+        set(nullptr);
+    }
+
+    SyncUnique& operator=(std::unique_ptr<T> p) {
+        set(std::move(p));
+        return *this;
+    }
+
+    void set(std::unique_ptr<T> p) {
+        delete _ptr.swap(p.release());
+    }
+
+    T* get() const {
+        return _ptr.load();
+    }
+
+    T* operator->() const {
+        return get();
+    }
+
+    T& operator*() const {
+        return *get();
+    }
+
+    explicit operator bool() const {
+        return static_cast<bool>(get());
+    }
+
+private:
+    AtomicWord<T*> _ptr{nullptr};
+};
+}  // namespace service_context_detail
+
 /**
  * Class representing the context of a service, such as a MongoD database service or
  * a MongoS routing service.
@@ -152,6 +203,8 @@ using OperationKey = UUID;
 class ServiceContext final : public Decorable<ServiceContext> {
     ServiceContext(const ServiceContext&) = delete;
     ServiceContext& operator=(const ServiceContext&) = delete;
+    template <typename T>
+    using SyncUnique = service_context_detail::SyncUnique<T>;
 
 public:
     /**
@@ -163,8 +216,8 @@ public:
         virtual ~ClientObserver() = default;
 
         /**
-         * Hook called after a new client "client" is created on a service by
-         * service->makeClient().
+         * Hook called after a new client "client" is created on a service
+         * managed by this ServiceContext.
          *
          * For a given client and registered instance of ClientObserver, if onCreateClient
          * returns without throwing an exception, onDestroyClient will be called when "client"
@@ -368,20 +421,14 @@ public:
      *
      * All calls to registerClientObserver must complete before ServiceContext
      * is used in multi-threaded operation, or is used to create clients via calls
-     * to makeClient.
+     * to makeClient on Service instances managed by this ServiceContext.
      */
     void registerClientObserver(std::unique_ptr<ClientObserver> observer);
 
-    /**
-     * Creates a new Client object representing a client session associated with this
-     * ServiceContext.
-     *
-     * The "desc" string is used to set a descriptive name for the client, used in logging.
-     *
-     * If supplied, "session" is the transport::Session used for communicating with the client.
-     */
-    UniqueClient makeClient(std::string desc,
-                            std::shared_ptr<transport::Session> session = nullptr);
+    /** Internal: Called by Service->makeClient. */
+    UniqueClient makeClientForService(std::string desc,
+                                      std::shared_ptr<transport::Session> session,
+                                      Service* service);
 
     /**
      * Creates a new OperationContext on "client".
@@ -461,6 +508,14 @@ public:
                        ErrorCodes::Error killCode = ErrorCodes::Interrupted);
 
     /**
+     * Delists the operation by removing it from "_clientByOperationId" and its client. Both
+     * "opCtx->getClient()->getServiceContext()" and "this" must point to the same instance of
+     * ServiceContext. Also, "opCtx" should never be deleted before this method returns. Finally,
+     * the thread invoking this method must not hold the client and the service context locks.
+     */
+    void delistOperation(OperationContext* opCtx) noexcept;
+
+    /**
      * Kills the operation "opCtx" with the code "killCode", if opCtx has not already been killed,
      * and delists the operation by removing it from "_clientByOperationId" and its client. Both
      * "opCtx->getClient()->getServiceContext()" and "this" must point to the same instance of
@@ -503,19 +558,12 @@ public:
     //
 
     /**
-     * Get the master TransportLayer. Routes to all other TransportLayers that
+     * Get the master TransportLayerManager. Routes to all other TransportLayers that
      * may be in use within this service.
      *
      * See TransportLayerManager for more details.
      */
-    transport::TransportLayer* getTransportLayer() const;
-
-    /**
-     * Get the service entry point for the service context.
-     *
-     * See ServiceEntryPoint for more details.
-     */
-    ServiceEntryPoint* getServiceEntryPoint() const;
+    transport::TransportLayerManager* getTransportLayerManager() const;
 
     /**
      * Waits for the ServiceContext to be fully initialized and for all TransportLayers to have been
@@ -595,17 +643,12 @@ public:
     void setPreciseClockSource(std::unique_ptr<ClockSource> newSource);
 
     /**
-     * Binds the service entry point implementation to the service context.
-     */
-    void setServiceEntryPoint(std::unique_ptr<ServiceEntryPoint> sep);
-
-    /**
-     * Binds the TransportLayer to the service context. The TransportLayer should have already
-     * had setup() called successfully, but not startup().
+     * Binds the TransportLayerManager to the service context. The TransportLayerManager should have
+     * already had setup() called successfully, but not startup().
      *
      * This should be a TransportLayerManager created with the global server configuration.
      */
-    void setTransportLayer(std::unique_ptr<transport::TransportLayer> tl);
+    void setTransportLayerManager(std::unique_ptr<transport::TransportLayerManager> tl);
 
     /**
      * Creates a delayed execution baton with basic functionality
@@ -640,55 +683,20 @@ public:
 
     LockedClient getLockedClient(OperationId id);
 
-private:
+    /** The `role` must be ShardServer or RouterServer exactly. */
+    Service* getService(ClusterRole role) const;
+
     /**
-     * A synchronized owning pointer to avoid setters racing with getters.
-     * This only guarantees that getters receive a coherent value, and
-     * not that the pointer is still valid.
+     * Returns the shard service if it exists.
+     * Otherwise, returns the router service.
      *
-     * The kernel of operations is `set` and and `get`, others ops are sugar.
+     * Gets the "main service" of this ServiceContext. Used when a caller needs
+     * some Service, but it doesn't matter which
+     * Service they get.
      */
-    template <typename T>
-    class SyncUnique {
-    public:
-        SyncUnique() = default;
-        explicit SyncUnique(std::unique_ptr<T> p) {
-            set(std::move(p));
-        }
+    Service* getService() const;
 
-        ~SyncUnique() {
-            set(nullptr);
-        }
-
-        SyncUnique& operator=(std::unique_ptr<T> p) {
-            set(std::move(p));
-            return *this;
-        }
-
-        void set(std::unique_ptr<T> p) {
-            delete _ptr.swap(p.release());
-        }
-
-        T* get() const {
-            return _ptr.load();
-        }
-
-        T* operator->() const {
-            return get();
-        }
-
-        T& operator*() const {
-            return *get();
-        }
-
-        explicit operator bool() const {
-            return static_cast<bool>(get());
-        }
-
-    private:
-        AtomicWord<T*> _ptr{nullptr};
-    };
-
+private:
     class ClientObserverHolder {
     public:
         explicit ClientObserverHolder(std::unique_ptr<ClientObserver> observer)
@@ -710,6 +718,8 @@ private:
         std::unique_ptr<ClientObserver> _observer;
     };
 
+    struct ServiceSet;
+
     /**
      * Removes the operation from its client and the `_clientByOperationId` of its service context.
      * It will acquire both client and service context locks, and should only be used internally by
@@ -728,12 +738,7 @@ private:
     /**
      * The TransportLayer.
      */
-    SyncUnique<transport::TransportLayer> _transportLayer;
-
-    /**
-     * The service entry point
-     */
-    SyncUnique<ServiceEntryPoint> _serviceEntryPoint;
+    SyncUnique<transport::TransportLayerManager> _transportLayerManager;
 
     /**
      * The storage engine, if any.
@@ -791,6 +796,61 @@ private:
 
     bool _startupComplete = false;
     stdx::condition_variable _startupCompleteCondVar;
+
+    std::unique_ptr<ServiceSet> _serviceSet;
+};
+
+/**
+ * A Service is a grouping of Clients, and is a creator of Client objects.
+ * It determines the ClusterRole of the Clients and the CommandRegistry
+ * available to them. Each service tracks some metrics separately.
+ *
+ * A Service is logically on a level below the ServiceContext, which holds state
+ * for the whole process, and above Client, which holds state for each
+ * connection. A ServiceContext owns one or more Service objects.
+ *
+ * A Service will be the handler for either the "shard" or "router" service, as
+ * both services can now exist in the same server process (ServiceContext).
+ */
+class Service : public Decorable<Service> {
+    template <typename T>
+    using SyncUnique = service_context_detail::SyncUnique<T>;
+
+public:
+    Service(ServiceContext* sc, ClusterRole role);
+    ~Service();
+
+    /**
+     * Creates a new Client object representing a client session associated with this
+     * Service.
+     *
+     * The "desc" string is used to set a descriptive name for the client, used in logging.
+     *
+     * If supplied, "session" is the transport::Session used for communicating with the client.
+     */
+    ServiceContext::UniqueClient makeClient(std::string desc,
+                                            std::shared_ptr<transport::Session> session = nullptr) {
+        return _sc->makeClientForService(std::move(desc), std::move(session), this);
+    }
+
+    ClusterRole role() const {
+        return _role;
+    }
+
+    ServiceContext* getServiceContext() const {
+        return _sc;
+    }
+
+    void setServiceEntryPoint(std::unique_ptr<ServiceEntryPoint> sep);
+
+    ServiceEntryPoint* getServiceEntryPoint() const {
+        return _serviceEntryPoint.get();
+    }
+
+private:
+    ServiceContext* _sc;
+    ClusterRole _role;
+    SyncUnique<ServiceEntryPoint> _serviceEntryPoint;
 };
 
 /**
@@ -823,5 +883,10 @@ ServiceContext* getCurrentServiceContext();
  * Takes ownership of 'serviceContext'.
  */
 void setGlobalServiceContext(ServiceContext::UniqueServiceContext&& serviceContext);
+
+/**
+ * Maps `service`'s ClusterRole (or ClusterRole::None if `service` is nullptr) to a LogService.
+ */
+logv2::LogService toLogService(Service* service);
 
 }  // namespace mongo

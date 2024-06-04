@@ -37,7 +37,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <iostream>
 #include <map>
 #include <set>
@@ -328,7 +327,8 @@ public:
     }
 
     GroupIdType integrate(const ABT& n) {
-        return algebra::transport<true>(n, *this, VariableEnvironment::build(n, &_memo));
+        return algebra::transport<true>(
+            n, *this, VariableEnvironment::build(n, &_memo, false /*computeLastRefs*/));
     }
 
 private:
@@ -509,24 +509,35 @@ void Memo::estimateCE(const Context& ctx, const GroupIdType groupId) {
 
     auto ceProp = properties::CardinalityEstimate(estimate);
 
-    if (auto sargablePtr = nodeRef.cast<SargableNode>(); sargablePtr != nullptr) {
+    if (auto sargablePtr = nodeRef.cast<SargableNode>()) {
         auto& partialSchemaKeyCE = ceProp.getPartialSchemaKeyCE();
         invariant(partialSchemaKeyCE.empty());
 
-        // Cache estimation for each individual requirement.
-        PSRExpr::visitDNF(sargablePtr->getReqMap(),
-                          [&](const PartialSchemaEntry& e, const PSRExpr::VisitorContext&) {
-                              ABT singularReq = make<SargableNode>(PSRExpr::makeSingularDNF(e),
-                                                                   CandidateIndexes{},
-                                                                   ScanParams{},
-                                                                   sargablePtr->getTarget(),
-                                                                   sargablePtr->getChild());
-                              const CEType singularEst = simpleIdLookup
-                                  ? CEType{1.0}
-                                  : ctx._cardinalityEstimator->deriveCE(
-                                        *ctx._metadata, *this, props, singularReq.ref());
-                              partialSchemaKeyCE.emplace_back(e.first, singularEst);
-                          });
+        // Cache estimation for each individual requirement. We may be attempting to individually
+        // estimate the same requirement in a different group.
+        PSRExpr::visitDNF(
+            sargablePtr->getReqMap(),
+            [&](const PartialSchemaEntry& e, const PSRExpr::VisitorContext& /*ctx*/) {
+                const std::pair<GroupIdType, PartialSchemaEntry> cacheKey{
+                    sargablePtr->getChild().cast<MemoLogicalDelegatorNode>()->getGroupId(), e};
+                if (auto it = _estimatesCache.find(cacheKey); it != _estimatesCache.cend()) {
+                    // Already estimated. Retrieve from cache.
+                    partialSchemaKeyCE.emplace_back(e.first, it->second);
+                    return;
+                }
+
+                ABT singularReq = make<SargableNode>(PSRExpr::makeSingularDNF(e),
+                                                     CandidateIndexes{},
+                                                     ScanParams{},
+                                                     sargablePtr->getTarget(),
+                                                     sargablePtr->getChild());
+                const CEType singularEst = simpleIdLookup
+                    ? CEType{1.0}
+                    : ctx._cardinalityEstimator->deriveCE(
+                          *ctx._metadata, *this, props, singularReq.ref());
+                partialSchemaKeyCE.emplace_back(e.first, singularEst);
+                _estimatesCache.emplace(cacheKey, singularEst);
+            });
     }
 
     properties::setPropertyOverwrite(props, std::move(ceProp));
@@ -659,6 +670,7 @@ void Memo::clear() {
     _groups.clear();
     _inputGroupsToNodeIdMap.clear();
     _nodeIdToInputGroupsMap.clear();
+    _estimatesCache.clear();
 }
 
 const Memo::Stats& Memo::getStats() const {
@@ -678,6 +690,13 @@ size_t Memo::getPhysicalNodeCount() const {
     for (const auto& group : _groups) {
         result += group->_physicalNodes.getNodes().size();
     }
+    return result;
+}
+
+size_t Memo::Hasher::operator()(const std::pair<GroupIdType, PartialSchemaEntry>& entry) const {
+    size_t result = 17;
+    updateHash(result, std::hash<GroupIdType>()(entry.first));
+    updateHash(result, ABTHashGenerator::generate(entry.second));
     return result;
 }
 

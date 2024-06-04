@@ -89,6 +89,7 @@ let testCases = {
     _shardsvrCheckMetadataConsistency: {skip: "internal command"},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: "internal command"},
     _shardsvrCleanupStructuredEncryptionData: {skip: "primary only"},
+    _shardsvrCoordinateMultiUpdate: {skip: "primary only"},
     _shardsvrCompactStructuredEncryptionData: {skip: "primary only"},
     _shardsvrMergeAllChunksOnShard: {skip: "primary only"},
     _shardsvrMovePrimary: {skip: "primary only"},
@@ -104,6 +105,7 @@ let testCases = {
     abortMoveCollection: {skip: "primary only"},
     abortReshardCollection: {skip: "primary only"},
     abortTransaction: {skip: "primary only"},
+    abortUnshardCollection: {skip: "primary only"},
     addShard: {skip: "primary only"},
     addShardToZone: {skip: "primary only"},
     aggregate: {
@@ -253,6 +255,7 @@ let testCases = {
     getChangeStreamState: {skip: "does not return user data"},
     getClusterParameter: {skip: "does not return user data"},
     getCmdLineOpts: {skip: "does not return user data"},
+    getDatabaseVersion: {skip: "does not return user data"},
     getDefaultRWConcern: {skip: "does not return user data"},
     getDiagnosticData: {skip: "does not return user data"},
     getLog: {skip: "does not return user data"},
@@ -408,8 +411,8 @@ let testCases = {
     usersInfo: {skip: "primary only"},
     validate: {skip: "does not return user data"},
     validateDBMetadata: {skip: "does not return user data"},
-    waitForOngoingChunkSplits: {skip: "does not return user data"},
     waitForFailPoint: {skip: "does not return user data"},
+    getShardingReady: {skip: "does not return user data"},
     whatsmyuri: {skip: "does not return user data"},
 
     // Percona commands
@@ -449,8 +452,8 @@ for (let command of commands) {
 
     jsTest.log("testing command " + tojson(test.command));
 
-    assert.commandWorked(staleMongos.adminCommand({enableSharding: db}));
-    st.ensurePrimaryShard(db, st.shard0.shardName);
+    assert.commandWorked(
+        staleMongos.adminCommand({enableSharding: db, primaryShard: st.shard0.shardName}));
     assert.commandWorked(staleMongos.adminCommand({shardCollection: nss, key: {x: 1}}));
 
     // We do this because we expect freshMongos to see that the collection is sharded, which it

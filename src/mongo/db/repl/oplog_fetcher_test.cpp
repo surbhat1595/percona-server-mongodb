@@ -34,7 +34,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -127,6 +126,7 @@ BSONObj makeNoopOplogEntry(OpTime opTime) {
         NamespaceString::createNamespaceString_forTest("test.t"),  // namespace
         boost::none,                                               // uuid
         boost::none,                                               // fromMigrate
+        boost::none,                                               // checkExistenceForDiffInsert
         repl::OplogEntry::kOplogVersion,                           // version
         BSONObj(),                                                 // o
         boost::none,                                               // o2
@@ -411,7 +411,7 @@ private:
     executor::ThreadPoolMock::Options makeThreadPoolMockOptions() const override {
         executor::ThreadPoolMock::Options options;
         options.onCreateThread = []() {
-            Client::initThread("OplogFetcherTest");
+            Client::initThread("OplogFetcherTest", getGlobalServiceContext()->getService());
         };
         return options;
     };
@@ -1874,9 +1874,8 @@ TEST_F(OplogFetcherTest,
     auto firstEntry = makeNoopOplogEntry(lastFetched);
     auto metadataObj = makeOplogBatchMetadata(replSetMetadata, oqMetadata);
 
-    auto missingFieldErrorCode = ErrorCodes::duplicateCodeForTest(40414);
     ASSERT_EQUALS(
-        missingFieldErrorCode,
+        ErrorCodes::IDLFailedToParse,
         processSingleBatch(makeFirstBatch(cursorId,
                                           {firstEntry,
                                            BSON("o" << BSON("msg"
@@ -2143,8 +2142,7 @@ TEST_F(OplogFetcherTest, ValidateDocumentsReturnsNoSuchKeyIfTimestampIsNotFoundI
     auto secondEntry = BSON("o" << BSON("msg"
                                         << "oplog entry without optime"));
 
-    auto missingFieldErrorCode = ErrorCodes::duplicateCodeForTest(40414);
-    ASSERT_EQUALS(missingFieldErrorCode,
+    ASSERT_EQUALS(ErrorCodes::IDLFailedToParse,
                   OplogFetcher::validateDocuments(
                       {firstEntry, secondEntry},
                       true,

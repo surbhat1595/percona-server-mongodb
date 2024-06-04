@@ -183,9 +183,9 @@ public:
     }
 
     /**
-     * Returns true if this is a $documents stage.
+     * Returns true if this desugars to a pipeline starting with a $queue stage.
      */
-    virtual bool isDocuments() const {
+    virtual bool startsWithQueue() const {
         return false;
     }
 
@@ -197,10 +197,14 @@ public:
     }
 
     /**
-     * Returns true if this stage may be forwarded from mongos unmodified.
+     * Returns true if this stage require knowledge of the collection default collation at parse
+     * time, false otherwise. This is useful to know as it could save a network request to discern
+     * the collation.
+     * TODO SERVER-81991: Delete this function once all unsharded collections are tracked in the
+     * sharding catalog as unsplittable along with their collation.
      */
-    virtual bool allowedToPassthroughFromMongos() const {
-        return true;
+    virtual bool requiresCollationForParsingUnshardedAggregate() const {
+        return false;
     }
 
     /**
@@ -336,7 +340,6 @@ public:
 
     virtual void getForeignExecutionNamespaces(
         stdx::unordered_set<NamespaceString>& nssSet) const override;
-    bool allowedToPassthroughFromMongos() const override;
 
     Status checkShardedForeignCollAllowed(NamespaceString nss,
                                           bool inMultiDocumentTransaction) const override;

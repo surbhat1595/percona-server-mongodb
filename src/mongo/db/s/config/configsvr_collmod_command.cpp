@@ -79,10 +79,6 @@ public:
         return Command::AllowedOnSecondary::kNever;
     }
 
-    bool supportsRetryableWrite() const final {
-        return true;
-    }
-
     class Invocation final : public InvocationBase {
     public:
         using InvocationBase::InvocationBase;
@@ -129,7 +125,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(ConfigsvrCollModCommand);
+MONGO_REGISTER_COMMAND(ConfigsvrCollModCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

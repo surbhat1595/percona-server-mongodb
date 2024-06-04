@@ -32,7 +32,6 @@
 #include <boost/container/flat_set.hpp>
 #include <boost/container/vector.hpp>
 #include <boost/iterator/iterator_facade.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/range/adaptor/argument_fwd.hpp>
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/range/begin.hpp>
@@ -1314,6 +1313,54 @@ std::unique_ptr<QuerySolutionNode> MatchNode::clone() const {
 }
 
 //
+// UnwindNode
+//
+
+void UnwindNode::appendToString(str::stream* ss, int indent) const {
+    addIndent(ss, indent);
+    *ss << "UNWIND\n";
+    addIndent(ss, indent + 1);
+    *ss << "preserveNullAndEmptyArrays = " << preserveNullAndEmptyArrays << "\n";
+    if (indexPath) {
+        addIndent(ss, indent + 1);
+        *ss << "indexPath = " << indexPath->fullPath() << "\n";
+    }
+
+    addCommon(ss, indent);
+    addIndent(ss, indent + 1);
+    *ss << "Child:" << '\n';
+    children[0]->appendToString(ss, indent + 2);
+}
+
+std::unique_ptr<QuerySolutionNode> UnwindNode::clone() const {
+    return std::make_unique<UnwindNode>(
+        children[0]->clone(), fieldPath, preserveNullAndEmptyArrays, indexPath);
+}
+
+//
+// ReplaceRootNode
+//
+
+void ReplaceRootNode::appendToString(str::stream* ss, int indent) const {
+    addIndent(ss, indent);
+    *ss << "REPLACE_ROOT\n";
+    if (nullptr != newRoot) {
+        addIndent(ss, indent + 1);
+        *ss << "newRoot:\n";
+
+        *ss << newRoot->serialize(SerializationOptions{}).toString();
+    }
+    addCommon(ss, indent);
+    addIndent(ss, indent + 1);
+    *ss << "Child:" << '\n';
+    children[0]->appendToString(ss, indent + 2);
+}
+
+std::unique_ptr<QuerySolutionNode> ReplaceRootNode::clone() const {
+    return std::make_unique<ReplaceRootNode>(children[0]->clone(), newRoot ? newRoot : nullptr);
+}
+
+//
 // ProjectionNode
 //
 
@@ -1820,7 +1867,7 @@ void SentinelNode::appendToString(str::stream* ss, int indent) const {
 
 std::unique_ptr<QuerySolutionNode> SearchNode::clone() const {
     return std::make_unique<SearchNode>(
-        isSearchMeta, searchQuery, limit, intermediateResultsProtocolVersion);
+        isSearchMeta, searchQuery, limit, sortSpec, remoteCursorId, remoteCursorVars);
 }
 
 void SearchNode::appendToString(str::stream* ss, int indent) const {
@@ -1830,6 +1877,7 @@ void SearchNode::appendToString(str::stream* ss, int indent) const {
     *ss << "isSearchMeta = " << isSearchMeta << '\n';
     addIndent(ss, indent + 1);
     *ss << "searchQuery = " << searchQuery << '\n';
+    *ss << "remoteCursorId = " << remoteCursorId << '\n';
     if (limit) {
         addIndent(ss, indent + 1);
         *ss << "limit = " << limit << '\n';

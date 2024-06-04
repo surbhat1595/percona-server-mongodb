@@ -115,7 +115,6 @@ SizeInfo getSizeInfo(const NamespaceString& ns,
                       "ns"_attr = ns,
                       "uri"_attr = sizeStorerUri,
                       "reason"_attr = wiredtiger_strerror(ret));
-        // TODO (SERVER-61476): Handle missing sizeStorer info.
         return {0, 0};
     }
 
@@ -188,6 +187,8 @@ std::vector<CollectionImportMetadata> wiredTigerRollbackToStableAndGetMetadata(
     std::vector<CollectionImportMetadata> metadatas;
 
     while (true) {
+        opCtx->checkForInterrupt();
+
         int ret = mdbCatalogCursor->next(mdbCatalogCursor);
         if (ret == WT_NOTFOUND) {
             break;

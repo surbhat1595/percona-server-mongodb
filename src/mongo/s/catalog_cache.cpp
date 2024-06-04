@@ -31,7 +31,6 @@
 
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <fmt/format.h>
@@ -154,6 +153,7 @@ std::shared_ptr<RoutingTableHistory> createUpdatedRoutingTableHistory(
             return existingHistory->optRt->makeUpdated(collectionAndChunks.timeseriesFields,
                                                        collectionAndChunks.reshardingFields,
                                                        collectionAndChunks.allowMigrations,
+                                                       collectionAndChunks.unsplittable,
                                                        collectionAndChunks.changedChunks);
         }
 
@@ -334,11 +334,9 @@ StatusWith<CachedDatabaseInfo> CatalogCache::_getDatabase(OperationContext* opCt
         CurOp::get(opCtx)->debug().catalogCacheDatabaseLookupMillis += Milliseconds(t.millis());
     });
 
-    const auto dbNameStr = DatabaseNameUtil::serialize(dbName);
     try {
-        // TODO SERVER-80333 _databaseCache to accept a DatabaseName
         auto dbEntryFuture =
-            _databaseCache.acquireAsync(dbNameStr, CacheCausalConsistency::kLatestKnown);
+            _databaseCache.acquireAsync(dbName, CacheCausalConsistency::kLatestKnown);
 
         if (allowLocks) {
             // When allowLocks is true we may be holding a lock, so we don't want to block the
@@ -619,10 +617,8 @@ boost::optional<ShardingIndexesCatalogCache> CatalogCache::_getCollectionIndexIn
 
 StatusWith<CachedDatabaseInfo> CatalogCache::getDatabaseWithRefresh(OperationContext* opCtx,
                                                                     const DatabaseName& dbName) {
-    // TODO SERVER-80333 _databaseCache to accept a DatabaseName
     _databaseCache.advanceTimeInStore(
-        DatabaseNameUtil::serialize(dbName),
-        ComparableDatabaseVersion::makeComparableDatabaseVersionForForcedRefresh());
+        dbName, ComparableDatabaseVersion::makeComparableDatabaseVersionForForcedRefresh());
     return getDatabase(opCtx, dbName);
 }
 
@@ -709,6 +705,44 @@ StatusWith<CollectionRoutingInfo> CatalogCache::getShardedCollectionRoutingInfoW
     }
 }
 
+CollectionRoutingInfo CatalogCache::getTrackedCollectionRoutingInfo(OperationContext* opCtx,
+                                                                    const NamespaceString& nss) {
+    auto cri = uassertStatusOK(getCollectionRoutingInfo(opCtx, nss));
+    uassert(ErrorCodes::NamespaceNotFound,
+            str::stream() << "Expected collection " << nss.toStringForErrorMsg()
+                          << " to be tracked",
+            cri.cm.hasRoutingTable());
+    return cri;
+}
+
+StatusWith<CollectionRoutingInfo> CatalogCache::getTrackedCollectionRoutingInfoWithRefresh(
+    OperationContext* opCtx, const NamespaceString& nss) {
+    try {
+        auto cri = uassertStatusOK(getCollectionRoutingInfoWithRefresh(opCtx, nss));
+        uassert(ErrorCodes::NamespaceNotFound,
+                str::stream() << "Expected collection " << nss.toStringForErrorMsg()
+                              << " to be tracked",
+                cri.cm.hasRoutingTable());
+        return cri;
+    } catch (const DBException& ex) {
+        return ex.toStatus();
+    }
+}
+
+StatusWith<CollectionRoutingInfo> CatalogCache::getTrackedCollectionRoutingInfoWithPlacementRefresh(
+    OperationContext* opCtx, const NamespaceString& nss) {
+    try {
+        auto cri = uassertStatusOK(getCollectionRoutingInfoWithPlacementRefresh(opCtx, nss));
+        uassert(ErrorCodes::NamespaceNotFound,
+                str::stream() << "Expected collection " << nss.toStringForErrorMsg()
+                              << " to be tracked",
+                cri.cm.hasRoutingTable());
+        return cri;
+    } catch (const DBException& ex) {
+        return ex.toStatus();
+    }
+}
+
 void CatalogCache::onStaleDatabaseVersion(const DatabaseName& dbName,
                                           const boost::optional<DatabaseVersion>& databaseVersion) {
     if (databaseVersion) {
@@ -719,10 +753,9 @@ void CatalogCache::onStaleDatabaseVersion(const DatabaseName& dbName,
                                   "Registering new database version",
                                   "db"_attr = dbName,
                                   "version"_attr = version);
-        _databaseCache.advanceTimeInStore(DatabaseNameUtil::serialize(dbName), version);
+        _databaseCache.advanceTimeInStore(dbName, version);
     } else {
-        // TODO SERVER-80333 _databaseCache to accept a DatabaseName
-        _databaseCache.invalidateKey(DatabaseNameUtil::serialize(dbName));
+        _databaseCache.invalidateKey(dbName);
     }
 }
 
@@ -770,7 +803,7 @@ void CatalogCache::invalidateEntriesThatReferenceShard(const ShardId& shardId) {
                 "shardId"_attr = shardId);
 
     _databaseCache.invalidateLatestCachedValueIf_IgnoreInProgress(
-        [&](const std::string&, const DatabaseType& dbt) { return dbt.getPrimary() == shardId; });
+        [&](const DatabaseName&, const DatabaseType& dbt) { return dbt.getPrimary() == shardId; });
 
     // Invalidate collections which contain data on this shard.
     _collectionCache.invalidateLatestCachedValueIf_IgnoreInProgress(
@@ -784,8 +817,6 @@ void CatalogCache::invalidateEntriesThatReferenceShard(const ShardId& shardId) {
 
             LOGV2_DEBUG(22647,
                         3,
-                        "Invalidating cached collection {namespace} that has data "
-                        "on shard {shardId}",
                         "Invalidating cached collection",
                         logAttrs(rt.nss()),
                         "shardId"_attr = shardId);
@@ -793,17 +824,15 @@ void CatalogCache::invalidateEntriesThatReferenceShard(const ShardId& shardId) {
         });
 
     LOGV2(22648,
-          "Finished invalidating databases and collections with data on shard: {shardId}",
           "Finished invalidating databases and collections that reference specific shard",
           "shardId"_attr = shardId);
 }
 
-void CatalogCache::purgeDatabase(StringData dbName) {
+void CatalogCache::purgeDatabase(const DatabaseName& dbName) {
     _databaseCache.invalidateKey(dbName);
     _collectionCache.invalidateKeyIf(
-        [&](const NamespaceString& nss) { return nss.db_forSharding() == dbName; });
-    _indexCache.invalidateKeyIf(
-        [&](const NamespaceString& nss) { return nss.db_forSharding() == dbName; });
+        [&](const NamespaceString& nss) { return nss.dbName() == dbName; });
+    _indexCache.invalidateKeyIf([&](const NamespaceString& nss) { return nss.dbName() == dbName; });
 }
 
 void CatalogCache::purgeAllDatabases() {
@@ -827,7 +856,7 @@ void CatalogCache::report(BSONObjBuilder* builder) const {
     _collectionCache.reportStats(&cacheStatsBuilder);
 }
 
-void CatalogCache::invalidateDatabaseEntry_LINEARIZABLE(const StringData& dbName) {
+void CatalogCache::invalidateDatabaseEntry_LINEARIZABLE(const DatabaseName& dbName) {
     _databaseCache.invalidateKey(dbName);
 }
 
@@ -856,7 +885,7 @@ CatalogCache::DatabaseCache::DatabaseCache(ServiceContext* service,
           service,
           threadPool,
           [this](OperationContext* opCtx,
-                 const std::string& dbName,
+                 const DatabaseName& dbName,
                  const ValueHandle& db,
                  const ComparableDatabaseVersion& previousDbVersion) {
               return _lookupDatabase(opCtx, dbName, db, previousDbVersion);
@@ -866,7 +895,7 @@ CatalogCache::DatabaseCache::DatabaseCache(ServiceContext* service,
 
 CatalogCache::DatabaseCache::LookupResult CatalogCache::DatabaseCache::_lookupDatabase(
     OperationContext* opCtx,
-    const std::string& dbName,
+    const DatabaseName& dbName,
     const DatabaseTypeValueHandle& previousDbType,
     const ComparableDatabaseVersion& previousDbVersion) {
     if (MONGO_unlikely(blockDatabaseCacheLookup.shouldFail())) {
@@ -885,7 +914,8 @@ CatalogCache::DatabaseCache::LookupResult CatalogCache::DatabaseCache::_lookupDa
         auto newDb = _catalogCacheLoader.getDatabase(dbName).get();
         uassertStatusOKWithContext(
             Grid::get(opCtx)->shardRegistry()->getShard(opCtx, newDb.getPrimary()),
-            str::stream() << "The primary shard for database " << dbName << " does not exist");
+            str::stream() << "The primary shard for database " << dbName.toStringForErrorMsg()
+                          << " does not exist");
 
         newDbVersion.setDatabaseVersion(newDb.getVersion());
 
@@ -1032,10 +1062,6 @@ CatalogCache::CollectionCache::LookupResult CatalogCache::CollectionCache::_look
                                       "duration"_attr = Milliseconds(t.millis()));
 
             return LookupResult(OptionalRoutingTableHistory(), std::move(newComparableVersion));
-        } else if (ex.code() == ErrorCodes::InvalidOptions) {
-            LOGV2_WARNING(5738000,
-                          "This error could be due to the fact that the config server is running "
-                          "an older version");
         }
 
         LOGV2_FOR_CATALOG_REFRESH(4619903,

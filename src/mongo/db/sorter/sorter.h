@@ -32,7 +32,6 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -50,7 +49,7 @@
 
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/sorter/sorter_gen.h"
 #include "mongo/db/sorter/sorter_stats.h"
 #include "mongo/logv2/log_attr.h"
@@ -125,7 +124,7 @@ struct SortOptions {
     // restarts, it must encrypt with a persistent key. This key is accessed using the database
     // name that the sorted collection lives in. If encryption is enabled and dbName is boost::none,
     // a temporary key is used.
-    boost::optional<std::string> dbName;
+    boost::optional<DatabaseName> dbName;
 
     // Directory into which we place a file when spilling to disk. Must be explicitly set if
     // extSortAllowed is true.
@@ -177,7 +176,7 @@ struct SortOptions {
         return *this;
     }
 
-    SortOptions& DBName(std::string newDbName) {
+    SortOptions& DBName(DatabaseName newDbName) {
         dbName = std::move(newDbName);
         return *this;
     }
@@ -632,7 +631,7 @@ public:
         std::streamoff fileStartOffset,
         std::streamoff fileEndOffset,
         const Settings& settings,
-        const boost::optional<std::string>& dbName,
+        const boost::optional<DatabaseName>& dbName,
         uint32_t checksum);
 
 private:

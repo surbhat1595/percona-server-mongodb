@@ -32,7 +32,6 @@
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -311,6 +310,7 @@ public:
     void onDelete(OperationContext* const opCtx,
                   const CollectionPtr& coll,
                   StmtId stmtId,
+                  const BSONObj& doc,
                   const OplogDeleteEntryArgs& args,
                   OpStateAccumulator* opAccumulator = nullptr) override {
         ReservedTimes times{opCtx};
@@ -327,7 +327,7 @@ public:
         }
 
         for (auto& o : *observerQueue)
-            o->onDelete(opCtx, coll, stmtId, args, &opStateAccumulator);
+            o->onDelete(opCtx, coll, stmtId, doc, args, &opStateAccumulator);
     }
 
     void onInternalOpMessage(OperationContext* const opCtx,
@@ -480,13 +480,6 @@ public:
         for (auto& o : _observers)
             o->postRenameCollection(
                 opCtx, fromCollection, toCollection, uuid, dropTargetUUID, stayTemp);
-    }
-    void onApplyOps(OperationContext* const opCtx,
-                    const DatabaseName& dbName,
-                    const BSONObj& applyOpCmd) override {
-        ReservedTimes times{opCtx};
-        for (auto& o : _observers)
-            o->onApplyOps(opCtx, dbName, applyOpCmd);
     }
 
     void onEmptyCapped(OperationContext* const opCtx,

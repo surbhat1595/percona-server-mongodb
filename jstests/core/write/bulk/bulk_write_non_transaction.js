@@ -12,11 +12,9 @@
  *   does_not_support_transactions,
  *   # TODO SERVER-52419 Remove this tag.
  *   featureFlagBulkWriteCommand,
- *   # TODO SERVER-79506 Remove this tag.
- *   assumes_unsharded_collection,
  * ]
  */
-import {cursorEntryValidator} from "jstests/libs/bulk_write_utils.js";
+import {cursorEntryValidator, cursorSizeValidator} from "jstests/libs/bulk_write_utils.js";
 
 var coll = db.getCollection("coll");
 var coll1 = db.getCollection("coll1");
@@ -88,14 +86,16 @@ assert.eq(coll.find().itcount(), 0);
 assert.eq(coll1.find().itcount(), 0);
 
 // Missing ops
-assert.commandFailedWithCode(db.adminCommand({bulkWrite: 1, nsInfo: [{ns: "mydb.coll"}]}), [40414]);
+assert.commandFailedWithCode(db.adminCommand({bulkWrite: 1, nsInfo: [{ns: "mydb.coll"}]}),
+                             [ErrorCodes.IDLFailedToParse]);
 
 assert.eq(coll.find().itcount(), 0);
 assert.eq(coll1.find().itcount(), 0);
 
 // Missing nsInfo
 assert.commandFailedWithCode(
-    db.adminCommand({bulkWrite: 1, ops: [{insert: 0, document: {skey: "MongoDB"}}]}), [40414]);
+    db.adminCommand({bulkWrite: 1, ops: [{insert: 0, document: {skey: "MongoDB"}}]}),
+    [ErrorCodes.IDLFailedToParse]);
 
 assert.eq(coll.find().itcount(), 0);
 assert.eq(coll1.find().itcount(), 0);
@@ -142,37 +142,16 @@ assert.commandFailedWithCode(
 assert.eq(coll.find().itcount(), 0);
 assert.eq(coll1.find().itcount(), 0);
 
-// Test update fails userAllowedWriteNS.
-res = db.adminCommand({
-    bulkWrite: 1,
-    ops: [
-        {
-            update: 0,
-            filter: {_id: 1},
-            updateMods: {$set: {skey: "MongoDB2"}},
-        },
-    ],
-    nsInfo: [{ns: "test.system.profile"}]
-});
-
-assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
-
-cursorEntryValidator(res.cursor.firstBatch[0],
-                     {ok: 0, idx: 0, n: 0, nModified: 0, code: ErrorCodes.InvalidNamespace});
-assert(!res.cursor.firstBatch[1]);
-
 var coll2 = db.getCollection("coll2");
 coll2.drop();
 
 // Test update continues on error with ordered:false.
-assert.commandWorked(coll2.createIndex({x: 1}, {unique: true}));
-assert.commandWorked(coll2.insert({x: 3}));
-assert.commandWorked(coll2.insert({x: 4}));
+assert.commandWorked(coll2.insert({_id: 3}));
+assert.commandWorked(coll2.insert({_id: 4}));
 res = db.adminCommand({
     bulkWrite: 1,
     ops: [
-        {update: 0, filter: {x: 3}, updateMods: {$inc: {x: 1}}, upsert: true},
+        {update: 0, filter: {_id: 3}, updateMods: {$inc: {_id: 1}}, upsert: true},
         {update: 1, filter: {_id: 1}, updateMods: {$set: {skey: "MongoDB2"}}, upsert: true},
     ],
     nsInfo: [{ns: "test.coll2"}, {ns: "test.coll"}],
@@ -180,25 +159,23 @@ res = db.adminCommand({
 });
 
 assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
+cursorSizeValidator(res, 2);
+assert.eq(res.numErrors, 1, "bulkWrite command response: " + tojson(res));
 
 cursorEntryValidator(res.cursor.firstBatch[0],
-                     {ok: 0, idx: 0, n: 0, nModified: 0, code: ErrorCodes.DuplicateKey});
-cursorEntryValidator(res.cursor.firstBatch[1], {ok: 1, idx: 1, n: 1, nModified: 0});
-
-assert.docEq(res.cursor.firstBatch[1].upserted, {_id: 1});
-assert(!res.cursor.firstBatch[2]);
+                     {ok: 0, idx: 0, n: 0, nModified: 0, code: ErrorCodes.ImmutableField});
+cursorEntryValidator(res.cursor.firstBatch[1],
+                     {ok: 1, idx: 1, n: 1, nModified: 0, upserted: {_id: 1}});
 coll.drop();
 coll2.drop();
 
 // Test update stop on error with ordered:true.
-assert.commandWorked(coll2.createIndex({x: 1}, {unique: true}));
-assert.commandWorked(coll2.insert({x: 3}));
-assert.commandWorked(coll2.insert({x: 4}));
+assert.commandWorked(coll2.insert({_id: 3}));
+assert.commandWorked(coll2.insert({_id: 4}));
 res = db.adminCommand({
     bulkWrite: 1,
     ops: [
-        {update: 0, filter: {x: 3}, updateMods: {$inc: {x: 1}}, upsert: true},
+        {update: 0, filter: {_id: 3}, updateMods: {$inc: {_id: 1}}, upsert: true},
         {update: 1, filter: {_id: 1}, updateMods: {$set: {skey: "MongoDB2"}}, upsert: true},
         {insert: 0, document: {_id: 1, skey: "MongoDB"}},
     ],
@@ -206,11 +183,11 @@ res = db.adminCommand({
 });
 
 assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
+cursorSizeValidator(res, 1);
+assert.eq(res.numErrors, 1, "bulkWrite command response: " + tojson(res));
 
 cursorEntryValidator(res.cursor.firstBatch[0],
-                     {ok: 0, idx: 0, n: 0, nModified: 0, code: ErrorCodes.DuplicateKey});
-assert(!res.cursor.firstBatch[1]);
+                     {ok: 0, idx: 0, n: 0, nModified: 0, code: ErrorCodes.ImmutableField});
 coll.drop();
 coll2.drop();
 
@@ -239,7 +216,8 @@ res = db.adminCommand({
 });
 
 assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
+cursorSizeValidator(res, 3);
+assert.eq(res.numErrors, 1, "bulkWrite command response: " + tojson(res));
 
 assert.eq(res.cursor.id, 0);
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, n: 1, idx: 0});
@@ -255,7 +233,6 @@ try {
                          {ok: 0, n: 0, idx: 1, code: ErrorCodes.Interrupted});
 }
 cursorEntryValidator(res.cursor.firstBatch[2], {ok: 1, n: 1, idx: 2});
-assert(!res.cursor.firstBatch[3]);
 
 coll.drop();
 
@@ -272,7 +249,8 @@ res = db.adminCommand({
 });
 
 assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
+cursorSizeValidator(res, 2);
+assert.eq(res.numErrors, 1, "bulkWrite command response: " + tojson(res));
 
 assert.eq(res.cursor.id, 0);
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, n: 1, idx: 0});
@@ -287,7 +265,6 @@ try {
     cursorEntryValidator(res.cursor.firstBatch[1],
                          {ok: 0, n: 0, idx: 1, code: ErrorCodes.Interrupted});
 }
-assert(!res.cursor.firstBatch[2]);
 
 coll.drop();
 
@@ -303,7 +280,8 @@ res = db.adminCommand({
 });
 
 assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
+cursorSizeValidator(res, 2);
+assert.eq(res.numErrors, 1, "bulkWrite command response: " + tojson(res));
 
 assert.eq(res.cursor.id, 0);
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, n: 1, idx: 0});
@@ -311,7 +289,6 @@ cursorEntryValidator(res.cursor.firstBatch[1], {ok: 0, n: 0, idx: 1, code: 11000
 // Make sure that error extra info was correctly added
 assert.docEq(res.cursor.firstBatch[1].keyPattern, {_id: 1});
 assert.docEq(res.cursor.firstBatch[1].keyValue, {_id: 1});
-assert(!res.cursor.firstBatch[2]);
 
 assert.eq(coll.find().itcount(), 1);
 assert.eq(coll1.find().itcount(), 0);
@@ -331,90 +308,18 @@ res = db.adminCommand({
 });
 
 assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
+cursorSizeValidator(res, 3);
+assert.eq(res.numErrors, 1, "bulkWrite command response: " + tojson(res));
 
 assert.eq(res.cursor.id, 0);
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, n: 1, idx: 0});
 cursorEntryValidator(res.cursor.firstBatch[1], {ok: 0, n: 0, idx: 1, code: 11000});
 cursorEntryValidator(res.cursor.firstBatch[2], {ok: 1, n: 1, idx: 2});
-assert(!res.cursor.firstBatch[3]);
 
 assert.eq(coll.find().itcount(), 1);
 assert.eq(coll1.find().itcount(), 1);
 coll.drop();
 coll1.drop();
-
-// Test delete fails userAllowedWriteNS.
-res = db.adminCommand({
-    bulkWrite: 1,
-    ops: [
-        {
-            delete: 0,
-            filter: {_id: 1},
-        },
-    ],
-    nsInfo: [{ns: "test.system.profile"}]
-});
-
-assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
-
-cursorEntryValidator(res.cursor.firstBatch[0],
-                     {ok: 0, idx: 0, n: 0, code: ErrorCodes.InvalidNamespace});
-assert(!res.cursor.firstBatch[1]);
-
-// Test delete continues on error with ordered:false.
-coll.insert({_id: 1, skey: "MongoDB"});
-res = db.adminCommand({
-    bulkWrite: 1,
-    ops: [
-        {
-            delete: 0,
-            filter: {_id: 0},
-        },
-        {delete: 1, filter: {_id: 1}}
-    ],
-    nsInfo: [{ns: "test.system.profile"}, {ns: "test.coll"}],
-    ordered: false
-});
-
-assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
-
-cursorEntryValidator(res.cursor.firstBatch[0],
-                     {ok: 0, idx: 0, n: 0, code: ErrorCodes.InvalidNamespace});
-cursorEntryValidator(res.cursor.firstBatch[1], {ok: 1, idx: 1, n: 1});
-assert(!res.cursor.firstBatch[2]);
-
-assert(!coll.findOne());
-
-coll.drop();
-
-// Test delete stop on error with ordered:true.
-coll.insert({_id: 1, skey: "MongoDB"});
-res = db.adminCommand({
-    bulkWrite: 1,
-    ops: [
-        {
-            delete: 0,
-            filter: {_id: 0},
-        },
-        {delete: 1, filter: {_id: 1}},
-        {insert: 0, document: {_id: 1, skey: "MongoDB"}},
-    ],
-    nsInfo: [{ns: "test.system.profile"}, {ns: "test.coll"}],
-});
-
-assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
-
-cursorEntryValidator(res.cursor.firstBatch[0],
-                     {ok: 0, idx: 0, n: 0, code: ErrorCodes.InvalidNamespace});
-assert(!res.cursor.firstBatch[1]);
-
-assert.eq(coll.findOne().skey, "MongoDB");
-
-coll.drop();
 
 // Test BypassDocumentValidator
 assert.commandWorked(coll.insert({_id: 1}));
@@ -427,32 +332,9 @@ res = db.adminCommand({
     bypassDocumentValidation: false,
 });
 assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
+assert.eq(res.numErrors, 1, "bulkWrite command response: " + tojson(res));
 
 assert.eq(0, coll.count({_id: 3}));
-coll.drop();
-
-// Test that we correctly count multiple errors for different write types when ordered=false.
-res = db.adminCommand({
-    bulkWrite: 1,
-    ops: [
-        {insert: 0, document: {_id: 1}},
-        {insert: 0, document: {_id: 2}},
-        // error 1: duplicate key error
-        {insert: 0, document: {_id: 1}},
-        {delete: 0, filter: {_id: 2}},
-        // error 2: user can't write to namespace
-        {delete: 1, filter: {_id: 0}},
-        {update: 0, filter: {_id: 0}, updateMods: {$set: {x: 1}}},
-        // error 3: invalid update operator
-        {update: 0, filter: {_id: 0}, updateMods: {$blah: {x: 1}}},
-    ],
-    nsInfo: [{ns: "test.coll"}, {ns: "test.system.profile"}],
-    ordered: false
-});
-
-assert.commandWorked(res);
-assert.eq(res.numErrors, 3);
 coll.drop();
 
 // Checking n and nModified on update success and failure.
@@ -467,15 +349,16 @@ res = db.adminCommand({
 });
 
 assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
+cursorSizeValidator(res, 3);
+assert.eq(res.numErrors, 1, "bulkWrite command response: " + tojson(res));
 
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, idx: 0, n: 1});
 cursorEntryValidator(res.cursor.firstBatch[1], {ok: 1, idx: 1, n: 1, nModified: 1});
 cursorEntryValidator(res.cursor.firstBatch[2],
                      {ok: 0, idx: 2, n: 0, nModified: 0, code: ErrorCodes.ImmutableField});
-assert(!res.cursor.firstBatch[3]);
 coll.drop();
 
+coll.insert({skey: "MongoDB"});
 // Test constants is not supported on non-pipeline update.
 res = db.adminCommand({
     bulkWrite: 1,
@@ -491,12 +374,12 @@ res = db.adminCommand({
 });
 
 assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
+cursorSizeValidator(res, 1);
+assert.eq(res.numErrors, 1, "bulkWrite command response: " + tojson(res));
 
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 0, idx: 0, n: 0, nModified: 0, code: 51198});
 assert.eq(res.cursor.firstBatch[0].errmsg,
           "Constant values may only be specified for pipeline updates");
-assert(!res.cursor.firstBatch[1]);
 
 coll.drop();
 
@@ -517,11 +400,30 @@ res = db.adminCommand({
 });
 
 assert.commandWorked(res);
-assert.eq(res.numErrors, 1);
+cursorSizeValidator(res, 1);
+assert.eq(res.numErrors, 1, "bulkWrite command response: " + tojson(res));
 
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 0, idx: 0, n: 0, nModified: 0, code: 9});
 assert.eq(res.cursor.firstBatch[0].errmsg,
           "the parameter 'upsertSupplied' is set to 'true', but no document was supplied");
-assert(!res.cursor.firstBatch[1]);
+
+coll.drop();
+
+// Test errorsOnly.
+res = db.adminCommand({
+    bulkWrite: 1,
+    ops: [{insert: 0, document: {_id: 1}}, {insert: 0, document: {_id: 1}}],
+    nsInfo: [{ns: "test.coll"}],
+    errorsOnly: true
+});
+
+assert.commandWorked(res, "bulkWrite command response: " + tojson(res));
+cursorSizeValidator(res, 1);
+assert.eq(res.numErrors, 1, "bulkWrite command response: " + tojson(res));
+
+assert(res.cursor.id == 0, "bulkWrite command response: " + tojson(res));
+cursorEntryValidator(res.cursor.firstBatch[0], {ok: 0, n: 0, idx: 1, code: 11000});
+assert(!res.cursor.firstBatch[1], "bulkWrite command response: " + tojson(res));
+assert.eq(res.cursor.ns, "admin.$cmd.bulkWrite", "bulkWrite command response: " + tojson(res));
 
 coll.drop();

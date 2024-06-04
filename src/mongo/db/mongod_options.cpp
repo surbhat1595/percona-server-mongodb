@@ -34,7 +34,6 @@
 #include <boost/filesystem.hpp>  // IWYU pragma: keep
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <initializer_list>
 #include <iostream>
@@ -177,8 +176,9 @@ StatusWith<repl::ReplSettings> populateReplSettings(const moe::Environment& para
     } else if (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup() &&
                serverGlobalParams.maintenanceMode != ServerGlobalParams::StandaloneMode) {
         replSettings.setShouldAutoInitiate();
-        // When autobootstrapping, we generate a UUID for the replica set name.
-        replSettings.setReplSetString(UUID::gen().toString());
+        // Empty `replSet` in replSettings means that the replica set name will be auto-generated
+        // in `processReplSetInitiate` after auto-initiation occurs or loaded from the
+        // local replica set configuration document if already part of a replica set.
     }
 
     if (params.count("replication.oplogSizeMB")) {
@@ -449,6 +449,23 @@ Status canonicalizeMongodOptions(moe::Environment* params) {
     return Status::OK();
 }
 
+namespace {
+constexpr char getPathSeparator() {
+#ifdef _WIN32
+    return '\\';
+#else
+    return '/';
+#endif
+}
+
+void removeTrailingPathSeparator(std::string& path, char separator) {
+    while (path.size() > 1 && path.ends_with(separator)) {
+        // size() check is for the unlikely possibility of --dbpath "/"
+        path.pop_back();
+    }
+}
+}  // namespace
+
 Status storeMongodOptions(const moe::Environment& params) {
     Status ret = storeServerOptions(params);
     if (!ret.isOK()) {
@@ -499,14 +516,9 @@ Status storeMongodOptions(const moe::Environment& params) {
             storageGlobalParams.dbpath = serverGlobalParams.cwd + "/" + storageGlobalParams.dbpath;
         }
     }
-#ifdef _WIN32
-    if (storageGlobalParams.dbpath.size() > 1 &&
-        storageGlobalParams.dbpath[storageGlobalParams.dbpath.size() - 1] == '/') {
-        // size() check is for the unlikely possibility of --dbpath "/"
-        storageGlobalParams.dbpath =
-            storageGlobalParams.dbpath.erase(storageGlobalParams.dbpath.size() - 1);
-    }
+    removeTrailingPathSeparator(storageGlobalParams.dbpath, getPathSeparator());
 
+#ifdef _WIN32
     StringData dbpath(storageGlobalParams.dbpath);
     if (dbpath.size() >= 2 && dbpath.startsWith("\\\\")) {
         // Check if the dbpath is on a Windows network share (eg. \\myserver\myshare)

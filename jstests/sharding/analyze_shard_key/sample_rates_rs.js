@@ -17,6 +17,10 @@ import {
     runNestedAggregateCmdsOnRepeat,
 } from "jstests/sharding/analyze_shard_key/libs/sample_rates_common.js";
 
+if (jsTestOptions().useAutoBootstrapProcedure) {  // TODO: SERVER-80318 Delete test
+    quit();
+}
+
 // Make the periodic jobs for refreshing sample rates and writing sampled queries and diffs have a
 // period of 1 second to speed up the test.
 const queryAnalysisSamplerConfigurationRefreshSecs = 1;
@@ -143,6 +147,8 @@ function testQuerySampling(dbName, collNameNotSampled, collNameSampled) {
     jsTest.log("Finished waiting for sampled queries: " +
                tojsononeline({actualSampleSize: sampleSize}));
 
+    const deleteField = TestData.runningWithBulkWriteOverride ? 'bulkWrite' : 'delete';
+
     // Verify that the difference between the actual and expected number of samples is within the
     // expected threshold.
     const expectedTotalCount = durationSecs * samplesPerSecond;
@@ -157,7 +163,7 @@ function testQuerySampling(dbName, collNameNotSampled, collNameSampled) {
                    expectedSampleSize: {
                        total: expectedTotalCount,
                        find: expectedFindPercentage * expectedTotalCount / 100,
-                       delete: expectedDeletePercentage * expectedTotalCount / 100,
+                       [deleteField]: expectedDeletePercentage * expectedTotalCount / 100,
                        aggregate: expectedAggPercentage * expectedTotalCount / 100
                    }
                }));
@@ -168,7 +174,7 @@ function testQuerySampling(dbName, collNameNotSampled, collNameSampled) {
         AnalyzeShardKeyUtil.calculatePercentage(sampleSize.find, sampleSize.total);
     assertDiffWindow(actualFindPercentage, expectedFindPercentage, 5 /* maxDiff */);
     const actualDeletePercentage =
-        AnalyzeShardKeyUtil.calculatePercentage(sampleSize.delete, sampleSize.total);
+        AnalyzeShardKeyUtil.calculatePercentage(sampleSize[deleteField], sampleSize.total);
     assertDiffWindow(actualDeletePercentage, expectedDeletePercentage, 5 /* maxDiff */);
     const actualAggPercentage =
         AnalyzeShardKeyUtil.calculatePercentage(sampleSize.aggregate, sampleSize.total);

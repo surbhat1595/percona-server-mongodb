@@ -35,7 +35,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bsonelement.h"
@@ -59,8 +58,8 @@
 #include "mongo/db/query/projection_ast.h"
 #include "mongo/db/query/projection_ast_util.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/record_id_bound.h"
-#include "mongo/db/query/serialization_options.h"
 #include "mongo/db/query/stage_types.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/unordered_map.h"
@@ -254,7 +253,8 @@ void statsToBSON(const QuerySolutionNode* node,
             auto eln = static_cast<const EqLookupNode*>(node);
 
             bob->append("foreignCollection",
-                        NamespaceStringUtil::serialize(eln->foreignCollection));
+                        NamespaceStringUtil::serialize(eln->foreignCollection,
+                                                       SerializationContext::stateDefault()));
             bob->append("localField", eln->joinFieldLocal.fullPath());
             bob->append("foreignField", eln->joinFieldForeign.fullPath());
             bob->append("asField", eln->joinField.fullPath());
@@ -279,8 +279,7 @@ void statsToBSON(const QuerySolutionNode* node,
                 BSONObjBuilder filtersBob(bob->subobjStart("filtersByPath"));
                 for (const auto& [path, matchExpr] : cisn->filtersByPath) {
                     SerializationOptions opts;
-                    opts.includePath = false;
-                    filtersBob.append(path, matchExpr->serialize(opts));
+                    filtersBob.append(path, matchExpr->serialize(opts, false));
                 }
             }
 
@@ -295,11 +294,16 @@ void statsToBSON(const QuerySolutionNode* node,
             auto utsbn = static_cast<const UnpackTsBucketNode*>(node);
             {
                 const auto behaviorField =
-                    utsbn->bucketSpec.behavior() == BucketSpec::Behavior::kInclude ? "include"
-                                                                                   : "exclude";
+                    utsbn->bucketSpec.behavior() == timeseries::BucketSpec::Behavior::kInclude
+                    ? "include"
+                    : "exclude";
                 BSONArrayBuilder fieldsBab{bob->subarrayStart(behaviorField)};
                 for (const auto& field : utsbn->bucketSpec.fieldSet()) {
                     fieldsBab.append(field);
+                }
+                if (utsbn->bucketSpec.behavior() == timeseries::BucketSpec::Behavior::kInclude &&
+                    utsbn->includeMeta) {
+                    fieldsBab.append(*utsbn->bucketSpec.metaField());
                 }
             }
             {
@@ -311,10 +315,17 @@ void statsToBSON(const QuerySolutionNode* node,
             bob->append("includeMeta", utsbn->includeMeta);
             bob->append("eventFilter",
                         utsbn->eventFilter ? utsbn->eventFilter->serialize() : BSONObj());
-            bob->append("wholebucketFilter",
+            bob->append("wholeBucketFilter",
                         utsbn->wholeBucketFilter ? utsbn->wholeBucketFilter->serialize()
                                                  : BSONObj());
 
+            break;
+        }
+        case STAGE_SEARCH: {
+            auto sn = static_cast<const SearchNode*>(node);
+            bob->append("isSearchMeta", sn->isSearchMeta);
+            bob->appendNumber("remoteCursorId", static_cast<long long>(sn->remoteCursorId));
+            bob->append("searchQuery", sn->searchQuery);
             break;
         }
         default:
@@ -452,6 +463,7 @@ PlanExplainer::PlanStatsDetails buildPlanStatsDetails(
     const sbe::PlanStageStats& stats,
     const boost::optional<BSONObj>& execPlanDebugInfo,
     const boost::optional<BSONObj>& optimizerExplain,
+    const boost::optional<BSONArray>& remotePlanInfo,
     ExplainOptions::Verbosity verbosity) {
     BSONObjBuilder bob;
 
@@ -475,13 +487,17 @@ PlanExplainer::PlanStatsDetails buildPlanStatsDetails(
     }
 
     invariant(execPlanDebugInfo);
+    BSONObjBuilder plan;
     if (optimizerExplain) {
-        return {BSON("optimizerPlan" << *optimizerExplain << "slotBasedPlan" << *execPlanDebugInfo),
-                boost::none};
+        plan.append("optimizerPlan", *optimizerExplain);
     } else {
-        return {BSON("queryPlan" << bob.obj() << "slotBasedPlan" << *execPlanDebugInfo),
-                boost::none};
+        plan.append("queryPlan", bob.obj());
     }
+    plan.append("slotBasedPlan", *execPlanDebugInfo);
+    if (remotePlanInfo && !remotePlanInfo->isEmpty()) {
+        plan.append("remotePlans", *remotePlanInfo);
+    }
+    return {plan.obj(), boost::none};
 }
 }  // namespace
 
@@ -554,6 +570,7 @@ PlanExplainer::PlanStatsDetails PlanExplainerSBE::getWinningPlanStats(
                                  *stats,
                                  buildExecPlanDebugInfo(_root, _rootData),
                                  buildCascadesPlan(),
+                                 buildRemotePlanInfo(),
                                  verbosity);
 }
 
@@ -566,8 +583,9 @@ PlanExplainer::PlanStatsDetails PlanExplainerSBE::getWinningPlanTrialStats() con
             *_rootData->savedStatsOnEarlyExit,
             // This parameter is not used in `buildPlanStatsDetails` if the last parameter is
             // `ExplainOptions::Verbosity::kExecAllPlans`, as is the case here.
-            boost::none,
-            boost::none,
+            boost::none /* execPlanDebugInfo */,
+            boost::none /* optimizerExplain */,
+            boost::none /* remotePlanInfo */,
             ExplainOptions::Verbosity::kExecAllPlans);
     }
     return getWinningPlanStats(ExplainOptions::Verbosity::kExecAllPlans);
@@ -589,8 +607,12 @@ std::vector<PlanExplainer::PlanStatsDetails> PlanExplainerSBE::getRejectedPlansS
         invariant(stats);
         auto execPlanDebugInfo =
             buildExecPlanDebugInfo(candidate.root.get(), &candidate.data.stageData);
-        res.push_back(buildPlanStatsDetails(
-            candidate.solution.get(), *stats, execPlanDebugInfo, boost::none, verbosity));
+        res.push_back(buildPlanStatsDetails(candidate.solution.get(),
+                                            *stats,
+                                            execPlanDebugInfo,
+                                            boost::none /* optimizerExplain */,
+                                            boost::none /* remotePlanInfo */,
+                                            verbosity));
     }
     return res;
 }
@@ -602,4 +624,14 @@ boost::optional<BSONObj> PlanExplainerSBE::buildCascadesPlan() const {
     return {};
 }
 
+boost::optional<BSONArray> PlanExplainerSBE::buildRemotePlanInfo() const {
+    if (!_remoteExplains) {
+        return boost::none;
+    }
+    BSONArrayBuilder arrBuilder;
+    for (const auto& explain : *_remoteExplains) {
+        arrBuilder << explain;
+    }
+    return arrBuilder.arr();
+}
 }  // namespace mongo

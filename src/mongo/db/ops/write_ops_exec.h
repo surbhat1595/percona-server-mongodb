@@ -50,6 +50,7 @@
 #include "mongo/db/ops/write_ops_exec_util.h"
 #include "mongo/db/ops/write_ops_gen.h"
 #include "mongo/db/ops/write_ops_parsers.h"
+#include "mongo/db/query/query_settings_gen.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/session/logical_session_id.h"
@@ -128,13 +129,12 @@ boost::optional<BSONObj> advanceExecutor(OperationContext* opCtx,
 UpdateResult performUpdate(OperationContext* opCtx,
                            const NamespaceString& nss,
                            CurOp* curOp,
-                           OpDebug* opDebug,
                            bool inTransaction,
                            bool remove,
                            bool upsert,
                            const boost::optional<mongo::UUID>& collectionUUID,
                            boost::optional<BSONObj>& docFound,
-                           const UpdateRequest& updateRequest);
+                           UpdateRequest* updateRequest);
 
 /**
  * Executes a delete, supports returning the deleted document. the returned document is placed into
@@ -142,9 +142,8 @@ UpdateResult performUpdate(OperationContext* opCtx,
  */
 long long performDelete(OperationContext* opCtx,
                         const NamespaceString& nss,
-                        const DeleteRequest& deleteRequest,
+                        DeleteRequest* deleteRequest,
                         CurOp* curOp,
-                        OpDebug* opDebug,
                         bool inTransaction,
                         const boost::optional<mongo::UUID>& collectionUUID,
                         boost::optional<BSONObj>& docFound);
@@ -156,6 +155,16 @@ boost::optional<write_ops::WriteError> generateError(OperationContext* opCtx,
                                                      const Status& status,
                                                      int index,
                                                      size_t numErrors);
+
+/**
+ * Updates the retryable write stats if the write op contains retry.
+ */
+void updateRetryStats(OperationContext* opCtx, bool containsRetry);
+
+/**
+ * Marks the op as complete, log it and profile if appropriate.
+ */
+void logOperationAndProfileIfNeeded(OperationContext* opCtx, CurOp* curOp);
 
 /**
  * Performs a batch of inserts, updates, or deletes.
@@ -219,6 +228,28 @@ bool shouldRetryDuplicateKeyException(const UpdateRequest& updateRequest,
  */
 write_ops::InsertCommandReply performTimeseriesWrites(
     OperationContext* opCtx, const write_ops::InsertCommandRequest& request);
+
+write_ops::InsertCommandReply performTimeseriesWrites(
+    OperationContext* opCtx, const write_ops::InsertCommandRequest& request, CurOp* curOp);
+
+/*
+ * Populates 'result' with the explain information for the write requests.
+ */
+void explainUpdate(OperationContext* opCtx,
+                   UpdateRequest& updateRequest,
+                   bool isTimeseriesViewRequest,
+                   const SerializationContext& serializationContext,
+                   const BSONObj& command,
+                   ExplainOptions::Verbosity verbosity,
+                   rpc::ReplyBuilderInterface* result);
+
+void explainDelete(OperationContext* opCtx,
+                   DeleteRequest& deleteRequest,
+                   bool isTimeseriesViewRequest,
+                   const SerializationContext& serializationContext,
+                   const BSONObj& command,
+                   ExplainOptions::Verbosity verbosity,
+                   rpc::ReplyBuilderInterface* result);
 
 }  // namespace write_ops_exec
 }  // namespace mongo

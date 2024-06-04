@@ -79,7 +79,7 @@ feature_flags:
         using unreplicated truncates instead of normal document deletions replicated from the
         primary."
         cpp_varname: feature_flags::gFeatureFlagUseUnreplicatedTruncatesForDeletions
-        default: false
+        default: true
         shouldBeFCVGated: false
     featureFlagTTLIndexesOnCappedCollections:
         description: "Enables support for capped collections having a TTL index."
@@ -100,5 +100,23 @@ feature_flags:
     featureFlagShardKeyIndexOptionalHashedSharding:
         description: "Feature flag to make a supporting shard key index for hashed sharding optional"
         cpp_varname: gFeatureFlagShardKeyIndexOptionalHashedSharding
-        default: false
+        default: true
+        version: 7.0
         shouldBeFCVGated: true
+    featureFlagBanEncryptionOptionsInCollectionCreation:
+        description: "Feature flag that bans encryption options from being used in createCollection
+        commands"
+        cpp_varname: gFeatureFlagBanEncryptionOptionsInCollectionCreation
+        default: true
+        version: 7.2
+        shouldBeFCVGated: true
+    featureFlagRearchitectUserAcquisition:
+        description: "Enable new flow for authentication and authorization"
+        cpp_varname: gFeatureFlagRearchitectUserAcquisition
+        default: false
+        shouldBeFCVGated: false
+    featureFlagOIDCInternalAuthorization:
+        description: "Feature flag gating OIDC authentication with internal authorization"
+        cpp_varname: gFeatureFlagOIDCInternalAuthorization
+        default: false
+        shouldBeFCVGated: false

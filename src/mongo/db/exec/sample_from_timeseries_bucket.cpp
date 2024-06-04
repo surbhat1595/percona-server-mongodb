@@ -30,7 +30,6 @@
 
 #include "mongo/db/exec/sample_from_timeseries_bucket.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <utility>
 #include <vector>
 
@@ -64,7 +63,7 @@ SampleFromTimeseriesBucket::SampleFromTimeseriesBucket(
     ExpressionContext* expCtx,
     WorkingSet* ws,
     std::unique_ptr<PlanStage> child,
-    BucketUnpacker bucketUnpacker,
+    timeseries::BucketUnpacker bucketUnpacker,
     boost::optional<std::unique_ptr<ShardFilterer>> shardFilterer,
     int maxConsecutiveAttempts,
     long long sampleSize,

@@ -6,7 +6,6 @@
 TestData.skipCheckShardFilteringMetadata = true;
 
 import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
-import {configureFailPointForRS} from "jstests/libs/fail_point_util.js";
 
 let st = new ShardingTest({shards: 2, other: {chunkSize: 1}});
 
@@ -84,10 +83,9 @@ assert.eq(docCount.n, 0);
 // Hashed shard key
 testNs = hashedTestColl.getFullName();
 
-assert.commandWorked(
-    adminDB.runCommand({shardCollection: testNs, key: {x: 'hashed'}, numInitialChunks: 2}));
+assert.commandWorked(adminDB.runCommand({shardCollection: testNs, key: {x: 'hashed'}}));
 
-createJumboChunk(hashedTestColl, 0);
+createJumboChunk(hashedTestColl, -1);
 validateJumboFlag(testNs, {min: {x: 0}});
 
 jumboChunk = findChunksUtil.findOneChunkByNs(configDB, testNs, {min: {x: 0}});
@@ -135,8 +133,8 @@ let chunk = findChunksUtil.findOneChunkByNs(configDB, testNs, {min: {x: 0}});
 assert(chunk.jumbo, tojson(chunk));
 assert.eq(st.shard0.shardName, chunk.shard);
 
-configureFailPointForRS(
-    st.configRS.nodes, 'overrideBalanceRoundInterval', {intervalMs: 200}, 'alwaysOn');
+st.forEachConfigServer((conn) => {assert.commandWorked(conn.adminCommand(
+                           {setParameter: 1, balancerMigrationsThrottlingMs: 200}))});
 
 runBalancer(testColl);
 

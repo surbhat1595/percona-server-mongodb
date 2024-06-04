@@ -32,8 +32,8 @@ const st = new ShardingTest({shards: numShards});
 const db = st.s.getDB(`${jsTest.name()}_db`);
 
 // Enable sharding on the database and use shard0 as the primary shard.
-assert.commandWorked(db.adminCommand({enableSharding: db.getName()}));
-st.ensurePrimaryShard(db.getName(), st.shard0.shardName);
+assert.commandWorked(
+    db.adminCommand({enableSharding: db.getName(), primaryShard: st.shard0.shardName}));
 
 // Test that the explain's 'executionStats' section includes all relevant fields for each shard
 // when the 'explain' command is executed against a sharded collection.
@@ -64,22 +64,29 @@ st.ensurePrimaryShard(db.getName(), st.shard0.shardName);
     // Sort the shards array by the 'shardName' to guarantee consistent results, as explain
     // outputs from the shards may arrive in an arbitrary order.
     executionStages.shards.sort((a, b) => a.shardName.localeCompare(b.shardName));
-    verifyExecStatsOnShard({
-        explain: executionStages.shards[0],
-        expectedShardName: st.shard0.shardName,
-        expectedNReturned: 4,
-        expectedKeysExamined: 0,
-        expectedDocsExamined: 4,
-        totals: totals
-    });
-    verifyExecStatsOnShard({
-        explain: executionStages.shards[1],
-        expectedShardName: st.shard1.shardName,
-        expectedNReturned: 6,
-        expectedKeysExamined: 0,
-        expectedDocsExamined: 6,
-        totals: totals
-    });
+
+    let sortedExpectedStats = [
+        {
+            expectedShardName: st.shard0.shardName,
+            expectedNReturned: 4,
+            expectedKeysExamined: 0,
+            expectedDocsExamined: 4,
+            totals: totals
+        },
+        {
+            expectedShardName: st.shard1.shardName,
+            expectedNReturned: 6,
+            expectedKeysExamined: 0,
+            expectedDocsExamined: 6,
+            totals: totals
+        }
+    ];
+    sortedExpectedStats.sort((a, b) => a.expectedShardName.localeCompare(b.expectedShardName));
+
+    verifyExecStatsOnShard(
+        Object.merge(sortedExpectedStats[0], {explain: executionStages.shards[0]}));
+    verifyExecStatsOnShard(
+        Object.merge(sortedExpectedStats[1], {explain: executionStages.shards[1]}));
 
     // Ensure that execution stats accumulated across all shards matches the values in the
     // top-level 'executionStages' section of the explain output.

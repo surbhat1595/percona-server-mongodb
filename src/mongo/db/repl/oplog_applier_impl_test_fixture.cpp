@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <utility>
 
 #include <boost/none.hpp>
@@ -106,12 +105,13 @@ void OplogApplierImplOpObserver::onInserts(OperationContext* opCtx,
 void OplogApplierImplOpObserver::onDelete(OperationContext* opCtx,
                                           const CollectionPtr& coll,
                                           StmtId stmtId,
+                                          const BSONObj& doc,
                                           const OplogDeleteEntryArgs& args,
                                           OpStateAccumulator* opAccumulator) {
     if (!onDeleteFn) {
         return;
     }
-    onDeleteFn(opCtx, coll, stmtId, args);
+    onDeleteFn(opCtx, coll, stmtId, doc, args);
 }
 
 void OplogApplierImplOpObserver::onUpdate(OperationContext* opCtx,
@@ -304,6 +304,7 @@ void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
     _opObserver->onDeleteFn = [&](OperationContext* opCtx,
                                   const CollectionPtr& coll,
                                   StmtId stmtId,
+                                  const BSONObj& doc,
                                   const OplogDeleteEntryArgs& args) {
         // Other threads may be calling into the opObserver. Only assert if we are writing to
         // the target ns, otherwise skip these asserts.
@@ -313,8 +314,7 @@ void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
 
         applyOpCalled = true;
         checkOpCtx(opCtx);
-        ASSERT(args.deletedDoc);
-        ASSERT_BSONOBJ_EQ(op.getObject(), *(args.deletedDoc));
+        ASSERT_BSONOBJ_EQ(op.getObject(), doc);
         return Status::OK();
     };
 
@@ -444,7 +444,7 @@ CollectionReader::CollectionReader(OperationContext* opCtx, const NamespaceStrin
     : _collToScan(opCtx, nss),
       _exec(InternalPlanner::collectionScan(opCtx,
                                             &_collToScan.getCollection(),
-                                            PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                            PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                             InternalPlanner::FORWARD)) {}
 
 StatusWith<BSONObj> CollectionReader::next() {
@@ -491,9 +491,10 @@ OplogEntry makeOplogEntry(OpTime opTime,
                           boost::optional<RetryImageEnum> needsRetryImage) {
     return {DurableOplogEntry(opTime,                     // optime
                               opType,                     // opType
-                              std::move(nss),             // namespace
+                              nss,                        // namespace
                               uuid,                       // uuid
                               fromMigrate,                // fromMigrate
+                              boost::none,                // checkExistenceForDiffInsert
                               OplogEntry::kOplogVersion,  // version
                               o,                          // o
                               o2,                         // o2

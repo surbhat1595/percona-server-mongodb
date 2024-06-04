@@ -33,7 +33,6 @@
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -65,7 +64,6 @@ RemoteCommandTargeterRS::RemoteCommandTargeterRS(const std::string& rsName,
 
     LOGV2_DEBUG(20157,
                 1,
-                "Started targeter for {connectionString}",
                 "Started targeter",
                 "connectionString"_attr = ConnectionString::forReplicaSet(
                     rsName, std::vector<HostAndPort>(seedServers.begin(), seedServers.end())));

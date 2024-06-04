@@ -33,7 +33,6 @@
 // IWYU pragma: no_include "cxxabi.h"
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <functional>
 #include <thread>
@@ -47,6 +46,7 @@
 #include "mongo/transport/service_executor_gen.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/transport_layer.h"
+#include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
@@ -232,7 +232,7 @@ void ServiceExecutorFixed::_finalize() noexcept {
     invariant(_stats->tasksWaiting() == 0);
 }
 
-Status ServiceExecutorFixed::start() {
+void ServiceExecutorFixed::start() {
     {
         auto lk = stdx::lock_guard(_mutex);
         switch (_state) {
@@ -240,11 +240,11 @@ Status ServiceExecutorFixed::start() {
                 _state = State::kRunning;
                 break;
             case State::kRunning:
-                return Status::OK();
+                return;
             case State::kStopping:
             case State::kStopped:
-                return {ErrorCodes::ServiceExecutorInShutdown,
-                        "ServiceExecutorFixed is already stopping or stopped"};
+                uasserted(ErrorCodes::ServiceExecutorInShutdown,
+                          "ServiceExecutorFixed is already stopping or stopped");
         }
     }
 
@@ -258,17 +258,17 @@ Status ServiceExecutorFixed::start() {
     if (!_svcCtx) {
         // For some tests, we do not have a ServiceContext.
         invariant(TestingProctor::instance().isEnabled());
-        return Status::OK();
+        return;
     }
 
-    auto tl = _svcCtx->getTransportLayer();
+    auto tl = _svcCtx->getTransportLayerManager();
     if (!tl) {
         // For some tests, we do not have a TransportLayer.
         invariant(TestingProctor::instance().isEnabled());
-        return Status::OK();
+        return;
     }
 
-    auto reactor = tl->getReactor(TransportLayer::WhichReactor::kIngress);
+    auto reactor = tl->getEgressLayer()->getReactor(TransportLayer::WhichReactor::kIngress);
     invariant(reactor);
     _threadPool->schedule([this, reactor](Status) {
         {
@@ -284,8 +284,6 @@ Status ServiceExecutorFixed::start() {
         // Start running on the reactor immediately.
         reactor->run();
     });
-
-    return Status::OK();
 }
 
 ServiceExecutorFixed* ServiceExecutorFixed::get(ServiceContext* ctx) {
@@ -385,14 +383,14 @@ void ServiceExecutorFixed::_checkForShutdown() {
         return;
     }
 
-    auto tl = _svcCtx->getTransportLayer();
+    auto tl = _svcCtx->getTransportLayerManager();
     if (!tl) {
         // For some tests, we do not have a TransportLayer.
         invariant(TestingProctor::instance().isEnabled());
         return;
     }
 
-    auto reactor = tl->getReactor(TransportLayer::WhichReactor::kIngress);
+    auto reactor = tl->getEgressLayer()->getReactor(TransportLayer::WhichReactor::kIngress);
     invariant(reactor);
     reactor->stop();
 }

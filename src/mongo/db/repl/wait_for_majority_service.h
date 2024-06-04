@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/iteration/iterate.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/utility/in_place_factory.hpp>  // IWYU pragma: keep
 #include <map>
@@ -193,14 +192,6 @@ public:
      * Blocking method, which shuts down and joins the background thread.
      */
     void shutDown();
-
-    /**
-     * Identical to waitUntilMajorityForWrite, which should be used instead.
-     *
-     * TODO(SERVER-74754): Remove this method and replace all uses with waitUntilMajorityForWrite.
-     */
-    SemiFuture<void> waitUntilMajority(const repl::OpTime& opTime,
-                                       const CancellationToken& cancelToken);
 
     /**
      * Enqueue a request to wait for the given opTime to be majority committed.

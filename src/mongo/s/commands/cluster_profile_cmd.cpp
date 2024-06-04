@@ -30,7 +30,6 @@
 #include <memory>
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/catalog/collection_catalog.h"
@@ -61,7 +60,9 @@ protected:
         OperationContext* opCtx,
         const DatabaseName& dbName,
         const ProfileCmdRequest& request) const final {
-        invariant(!opCtx->lockState()->isW());
+        // Writing to the CollectionCatalog requires holding the Global lock to avoid concurrent
+        // races with BatchedCollectionCatalogWriter.
+        Lock::GlobalLock lk{opCtx, MODE_IX};
 
         const auto profilingLevel = request.getCommandParameter();
 
@@ -92,8 +93,8 @@ protected:
     }
 };
 
-MONGO_REGISTER_COMMAND(ProfileCmd);
-MONGO_REGISTER_COMMAND(SetProfilingFilterGloballyCmd);
+MONGO_REGISTER_COMMAND(ProfileCmd).forRouter();
+MONGO_REGISTER_COMMAND(SetProfilingFilterGloballyCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

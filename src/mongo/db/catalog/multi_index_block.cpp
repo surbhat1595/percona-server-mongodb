@@ -33,7 +33,6 @@
 #include <boost/container/flat_set.hpp>
 #include <boost/container/small_vector.hpp>
 #include <boost/container/vector.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -248,12 +247,10 @@ void MultiIndexBlock::abortIndexBuild(OperationContext* opCtx,
             if (e.toStatus() == ErrorCodes::ExceededMemoryLimit)
                 continue;
             LOGV2_ERROR(20393,
-                        "Caught exception while cleaning up partially built indexes: {e}",
                         "Caught exception while cleaning up partially built indexes",
                         "error"_attr = redact(e));
         } catch (const std::exception& e) {
             LOGV2_ERROR(20394,
-                        "Caught exception while cleaning up partially built indexes: {e_what}",
                         "Caught exception while cleaning up partially built indexes",
                         "error"_attr = e.what());
         } catch (...) {

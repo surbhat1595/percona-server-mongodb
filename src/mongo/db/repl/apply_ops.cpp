@@ -37,7 +37,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -105,8 +104,9 @@ Status _applyOps(OperationContext* opCtx,
         if (*opType == 'n')
             continue;
 
-        const NamespaceString nss(
-            NamespaceStringUtil::deserialize(dbName.tenantId(), opObj["ns"].String()));
+        // opObj["ns"] contains a tenantId prefixed namespace if there is tenancy.
+        const NamespaceString nss(NamespaceStringUtil::deserialize(
+            dbName.tenantId(), opObj["ns"].String(), SerializationContext::stateDefault()));
 
         // Need to check this here, or OldClientContext may fail an invariant.
         if (*opType != 'c' && !nss.isValid())
@@ -115,7 +115,7 @@ Status _applyOps(OperationContext* opCtx,
         Status status = Status::OK();
 
         try {
-            status = writeConflictRetry(
+            status = writeConflictRetryWithLimit(
                 opCtx,
                 "applyOps",
                 nss,
@@ -207,10 +207,7 @@ Status _applyOps(OperationContext* opCtx,
 
         ab.append(status.isOK());
         if (!status.isOK()) {
-            LOGV2(21064,
-                  "applyOps error applying: {error}",
-                  "applyOps error applying",
-                  "error"_attr = status);
+            LOGV2(21064, "applyOps error applying", "error"_attr = status);
             errors++;
         }
 

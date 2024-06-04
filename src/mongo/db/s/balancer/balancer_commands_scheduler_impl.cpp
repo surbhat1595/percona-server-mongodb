@@ -34,7 +34,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <mutex>
 #include <type_traits>
@@ -384,13 +383,8 @@ void BalancerCommandsSchedulerImpl::_workerThread() {
         _stateUpdatedCV.notify_all();
     });
 
-    Client::initThread("BalancerCommandsScheduler");
-
-    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnkillableByStepdown(lk);
-    }
+    Client::initThread("BalancerCommandsScheduler",
+                       getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
     bool stopWorkerRequested = false;
     LOGV2(5847205, "Balancer scheduler thread started");

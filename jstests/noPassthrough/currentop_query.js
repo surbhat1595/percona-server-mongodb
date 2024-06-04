@@ -6,6 +6,10 @@
  *    requires_sharding,
  * ]
  */
+import {
+    checkCascadesOptimizerEnabled,
+    checkExperimentalCascadesOptimizerEnabled
+} from "jstests/libs/optimizer_utils.js";
 import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
 // This test runs manual getMores using different connections, which will not inherit the
@@ -30,8 +34,8 @@ const mongosDB = mongosConn.getDB("currentop_query");
 const mongosColl = mongosDB.currentop_query;
 
 // Enable sharding on the the test database and ensure that the primary is on shard0.
-assert.commandWorked(mongosDB.adminCommand({enableSharding: mongosDB.getName()}));
-st.ensurePrimaryShard(mongosDB.getName(), rsConn.name);
+assert.commandWorked(
+    mongosDB.adminCommand({enableSharding: mongosDB.getName(), primaryShard: rsConn.name}));
 
 // On a sharded cluster, aggregations which are dispatched to multiple shards first establish
 // zero-batch cursors and only hit the failpoints on the following getMore. This helper takes a
@@ -77,6 +81,8 @@ function runTests({conn, currentOp, truncatedOps, localOps}) {
     const isRemoteShardCurOp = (FixtureHelpers.isMongos(testDB) && !localOps);
 
     const sbeEnabled = checkSBEEnabled(testDB);
+    const cqfEnabled = checkCascadesOptimizerEnabled(testDB);
+    const cqfExperimentalEnabled = checkExperimentalCascadesOptimizerEnabled(testDB);
 
     // If 'truncatedOps' is true, run only the subset of tests designed to validate the
     // truncation behaviour. Otherwise, run the standard set of tests which assume that
@@ -224,6 +230,20 @@ function runTests({conn, currentOp, truncatedOps, localOps}) {
             },
             {
                 test: function(db) {
+                    assert.eq(db.currentop_query.find({_id: {$lte: 1}})
+                                  .hint({_id: 1})
+                                  .comment("currentop_query_id_hint")
+                                  .itcount(),
+                              2);
+                },
+                planSummary: "IXSCAN { _id: 1 }",
+                queryFramework: cqfExperimentalEnabled ? "cqf"
+                    : sbeEnabled                       ? "sbe"
+                                                       : "classic",
+                currentOpFilter: {"command.comment": "currentop_query_id_hint"}
+            },
+            {
+                test: function(db) {
                     assert.eq(db.currentop_query.find({a: 1, $comment: "currentop_query"})
                                   .collation({locale: "fr"})
                                   .count(),
@@ -254,7 +274,9 @@ function runTests({conn, currentOp, truncatedOps, localOps}) {
                 },
                 command: "find",
                 planSummary: "COLLSCAN",
-                queryFramework: sbeEnabled ? "sbe" : "classic",
+                queryFramework: cqfEnabled ? "cqf"
+                    : sbeEnabled           ? "sbe"
+                                           : "classic",
                 currentOpFilter: {"command.comment": "currentop_query"}
             },
             {
@@ -268,7 +290,9 @@ function runTests({conn, currentOp, truncatedOps, localOps}) {
                 // expected to work when running against a mongos with localOps=true.
                 skipMongosLocalOps: true,
                 planSummary: "COLLSCAN",
-                queryFramework: sbeEnabled ? "sbe" : "classic",
+                queryFramework: cqfEnabled ? "cqf"
+                    : sbeEnabled           ? "sbe"
+                                           : "classic",
                 currentOpFilter: {"command.comment": "currentop_query", numYields: {$gt: 0}}
             },
             {
@@ -395,40 +419,60 @@ function runTests({conn, currentOp, truncatedOps, localOps}) {
         });
 
         //
-        // Confirm currentOp content for getMore. This case tests command and legacy getMore
-        // with originating find and aggregate commands.
+        // Confirm currentOp content for getMore. This case tests command and legacy
+        // getMore with originating find and aggregate commands.
         //
         dropAndRecreateTestCollection();
         for (let i = 0; i < 10; ++i) {
             assert.commandWorked(coll.insert({a: i}));
         }
 
-        const originatingCommands = {
-            find: {find: "currentop_query", filter: {}, comment: "currentop_query", batchSize: 0},
-            aggregate: {
-                aggregate: "currentop_query",
-                pipeline: [{$match: {}}],
-                comment: "currentop_query",
-                cursor: {batchSize: 0}
-            }
-        };
+        const getMoreTests = [
+            {
+                command: {
+                    find: "currentop_query",
+                    filter: {},
+                    comment: "currentop_query_find_getmore",
+                    batchSize: 0
+                },
+                queryFramework: cqfEnabled ? "cqf"
+                    : sbeEnabled           ? "sbe"
+                                           : "classic",
+                cmdName: "find",
+            },
+            {
+                command: {
+                    aggregate: "currentop_query",
+                    pipeline: [{$match: {}}],
+                    comment: "currentop_query_agg_getmore",
+                    cursor: {batchSize: 0}
+                },
+                // Even when CQF is enabled, aggregation commands against sharded collections are
+                // not eligible for CQF because mongos attaches unsupported fields including
+                // let parameters and collation to the command sent to the shard.
+                queryFramework: (!isRemoteShardCurOp && cqfEnabled) ? "cqf"
+                    : sbeEnabled                                    ? "sbe"
+                                                                    : "classic",
+                cmdName: "aggregate",
+            },
+        ];
 
-        for (let cmdName in originatingCommands) {
-            const cmdObj = originatingCommands[cmdName];
-            const cmdRes = testDB.runCommand(cmdObj);
+        getMoreTests.forEach((test) => {
+            const cmdRes = testDB.runCommand(test.command);
             assert.commandWorked(cmdRes);
 
             TestData.commandResult = cmdRes;
 
-            // If this is a non-localOps test running via mongoS, then the cursorID we obtained
-            // above is the ID of the mongoS cursor, and will not match the IDs of any of the
-            // individual shard cursors in the currentOp output. We therefore don't perform an
-            // exact match on 'command.getMore', but only verify that the cursor ID is non-zero.
+            // If this is a non-localOps test running via mongoS, then the cursorID we
+            // obtained above is the ID of the mongoS cursor, and will not match the IDs
+            // of any of the individual shard cursors in the currentOp output. We
+            // therefore don't perform an exact match on 'command.getMore', but only
+            // verify that the cursor ID is non-zero.
             const filter = {
                 "command.getMore":
                     (isRemoteShardCurOp ? {$gt: 0} : TestData.commandResult.cursor.id),
-                [`cursor.originatingCommand.${cmdName}`]: {$exists: true},
-                "cursor.originatingCommand.comment": "currentop_query"
+                [`cursor.originatingCommand.${test.cmdName}`]: {$exists: true},
+                "cursor.originatingCommand.comment": test.command.comment,
             };
 
             confirmCurrentOpContents({
@@ -438,12 +482,12 @@ function runTests({conn, currentOp, truncatedOps, localOps}) {
                 },
                 command: "getMore",
                 planSummary: "COLLSCAN",
-                queryFramework: sbeEnabled ? "sbe" : "classic",
+                queryFramework: test.queryFramework,
                 currentOpFilter: filter,
             });
 
             delete TestData.commandResult;
-        }
+        });
     }
 
     /**

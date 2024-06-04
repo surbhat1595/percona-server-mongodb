@@ -30,7 +30,6 @@
 #pragma once
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <memory>
 #include <tuple>
@@ -64,11 +63,11 @@ namespace async_rpc {
 
 class ShardIdTargeter : public Targeter {
 public:
-    ShardIdTargeter(ShardId shardId,
+    ShardIdTargeter(ExecutorPtr executor,
                     OperationContext* opCtx,
-                    ReadPreferenceSetting readPref,
-                    ExecutorPtr executor)
-        : _shardId(shardId), _opCtx(opCtx), _readPref(readPref), _executor(executor){};
+                    ShardId shardId,
+                    ReadPreferenceSetting readPref)
+        : _executor(executor), _opCtx(opCtx), _shardId(shardId), _readPref(readPref){};
 
     SemiFuture<std::vector<HostAndPort>> resolve(CancellationToken t) override {
         return getShard()
@@ -100,10 +99,10 @@ public:
     }
 
 private:
-    ShardId _shardId;
-    OperationContext* _opCtx;
-    ReadPreferenceSetting _readPref;
     ExecutorPtr _executor;
+    OperationContext* _opCtx;
+    ShardId _shardId;
+    ReadPreferenceSetting _readPref;
     std::shared_ptr<Shard> _shardFromLastResolve;
 };
 

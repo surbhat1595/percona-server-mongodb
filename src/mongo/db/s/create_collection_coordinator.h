@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <string>
 
@@ -61,6 +60,26 @@
 
 namespace mongo {
 
+namespace create_collection_util {
+/**
+ * Returns the optimization strategy for building initial chunks based on the input parameters
+ * and the collection state.
+ *
+ * If dataShard is specified, isUnsplittable must be true, because we can only select the shard
+ * that will hold the data for unsplittable collections.
+ */
+std::unique_ptr<InitialSplitPolicy> createPolicy(
+    OperationContext* opCtx,
+    const ShardKeyPattern& shardKeyPattern,
+    bool presplitHashedZones,
+    std::vector<TagsType> tags,
+    size_t numShards,
+    bool collectionIsEmpty,
+    bool isUnsplittable,
+    boost::optional<ShardId> dataShard,
+    boost::optional<std::vector<ShardId>> availableShardIds = boost::none);
+}  // namespace create_collection_util
+
 // This interface allows the retrieval of the outcome of a shardCollection request (which may be
 // served by different types of Coordinator)
 class CreateCollectionResponseProvider {
@@ -80,10 +99,12 @@ public:
     CreateCollectionCoordinatorLegacy(ShardingDDLCoordinatorService* service,
                                       const BSONObj& initialState)
         : RecoverableShardingDDLCoordinator(service, "CreateCollectionCoordinator", initialState),
-          _request(_doc.getCreateCollectionRequest()),
+          _request(_doc.getShardsvrCreateCollectionRequest()),
           _critSecReason(BSON("command"
                               << "createCollection"
-                              << "ns" << NamespaceStringUtil::serialize(originalNss()))) {}
+                              << "ns"
+                              << NamespaceStringUtil::serialize(
+                                     originalNss(), SerializationContext::stateDefault()))) {}
 
     ~CreateCollectionCoordinatorLegacy() = default;
 
@@ -109,7 +130,11 @@ private:
     ExecutorFuture<void> _runImpl(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                   const CancellationToken& token) noexcept override;
 
-    mongo::CreateCollectionRequest _request;
+    ExecutorFuture<void> _cleanupOnAbort(std::shared_ptr<executor::ScopedTaskExecutor> executor,
+                                         const CancellationToken& token,
+                                         const Status& status) noexcept override;
+
+    mongo::ShardsvrCreateCollectionRequest _request;
 
     const BSONObj _critSecReason;
 
@@ -136,10 +161,12 @@ public:
 
     CreateCollectionCoordinator(ShardingDDLCoordinatorService* service, const BSONObj& initialState)
         : RecoverableShardingDDLCoordinator(service, "CreateCollectionCoordinator", initialState),
-          _request(_doc.getCreateCollectionRequest()),
+          _request(_doc.getShardsvrCreateCollectionRequest()),
           _critSecReason(BSON("command"
                               << "createCollection"
-                              << "ns" << NamespaceStringUtil::serialize(originalNss()))) {}
+                              << "ns"
+                              << NamespaceStringUtil::serialize(
+                                     originalNss(), SerializationContext::stateDefault()))) {}
 
     ~CreateCollectionCoordinator() = default;
 
@@ -160,6 +187,10 @@ private:
 
     ExecutorFuture<void> _runImpl(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                   const CancellationToken& token) noexcept override;
+
+    ExecutorFuture<void> _cleanupOnAbort(std::shared_ptr<executor::ScopedTaskExecutor> executor,
+                                         const CancellationToken& token,
+                                         const Status& status) noexcept override;
 
     /**
      * Acquires critical sections on all shards.
@@ -182,7 +213,7 @@ private:
      */
     void _checkPreconditions(std::shared_ptr<executor::ScopedTaskExecutor> executor);
 
-    mongo::CreateCollectionRequest _request;
+    mongo::ShardsvrCreateCollectionRequest _request;
 
     const BSONObj _critSecReason;
 

@@ -29,7 +29,6 @@
 
 #include <absl/container/node_hash_map.h>
 #include <algorithm>
-#include <boost/preprocessor/control/iif.hpp>
 #include <map>
 #include <memory>
 #include <set>
@@ -175,6 +174,7 @@ IndexDescriptor::SharedState::SharedState(const std::string& accessMethodName, B
       _projection(createPathProjection(infoObj)),
       _indexName(infoObj.getStringField(IndexDescriptor::kIndexNameFieldName)),
       _isIdIndex(isIdIndexPattern(_keyPattern)),
+      _isHashedIdIndex(isHashedIdIndex(_keyPattern)),
       _sparse(infoObj[IndexDescriptor::kSparseFieldName].trueValue()),
       _unique(_isIdIndex || infoObj[kUniqueFieldName].trueValue()),
       _hidden(infoObj[kHiddenFieldName].trueValue()),
@@ -197,10 +197,6 @@ IndexDescriptor::SharedState::SharedState(const std::string& accessMethodName, B
     }
 
     if (BSONElement prepareUniqueElement = _infoObj[kPrepareUniqueFieldName]) {
-        uassert(
-            ErrorCodes::InvalidOptions,
-            "Index does not support the 'prepareUnique' field",
-            feature_flags::gCollModIndexUnique.isEnabled(serverGlobalParams.featureCompatibility));
         _prepareUnique = prepareUniqueElement.trueValue();
     }
 

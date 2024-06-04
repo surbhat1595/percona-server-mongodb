@@ -2,8 +2,7 @@
  * Tests 'updateOne' command on sharded collections.
  *
  * @tags: [
- *   # To avoid multiversion tests
- *   requires_fcv_71,
+ *   featureFlagTimeseriesUpdatesSupport,
  *   # To avoid burn-in tests in in-memory build variants
  *   requires_persistence,
  * ]
@@ -35,6 +34,7 @@ const runTest = function({
     resultDocList,
     includeMeta = true,
     retryableWrite = false,
+    expectedWriteErrorCode = 0,
 }) {
     const collName = getCallerName();
     jsTestLog(`Running ${collName}(${tojson(arguments[0])})`);
@@ -45,7 +45,11 @@ const runTest = function({
     const updateCommand = {update: collName, updates: [{q: query, u: update, multi: false}]};
     const result = (() => {
         if (!retryableWrite) {
-            return assert.commandWorked(testDB.runCommand(updateCommand));
+            if (expectedWriteErrorCode) {
+                return assert.commandWorkedIgnoringWriteErrors(testDB.runCommand(updateCommand));
+            } else {
+                return assert.commandWorked(testDB.runCommand(updateCommand));
+            }
         }
 
         // Run as a retryable write to modify the shard key value.
@@ -53,11 +57,17 @@ const runTest = function({
         const sessionDb = session.getDatabase(coll.getDB().getName());
         updateCommand["lsid"] = session.getSessionId();
         updateCommand["txnNumber"] = NumberLong(1);
-        const res = assert.commandWorked(sessionDb.runCommand(updateCommand));
-
-        return res;
+        if (expectedWriteErrorCode) {
+            return assert.commandWorkedIgnoringWriteErrors(testDB.runCommand(updateCommand));
+        } else {
+            return assert.commandWorked(testDB.runCommand(updateCommand));
+        }
     })();
-    assert.eq(nModified, result.nModified, tojson(result));
+    if (expectedWriteErrorCode) {
+        assert.commandFailedWithCode(result, expectedWriteErrorCode);
+    } else {
+        assert.eq(nModified, result.nModified, tojson(result));
+    }
 
     if (resultDocList) {
         assert.sameMembers(resultDocList,
@@ -70,6 +80,16 @@ const runTest = function({
                       tojson(coll.find().toArray()));
     }
 };
+
+(function testRetryableTimeseriesUpdateError() {
+    runTest({
+        initialDocList: [doc2_a_f101, doc4_b_f103],
+        query: {[metaFieldName]: "A"},
+        update: {$inc: {f: 'h'}},
+        retryableWrite: true,
+        expectedWriteErrorCode: ErrorCodes.TypeMismatch,
+    });
+})();
 
 (function testTargetSingleShardByMeta() {
     runTest({

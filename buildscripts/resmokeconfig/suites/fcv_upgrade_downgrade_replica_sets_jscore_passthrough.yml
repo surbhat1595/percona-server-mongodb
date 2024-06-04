@@ -18,10 +18,15 @@ selector:
   - featureFlagFLE2CleanupCommand
   # TODO: SERVER-71537 Remove Feature Flag for PM-412.
   - featureFlagQuerySettings
+  # TODO: SERVER-66393 Remove Feature Flag for PM-2919.
+  - featureFlagTimeseriesUpdatesSupport
   # Transactions are aborted upon fcv upgrade or downgrade.
   - uses_transactions
-  # Exclude tests with the latest fcv.
+  # Exclude tests that require a specific fcv.
   - requires_fcv_71
+  - requires_fcv_72
+  # Exclude tests that are not compatible with upgrade/downgrade.
+  - cannot_run_during_upgrade_downgrade
 
   exclude_files:
   # The set_param1.js test attempts to compare the response from running the {getParameter: "*"}
@@ -63,11 +68,6 @@ selector:
   - src/mongo/db/modules/*/jstests/fle/fle_use_cases.js
   - src/mongo/db/modules/*/jstests/fle/fle_drivers_integration.js
 
-  # The test uses a resumeToken from previous calls so FCV change will make the token invalid and fail.
-  - jstests/core/resume_query_from_non_existent_record.js
-  - jstests/core/resume_query.js
-  - jstests/core/find_with_resume_after_param.js
-
   # Expected failure due to command count being not precise due to potential retry of index build.
   - jstests/core/operation_latency_histogram.js
 
@@ -86,6 +86,15 @@ selector:
 
   # Queryable encryption uses internal transactions (which are aborted on fcv upgrade/downgrade)
   - jstests/core/queryable_encryption/**/*.js
+
+  # TODO SERVER-80490: The test below requires a precise lock count that can get modified by concurrent
+  # setFCV operations. The exclusion can be removed once the linked ticket is fixed.
+  - jstests/core/top.js
+
+  # Tests that use profiling at level 2 are expecting to profile a specific command or a specific number
+  # of commands. If they profile the setFCV command, this could cause the test to fail.
+  - jstests/core/administrative/profile/profile_sampling.js
+  - jstests/core/administrative/profile/profile1.js
 
 executor:
   archive:

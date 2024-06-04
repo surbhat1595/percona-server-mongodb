@@ -29,7 +29,6 @@
 
 #include "mongo/db/pipeline/window_function/window_function_integral.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <utility>
 #include <vector>
 
@@ -100,7 +99,7 @@ void WindowFunctionIntegral::add(Value value) {
     if (!_values.empty() && isNonremovable) {
         _values.pop_front();
     }
-    _values.emplace_back(MemoryToken{value.getApproximateSize(), &_memUsageTracker},
+    _values.emplace_back(SimpleMemoryToken{value.getApproximateSize(), &_memUsageTracker},
                          std::move(value));
 }
 

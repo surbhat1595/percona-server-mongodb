@@ -137,10 +137,15 @@ public:
     void createCollection(OperationContext* opCtx,
                           const DatabaseName& dbName,
                           const BSONObj& cmdObj) final;
+    void createTempCollection(OperationContext* opCtx,
+                              const NamespaceString& nss,
+                              const BSONObj& collectionOptions) final;
     void createIndexesOnEmptyCollection(OperationContext* opCtx,
                                         const NamespaceString& ns,
                                         const std::vector<BSONObj>& indexSpecs) final;
     void dropCollection(OperationContext* opCtx, const NamespaceString& collection) final;
+
+    void dropTempCollection(OperationContext* opCtx, const NamespaceString& nss) final;
 
     /**
      * If 'allowTargetingShards' is true, splits the pipeline and dispatch half to the shards,
@@ -176,6 +181,10 @@ public:
                             std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
                             const WriteConcernOptions& wc,
                             boost::optional<OID> targetEpoch) final;
+
+private:
+    boost::optional<TimeseriesOptions> _getTimeseriesOptions(OperationContext* opCtx,
+                                                             const NamespaceString& ns) final;
 };
 
 }  // namespace mongo

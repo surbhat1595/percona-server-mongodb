@@ -32,7 +32,6 @@
 #include <string>
 #include <utility>
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 
 #include "mongo/base/error_codes.h"
@@ -47,6 +46,8 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
+
 namespace mongo {
 
 extern FailPoint skipWriteConflictRetries;
@@ -57,17 +58,24 @@ extern FailPoint skipWriteConflictRetries;
  * @param attempt - what attempt is this, 1 based
  * @param operation - e.g. "update"
  */
-void logWriteConflictAndBackoff(int attempt,
+void logWriteConflictAndBackoff(size_t attempt,
                                 StringData operation,
                                 StringData reason,
                                 const NamespaceStringOrUUID& nssOrUUID);
 
+/**
+ * Retries the operation for a fixed number of attempts with linear backoff.
+ * For internal system operations, converts the temporarily unavailable error into a write
+ * conflict and handles it, because unlike user operations, the error cannot eventually escape to
+ * the client.
+ */
 void handleTemporarilyUnavailableException(
     OperationContext* opCtx,
-    int attempts,
+    size_t tempUnavailAttempts,
     StringData opStr,
     const NamespaceStringOrUUID& nssOrUUID,
-    const ExceptionFor<ErrorCodes::TemporarilyUnavailable>& e);
+    const ExceptionFor<ErrorCodes::TemporarilyUnavailable>& e,
+    size_t& writeConflictAttempts);
 
 /**
  * Convert `e` into a `WriteConflictException` and throw it.
@@ -78,10 +86,10 @@ void convertToWCEAndRethrow(OperationContext* opCtx,
 
 void handleTransactionTooLargeForCacheException(
     OperationContext* opCtx,
-    int* writeConflictAttempts,
     StringData opStr,
     const NamespaceStringOrUUID& nssOrUUID,
-    const ExceptionFor<ErrorCodes::TransactionTooLargeForCache>& e);
+    const ExceptionFor<ErrorCodes::TransactionTooLargeForCache>& e,
+    size_t& writeConflictAttempts);
 
 namespace error_details {
 /**
@@ -142,7 +150,8 @@ template <typename F>
 auto writeConflictRetry(OperationContext* opCtx,
                         StringData opStr,
                         const NamespaceStringOrUUID& nssOrUUID,
-                        F&& f) {
+                        F&& f,
+                        boost::optional<size_t> retryLimit = boost::none) {
     invariant(opCtx);
     invariant(opCtx->lockState());
     invariant(opCtx->recoveryUnit());
@@ -163,8 +172,8 @@ auto writeConflictRetry(OperationContext* opCtx,
         }
     }
 
-    int writeConflictAttempts = 0;
-    int attemptsTempUnavailable = 0;
+    size_t writeConflictAttempts = 0;
+    size_t attemptsTempUnavailable = 0;
     while (true) {
         try {
             return f();
@@ -173,14 +182,21 @@ auto writeConflictRetry(OperationContext* opCtx,
             logWriteConflictAndBackoff(writeConflictAttempts, opStr, e.reason(), nssOrUUID);
             ++writeConflictAttempts;
             opCtx->recoveryUnit()->abandonSnapshot();
+            if (MONGO_unlikely(retryLimit && writeConflictAttempts > *retryLimit)) {
+                LOGV2_ERROR(7677402,
+                            "Got too many write conflicts, the server may run into problems.");
+                fassert(7677401, !getTestCommandsEnabled());
+            }
         } catch (ExceptionFor<ErrorCodes::TemporarilyUnavailable> const& e) {
             handleTemporarilyUnavailableException(
-                opCtx, ++attemptsTempUnavailable, opStr, nssOrUUID, e);
+                opCtx, ++attemptsTempUnavailable, opStr, nssOrUUID, e, writeConflictAttempts);
         } catch (ExceptionFor<ErrorCodes::TransactionTooLargeForCache> const& e) {
             handleTransactionTooLargeForCacheException(
-                opCtx, &writeConflictAttempts, opStr, nssOrUUID, e);
+                opCtx, opStr, nssOrUUID, e, writeConflictAttempts);
         }
     }
 }
 
 }  // namespace mongo
+
+#undef MONGO_LOGV2_DEFAULT_COMPONENT

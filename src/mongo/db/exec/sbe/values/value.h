@@ -35,7 +35,6 @@
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 // IWYU pragma: no_include "boost/predef/hardware/simd/x86.h"
 // IWYU pragma: no_include "boost/predef/hardware/simd/x86/versions.h"
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 // IWYU pragma: no_include "emmintrin.h"
 #include <algorithm>
@@ -49,6 +48,7 @@
 #include <ostream>
 #include <string>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -85,7 +85,7 @@ class RecordId;
 
 namespace KeyString {
 class Value;
-}
+}  // namespace KeyString
 
 class InListData;
 
@@ -180,6 +180,7 @@ enum class TypeTags : uint8_t {
     StringBig,
     Array,
     ArraySet,
+    ArrayMultiSet,
     Object,
 
     ObjectId,
@@ -267,7 +268,8 @@ inline constexpr bool isObject(TypeTags tag) noexcept {
 }
 
 inline constexpr bool isArray(TypeTags tag) noexcept {
-    return tag == TypeTags::Array || tag == TypeTags::ArraySet || tag == TypeTags::bsonArray;
+    return tag == TypeTags::Array || tag == TypeTags::ArraySet || tag == TypeTags::ArrayMultiSet ||
+        tag == TypeTags::bsonArray;
 }
 
 inline constexpr bool isNullish(TypeTags tag) noexcept {
@@ -365,17 +367,22 @@ std::ostream& operator<<(std::ostream& os, TypeTags tag);
 str::stream& operator<<(str::stream& str, TypeTags tag);
 std::ostream& operator<<(std::ostream& os, const std::pair<TypeTags, Value>& value);
 str::stream& operator<<(str::stream& str, const std::pair<TypeTags, Value>& value);
-std::string print(const std::pair<TypeTags, Value>& value);
+
+/**
+ * Functions for writing values and tags to a std::string.
+ */
+std::string print(const std::pair<TypeTags, Value>& value);           // production function
+std::string printTagAndVal(TypeTags tag, Value value);                // debugging function
+std::string printTagAndVal(const std::pair<TypeTags, Value>& value);  // debugging function
 
 /**
  * Three ways value comparison (aka spaceship operator).
  */
-std::pair<TypeTags, Value> compareValue(
-    TypeTags lhsTag,
-    Value lhsValue,
-    TypeTags rhsTag,
-    Value rhsValue,
-    const StringData::ComparatorInterface* comparator = nullptr);
+std::pair<TypeTags, Value> compareValue(TypeTags lhsTag,
+                                        Value lhsValue,
+                                        TypeTags rhsTag,
+                                        Value rhsValue,
+                                        const StringDataComparator* comparator = nullptr);
 
 bool isNaN(TypeTags tag, Value val) noexcept;
 
@@ -965,6 +972,8 @@ private:
     std::vector<std::pair<TypeTags, Value>> _vals;
 };
 
+class ArrayMultiSet;
+
 /**
  * This is a set of unique values with the same interface as Array.
  */
@@ -1027,6 +1036,125 @@ public:
 
 private:
     ValueSetType _values;
+};
+
+/**
+ * This is the SBE representation of unordered_multiset. It is similar to ArraySet but each value
+ * can be stored multiple times.
+ */
+class ArrayMultiSet {
+public:
+    using iterator =
+        typename std::unordered_multiset<std::pair<TypeTags, Value>,
+                                         ValueHash,
+                                         ValueEq,
+                                         std::allocator<std::pair<TypeTags, Value>>>::iterator;
+    using const_iterator = typename std::unordered_multiset<
+        std::pair<TypeTags, Value>,
+        ValueHash,
+        ValueEq,
+        std::allocator<std::pair<TypeTags, Value>>>::const_iterator;
+
+    ArrayMultiSet() = default;
+    explicit ArrayMultiSet(const CollatorInterface* collator = nullptr)
+        : _values(0, ValueHash(collator), ValueEq(collator)) {}
+
+    ArrayMultiSet(const ArrayMultiSet& other) {
+        reserve(other._values.size());
+        for (const auto& p : other._values) {
+            const auto copy = copyValue(p.first, p.second);
+            ValueGuard guard{copy.first, copy.second};
+            _values.insert(copy);
+            guard.reset();
+        }
+    }
+    ArrayMultiSet(ArrayMultiSet&&) = default;
+    ~ArrayMultiSet() {
+        for (auto [tag, val] : _values) {
+            releaseValue(tag, val);
+        }
+        _values.clear();
+    }
+
+    /**
+     * Adds the given SBE value to the multiset. Assumes ownership of the given value.
+     */
+    void push_back(TypeTags tag, Value val) {
+        if (tag != TypeTags::Nothing) {
+            ValueGuard guard{tag, val};
+            _values.insert({tag, val});
+            guard.reset();
+        }
+    }
+
+    void push_back(std::pair<TypeTags, Value> val) {
+        push_back(val.first, val.second);
+    }
+
+    /**
+     * Removes an element val from the multiset. Returns true if an element has been removed.
+     */
+    bool remove(std::pair<TypeTags, Value> val) {
+        if (val.first != TypeTags::Nothing) {
+            if (auto it = _values.find(val); it != _values.end()) {
+                releaseValue(it->first, it->second);
+                _values.erase(it);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool remove(TypeTags tag, Value val) {
+        return remove({tag, val});
+    }
+
+    auto size() const noexcept {
+        return _values.size();
+    }
+
+    void reserve(size_t s) {
+        // Normalize to at least 1.
+        s = s ? s : 1;
+        _values.reserve(s);
+    }
+
+    auto& values() const noexcept {
+        return _values;
+    }
+
+    auto& values() noexcept {
+        return _values;
+    }
+
+    void clear() {
+        for (auto [tag, val] : _values) {
+            releaseValue(tag, val);
+        }
+        _values.clear();
+    }
+
+    const CollatorInterface* getCollator() {
+        return _values.key_eq().getCollator();
+    }
+
+    friend bool operator==(const ArrayMultiSet& lhs, const ArrayMultiSet& rhs) {
+        return lhs._values == rhs._values;
+    }
+
+    friend bool operator!=(const ArrayMultiSet& lhs, const ArrayMultiSet& rhs) {
+        return !(lhs == rhs);
+    }
+
+    friend class ArraySet;
+
+private:
+    std::unordered_multiset<std::pair<TypeTags, Value>,  // NOLINT
+                            ValueHash,
+                            ValueEq,
+                            std::allocator<std::pair<TypeTags, Value>>>
+        _values;
 };
 
 /**
@@ -1292,6 +1420,12 @@ inline std::pair<TypeTags, Value> makeNewArraySet(const CollatorInterface* colla
     return {TypeTags::ArraySet, reinterpret_cast<Value>(a)};
 }
 
+inline std::pair<TypeTags, Value> makeNewArrayMultiSet(
+    const CollatorInterface* collator = nullptr) {
+    auto a = new ArrayMultiSet(collator);
+    return {TypeTags::ArrayMultiSet, reinterpret_cast<Value>(a)};
+}
+
 inline std::pair<TypeTags, Value> makeCopyArray(const Array& inA) {
     auto a = new Array(inA);
     return {TypeTags::Array, reinterpret_cast<Value>(a)};
@@ -1302,12 +1436,21 @@ inline std::pair<TypeTags, Value> makeCopyArraySet(const ArraySet& inA) {
     return {TypeTags::ArraySet, reinterpret_cast<Value>(a)};
 }
 
+inline std::pair<TypeTags, Value> makeCopyArrayMultiSet(const ArrayMultiSet& inA) {
+    auto a = new ArrayMultiSet(inA);
+    return {TypeTags::ArrayMultiSet, reinterpret_cast<Value>(a)};
+}
+
 inline Array* getArrayView(Value val) noexcept {
     return reinterpret_cast<Array*>(val);
 }
 
 inline ArraySet* getArraySetView(Value val) noexcept {
     return reinterpret_cast<ArraySet*>(val);
+}
+
+inline ArrayMultiSet* getArrayMultiSetView(Value val) noexcept {
+    return reinterpret_cast<ArrayMultiSet*>(val);
 }
 
 inline std::pair<TypeTags, Value> makeNewObject() {
@@ -1562,6 +1705,8 @@ inline std::pair<TypeTags, Value> copyValue(TypeTags tag, Value val) {
             return makeCopyArray(*getArrayView(val));
         case TypeTags::ArraySet:
             return makeCopyArraySet(*getArraySetView(val));
+        case TypeTags::ArrayMultiSet:
+            return makeCopyArrayMultiSet(*getArrayMultiSetView(val));
         case TypeTags::Object:
             return makeCopyObject(*getObjectView(val));
         case TypeTags::StringBig:
@@ -1856,7 +2001,10 @@ public:
         } else {
             if (tag == TypeTags::ArraySet) {
                 _arraySet = getArraySetView(val);
-                _iter = _arraySet->values().begin();
+                _arraySetIter = _arraySet->values().begin();
+            } else if (tag == TypeTags::ArrayMultiSet) {
+                _arrayMultiSet = getArrayMultiSetView(val);
+                _arrayMultiSetIter = _arrayMultiSet->values().begin();
             } else if (tag == TypeTags::bsonArray) {
                 auto bson = getRawPointerView(val);
                 _arrayCurrent = bson + 4;
@@ -1880,7 +2028,9 @@ public:
         if (_array) {
             return _index == _array->size();
         } else if (_arraySet) {
-            return _iter == _arraySet->values().end();
+            return _arraySetIter == _arraySet->values().end();
+        } else if (_arrayMultiSet) {
+            return _arrayMultiSetIter == _arrayMultiSet->values().end();
         } else {
             return _arrayCurrent == _arrayEnd - 1;
         }
@@ -1898,7 +2048,11 @@ private:
 
     // ArraySet
     ArraySet* _arraySet{nullptr};
-    ArraySet::const_iterator _iter;
+    ArraySet::const_iterator _arraySetIter;
+
+    // ArrayMultiSet
+    ArrayMultiSet* _arrayMultiSet{nullptr};
+    ArrayMultiSet::const_iterator _arrayMultiSetIter;
 
     // bsonArray
     const char* _arrayCurrent{nullptr};

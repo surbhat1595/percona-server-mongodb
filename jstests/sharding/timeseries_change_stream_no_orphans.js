@@ -11,6 +11,8 @@
  *   requires_fcv_71,
  *   # To avoid burn-in tests in in-memory build variants
  *   requires_persistence,
+ *   # TODO (SERVER-80521): Re-enable this test once redness is resolve in multiversion suites.
+ *   DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE,
  * ]
  */
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
@@ -145,10 +147,7 @@ const mongosDbChangeStream = db.watch([], {showSystemEvents: true});
 
     // If we are always using compressed buckets for time-series writes, we must de-compress the
     // bucket to inspect its contents.
-    if (FeatureFlagUtil.isPresentAndEnabled(db,
-                                            "TimeseriesAlwaysUseCompressedBuckets",
-                                            /*user=*/ undefined,
-                                            /*ignoreFCV=*/ true)) {  // TODO SERVER-79460
+    if (FeatureFlagUtil.isPresentAndEnabled(db, "TimeseriesAlwaysUseCompressedBuckets")) {
         TimeseriesTest.decompressBucket(actualBucket);
     }
 
@@ -191,10 +190,7 @@ const mongosDbChangeStream = db.watch([], {showSystemEvents: true});
 
     // If we are always using compressed buckets for time-series writes, we must de-compress the
     // bucket to inspect its contents.
-    if (FeatureFlagUtil.isPresentAndEnabled(db,
-                                            "TimeseriesAlwaysUseCompressedBuckets",
-                                            /*user=*/ undefined,
-                                            /*ignoreFCV=*/ true)) {  // TODO SERVER-79460
+    if (FeatureFlagUtil.isPresentAndEnabled(db, "TimeseriesAlwaysUseCompressedBuckets")) {
         TimeseriesTest.decompressBucket(shard0Bucket);
     }
 

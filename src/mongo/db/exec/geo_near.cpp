@@ -44,7 +44,6 @@
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <r1interval.h>
 #include <s1angle.h>
 #include <s2.h>
@@ -238,7 +237,7 @@ GeoNear2DStage::DensityEstimator::DensityEstimator(
       _fullBounds(fullBounds),
       _currentLevel(0) {
     // The index status should always be valid.
-    auto result = invariantStatusOK(GeoHashConverter::createFromDoc(std::move(infoObj)));
+    auto result = invariantStatusOK(GeoHashConverter::createFromDoc(infoObj));
 
     _converter = std::move(result);
     _centroidCell = _converter->hash(_nearParams->nearQuery->centroid->oldPoint);

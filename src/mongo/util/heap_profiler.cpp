@@ -28,6 +28,9 @@
  */
 
 #include <gperftools/malloc_hook.h>
+
+#include <absl/hash/hash.h>
+
 // IWYU pragma: no_include "cxxabi.h"
 #include <algorithm>
 #include <array>
@@ -57,7 +60,6 @@
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
-#include "mongo/util/murmur3.h"
 #include "mongo/util/stacktrace.h"
 #include "mongo/util/tcmalloc_parameters_gen.h"
 
@@ -174,6 +176,7 @@ private:
     int _status = 0;
 };
 
+// TODO SERVER-44010: Consider replacing this custom implementation with a generic one.
 //
 // Simple hash table maps Key->Value.
 // All storage is pre-allocated at creation.
@@ -194,7 +197,7 @@ private:
 //             caller must ensure safety wrt concurrent modification of Value of existing entry
 //
 
-using Hash = uint32_t;
+using Hash = size_t;
 
 template <class Key, class Value>
 class HashTable {
@@ -366,7 +369,7 @@ private:
                                     "frames array is not dense");
             ConstDataRange dataRange{reinterpret_cast<const char*>(frames.data()),
                                      numFrames * sizeof(FrameInfo)};
-            return murmur3<sizeof(Hash)>(dataRange, 0 /*seed*/);
+            return absl::HashOf(dataRange);
         }
     };
 
@@ -406,8 +409,7 @@ private:
         }
 
         Hash hash() {
-            ConstDataRange dataRange{reinterpret_cast<const char*>(&objPtr), sizeof(objPtr)};
-            return murmur3<sizeof(Hash)>(dataRange, 0 /*seed*/);
+            return absl::HashOf(objPtr);
         }
     };
 
@@ -555,7 +557,6 @@ private:
             builder.append(frameString);
         }
         LOGV2(23158,
-              "heapProfile stack {stackNum}: {stackObj}",
               "heapProfile stack",
               "stackNum"_attr = stackInfo.stackNum,
               "stackObj"_attr = builder.done());
@@ -589,11 +590,6 @@ private:
             const size_t stackTableSize = stackHashTable.memorySizeBytes();
             const double MB = 1024 * 1024;
             LOGV2(23159,
-                  "Generating heap profiler serverStatus: sampleIntervalBytes "
-                  "{heapProfilingSampleIntervalBytes}; "
-                  "maxActiveMemory {maxActiveMemoryMB} MB; objTableSize {objTableSize_MB} MB; "
-                  "stackTableSize "
-                  "{stackTableSizeMB} MB",
                   "Generating heap profiler serverStatus",
                   "heapProfilingSampleIntervalBytes"_attr = HeapProfilingSampleIntervalBytes,
                   "maxActiveMemoryMB"_attr = maxActiveMemory / MB,

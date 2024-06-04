@@ -99,6 +99,9 @@ namespace mongo {
  *     void onStepDown() final {
  *         // ...
  *     }
+ *     void onRollback() final {
+ *         // ...
+ *     }
  *     void onBecomeArbiter() final {
  *         // ...
  *     }
@@ -151,6 +154,8 @@ public:
 
     /**
      * Called as part of ReplicationCoordinator shutdown.
+     * Note that it is possible that we are still a writable primary after onShutdown() has been
+     * called (see SERVER-81115).
      */
     virtual void onShutdown() = 0;
 
@@ -179,6 +184,11 @@ public:
      * that `onStepUp` hooks have been invoked at least once before this method is invoked.
      */
     virtual void onStepDown() = 0;
+
+    /**
+     * Called after the node has transitioned to ROLLBACK.
+     */
+    virtual void onRollback() = 0;
 
     /**
      * Called when the node commences being an arbiter.
@@ -243,6 +253,7 @@ public:
     void onStepUpBegin(OperationContext* opCtx, long long term) final;
     void onStepUpComplete(OperationContext* opCtx, long long term) final;
     void onStepDown() final;
+    void onRollback() final;
     void onBecomeArbiter() final;
     inline std::string getServiceName() const override final {
         return "ReplicaSetAwareServiceRegistry";

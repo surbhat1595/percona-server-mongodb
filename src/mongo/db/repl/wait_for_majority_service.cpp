@@ -29,7 +29,6 @@
 
 
 #include <algorithm>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <iterator>
 #include <mutex>
@@ -115,10 +114,11 @@ void WaitForMajorityServiceImplBase::startup(ServiceContext* ctx) {
     stdx::lock_guard lk(_mutex);
     invariant(_state == State::kNotStarted);
     _pool = makeThreadPool(_getReadOrWrite());
-    _waitForMajorityClient =
-        ClientStrand::make(ctx->makeClient(kWaitClientName + _getReadOrWrite()));
+    _waitForMajorityClient = ClientStrand::make(
+        ctx->getService(ClusterRole::ShardServer)->makeClient(kWaitClientName + _getReadOrWrite()));
     _waitForMajorityCancellationClient =
-        ClientStrand::make(ctx->makeClient(kCancelClientName + _getReadOrWrite()));
+        ClientStrand::make(ctx->getService(ClusterRole::ShardServer)
+                               ->makeClient(kCancelClientName + _getReadOrWrite()));
     _backgroundWorkComplete = _periodicallyWaitForMajority();
     _pool->startup();
     _state = State::kRunning;
@@ -135,11 +135,6 @@ SemiFuture<void> WaitForMajorityService::waitUntilMajorityForRead(
 
 SemiFuture<void> WaitForMajorityService::waitUntilMajorityForWrite(
     const repl::OpTime& opTime, const CancellationToken& cancelToken) {
-    return _writeService.waitUntilMajority(opTime, cancelToken);
-}
-
-SemiFuture<void> WaitForMajorityService::waitUntilMajority(const repl::OpTime& opTime,
-                                                           const CancellationToken& cancelToken) {
     return _writeService.waitUntilMajority(opTime, cancelToken);
 }
 

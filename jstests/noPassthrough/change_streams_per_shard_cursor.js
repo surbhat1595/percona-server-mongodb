@@ -17,8 +17,7 @@ const setupShardedCluster = (shards = 1) => {
     st.shard0.getDB(dbName).setProfilingLevel(0, -1);
 
     // Shard the relevant collections.
-    assert.commandWorked(st.s.adminCommand({enableSharding: dbName}));
-    st.ensurePrimaryShard(dbName, st.shard0.name);
+    assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
     if (shards === 2) {
         // Shard the collection on {_id: 1}, split at {_id: 0} and move the empty upper chunk to
         // shard1.
@@ -76,7 +75,7 @@ assert.commandFailedWithCode(
 assert.commandFailedWithCode(
     sdb.runCommand(
         {aggregate: "coll", cursor: {}, pipeline: [{$changeStream: {}}], $_passthroughToShard: {}}),
-    40414);
+    ErrorCodes.IDLFailedToParse);
 
 // The shardId field should be a string.
 assert.commandFailedWithCode(assert.throws(() => pscWatch(sdb, "coll", 42)),

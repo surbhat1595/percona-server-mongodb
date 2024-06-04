@@ -126,7 +126,7 @@ void quineMcCluskey_4predicates_complex(benchmark::State& state) {
  */
 void quineMcCluskey_noSimplifications(benchmark::State& state) {
     const auto numPredicates = static_cast<size_t>(state.range());
-    Maxterm maxterm{numPredicates};
+    Maxterm maxterm{};
     for (size_t predicateIndex = 0; predicateIndex < numPredicates; ++predicateIndex) {
         maxterm.append(predicateIndex, true);
     }
@@ -141,7 +141,7 @@ void quineMcCluskey_noSimplifications(benchmark::State& state) {
  */
 void quineMcCluskey_someSimplifications(benchmark::State& state) {
     const auto numPredicates = static_cast<size_t>(state.range());
-    Maxterm maxterm{numPredicates};
+    Maxterm maxterm{};
     for (size_t predicateIndex = 0; predicateIndex < numPredicates - 1; predicateIndex += 2) {
         maxterm.append(predicateIndex, true);
         maxterm.minterms.back().set(predicateIndex + 1, true);
@@ -154,36 +154,12 @@ void quineMcCluskey_someSimplifications(benchmark::State& state) {
     }
 }
 
-/**
- * Benchmarks a degenerate test case in which all minterms have the same number of true predicates
- * which equals to #predicates / 10.
- */
-void quineMcCluskey_degenerate(benchmark::State& state) {
-    const auto numPredicates = static_cast<size_t>(state.range());
-    const size_t step = numPredicates / 10;
-    Maxterm maxterm{numPredicates};
-    for (size_t predicateIndex = 0; predicateIndex < numPredicates - step + 1;
-         predicateIndex += step) {
-        maxterm.append(predicateIndex, true);
-        for (size_t i = 1; i < step; ++i) {
-            maxterm.minterms.back().set(predicateIndex + i, true);
-        }
-    }
-
-    for (auto _ : state) {
-        benchmark::DoNotOptimize(findPrimeImplicants(maxterm));
-    }
-}
-
 BENCHMARK(quineMcCluskey_1predicate);
 BENCHMARK(quineMcCluskey_2predicates);
 BENCHMARK(quineMcCluskey_3predicates);
 BENCHMARK(quineMcCluskey_3predicates_complex);
 BENCHMARK(quineMcCluskey_4predicates_complex);
 BENCHMARK(quineMcCluskey_noSimplifications)->DenseRange(5, 50, 5);
-BENCHMARK(quineMcCluskey_noSimplifications)->DenseRange(100, 1000, 100);
 BENCHMARK(quineMcCluskey_someSimplifications)->DenseRange(5, 50, 5);
-BENCHMARK(quineMcCluskey_someSimplifications)->DenseRange(100, 1000, 100);
-BENCHMARK(quineMcCluskey_degenerate)->DenseRange(1000, 10000, 1000);
 
 }  // namespace mongo::boolean_simplification

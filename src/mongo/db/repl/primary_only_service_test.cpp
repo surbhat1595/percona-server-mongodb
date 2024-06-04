@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -380,7 +379,7 @@ public:
         threadPoolOptions.threadNamePrefix = "PrimaryOnlyServiceTest-";
         threadPoolOptions.poolName = "PrimaryOnlyServiceTestThreadPool";
         threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-            Client::initThread(threadName.c_str());
+            Client::initThread(threadName.c_str(), getGlobalServiceContext()->getService());
         };
 
         auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
@@ -1182,14 +1181,14 @@ TEST_F(PrimaryOnlyServiceTest, StateTransitionFromRebuildingShouldWakeUpConditio
     {
         FailPointEnableBlock stepUpFailpoint("PrimaryOnlyServiceHangBeforeLaunchingStepUpLogic");
         stepUpThread = stdx::thread([this] {
-            ThreadClient tc("StepUpThread", getServiceContext());
+            ThreadClient tc("StepUpThread", getServiceContext()->getService());
             stepUp();
         });
 
         stepUpFailpoint->waitForTimesEntered(stepUpFailpoint.initialTimesEntered() + 1);
 
         lookUpInstanceThread = stdx::thread([this] {
-            ThreadClient tc("LookUpInstanceThread", getServiceContext());
+            ThreadClient tc("LookUpInstanceThread", getServiceContext()->getService());
             auto opCtx = makeOperationContext();
             TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
         });
@@ -1286,7 +1285,7 @@ TEST_F(PrimaryOnlyServiceTest, RebuildServiceFailsShouldSetStateFromRebuilding) 
     {
         FailPointEnableBlock stepUpFailpoint("PrimaryOnlyServiceHangBeforeLaunchingStepUpLogic");
         stepUpThread = stdx::thread([this] {
-            ThreadClient tc("StepUpThread", getServiceContext());
+            ThreadClient tc("StepUpThread", getServiceContext()->getService());
             stepUp();
         });
 
@@ -1294,7 +1293,7 @@ TEST_F(PrimaryOnlyServiceTest, RebuildServiceFailsShouldSetStateFromRebuilding) 
 
         lookUpInstanceThread = stdx::thread([this, &lookupError] {
             try {
-                ThreadClient tc("LookUpInstanceThread", getServiceContext());
+                ThreadClient tc("LookUpInstanceThread", getServiceContext()->getService());
                 auto opCtx = makeOperationContext();
                 TestService::Instance::lookup(opCtx.get(), _service, BSON("_id" << 0));
             } catch (DBException& ex) {

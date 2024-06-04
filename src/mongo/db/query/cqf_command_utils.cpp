@@ -145,10 +145,10 @@ public:
           _queryHasNaturalHint(queryHasNaturalHint) {}
 
     void visit(const LTEMatchExpression* expr) override {
-        assertSupportedPathExpression(expr);
+        assertSupportedComparisonMatchExpression(expr);
     }
     void visit(const LTMatchExpression* expr) override {
-        assertSupportedPathExpression(expr);
+        assertSupportedComparisonMatchExpression(expr);
     }
     void visit(const ElemMatchObjectMatchExpression* expr) override {
         assertSupportedPathExpression(expr);
@@ -157,16 +157,24 @@ public:
         assertSupportedPathExpression(expr);
     }
     void visit(const EqualityMatchExpression* expr) override {
-        assertSupportedPathExpression(expr);
+        assertSupportedComparisonMatchExpression(expr);
     }
     void visit(const GTEMatchExpression* expr) override {
-        assertSupportedPathExpression(expr);
+        assertSupportedComparisonMatchExpression(expr);
     }
     void visit(const GTMatchExpression* expr) override {
-        assertSupportedPathExpression(expr);
+        assertSupportedComparisonMatchExpression(expr);
     }
     void visit(const InMatchExpression* expr) override {
         assertSupportedPathExpression(expr);
+
+        // Dotted path equality to null is not supported.
+        const auto fieldRef = expr->fieldRef();
+        if (fieldRef && fieldRef->numParts() > 1) {
+            _eligible &= std::none_of(expr->getEqualities().begin(),
+                                      expr->getEqualities().end(),
+                                      [](auto&& elt) { return elt.isNull(); });
+        }
 
         // $in over a regex predicate is not supported.
         if (!expr->getRegexes().empty()) {
@@ -368,6 +376,16 @@ public:
 private:
     void unsupportedExpression(const MatchExpression* expr) {
         _eligible = false;
+    }
+
+    void assertSupportedComparisonMatchExpression(const ComparisonMatchExpression* expr) {
+        assertSupportedPathExpression(expr);
+
+        // Dotted path equality to null is not supported.
+        const auto fieldRef = expr->fieldRef();
+        if (fieldRef && fieldRef->numParts() > 1 && expr->getData().isNull()) {
+            _eligible = false;
+        }
     }
 
     void assertSupportedPathExpression(const PathMatchExpression* expr) {
@@ -1122,16 +1140,25 @@ bool isEligibleCommon(const RequestType& request,
                 continue;
             }
 
-            // In M2, we should fall back on any non-hidden, non-_id index on a query with no
+            // In M2, allow {id: 'hashed'} index for test coverage purposes, but we don't add it to
+            // the metadata.
+            if (descriptor.isHashedIdIndex()) {
+                continue;
+            }
+
+            // In M2, we should fallback on any non-hidden, non-_id index on a query with no
             // $natural hint.
             if (!descriptor.isIdIndex() &&
                 frameworkControl == QueryFrameworkControlEnum::kTryBonsai) {
                 return false;
             }
 
+            if (descriptor.getIndexType() != IndexType::INDEX_BTREE) {
+                return false;
+            }
+
             if (descriptor.infoObj().hasField(IndexDescriptor::kExpireAfterSecondsFieldName) ||
                 descriptor.isPartial() || descriptor.isSparse() ||
-                descriptor.getIndexType() != IndexType::INDEX_BTREE ||
                 !descriptor.collation().isEmpty()) {
                 return false;
             }
@@ -1156,7 +1183,6 @@ boost::optional<bool> shouldForceEligibility(QueryFrameworkControlEnum framework
     // be set to enable bonsai if featureFlagCommonQueryFramework is enabled.
     LOGV2_DEBUG(7325101,
                 4,
-                "internalQueryFrameworkControl={knob}",
                 "logging internalQueryFrameworkControl",
                 "knob"_attr = QueryFrameworkControl_serializer(frameworkControl));
 
@@ -1188,7 +1214,7 @@ bool isEligibleForBonsai(ServiceContext* serviceCtx,
 }
 
 bool isEligibleForBonsai(const CanonicalQuery& cq, QueryFrameworkControlEnum frameworkControl) {
-    auto expression = cq.root();
+    auto expression = cq.getPrimaryMatchExpression();
 
     auto hint = cq.getFindCommandRequest().getHint();
     bool hasNaturalHint = !hint.isEmpty() &&

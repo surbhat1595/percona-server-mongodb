@@ -33,7 +33,6 @@
 #include <absl/container/inlined_vector.h>
 #include <absl/hash/hash.h>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -49,14 +48,17 @@
 #include "mongo/base/compare_numbers.h"
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/string_data.h"
-#include "mongo/base/string_data_comparator_interface.h"
+#include "mongo/base/string_data_comparator.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/exec/sbe/makeobj_spec.h"
 #include "mongo/db/exec/sbe/sort_spec.h"
+#include "mongo/db/exec/sbe/values/column_op.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/datetime.h"
 #include "mongo/db/exec/sbe/vm/label.h"
+#include "mongo/db/exec/sbe/vm/makeobj_cursors.h"
+#include "mongo/db/pipeline/accumulator_multi.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/platform/compiler.h"
@@ -80,7 +82,7 @@ std::pair<value::TypeTags, value::Value> genericCompare(
     value::Value lhsValue,
     value::TypeTags rhsTag,
     value::Value rhsValue,
-    const StringData::ComparatorInterface* comparator = nullptr,
+    const StringDataComparator* comparator = nullptr,
     Op op = {}) {
     if (value::isNumber(lhsTag) && value::isNumber(rhsTag)) {
         switch (getWidestNumericalType(lhsTag, rhsTag)) {
@@ -240,6 +242,9 @@ std::pair<value::TypeTags, value::Value> genericCompare(
         }
     }
 
+    // TODO: SERVER-82089: Use cmp3w instead of simple comparisons in ABT optimization + lowering of
+    // parameterized constants
+
     return {value::TypeTags::Nothing, 0};
 }
 
@@ -255,8 +260,7 @@ std::pair<value::TypeTags, value::Value> genericCompare(value::TypeTags lhsTag,
         return {value::TypeTags::Nothing, 0};
     }
 
-    auto comparator =
-        static_cast<StringData::ComparatorInterface*>(value::getCollatorView(collValue));
+    auto comparator = static_cast<StringDataComparator*>(value::getCollatorView(collValue));
 
     return genericCompare(lhsTag, lhsValue, rhsTag, rhsValue, comparator, op);
 }
@@ -280,6 +284,12 @@ size_t writeToMemory(uint8_t* ptr, const T val) noexcept {
 }
 }  // namespace
 
+/**
+ * Enumeration of built-in VM instructions. These are implemented in vm.cpp ByteCode::runInternal.
+ *
+ * See also enum class Builtin for built-in functions, like 'addToArray', that are implemented as
+ * C++ rather than VM instructions.
+ */
 struct Instruction {
     enum Tags {
         pushConstVal,
@@ -339,7 +349,7 @@ struct Instruction {
         // Iterates the column index cell and returns values representing the types of cell's
         // content, including arrays and nested objects. Skips contents of nested arrays.
         traverseCsiCellTypes,
-        setField,
+        setField,      // add or overwrite a field in a document
         getArraySize,  // number of elements
 
         aggSum,
@@ -382,6 +392,9 @@ struct Instruction {
 
         dateTruncImm,
 
+        valueBlockApplyLambda,  // Applies a lambda to each element in a block, returning a new
+                                // block.
+
         lastInstruction  // this is just a marker used to calculate number of instructions
     };
 
@@ -405,6 +418,7 @@ struct Instruction {
      */
     struct Parameter {
         int variable{0};
+        bool moveFrom{false};
         boost::optional<FrameId> frameId;
 
         // Get the size in bytes of an instruction parameter encoded in byte code.
@@ -413,8 +427,10 @@ struct Instruction {
         }
 
         MONGO_COMPILER_ALWAYS_INLINE_OPT
-        static std::pair<bool, int> decodeParam(const uint8_t*& pcPointer) noexcept {
-            auto pop = readFromMemory<bool>(pcPointer);
+        static FastTuple<bool, bool, int> decodeParam(const uint8_t*& pcPointer) noexcept {
+            auto flags = readFromMemory<uint8_t>(pcPointer);
+            bool pop = flags & 1u;
+            bool moveFrom = flags & 2u;
             pcPointer += sizeof(pop);
             int offset = 0;
             if (!pop) {
@@ -422,7 +438,7 @@ struct Instruction {
                 pcPointer += sizeof(offset);
             }
 
-            return {pop, offset};
+            return {pop, moveFrom, offset};
         }
     };
 
@@ -619,10 +635,21 @@ struct Instruction {
 };
 static_assert(sizeof(Instruction) == sizeof(uint8_t));
 
-enum class Builtin : uint8_t {
+/**
+ * Enumeration of SBE VM built-in functions. These are dispatched by ByteCode::dispatchBuiltin() in
+ * vm.cpp. An enum value 'foo' refers to a C++ implementing function named builtinFoo().
+ *
+ * See also struct Instruction for "functions" like 'setField' that are implemented as single VM
+ * instructions.
+ *
+ * Builtins which can fit into one byte and have small arity are encoded using a special instruction
+ * tag, functionSmall.
+ */
+using SmallBuiltinType = uint8_t;
+enum class Builtin : uint16_t {
     split,
     regexMatch,
-    replaceOne,
+    replaceOne,  // replace first occurrence of a specified substring with a diffferent substring
     dateDiff,
     dateParts,
     dateToParts,
@@ -635,10 +662,10 @@ enum class Builtin : uint8_t {
     dateFromString,
     dateFromStringNoThrow,
     dropFields,
-    newArray,
+    newArray,  // create a new array from the top 'arity' values on the stack
     keepFields,
     newArrayFromRange,
-    newObj,
+    newObj,      // create a new object from 'arity' alternating field names and values on the stack
     ksToString,  // KeyString to string
     newKs,       // new KeyString
     collNewKs,   // new KeyString (with collation)
@@ -739,10 +766,12 @@ enum class Builtin : uint8_t {
     setIntersection,
     setDifference,
     setEquals,
+    setIsSubset,
     collSetUnion,
     collSetIntersection,
     collSetDifference,
     collSetEquals,
+    collSetIsSubset,
     runJsPredicate,
     regexCompile,  // compile <pattern, options> into value::pcreRegex
     regexFind,
@@ -782,6 +811,7 @@ enum class Builtin : uint8_t {
     isoDayOfWeek,
     isoWeek,
     objectToArray,
+    setToArray,
     arrayToObject,
 
     aggFirstNNeedsMoreInput,
@@ -817,9 +847,6 @@ enum class Builtin : uint8_t {
     aggIntegralAdd,
     aggIntegralRemove,
     aggIntegralFinalize,
-    aggDerivativeInit,
-    aggDerivativeAdd,
-    aggDerivativeRemove,
     aggDerivativeFinalize,
     aggCovarianceAdd,
     aggCovarianceRemove,
@@ -832,18 +859,51 @@ enum class Builtin : uint8_t {
     aggRemovableStdDevRemove,
     aggRemovableStdDevSampFinalize,
     aggRemovableStdDevPopFinalize,
+    aggRemovableAvgFinalize,
+    aggLinearFillCanAdd,
+    aggLinearFillAdd,
+    aggLinearFillFinalize,
+    aggRemovableFirstNInit,
+    aggRemovableFirstNAdd,
+    aggRemovableFirstNRemove,
+    aggRemovableFirstNFinalize,
+    aggRemovableLastNInit,
+    aggRemovableLastNAdd,
+    aggRemovableLastNRemove,
+    aggRemovableLastNFinalize,
+    aggRemovableAddToSetInit,
+    aggRemovableAddToSetCollInit,
+    aggRemovableAddToSetAdd,
+    aggRemovableAddToSetRemove,
+    aggRemovableAddToSetFinalize,
 
-    valueBlockExists,
+    // Additional one-byte builtins go here.
+
+    // Start of 2 byte builtins.
+    valueBlockExists = 256,
     valueBlockFillEmpty,
+    valueBlockFillEmptyBlock,
     valueBlockMin,
     valueBlockMax,
     valueBlockCount,
     valueBlockGtScalar,
     valueBlockGteScalar,
     valueBlockEqScalar,
+    valueBlockNeqScalar,
     valueBlockLtScalar,
     valueBlockLteScalar,
+    valueBlockCmp3wScalar,
     valueBlockCombine,
+    valueBlockLogicalAnd,
+    valueBlockLogicalOr,
+    valueBlockLogicalNot,
+    valueBlockNewFill,
+    valueBlockSize,
+    valueBlockNone,
+
+    cellFoldValues_F,
+    cellFoldValues_P,
+    cellBlockGetFlatValuesBlock,
 };
 
 std::string builtinToString(Builtin b);
@@ -858,8 +918,17 @@ std::string builtinToString(Builtin b);
  * - The element at index `kMaxSize` is the maximum number entries the data structure holds.
  * - The element at index `kMemUsage` holds the current memory usage
  * - The element at index `kMemLimit` holds the max memory limit allowed
+ * - The element at index `kIsGroupAccum` specifices if the accumulator belongs to group-by stage
  */
-enum class AggMultiElems { kInternalArr, kStartIdx, kMaxSize, kMemUsage, kMemLimit, kSizeOfArray };
+enum class AggMultiElems {
+    kInternalArr,
+    kStartIdx,
+    kMaxSize,
+    kMemUsage,
+    kMemLimit,
+    kIsGroupAccum,
+    kSizeOfArray
+};
 
 /**
  * Less than comparison based on a sort pattern.
@@ -939,6 +1008,11 @@ private:
     const CollatorInterface* _collator;
 };
 
+struct MakeObjStackOffsets {
+    int fieldsStackOffset = 0;
+    int argsStackOffset = 0;
+};
+
 /**
  * This enum defines indices into an 'Array' that returns the partial sum result when 'needsMerge'
  * is requested.
@@ -974,11 +1048,12 @@ enum AggStdDevValueElems {
  *
  * The array contains three elements:
  * - The element at index `kLastValue` is the last value.
+ * - The element at index `kLastValueIsNothing` is true if the last value is nothing.
  * - The element at index `kLastRank` is the rank of the last value.
  * - The element at index `kSameRankCount` is how many values are of the same rank as the last
  * value.
  */
-enum AggRankElems { kLastValue, kLastRank, kSameRankCount, kRankArraySize };
+enum AggRankElems { kLastValue, kLastValueIsNothing, kLastRank, kSameRankCount, kRankArraySize };
 
 /**
  * This enum defines indices into an 'Array' that returns the result of accumulators that track the
@@ -1056,6 +1131,24 @@ enum class AggCovarianceElems { kSumX, kSumY, kCXY, kCount, kSizeOfArray };
  */
 enum class AggRemovableStdDevElems { kSum, kM2, kCount, kNonFiniteCount, kSizeOfArray };
 
+/**
+ * This enum defines indices into an `Array` that store state for $linearFill
+ * X, Y refers to sortby field and input field respectively
+ * At any time, (X1, Y1) and (X2, Y2) defines two end-points with non-null input values
+ * with zero or more null input values in between. Count stores the number of values left
+ * till (X2, Y2). Initially it is equal to number of values between (X1, Y1) and (X2, Y2),
+ * exclusive of first and inclusive of latter. It is decremented after each finalize call,
+ * till this segment is exhausted and after which we find next segement(new (X2, Y2)
+ * while (X1, Y1) is set to previous (X2, Y2))
+ */
+enum class AggLinearFillElems { kX1, kY1, kX2, kY2, kPrevX, kCount, kSizeOfArray };
+
+/**
+ * This enum defines indices into an 'Array' that store state for $firstN/$lastN
+ * window functions
+ */
+enum class AggFirstLastNElems { kQueue, kN, kSizeOfArray };
+
 using SmallArityType = uint8_t;
 using ArityType = uint32_t;
 
@@ -1079,6 +1172,9 @@ public:
 
     void append(CodeFragment&& code);
     void appendNoStack(CodeFragment&& code);
+    // Used when either `lhs` or `rhs` will run, but not both. This method will adjust the stack
+    // size once in this call, rather than twice (once for each CodeFragment). The CodeFragments
+    // must have the same stack size for us to know how to adjust the stack at compile time.
     void append(CodeFragment&& lhs, CodeFragment&& rhs);
     void appendConstVal(value::TypeTags tag, value::Value val);
     void appendAccessVal(value::SlotAccessor* accessor);
@@ -1149,6 +1245,7 @@ public:
     void appendSetField();
     void appendGetArraySize(Instruction::Parameter input);
     void appendDateTrunc(TimeUnit unit, int64_t binSize, TimeZone timezone, DayOfWeek startOfWeek);
+    void appendValueBlockApplyLambda();
 
     void appendSum();
     void appendMin();
@@ -1310,6 +1407,9 @@ class ByteCode {
     static_assert(std::is_trivially_copyable_v<FastTuple<bool, value::TypeTags, value::Value>>);
 
 public:
+    struct InvokeLambdaFunctor;
+    struct GetFromStackFunctor;
+
     ByteCode() {
         _argStack = reinterpret_cast<uint8_t*>(mongoMalloc(sizeOfElement * 4));
         _argStackEnd = _argStack + sizeOfElement * 4;
@@ -1332,13 +1432,17 @@ private:
 
     MONGO_COMPILER_NORETURN void runFailInstruction();
 
+    /**
+     * Run a usually Boolean check against the tag of the item on top of the stack and add its
+     * result to the stack as a TypeTags::Boolean value. However, if the stack item to be checked
+     * itself has a tag of TagTypes::Nothing, this instead pushes a result of TagTypes::Nothing.
+     */
     template <typename T>
     void runTagCheck(const uint8_t*& pcPointer, T&& predicate);
-
     void runTagCheck(const uint8_t*& pcPointer, value::TypeTags tagRhs);
 
     MONGO_COMPILER_ALWAYS_INLINE
-    static std::pair<bool, int> decodeParam(const uint8_t*& pcPointer) noexcept {
+    static FastTuple<bool, bool, int> decodeParam(const uint8_t*& pcPointer) noexcept {
         return Instruction::Parameter::decodeParam(pcPointer);
     }
 
@@ -1381,7 +1485,7 @@ private:
         value::Value lhsValue,
         value::TypeTags rhsTag,
         value::Value rhsValue,
-        const StringData::ComparatorInterface* comparator = nullptr);
+        const StringDataComparator* comparator = nullptr);
 
     std::pair<value::TypeTags, value::Value> compare3way(value::TypeTags lhsTag,
                                                          value::Value lhsValue,
@@ -1423,6 +1527,7 @@ private:
     bool runLambdaPredicate(const CodeFragment* code, int64_t position);
     void traverseCsiCellValues(const CodeFragment* code, int64_t position);
     void traverseCsiCellTypes(const CodeFragment* code, int64_t position);
+    void valueBlockApplyLambda(const CodeFragment* code);
 
     FastTuple<bool, value::TypeTags, value::Value> setField();
 
@@ -1655,30 +1760,59 @@ private:
      * values, and then it returns the output object. (Note the computed input values are not
      * directly passed in as C++ parameters -- instead the computed input values are passed via
      * the VM's stack.)
-     *
-     * 'spec' provides two lists of field names: "keepOrDrop" fields and "computed" fields. These
-     * lists are disjoint and do not contain duplicates. The number of computed input values passed
-     * in by the caller on the VM stack must match the number of fields in the "computed" list.
-     *
-     * For each field F in the "computed" list, this method will retrieve the corresponding computed
-     * input value V from the VM stack and add {F,V} to the output object.
-     *
-     * If 'root' is not an object, it is ignored. Otherwise, for each field F in 'root' with value V
-     * that does not appear in the "computed" list, this method will copy {F,V} to the output object
-     * if either: (1) field F appears in the "keepOrDrop" list and 'spec->fieldBehavior == keep'; or
-     * (2) field F does _not_ appear in the "keepOrDrop" list and 'spec->fieldBehavior == drop'. If
-     * neither of these conditions are met, field F in 'root' will be ignored.
-     *
-     * For any two distinct fields F1 and F2 in the output object, if F1 is in 'root' and F2 does
-     * not appear before F1 in 'root', -OR- if both F1 and F2 are not in 'root' and F2 does not
-     * appear before F1 in the "computed" list, then F2 will appear after F1 in the output object.
      */
     void produceBsonObject(const MakeObjSpec* spec,
-                           value::TypeTags rootTag,
-                           value::Value rootVal,
-                           int stackOffset,
+                           MakeObjStackOffsets stackOffsets,
                            const CodeFragment* code,
-                           UniqueBSONObjBuilder& bob);
+                           UniqueBSONObjBuilder& bob,
+                           value::TypeTags rootTag,
+                           value::Value rootVal) {
+        using TypeTags = value::TypeTags;
+
+        const auto& fields = spec->fields;
+        const auto& actions = spec->actions;
+        const auto defActionType = spec->fieldsScopeIsClosed() ? MakeObjSpec::ActionType::kDrop
+                                                               : MakeObjSpec::ActionType::kKeep;
+
+        // Invoke the produceBsonObject() lambda with the appropriate iterator type.
+        switch (rootTag) {
+            case TypeTags::bsonObject: {
+                // For BSON objects, use BsonObjCursor.
+                auto cursor = BsonObjCursor(
+                    fields, actions, defActionType, value::bitcastTo<const char*>(rootVal));
+                produceBsonObject(spec, stackOffsets, code, bob, std::move(cursor));
+                break;
+            }
+            case TypeTags::Object: {
+                // For SBE objects, use ObjectCursor.
+                auto cursor =
+                    ObjectCursor(fields, actions, defActionType, value::getObjectView(rootVal));
+                produceBsonObject(spec, stackOffsets, code, bob, std::move(cursor));
+                break;
+            }
+            default: {
+                // For all other types, use BsonObjCursor initialized with an empty object.
+                auto cursor =
+                    BsonObjCursor(fields, actions, defActionType, BSONObj::kEmptyObject.objdata());
+                produceBsonObject(spec, stackOffsets, code, bob, std::move(cursor));
+                break;
+            }
+        }
+    }
+
+    void produceBsonObjectWithInputFields(const MakeObjSpec* spec,
+                                          MakeObjStackOffsets stackOffsets,
+                                          const CodeFragment* code,
+                                          UniqueBSONObjBuilder& bob,
+                                          value::TypeTags objTag,
+                                          value::Value objVal);
+
+    template <typename CursorT>
+    void produceBsonObject(const MakeObjSpec* spec,
+                           MakeObjStackOffsets stackOffsets,
+                           const CodeFragment* code,
+                           UniqueBSONObjBuilder& bob,
+                           CursorT cursor);
 
     /**
      * This struct is used by traverseAndProduceBsonObj() to hold args that stay the same across
@@ -1688,7 +1822,7 @@ private:
      */
     struct TraverseAndProduceBsonObjContext {
         const MakeObjSpec* spec;
-        int stackStartOffset;
+        MakeObjStackOffsets stackOffsets;
         const CodeFragment* code;
     };
 
@@ -1743,7 +1877,7 @@ private:
                                                                       CollatorInterface* collator);
     FastTuple<bool, value::TypeTags, value::Value> builtinAddToSetCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollAddToSetCapped(ArityType arity);
-
+    FastTuple<bool, value::TypeTags, value::Value> builtinSetToArray(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinDoubleDoubleSum(ArityType arity);
     // The template parameter is false for a regular DoubleDouble summation and true if merging
     // partially computed DoubleDouble sums.
@@ -1813,10 +1947,12 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinSetIntersection(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSetDifference(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSetEquals(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinSetIsSubset(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollSetUnion(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollSetIntersection(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollSetDifference(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollSetEquals(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinCollSetIsSubset(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinRunJsPredicate(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinRegexCompile(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinRegexFind(ArityType arity);
@@ -1908,9 +2044,6 @@ private:
         std::pair<value::TypeTags, value::Value> prevSortByVal,
         std::pair<value::TypeTags, value::Value> newInput,
         std::pair<value::TypeTags, value::Value> newSortByVal);
-    FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeInit(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeAdd(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeRemove(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeFinalize(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> aggRemovableAvgFinalizeImpl(
         value::Array* sumState, int64_t count);
@@ -1937,19 +2070,67 @@ private:
         ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableStdDevPopFinalize(
         ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableAvgFinalize(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggFirstLastNInit(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggFirstLastNAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggFirstLastNRemove(ArityType arity);
+    template <AccumulatorFirstLastN::Sense S>
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggFirstLastNFinalize(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggLinearFillCanAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggLinearFillAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggLinearFillFinalize(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableAddToSetInit(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableAddToSetCollInit(
+        ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableAddToSetAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableAddToSetRemove(
+        ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableAddToSetFinalize(
+        ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> linearFillInterpolate(
+        std::pair<value::TypeTags, value::Value> x1,
+        std::pair<value::TypeTags, value::Value> y1,
+        std::pair<value::TypeTags, value::Value> x2,
+        std::pair<value::TypeTags, value::Value> y2,
+        std::pair<value::TypeTags, value::Value> x);
 
+
+    // Block builtins
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockExists(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockFillEmpty(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockFillEmptyBlock(ArityType arity);
+    template <bool less>
+    FastTuple<bool, value::TypeTags, value::Value> valueBlockMinMaxImpl(
+        value::ValueBlock* inputBlock, value::ValueBlock* bitsetBlock);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMin(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMax(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCount(ArityType arity);
+
+    template <class Cmp, value::ColumnOpType::Flags AddFlags = value::ColumnOpType::kNoFlags>
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCmpScalar(ArityType arity);
+
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockGtScalar(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockGteScalar(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockEqScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockNeqScalar(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLtScalar(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLteScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCmp3wScalar(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCombine(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLogicalAnd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLogicalOr(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLogicalNot(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockNewFill(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockSize(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockNone(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinCellFoldValues_F(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinCellFoldValues_P(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinCellBlockGetFlatValuesBlock(
+        ArityType arity);
 
+    /**
+     * Dispatcher for calls to VM built-in C++ functions enumerated by enum class Builtin.
+     */
     FastTuple<bool, value::TypeTags, value::Value> dispatchBuiltin(Builtin f,
                                                                    ArityType arity,
                                                                    const CodeFragment* code);
@@ -2010,6 +2191,16 @@ private:
     }
 
     MONGO_COMPILER_ALWAYS_INLINE_OPT
+    void setTagToNothing(size_t offset) noexcept {
+        if (MONGO_likely(offset == 0)) {
+            writeToMemory(_argStackTop + offsetTag, value::TypeTags::Nothing);
+        } else {
+            auto ptr = _argStackTop - offset * sizeOfElement;
+            writeToMemory(ptr + offsetTag, value::TypeTags::Nothing);
+        }
+    }
+
+    MONGO_COMPILER_ALWAYS_INLINE_OPT
     void setStack(size_t offset, bool owned, value::TypeTags tag, value::Value val) noexcept {
         if (MONGO_likely(offset == 0)) {
             topStack(owned, tag, val);
@@ -2064,6 +2255,95 @@ private:
     // Expression execution stack of (owned, tag, value) tuples each of 'sizeOfElement' bytes.
     uint8_t* _argStack{nullptr};
 };
+
+struct ByteCode::InvokeLambdaFunctor {
+    InvokeLambdaFunctor(ByteCode& bytecode, const CodeFragment* code, int64_t lamPos)
+        : bytecode(bytecode), code(code), lamPos(lamPos) {}
+
+    std::pair<value::TypeTags, value::Value> operator()(value::TypeTags tag,
+                                                        value::Value val) const {
+        // Invoke the lambda.
+        bytecode.pushStack(false, tag, val);
+        bytecode.runLambdaInternal(code, lamPos);
+        // Move the result off the stack, make sure it's owned, and return it.
+        auto result = bytecode.moveOwnedFromStack(0);
+        bytecode.popStack();
+        return result;
+    }
+
+    ByteCode& bytecode;
+    const CodeFragment* const code;
+    const int64_t lamPos;
+};
+
+struct ByteCode::GetFromStackFunctor {
+    GetFromStackFunctor(ByteCode& bytecode, int stackStartOffset)
+        : bytecode(&bytecode), stackStartOffset(stackStartOffset) {}
+
+    FastTuple<bool, value::TypeTags, value::Value> operator()(size_t idx) const {
+        return bytecode->getFromStack(stackStartOffset + idx);
+    }
+
+    ByteCode* bytecode;
+    const int stackStartOffset;
+};
+
+class MakeObjCursorInputFields {
+public:
+    MakeObjCursorInputFields(ByteCode& bytecode, int startOffset, size_t numFields)
+        : _getFieldFn(bytecode, startOffset), _numFields(numFields) {}
+
+    size_t size() const {
+        return _numFields;
+    }
+
+    FastTuple<bool, value::TypeTags, value::Value> operator[](size_t idx) const {
+        return _getFieldFn(idx);
+    }
+
+private:
+    ByteCode::GetFromStackFunctor _getFieldFn;
+    size_t _numFields;
+};
+
+class InputFieldsOnlyCursor;
+class BsonObjWithInputFieldsCursor;
+class ObjWithInputFieldsCursor;
+
+// There are five instantiations of the templated produceBsonObject() method, one for each
+// type of MakeObj input cursor.
+extern template void ByteCode::produceBsonObject<BsonObjCursor>(const MakeObjSpec* spec,
+                                                                MakeObjStackOffsets stackOffsets,
+                                                                const CodeFragment* code,
+                                                                UniqueBSONObjBuilder& bob,
+                                                                BsonObjCursor cursor);
+
+extern template void ByteCode::produceBsonObject<ObjectCursor>(const MakeObjSpec* spec,
+                                                               MakeObjStackOffsets stackOffsets,
+                                                               const CodeFragment* code,
+                                                               UniqueBSONObjBuilder& bob,
+                                                               ObjectCursor cursor);
+
+extern template void ByteCode::produceBsonObject<InputFieldsOnlyCursor>(
+    const MakeObjSpec* spec,
+    MakeObjStackOffsets stackOffsets,
+    const CodeFragment* code,
+    UniqueBSONObjBuilder& bob,
+    InputFieldsOnlyCursor cursor);
+
+extern template void ByteCode::produceBsonObject<BsonObjWithInputFieldsCursor>(
+    const MakeObjSpec* spec,
+    MakeObjStackOffsets stackOffsets,
+    const CodeFragment* code,
+    UniqueBSONObjBuilder& bob,
+    BsonObjWithInputFieldsCursor cursor);
+
+extern template void ByteCode::produceBsonObject<ObjWithInputFieldsCursor>(
+    const MakeObjSpec* spec,
+    MakeObjStackOffsets stackOffsets,
+    const CodeFragment* code,
+    UniqueBSONObjBuilder& bob,
+    ObjWithInputFieldsCursor cursor);
 }  // namespace vm
 }  // namespace sbe
 }  // namespace mongo

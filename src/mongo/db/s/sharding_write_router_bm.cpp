@@ -40,7 +40,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -128,7 +127,7 @@ protected:
     }
 
     void setupCatalogCacheMock(ServiceContext* serviceContext, bool withShardedCollection) {
-        const auto client = serviceContext->makeClient("test-setup");
+        const auto client = serviceContext->getService()->makeClient("test-setup");
         const auto opCtxHolder = client->makeOperationContext();
         OperationContext* opCtx = opCtxHolder.get();
 
@@ -141,7 +140,7 @@ protected:
             const auto shards = std::vector<ShardId>{ShardId("shard0")};
             const auto originatorShard = shards[0];
 
-            const auto [chunks, chunkManager] = createChunks(nShards, nChunks, shards);
+            auto [chunks, chunkManager] = createChunks(nShards, nChunks, shards);
 
             ShardingState::get(serviceContext)->setInitialized(originatorShard, clusterId);
 
@@ -163,7 +162,17 @@ protected:
             CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, kNss)
                 ->setFilteringMetadata(opCtx, CollectionMetadata(chunkManager, originatorShard));
 
-            catalogCache->setChunkManagerReturnValue(chunkManager);
+            // Setup the CatalogCacheMock for the temp resharding ns.
+            const auto reshardingTempNs =
+                chunkManager.getReshardingFields()->getDonorFields()->getTempReshardingNss();
+            catalogCache->setCollectionReturnValue(
+                reshardingTempNs,
+                CatalogCacheMock::makeCollectionRoutingInfoSharded(
+                    reshardingTempNs,
+                    shards[0],
+                    DatabaseVersion(),
+                    BSON("y" << 1),
+                    {{ChunkRange(BSON("y" << MINKEY), BSON("y" << MAXKEY)), shards[0]}}));
         }
 
         auto mockNetwork = std::make_unique<executor::NetworkInterfaceMock>();
@@ -242,7 +251,7 @@ protected:
                             RoutingTableHistory::makeNew(kNss,
                                                          collIdentifier,
                                                          shardKeyPattern,
-                                                         false, /*unsplittable*/
+                                                         false, /* unsplittable */
                                                          nullptr,
                                                          false,
                                                          collEpoch,
@@ -276,7 +285,7 @@ BENCHMARK_DEFINE_F(ShardingWriteRouterTestFixture, BM_InsertGetDestinedRecipient
     for (auto keepRunning : state) {
         benchmark::ClobberMemory();
 
-        const auto client = serviceContext()->makeClient("test");
+        const auto client = serviceContext()->getService()->makeClient("test");
         const auto opCtx = client->makeOperationContext();
 
         OperationShardingState::setShardRole(
@@ -299,7 +308,7 @@ BENCHMARK_DEFINE_F(ShardingWriteRouterTestFixture, BM_UpdateGetDestinedRecipient
     for (auto keepRunning : state) {
         benchmark::ClobberMemory();
 
-        const auto client = serviceContext()->makeClient("test");
+        const auto client = serviceContext()->getService()->makeClient("test");
         const auto opCtx = client->makeOperationContext();
 
         OperationShardingState::setShardRole(
@@ -321,7 +330,7 @@ BENCHMARK_DEFINE_F(WriteRouterTestFixture, BM_UnshardedDestinedRecipient)
     for (auto keepRunning : state) {
         benchmark::ClobberMemory();
 
-        const auto client = serviceContext()->makeClient("test");
+        const auto client = serviceContext()->getService()->makeClient("test");
         const auto opCtx = client->makeOperationContext();
 
         Lock::DBLock dbLock{opCtx.get(), kNss.dbName(), MODE_IX};

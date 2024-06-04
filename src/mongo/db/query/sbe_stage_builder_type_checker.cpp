@@ -31,7 +31,6 @@
 
 #include <absl/container/node_hash_map.h>
 #include <absl/meta/type_traits.h>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <memory>
 #include <string>
@@ -44,78 +43,6 @@
 #include "mongo/util/assert_util.h"
 
 namespace mongo::stage_builder {
-
-// Return the signature corresponding to the given SBE type.
-TypeSignature getTypeSignature(sbe::value::TypeTags type) {
-    uint8_t tagIndex = static_cast<uint8_t>(type);
-    return TypeSignature{1LL << tagIndex};
-}
-
-template <typename Head, typename... Tail>
-TypeSignature getTypeSignature(Head type, Tail... tail) {
-    return getTypeSignature(type).include(getTypeSignature(tail...));
-}
-
-// Return the set of SBE types encoded in the provided signature.
-std::vector<sbe::value::TypeTags> getBSONTypesFromSignature(TypeSignature signature) {
-    // This constant signature holds all the types that have a BSON counterpart and can
-    // represent a value stored in the database, excluding all the TypeTags that describe
-    // internal types like SortSpec, TimeZoneDB, etc...
-    static TypeSignature kAnyBSONType = getTypeSignature(sbe::value::TypeTags::Nothing,
-                                                         sbe::value::TypeTags::NumberInt32,
-                                                         sbe::value::TypeTags::NumberInt64,
-                                                         sbe::value::TypeTags::NumberDouble,
-                                                         sbe::value::TypeTags::NumberDecimal,
-                                                         sbe::value::TypeTags::Date,
-                                                         sbe::value::TypeTags::Timestamp,
-                                                         sbe::value::TypeTags::Boolean,
-                                                         sbe::value::TypeTags::Null,
-                                                         sbe::value::TypeTags::StringSmall,
-                                                         sbe::value::TypeTags::StringBig,
-                                                         sbe::value::TypeTags::Array,
-                                                         sbe::value::TypeTags::ArraySet,
-                                                         sbe::value::TypeTags::Object,
-                                                         sbe::value::TypeTags::ObjectId,
-                                                         sbe::value::TypeTags::MinKey,
-                                                         sbe::value::TypeTags::MaxKey,
-                                                         sbe::value::TypeTags::bsonObject,
-                                                         sbe::value::TypeTags::bsonArray,
-                                                         sbe::value::TypeTags::bsonString,
-                                                         sbe::value::TypeTags::bsonSymbol,
-                                                         sbe::value::TypeTags::bsonObjectId,
-                                                         sbe::value::TypeTags::bsonBinData,
-                                                         sbe::value::TypeTags::bsonUndefined,
-                                                         sbe::value::TypeTags::bsonRegex,
-                                                         sbe::value::TypeTags::bsonJavascript,
-                                                         sbe::value::TypeTags::bsonDBPointer,
-                                                         sbe::value::TypeTags::bsonCodeWScope);
-    signature = signature.intersect(kAnyBSONType);
-    std::vector<sbe::value::TypeTags> tags;
-    for (size_t i = 0; i < sizeof(size_t) * 8; i++) {
-        auto tag = static_cast<sbe::value::TypeTags>(i);
-        if (getTypeSignature(tag).isSubset(signature)) {
-            tags.push_back(tag);
-        }
-    }
-    return tags;
-}
-
-TypeSignature TypeChecker::kAnyType = TypeSignature{~0};
-TypeSignature TypeChecker::kArrayType = getTypeSignature(
-    sbe::value::TypeTags::Array, sbe::value::TypeTags::ArraySet, sbe::value::TypeTags::bsonArray);
-TypeSignature TypeChecker::kBooleanType = getTypeSignature(sbe::value::TypeTags::Boolean);
-TypeSignature TypeChecker::kDateTimeType =
-    getTypeSignature(sbe::value::TypeTags::Date, sbe::value::TypeTags::Timestamp);
-TypeSignature TypeChecker::kNothingType = getTypeSignature(sbe::value::TypeTags::Nothing);
-TypeSignature TypeChecker::kNumericType = getTypeSignature(sbe::value::TypeTags::NumberInt32,
-                                                           sbe::value::TypeTags::NumberInt64,
-                                                           sbe::value::TypeTags::NumberDecimal,
-                                                           sbe::value::TypeTags::NumberDouble);
-TypeSignature TypeChecker::kStringType = getTypeSignature(sbe::value::TypeTags::StringSmall,
-                                                          sbe::value::TypeTags::StringBig,
-                                                          sbe::value::TypeTags::bsonString);
-TypeSignature TypeChecker::kObjectType =
-    getTypeSignature(sbe::value::TypeTags::Object, sbe::value::TypeTags::bsonObject);
 
 TypeChecker::TypeChecker() {
     // Define an initial binding level, so that the caller can define variable bindings before
@@ -147,7 +74,7 @@ TypeSignature TypeChecker::getInferredType(optimizer::ProjectionName variable) {
         }
     }
     // No explicit type defined, return the wildcard type.
-    return kAnyType;
+    return TypeSignature::kAnyScalarType;
 }
 
 void TypeChecker::bind(optimizer::ProjectionName variable, TypeSignature type) {
@@ -206,13 +133,14 @@ TypeSignature TypeChecker::operator()(optimizer::ABT& n,
     switch (op.op()) {
         case optimizer::Operations::Not: {
             // The signature of Not is boolean plus Nothing if the operand can be Nothing.
-            return kBooleanType.include(childType.intersect(kNothingType));
+            return TypeSignature::kBooleanType.include(
+                childType.intersect(TypeSignature::kNothingType));
         } break;
 
         default:
             break;
     }
-    return kAnyType;
+    return TypeSignature::kAnyScalarType;
 }
 
 // Recursively walk a binary node and invoke the callback with the arguments in the order of test.
@@ -260,24 +188,26 @@ TypeSignature TypeChecker::operator()(optimizer::ABT& n,
             // Visit the child node using the flag 'saveInference' set to true, so that any
             // constraint applied to a variable can be stored in the local binding.
             TypeSignature nodeType = node.visit(*this, true);
-            canBeNothing |= kNothingType.isSubset(nodeType);
+            canBeNothing |= TypeSignature::kNothingType.isSubset(nodeType);
         });
 
         if (!saveInference) {
             exitLocalBinding();
         }
         // The signature of the And is boolean plus Nothing if any operands can be Nothing.
-        return canBeNothing ? kBooleanType.include(kNothingType) : kBooleanType;
+        return canBeNothing ? TypeSignature::kBooleanType.include(TypeSignature::kNothingType)
+                            : TypeSignature::kBooleanType;
     } else if (op.op() == optimizer::Operations::Or) {
         // Visit the logical children in their natural order, even if they are not direct
         // children of this node.
         bool canBeNothing = false;
         walkTreeInOrder(&op, [&](optimizer::ABT& node) {
             TypeSignature nodeType = node.visit(*this, false);
-            canBeNothing |= kNothingType.isSubset(nodeType);
+            canBeNothing |= TypeSignature::kNothingType.isSubset(nodeType);
         });
         // The signature of the Or is boolean plus Nothing if any operands can be Nothing.
-        return canBeNothing ? kBooleanType.include(kNothingType) : kBooleanType;
+        return canBeNothing ? TypeSignature::kBooleanType.include(TypeSignature::kNothingType)
+                            : TypeSignature::kBooleanType;
     }
 
     TypeSignature lhs = const_cast<optimizer::ABT&>(op.getLeftChild()).visit(*this, false);
@@ -286,7 +216,7 @@ TypeSignature TypeChecker::operator()(optimizer::ABT& n,
         case optimizer::Operations::FillEmpty: {
             // If the argument is already guaranteed not to be a Nothing, the fillEmpty can be
             // removed.
-            if (!kNothingType.isSubset(lhs)) {
+            if (!TypeSignature::kNothingType.isSubset(lhs)) {
                 swapAndUpdate(n,
                               std::exchange(const_cast<optimizer::ABT&>(op.getLeftChild()),
                                             optimizer::make<optimizer::Blackhole>()));
@@ -294,7 +224,7 @@ TypeSignature TypeChecker::operator()(optimizer::ABT& n,
             }
             // The signature of FillEmtpy is the signature of the first argument, minus Nothing,
             // plus the signature of the second argument.
-            return lhs.exclude(kNothingType).include(rhs);
+            return lhs.exclude(TypeSignature::kNothingType).include(rhs);
             break;
         }
 
@@ -302,14 +232,16 @@ TypeSignature TypeChecker::operator()(optimizer::ABT& n,
         case optimizer::Operations::Sub: {
             // The signature of the Add/Sub is either numeric or date, plus Nothing.
             auto argsType = lhs.include(rhs);
-            return kNumericType.include(argsType.intersect(kDateTimeType))
-                .include(argsType.intersect(kNothingType));
+            return TypeSignature::kNumericType
+                .include(argsType.intersect(TypeSignature::kDateTimeType))
+                .include(argsType.intersect(TypeSignature::kNothingType));
         } break;
 
         case optimizer::Operations::Mult: {
             // The signature of the Mult is numeric plus Nothing.
             auto argsType = lhs.include(rhs);
-            return kNumericType.include(argsType.intersect(kNothingType));
+            return TypeSignature::kNumericType.include(
+                argsType.intersect(TypeSignature::kNothingType));
         } break;
 
         case optimizer::Operations::Eq: {
@@ -323,7 +255,7 @@ TypeSignature TypeChecker::operator()(optimizer::ABT& n,
             }
             if (!op.getLeftChild().is<optimizer::Constant>() &&
                 op.getRightChild().is<optimizer::Constant>() &&
-                lhs.isSubset(kBooleanType.include(kNothingType))) {
+                lhs.isSubset(TypeSignature::kBooleanType.include(TypeSignature::kNothingType))) {
                 // If the left side is type checked as a boolean and the right side is the
                 // constant 'true', replace the comparison with just the left side; if it is
                 // 'false', replace it with a not(left side).
@@ -348,7 +280,8 @@ TypeSignature TypeChecker::operator()(optimizer::ABT& n,
             }
             // The signature of the Eq is boolean plus Nothing if either operands can be
             // Nothing.
-            return kBooleanType.include(lhs.include(rhs).intersect(kNothingType));
+            return TypeSignature::kBooleanType.include(
+                lhs.include(rhs).intersect(TypeSignature::kNothingType));
         } break;
 
         case optimizer::Operations::Neq:
@@ -358,33 +291,41 @@ TypeSignature TypeChecker::operator()(optimizer::ABT& n,
         case optimizer::Operations::Lte: {
             // The signature of comparison is boolean plus Nothing if either operands can be
             // Nothing.
-            return kBooleanType.include(lhs.include(rhs).intersect(kNothingType));
+            return TypeSignature::kBooleanType.include(
+                lhs.include(rhs).intersect(TypeSignature::kNothingType));
+        } break;
+
+        case optimizer::Operations::Cmp3w: {
+            // The signature of comparison is integer plus Nothing if either operands can be
+            // Nothing.
+            return getTypeSignature(sbe::value::TypeTags::NumberInt32)
+                .include(lhs.include(rhs).intersect(TypeSignature::kNothingType));
         } break;
 
         default:
             break;
     }
 
-    return kAnyType;
+    return TypeSignature::kAnyScalarType;
 }
 
 TypeSignature TypeChecker::evaluateTypeTest(optimizer::ABT& n,
                                             TypeSignature argSignature,
                                             TypeSignature typeToCheck) {
-    if (argSignature.isSubset(kNothingType)) {
+    if (argSignature.isSubset(TypeSignature::kNothingType)) {
         // If the argument is exactly Nothing, evaluate to Nothing
         swapAndUpdate(n, optimizer::Constant::nothing());
-        return kNothingType;
+        return TypeSignature::kNothingType;
     } else if (argSignature.isSubset(typeToCheck)) {
         // If the argument is only one (or more) of the types to check, evaluate to True
         swapAndUpdate(n, optimizer::Constant::boolean(true));
-        return kBooleanType;
-    } else if (!argSignature.containsAny(typeToCheck.include(kNothingType))) {
+        return TypeSignature::kBooleanType;
+    } else if (!argSignature.containsAny(typeToCheck.include(TypeSignature::kNothingType))) {
         // If the argument doesn't include Nothing or any of the types to check, evaluate to False
         swapAndUpdate(n, optimizer::Constant::boolean(false));
-        return kBooleanType;
+        return TypeSignature::kBooleanType;
     }
-    return kBooleanType.include(argSignature.intersect(kNothingType));
+    return TypeSignature::kBooleanType.include(argSignature.intersect(TypeSignature::kNothingType));
 }
 
 TypeSignature TypeChecker::operator()(optimizer::ABT& n,
@@ -399,25 +340,27 @@ TypeSignature TypeChecker::operator()(optimizer::ABT& n,
     if (op.name() == "exists" && arity == 1) {
         // If the argument is already guaranteed not to be a Nothing or if it is a constant, we can
         // evaluate it now.
-        if (!kNothingType.isSubset(argTypes[0])) {
+        if (!TypeSignature::kNothingType.isSubset(argTypes[0])) {
             swapAndUpdate(n, optimizer::Constant::boolean(true));
         } else if (saveInference && op.nodes()[0].cast<optimizer::Variable>()) {
             // If this 'exists' is testing a variable and is part of an And, add a mask excluding
             // Nothing from the type information of the variable.
             auto& varName = op.nodes()[0].cast<optimizer::Variable>()->name();
-            bind(varName, getInferredType(varName).exclude(kNothingType));
+            bind(varName, getInferredType(varName).exclude(TypeSignature::kNothingType));
         }
-        return kBooleanType;
+        return TypeSignature::kBooleanType;
     }
 
     if (op.name() == "coerceToBool" && arity == 1) {
         auto argSignature = argTypes[0];
         // If the argument is already guaranteed to be a boolean or a Nothing, the coerceToBool is
         // unnecessary.
-        if (argSignature.isSubset(kBooleanType.include(kNothingType))) {
+        if (argSignature.isSubset(
+                TypeSignature::kBooleanType.include(TypeSignature::kNothingType))) {
             swapAndUpdate(n, std::exchange(op.nodes()[0], optimizer::make<optimizer::Blackhole>()));
         }
-        return kBooleanType.include(argSignature.intersect(kNothingType));
+        return TypeSignature::kBooleanType.include(
+            argSignature.intersect(TypeSignature::kNothingType));
     }
 
     if (op.name() == "typeMatch" && arity == 2) {
@@ -426,7 +369,7 @@ TypeSignature TypeChecker::operator()(optimizer::ABT& n,
             auto [tagMask, valMask] = op.nodes()[1].cast<optimizer::Constant>()->get();
             if (tagMask == sbe::value::TypeTags::NumberInt32) {
                 auto bsonMask = static_cast<uint32_t>(sbe::value::bitcastTo<int32_t>(valMask));
-                if (!kNothingType.isSubset(argSignature)) {
+                if (!TypeSignature::kNothingType.isSubset(argSignature)) {
                     // See if we can answer the typeMatch call only using type inference. The type
                     // of the argument must be either completely inside or outside of the requested
                     // type mask in order to constant fold this call. It also must not include the
@@ -442,11 +385,12 @@ TypeSignature TypeChecker::operator()(optimizer::ABT& n,
                     } else if ((argBsonTypeMask & bsonMask) == 0) {
                         swapAndUpdate(n, optimizer::Constant::boolean(false));
                     }
-                    return kBooleanType;
+                    return TypeSignature::kBooleanType;
                 }
             }
         }
-        return kBooleanType.include(argSignature.intersect(kNothingType));
+        return TypeSignature::kBooleanType.include(
+            argSignature.intersect(TypeSignature::kNothingType));
     }
 
     if (op.name() == "convert" && arity == 2) {
@@ -459,18 +403,19 @@ TypeSignature TypeChecker::operator()(optimizer::ABT& n,
                 TypeSignature targetSignature = getTypeSignature(targetTypeTag);
                 // If the argument is already of the requested type (or Nothing), remove the
                 // 'convert' call.
-                if (argSignature.isSubset(targetSignature.include(kNothingType))) {
+                if (argSignature.isSubset(targetSignature.include(TypeSignature::kNothingType))) {
                     swapAndUpdate(
                         n, std::exchange(op.nodes()[0], optimizer::make<optimizer::Blackhole>()));
                 }
-                return targetSignature.include(argSignature.intersect(kNothingType));
+                return targetSignature.include(argSignature.intersect(TypeSignature::kNothingType));
             }
         }
-        return kNumericType.include(argSignature.intersect(kNothingType));
+        return TypeSignature::kNumericType.include(
+            argSignature.intersect(TypeSignature::kNothingType));
     }
 
     if (op.name() == "isArray" && arity == 1) {
-        return evaluateTypeTest(n, argTypes[0], kArrayType);
+        return evaluateTypeTest(n, argTypes[0], TypeSignature::kArrayType);
     }
 
     if (op.name() == "isDate" && arity == 1) {
@@ -482,22 +427,27 @@ TypeSignature TypeChecker::operator()(optimizer::ABT& n,
     }
 
     if (op.name() == "isNumber" && arity == 1) {
-        return evaluateTypeTest(n, argTypes[0], kNumericType);
+        return evaluateTypeTest(n, argTypes[0], TypeSignature::kNumericType);
     }
 
     if (op.name() == "isObject" && arity == 1) {
-        return evaluateTypeTest(n, argTypes[0], kDateTimeType);
+        return evaluateTypeTest(n, argTypes[0], TypeSignature::kObjectType);
     }
 
     if (op.name() == "isString" && arity == 1) {
-        return evaluateTypeTest(n, argTypes[0], kStringType);
+        return evaluateTypeTest(n, argTypes[0], TypeSignature::kStringType);
     }
 
     if (op.name() == "isTimestamp" && arity == 1) {
         return evaluateTypeTest(n, argTypes[0], getTypeSignature(sbe::value::TypeTags::Timestamp));
     }
 
-    return kAnyType;
+    if ((op.name() == "dateTrunc" && arity == 6) || (op.name() == "dateAdd" && arity == 5)) {
+        // Always mark Nothing as a possible return type, as it can be reported due to invalid
+        // arguments.
+        return getTypeSignature(sbe::value::TypeTags::Date).include(TypeSignature::kNothingType);
+    }
+    return TypeSignature::kAnyScalarType;
 }
 
 TypeSignature TypeChecker::operator()(optimizer::ABT& n, optimizer::If& op, bool saveInference) {
@@ -515,7 +465,7 @@ TypeSignature TypeChecker::operator()(optimizer::ABT& n, optimizer::If& op, bool
 
     // The signature of If is the mix of both branches, plus Nothing if the condition can produce
     // it.
-    return thenType.include(elseType).include(condType.intersect(kNothingType));
+    return thenType.include(elseType).include(condType.intersect(TypeSignature::kNothingType));
 }
 
 void TypeChecker::swapAndUpdate(optimizer::ABT& n, optimizer::ABT newN) {

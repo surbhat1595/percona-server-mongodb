@@ -64,6 +64,7 @@ public:
     }
 
     // No auth needed because it only works when enabled via command line.
+    // See docs/test_commands.md.
     Status checkAuthForOperation(OperationContext*,
                                  const DatabaseName&,
                                  const BSONObj&) const override {
@@ -81,7 +82,7 @@ public:
     }
 };
 
-MONGO_REGISTER_COMMAND(ReapLogicalSessionCacheNowCommand).testOnly();
+MONGO_REGISTER_COMMAND(ReapLogicalSessionCacheNowCommand).testOnly().forRouter().forShard();
 
 }  // namespace
 }  // namespace mongo

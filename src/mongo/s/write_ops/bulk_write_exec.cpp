@@ -35,7 +35,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -55,6 +54,7 @@
 #include "mongo/db/commands/bulk_write_gen.h"
 #include "mongo/db/commands/bulk_write_parser.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/error_labels.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/ops/write_ops_parsers.h"
@@ -68,7 +68,6 @@
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/redaction.h"
-#include "mongo/s/async_requests_sender.h"
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/client/shard.h"
@@ -82,8 +81,11 @@
 #include "mongo/s/transaction_router.h"
 #include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/batched_command_request.h"
+#include "mongo/s/write_ops/bulk_write_command_modifier.h"
 #include "mongo/s/write_ops/write_op.h"
+#include "mongo/s/write_ops/write_without_shard_key_util.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/exit.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
 
@@ -102,16 +104,21 @@ bool isVerboseWc(const BSONObj& wc) {
     return !wElem.isNumber() || wElem.Number() != 0;
 }
 
-// Send and process the child batches. Each child batch is targeted at a unique shard: therefore
-// one shard will have only one batch incoming.
+/**
+ * Send and process the child batches. Each child batch is targeted at a unique shard: therefore one
+ * shard will have only one batch incoming.
+ */
 void executeChildBatches(OperationContext* opCtx,
+                         const std::vector<std::unique_ptr<NSTargeter>>& targeters,
                          TargetedBatchMap& childBatches,
                          BulkWriteOp& bulkWriteOp,
-                         stdx::unordered_map<NamespaceString, TrackedErrors>& errorsPerNamespace) {
+                         stdx::unordered_map<NamespaceString, TrackedErrors>& errorsPerNamespace,
+                         boost::optional<bool> allowShardKeyUpdatesWithoutFullShardKeyInQuery) {
     std::vector<AsyncRequestsSender::Request> requests;
     for (auto& childBatch : childBatches) {
         auto request = [&]() {
-            auto bulkReq = bulkWriteOp.buildBulkCommandRequest(*childBatch.second);
+            auto bulkReq = bulkWriteOp.buildBulkCommandRequest(
+                targeters, *childBatch.second, allowShardKeyUpdatesWithoutFullShardKeyInQuery);
 
             // Transform the request into a sendable BSON.
             BSONObjBuilder builder;
@@ -133,14 +140,27 @@ void executeChildBatches(OperationContext* opCtx,
             }
 
             auto obj = builder.obj();
-            // When running a debug build, verify that estSize is at least the BSON serialization
-            // size.
-            dassert(childBatch.second->getEstimatedSizeBytes() >= obj.objsize());
+
+            // When running a debug build, verify that estSize is at least the BSON
+            // serialization size.
+            //
+            // The estimated size doesn't take into account the size of the internal
+            // '_allowShardKeyUpdatesWithoutFullShardKeyInQuery' field for updates. When
+            // allowShardKeyUpdatesWithoutFullShardKeyInQuery is set, we are running a single
+            // updateOne without shard key in its own child batch. So it doesn't matter what the
+            // estimated size is, skip the debug check.
+            dassert(allowShardKeyUpdatesWithoutFullShardKeyInQuery ||
+                    childBatch.second->getEstimatedSizeBytes() >= obj.objsize());
+
             return obj;
         }();
 
         requests.emplace_back(childBatch.first, request);
     }
+
+    // Note we check this rather than `isRetryableWrite()` because we do not want to retry
+    // commands within retryable internal transactions.
+    bool shouldRetry = opCtx->getTxnNumber() && !TransactionRouter::get(opCtx);
 
     // Use MultiStatementTransactionRequestsSender to send any ready sub-batches to targeted
     // shard endpoints. Requests are sent on construction.
@@ -150,84 +170,49 @@ void executeChildBatches(OperationContext* opCtx,
         DatabaseName::kAdmin,
         requests,
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-        opCtx->isRetryableWrite() ? Shard::RetryPolicy::kIdempotent : Shard::RetryPolicy::kNoRetry);
+        shouldRetry ? Shard::RetryPolicy::kIdempotent : Shard::RetryPolicy::kNoRetry);
 
-    while (!ars.done()) {
+    // The BulkWriteOp may be marked finished early if we are in a transaction and encounter an
+    // error, which aborts the transaction. In those cases, we do not bother waiting for any
+    // outstanding responses from shards.
+    while (!ars.done() && !bulkWriteOp.isFinished()) {
         // Block until a response is available.
         auto response = ars.next();
 
-        Status responseStatus = response.swResponse.getStatus();
+        TargetedWriteBatch* writeBatch = childBatches.find(response.shardId)->second.get();
+        tassert(8048101, "Unexpectedly could not find write batch for shard", writeBatch);
+
         // When the responseStatus is not OK, this means that mongos was unable to receive a
         // response from the shard the write batch was sent to, or mongos faced some other local
-        // error (for example, mongos was shutting down). In these cases, throw and return the
-        // error to the client.
-        // Note that this is different from an operation within the bulkWrite command having an
-        // error.
-        uassertStatusOK(responseStatus);
-
-        auto bwReply = BulkWriteCommandReply::parse(IDLParserContext("bulkWrite"),
-                                                    response.swResponse.getValue().data);
-
-        // TODO (SERVER-76958): Iterate through the cursor rather than looking only at the
-        // first batch.
-        auto cursor = bwReply.getCursor();
-        const auto& replyItems = cursor.getFirstBatch();
-        TargetedWriteBatch* writeBatch = childBatches.find(response.shardId)->second.get();
-
-        // Capture the errors if any exist and mark the writes in the TargetedWriteBatch so that
-        // they may be re-targeted if needed.
-        bulkWriteOp.noteBatchResponse(*writeBatch, replyItems, errorsPerNamespace);
-    }
-}
-
-void noteStaleResponses(
-    OperationContext* opCtx,
-    const std::vector<std::unique_ptr<NSTargeter>>& targeters,
-    const stdx::unordered_map<NamespaceString, TrackedErrors>& errorsPerNamespace) {
-    for (auto& targeter : targeters) {
-        auto errors = errorsPerNamespace.find(targeter->getNS());
-        if (errors != errorsPerNamespace.cend()) {
-            for (const auto& error : errors->second.getErrors(ErrorCodes::StaleConfig)) {
-                LOGV2_DEBUG(7279201,
-                            4,
-                            "Noting stale config response.",
-                            "shardId"_attr = error.endpoint.shardName,
-                            "status"_attr = error.error.getStatus());
-                targeter->noteStaleShardResponse(
-                    opCtx, error.endpoint, *error.error.getStatus().extraInfo<StaleConfigInfo>());
-            }
-            for (const auto& error : errors->second.getErrors(ErrorCodes::StaleDbVersion)) {
-                LOGV2_DEBUG(7279202,
-                            4,
-                            "Noting stale database response.",
-                            "shardId"_attr = error.endpoint.shardName,
-                            "status"_attr = error.error.getStatus());
-                targeter->noteStaleDbResponse(
-                    opCtx,
-                    error.endpoint,
-                    *error.error.getStatus().extraInfo<StaleDbRoutingVersion>());
-            }
+        // error (for example, mongos was shutting down).
+        // The status being OK does not mean that all operations within the bulkWrite succeeded, nor
+        // that we got an ok:1 response from the shard.
+        if (!response.swResponse.getStatus().isOK()) {
+            bulkWriteOp.processLocalChildBatchError(*writeBatch, response);
+        } else {
+            bulkWriteOp.processChildBatchResponseFromRemote(
+                *writeBatch, response, errorsPerNamespace);
         }
     }
 }
 
-void fillOKInsertReplies(BulkWriteReplyInfo& replies, int size) {
-    replies.first.reserve(size);
+void fillOKInsertReplies(BulkWriteReplyInfo& replyInfo, int size) {
+    replyInfo.replyItems.reserve(size);
     for (int i = 0; i < size; ++i) {
         BulkWriteReplyItem reply;
         reply.setN(1);
         reply.setOk(1);
         reply.setIdx(i);
-        replies.first.push_back(reply);
+        replyInfo.replyItems.push_back(reply);
     }
 }
 
 BulkWriteReplyInfo processFLEResponse(const BulkWriteCRUDOp::OpType& firstOpType,
                                       const BatchedCommandResponse& response) {
-    BulkWriteReplyInfo replies;
+    BulkWriteReplyInfo replyInfo;
     if (response.toStatus().isOK()) {
         if (firstOpType == BulkWriteCRUDOp::kInsert) {
-            fillOKInsertReplies(replies, response.getN());
+            fillOKInsertReplies(replyInfo, response.getN());
         } else {
             BulkWriteReplyItem reply;
             reply.setN(response.getN());
@@ -244,18 +229,18 @@ BulkWriteReplyInfo processFLEResponse(const BulkWriteCRUDOp::OpType& firstOpType
             }
             reply.setOk(1);
             reply.setIdx(0);
-            replies.first.push_back(reply);
+            replyInfo.replyItems.push_back(reply);
         }
     } else {
         if (response.isErrDetailsSet()) {
             const auto& errDetails = response.getErrDetails();
             if (firstOpType == BulkWriteCRUDOp::kInsert) {
-                fillOKInsertReplies(replies, response.getN() + errDetails.size());
+                fillOKInsertReplies(replyInfo, response.getN() + errDetails.size());
                 for (const auto& err : errDetails) {
                     int32_t idx = err.getIndex();
-                    replies.first[idx].setN(0);
-                    replies.first[idx].setOk(0);
-                    replies.first[idx].setStatus(err.getStatus());
+                    replyInfo.replyItems[idx].setN(0);
+                    replyInfo.replyItems[idx].setOk(0);
+                    replyInfo.replyItems[idx].setStatus(err.getStatus());
                 }
             } else {
                 invariant(errDetails.size() == 1 && response.getN() == 0);
@@ -264,19 +249,18 @@ BulkWriteReplyInfo processFLEResponse(const BulkWriteCRUDOp::OpType& firstOpType
                 if (firstOpType == BulkWriteCRUDOp::kUpdate) {
                     reply.setNModified(0);
                 }
-                replies.first.push_back(reply);
+                replyInfo.replyItems.push_back(reply);
             }
-            replies.second += errDetails.size();
-        } else if (response.isWriteConcernErrorSet()) {
-            // TODO SERVER-76954 handle write concern errors, use getWriteConcernError.
+            replyInfo.numErrors += errDetails.size();
         } else {
-            // response.toStatus() is not OK but there is no errDetails or writeConcernError, so the
+            // response.toStatus() is not OK but there is no errDetails so the
             // top level status should be not OK instead. Raising an exception.
             uassertStatusOK(response.getTopLevelStatus());
             MONGO_UNREACHABLE;
         }
+        // TODO (SERVER-81280): Handle write concern errors.
     }
-    return replies;
+    return replyInfo;
 }
 
 }  // namespace
@@ -336,27 +320,206 @@ std::pair<FLEBatchResult, BulkWriteReplyInfo> attemptExecuteFLE(
         }
 
         if (fleResult == FLEBatchResult::kNotProcessed) {
-            return {FLEBatchResult::kNotProcessed, {}};
+            return {FLEBatchResult::kNotProcessed, BulkWriteReplyInfo()};
         }
 
-        BulkWriteReplyInfo replies = processFLEResponse(firstOpType, response);
-        return {FLEBatchResult::kProcessed, std::move(replies)};
+        BulkWriteReplyInfo replyInfo = processFLEResponse(firstOpType, response);
+        return {FLEBatchResult::kProcessed, std::move(replyInfo)};
     } catch (const DBException& ex) {
         LOGV2_WARNING(7749700,
                       "Failed to process bulkWrite with Queryable Encryption",
                       "error"_attr = redact(ex));
         // If Queryable encryption adds support for update with multi: true, we might have to update
         // the way we make replies here to handle SERVER-15292 correctly.
-        BulkWriteReplyInfo replies;
+        BulkWriteReplyInfo replyInfo;
         BulkWriteReplyItem reply(0, ex.toStatus());
         reply.setN(0);
         if (firstOpType == BulkWriteCRUDOp::kUpdate) {
             reply.setNModified(0);
         }
 
-        replies.first.push_back(reply);
-        replies.second = 1;
-        return {FLEBatchResult::kProcessed, std::move(replies)};
+        replyInfo.replyItems.push_back(reply);
+        replyInfo.numErrors = 1;
+        return {FLEBatchResult::kProcessed, std::move(replyInfo)};
+    }
+}
+
+void executeRetryableTimeseriesUpdate(OperationContext* opCtx,
+                                      TargetedBatchMap& childBatches,
+                                      BulkWriteOp& bulkWriteOp) {
+    invariant(!childBatches.empty());
+    // Get the index of the targeted operation in the client bulkWrite request.
+    auto opIdx = childBatches.begin()->second->getWrites()[0]->writeOpRef.first;
+
+    // Construct a single-op update request based on the update operation at opIdx.
+    auto& bulkWriteReq = bulkWriteOp.getClientRequest();
+
+    BulkWriteCommandRequest singleUpdateRequest =
+        bulk_write_common::makeSingleOpBulkWriteCommandRequest(bulkWriteReq, opIdx);
+
+    auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+    auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
+    txn_api::SyncTransactionWithRetries txn(
+        opCtx, executor, nullptr /* resourceYielder */, inlineExecutor);
+    BulkWriteCommandReply bulkWriteResponse;
+
+    // Execute the singleUpdateRequest (a bulkWrite command) in an internal transaction to perform
+    // the retryable timeseries update operation. This separate bulkWrite command will get executed
+    // on its own via bulkWrite execute() logic again as a transaction, which handles retries of all
+    // kinds. This function is just a client of the internal transaction spawned. As a result, we
+    // must only receive a single final (non-retryable) response for the timeseries update
+    // operation.
+    auto swResult =
+        txn.runNoThrow(opCtx,
+                       [&singleUpdateRequest, &bulkWriteResponse](
+                           const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+                           auto updateResponse = txnClient.runCRUDOpSync(singleUpdateRequest);
+                           bulkWriteResponse = std::move(updateResponse);
+
+                           return SemiFuture<void>::makeReady();
+                       });
+
+    Status responseStatus = swResult.getStatus();
+    WriteConcernErrorDetail wcError;
+    if (responseStatus.isOK()) {
+        if (!swResult.getValue().cmdStatus.isOK()) {
+            responseStatus = swResult.getValue().cmdStatus;
+        }
+        wcError = swResult.getValue().wcError;
+    }
+    if (!responseStatus.isOK()) {
+        // Set an error for the operation.
+        bulkWriteResponse.setCursor(BulkWriteCommandResponseCursor(
+            0,  // cursorId
+            std::vector<mongo::BulkWriteReplyItem>{BulkWriteReplyItem(0, responseStatus)},
+            NamespaceString::makeBulkWriteNSS(boost::none)));
+    }
+
+    // We should get back just one reply item for the single update we are running.
+    const auto& replyItems = bulkWriteResponse.getCursor().getFirstBatch();
+    tassert(7934203, "unexpected reply for retryable timeseries update", replyItems.size() == 1);
+    LOGV2_DEBUG(7934204,
+                4,
+                "Processing bulk write response for retryable timeseries update",
+                "opIdx"_attr = opIdx,
+                "singleUpdateRequest"_attr = redact(singleUpdateRequest.toBSON({})),
+                "replyItem"_attr = replyItems[0],
+                "wcError"_attr = wcError.toString());
+    bulkWriteOp.noteWriteOpFinalResponse(opIdx,
+                                         replyItems[0],
+                                         ShardWCError(childBatches.begin()->first, wcError),
+                                         bulkWriteResponse.getRetriedStmtIds());
+}
+
+void executeWriteWithoutShardKey(
+    OperationContext* opCtx,
+    const std::vector<std::unique_ptr<NSTargeter>>& targeters,
+    TargetedBatchMap& childBatches,
+    BulkWriteOp& bulkWriteOp,
+    stdx::unordered_map<NamespaceString, TrackedErrors>& errorsPerNamespace) {
+    // If the targetStatus value is 'WithoutShardKeyOrId', then we have detected an
+    // updateOne/deleteOne request without a shard key or _id. We will use a two
+    // phase protocol to apply the write.
+    tassert(7298300, "Executing empty write batch without shard key", !childBatches.empty());
+
+    // Get the index of the targeted operation in the client bulkWrite request.
+    const auto opIdx = childBatches.begin()->second->getWrites()[0]->writeOpRef.first;
+    auto op = BulkWriteCRUDOp(bulkWriteOp.getClientRequest().getOps()[opIdx]);
+    const auto nsIdx = op.getNsInfoIdx();
+    auto& targeter = targeters[nsIdx];
+
+    auto allowShardKeyUpdatesWithoutFullShardKeyInQuery =
+        opCtx->isRetryableWrite() || opCtx->inMultiDocumentTransaction();
+
+    // If there is only 1 targetable shard, we can skip using the two phase write protocol.
+    if (targeter->getNShardsOwningChunks() == 1) {
+        executeChildBatches(opCtx,
+                            targeters,
+                            childBatches,
+                            bulkWriteOp,
+                            errorsPerNamespace,
+                            allowShardKeyUpdatesWithoutFullShardKeyInQuery);
+    } else {
+        // Execute the two phase write protocol for writes that cannot directly target a shard.
+
+        const auto targetedWriteBatch = [&] {
+            // If there is a targeted write with a sampleId, use that write instead in order to pass
+            // the sampleId to the two phase write protocol. Otherwise, just choose the first
+            // targeted write.
+            for (auto&& [_ /* shardId */, childBatch] : childBatches) {
+                auto nextBatch = childBatch.get();
+
+                // For a write without shard key, we expect each TargetedWriteBatch in childBatches
+                // to contain only one TargetedWrite directed to each shard.
+                tassert(7787100,
+                        "There must be only 1 targeted write in this targeted write batch.",
+                        nextBatch->getWrites().size() == 1);
+
+                auto targetedWrite = nextBatch->getWrites().begin()->get();
+                if (targetedWrite->sampleId) {
+                    return nextBatch;
+                }
+            }
+            return childBatches.begin()->second.get();
+        }();
+
+        auto cmdObj = bulkWriteOp
+                          .buildBulkCommandRequest(targeters,
+                                                   *targetedWriteBatch,
+                                                   allowShardKeyUpdatesWithoutFullShardKeyInQuery)
+                          .toBSON({});
+
+        auto swRes = write_without_shard_key::runTwoPhaseWriteProtocol(
+            opCtx, targeter->getNS(), std::move(cmdObj));
+
+        BulkWriteCommandReply bulkWriteResponse;
+        // TODO (SERVER-81261): Handle writeConcernErrors.
+        WriteConcernErrorDetail wcError;
+        Status responseStatus = swRes.getStatus();
+        if (swRes.isOK()) {
+            std::string errMsg;
+            if (swRes.getValue().getResponse().isEmpty()) {
+                // When we get an empty response, it means that the predicate didn't match anything
+                // and no write was done. So we can just set a trivial ok response.
+                bulkWriteResponse.setCursor(BulkWriteCommandResponseCursor(
+                    0,  // cursorId
+                    std::vector<mongo::BulkWriteReplyItem>{BulkWriteReplyItem(0)},
+                    NamespaceString::makeBulkWriteNSS(boost::none)));
+            } else {
+                try {
+                    bulkWriteResponse = BulkWriteCommandReply::parse(
+                        IDLParserContext("BulkWriteCommandReplyForWriteWithoutShardKey"),
+                        swRes.getValue().getResponse());
+                } catch (const DBException& ex) {
+                    responseStatus = ex.toStatus().withContext(
+                        "Failed to parse response from writes without shard key");
+                }
+            }
+        }
+
+        if (!responseStatus.isOK()) {
+            // Set an error for the operation.
+            bulkWriteResponse.setCursor(BulkWriteCommandResponseCursor(
+                0,  // cursorId
+                std::vector<mongo::BulkWriteReplyItem>{BulkWriteReplyItem(0, responseStatus)},
+                NamespaceString::makeBulkWriteNSS(boost::none)));
+        }
+
+        // We should get back just one reply item for the single update we are running.
+        const auto& replyItems = bulkWriteResponse.getCursor().getFirstBatch();
+        tassert(7298301,
+                "unexpected bulkWrite reply for writes without shard key",
+                replyItems.size() == 1);
+        LOGV2_DEBUG(7298302,
+                    4,
+                    "Processing bulk write response for writes without shard key",
+                    "opIdx"_attr = opIdx,
+                    "replyItem"_attr = replyItems[0],
+                    "wcError"_attr = wcError.toString());
+        bulkWriteOp.noteWriteOpFinalResponse(opIdx,
+                                             replyItems[0],
+                                             ShardWCError(childBatches.begin()->first, wcError),
+                                             bulkWriteResponse.getRetriedStmtIds());
     }
 }
 
@@ -366,8 +529,7 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
     LOGV2_DEBUG(7263700,
                 4,
                 "Starting execution of a bulkWrite",
-                "size"_attr = clientRequest.getOps().size(),
-                "nsInfoSize"_attr = clientRequest.getNsInfo().size());
+                "clientRequest"_attr = redact(clientRequest.toBSON({})));
 
     BulkWriteOp bulkWriteOp(opCtx, clientRequest);
 
@@ -388,6 +550,8 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
         bool recordTargetErrors = refreshedTargeter;
         auto targetStatus = bulkWriteOp.target(targeters, recordTargetErrors, childBatches);
         if (!targetStatus.isOK()) {
+            bulkWriteOp.processTargetingError(targetStatus);
+
             dassert(childBatches.size() == 0u);
             // The target error comes from one of the targeters. But to avoid getting another target
             // error from another targeter in retry, we simply refresh all targeters and only retry
@@ -399,14 +563,27 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
             refreshedTargeter = true;
         } else {
             stdx::unordered_map<NamespaceString, TrackedErrors> errorsPerNamespace;
-
-            // Send the child batches and wait for responses.
-            executeChildBatches(opCtx, childBatches, bulkWriteOp, errorsPerNamespace);
+            if (targetStatus.getValue() == WriteType::TimeseriesRetryableUpdate) {
+                executeRetryableTimeseriesUpdate(opCtx, childBatches, bulkWriteOp);
+            } else if (targetStatus.getValue() == WriteType::WithoutShardKeyOrId) {
+                executeWriteWithoutShardKey(
+                    opCtx, targeters, childBatches, bulkWriteOp, errorsPerNamespace);
+            } else {
+                // Send the child batches and wait for responses.
+                executeChildBatches(opCtx,
+                                    targeters,
+                                    childBatches,
+                                    bulkWriteOp,
+                                    errorsPerNamespace,
+                                    /*allowShardKeyUpdatesWithoutFullShardKeyInQuery=*/boost::none);
+            }
 
             // If we saw any staleness errors, tell the targeters to invalidate their cache
             // so that they may be refreshed.
-            noteStaleResponses(opCtx, targeters, errorsPerNamespace);
+            bulkWriteOp.noteStaleResponses(targeters, errorsPerNamespace);
         }
+
+        rounds++;
 
         if (bulkWriteOp.isFinished()) {
             // No need to refresh the targeters if we are done.
@@ -431,7 +608,7 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
                 "Failed to refresh all targeters for bulkWrite because collection was dropped",
                 "error"_attr = redact(ex));
 
-            bulkWriteOp.abortBatch(
+            bulkWriteOp.noteErrorForRemainingWrites(
                 ex.toStatus("collection was dropped in the middle of the operation"));
             break;
         } catch (const DBException& ex) {
@@ -448,8 +625,16 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
         }
         numCompletedOps = currCompletedOps;
 
+        LOGV2_DEBUG(7934202,
+                    2,
+                    "Completed a round of bulkWrite execution",
+                    "rounds"_attr = rounds,
+                    "numCompletedOps"_attr = numCompletedOps,
+                    "targeterChanged"_attr = targeterChanged,
+                    "numRoundsWithoutProgress"_attr = numRoundsWithoutProgress);
+
         if (numRoundsWithoutProgress > kMaxRoundsWithoutProgress) {
-            bulkWriteOp.abortBatch(
+            bulkWriteOp.noteErrorForRemainingWrites(
                 {ErrorCodes::NoProgressMade,
                  str::stream() << "no progress was made executing bulkWrite ops in after "
                                << kMaxRoundsWithoutProgress << " rounds (" << numCompletedOps
@@ -459,7 +644,7 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
     }
 
     LOGV2_DEBUG(7263701, 4, "Finished execution of bulkWrite");
-    return bulkWriteOp.generateReplyInfo();
+    return bulkWriteOp.generateReplyInfo(clientRequest.getErrorsOnly());
 }
 
 BulkWriteOp::BulkWriteOp(OperationContext* opCtx, const BulkWriteCommandRequest& clientRequest)
@@ -504,12 +689,14 @@ StatusWith<WriteType> BulkWriteOp::target(const std::vector<std::unique_ptr<NSTa
                          : 0);
             return writeSizeBytes;
         },
-        getBaseBatchCommandSizeEstimate(),
+        getBaseChildBatchCommandSizeEstimate(),
         targetedBatches);
 }
 
 BulkWriteCommandRequest BulkWriteOp::buildBulkCommandRequest(
-    const TargetedWriteBatch& targetedBatch) const {
+    const std::vector<std::unique_ptr<NSTargeter>>& targeters,
+    const TargetedWriteBatch& targetedBatch,
+    boost::optional<bool> allowShardKeyUpdatesWithoutFullShardKeyInQuery) const {
     BulkWriteCommandRequest request;
 
     // A single bulk command request batch may contain operations of different
@@ -527,6 +714,16 @@ BulkWriteCommandRequest BulkWriteOp::buildBulkCommandRequest(
         const WriteOpRef& writeOpRef = targetedWrite->writeOpRef;
         ops.push_back(_clientRequest.getOps().at(writeOpRef.first));
 
+        if (targetedWrite->sampleId.has_value()) {
+            stdx::visit(
+                OverloadedVisitor{
+                    [&](mongo::BulkWriteInsertOp& op) { return; },
+                    [&](mongo::BulkWriteUpdateOp& op) { op.setSampleId(targetedWrite->sampleId); },
+                    [&](mongo::BulkWriteDeleteOp& op) { op.setSampleId(targetedWrite->sampleId); },
+                },
+                ops.back());
+        }
+
         // Set the nsInfo's shardVersion & databaseVersion fields based on the endpoint
         // of each operation. Since some operations may be on the same namespace, this
         // might result in the same nsInfo entry being written to multiple times. This
@@ -536,7 +733,29 @@ BulkWriteCommandRequest BulkWriteOp::buildBulkCommandRequest(
         // null OR the new versions in the targetedWrite match the existing version in
         // nsInfo.
         const auto& bulkWriteOp = BulkWriteCRUDOp(ops.back());
-        auto& nsInfoEntry = nsInfo.at(bulkWriteOp.getNsInfoIdx());
+        auto nsIdx = bulkWriteOp.getNsInfoIdx();
+        auto& nsInfoEntry = nsInfo.at(nsIdx);
+        auto& targeter = targeters.at(nsIdx);
+
+        auto isClientRequestOnTimeseriesBucketCollection =
+            nsInfoEntry.getNs().isTimeseriesBucketsCollection();
+        if (targeter->isTrackedTimeSeriesBucketsNamespace() &&
+            !isClientRequestOnTimeseriesBucketCollection) {
+            // For tracked timeseries collections, only the bucket collections are tracked. This
+            // sets the namespace to the namespace of the tracked bucket collection.
+            nsInfoEntry.setNs(targeter->getNS());
+            nsInfoEntry.setIsTimeseriesNamespace(true);
+        }
+
+        // If we are using the two phase write protocol introduced in PM-1632, we allow shard key
+        // updates without specifying the full shard key in the query if we execute the update in a
+        // retryable write/transaction.
+        if (bulkWriteOp.getType() == BulkWriteCRUDOp::OpType::kUpdate &&
+            allowShardKeyUpdatesWithoutFullShardKeyInQuery.has_value()) {
+            auto mutableUpdateOp = stdx::get_if<BulkWriteUpdateOp>(&ops.back());
+            mutableUpdateOp->setAllowShardKeyUpdatesWithoutFullShardKeyInQuery(
+                allowShardKeyUpdatesWithoutFullShardKeyInQuery);
+        }
 
         invariant((!nsInfoEntry.getShardVersion() ||
                    nsInfoEntry.getShardVersion() == targetedWrite->endpoint.shardVersion) &&
@@ -571,6 +790,12 @@ BulkWriteCommandRequest BulkWriteOp::buildBulkCommandRequest(
 }
 
 bool BulkWriteOp::isFinished() const {
+    // We encountered some error requiring us to abort execution. Note this may mean that some ops
+    // are left in state pending.
+    if (_aborted) {
+        return true;
+    }
+
     // TODO: Track ops lifetime.
     const bool ordered = _clientRequest.getOrdered();
     for (auto& writeOp : _writeOps) {
@@ -594,7 +819,7 @@ int BulkWriteOp::numWriteOpsIn(WriteOpState opState) const {
         });
 }
 
-void BulkWriteOp::abortBatch(const Status& status) {
+void BulkWriteOp::noteErrorForRemainingWrites(const Status& status) {
     dassert(!isFinished());
     dassert(numWriteOpsIn(WriteOpState_Pending) == 0);
 
@@ -613,15 +838,85 @@ void BulkWriteOp::abortBatch(const Status& status) {
     dassert(isFinished());
 }
 
-void BulkWriteOp::noteBatchResponse(
-    TargetedWriteBatch& targetedBatch,
-    const std::vector<BulkWriteReplyItem>& replyItems,
-    stdx::unordered_map<NamespaceString, TrackedErrors>& errorsPerNamespace) {
+/**
+ * Checks if an error reply has the TransientTransactionError label. We use this in cases where we
+ * want to defer to whether a shard attached the label to an error it gave us.
+ */
+bool hasTransientTransactionErrorLabel(const ErrorReply& reply) {
+    auto errorLabels = reply.getErrorLabels();
+    if (!errorLabels) {
+        return false;
+    }
+    for (auto& label : errorLabels.value()) {
+        if (label == ErrorLabel::kTransientTransaction) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void BulkWriteOp::processChildBatchResponseFromRemote(
+    const TargetedWriteBatch& writeBatch,
+    const AsyncRequestsSender::Response& response,
+    boost::optional<stdx::unordered_map<NamespaceString, TrackedErrors>&> errorsPerNamespace) {
+    invariant(response.swResponse.getStatus().isOK(), "Response status was unexpectedly not OK");
+
+    auto childBatchResponse = response.swResponse.getValue();
     LOGV2_DEBUG(7279200,
                 4,
                 "Processing bulk write response from shard.",
-                "shard"_attr = targetedBatch.getShardId(),
-                "replyItems"_attr = replyItems);
+                "shard"_attr = response.shardId,
+                "response"_attr = childBatchResponse.data);
+
+    auto childBatchStatus = getStatusFromCommandResult(childBatchResponse.data);
+    if (childBatchStatus.isOK()) {
+        auto bwReply = BulkWriteCommandReply::parse(IDLParserContext("BulkWriteCommandReply"),
+                                                    childBatchResponse.data);
+        if (bwReply.getWriteConcernError()) {
+            saveWriteConcernError(response.shardId, bwReply.getWriteConcernError().value());
+        }
+
+        // TODO (SERVER-76958): Iterate through the cursor rather than looking only at the first
+        // batch.
+        const auto& replyItems = bwReply.getCursor().getFirstBatch();
+
+        // Capture the errors if any exist and mark the writes in the TargetedWriteBatch so that
+        // they may be re-targeted if needed.
+        noteChildBatchResponse(
+            writeBatch, replyItems, bwReply.getRetriedStmtIds(), errorsPerNamespace);
+    } else {
+        noteChildBatchError(writeBatch, childBatchStatus);
+
+        // If we are in a transaction, we must abort execution on any error.
+        // TODO SERVER-72793: handle WouldChangeOwningShard errors.
+        if (TransactionRouter::get(_opCtx)) {
+            _aborted = true;
+
+            auto errorReply =
+                ErrorReply::parse(IDLParserContext("ErrorReply"), childBatchResponse.data);
+
+            // Transient transaction errors should be returned directly as top level errors to allow
+            // the client to retry.
+            if (hasTransientTransactionErrorLabel(errorReply)) {
+                const auto shardInfo = response.shardHostAndPort
+                    ? response.shardHostAndPort->toString()
+                    : writeBatch.getShardId();
+                auto newStatus = childBatchStatus.withContext(
+                    str::stream() << "Encountered error from " << shardInfo
+                                  << " during a transaction");
+
+                uassertStatusOK(newStatus);
+            }
+        }
+    }
+}
+
+void BulkWriteOp::noteChildBatchResponse(
+    const TargetedWriteBatch& targetedBatch,
+    const std::vector<BulkWriteReplyItem>& replyItems,
+    const boost::optional<std::vector<StmtId>>& retriedStmtIds,
+    boost::optional<stdx::unordered_map<NamespaceString, TrackedErrors>&> errorsPerNamespace) {
+
     int index = -1;
     bool ordered = _clientRequest.getOrdered();
     boost::optional<write_ops::WriteError> lastError;
@@ -629,18 +924,20 @@ void BulkWriteOp::noteBatchResponse(
         ++index;
         WriteOp& writeOp = _writeOps[write->writeOpRef.first];
         // When an error is encountered on an ordered bulk write, it is impossible for any of the
-        // remaining operations to have been executed. For that reason we cancel them here so they
-        // may be retargeted and retried.
+        // remaining operations to have been executed. For that reason we reset them here so they
+        // may be retargeted and retried if the error we saw is one we can retry after (e.g.
+        // StaleConfig.).
         if (ordered && lastError) {
             invariant(index >= (int)replyItems.size());
-            writeOp.cancelWrites();
+            writeOp.resetWriteToReady();
             continue;
         }
 
         // On most errors (for example, a DuplicateKeyError) unordered bulkWrite on a shard attempts
         // to execute following operations even if a preceding operation errored. This isn't true
-        // for StaleConfig or StaleDbVersion errors. On these errors, since the shard knows that it
-        // following operations will also be stale, it stops right away.
+        // for StaleConfig or StaleDbVersion errors. On these errors, since the shard knows that
+        // following operations will also be stale, it stops right away (except for unordered
+        // timeseries inserts, see SERVER-80796).
         // For that reason, although typically we can expect the size of replyItems to match the
         // size of the number of operations sent (even in the case of errors), when a staleness
         // error is received the size of replyItems will be <= the size of the number of operations.
@@ -648,7 +945,8 @@ void BulkWriteOp::noteBatchResponse(
         // replyItem as having failed with a staleness error.
         if (!ordered && lastError &&
             (lastError->getStatus().code() == ErrorCodes::StaleDbVersion ||
-             ErrorCodes::isStaleShardVersionError(lastError->getStatus()))) {
+             ErrorCodes::isStaleShardVersionError(lastError->getStatus())) &&
+            (index == (int)replyItems.size())) {
             // Decrement the index so it keeps pointing to the same error (i.e. the
             // last error, which is a staleness error).
             LOGV2_DEBUG(7695304,
@@ -656,7 +954,6 @@ void BulkWriteOp::noteBatchResponse(
                         "Duplicating the error for op",
                         "opIdx"_attr = write->writeOpRef.first,
                         "error"_attr = lastError->getStatus());
-            invariant(index == (int)replyItems.size());
             index--;
         }
 
@@ -670,23 +967,166 @@ void BulkWriteOp::noteBatchResponse(
             auto origWrite = BulkWriteCRUDOp(_clientRequest.getOps()[write->writeOpRef.first]);
             auto nss = _clientRequest.getNsInfo()[origWrite.getNsInfoIdx()].getNs();
 
-            if (errorsPerNamespace.find(nss) == errorsPerNamespace.end()) {
-                TrackedErrors trackedErrors;
-                trackedErrors.startTracking(ErrorCodes::StaleConfig);
-                trackedErrors.startTracking(ErrorCodes::StaleDbVersion);
-                errorsPerNamespace.emplace(nss, trackedErrors);
-            }
+            // We don't always want to track errors per-namespace, e.g. when we encounter errors
+            // local to mongos.
+            if (errorsPerNamespace) {
+                if (errorsPerNamespace->find(nss) == errorsPerNamespace->end()) {
+                    TrackedErrors trackedErrors;
+                    trackedErrors.startTracking(ErrorCodes::StaleConfig);
+                    trackedErrors.startTracking(ErrorCodes::StaleDbVersion);
+                    errorsPerNamespace->emplace(nss, trackedErrors);
+                }
 
-            auto trackedErrors = errorsPerNamespace.find(nss);
-            invariant(trackedErrors != errorsPerNamespace.end());
-            if (trackedErrors->second.isTracking(reply.getStatus().code())) {
-                trackedErrors->second.addError(ShardError(write->endpoint, *lastError));
+                auto trackedErrors = errorsPerNamespace->find(nss);
+                invariant(trackedErrors != errorsPerNamespace->end());
+                if (trackedErrors->second.isTracking(reply.getStatus().code())) {
+                    trackedErrors->second.addError(ShardError(write->endpoint, *lastError));
+                }
             }
+        }
+    }
+
+    if (retriedStmtIds && !retriedStmtIds->empty()) {
+        if (_retriedStmtIds) {
+            _retriedStmtIds->insert(
+                _retriedStmtIds->end(), retriedStmtIds->begin(), retriedStmtIds->end());
+        } else {
+            _retriedStmtIds = retriedStmtIds;
         }
     }
 }
 
-BulkWriteReplyInfo BulkWriteOp::generateReplyInfo() {
+void BulkWriteOp::processTargetingError(const StatusWith<WriteType>& targetStatus) {
+    invariant(!targetStatus.isOK());
+    // Note that the targeting logic already handles recording the error for the appropriate
+    // WriteOp, so we only need to update the BulkWriteOp state here.
+    if (_inTransaction) {
+        _aborted = true;
+
+        // Throw when there is a transient transaction error since this should be a top
+        // level error and not just a write error.
+        if (isTransientTransactionError(targetStatus.getStatus().code(),
+                                        false /* hasWriteConcernError */,
+                                        false /* isCommitOrAbort */)) {
+            uassertStatusOK(targetStatus);
+        }
+    }
+}
+
+void BulkWriteOp::abortIfNeeded(const mongo::Status& error) {
+    invariant(!error.isOK());
+
+    // If we see a local shutdown error, it means mongos itself is shutting down. A remote shutdown
+    // error would have been returned with response.swResponse.getStatus() being OK.
+    // If we see a local CallbackCanceled error, it is likely also due to mongos shutting down,
+    // therefore shutting down executor thread pools and cancelling any work scheduled on them.
+    // While we don't currently know of any other cases we'd see CallbackCanceled here, we check
+    // the shutdown flag as well to ensure the cancellation is due to shutdown.
+    // While the shutdown flag check is deprecated, that is because modules shouldn't consult it
+    // to coordinate their own shutdowns. But it is OK to use here because we are only checking
+    // whether a shutdown has started.
+    if (ErrorCodes::isShutdownError(error) ||
+        (error == ErrorCodes::CallbackCanceled && globalInShutdownDeprecated())) {
+        // We shouldn't continue execution (even if unordered) if we are shutting down since
+        // further batches will fail to execute as well.
+        _aborted = true;
+
+        // We want to throw such an error at the top level so that it can be returned to the client
+        // directly with the appropriate error labels,  allowing them to retry it.
+        uassertStatusOK(error);
+    }
+
+    // If we are in a transaction, we must stop immediately (even for unordered).
+    if (_inTransaction) {
+        // Even if we aren't throwing a top-level error, we won't continue processing any
+        // outstanding writes after seeing this error since the transaction is aborted.
+        _aborted = true;
+
+        // Throw when there is a transient transaction error as those must be returned to the client
+        // at the top level to allow them to retry.
+        if (isTransientTransactionError(error.code(), false, false)) {
+            uassertStatusOK(error);
+        }
+    }
+}
+
+void BulkWriteOp::processLocalChildBatchError(const TargetedWriteBatch& batch,
+                                              const AsyncRequestsSender::Response& response) {
+    const auto& responseStatus = response.swResponse.getStatus();
+    invariant(!responseStatus.isOK(), "Response status was unexpectedly OK");
+
+    const auto shardInfo =
+        response.shardHostAndPort ? response.shardHostAndPort->toString() : batch.getShardId();
+
+    const Status status = responseStatus.withContext(
+        str::stream() << "bulkWrite results unavailable "
+                      << (response.shardHostAndPort ? "from "
+                                                    : "from failing to target a host in the shard ")
+                      << shardInfo);
+
+    noteChildBatchError(batch, status);
+
+    LOGV2_DEBUG(8048100,
+                4,
+                "Unable to receive bulkWrite results from shard",
+                "shardInfo"_attr = shardInfo,
+                "error"_attr = redact(status));
+
+    abortIfNeeded(responseStatus);
+}
+
+void BulkWriteOp::noteChildBatchError(const TargetedWriteBatch& targetedBatch,
+                                      const Status& status) {
+    // Treat an error to get a batch response as failures of the contained write(s).
+    const int numErrors = _clientRequest.getOrdered() ? 1 : targetedBatch.getWrites().size();
+
+    std::vector<BulkWriteReplyItem> emulatedReplies;
+    emulatedReplies.reserve(numErrors);
+
+    for (int i = 0; i < numErrors; i++) {
+        emulatedReplies.emplace_back(i, status);
+    }
+
+    // This error isn't actually specific to any namespaces and so we do not want to track it.
+    noteChildBatchResponse(targetedBatch,
+                           emulatedReplies,
+                           /* retriedStmtIds */ boost::none,
+                           /* errorsPerNamespace*/ boost::none);
+}
+
+void BulkWriteOp::noteWriteOpFinalResponse(
+    size_t opIdx,
+    const BulkWriteReplyItem& reply,
+    const ShardWCError& shardWCError,
+    const boost::optional<std::vector<StmtId>>& retriedStmtIds) {
+    WriteOp& writeOp = _writeOps[opIdx];
+
+    // Cancel all childOps if any.
+    writeOp.resetWriteToReady();
+
+    if (!shardWCError.error.toStatus().isOK()) {
+        saveWriteConcernError(shardWCError);
+    }
+
+    if (reply.getStatus().isOK()) {
+        writeOp.setOpComplete(reply);
+    } else {
+        auto writeError = write_ops::WriteError(opIdx, reply.getStatus());
+        writeOp.setOpError(writeError);
+        abortIfNeeded(reply.getStatus());
+    }
+
+    if (retriedStmtIds && !retriedStmtIds->empty()) {
+        if (_retriedStmtIds) {
+            _retriedStmtIds->insert(
+                _retriedStmtIds->end(), retriedStmtIds->begin(), retriedStmtIds->end());
+        } else {
+            _retriedStmtIds = retriedStmtIds;
+        }
+    }
+}
+
+BulkWriteReplyInfo BulkWriteOp::generateReplyInfo(bool errorsOnly) {
     dassert(isFinished());
     std::vector<BulkWriteReplyItem> replyItems;
     int numErrors = 0;
@@ -694,10 +1134,33 @@ BulkWriteReplyInfo BulkWriteOp::generateReplyInfo() {
 
     const auto ordered = _clientRequest.getOrdered();
     for (auto& writeOp : _writeOps) {
-        dassert(writeOp.getWriteState() != WriteOpState_Pending);
-        if (writeOp.getWriteState() == WriteOpState_Completed) {
-            replyItems.push_back(writeOp.takeBulkWriteReplyItem());
-        } else if (writeOp.getWriteState() == WriteOpState_Error) {
+        // If we encountered an error causing us to abort execution we may not have waited for
+        // responses to all outstanding requests.
+        dassert(writeOp.getWriteState() != WriteOpState_Pending || _aborted);
+        auto writeOpState = writeOp.getWriteState();
+
+        // TODO (SERVER-79611): Improve mongos metrics.
+        if (writeOpState == WriteOpState_Completed || writeOpState == WriteOpState_Error) {
+            switch (writeOp.getWriteItem().getOpType()) {
+                case BatchedCommandRequest::BatchType_Insert:
+                    globalOpCounters.gotInsert();
+                    break;
+                case BatchedCommandRequest::BatchType_Update:
+                    globalOpCounters.gotUpdate();
+                    break;
+                case BatchedCommandRequest::BatchType_Delete:
+                    globalOpCounters.gotDelete();
+                    break;
+                default:
+                    MONGO_UNREACHABLE
+            }
+        }
+
+        if (writeOpState == WriteOpState_Completed) {
+            if (!errorsOnly) {
+                replyItems.push_back(writeOp.takeBulkWriteReplyItem());
+            }
+        } else if (writeOpState == WriteOpState_Error) {
             replyItems.emplace_back(writeOp.getWriteItem().getItemIndex(),
                                     writeOp.getOpError().getStatus());
             // TODO SERVER-79510: Remove this. This is necessary right now because the nModified
@@ -717,14 +1180,70 @@ BulkWriteReplyInfo BulkWriteOp::generateReplyInfo() {
         }
     }
 
-    return {replyItems, numErrors};
+    return {std::move(replyItems), numErrors, generateWriteConcernError(), _retriedStmtIds};
 }
 
-int BulkWriteOp::getBaseBatchCommandSizeEstimate() const {
+void BulkWriteOp::saveWriteConcernError(ShardId shardId, BulkWriteWriteConcernError wcError) {
+    WriteConcernErrorDetail wce;
+    wce.setStatus(Status(ErrorCodes::Error(wcError.getCode()), wcError.getErrmsg()));
+    _wcErrors.push_back(ShardWCError(shardId, wce));
+}
+
+void BulkWriteOp::saveWriteConcernError(ShardWCError shardWCError) {
+    _wcErrors.push_back(std::move(shardWCError));
+}
+
+boost::optional<BulkWriteWriteConcernError> BulkWriteOp::generateWriteConcernError() const {
+    if (auto mergedWce = mergeWriteConcernErrors(_wcErrors)) {
+        auto totalWcError = BulkWriteWriteConcernError();
+        totalWcError.setCode(mergedWce->toStatus().code());
+        totalWcError.setErrmsg(mergedWce->toStatus().reason());
+
+        return boost::optional<BulkWriteWriteConcernError>(totalWcError);
+    }
+
+    return boost::none;
+}
+
+void BulkWriteOp::noteStaleResponses(
+    const std::vector<std::unique_ptr<NSTargeter>>& targeters,
+    const stdx::unordered_map<NamespaceString, TrackedErrors>& errorsPerNamespace) {
+    auto& nsInfo = _clientRequest.getNsInfo();
+    for (size_t i = 0; i < nsInfo.size(); i++) {
+        auto& nsEntry = nsInfo.at(i);
+        auto& targeter = targeters.at(i);
+        // We must use the namespace from the original client request instead of the targeter's
+        // namespace because the targeter's namespace could be pointing to the bucket collection for
+        // tracked timeseries collections.
+        auto errors = errorsPerNamespace.find(nsEntry.getNs());
+        if (errors != errorsPerNamespace.cend()) {
+            for (const auto& error : errors->second.getErrors(ErrorCodes::StaleConfig)) {
+                LOGV2_DEBUG(7279201,
+                            4,
+                            "Noting stale config response.",
+                            "shardId"_attr = error.endpoint.shardName,
+                            "status"_attr = error.error.getStatus());
+                targeter->noteStaleShardResponse(
+                    _opCtx, error.endpoint, *error.error.getStatus().extraInfo<StaleConfigInfo>());
+            }
+            for (const auto& error : errors->second.getErrors(ErrorCodes::StaleDbVersion)) {
+                LOGV2_DEBUG(7279202,
+                            4,
+                            "Noting stale database response.",
+                            "shardId"_attr = error.endpoint.shardName,
+                            "status"_attr = error.error.getStatus());
+                targeter->noteStaleDbResponse(
+                    _opCtx,
+                    error.endpoint,
+                    *error.error.getStatus().extraInfo<StaleDbRoutingVersion>());
+            }
+        }
+    }
+}
+
+int BulkWriteOp::getBaseChildBatchCommandSizeEstimate() const {
     // For simplicity, we build a dummy bulk write command request that contains all the common
     // fields and serialize it to get the base command size.
-    // TODO SERVER-78301: Re-evaluate this estimation method and consider switching to a more
-    // efficient approach.
     // We only bother to copy over variable-size and/or optional fields, since the value of fields
     // that are fixed-size and always present (e.g. 'ordered') won't affect the size calculation.
     BulkWriteCommandRequest request;
@@ -737,9 +1256,16 @@ int BulkWriteOp::getBaseBatchCommandSizeEstimate() const {
     static const DatabaseVersion mockDBVersion = DatabaseVersion(UUID::gen(), Timestamp());
 
     auto nsInfo = _clientRequest.getNsInfo();
-    for (auto& ns : nsInfo) {
-        ns.setShardVersion(mockShardVersion);
-        ns.setDatabaseVersion(mockDBVersion);
+    for (auto& nsEntry : nsInfo) {
+        nsEntry.setShardVersion(mockShardVersion);
+        nsEntry.setDatabaseVersion(mockDBVersion);
+        if (!nsEntry.getNs().isTimeseriesBucketsCollection()) {
+            // This could be a timeseries view. To be conservative about the estimate, we
+            // speculatively account for the additional size needed for the timeseries bucket
+            // transalation and the 'isTimeseriesCollection' field.
+            nsEntry.setNs(nsEntry.getNs().makeTimeseriesBucketsNamespace());
+            nsEntry.setIsTimeseriesNamespace(true);
+        }
     }
     request.setNsInfo(nsInfo);
 

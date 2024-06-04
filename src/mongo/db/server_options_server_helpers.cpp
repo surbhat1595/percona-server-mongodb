@@ -162,10 +162,7 @@ void printCommandLineOpts(std::ostream* os) {
                       tojson(serverGlobalParams.parsedOpts, ExtendedRelaxedV2_0_0, true))
             << std::endl;
     } else {
-        LOGV2(21951,
-              "Options set by command line: {options}",
-              "Options set by command line",
-              "options"_attr = serverGlobalParams.parsedOpts);
+        LOGV2(21951, "Options set by command line", "options"_attr = serverGlobalParams.parsedOpts);
     }
 }
 
@@ -355,13 +352,6 @@ Status storeServerOptions(const moe::Environment& params) {
         serverGlobalParams.listenBacklog = params["net.listenBacklog"].as<int>();
     }
 
-    if (params.count("net.transportLayer")) {
-        serverGlobalParams.transportLayer = params["net.transportLayer"].as<std::string>();
-        if (serverGlobalParams.transportLayer != "asio") {
-            return {ErrorCodes::BadValue, "Unsupported value for transportLayer. Must be \"asio\""};
-        }
-    }
-
     if (params.count("security.transitionToAuth")) {
         serverGlobalParams.transitionToAuth = params["security.transitionToAuth"].as<bool>();
     }
@@ -494,15 +484,6 @@ Status storeServerOptions(const moe::Environment& params) {
             return ret;
         }
     }
-
-#ifdef MONGO_CONFIG_GRPC
-    if (params.count("net.grpc.port")) {
-        serverGlobalParams.grpcPort = params["net.grpc.port"].as<int>();
-    }
-    if (params.count("net.grpc.serverMaxThreads")) {
-        serverGlobalParams.grpcServerMaxThreads = params["net.grpc.serverMaxThreads"].as<int>();
-    }
-#endif
 
     return Status::OK();
 }

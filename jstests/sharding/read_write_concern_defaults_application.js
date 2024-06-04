@@ -156,6 +156,7 @@ let testCases = {
     _shardsvrCommitIndexParticipant: {skip: "internal command"},
     _shardsvrCommitReshardCollection: {skip: "internal command"},
     _shardsvrCompactStructuredEncryptionData: {skip: "internal command"},
+    _shardsvrCoordinateMultiUpdate: {skip: "internal command"},
     _shardsvrCreateCollection: {skip: "internal command"},
     _shardsvrCreateCollectionParticipant: {skip: "internal command"},
     _shardsvrCreateGlobalIndex: {skip: "internal command"},
@@ -234,6 +235,7 @@ let testCases = {
         checkWriteConcern: true,
         useLogs: true,
     },
+    abortUnshardCollection: {skip: "does not accept read or write concern"},
     addShard: {skip: "does not accept read or write concern"},
     addShardToZone: {skip: "does not accept read or write concern"},
     aggregate: {
@@ -277,8 +279,8 @@ let testCases = {
         // },
         // checkReadConcern: false,
         // checkWriteConcern: true,
-        // // TODO SERVER-78258: Depending on what profiling behavior we implement we may be able to
-        // // use profiler output here instead rather than logs.
+        // // TODO SERVER-23266: If the overall batch command if profiled, then it would be better
+        // // to use profiling.  In the meantime, use logs.
         // useLogs: true,
         skip: "requires feature flag"
     },
@@ -372,9 +374,8 @@ let testCases = {
     },
     cpuload: {skip: "does not accept read or write concern"},
     create: {
-        command: {create: coll},
-        checkReadConcern: false,
-        checkWriteConcern: true,
+        skip:
+            "The create command is not passed through and instead it goes out to the shards as _shardsvrCreateCollection with the user-specified write concern"
     },
     createBackup: {skip: "does not accept read or write concern"},
     createIndexes: {
@@ -822,7 +823,7 @@ let testCases = {
     voteCommitImportCollection: {skip: "internal command"},
     voteCommitIndexBuild: {skip: "internal command"},
     waitForFailPoint: {skip: "does not accept read or write concern"},
-    waitForOngoingChunkSplits: {skip: "does not accept read or write concern"},
+    getShardingReady: {skip: "internal command"},
     whatsmysni: {skip: "does not accept read or write concern"},
     whatsmyuri: {skip: "internal command"},
 };
@@ -1118,11 +1119,13 @@ function runTests(conn, regularCheckConn, configSvrCheckConn) {
                 {explicitRWC: true, explicitProvenance: true});
 }
 
-let rst = new ReplSetTest({nodes: 1});
-rst.startSet();
-rst.initiate();
-runTests(rst.getPrimary(), rst.getPrimary(), undefined, false);
-rst.stopSet();
+if (!jsTestOptions().useAutoBootstrapProcedure) {  // TODO: SERVER-80318 Delete block
+    let rst = new ReplSetTest({nodes: 1});
+    rst.startSet();
+    rst.initiate();
+    runTests(rst.getPrimary(), rst.getPrimary(), undefined, false);
+    rst.stopSet();
+}
 
 let st = new ShardingTest({mongos: 1, shards: {rs0: {nodes: 1}}});
 runTests(st.s0, st.rs0.getPrimary(), st.configRS.getPrimary(), true);

@@ -31,7 +31,6 @@
 
 #include <algorithm>
 #include <boost/cstdint.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -75,7 +74,7 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
-namespace mongo {
+namespace mongo::timeseries {
 
 using IneligiblePredicatePolicy = BucketSpec::IneligiblePredicatePolicy;
 
@@ -88,25 +87,35 @@ bool BucketSpec::fieldIsComputed(StringData field) const {
 }
 
 namespace {
-std::unique_ptr<MatchExpression> createTightExprComparisonPredicate(
+std::unique_ptr<MatchExpression> createTightExprTimeFieldPredicate(
     const ExprMatchExpression* matchExpr,
-    const timeseries::BucketLevelComparisonPredicateGeneratorBase::Params params) {
-    using namespace timeseries;
-    auto rewriteMatchExpr =
-        RewriteExpr::rewrite(matchExpr->getExpression(), params.pExpCtx->getCollator())
-            .releaseMatchExpression();
-    if (rewriteMatchExpr &&
-        ComparisonMatchExpressionBase::isInternalExprComparison(rewriteMatchExpr->matchType())) {
-        auto compareMatchExpr =
-            checked_cast<const ComparisonMatchExpressionBase*>(rewriteMatchExpr.get());
+    const BucketLevelComparisonPredicateGeneratorBase::Params params) {
+    RewriteExpr::RewriteResult rewriteRes =
+        RewriteExpr::rewrite(matchExpr->getExpression(), params.pExpCtx->getCollator());
+    auto unownedExpr = rewriteRes.matchExpression();
+
+    // There might be children in the $and expression that cannot be rewritten to a match
+    // expression. If this is the case we cannot assume that the tight predicate or
+    // wholeBucketFilter produced by the rewritten $and expression is correct. Measurements in the
+    // bucket might fit the rewritten $and expression, but fail to fit the other children of the
+    // $and expression and will be returned incorrectly.
+
+    // It is an error to call 'createPredicate' on predicates on the meta field, and it only
+    // returns a value for predicates on the 'timeField'.
+    if (unownedExpr && rewriteRes.allSubExpressionsRewritten() &&
+        unownedExpr->path() == params.bucketSpec.timeField() &&
+        ComparisonMatchExpressionBase::isInternalExprComparison(unownedExpr->matchType())) {
+        const auto compareMatchExpr =
+            checked_cast<const ComparisonMatchExpressionBase*>(unownedExpr);
         return BucketLevelComparisonPredicateGenerator::createPredicate(
                    compareMatchExpr, params, true /* tight */)
             .matchExpr;
     }
 
-    return BucketSpec::handleIneligible(BucketSpec::IneligiblePredicatePolicy::kIgnore,
-                                        matchExpr,
-                                        "can't handle non-comparison $expr match expression")
+    return BucketSpec::handleIneligible(
+               BucketSpec::IneligiblePredicatePolicy::kIgnore,
+               matchExpr,
+               "can only handle comparison $expr match expressions on the timeField")
         .tightPredicate;
 }
 
@@ -140,7 +149,7 @@ BucketSpec::BucketPredicate BucketSpec::createPredicatesOnBucketLevelField(
 
     tassert(5916304, "BucketSpec::createPredicatesOnBucketLevelField nullptr", matchExpr);
 
-    auto bucketPredicateParams = timeseries::BucketLevelComparisonPredicateGeneratorBase::Params{
+    auto bucketPredicateParams = BucketLevelComparisonPredicateGeneratorBase::Params{
         bucketSpec, bucketMaxSpanSeconds, pExpCtx, assumeNoMixedSchemaData, policy, fixedBuckets};
     // If we have a leaf predicate on a meta field, we can map it to the bucket's meta field.
     // This includes comparisons such as $eq and $lte, as well as other non-comparison predicates
@@ -164,8 +173,7 @@ BucketSpec::BucketPredicate BucketSpec::createPredicatesOnBucketLevelField(
             return handleIneligible(policy, matchExpr, "cannot handle an excluded meta field");
 
         if (auto looseResult = expression::copyExpressionAndApplyRenames(
-                matchExpr,
-                {{bucketSpec.metaField().value(), timeseries::kBucketMetaFieldName.toString()}});
+                matchExpr, {{bucketSpec.metaField().value(), kBucketMetaFieldName.toString()}});
             looseResult) {
             auto tightResult = looseResult->clone();
             return {std::move(looseResult), std::move(tightResult)};
@@ -288,12 +296,12 @@ BucketSpec::BucketPredicate BucketSpec::createPredicatesOnBucketLevelField(
                 rewriteProvidesExactMatchPredicate};
     } else if (ComparisonMatchExpression::isComparisonMatchExpression(matchExpr) ||
                ComparisonMatchExpressionBase::isInternalExprComparison(matchExpr->matchType())) {
-        auto result = timeseries::BucketLevelComparisonPredicateGenerator::createPredicate(
+        auto result = BucketLevelComparisonPredicateGenerator::createPredicate(
             checked_cast<const ComparisonMatchExpressionBase*>(matchExpr),
             bucketPredicateParams,
             false /* tight */);
 
-        auto tightResult = timeseries::BucketLevelComparisonPredicateGenerator::createPredicate(
+        auto tightResult = BucketLevelComparisonPredicateGenerator::createPredicate(
             checked_cast<const ComparisonMatchExpressionBase*>(matchExpr),
             bucketPredicateParams,
             true /* tight */);
@@ -306,8 +314,8 @@ BucketSpec::BucketPredicate BucketSpec::createPredicatesOnBucketLevelField(
             // the query planner. Since the classic planner doesn't handle the $expr expression, we
             // don't generate the loose predicate.
             nullptr,
-            createTightExprComparisonPredicate(checked_cast<const ExprMatchExpression*>(matchExpr),
-                                               bucketPredicateParams)};
+            createTightExprTimeFieldPredicate(checked_cast<const ExprMatchExpression*>(matchExpr),
+                                              bucketPredicateParams)};
     } else if (matchExpr->matchType() == MatchExpression::GEO) {
         auto& geoExpr = static_cast<const GeoMatchExpression*>(matchExpr)->getGeoExpression();
         if (geoExpr.getPred() == GeoExpression::WITHIN ||
@@ -320,10 +328,10 @@ BucketSpec::BucketPredicate BucketSpec::createPredicatesOnBucketLevelField(
         if (assumeNoMixedSchemaData) {
             // We know that every field that appears in an event will also appear in the min/max.
             auto result = std::make_unique<AndMatchExpression>();
-            result->add(std::make_unique<ExistsMatchExpression>(StringData(
-                std::string{timeseries::kControlMinFieldNamePrefix} + matchExpr->path())));
-            result->add(std::make_unique<ExistsMatchExpression>(StringData(
-                std::string{timeseries::kControlMaxFieldNamePrefix} + matchExpr->path())));
+            result->add(std::make_unique<ExistsMatchExpression>(
+                StringData(std::string{kControlMinFieldNamePrefix} + matchExpr->path())));
+            result->add(std::make_unique<ExistsMatchExpression>(
+                StringData(std::string{kControlMaxFieldNamePrefix} + matchExpr->path())));
             return {std::move(result), nullptr};
         } else {
             // At time of writing, we only pass 'kError' when creating a partial index, and
@@ -355,7 +363,7 @@ BucketSpec::BucketPredicate BucketSpec::createPredicatesOnBucketLevelField(
             // If inExpr is {$in: [X, Y]} then the elems are '0: X' and '1: Y'.
             auto eq = std::make_unique<EqualityMatchExpression>(
                 inExpr->path(), elem, nullptr /*annotation*/, inExpr->getCollator());
-            auto child = timeseries::BucketLevelComparisonPredicateGenerator::createPredicate(
+            auto child = BucketLevelComparisonPredicateGenerator::createPredicate(
                 eq.get(), bucketPredicateParams, false /* tight */);
             rewriteProvidesExactMatchPredicate =
                 rewriteProvidesExactMatchPredicate && child.rewriteProvidesExactMatchPredicate;
@@ -419,7 +427,7 @@ BucketSpec::splitOutMetaOnlyPredicate(std::unique_ptr<MatchExpression> expr,
     return expression::splitMatchExpressionBy(
         std::move(expr),
         {metaField->toString()},
-        {{metaField->toString(), timeseries::kBucketMetaFieldName.toString()}},
+        {{metaField->toString(), kBucketMetaFieldName.toString()}},
         expression::isOnlyDependentOn);
 }
 
@@ -470,18 +478,18 @@ BucketSpec::SplitPredicates BucketSpec::getPushdownPredicates(
             .residualExpr = std::move(residualPred)};
 }
 
-BucketSpec::BucketSpec(const std::string& timeField,
-                       const boost::optional<std::string>& metaField,
-                       const std::set<std::string>& fields,
+BucketSpec::BucketSpec(std::string timeField,
+                       boost::optional<std::string> metaField,
+                       std::set<std::string> fields,
                        Behavior behavior,
-                       const std::set<std::string>& computedProjections,
+                       std::set<std::string> computedProjections,
                        bool usesExtendedRange)
-    : _fieldSet(fields),
+    : _fieldSet(std::move(fields)),
       _behavior(behavior),
-      _computedMetaProjFields(computedProjections),
-      _timeField(timeField),
+      _computedMetaProjFields(std::move(computedProjections)),
+      _timeField(std::move(timeField)),
       _timeFieldHashed(FieldNameHasher().hashedFieldName(_timeField)),
-      _metaField(metaField),
+      _metaField(std::move(metaField)),
       _usesExtendedRange(usesExtendedRange) {
     if (_metaField) {
         _metaFieldHashed = FieldNameHasher().hashedFieldName(*_metaField);
@@ -536,6 +544,20 @@ BucketSpec& BucketSpec::operator=(const BucketSpec& other) {
     return *this;
 }
 
+BucketSpec& BucketSpec::operator=(BucketSpec&& other) {
+    _fieldSet = std::move(other._fieldSet);
+    _behavior = other._behavior;
+    _computedMetaProjFields = std::move(other._computedMetaProjFields);
+    _timeField = std::move(other._timeField);
+    _timeFieldHashed = HashedFieldName{_timeField, other._timeFieldHashed->hash()};
+    _metaField = std::move(other._metaField);
+    if (_metaField) {
+        _metaFieldHashed = HashedFieldName{*_metaField, other._metaFieldHashed->hash()};
+    }
+    _usesExtendedRange = other._usesExtendedRange;
+    return *this;
+}
+
 void BucketSpec::setTimeField(std::string&& name) {
     _timeField = std::move(name);
     _timeFieldHashed = FieldNameHasher().hashedFieldName(_timeField);
@@ -567,4 +589,4 @@ const boost::optional<std::string>& BucketSpec::metaField() const {
 boost::optional<HashedFieldName> BucketSpec::metaFieldHashed() const {
     return _metaFieldHashed;
 }
-}  // namespace mongo
+}  // namespace mongo::timeseries

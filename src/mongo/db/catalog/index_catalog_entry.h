@@ -103,9 +103,6 @@ public:
     virtual void setIsReady(bool newIsReady) = 0;
     virtual void setIsFrozen(bool newIsFrozen) = 0;
 
-    virtual void setDropped() = 0;
-    virtual bool isDropped() const = 0;
-
     // --
 
     /**
@@ -175,6 +172,12 @@ public:
     virtual bool shouldValidateDocument() const = 0;
 
     virtual const UpdateIndexData& getIndexedPaths() const = 0;
+
+    /**
+     * Returns a normalized entry as given by IndexCatalog::normalizeIndexSpecs.
+     */
+    virtual std::unique_ptr<const IndexCatalogEntry> getNormalizedEntry(
+        OperationContext* opCtx, const CollectionPtr& coll) const = 0;
 };
 
 class IndexCatalogEntryContainer {

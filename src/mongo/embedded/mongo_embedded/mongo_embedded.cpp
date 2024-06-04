@@ -43,7 +43,6 @@
 #include <boost/log/core/core.hpp>
 // IWYU pragma: no_include "boost/log/detail/attachable_sstream_buf.hpp"
 #include <boost/log/sinks/sync_frontend.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/make_shared_object.hpp>
 #include <boost/smart_ptr/shared_ptr.hpp>
 #include <boost/thread/exceptions.hpp>
@@ -200,7 +199,8 @@ struct mongo_embedded_v1_client {
 
     explicit mongo_embedded_v1_client(mongo_embedded_v1_instance* const db)
         : parent_db(db),
-          client(db->serviceContext->makeClient("embedded", db->transportLayer->createSession())) {
+          client(db->serviceContext->getService()->makeClient(
+              "embedded", db->transportLayer->createSession())) {
         this->parent_db->clientCount.addAndFetch(1);
     }
 
@@ -433,7 +433,7 @@ void client_wire_protocol_rpc(mongo_embedded_v1_client* const client,
     ClientGuard clientGuard(client);
 
     auto opCtx = cc().makeOperationContext();
-    auto sep = client->parent_db->serviceContext->getServiceEntryPoint();
+    auto sep = client->parent_db->serviceContext->getService()->getServiceEntryPoint();
 
     auto sb = SharedBuffer::allocate(input_size);
     memcpy(sb.get(), input, input_size);

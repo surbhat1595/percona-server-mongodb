@@ -94,8 +94,6 @@ public:
             const auto& cmd = request();
             LOGV2_DEBUG(3856208,
                         1,
-                        "Received voteCommitIndexBuild request for index build: {buildUUID}, "
-                        "from host: {host}",
                         "Received voteCommitIndexBuild request",
                         "buildUUID"_attr = cmd.getCommandParameter(),
                         "host"_attr = cmd.getHostAndPort().toString());
@@ -135,7 +133,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(VoteCommitIndexBuildCommand);
+MONGO_REGISTER_COMMAND(VoteCommitIndexBuildCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

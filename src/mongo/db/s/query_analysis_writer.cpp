@@ -30,7 +30,6 @@
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <cstdint>
 #include <functional>
@@ -125,13 +124,6 @@ BSONObj createIndex(OperationContext* opCtx, const NamespaceString& nss, const B
     return resObj;
 }
 
-struct SampledCommandRequest {
-    UUID sampleId;
-    NamespaceString nss;
-    // The BSON for a SampledReadCommand or {Update,Delete,FindAndModify}CommandRequest.
-    BSONObj cmd;
-};
-
 /*
  * Returns a sampled read command for a read with the given filter, collation, let and runtime
  * constants.
@@ -180,10 +172,11 @@ SampledCommandRequest makeSampledUpdateCommandRequest(
     write_ops::UpdateCommandRequest sampledCmd(originalCmd.getNamespace(), {std::move(op)});
     sampledCmd.setLet(originalCmd.getLet());
 
-    return {
-        sampleId,
-        sampledCmd.getNamespace(),
-        sampledCmd.toBSON(BSON("$db" << sampledCmd.getNamespace().db_forSharding().toString()))};
+    return {sampleId,
+            sampledCmd.getNamespace(),
+            sampledCmd.toBSON(
+                BSON("$db" << DatabaseNameUtil::serialize(sampledCmd.getNamespace().dbName(),
+                                                          sampledCmd.getSerializationContext())))};
 }
 
 /*
@@ -398,8 +391,9 @@ void QueryAnalysisWriter::onStartup(OperationContext* opCtx) {
     threadPoolOptions.minThreads = gQueryAnalysisWriterMinThreadPoolSize;
     threadPoolOptions.threadNamePrefix = "QueryAnalysisWriter-";
     threadPoolOptions.poolName = "QueryAnalysisWriterThreadPool";
-    threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-        Client::initThread(threadName.c_str());
+    threadPoolOptions.onCreateThread = [service =
+                                            opCtx->getService()](const std::string& threadName) {
+        Client::initThread(threadName.c_str(), service);
     };
     _executor = std::make_shared<executor::ThreadPoolTaskExecutor>(
         std::make_unique<ThreadPool>(threadPoolOptions),
@@ -663,13 +657,12 @@ ExecutorFuture<void> QueryAnalysisWriter::_addReadQuery(
     return ExecutorFuture<void>(_executor)
         .then([this,
                cmdName,
-               sampledReadCmd =
-                   makeSampledReadCommand(sampleId, nss, filter, collation, letParameters)] {
+               sampledReadCmd = makeSampledReadCommand(
+                   sampleId, nss, filter, collation, letParameters)]() mutable {
             auto opCtxHolder = cc().makeOperationContext();
             auto opCtx = opCtxHolder.get();
 
-            auto collUuid =
-                CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, sampledReadCmd.nss);
+            auto collUuid = getCollectionUUID(opCtx, sampledReadCmd.nss);
             if (!shouldPersistSample(opCtx, sampledReadCmd.nss, collUuid)) {
                 return;
             }
@@ -703,42 +696,41 @@ ExecutorFuture<void> QueryAnalysisWriter::_addReadQuery(
         });
 }
 
-ExecutorFuture<void> QueryAnalysisWriter::addUpdateQuery(
-    OperationContext* originalOpCtx,
-    const UUID& sampleId,
-    const write_ops::UpdateCommandRequest& updateCmd,
-    int opIndex) {
+ExecutorFuture<void> QueryAnalysisWriter::addUpdateQuery(SampledCommandNameEnum cmdName,
+                                                         SampledCommandRequest sampledUpdateCmd) {
     invariant(_executor);
+    invariant(cmdName == SampledCommandNameEnum::kUpdate ||
+              cmdName == SampledCommandNameEnum::kBulkWrite);
+
+    auto nss = sampledUpdateCmd.nss;
 
     return ExecutorFuture<void>(_executor)
-        .then([this,
-               sampledUpdateCmd =
-                   makeSampledUpdateCommandRequest(originalOpCtx, sampleId, updateCmd, opIndex)]() {
-            auto opCtxHolder = cc().makeOperationContext();
-            auto opCtx = opCtxHolder.get();
+        .then(
+            [this, cmdName = std::move(cmdName), sampledUpdateCmd = std::move(sampledUpdateCmd)]() {
+                auto opCtxHolder = cc().makeOperationContext();
+                auto opCtx = opCtxHolder.get();
 
-            auto collUuid =
-                CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, sampledUpdateCmd.nss);
-            if (!shouldPersistSample(opCtx, sampledUpdateCmd.nss, collUuid)) {
-                return;
-            }
+                auto collUuid = getCollectionUUID(opCtx, sampledUpdateCmd.nss);
+                if (!shouldPersistSample(opCtx, sampledUpdateCmd.nss, collUuid)) {
+                    return;
+                }
 
-            auto expireAt = opCtx->getServiceContext()->getFastClockSource()->now() +
-                mongo::Milliseconds(gQueryAnalysisSampleExpirationSecs.load() * 1000);
-            auto doc = SampledQueryDocument{sampledUpdateCmd.sampleId,
-                                            sampledUpdateCmd.nss,
-                                            *collUuid,
-                                            SampledCommandNameEnum::kUpdate,
-                                            std::move(sampledUpdateCmd.cmd),
-                                            expireAt}
-                           .toBSON();
+                auto expireAt = opCtx->getServiceContext()->getFastClockSource()->now() +
+                    mongo::Milliseconds(gQueryAnalysisSampleExpirationSecs.load() * 1000);
+                auto doc = SampledQueryDocument{sampledUpdateCmd.sampleId,
+                                                sampledUpdateCmd.nss,
+                                                *collUuid,
+                                                cmdName,
+                                                std::move(sampledUpdateCmd.cmd),
+                                                expireAt}
+                               .toBSON();
 
-            stdx::lock_guard<Latch> lk(_mutex);
-            if (_queries.add(doc)) {
-                QueryAnalysisSampleTracker::get(opCtx).incrementWrites(
-                    opCtx, sampledUpdateCmd.nss, *collUuid, doc.objsize());
-            }
-        })
+                stdx::lock_guard<Latch> lk(_mutex);
+                if (_queries.add(doc)) {
+                    QueryAnalysisSampleTracker::get(opCtx).incrementWrites(
+                        opCtx, sampledUpdateCmd.nss, *collUuid, doc.objsize());
+                }
+            })
         .then([this] {
             if (_exceedsMaxSizeBytes()) {
                 auto opCtxHolder = cc().makeOperationContext();
@@ -746,12 +738,22 @@ ExecutorFuture<void> QueryAnalysisWriter::addUpdateQuery(
                 _flushQueries(opCtx);
             }
         })
-        .onError([this, nss = updateCmd.getNamespace()](Status status) {
+        .onError([this, nss = std::move(nss)](Status status) {
             LOGV2(7075301,
                   "Failed to add update query",
                   logAttrs(nss),
                   "error"_attr = redact(status));
         });
+}
+
+ExecutorFuture<void> QueryAnalysisWriter::addUpdateQuery(
+    OperationContext* originalOpCtx,
+    const UUID& sampleId,
+    const write_ops::UpdateCommandRequest& updateCmd,
+    int opIndex) {
+    return addUpdateQuery(
+        SampledCommandNameEnum::kUpdate,
+        makeSampledUpdateCommandRequest(originalOpCtx, sampleId, updateCmd, opIndex));
 }
 
 ExecutorFuture<void> QueryAnalysisWriter::addUpdateQuery(
@@ -761,42 +763,41 @@ ExecutorFuture<void> QueryAnalysisWriter::addUpdateQuery(
     return addUpdateQuery(opCtx, *sampleId, updateCmd, opIndex);
 }
 
-ExecutorFuture<void> QueryAnalysisWriter::addDeleteQuery(
-    OperationContext* originalOpCtx,
-    const UUID& sampleId,
-    const write_ops::DeleteCommandRequest& deleteCmd,
-    int opIndex) {
+ExecutorFuture<void> QueryAnalysisWriter::addDeleteQuery(SampledCommandNameEnum cmdName,
+                                                         SampledCommandRequest sampledDeleteCmd) {
     invariant(_executor);
+    invariant(cmdName == SampledCommandNameEnum::kDelete ||
+              cmdName == SampledCommandNameEnum::kBulkWrite);
+
+    auto nss = sampledDeleteCmd.nss;
 
     return ExecutorFuture<void>(_executor)
-        .then([this,
-               sampledDeleteCmd =
-                   makeSampledDeleteCommandRequest(originalOpCtx, sampleId, deleteCmd, opIndex)]() {
-            auto opCtxHolder = cc().makeOperationContext();
-            auto opCtx = opCtxHolder.get();
+        .then(
+            [this, cmdName = std::move(cmdName), sampledDeleteCmd = std::move(sampledDeleteCmd)]() {
+                auto opCtxHolder = cc().makeOperationContext();
+                auto opCtx = opCtxHolder.get();
 
-            auto collUuid =
-                CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, sampledDeleteCmd.nss);
-            if (!shouldPersistSample(opCtx, sampledDeleteCmd.nss, collUuid)) {
-                return;
-            }
+                auto collUuid = getCollectionUUID(opCtx, sampledDeleteCmd.nss);
+                if (!shouldPersistSample(opCtx, sampledDeleteCmd.nss, collUuid)) {
+                    return;
+                }
 
-            auto expireAt = opCtx->getServiceContext()->getFastClockSource()->now() +
-                mongo::Milliseconds(gQueryAnalysisSampleExpirationSecs.load() * 1000);
-            auto doc = SampledQueryDocument{sampledDeleteCmd.sampleId,
-                                            sampledDeleteCmd.nss,
-                                            *collUuid,
-                                            SampledCommandNameEnum::kDelete,
-                                            std::move(sampledDeleteCmd.cmd),
-                                            expireAt}
-                           .toBSON();
+                auto expireAt = opCtx->getServiceContext()->getFastClockSource()->now() +
+                    mongo::Milliseconds(gQueryAnalysisSampleExpirationSecs.load() * 1000);
+                auto doc = SampledQueryDocument{sampledDeleteCmd.sampleId,
+                                                sampledDeleteCmd.nss,
+                                                *collUuid,
+                                                cmdName,
+                                                std::move(sampledDeleteCmd.cmd),
+                                                expireAt}
+                               .toBSON();
 
-            stdx::lock_guard<Latch> lk(_mutex);
-            if (_queries.add(doc)) {
-                QueryAnalysisSampleTracker::get(opCtx).incrementWrites(
-                    opCtx, sampledDeleteCmd.nss, *collUuid, doc.objsize());
-            }
-        })
+                stdx::lock_guard<Latch> lk(_mutex);
+                if (_queries.add(doc)) {
+                    QueryAnalysisSampleTracker::get(opCtx).incrementWrites(
+                        opCtx, sampledDeleteCmd.nss, *collUuid, doc.objsize());
+                }
+            })
         .then([this] {
             if (_exceedsMaxSizeBytes()) {
                 auto opCtxHolder = cc().makeOperationContext();
@@ -804,12 +805,22 @@ ExecutorFuture<void> QueryAnalysisWriter::addDeleteQuery(
                 _flushQueries(opCtx);
             }
         })
-        .onError([this, nss = deleteCmd.getNamespace()](Status status) {
+        .onError([this, nss = std::move(nss)](Status status) {
             LOGV2(7075303,
                   "Failed to add delete query",
                   logAttrs(nss),
                   "error"_attr = redact(status));
         });
+}
+
+ExecutorFuture<void> QueryAnalysisWriter::addDeleteQuery(
+    OperationContext* originalOpCtx,
+    const UUID& sampleId,
+    const write_ops::DeleteCommandRequest& deleteCmd,
+    int opIndex) {
+    return addDeleteQuery(
+        SampledCommandNameEnum::kDelete,
+        makeSampledDeleteCommandRequest(originalOpCtx, sampleId, deleteCmd, opIndex));
 }
 
 ExecutorFuture<void> QueryAnalysisWriter::addDeleteQuery(
@@ -828,12 +839,11 @@ ExecutorFuture<void> QueryAnalysisWriter::addFindAndModifyQuery(
     return ExecutorFuture<void>(_executor)
         .then([this,
                sampledFindAndModifyCmd = makeSampledFindAndModifyCommandRequest(
-                   originalOpCtx, sampleId, findAndModifyCmd)]() {
+                   originalOpCtx, sampleId, findAndModifyCmd)]() mutable {
             auto opCtxHolder = cc().makeOperationContext();
             auto opCtx = opCtxHolder.get();
 
-            auto collUuid =
-                CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, sampledFindAndModifyCmd.nss);
+            auto collUuid = getCollectionUUID(opCtx, sampledFindAndModifyCmd.nss);
             if (!shouldPersistSample(opCtx, sampledFindAndModifyCmd.nss, collUuid)) {
                 return;
             }
@@ -897,7 +907,7 @@ ExecutorFuture<void> QueryAnalysisWriter::addDiff(const UUID& sampleId,
                 return;
             }
 
-            if (collUuid != CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, nss)) {
+            if (collUuid != getCollectionUUID(opCtx, nss)) {
                 return;
             }
 

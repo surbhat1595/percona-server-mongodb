@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -287,10 +286,7 @@ public:
         resumeBody().appendElements(body);
     }
 
-    BSONObjBuilder beginSecurityToken();
-    void setSecurityToken(const BSONObj& token) {
-        beginSecurityToken().appendElements(token);
-    }
+    void setSecurityToken(StringData token);
 
     /**
      * Finish building and return a Message ready to give to the networking layer for transmission.
@@ -353,7 +349,6 @@ private:
         kEmpty,
         kDocSequence,
         kBody,
-        kSecurityToken,
         kDone,
     };
 
@@ -468,7 +463,6 @@ public:
         const DatabaseName& dbName,
         boost::optional<auth::ValidatedTenancyScope> validatedTenancyScope,
         BSONObj body,
-        const BSONObj& extraFields = {},
         const SerializationContext& sc = SerializationContext::stateDefault());
 };
 

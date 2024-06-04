@@ -120,4 +120,20 @@ void setShouldRedactBinDataEncrypt(bool enabled) {
     redactBinDataEncrypt.store(enabled);
 }
 
+/** Stores the callback that is used to determine whether log service should be emitted. */
+ShouldEmitLogServiceFn& emitLogServiceEnabled() {
+    static StaticImmortal<ShouldEmitLogServiceFn> f{};
+    return *f;
+}
+
+bool shouldEmitLogService() {
+    auto fn = emitLogServiceEnabled();
+    return fn && fn();
+}
+
+void setShouldEmitLogService(ShouldEmitLogServiceFn enabled) {
+    invariant(enabled);
+    emitLogServiceEnabled() = enabled;
+}
+
 }  // namespace mongo::logv2

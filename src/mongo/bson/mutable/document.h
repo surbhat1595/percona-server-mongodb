@@ -39,6 +39,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
+#include "mongo/bson/mutable/api.h"
 #include "mongo/bson/mutable/const_element.h"
 #include "mongo/bson/mutable/damage_vector.h"
 #include "mongo/bson/mutable/element.h"
@@ -242,7 +243,7 @@ namespace mutablebson {
  *  ConstElement for the root. ConstElement is much like Element, but does not permit
  *  mutations. See the class comment for ConstElement for more information.
  */
-class MONGO_API(mutable_bson) Document {
+class MONGO_MUTABLE_BSON_API Document {
     // TODO: In principle there is nothing that prevents implementing a deep copy for
     // Document, but for now it is not permitted.
     Document(const Document&) = delete;
@@ -292,12 +293,12 @@ public:
 
     /** Compare this Document to 'other' with the semantics of BSONObj::woCompare. */
     inline int compareWith(const Document& other,
-                           const StringData::ComparatorInterface* comparator,
+                           const StringDataComparator* comparator,
                            bool considerFieldName = true) const;
 
     /** Compare this Document to 'other' with the semantics of BSONObj::woCompare. */
     inline int compareWithBSONObj(const BSONObj& other,
-                                  const StringData::ComparatorInterface* comparator,
+                                  const StringDataComparator* comparator,
                                   bool considerFieldName = true) const;
 
 
@@ -531,7 +532,7 @@ private:
 };
 
 inline int Document::compareWith(const Document& other,
-                                 const StringData::ComparatorInterface* comparator,
+                                 const StringDataComparator* comparator,
                                  bool considerFieldName) const {
     // We cheat and use Element::compareWithElement since we know that 'other' is a
     // Document and has a 'hidden' fieldname that is always indentical across all Document
@@ -540,7 +541,7 @@ inline int Document::compareWith(const Document& other,
 }
 
 inline int Document::compareWithBSONObj(const BSONObj& other,
-                                        const StringData::ComparatorInterface* comparator,
+                                        const StringDataComparator* comparator,
                                         bool considerFieldName) const {
     return root().compareWithBSONObj(other, comparator, considerFieldName);
 }

@@ -33,7 +33,6 @@
 #include <absl/container/node_hash_set.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 // IWYU pragma: no_include "ext/alloc_traits.h"
@@ -302,7 +301,8 @@ public:
                                    ProjectionNameOrderPreservingSet required) {
         ProjectionNameOrderPreservingSet requiredForChild = required;
         requiredForChild.erase(node.getProjectionName());
-        auto env = VariableEnvironment::build(node.getProjection());
+        auto env = VariableEnvironment::build(
+            node.getProjection(), nullptr /*memoInterface*/, false /*computeLastRefs*/);
         for (const auto& proj : env.freeVariableNames()) {
             requiredForChild.emplace_back(proj);
         }

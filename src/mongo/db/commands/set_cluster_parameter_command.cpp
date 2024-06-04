@@ -46,6 +46,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/cluster_server_parameter_cmds_gen.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
+#include "mongo/db/commands/set_cluster_parameter_command_impl.h"
 #include "mongo/db/commands/set_cluster_parameter_invocation.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
@@ -65,42 +66,10 @@
 
 
 namespace mongo {
-
 namespace {
-MONGO_FAIL_POINT_DEFINE(hangInSetClusterParameter);
-
 const WriteConcernOptions kMajorityWriteConcern{WriteConcernOptions::kMajority,
                                                 WriteConcernOptions::SyncMode::UNSET,
                                                 WriteConcernOptions::kNoTimeout};
-
-void setClusterParameterImpl(OperationContext* opCtx, const SetClusterParameter& request) {
-    uassert(ErrorCodes::ErrorCodes::NotImplemented,
-            "setClusterParameter can only run on mongos in sharded clusters",
-            (serverGlobalParams.clusterRole.has(ClusterRole::None)));
-
-    if (!feature_flags::gFeatureFlagAuditConfigClusterParameter.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
-        uassert(ErrorCodes::IllegalOperation,
-                str::stream() << SetClusterParameter::kCommandName
-                              << " cannot be run on standalones",
-                repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet());
-    }
-
-    // setClusterParameter is serialized against setFeatureCompatibilityVersion.
-    FixedFCVRegion fcvRegion(opCtx);
-
-    hangInSetClusterParameter.pauseWhileSet();
-
-    std::unique_ptr<ServerParameterService> parameterService =
-        std::make_unique<ClusterParameterService>();
-
-    DBDirectClient dbClient(opCtx);
-    ClusterParameterDBClientService dbService(dbClient);
-
-    SetClusterParameterInvocation invocation{std::move(parameterService), dbService};
-
-    invocation.invoke(opCtx, request, boost::none, kMajorityWriteConcern);
-}
 
 class SetClusterParameterCommand final : public TypedCommand<SetClusterParameterCommand> {
 public:
@@ -127,7 +96,14 @@ public:
         using InvocationBase::InvocationBase;
 
         void typedRun(OperationContext* opCtx) {
-            setClusterParameterImpl(opCtx, request());
+            auto service = opCtx->getService();
+            invariant(service->role().hasExclusively(ClusterRole::ShardServer),
+                      "Attempted to run a shard-only command directly from the router role.");
+            static auto impl = getSetClusterParameterImpl(service);
+            impl(opCtx,
+                 request(),
+                 boost::none /* clusterParameterTime */,
+                 boost::none /* previousTime */);
         }
 
     private:
@@ -136,7 +112,7 @@ public:
         }
 
         NamespaceString ns() const override {
-            return NamespaceString();
+            return NamespaceString::kEmpty;
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
@@ -149,10 +125,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(SetClusterParameterCommand);
-
-auto setClusterParameterRegistration =
-    MONGO_WEAK_FUNCTION_REGISTRATION(setClusterParameter, setClusterParameterImpl);
+MONGO_REGISTER_COMMAND(SetClusterParameterCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

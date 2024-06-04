@@ -33,7 +33,6 @@
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
@@ -135,13 +134,6 @@ void LiteParsedDocumentSourceNestedPipelines::getForeignExecutionNamespaces(
             nssSet.insert(nssOrUUID.nss());
         }
     }
-}
-
-bool LiteParsedDocumentSourceNestedPipelines::allowedToPassthroughFromMongos() const {
-    // If any of the sub-pipelines doesn't allow pass through, then return false.
-    return std::all_of(_pipelines.cbegin(), _pipelines.cend(), [](const auto& subPipeline) {
-        return subPipeline.allowedToPassthroughFromMongos();
-    });
 }
 
 Status LiteParsedDocumentSourceNestedPipelines::checkShardedForeignCollAllowed(

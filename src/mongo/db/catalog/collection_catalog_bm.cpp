@@ -36,7 +36,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/catalog/collection.h"
@@ -82,10 +81,12 @@ void createCollections(OperationContext* opCtx, int numCollections) {
 
 void BM_CollectionCatalogWrite(benchmark::State& state) {
     auto serviceContext = setupServiceContext();
-    ThreadClient threadClient(serviceContext);
+    ThreadClient threadClient(serviceContext->getService());
     ServiceContext::UniqueOperationContext opCtx = threadClient->makeOperationContext();
 
     createCollections(opCtx.get(), state.range(0));
+
+    Lock::GlobalLock lk{opCtx.get(), MODE_IX};
 
     for (auto _ : state) {
         benchmark::ClobberMemory();
@@ -95,7 +96,7 @@ void BM_CollectionCatalogWrite(benchmark::State& state) {
 
 void BM_CollectionCatalogWriteBatchedWithGlobalExclusiveLock(benchmark::State& state) {
     auto serviceContext = setupServiceContext();
-    ThreadClient threadClient(serviceContext);
+    ThreadClient threadClient(serviceContext->getService());
     ServiceContext::UniqueOperationContext opCtx = threadClient->makeOperationContext();
 
     // TODO(SERVER-74657): Please revisit if this thread could be made killable.
@@ -117,7 +118,7 @@ void BM_CollectionCatalogWriteBatchedWithGlobalExclusiveLock(benchmark::State& s
 
 void BM_CollectionCatalogCreateDropCollection(benchmark::State& state) {
     auto serviceContext = setupServiceContext();
-    ThreadClient threadClient(serviceContext);
+    ThreadClient threadClient(serviceContext->getService());
     ServiceContext::UniqueOperationContext opCtx = threadClient->makeOperationContext();
     Lock::GlobalLock globalLk(opCtx.get(), MODE_X);
 
@@ -141,7 +142,7 @@ void BM_CollectionCatalogCreateNCollectionsBatched(benchmark::State& state) {
         benchmark::ClobberMemory();
 
         auto serviceContext = setupServiceContext();
-        ThreadClient threadClient(serviceContext);
+        ThreadClient threadClient(serviceContext->getService());
         ServiceContext::UniqueOperationContext opCtx = threadClient->makeOperationContext();
 
         Lock::GlobalLock globalLk(opCtx.get(), MODE_X);
@@ -164,7 +165,7 @@ void BM_CollectionCatalogCreateNCollections(benchmark::State& state) {
         benchmark::ClobberMemory();
 
         auto serviceContext = setupServiceContext();
-        ThreadClient threadClient(serviceContext);
+        ThreadClient threadClient(serviceContext->getService());
         ServiceContext::UniqueOperationContext opCtx = threadClient->makeOperationContext();
         Lock::GlobalLock globalLk(opCtx.get(), MODE_X);
 
@@ -182,7 +183,7 @@ void BM_CollectionCatalogCreateNCollections(benchmark::State& state) {
 
 void BM_CollectionCatalogLookupCollectionByNamespace(benchmark::State& state) {
     auto serviceContext = setupServiceContext();
-    ThreadClient threadClient(serviceContext);
+    ThreadClient threadClient(serviceContext->getService());
     ServiceContext::UniqueOperationContext opCtx = threadClient->makeOperationContext();
 
     createCollections(opCtx.get(), state.range(0));
@@ -199,7 +200,7 @@ void BM_CollectionCatalogLookupCollectionByNamespace(benchmark::State& state) {
 
 void BM_CollectionCatalogLookupCollectionByUUID(benchmark::State& state) {
     auto serviceContext = setupServiceContext();
-    ThreadClient threadClient(serviceContext);
+    ThreadClient threadClient(serviceContext->getService());
     ServiceContext::UniqueOperationContext opCtx = threadClient->makeOperationContext();
 
     createCollections(opCtx.get(), state.range(0));
@@ -218,7 +219,7 @@ void BM_CollectionCatalogLookupCollectionByUUID(benchmark::State& state) {
 
 void BM_CollectionCatalogIterateCollections(benchmark::State& state) {
     auto serviceContext = setupServiceContext();
-    ThreadClient threadClient(serviceContext);
+    ThreadClient threadClient(serviceContext->getService());
     ServiceContext::UniqueOperationContext opCtx = threadClient->makeOperationContext();
 
     createCollections(opCtx.get(), state.range(0));

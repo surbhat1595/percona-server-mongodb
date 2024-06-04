@@ -531,6 +531,10 @@ error_codes:
 
     - {code: 403, name: UnsupportedShardingEventNotification}
 
+    - {code: 404, name: LDAPRoleAcquisitionError}
+
+    - {code: 405, name: CannotCreateChunkDistribution}
+
     # Error codes 4000-8999 are reserved.
 
     # Non-sequential error codes for compatibility only)
@@ -557,11 +561,16 @@ error_codes:
     - {code: 14031,name: OutOfDiskSpace}
     - {code: 17280,name: OBSOLETE_KeyTooLong}
     - {code: 28769,name: NamespaceCannotBeSharded}
+    - {code: 31082,name: SearchNotEnabled}
+    - {code: 40414,name: IDLFailedToParse}
     - {code: 46841,name: ClientMarkedKilled,categories: [Interruption,CancellationError]}
     - {code: 50768,name: NotARetryableWriteCommand}
     - {code: 50915,name: BackupCursorOpenConflictWithCheckpoint, categories: [RetriableError]}
     - {code: 56846,name: ConfigServerUnreachable}
     - {code: 57986,name: RetryableInternalTransactionNotSupported}
+    - {code: 640570,name: IllegalChangeToExpectedShardVersion}
+    - {code: 640571,name: IllegalChangeToExpectedDatabaseVersion}
+
 
     # Percona Server for MongoDB error codes
     - {code: 9390,name: LDAPLibraryError}

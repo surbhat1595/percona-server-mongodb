@@ -122,7 +122,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(AddShardCmd);
+MONGO_REGISTER_COMMAND(AddShardCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

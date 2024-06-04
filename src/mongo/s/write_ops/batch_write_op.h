@@ -82,22 +82,16 @@ struct ShardError {
  * Certain types of errors are not stored in WriteOps or must be returned to a caller.
  */
 struct ShardWCError {
-    ShardWCError(const ShardEndpoint& endpoint, const WriteConcernErrorDetail& error)
-        : endpoint(endpoint) {
+    ShardWCError(const ShardId& shardName, const WriteConcernErrorDetail& error)
+        : shardName(shardName) {
         error.cloneTo(&this->error);
     }
 
-    ShardEndpoint endpoint;
+    ShardId shardName;
     WriteConcernErrorDetail error;
 };
 
 using TargetedBatchMap = std::map<ShardId, std::unique_ptr<TargetedWriteBatch>>;
-
-enum class WriteType {
-    Ordinary,
-    WithoutShardKeyOrId,
-    TimeseriesRetryableUpdate,
-};
 
 /**
  * The BatchWriteOp class manages the lifecycle of a batched write received by mongos.  Each
@@ -191,13 +185,6 @@ public:
     void abortBatch(const write_ops::WriteError& error);
 
     /**
-     * Disposes of all tracked targeted batches when an error is encountered during a transaction.
-     * This is safe because any partially written data on shards will be rolled back if mongos
-     * decides to abort.
-     */
-    void forgetTargetedBatchesOnTransactionAbortingError();
-
-    /**
      * Returns false if the batch write op needs more processing.
      */
     bool isFinished();
@@ -215,6 +202,11 @@ public:
 
     boost::optional<int> getNShardsOwningChunks();
 
+    /**
+     * Returns the WriteOp with index referencing the write item in the batch.
+     */
+    WriteOp& getWriteOp(int index);
+
 private:
     /**
      * Maintains the batch execution statistics when a response is received.
@@ -231,10 +223,6 @@ private:
 
     // Array of ops being processed from the client request
     std::vector<WriteOp> _writeOps;
-
-    // Current outstanding batch op write requests
-    // Not owned here but tracked for reporting
-    std::set<const TargetedWriteBatch*> _targeted;
 
     // Write concern responses from all write batches so far
     std::vector<ShardWCError> _wcErrors;
@@ -282,6 +270,10 @@ private:
 
 typedef std::function<const NSTargeter&(const WriteOp& writeOp)> GetTargeterFn;
 typedef std::function<int(const WriteOp& writeOp)> GetWriteSizeFn;
+
+// Utility function to merge write concern errors received from various shards.
+boost::optional<WriteConcernErrorDetail> mergeWriteConcernErrors(
+    const std::vector<ShardWCError>& wcErrors);
 
 // Helper function to target ready writeOps. See BatchWriteOp::targetBatch for details.
 StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,

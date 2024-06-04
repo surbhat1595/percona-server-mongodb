@@ -117,7 +117,8 @@ public:
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
         return NamespaceStringUtil::deserialize(dbName.tenantId(),
-                                                CommandHelpers::parseNsFullyQualified(cmdObj));
+                                                CommandHelpers::parseNsFullyQualified(cmdObj),
+                                                SerializationContext::stateDefault());
     }
 
     Status checkAuthForOperation(OperationContext* opCtx,
@@ -170,7 +171,12 @@ public:
         // We force a refresh immediately after registering this migration to guarantee that this
         // shard will not receive a chunk after refreshing.
         onCollectionPlacementVersionMismatch(opCtx, nss, boost::none);
-        const auto shardId = ShardingState::get(opCtx)->shardId();
+
+        // Wait for the ShardServerCatalogCacheLoader to finish flushing the metadata to the
+        // storage. This is not required for correctness, but helps mitigate stalls on secondaries
+        // when a shard receives the first chunk for a collection with a large routing table.
+        CatalogCacheLoader::get(opCtx).waitForCollectionFlush(opCtx, nss);
+        repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
 
         uassertStatusOK(MigrationDestinationManager::get(opCtx)->start(
             opCtx, nss, std::move(scopedReceiveChunk), cloneRequest, writeConcern));
@@ -179,7 +185,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(RecvChunkStartCommand);
+MONGO_REGISTER_COMMAND(RecvChunkStartCommand).forShard();
 
 class RecvChunkStatusCommand : public BasicCommand {
 public:
@@ -227,7 +233,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(RecvChunkStatusCommand);
+MONGO_REGISTER_COMMAND(RecvChunkStatusCommand).forShard();
 
 class RecvChunkCommitCommand : public BasicCommand {
 public:
@@ -277,16 +283,13 @@ public:
         Status const status = mdm->startCommit(sessionId);
         mdm->report(result, opCtx, false);
         if (!status.isOK()) {
-            LOGV2(22014,
-                  "_recvChunkCommit failed: {error}",
-                  "_recvChunkCommit failed",
-                  "error"_attr = redact(status));
+            LOGV2(22014, "_recvChunkCommit failed", "error"_attr = redact(status));
             uassertStatusOK(status);
         }
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(RecvChunkCommitCommand);
+MONGO_REGISTER_COMMAND(RecvChunkCommitCommand).forShard();
 
 class RecvChunkAbortCommand : public BasicCommand {
 public:
@@ -337,10 +340,7 @@ public:
             Status const status = mdm->abort(migrationSessionIdStatus.getValue());
             mdm->report(result, opCtx, false);
             if (!status.isOK()) {
-                LOGV2(22015,
-                      "_recvChunkAbort failed: {error}",
-                      "_recvChunkAbort failed",
-                      "error"_attr = redact(status));
+                LOGV2(22015, "_recvChunkAbort failed", "error"_attr = redact(status));
                 uassertStatusOK(status);
             }
         } else if (migrationSessionIdStatus == ErrorCodes::NoSuchKey) {
@@ -352,7 +352,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(RecvChunkAbortCommand);
+MONGO_REGISTER_COMMAND(RecvChunkAbortCommand).forShard();
 
 class RecvChunkReleaseCritSecCommand : public BasicCommand {
 public:
@@ -401,16 +401,13 @@ public:
         const auto mdm = MigrationDestinationManager::get(opCtx);
         const auto status = mdm->exitCriticalSection(opCtx, sessionId);
         if (!status.isOK()) {
-            LOGV2(5899109,
-                  "_recvChunkReleaseCritSec failed: {error}",
-                  "_recvChunkReleaseCritSec failed",
-                  "error"_attr = redact(status));
+            LOGV2(5899109, "_recvChunkReleaseCritSec failed", "error"_attr = redact(status));
             uassertStatusOK(status);
         }
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(RecvChunkReleaseCritSecCommand);
+MONGO_REGISTER_COMMAND(RecvChunkReleaseCritSecCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

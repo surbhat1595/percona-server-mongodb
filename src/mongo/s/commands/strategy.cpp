@@ -39,7 +39,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -144,10 +143,10 @@ MONGO_FAIL_POINT_DEFINE(allowSkippingAppendRequiredFieldsToResponse);
 
 Future<void> runCommandInvocation(std::shared_ptr<RequestExecutionContext> rec,
                                   std::shared_ptr<CommandInvocation> invocation) {
-    bool useDedicatedThread = [&] {
+    bool usesDedicatedThread = [&] {
         auto client = rec->getOpCtx()->getClient();
         if (auto context = transport::ServiceExecutorContext::get(client); context) {
-            return context->useDedicatedThread();
+            return context->usesDedicatedThread();
         }
         tassert(5453902,
                 "Threading model may only be absent for internal and direct clients",
@@ -155,7 +154,7 @@ Future<void> runCommandInvocation(std::shared_ptr<RequestExecutionContext> rec,
         return true;
     }();
     return CommandHelpers::runCommandInvocation(
-        std::move(rec), std::move(invocation), useDedicatedThread);
+        std::move(rec), std::move(invocation), usesDedicatedThread);
 }
 
 /**
@@ -185,7 +184,6 @@ void appendRequiredFieldsToResponse(OperationContext* opCtx, BSONObjBuilder* res
         if (VectorClock::isValidComponentTime(operationTime)) {
             LOGV2_DEBUG(22764,
                         5,
-                        "Appending operationTime: {operationTime}",
                         "Appending operationTime",
                         "operationTime"_attr = operationTime.asTimestamp());
             operationTime.appendAsOperationTime(responseBuilder);
@@ -195,7 +193,6 @@ void appendRequiredFieldsToResponse(OperationContext* opCtx, BSONObjBuilder* res
             // actual.
             LOGV2_DEBUG(22765,
                         5,
-                        "Appending clusterTime as operationTime {clusterTime}",
                         "Appending clusterTime as operationTime",
                         "clusterTime"_attr = clusterTime.asTimestamp());
             clusterTime.appendAsOperationTime(responseBuilder);
@@ -286,7 +283,7 @@ void ExecCommandClient::_prologue() {
             dbname != DatabaseName::kLocal.db());
     uassert(ErrorCodes::InvalidNamespace,
             "Invalid database name: '{}'"_format(dbname),
-            NamespaceString::validDBName(dbname, NamespaceString::DollarInDbNameBehavior::Allow));
+            DatabaseName::validDBName(dbname, DatabaseName::DollarInDbNameBehavior::Allow));
 
     StringMap<int> topLevelFields;
     for (auto&& element : request.body) {
@@ -379,9 +376,9 @@ void ExecCommandClient::_onCompletion() {
     }
 
     if (!_invocation->isSafeForBorrowedThreads()) {
-        // If the last command wasn't safe for a borrowed thread, then let's move
-        // off of it.
-        seCtx->setUseDedicatedThread(true);
+        // If the last command wasn't safe for a borrowed thread,
+        // then let's move off of it.
+        seCtx->setThreadModel(seCtx->kSynchronous);
     }
 }
 
@@ -437,7 +434,7 @@ private:
     const StringData _commandName;
 
     std::shared_ptr<CommandInvocation> _invocation;
-    boost::optional<std::string> _ns;
+    boost::optional<NamespaceString> _ns;
     OperationSessionInfoFromClient _osi;
     boost::optional<WriteConcernOptions> _wc;
     boost::optional<bool> _isHello;
@@ -593,8 +590,8 @@ void ParseAndRunCommand::_parseCommand() {
     // Set the logical optype, command object and namespace as soon as we identify the command. If
     // the command does not define a fully-qualified namespace, set CurOp to the generic command
     // namespace db.$cmd.
-    _ns.emplace(NamespaceStringUtil::serialize(_invocation->ns()));
-    const auto nss = (request.getDatabase() == *_ns
+    _ns.emplace(_invocation->ns());
+    const auto nss = (NamespaceString(request.getDbName()) == *_ns
                           ? NamespaceString::makeCommandNamespace(_invocation->ns().dbName())
                           : _invocation->ns());
 
@@ -607,8 +604,19 @@ void ParseAndRunCommand::_parseCommand() {
     auto allowTransactionsOnConfigDatabase =
         !serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer) ||
         client->isFromSystemConnection();
-    // TODO (SERVER-79644): Make this call also use allNamespaces() when applicable.
-    validateSessionOptions(_osi, command->getName(), {nss}, allowTransactionsOnConfigDatabase);
+
+    // If there are multiple namespaces this command operates on we need to validate them all
+    // explicitly. Otherwise we can use the nss defined above which may be the generic command
+    // namespace.
+    std::vector<NamespaceString> namespaces = {nss};
+    if (_invocation->allNamespaces().size() > 1) {
+        namespaces = _invocation->allNamespaces();
+    }
+    validateSessionOptions(_osi,
+                           opCtx->getService(),
+                           command->getName(),
+                           namespaces,
+                           allowTransactionsOnConfigDatabase);
 
     _wc.emplace(uassertStatusOK(WriteConcernOptions::extractWCFromCommand(request.body)));
 
@@ -648,9 +656,10 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
     if (MONGO_unlikely(
             hangBeforeCheckingMongosShutdownInterrupt.shouldFail([&](const BSONObj& data) {
                 if (data.hasField("cmdName") && data.hasField("ns")) {
-                    std::string cmdNS = _parc->_ns.value();
-                    return ((data.getStringField("cmdName") == _parc->_commandName) &&
-                            (data.getStringField("ns") == cmdNS));
+                    const auto cmdNss = _parc->_ns.value();
+                    const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns"_sd);
+                    return (data.getStringField("cmdName") == _parc->_commandName &&
+                            fpNss == cmdNss);
                 }
                 return false;
             }))) {
@@ -747,7 +756,6 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
                     defaultWriteConcernSource == DefaultWriteConcernSourceEnum::kGlobal;
                 LOGV2_DEBUG(22766,
                             2,
-                            "Applying default writeConcern on {command} of {writeConcern}",
                             "Applying default writeConcern on command",
                             "command"_attr = request.getCommandName(),
                             "writeConcern"_attr = *wcDefault);
@@ -756,7 +764,7 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
     }
 
     if (TransactionRouter::get(opCtx)) {
-        validateWriteConcernForTransaction(*_parc->_wc, _parc->_commandName);
+        validateWriteConcernForTransaction(opCtx->getService(), *_parc->_wc, _parc->_commandName);
     }
 
     if (supportsWriteConcern) {
@@ -806,7 +814,6 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         LOGV2_DEBUG(22767,
                     2,
-                    "Applying default readConcern on {command} of {readConcern}",
                     "Applying default readConcern on command",
                     "command"_attr = invocation->definition()->getName(),
                     "readConcern"_attr = rcDefault);
@@ -939,7 +946,7 @@ void ParseAndRunCommand::RunAndRetry::_setup() {
         // Re-parse before retrying in case the process of run()-ning the invocation could
         // affect the parsed result.
         _parc->_invocation = command->parse(opCtx, request);
-        invariant(NamespaceStringUtil::serialize(_parc->_invocation->ns()) == _parc->_ns,
+        invariant(_parc->_invocation->ns() == _parc->_ns,
                   "unexpected change of namespace when retrying");
     }
 
@@ -1230,18 +1237,13 @@ void ClientCommand::_parseMessage() try {
     if (ErrorCodes::isConnectionFatalMessageParseError(ex.code()))
         _propagateException = true;
 
-    LOGV2_DEBUG(22769,
-                1,
-                "Exception thrown while parsing command {error}",
-                "Exception thrown while parsing command",
-                "error"_attr = redact(ex));
+    LOGV2_DEBUG(22769, 1, "Exception thrown while parsing command", "error"_attr = redact(ex));
     throw;
 }
 
 Future<void> ClientCommand::_execute() {
     LOGV2_DEBUG(22770,
                 3,
-                "Command begin db: {db} msg id: {headerId}",
                 "Command begin",
                 "db"_attr = _getDatabaseStringForLogging(),
                 "headerId"_attr = _rec->getMessage().header().getId());
@@ -1251,20 +1253,17 @@ Future<void> ClientCommand::_execute() {
         .then([this] {
             LOGV2_DEBUG(22771,
                         3,
-                        "Command end db: {db} msg id: {headerId}",
                         "Command end",
                         "db"_attr = _getDatabaseStringForLogging(),
                         "headerId"_attr = _rec->getMessage().header().getId());
         })
         .tapError([this](Status status) {
-            LOGV2_DEBUG(
-                22772,
-                1,
-                "Exception thrown while processing command on {db} msg id: {headerId} {error}",
-                "Exception thrown while processing command",
-                "db"_attr = _getDatabaseStringForLogging(),
-                "headerId"_attr = _rec->getMessage().header().getId(),
-                "error"_attr = redact(status));
+            LOGV2_DEBUG(22772,
+                        1,
+                        "Exception thrown while processing command",
+                        "db"_attr = _getDatabaseStringForLogging(),
+                        "headerId"_attr = _rec->getMessage().header().getId(),
+                        "error"_attr = redact(status));
 
             // Record the exception in CurOp.
             CurOp::get(_rec->getOpCtx())->debug().errInfo = std::move(status);
@@ -1284,8 +1283,8 @@ Future<void> ClientCommand::_handleException(Status status) {
     CommandHelpers::appendCommandStatusNoThrow(bob, status);
     appendRequiredFieldsToResponse(opCtx, &bob);
 
-    // Only attach the topology version to the response if mongos is in quiesce mode. If mongos is
-    // in quiesce mode, this shutdown error is due to mongos rather than a shard.
+    // Only attach the topology version to the response if mongos is in quiesce mode. If mongos
+    // is in quiesce mode, this shutdown error is due to mongos rather than a shard.
     if (ErrorCodes::isA<ErrorCategory::ShutdownError>(status)) {
         if (auto mongosTopCoord = MongosTopologyCoordinator::get(opCtx);
             mongosTopCoord && mongosTopCoord->inQuiesceMode()) {

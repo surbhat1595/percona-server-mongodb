@@ -29,7 +29,6 @@
 
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <initializer_list>
@@ -199,7 +198,8 @@ std::shared_ptr<executor::TaskExecutor> ReshardingDataReplication::_makeCollecti
     threadPoolOptions.threadNamePrefix = prefix + "-";
     threadPoolOptions.poolName = prefix + "ThreadPool";
     threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-        Client::initThread(threadName.c_str());
+        Client::initThread(threadName.c_str(),
+                           getGlobalServiceContext()->getService(ClusterRole::ShardServer));
         auto* client = Client::getCurrent();
         AuthorizationSession::get(*client)->grantInternalAuthorization(client);
     };
@@ -479,10 +479,16 @@ std::vector<SharedSemiFuture<void>> ReshardingDataReplication::_runOplogAppliers
 
 void ReshardingDataReplication::shutdown() {
     _oplogFetcherExecutor->shutdown();
+    if (_collectionClonerExecutor) {
+        _collectionClonerExecutor->shutdown();
+    }
 }
 
 void ReshardingDataReplication::join() {
     _oplogFetcherExecutor->join();
+    if (_collectionClonerExecutor) {
+        _collectionClonerExecutor->join();
+    }
 }
 
 std::vector<NamespaceString> ReshardingDataReplication::ensureStashCollectionsExist(
@@ -538,6 +544,11 @@ ReshardingDonorOplogId ReshardingDataReplication::getOplogApplierResumeId(
     auto applierProgress = ReshardingOplogApplier::checkStoredProgress(opCtx, sourceId);
     return applierProgress ? applierProgress->getProgress()
                            : ReshardingDonorOplogId{minFetchTimestamp, minFetchTimestamp};
+}
+
+ReshardingDataReplication::~ReshardingDataReplication() {
+    shutdown();
+    join();
 }
 
 }  // namespace mongo

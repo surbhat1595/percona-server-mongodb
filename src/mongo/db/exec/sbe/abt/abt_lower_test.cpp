@@ -85,6 +85,7 @@ protected:
     NodeToGroupPropsMap _nodeMap;
     // This can be modified by tests that need other labels.
     FieldProjectionMap _fieldProjMap{{}, {scanLabel}, {}};
+    sbe::InputParamToSlotMap inputParamToSlotMap;
 
     void runExpressionVariation(GoldenTestContext& gctx, const std::string& name, const ABT& n) {
         auto& stream = gctx.outStream();
@@ -98,10 +99,13 @@ protected:
         auto env = VariableEnvironment::build(n);
         SlotVarMap map;
         sbe::RuntimeEnvironment runtimeEnv;
+        sbe::value::SlotIdGenerator ids;
         Metadata metadata;
         NodeProps np;
         auto expr =
-            optimizer::SBEExpressionLowering{env, map, runtimeEnv, &metadata, &np}.optimize(n);
+            optimizer::SBEExpressionLowering{
+                env, map, runtimeEnv, ids, inputParamToSlotMap, &metadata, &np}
+                .optimize(n);
         stream << expr->toString() << std::endl;
     }
 
@@ -151,8 +155,9 @@ protected:
 
         Metadata md(scanDefs);
         auto planStage =
-            SBENodeLowering{env, *runtimeEnv, *ids, md, _nodeMap, ScanOrder::Forward}.optimize(
-                n, map, ridSlot);
+            SBENodeLowering{
+                env, *runtimeEnv, *ids, inputParamToSlotMap, md, _nodeMap, ScanOrder::Forward}
+                .optimize(n, map, ridSlot);
         sbe::DebugPrinter printer;
         stream << stripUUIDs(printer.print(*planStage)) << std::endl;
 
@@ -175,19 +180,41 @@ protected:
         runNodeVariation(gctx, name, n, &runtimeEnv, &ids, collIndexDefs, scanDefs);
     }
 
+    std::string autoUpdateExpressionVariation(const ABT& n) {
+        auto env = VariableEnvironment::build(n);
+        SlotVarMap map;
+        sbe::RuntimeEnvironment runtimeEnv;
+        sbe::value::SlotIdGenerator ids;
+        Metadata metadata;
+        NodeProps np;
+        auto expr =
+            optimizer::SBEExpressionLowering{
+                env, map, runtimeEnv, ids, inputParamToSlotMap, &metadata, &np}
+                .optimize(n);
+        return expr->toString();
+    }
+
     ScanDefinition buildScanDefinition(
         opt::unordered_map<std::string, IndexDefinition> indexDefs = {},
         DistributionAndPaths dnp = DistributionAndPaths(DistributionType::Centralized),
         ShardingMetadata shardingMetadata = ShardingMetadata{}) {
         ScanDefOptions opts;
         opts.insert({"type", "mongod"});
-        opts.insert({"database", "test"});
-        opts.insert({"uuid", UUID::gen().toString()});
-
         MultikeynessTrie trie;
+        IndexedFieldPaths indexedFieldPaths;
         bool exists = true;
         CEType ce{false};
-        return ScanDefinition(opts, indexDefs, trie, dnp, exists, ce, shardingMetadata);
+        return ScanDefinition(DatabaseNameUtil::deserialize(
+                                  boost::none, "test", SerializationContext::stateDefault()),
+                              UUID::gen(),
+                              opts,
+                              indexDefs,
+                              trie,
+                              dnp,
+                              exists,
+                              ce,
+                              shardingMetadata,
+                              indexedFieldPaths);
     }
 
     // Does not add the node to the Node map, must be called inside '_node()'.
@@ -288,6 +315,14 @@ protected:
         return makeEquals(make<Variable>(ProjectionName(lhs)), rhs);
     }
 
+    boost::optional<sbe::value::SlotId> getSlotId(MatchExpression::InputParamId paramId) const {
+        auto it = inputParamToSlotMap.find(paramId);
+        if (it != inputParamToSlotMap.end()) {
+            return it->second;
+        }
+        return boost::none;
+    }
+
 private:
     int32_t lastNodeGenerated = 0;
 };
@@ -354,7 +389,7 @@ TEST_F(ABTPlanGeneration, LowerShardFiltering) {
                   filterNodeProps);
         runNodeVariation(ctx,
                          "Shard Filtering with Top Level Fields",
-                         std::move(filterNode),
+                         filterNode,
                          &runtimeEnv,
                          &ids,
                          boost::none,
@@ -403,7 +438,7 @@ TEST_F(ABTPlanGeneration, LowerShardFiltering) {
                                 filterNodeProps);
         runNodeVariation(ctx,
                          "Shard Filtering with Dotted Field Path",
-                         std::move(filterNode),
+                         filterNode,
                          &runtimeEnv,
                          &ids,
                          boost::none,
@@ -460,7 +495,7 @@ TEST_F(ABTPlanGeneration, LowerShardFiltering) {
                   filterNodeProps);
         runNodeVariation(ctx,
                          "Shard Filtering with Inlined path",
-                         std::move(filterNode),
+                         filterNode,
                          &runtimeEnv,
                          &ids,
                          boost::none,
@@ -637,6 +672,96 @@ TEST_F(ABTPlanGeneration, LowerFilterNode) {
         _node(make<FilterNode>(_path(make<EvalFilter>(make<PathConstant>(Constant::boolean(true)),
                                                       make<Variable>(scanLabel))),
                                _node(scanForTest()))));
+}
+
+TEST_F(ABTPlanGeneration, LowerFilterNodeParameterized) {
+    GoldenTestContext ctx(&goldenTestConfig);
+    ctx.printTestHeader(GoldenTestContext::HeaderFormat::Text);
+
+    runNodeVariation(
+        ctx,
+        "filter for: a >= Constant",
+        _node(make<FilterNode>(
+            _path(make<EvalFilter>(
+                make<PathGet>(
+                    "a",
+                    make<PathCompare>(
+                        Operations::Gte,
+                        make<FunctionCall>("getParam",
+                                           makeSeq(Constant::int32(0),
+                                                   Constant::int32(static_cast<int32_t>(
+                                                       sbe::value::TypeTags::NumberInt32)))))),
+                make<Variable>(scanLabel))),
+            _node(scanForTest()))));
+
+    // Check that correct sbe slot entry is added to inputParamToSlotMap
+    auto slotId0 = getSlotId(0);
+    ASSERT(slotId0 != boost::none);
+    ASSERT_EQUALS(*slotId0, 2);
+
+    runNodeVariation(
+        ctx,
+        "range conjunction filter for: a >= Constant1, a < Constant2",
+        _node(make<FilterNode>(
+            _path(make<EvalFilter>(
+                make<PathGet>(
+                    "a",
+                    make<PathComposeM>(
+                        make<PathCompare>(
+                            Operations::Gte,
+                            make<FunctionCall>("getParam",
+                                               makeSeq(Constant::int32(1),
+                                                       Constant::int32(static_cast<int32_t>(
+                                                           sbe::value::TypeTags::NumberInt32))))),
+                        make<PathCompare>(
+                            Operations::Lt,
+                            make<FunctionCall>("getParam",
+                                               makeSeq(Constant::int32(2),
+                                                       Constant::int32(static_cast<int32_t>(
+                                                           sbe::value::TypeTags::NumberInt32))))))),
+                make<Variable>(scanLabel))),
+            _node(scanForTest()))));
+
+    // Check that correct sbe slot entry is added to inputParamToSlotMap
+    auto slotId1 = getSlotId(1);
+    ASSERT(slotId1 != boost::none);
+    ASSERT_EQUALS(*slotId1, 2);
+
+    auto slotId2 = getSlotId(2);
+    ASSERT(slotId2 != boost::none);
+    ASSERT_EQUALS(*slotId2, 3);
+
+    runNodeVariation(
+        ctx,
+        "filter for getParam duplicated by the optimizer: a >= Constant1, a < Constant2",
+        _node(make<FilterNode>(
+            _path(make<EvalFilter>(
+                make<PathGet>(
+                    "a",
+                    make<PathComposeM>(
+                        make<PathCompare>(
+                            Operations::Gte,
+                            make<FunctionCall>("getParam",
+                                               makeSeq(Constant::int32(1),
+                                                       Constant::int32(static_cast<int32_t>(
+                                                           sbe::value::TypeTags::NumberInt32))))),
+                        make<PathCompare>(
+                            Operations::Lt,
+                            make<FunctionCall>("getParam",
+                                               makeSeq(Constant::int32(2),
+                                                       Constant::int32(static_cast<int32_t>(
+                                                           sbe::value::TypeTags::NumberInt32))))))),
+                make<Variable>(scanLabel))),
+            _node(scanForTest()))));
+
+    // Check that correct sbe slot entry is added to inputParamToSlotMap
+    slotId1 = getSlotId(1);
+    ASSERT(slotId1 != boost::none);
+    ASSERT_EQUALS(*slotId1, 2);
+
+    slotId2 = getSlotId(2);
+    ASSERT(slotId2 != boost::none);
+    ASSERT_EQUALS(*slotId2, 3);
 }
 
 TEST_F(ABTPlanGeneration, LowerGroupByNode) {
@@ -1160,6 +1285,16 @@ DEATH_TEST_F(ABTPlanGeneration,
     ctx.printTestHeader(GoldenTestContext::HeaderFormat::Text);
 
     runNodeVariation(ctx, "Do not lower scan node", _node(make<ScanNode>("proj0", "scan0")));
+}
+
+TEST_F(ABTPlanGeneration, LowerBinaryOpEqMemberRHSArray) {
+    // Lower BinaryOp [EqMember] where the type of RHS is array.
+    std::string output = autoUpdateExpressionVariation(
+        _binary("EqMember", "hello"_cstr, _carray("1"_cdouble, "2"_cdouble, "3"_cdouble))._n);
+
+    ASSERT_STR_EQ_AUTO(  // NOLINT
+        "isMember(\"hello\", [1L, 2L, 3L]) ",
+        output);
 }
 
 }  // namespace

@@ -34,7 +34,6 @@
 #include <vector>
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/basic_types.h"
@@ -46,6 +45,7 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/projection.h"
+#include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/string_map.h"
@@ -67,9 +67,11 @@ bool sortPatternHasPartsWithCommonPrefix(const SortPattern& sortPattern) {
     return false;
 }
 
-bool isIdHackEligibleQuery(const CollectionPtr& collection, const CanonicalQuery& query) {
-    return isIdHackEligibleQueryWithoutCollator(query.getFindCommandRequest()) &&
-        CollatorInterface::collatorsMatch(query.getCollator(), collection->getDefaultCollator());
+bool isIdHackEligibleQuery(const CollectionPtr& collection,
+                           const FindCommandRequest& findCommand,
+                           const CollatorInterface* queryCollator) {
+    return isIdHackEligibleQueryWithoutCollator(findCommand) &&
+        CollatorInterface::collatorsMatch(queryCollator, collection->getDefaultCollator());
 }
 
 bool isIdHackEligibleQueryWithoutCollator(const FindCommandRequest& findCommand) {
@@ -96,7 +98,8 @@ bool isQuerySbeCompatible(const CollectionPtr* collection, const CanonicalQuery*
     // If we don't support all expressions used or the query is eligible for IDHack, don't use SBE.
     if (!expCtx || expCtx->sbeCompatibility == SbeCompatibility::notCompatible ||
         expCtx->sbePipelineCompatibility == SbeCompatibility::notCompatible ||
-        (*collection && isIdHackEligibleQuery(*collection, *cq))) {
+        (*collection &&
+         isIdHackEligibleQuery(*collection, cq->getFindCommandRequest(), cq->getCollator()))) {
         return false;
     }
 
@@ -107,15 +110,17 @@ bool isQuerySbeCompatible(const CollectionPtr* collection, const CanonicalQuery*
 
     const auto& nss = cq->nss();
 
-    if (!feature_flags::gFeatureFlagTimeSeriesInSbe.isEnabled(
-            serverGlobalParams.featureCompatibility) &&
+    auto& queryKnob = QueryKnobConfiguration::decoration(cq->getExpCtxRaw()->opCtx);
+    if ((!feature_flags::gFeatureFlagTimeSeriesInSbe.isEnabled(
+             serverGlobalParams.featureCompatibility) ||
+         queryKnob.getSbeDisableTimeSeriesForOp()) &&
         nss.isTimeseriesBucketsCollection()) {
         return false;
     }
 
     // Queries against the oplog or a change collection are not supported. Also queries on the inner
-    // side of a $lookup are not considered for SBE.
-    if (expCtx->inLookup || nss.isOplog() || nss.isChangeCollection() ||
+    // side of a $lookup are not considered for SBE except search queries.
+    if ((expCtx->inLookup && !cq->isSearchQuery()) || nss.isOplog() || nss.isChangeCollection() ||
         !cq->metadataDeps().none()) {
         return false;
     }

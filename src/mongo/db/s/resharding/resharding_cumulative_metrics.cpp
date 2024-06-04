@@ -38,6 +38,8 @@
 
 #include <boost/optional/optional.hpp>
 
+#include "mongo/s/resharding/resharding_feature_flag_gen.h"
+
 namespace mongo {
 
 namespace {
@@ -83,8 +85,11 @@ boost::optional<StringData> ReshardingCumulativeMetrics::fieldNameFor(AnyState s
 }
 
 ReshardingCumulativeMetrics::ReshardingCumulativeMetrics()
+    : ReshardingCumulativeMetrics(kResharding) {}
+
+ReshardingCumulativeMetrics::ReshardingCumulativeMetrics(const std::string& rootName)
     : resharding_cumulative_metrics::Base(
-          kResharding, std::make_unique<ReshardingCumulativeMetricsFieldNameProvider>()),
+          rootName, std::make_unique<ReshardingCumulativeMetricsFieldNameProvider>()),
       _fieldNames(
           static_cast<const ReshardingCumulativeMetricsFieldNameProvider*>(getFieldNames())) {}
 
@@ -101,6 +106,54 @@ void ReshardingCumulativeMetrics::reportLatencies(BSONObjBuilder* bob) const {
 void ReshardingCumulativeMetrics::reportCurrentInSteps(BSONObjBuilder* bob) const {
     ShardingDataTransformCumulativeMetrics::reportCurrentInSteps(bob);
     reportCountsForAllStates(kReportedStateFieldNamesMap, bob);
+}
+
+void ReshardingCumulativeMetrics::reportForServerStatus(BSONObjBuilder* bob) const {
+    if (!_operationWasAttempted.load()) {
+        return;
+    }
+
+    BSONObjBuilder root(bob->subobjStart(_rootSectionName));
+    if (_rootSectionName == kResharding &&
+        resharding::gFeatureFlagReshardingImprovements.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+        root.append(_fieldNames->getForCountSameKeyStarted(), _countSameKeyStarted.load());
+        root.append(_fieldNames->getForCountSameKeySucceeded(), _countSameKeySucceeded.load());
+        root.append(_fieldNames->getForCountSameKeyFailed(), _countSameKeyFailed.load());
+        root.append(_fieldNames->getForCountSameKeyCanceled(), _countSameKeyCancelled.load());
+    }
+    {
+        BSONObjBuilder builder;
+        Base::reportForServerStatus(&builder);
+        root.appendElementsUnique(builder.obj().getObjectField(_rootSectionName));
+    }
+}
+
+void ReshardingCumulativeMetrics::onStarted(bool isSameKeyResharding) {
+    if (_rootSectionName == kResharding && isSameKeyResharding) {
+        _countSameKeyStarted.fetchAndAdd(1);
+    }
+    Base::onStarted();
+}
+
+void ReshardingCumulativeMetrics::onSuccess(bool isSameKeyResharding) {
+    if (_rootSectionName == kResharding && isSameKeyResharding) {
+        _countSameKeySucceeded.fetchAndAdd(1);
+    }
+    Base::onSuccess();
+}
+
+void ReshardingCumulativeMetrics::onFailure(bool isSameKeyResharding) {
+    if (_rootSectionName == kResharding && isSameKeyResharding) {
+        _countSameKeyFailed.fetchAndAdd(1);
+    }
+    Base::onFailure();
+}
+
+void ReshardingCumulativeMetrics::onCanceled(bool isSameKeyResharding) {
+    if (_rootSectionName == kResharding && isSameKeyResharding) {
+        _countSameKeyCancelled.fetchAndAdd(1);
+    }
+    Base::onCanceled();
 }
 
 }  // namespace mongo

@@ -32,7 +32,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <exception>
 #include <list>
@@ -44,6 +43,7 @@
 #include "mongo/db/default_baton.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/recovery_unit_noop.h"
@@ -53,7 +53,7 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/session.h"
-#include "mongo/transport/transport_layer.h"
+#include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/scopeguard.h"
@@ -105,23 +105,76 @@ void setGlobalServiceContext(ServiceContext::UniqueServiceContext&& serviceConte
     globalServiceContext = serviceContext.release();
 }
 
+logv2::LogService toLogService(Service* service) {
+    return toLogService(service ? service->role() : ClusterRole::None);
+}
+
+/**
+ * The global clusterRole determines which services are initialized.
+ * If no role is set, then ShardServer is assumed, so there's always
+ * at least one Service created.
+ */
+struct ServiceContext::ServiceSet {
+public:
+    explicit ServiceSet(ServiceContext* sc) {
+        auto role = serverGlobalParams.clusterRole;
+        if (!role.has(ClusterRole::RouterServer))
+            role += ClusterRole::ShardServer;
+        if (role.has(ClusterRole::RouterServer))
+            _router = std::make_unique<Service>(sc, ClusterRole::RouterServer);
+        if (role.has(ClusterRole::ShardServer))
+            _shard = std::make_unique<Service>(sc, ClusterRole::ShardServer);
+    }
+
+    /** The `role` here must be ShardServer or RouterServer exactly. */
+    Service* getService(ClusterRole role) {
+        if (role.hasExclusively(ClusterRole::ShardServer))
+            return _shard.get();
+        if (role.hasExclusively(ClusterRole::RouterServer))
+            return _router.get();
+        MONGO_UNREACHABLE;
+    }
+
+private:
+    std::unique_ptr<Service> _shard;
+    std::unique_ptr<Service> _router;
+};
+
+Service::~Service() = default;
+Service::Service(ServiceContext* sc, ClusterRole role) : _sc{sc}, _role{role} {}
+
 ServiceContext::ServiceContext()
     : _opIdRegistry(UniqueOperationIdRegistry::create()),
       _tickSource(makeSystemTickSource()),
       _fastClockSource(std::make_unique<SystemClockSource>()),
-      _preciseClockSource(std::make_unique<SystemClockSource>()) {}
+      _preciseClockSource(std::make_unique<SystemClockSource>()),
+      _serviceSet(std::make_unique<ServiceSet>(this)) {}
 
 
 ServiceContext::~ServiceContext() {
     stdx::lock_guard<Latch> lk(_mutex);
     for (const auto& client : _clients) {
         LOGV2_ERROR(23828,
-                    "{client} exists while destroying {serviceContext}",
                     "Non-empty client list when destroying service context",
                     "client"_attr = client->desc(),
                     "serviceContext"_attr = reinterpret_cast<uint64_t>(this));
     }
     invariant(_clients.empty());
+}
+
+Service* ServiceContext::getService(ClusterRole role) const {
+    return _serviceSet->getService(role);
+}
+
+Service* ServiceContext::getService() const {
+    for (auto role : {ClusterRole::ShardServer, ClusterRole::RouterServer})
+        if (auto p = getService(role))
+            return p;
+    MONGO_UNREACHABLE;
+}
+
+void Service::setServiceEntryPoint(std::unique_ptr<ServiceEntryPoint> sep) {
+    _serviceEntryPoint = std::move(sep);
 }
 
 namespace {
@@ -176,9 +229,9 @@ void onCreate(T* object, const ObserversContainer& observers) {
 
 }  // namespace
 
-ServiceContext::UniqueClient ServiceContext::makeClient(
-    std::string desc, std::shared_ptr<transport::Session> session) {
-    std::unique_ptr<Client> client(new Client(std::move(desc), this, std::move(session)));
+ServiceContext::UniqueClient ServiceContext::makeClientForService(
+    std::string desc, std::shared_ptr<transport::Session> session, Service* service) {
+    std::unique_ptr<Client> client(new Client(std::move(desc), service, std::move(session)));
     onCreate(client.get(), _clientObservers);
     {
         stdx::lock_guard<Latch> lk(_mutex);
@@ -196,12 +249,8 @@ PeriodicRunner* ServiceContext::getPeriodicRunner() const {
     return _runner.get();
 }
 
-transport::TransportLayer* ServiceContext::getTransportLayer() const {
-    return _transportLayer.get();
-}
-
-ServiceEntryPoint* ServiceContext::getServiceEntryPoint() const {
-    return _serviceEntryPoint.get();
+transport::TransportLayerManager* ServiceContext::getTransportLayerManager() const {
+    return _transportLayerManager.get();
 }
 
 void ServiceContext::setStorageEngine(std::unique_ptr<StorageEngine> engine) {
@@ -226,12 +275,9 @@ void ServiceContext::setPreciseClockSource(std::unique_ptr<ClockSource> newSourc
     _preciseClockSource = std::move(newSource);
 }
 
-void ServiceContext::setServiceEntryPoint(std::unique_ptr<ServiceEntryPoint> sep) {
-    _serviceEntryPoint = std::move(sep);
-}
-
-void ServiceContext::setTransportLayer(std::unique_ptr<transport::TransportLayer> tl) {
-    _transportLayer = std::move(tl);
+void ServiceContext::setTransportLayerManager(
+    std::unique_ptr<transport::TransportLayerManager> tl) {
+    _transportLayerManager = std::move(tl);
 }
 
 void ServiceContext::ClientDeleter::operator()(Client* client) const {
@@ -263,15 +309,18 @@ ServiceContext::UniqueOperationContext ServiceContext::makeOperationContext(Clie
     onCreate(opCtx.get(), _clientObservers);
     ScopeGuard onCreateGuard([&] { onDestroy(opCtx.get(), _clientObservers); });
 
-    invariant(opCtx->lockState(), ProcessInfo().getProcessName());
+    invariant(
+        opCtx->lockState(),
+        str::stream() << "No lock state configured. This could be a missing build dependency. "
+                      << ProcessInfo().getProcessName());
 
     if (!opCtx->recoveryUnit()) {
         opCtx->setRecoveryUnit(std::make_unique<RecoveryUnitNoop>(),
                                WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
     }
     // The baton must be attached before attaching to a client
-    if (_transportLayer) {
-        _transportLayer->makeBaton(opCtx.get());
+    if (_transportLayerManager) {
+        _transportLayerManager->getEgressLayer()->makeBaton(opCtx.get());
     } else {
         makeBaton(opCtx.get());
     }
@@ -423,6 +472,16 @@ void ServiceContext::_delistOperation(OperationContext* opCtx) noexcept {
     }
 
     opCtx->releaseOperationKey();
+}
+
+void ServiceContext::delistOperation(OperationContext* opCtx) noexcept {
+    auto client = opCtx->getClient();
+    invariant(client);
+
+    auto service = client->getServiceContext();
+    invariant(service == this);
+
+    _delistOperation(opCtx);
 }
 
 void ServiceContext::killAndDelistOperation(OperationContext* opCtx,

@@ -39,7 +39,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/parse_number.h"
@@ -108,6 +107,13 @@ WiredTigerRecoveryUnit::WiredTigerRecoveryUnit(WiredTigerSessionCache* sc,
 WiredTigerRecoveryUnit::~WiredTigerRecoveryUnit() {
     invariant(!_inUnitOfWork(), toString(_getState()));
     _abort();
+
+    // If the session has non zero timeout then reset it back to 0 before returning the session back
+    // to the cache.
+    if (durationCount<Milliseconds>(_cacheMaxWaitTimeout)) {
+        auto wtSession = getSessionNoTxn()->getSession();
+        invariantWTOK(wtSession->reconfigure(wtSession, "cache_max_wait_ms=0"), wtSession);
+    }
 }
 
 void WiredTigerRecoveryUnit::_commit() {
@@ -223,10 +229,7 @@ void WiredTigerRecoveryUnit::assertInActiveTxn() const {
     if (_isActive()) {
         return;
     }
-    LOGV2_FATAL(28575,
-                "Recovery unit is not active. Current state: {currentState}",
-                "Recovery unit is not active.",
-                "currentState"_attr = _getState());
+    LOGV2_FATAL(28575, "Recovery unit is not active.", "currentState"_attr = _getState());
 }
 
 void WiredTigerRecoveryUnit::setTxnModified() {
@@ -931,4 +934,15 @@ void WiredTigerRecoveryUnit::storeWriteContextForDebugging(const BSONObj& info) 
     _writeContextForDebugging.push_back(info);
 }
 
+void WiredTigerRecoveryUnit::setCacheMaxWaitTimeout(Milliseconds timeout) {
+    _cacheMaxWaitTimeout = timeout;
+
+    auto wtSession = getSessionNoTxn()->getSession();
+    invariantWTOK(
+        wtSession->reconfigure(
+            wtSession,
+            fmt::format("cache_max_wait_ms={}", durationCount<Milliseconds>(_cacheMaxWaitTimeout))
+                .c_str()),
+        wtSession);
+}
 }  // namespace mongo

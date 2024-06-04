@@ -38,7 +38,6 @@
 #include <utility>
 #include <vector>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -105,7 +104,6 @@ public:
 void logAndThrowWithErrnoAt(StringData expr, StringData file, unsigned line) {
     auto ec = lastPosixError();
     LOGV2_ERROR(24138,
-                "{expr} failed: {error} @{file}:{line}",
                 "expression failed",
                 "expr"_attr = expr,
                 "error"_attr = errorMessage(ec),

@@ -48,7 +48,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/config.h"     // IWYU pragma: keep
@@ -118,7 +117,6 @@ void setOSThreadName(const std::string& threadName) {
     int error = pthread_setname_np(threadNameCopy.c_str());
     if (error) {
         LOGV2(23102,
-              "Ignoring error from setting thread name: {error}",
               "Ignoring error from setting thread name",
               "error"_attr = errorMessage(posixError(error)));
     }
@@ -143,10 +141,7 @@ void setOSThreadName(const std::string& threadName) {
 
     int error = pthread_setname_np(pthread_self(), truncName);
     if (auto ec = posixError(error)) {
-        LOGV2(23103,
-              "Ignoring error from setting thread name: {error}",
-              "Ignoring error from setting thread name",
-              "error"_attr = errorMessage(ec));
+        LOGV2(23103, "Ignoring error from setting thread name", "error"_attr = errorMessage(ec));
     }
 #endif
 }

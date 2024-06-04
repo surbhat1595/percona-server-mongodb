@@ -128,6 +128,7 @@ const allCommands = {
     _shardsvrSetUserWriteBlockMode: {skip: isPrimaryOnly},
     _shardsvrUnregisterIndex: {skip: isPrimaryOnly},
     _shardsvrValidateShardKeyCandidate: {skip: isPrimaryOnly},
+    _shardsvrCoordinateMultiUpdate: {skip: isAnInternalCommand},
     _shardsvrCollMod: {skip: isPrimaryOnly},
     _shardsvrCollModParticipant: {skip: isAnInternalCommand},
     _shardsvrParticipantBlock: {skip: isAnInternalCommand},
@@ -146,6 +147,7 @@ const allCommands = {
     abortMoveCollection: {skip: isPrimaryOnly},
     abortReshardCollection: {skip: isPrimaryOnly},
     abortTransaction: {skip: isPrimaryOnly},
+    abortUnshardCollection: {skip: isPrimaryOnly},
     aggregate: {
         command: {aggregate: collName, pipeline: [{$match: {}}], cursor: {}},
         expectFailure: true,
@@ -440,7 +442,7 @@ const allCommands = {
     voteCommitImportCollection: {skip: isNotAUserDataRead},
     voteCommitIndexBuild: {skip: isNotAUserDataRead},
     waitForFailPoint: {skip: isNotAUserDataRead},
-    waitForOngoingChunkSplits: {skip: isNotAUserDataRead},
+    getShardingReady: {skip: isNotAUserDataRead},
     whatsmysni: {skip: isNotAUserDataRead},
     whatsmyuri: {skip: isNotAUserDataRead}
 };

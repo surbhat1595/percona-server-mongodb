@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 #include "ticket_pool.h"
 
@@ -37,7 +36,6 @@
 #include <string>
 // IWYU pragma: no_include "syscall.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #ifndef _WIN32
 // TODO SERVER-72616: Remove futex usage from this class in favour of atomic waits.
@@ -57,6 +55,9 @@
 #if defined(MONGO_CONFIG_HAVE_HEADER_UNISTD_H)
 #include <unistd.h>
 #endif
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
+
 
 namespace mongo {
 namespace {

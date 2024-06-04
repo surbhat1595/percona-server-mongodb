@@ -112,58 +112,7 @@ TEST_F(NamespaceStringTest, Oplog) {
     ASSERT(NamespaceString::oplog("local.oplog.$foo"));
 }
 
-TEST_F(NamespaceStringTest, DatabaseValidNames) {
-    ASSERT(NamespaceString::validDBName("foo", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(NamespaceString::validDBName("foo$bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo/bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo.bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo\\bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo\"bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("a\0b"_sd, NamespaceString::DollarInDbNameBehavior::Allow));
-#ifdef _WIN32
-    ASSERT(
-        !NamespaceString::validDBName("foo*bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo<bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo>bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo:bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo|bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo?bar", NamespaceString::DollarInDbNameBehavior::Allow));
-#endif
-
-    ASSERT(NamespaceString::validDBName("foo"));
-    ASSERT(!NamespaceString::validDBName("foo$bar"));
-    ASSERT(!NamespaceString::validDBName("foo/bar"));
-    ASSERT(!NamespaceString::validDBName("foo bar"));
-    ASSERT(!NamespaceString::validDBName("foo.bar"));
-    ASSERT(!NamespaceString::validDBName("foo\\bar"));
-    ASSERT(!NamespaceString::validDBName("foo\"bar"));
-    ASSERT(!NamespaceString::validDBName("a\0b"_sd));
-#ifdef _WIN32
-    ASSERT(!NamespaceString::validDBName("foo*bar"));
-    ASSERT(!NamespaceString::validDBName("foo<bar"));
-    ASSERT(!NamespaceString::validDBName("foo>bar"));
-    ASSERT(!NamespaceString::validDBName("foo:bar"));
-    ASSERT(!NamespaceString::validDBName("foo|bar"));
-    ASSERT(!NamespaceString::validDBName("foo?bar"));
-#endif
-
-    ASSERT(NamespaceString::validDBName(
-        "ThisIsADatabaseNameThatBrokeAllRecordsForValidLengthForDBName63"));
-    ASSERT(!NamespaceString::validDBName(
-        "WhileThisDatabaseNameExceedsTheMaximumLengthForDatabaseNamesof63"));
-
+TEST_F(NamespaceStringTest, CheckNamespaceStringConstructor) {
     ASSERT_THROWS_CODE(
         makeNamespaceString(boost::none,
                             "WhileThisDatabaseNameExceedsTheMaximumLengthForDatabaseNamesof63"),
@@ -626,6 +575,54 @@ TEST_F(NamespaceStringTest, CompareNSSWithTenantId) {
     ASSERT_LT(ns1, ns2);
     ASSERT_LT(ns1, ns3);
     ASSERT_GT(ns3, ns2);
+}
+
+TEST_F(NamespaceStringTest, EmptyNamespaceString) {
+    const auto emptyNss = NamespaceString();
+    const auto kEmptyNss = NamespaceString::kEmpty;
+    ASSERT_EQ(emptyNss, kEmptyNss);
+    ASSERT_EQ(emptyNss.toStringForErrorMsg(), kEmptyNss.toStringForErrorMsg());
+    ASSERT_EQ(emptyNss.dbName(), DatabaseName::kEmpty);
+    ASSERT_EQ(emptyNss.coll().empty(), true);
+    ASSERT_EQ(emptyNss.toStringForErrorMsg(), "");
+}
+
+TEST_F(NamespaceStringTest, isDbOnly) {
+    TenantId tenantId(OID::gen());
+
+    // Namespaces that should succeed validation because of being db only.
+    const std::vector<NamespaceString> dbOnlyNamespaces = {
+        makeNamespaceString(boost::none, "foo"),
+        makeNamespaceString(tenantId, "foo"),
+        makeNamespaceString(boost::none, "foo."),  // ignores the period
+        makeNamespaceString(tenantId, "foo."),     // ignores the period
+        makeNamespaceString(boost::none, "."),     // ignores the period, empty db
+        makeNamespaceString(tenantId, "."),        // ignores the period, `tenantId_`
+        NamespaceString::createNamespaceString_forTest(
+            DatabaseName::createDatabaseName_forTest(boost::none, "foo")),
+        NamespaceString::createNamespaceString_forTest(
+            DatabaseName::createDatabaseName_forTest(tenantId, "foo")),
+        makeNamespaceString(DatabaseName::createDatabaseName_forTest(boost::none, "foo"), ""),
+        makeNamespaceString(DatabaseName::createDatabaseName_forTest(tenantId, "foo"), ""),
+        NamespaceString(),
+        NamespaceString::kEmpty};
+
+    // Namespaces that should fail validation because of the coll.
+    const std::vector<NamespaceString> dbAndCollNamespaces = {
+        makeNamespaceString(boost::none, "foo.a"),
+        makeNamespaceString(tenantId, "foo.a"),
+        makeNamespaceString(DatabaseName::createDatabaseName_forTest(boost::none, "foo"), "bar"),
+        NamespaceString::createNamespaceString_forTest(
+            DatabaseName::createDatabaseName_forTest(tenantId, "foo"), "bar")};
+
+    for (const auto& nss : dbOnlyNamespaces) {
+        std::cout << "nss=" << nss.toStringForErrorMsg() << std::endl;
+        ASSERT_TRUE(nss.isDbOnly());
+    }
+
+    for (const auto& nss : dbAndCollNamespaces) {
+        ASSERT_FALSE(nss.isDbOnly());
+    }
 }
 
 }  // namespace

@@ -91,8 +91,10 @@ namespace {
 void createQEClusteredStateCollection(OperationContext* opCtx, const NamespaceString& nss) {
     CreateCommand createCmd(nss);
     mongo::ClusteredIndexSpec clusterIdxSpec(BSON("_id" << 1), true);
-    createCmd.setClusteredIndex(
+    CreateCollectionRequest request;
+    request.setClusteredIndex(
         stdx::variant<bool, mongo::ClusteredIndexSpec>(std::move(clusterIdxSpec)));
+    createCmd.setCreateCollectionRequest(std::move(request));
     auto status = createCollection(opCtx, createCmd);
     if (!status.isOK()) {
         if (status != ErrorCodes::NamespaceExists) {
@@ -140,7 +142,10 @@ void dropQEStateCollection(OperationContext* opCtx, const NamespaceString& nss) 
  */
 CleanupStats cleanupEncryptedCollection(OperationContext* opCtx,
                                         const CleanupStructuredEncryptionData& request) {
-    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+    }
 
     uassert(7618803,
             str::stream() << "Feature flag `FLE2CleanupCommand` must be enabled to run "
@@ -344,7 +349,7 @@ public:
         return {CleanupStructuredEncryptionData::kCleanupTokensFieldName};
     }
 };
-MONGO_REGISTER_COMMAND(CleanupStructuredEncryptionDataCmd);
+MONGO_REGISTER_COMMAND(CleanupStructuredEncryptionDataCmd).forShard();
 
 
 }  // namespace

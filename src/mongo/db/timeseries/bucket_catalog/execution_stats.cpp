@@ -105,6 +105,11 @@ void ExecutionStatsController::incNumCommits(long long increment) {
     _globalStats.numCommits.fetchAndAddRelaxed(increment);
 }
 
+void ExecutionStatsController::incNumMeasurementsGroupCommitted(long long increment) {
+    _collectionStats->numMeasurementsGroupCommitted.fetchAndAddRelaxed(increment);
+    _globalStats.numMeasurementsGroupCommitted.fetchAndAddRelaxed(increment);
+}
+
 void ExecutionStatsController::incNumWaits(long long increment) {
     _collectionStats->numWaits.fetchAndAddRelaxed(increment);
     _globalStats.numWaits.fetchAndAddRelaxed(increment);
@@ -173,6 +178,8 @@ void appendExecutionStatsToBuilder(const ExecutionStats& stats, BSONObjBuilder& 
 
     auto commits = stats.numCommits.load();
     builder.appendNumber("numCommits", commits);
+    builder.appendNumber("numMeasurementsGroupCommitted",
+                         stats.numMeasurementsGroupCommitted.load());
     builder.appendNumber("numWaits", stats.numWaits.load());
     auto measurementsCommitted = stats.numMeasurementsCommitted.load();
     builder.appendNumber("numMeasurementsCommitted", measurementsCommitted);
@@ -180,27 +187,23 @@ void appendExecutionStatsToBuilder(const ExecutionStats& stats, BSONObjBuilder& 
         builder.appendNumber("avgNumMeasurementsPerCommit", measurementsCommitted / commits);
     }
 
-    if (feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
-        builder.appendNumber("numBucketsClosedDueToReopening",
-                             stats.numBucketsClosedDueToReopening.load());
-        builder.appendNumber("numBucketsArchivedDueToMemoryThreshold",
-                             stats.numBucketsArchivedDueToMemoryThreshold.load());
-        builder.appendNumber("numBucketsArchivedDueToTimeBackward",
-                             stats.numBucketsArchivedDueToTimeBackward.load());
-        builder.appendNumber("numBucketsReopened", stats.numBucketsReopened.load());
-        builder.appendNumber("numBucketsKeptOpenDueToLargeMeasurements",
-                             stats.numBucketsKeptOpenDueToLargeMeasurements.load());
-        builder.appendNumber("numBucketsClosedDueToCachePressure",
-                             stats.numBucketsClosedDueToCachePressure.load());
-        builder.appendNumber("numBucketsFetched", stats.numBucketsFetched.load());
-        builder.appendNumber("numBucketsQueried", stats.numBucketsQueried.load());
-        builder.appendNumber("numBucketFetchesFailed", stats.numBucketFetchesFailed.load());
-        builder.appendNumber("numBucketQueriesFailed", stats.numBucketQueriesFailed.load());
-        builder.appendNumber("numBucketReopeningsFailed", stats.numBucketReopeningsFailed.load());
-        builder.appendNumber("numDuplicateBucketsReopened",
-                             stats.numDuplicateBucketsReopened.load());
-    }
+    builder.appendNumber("numBucketsClosedDueToReopening",
+                         stats.numBucketsClosedDueToReopening.load());
+    builder.appendNumber("numBucketsArchivedDueToMemoryThreshold",
+                         stats.numBucketsArchivedDueToMemoryThreshold.load());
+    builder.appendNumber("numBucketsArchivedDueToTimeBackward",
+                         stats.numBucketsArchivedDueToTimeBackward.load());
+    builder.appendNumber("numBucketsReopened", stats.numBucketsReopened.load());
+    builder.appendNumber("numBucketsKeptOpenDueToLargeMeasurements",
+                         stats.numBucketsKeptOpenDueToLargeMeasurements.load());
+    builder.appendNumber("numBucketsClosedDueToCachePressure",
+                         stats.numBucketsClosedDueToCachePressure.load());
+    builder.appendNumber("numBucketsFetched", stats.numBucketsFetched.load());
+    builder.appendNumber("numBucketsQueried", stats.numBucketsQueried.load());
+    builder.appendNumber("numBucketFetchesFailed", stats.numBucketFetchesFailed.load());
+    builder.appendNumber("numBucketQueriesFailed", stats.numBucketQueriesFailed.load());
+    builder.appendNumber("numBucketReopeningsFailed", stats.numBucketReopeningsFailed.load());
+    builder.appendNumber("numDuplicateBucketsReopened", stats.numDuplicateBucketsReopened.load());
 }
 
 void addCollectionExecutionStats(ExecutionStatsController& stats, const ExecutionStats& collStats) {
@@ -222,6 +225,7 @@ void addCollectionExecutionStats(ExecutionStatsController& stats, const Executio
     stats.incNumBucketsArchivedDueToTimeBackward(
         collStats.numBucketsArchivedDueToTimeBackward.load());
     stats.incNumCommits(collStats.numCommits.load());
+    stats.incNumMeasurementsGroupCommitted(collStats.numMeasurementsGroupCommitted.load());
     stats.incNumWaits(collStats.numWaits.load());
     stats.incNumMeasurementsCommitted(collStats.numMeasurementsCommitted.load());
     stats.incNumBucketsReopened(collStats.numBucketsReopened.load());

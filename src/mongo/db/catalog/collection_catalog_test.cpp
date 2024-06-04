@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <algorithm>
 #include <map>
@@ -592,7 +591,37 @@ TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNames) {
     catalog.deregisterAllCollectionsAndViews(getServiceContext());
 }
 
+TEST_F(CollectionCatalogTest, GetAllDbNamesForTenantMultitenancyFalse) {
+    TenantId tid1 = TenantId(OID::gen());
+    TenantId tid2 = TenantId(OID::gen());
+    // This is extremely contrived as we shouldn't be able to create nss's with tenantIds in
+    // multitenancySupport=false mode, but the behavior of getAllDbNamesForTenant should be well
+    // defined even in the event of a rollback.
+    NamespaceString testDb = NamespaceString::createNamespaceString_forTest(boost::none, "testdb");
+    NamespaceString dbA = NamespaceString::createNamespaceString_forTest(tid1, "dbA.collA");
+    NamespaceString dbB = NamespaceString::createNamespaceString_forTest(tid1, "dbB.collA");
+    NamespaceString dbC = NamespaceString::createNamespaceString_forTest(tid1, "dbC.collA");
+    NamespaceString dbD = NamespaceString::createNamespaceString_forTest(tid2, "dbB.collA");
+
+    std::vector<NamespaceString> nsss = {testDb, dbA, dbB, dbC, dbD};
+    for (auto& nss : nsss) {
+        std::shared_ptr<Collection> newColl = std::make_shared<CollectionMock>(nss);
+        catalog.registerCollection(opCtx.get(), std::move(newColl), boost::none);
+    }
+
+    std::vector<DatabaseName> allDbNames = {
+        DatabaseName::createDatabaseName_forTest(boost::none, "testdb"),
+        DatabaseName::createDatabaseName_forTest(tid1, "dbA"),
+        DatabaseName::createDatabaseName_forTest(tid1, "dbB"),
+        DatabaseName::createDatabaseName_forTest(tid1, "dbC"),
+        DatabaseName::createDatabaseName_forTest(tid2, "dbB")};
+    ASSERT_EQ(catalog.getAllDbNamesForTenant(boost::none), allDbNames);
+
+    catalog.deregisterAllCollectionsAndViews(getServiceContext());
+}
+
 TEST_F(CollectionCatalogTest, GetAllDbNamesForTenant) {
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     TenantId tid1 = TenantId(OID::gen());
     TenantId tid2 = TenantId(OID::gen());
     NamespaceString dbA = NamespaceString::createNamespaceString_forTest(tid1, "dbA.collA");
@@ -610,17 +639,33 @@ TEST_F(CollectionCatalogTest, GetAllDbNamesForTenant) {
         DatabaseName::createDatabaseName_forTest(tid1, "dbA"),
         DatabaseName::createDatabaseName_forTest(tid1, "dbB"),
         DatabaseName::createDatabaseName_forTest(tid1, "dbC")};
-    ASSERT(catalog.getAllDbNamesForTenant(tid1) == dbNamesForTid1);
+    ASSERT_EQ(catalog.getAllDbNamesForTenant(tid1), dbNamesForTid1);
 
     std::vector<DatabaseName> dbNamesForTid2 = {
         DatabaseName::createDatabaseName_forTest(tid2, "dbB")};
-    ASSERT(catalog.getAllDbNamesForTenant(tid2) == dbNamesForTid2);
+    ASSERT_EQ(catalog.getAllDbNamesForTenant(tid2), dbNamesForTid2);
+
+    catalog.deregisterAllCollectionsAndViews(getServiceContext());
+}
+
+TEST_F(CollectionCatalogTest, GetAllTenantsMultitenancyFalse) {
+    std::vector<NamespaceString> nsss = {
+        NamespaceString::createNamespaceString_forTest(boost::none, "a"),
+        NamespaceString::createNamespaceString_forTest(boost::none, "c"),
+        NamespaceString::createNamespaceString_forTest(boost::none, "l")};
+
+    for (auto& nss : nsss) {
+        std::shared_ptr<Collection> newColl = std::make_shared<CollectionMock>(nss);
+        catalog.registerCollection(opCtx.get(), std::move(newColl), boost::none);
+    }
+
+    ASSERT_EQ(catalog.getAllTenants(), std::set<TenantId>());
 
     catalog.deregisterAllCollectionsAndViews(getServiceContext());
 }
 
 TEST_F(CollectionCatalogTest, GetAllTenants) {
-    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     TenantId tid1 = TenantId(OID::gen());
     TenantId tid2 = TenantId(OID::gen());
     std::vector<NamespaceString> nsss = {
@@ -1197,7 +1242,7 @@ private:
         int numCalls = 0;
 
         stdx::thread t([&, svcCtx = getServiceContext()] {
-            ThreadClient client(svcCtx);
+            ThreadClient client(svcCtx->getService());
             auto newOpCtx = client->makeOperationContext();
             _setupDDLOperation(newOpCtx.get(), timestamp);
 
@@ -1408,7 +1453,7 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollection) {
     // Verify that the CollectionCatalog returns the latest collection with the index present. This
     // has to be done in an alternative client as we already have an open snapshot from an earlier
     // point-in-time above.
-    auto newClient = opCtx->getServiceContext()->makeClient("AlternativeClient");
+    auto newClient = opCtx->getServiceContext()->getService()->makeClient("AlternativeClient");
     AlternativeClientRegion acr(newClient);
     auto newOpCtx = cc().makeOperationContext();
     auto latestColl =
@@ -1452,7 +1497,7 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollectionWithIndex) {
 
     // Verify that the CollectionCatalog returns the latest collection. This has to be done in an
     // alternative client as we already have an open snapshot from an earlier point-in-time above.
-    auto newClient = opCtx->getServiceContext()->makeClient("AlternativeClient");
+    auto newClient = opCtx->getServiceContext()->getService()->makeClient("AlternativeClient");
     AlternativeClientRegion acr(newClient);
     auto newOpCtx = cc().makeOperationContext();
     auto latestColl =
@@ -1551,7 +1596,7 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollectionWithDropPendingIndex
 
     // Collection is not shared from the latest instance. This has to be done in an  alternative
     // client as we already have an open snapshot from an earlier point-in-time above.
-    auto newClient = opCtx->getServiceContext()->makeClient("AlternativeClient");
+    auto newClient = opCtx->getServiceContext()->getService()->makeClient("AlternativeClient");
     AlternativeClientRegion acr(newClient);
     auto newOpCtx = cc().makeOperationContext();
     auto latestColl =
@@ -1644,7 +1689,7 @@ TEST_F(CollectionCatalogTimestampTest,
 
     // Collection is not shared from the latest instance. This has to be done in an  alternative
     // client as we already have an open snapshot from an earlier point-in-time above.
-    auto newClient = opCtx->getServiceContext()->makeClient("AlternativeClient");
+    auto newClient = opCtx->getServiceContext()->getService()->makeClient("AlternativeClient");
     AlternativeClientRegion acr(newClient);
     auto newOpCtx = cc().makeOperationContext();
     auto latestColl =
@@ -3312,7 +3357,7 @@ TEST_F(CollectionCatalogTimestampTest, IndexCatalogEntryCopying) {
     }
 
     // In a different client, open the latest collection instance and verify the index is not ready.
-    auto newClient = opCtx->getServiceContext()->makeClient("alternativeClient");
+    auto newClient = opCtx->getServiceContext()->getService()->makeClient("alternativeClient");
     auto newOpCtx = newClient->makeOperationContext();
     auto latestCatalog = CollectionCatalog::latest(newOpCtx.get());
     auto latestColl =
@@ -3352,10 +3397,12 @@ TEST_F(CollectionCatalogTimestampTest, MixedModeWrites) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
 
     // Initialize the oldest timestamp.
-    CollectionCatalog::write(opCtx.get(), [](CollectionCatalog& catalog) {
-        catalog.catalogIdTracker().cleanup(Timestamp(1, 1));
-    });
-
+    {
+        Lock::GlobalLock lk{opCtx.get(), MODE_IX};
+        CollectionCatalog::write(opCtx.get(), [](CollectionCatalog& catalog) {
+            catalog.catalogIdTracker().cleanup(Timestamp(1, 1));
+        });
+    }
     // Create and drop the collection. We have a time window where the namespace exists.
     createCollection(opCtx.get(), nss, Timestamp::min(), true /* allowMixedModeWrite */);
     dropCollection(opCtx.get(), nss, Timestamp(10, 10));
@@ -3364,17 +3411,22 @@ TEST_F(CollectionCatalogTimestampTest, MixedModeWrites) {
     createCollection(opCtx.get(), nss, Timestamp::min(), true /* allowMixedModeWrite */);
 
     // Perform collection catalog cleanup.
-    CollectionCatalog::write(opCtx.get(), [](CollectionCatalog& catalog) {
-        catalog.catalogIdTracker().cleanup(Timestamp(20, 20));
-    });
-
+    {
+        Lock::GlobalLock lk{opCtx.get(), MODE_IX};
+        CollectionCatalog::write(opCtx.get(), [](CollectionCatalog& catalog) {
+            catalog.catalogIdTracker().cleanup(Timestamp(20, 20));
+        });
+    }
     // Drop the re-created collection.
     dropCollection(opCtx.get(), nss, Timestamp(30, 30));
 
     // Cleanup again.
-    CollectionCatalog::write(opCtx.get(), [](CollectionCatalog& catalog) {
-        catalog.catalogIdTracker().cleanup(Timestamp(40, 40));
-    });
+    {
+        Lock::GlobalLock lk{opCtx.get(), MODE_IX};
+        CollectionCatalog::write(opCtx.get(), [](CollectionCatalog& catalog) {
+            catalog.catalogIdTracker().cleanup(Timestamp(40, 40));
+        });
+    }
 }
 }  // namespace
 }  // namespace mongo

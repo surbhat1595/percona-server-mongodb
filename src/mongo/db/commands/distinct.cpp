@@ -85,6 +85,7 @@
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_planner_params.h"
+#include "mongo/db/query/query_settings_gen.h"
 #include "mongo/db/query/view_response_formatter.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -153,7 +154,7 @@ public:
         return ReadConcernSupportResult::allSupportedAndDefaultPermitted();
     }
 
-    bool shouldAffectReadConcernCounter() const override {
+    bool shouldAffectReadOptionCounters() const override {
         return true;
     }
 
@@ -222,7 +223,7 @@ public:
         auto parsedDistinct = uassertStatusOK(
             ParsedDistinct::parse(opCtx, nss, cmdObj, extensionsCallback, true, defaultCollator));
 
-        SerializationContext sc = request.getSerializationContext();
+        SerializationContext serializationCtx = request.getSerializationContext();
 
         if (collectionOrView->isView()) {
             // Relinquish locks. The aggregation command will re-acquire them.
@@ -234,8 +235,10 @@ public:
             }
 
             auto viewAggCmd =
-                OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                    nss.dbName(), request.validatedTenancyScope, viewAggregation.getValue())
+                OpMsgRequestBuilder::createWithValidatedTenancyScope(nss.dbName(),
+                                                                     request.validatedTenancyScope,
+                                                                     viewAggregation.getValue(),
+                                                                     serializationCtx)
                     .body;
             auto viewAggRequest = aggregation_request_helper::parseFromBSON(
                 opCtx,
@@ -243,12 +246,12 @@ public:
                 viewAggCmd,
                 verbosity,
                 APIParameters::get(opCtx).getAPIStrict().value_or(false),
-                sc);
+                serializationCtx);
 
             // An empty PrivilegeVector is acceptable because these privileges are only checked
             // on getMore and explain will not open a cursor.
             return runAggregate(
-                opCtx, nss, viewAggRequest, viewAggregation.getValue(), PrivilegeVector(), result);
+                opCtx, viewAggRequest, viewAggregation.getValue(), PrivilegeVector(), result);
         }
 
         const auto& collection = collectionOrView->getCollectionPtr();
@@ -261,7 +264,7 @@ public:
                                collection,
                                verbosity,
                                BSONObj(),
-                               SerializationContext::stateCommandReply(sc),
+                               SerializationContext::stateCommandReply(serializationCtx),
                                cmdObj,
                                &bodyBuilder);
         return Status::OK();
@@ -475,6 +478,7 @@ public:
             keyBob.append("hint", 1);
             keyBob.append("collation", 1);
             keyBob.append("shardVersion", 1);
+            keyBob.append("databaseVersion", 1);
             return keyBob.obj();
         }();
 
@@ -482,7 +486,7 @@ public:
         cmdObj.filterFieldsUndotted(bob, kMirrorableKeys, true);
     }
 };
-MONGO_REGISTER_COMMAND(DistinctCommand);
+MONGO_REGISTER_COMMAND(DistinctCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

@@ -18,8 +18,7 @@ dbForTest.foo.drop();
 var numDocs = 10000;
 
 // shard test.foo and add a split point
-s.adminCommand({enablesharding: "test"});
-s.ensurePrimaryShard('test', s.shard1.shardName);
+s.adminCommand({enablesharding: "test", primaryShard: s.shard1.shardName});
 s.adminCommand({shardcollection: "test.foo", key: {_id: 1}});
 s.adminCommand({split: "test.foo", middle: {_id: numDocs / 2}});
 
@@ -148,13 +147,5 @@ assert(x.code == 13, "fsync on non-admin succeeded, but should have failed: " + 
 // test fsync on admin db
 x = dbForTest._adminCommand("fsync");
 assert(x.ok == 1, "fsync failed: " + tojson(x));
-
-// test fsync+lock on admin db
-const featureFlagClusterFsyncLock =
-    FeatureFlagUtil.isEnabled(s.configRS.getPrimary().getDB('admin'), "ClusterFsyncLock");
-if (!featureFlagClusterFsyncLock) {
-    x = dbForTest._adminCommand({"fsync": 1, lock: true});
-    assert(!x.ok, "lock should fail: " + tojson(x));
-}
 
 s.stop();

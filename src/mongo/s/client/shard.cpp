@@ -28,8 +28,6 @@
  */
 
 
-#include <boost/preprocessor/control/iif.hpp>
-
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
@@ -185,8 +183,6 @@ StatusWith<Shard::CommandResponse> Shard::runCommand(OperationContext* opCtx,
         if (isRetriableError(status.code(), retryPolicy)) {
             LOGV2_DEBUG(22719,
                         2,
-                        "Command {command} failed with retryable error and will be retried. Caused "
-                        "by {error}",
                         "Command failed with retryable error and will be retried",
                         "command"_attr = redact(cmdObj),
                         "error"_attr = redact(status));
@@ -272,8 +268,6 @@ BatchedCommandResponse Shard::runBatchWriteCommand(OperationContext* opCtx,
         if (retry < kOnErrorNumRetries && isRetriableError(writeStatus.code(), retryPolicy)) {
             LOGV2_DEBUG(22721,
                         2,
-                        "Batch write command to shard {shardId} failed with retryable error "
-                        "and will be retried. Caused by {error}",
                         "Batch write command failed with retryable error and will be retried",
                         "shardId"_attr = getId(),
                         "error"_attr = redact(writeStatus));

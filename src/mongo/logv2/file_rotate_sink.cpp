@@ -40,7 +40,6 @@
 #include <boost/iterator/transform_iterator.hpp>
 #include <boost/log/sinks/text_ostream_backend.hpp>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/make_shared_object.hpp>
 #include <boost/smart_ptr/shared_ptr.hpp>
 #include <exception>
@@ -217,6 +216,7 @@ void FileRotateSink::consume(const boost::log::record_view& rec,
                         LogComponent::kControl,
                         Date_t::now(),
                         4522200,
+                        getLogService(),
                         getThreadName(),
                         "Writing to log file failed, aborting application",
                         TypeErasedAttributeStorage(attrs),

@@ -31,7 +31,6 @@
 
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -86,10 +85,11 @@ StatusWith<AggregateCommandRequest> parseFromBSONForTests(
     NamespaceString nss,
     const BSONObj& cmdObj,
     boost::optional<ExplainOptions::Verbosity> explainVerbosity,
-    bool apiStrict) {
+    bool apiStrict,
+    const SerializationContext& serializationContext) {
     try {
         return parseFromBSON(
-            /*opCtx=*/nullptr, nss, cmdObj, explainVerbosity, apiStrict, SerializationContext());
+            /*opCtx=*/nullptr, nss, cmdObj, explainVerbosity, apiStrict, serializationContext);
     } catch (const AssertionException&) {
         return exceptionToStatus();
     }
@@ -99,11 +99,12 @@ StatusWith<AggregateCommandRequest> parseFromBSONForTests(
     const DatabaseName& dbName,
     const BSONObj& cmdObj,
     boost::optional<ExplainOptions::Verbosity> explainVerbosity,
-    bool apiStrict) {
+    bool apiStrict,
+    const SerializationContext& serializationContext) {
     try {
         // TODO SERVER-75930: pass serializationContext in
         return parseFromBSON(
-            /*opCtx=*/nullptr, dbName, cmdObj, explainVerbosity, apiStrict, SerializationContext());
+            /*opCtx=*/nullptr, dbName, cmdObj, explainVerbosity, apiStrict, serializationContext);
     } catch (const AssertionException&) {
         return exceptionToStatus();
     }
@@ -121,7 +122,7 @@ AggregateCommandRequest parseFromBSON(OperationContext* opCtx,
     auto cmdObjBob = BSONObjBuilder{BSON(AggregateCommandRequest::kCommandName << nss.coll())};
     if (!cmdObj.hasField(AggregateCommandRequest::kCommandName) ||
         !cmdObj.hasField(AggregateCommandRequest::kDbNameFieldName)) {
-        cmdObjBob.append("$db", nss.db_deprecated());
+        cmdObjBob.append("$db", DatabaseNameUtil::serialize(nss.dbName(), serializationContext));
         cmdObjBob.appendElementsUnique(cmdObj);
         cmdObjChanged = true;
     }

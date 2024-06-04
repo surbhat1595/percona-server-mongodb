@@ -11,6 +11,11 @@ TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 TestData.skipCheckOrphans = true;
 TestData.skipCheckShardFilteringMetadata = true;
 
+// The routing table consistency check runs with 'snapshot' level readConcern. This readConcern
+// level cannot be satisfied without a replica set primary, which we won't have on the config server
+// because this test removes the config server primary.
+TestData.skipCheckRoutingTableConsistency = true;
+
 var st = new ShardingTest({shards: 2, config: 3});
 
 jsTest.log("Starting sharding batch write tests...");

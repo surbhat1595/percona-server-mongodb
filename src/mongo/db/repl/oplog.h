@@ -30,7 +30,6 @@
 #pragma once
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <functional>
 #include <iosfwd>
@@ -319,6 +318,14 @@ using ApplyImportCollectionFn = std::function<void(OperationContext*,
                                                    OplogApplication::Mode)>;
 
 void registerApplyImportCollectionFn(ApplyImportCollectionFn func);
+
+template <typename F>
+auto writeConflictRetryWithLimit(OperationContext* opCtx,
+                                 StringData opStr,
+                                 const NamespaceStringOrUUID& nssOrUUID,
+                                 F&& f) {
+    return writeConflictRetry(opCtx, opStr, nssOrUUID, f, repl::writeConflictRetryLimit);
+}
 
 }  // namespace repl
 }  // namespace mongo

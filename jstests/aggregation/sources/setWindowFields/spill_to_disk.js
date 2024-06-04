@@ -5,8 +5,11 @@
  * requires_profiling,
  * assumes_read_concern_unchanged,
  * do_not_wrap_aggregations_in_facets,
+ * not_allowed_with_security_token,
  * ]
  */
+import "jstests/libs/sbe_assert_error_override.js";
+
 import {arrayEq} from "jstests/aggregation/extras/utils.js";
 import {
     seedWithTickerData,
@@ -18,12 +21,6 @@ import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 import {setParameterOnAllHosts} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
-
-// TODO SERVER-78709: Implement spilling
-if (checkSBEEnabled(db, ["featureFlagSbeFull"])) {
-    jsTestLog("Skipping the test since spilling is not implemented in SBE yet");
-    quit();
-}
 
 // Doc size was found through logging the size in the SpillableCache. Partition sizes were chosen
 // arbitrarily.
@@ -51,7 +48,12 @@ function checkProfilerForDiskWrite(dbToCheck, expectedFirstStage) {
 function resetProfiler(db) {
     FixtureHelpers.runCommandOnEachPrimary({db: db, cmdObj: {profile: 0}});
     db.system.profile.drop();
-    FixtureHelpers.runCommandOnEachPrimary({db: db, cmdObj: {profile: 2}});
+    // Don't profile the setFCV command, which could be run during this test in the
+    // fcv_upgrade_downgrade_replica_sets_jscore_passthrough suite.
+    FixtureHelpers.runCommandOnEachPrimary({
+        db: db,
+        cmdObj: {profile: 1, filter: {'command.setFeatureCompatibilityVersion': {'$exists': false}}}
+    });
 }
 
 function changeSpillLimit({mode, maxDocs}) {
@@ -61,6 +63,14 @@ function changeSpillLimit({mode, maxDocs}) {
             configureFailPoint: 'overrideMemoryLimitForSpill',
             mode: mode,
             'data': {maxDocsBeforeSpill: maxDocs}
+        }
+    });
+    FixtureHelpers.runCommandOnEachPrimary({
+        db: admin,
+        cmdObj: {
+            configureFailPoint: 'overrideMemoryLimitForSpillForSBEWindowStage',
+            mode: mode,
+            'data': {spillCounter: maxDocs}
         }
     });
 }
@@ -204,16 +214,18 @@ function testUsedDiskAppearsInExplain() {
         {$sort: {_id: 1}}
     ];
 
+    const stageName =
+        checkSBEEnabled(db, ["featureFlagSbeFull"]) ? "window" : "$_internalSetWindowFields";
     let stages = getAggPlanStages(
         coll.explain("allPlansExecution").aggregate(explainPipeline, {allowDiskUse: true}),
-        "$_internalSetWindowFields");
+        stageName);
     assert(stages[0]["usedDisk"], stages);
 
     // Run an explain query with the default memory limit, so 'usedDisk' should be false.
     changeSpillLimit({mode: 'off', maxDocs: null});
     stages = getAggPlanStages(
         coll.explain("allPlansExecution").aggregate(explainPipeline, {allowDiskUse: true}),
-        "$_internalSetWindowFields");
+        stageName);
     assert(!stages[0]["usedDisk"], stages);
 }
 

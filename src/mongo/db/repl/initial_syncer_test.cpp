@@ -184,7 +184,7 @@ class InitialSyncerTest : public executor::ThreadPoolExecutorTest,
                           public SyncSourceSelector,
                           public ScopedGlobalServiceContextForTest {
 public:
-    InitialSyncerTest() : _threadClient(getGlobalServiceContext()) {}
+    InitialSyncerTest() : _threadClient(getGlobalServiceContext()->getService()) {}
 
     executor::ThreadPoolMock::Options makeThreadPoolMockOptions() const override;
     executor::ThreadPoolMock::Options makeClonerThreadPoolMockOptions() const;
@@ -410,7 +410,7 @@ protected:
         dbThreadPoolOptions.minThreads = 1U;
         dbThreadPoolOptions.maxThreads = 1U;
         dbThreadPoolOptions.onCreateThread = [](const std::string& threadName) {
-            Client::initThread(threadName.c_str());
+            Client::initThread(threadName.c_str(), getGlobalServiceContext()->getService());
         };
         _dbWorkThreadPool = std::make_unique<ThreadPool>(dbThreadPoolOptions);
         _dbWorkThreadPool->startup();
@@ -470,7 +470,7 @@ protected:
         threadPoolOptions.minThreads = 1U;
         threadPoolOptions.maxThreads = 1U;
         threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-            Client::initThread(threadName.c_str());
+            Client::initThread(threadName.c_str(), getGlobalServiceContext()->getService());
         };
 
         auto dataReplicatorExternalState = std::make_unique<DataReplicatorExternalStateMock>();
@@ -596,7 +596,7 @@ private:
 executor::ThreadPoolMock::Options InitialSyncerTest::makeThreadPoolMockOptions() const {
     executor::ThreadPoolMock::Options options;
     options.onCreateThread = []() {
-        Client::initThread("InitialSyncerTest");
+        Client::initThread("InitialSyncerTest", getGlobalServiceContext()->getService());
     };
     return options;
 }
@@ -604,7 +604,7 @@ executor::ThreadPoolMock::Options InitialSyncerTest::makeThreadPoolMockOptions()
 executor::ThreadPoolMock::Options InitialSyncerTest::makeClonerThreadPoolMockOptions() const {
     executor::ThreadPoolMock::Options options;
     options.onCreateThread = []() {
-        Client::initThread("ClonerThreadTest");
+        Client::initThread("ClonerThreadTest", getGlobalServiceContext()->getService());
     };
     return options;
 }
@@ -690,11 +690,12 @@ OplogEntry makeOplogEntry(int t,
                               NamespaceString::createNamespaceString_forTest("a.a"),  // namespace
                               boost::none,                                            // uuid
                               boost::none,                                            // fromMigrate
-                              version,                                                // version
-                              oField,                                                 // o
-                              boost::none,                                            // o2
-                              {},                                                     // sessionInfo
-                              boost::none,                                            // upsert
+                              boost::none,            // checkExistenceForDiffInsert
+                              version,                // version
+                              oField,                 // o
+                              boost::none,            // o2
+                              {},                     // sessionInfo
+                              boost::none,            // upsert
                               Date_t() + Seconds(t),  // wall clock time
                               {},                     // statement ids
                               boost::none,    // optime of previous write within same transaction
@@ -975,7 +976,6 @@ TEST_F(InitialSyncerTest,
     // Check number of failed attempts in stats.
     auto progress = initialSyncer->getInitialSyncProgress();
     LOGV2(24166,
-          "Progress after {initialSyncMaxAttempts} failed attempts: {progress}",
           "Progress after initialSyncMaxAttempts failed attempts",
           "initialSyncMaxAttempts"_attr = initialSyncMaxAttempts,
           "progress"_attr = progress);
@@ -1720,7 +1720,7 @@ TEST_F(InitialSyncerTest,
 
     // OpTimeAndWallTime now uses the IDL parser, so the status code returned is from
     // IDLParserContext
-    ASSERT_EQUALS(_lastApplied.getStatus().code(), 40414);
+    ASSERT_EQUALS(_lastApplied.getStatus().code(), ErrorCodes::IDLFailedToParse);
 }
 
 TEST_F(InitialSyncerTest,
@@ -2025,7 +2025,7 @@ TEST_F(InitialSyncerTest, InitialSyncerReturnsParseErrorWhenFCVFetcherReturnsNoV
     // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
     auto docs = {BSON("_id" << multiversion::kParameterName << "targetVersion"
                             << multiversion::toString(multiversion::GenericFCV::kLatest))};
-    runInitialSyncWithBadFCVResponse(docs, ((ErrorCodes::Error)40414));
+    runInitialSyncWithBadFCVResponse(docs, ErrorCodes::IDLFailedToParse);
 }
 
 TEST_F(InitialSyncerTest, InitialSyncerSucceedsWhenFCVFetcherReturnsOldVersion) {

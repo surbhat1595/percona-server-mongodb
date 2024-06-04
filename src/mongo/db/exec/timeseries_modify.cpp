@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -88,7 +87,7 @@ TimeseriesModifyStage::TimeseriesModifyStage(ExpressionContext* expCtx,
                                              WorkingSet* ws,
                                              std::unique_ptr<PlanStage> child,
                                              CollectionAcquisition coll,
-                                             BucketUnpacker bucketUnpacker,
+                                             timeseries::BucketUnpacker bucketUnpacker,
                                              std::unique_ptr<MatchExpression> residualPredicate,
                                              std::unique_ptr<MatchExpression> originalPredicate)
     : RequiresWritableCollectionStage(kStageType, expCtx, coll),
@@ -136,7 +135,8 @@ TimeseriesModifyStage::TimeseriesModifyStage(ExpressionContext* expCtx,
           _params.updateDriver->type() == UpdateDriver::UpdateType::kDelta || _params.fromMigrate);
 
     if (_params.isUpdate) {
-        _sideBucketCatalog = std::make_unique<timeseries::bucket_catalog::BucketCatalog>(1);
+        _sideBucketCatalog = std::make_unique<timeseries::bucket_catalog::BucketCatalog>(
+            1, getTimeseriesSideBucketCatalogMemoryUsageThresholdBytes);
     }
 }
 
@@ -268,7 +268,7 @@ std::vector<BSONObj> TimeseriesModifyStage::_applyUpdate(
             modifiedMeasurements.emplace_back(doc.getObject());
         } else {
             // The document wasn't modified, write it back to the original bucket unchanged.
-            unchangedMeasurements.emplace_back(std::move(measurement));
+            unchangedMeasurements.emplace_back(measurement);
         }
     }
 
@@ -462,7 +462,6 @@ TimeseriesModifyStage::_writeToTimeseriesBuckets(ScopeGuard<F>& bucketFreer,
     if (matchedMeasurements.empty()) {
         return {false, PlanStage::NEED_TIME, boost::none};
     }
-    _specificStats.nMeasurementsMatched += matchedMeasurements.size();
 
     bool isUpdate = _params.isUpdate;
 
@@ -495,7 +494,7 @@ TimeseriesModifyStage::_writeToTimeseriesBuckets(ScopeGuard<F>& bucketFreer,
                 // measurement. If we did not, then we should return the old measurement instead.
                 return boost::optional<BSONObj>(std::move(matchedMeasurements[0]));
             } else {
-                return boost::optional<BSONObj>(std::move(modifiedMeasurements[0]));
+                return boost::optional<BSONObj>(modifiedMeasurements[0]);
             }
         }
         return boost::optional<BSONObj>();
@@ -514,17 +513,22 @@ TimeseriesModifyStage::_writeToTimeseriesBuckets(ScopeGuard<F>& bucketFreer,
         return {true, PlanStage::NEED_TIME, getMeasurementToReturn()};
     }
 
-    handlePlanStageYield(
+    const auto saveRet = handlePlanStageYield(
         expCtx(),
         "TimeseriesModifyStage saveState",
         [&] {
             child()->saveState();
-            return PlanStage::NEED_TIME /* unused */;
+            return PlanStage::NEED_TIME;
         },
         [&] {
             // yieldHandler
-            std::terminate();
+            // We need to retry the bucket, so we should not free the current bucket.
+            bucketFreer.dismiss();
+            _retryBucket(bucketWsmId);
         });
+    if (saveRet != PlanStage::NEED_TIME) {
+        return {false, saveRet, boost::none};
+    }
 
     auto recordId = _ws->get(bucketWsmId)->recordId;
     try {
@@ -581,31 +585,30 @@ TimeseriesModifyStage::_writeToTimeseriesBuckets(ScopeGuard<F>& bucketFreer,
     // As restoreState may restore (recreate) cursors, cursors are tied to the transaction in which
     // they are created, and a WriteUnitOfWork is a transaction, make sure to restore the state
     // outside of the WriteUnitOfWork.
-    //
-    // If this stage is already exhausted it won't use its children stages anymore and therefore
-    // there's no need to restore them. Avoid restoring them so that there's no possibility of
-    // requiring yielding at this point. Restoring from yield could fail due to a sharding
-    // placement change. Throwing a StaleConfig error is undesirable after an "single write"
-    // operation has already performed a write because the router would retry.
-    if (!isEOF()) {
-        auto status = handlePlanStageYield(
-            expCtx(),
-            "TimeseriesModifyStage restoreState",
-            [&] {
-                child()->restoreState(&collectionPtr());
-                return PlanStage::NEED_TIME;
-            },
-            // yieldHandler
-            // Note we don't need to retry anything in this case since the write already was
-            // committed. However, we still need to return the affected measurement (if it was
-            // requested). We don't need to rely on the storage engine to return the affected
-            // document since we already have it in memory.
-            [&] { /* noop */ });
+    auto status = handlePlanStageYield(
+        expCtx(),
+        "TimeseriesModifyStage restoreState",
+        [&] {
+            child()->restoreState(&collectionPtr());
+            return PlanStage::NEED_TIME;
+        },
+        // yieldHandler
+        // Note we don't need to retry anything in this case since the write already was committed.
+        // However, we still need to return the affected measurement (if it was requested). We don't
+        // need to rely on the storage engine to return the affected document since we already have
+        // it in memory.
+        [&] { /* noop */ });
 
-        return {true, status, getMeasurementToReturn()};
-    } else {
-        return {true, PlanStage::NEED_TIME, getMeasurementToReturn()};
+    if (status == NEED_YIELD && isEOF()) {
+        // If this stage is already exhausted it won't use its children stages anymore and therefore
+        // it's okay if we failed to restore them. Avoid requesting a yield to the plan executor.
+        // Restoring from yield could fail due to a sharding placement change. Throwing a
+        // StaleConfig error is undesirable after an "update one" operation has already performed a
+        // write because the router would retry.
+        status = PlanStage::NEED_TIME;
     }
+
+    return {true, status, getMeasurementToReturn()};
 }
 
 template <typename F>
@@ -685,7 +688,7 @@ void TimeseriesModifyStage::_prepareToReturnMeasurement(WorkingSetID& out, BSONO
     auto member = _ws->get(out);
     // The measurement does not have record id.
     member->recordId = RecordId{};
-    member->doc.value() = Document{std::move(measurement)};
+    member->doc.value() = Document{measurement};
     _ws->transitionToOwnedObj(out);
 }
 
@@ -750,6 +753,7 @@ PlanStage::StageState TimeseriesModifyStage::doWork(WorkingSetID* out) {
 
     auto isWriteSuccessful = false;
     boost::optional<BSONObj> measurementToReturn = boost::none;
+    auto numMatchedMeasurements = matchedMeasurements.size();
     std::tie(isWriteSuccessful, status, measurementToReturn) =
         _writeToTimeseriesBuckets(bucketFreer,
                                   id,
@@ -758,11 +762,14 @@ PlanStage::StageState TimeseriesModifyStage::doWork(WorkingSetID* out) {
                                   bucketFromMigrate);
     if (status != PlanStage::NEED_TIME) {
         *out = WorkingSet::INVALID_ID;
-    } else if (isWriteSuccessful && measurementToReturn) {
-        // If the write was successful and if asked to return the old or new measurement, then
-        // 'measurementToReturn' must have been filled out and we can return it immediately.
-        _prepareToReturnMeasurement(*out, std::move(*measurementToReturn));
-        status = PlanStage::ADVANCED;
+    } else if (isWriteSuccessful) {
+        _specificStats.nMeasurementsMatched += numMatchedMeasurements;
+        if (measurementToReturn) {
+            // If the write was successful and if asked to return the old or new measurement, then
+            // 'measurementToReturn' must have been filled out and we can return it immediately.
+            _prepareToReturnMeasurement(*out, std::move(*measurementToReturn));
+            status = PlanStage::ADVANCED;
+        }
     }
 
     if (status == PlanStage::NEED_TIME && isEOF()) {

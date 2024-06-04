@@ -97,10 +97,10 @@ class DDLLockManager {
         static Milliseconds _getTimeout();
 
         // Attributes
-        const std::string _resourceName;
-        const ResourceId _resourceId;
-        const std::string _reason;
-        const LockMode _mode;
+        std::string _resourceName;
+        ResourceId _resourceId;
+        std::string _reason;
+        LockMode _mode;
         LockResult _result;
         Locker* _locker;
         DDLLockManager* _lockManager;
@@ -112,7 +112,7 @@ public:
     static const Milliseconds kSingleLockAttemptTimeout;
 
     // RAII-style class to acquire a DDL lock on the given database
-    class ScopedDatabaseDDLLock : public ScopedBaseDDLLock {
+    class ScopedDatabaseDDLLock {
     public:
         /**
          * Constructs a ScopedDatabaseDDLLock object
@@ -135,6 +135,9 @@ public:
                               const DatabaseName& db,
                               StringData reason,
                               LockMode mode);
+
+    private:
+        ScopedBaseDDLLock _dbLock;
     };
 
     // RAII-style class to acquire a DDL lock on the given collection. The database DDL lock will
@@ -235,6 +238,7 @@ protected:
     void _unregisterResourceNameIfNoLongerNeeded(WithLock lk, ResourceId resId, StringData resName);
 
 
+    friend class DDLLockManagerTest;
     friend class ShardingCatalogManager;
     friend class ShardingDDLCoordinator;
     friend class ShardingDDLCoordinatorService;

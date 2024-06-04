@@ -35,20 +35,12 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
-#include "mongo/db/exec/sbe/abt/abt_lower.h"
-#include "mongo/db/exec/sbe/abt/abt_lower_defs.h"
-#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
-#include "mongo/db/exec/sbe/expressions/runtime_environment.h"
-#include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/ce/sel_tree_utils.h"
 #include "mongo/db/query/cqf_command_utils.h"
 #include "mongo/db/query/optimizer/algebra/operator.h"
@@ -151,38 +143,119 @@ private:
     const OptPhaseManager& _phaseManager;
 };
 
+class SamplingChunksTransport {
+public:
+    SamplingChunksTransport(NodeToGroupPropsMap& propsMap,
+                            const int64_t numChunks,
+                            const RIDProjectionsMap& ridProjections)
+        : _propsMap(propsMap), _numChunks(numChunks), _ridProjections(ridProjections) {}
+
+    void transport(ABT& n, const LimitSkipNode& limit, ABT& child) {
+        if (limit.getProperty().getSkip() != 0) {
+            return;
+        }
+        const PhysicalScanNode& physicalScan = *child.cast<PhysicalScanNode>();
+        const auto& ridProj = _ridProjections.at(physicalScan.getScanDefName());
+
+        ABT newPhysicalScan =
+            make<PhysicalScanNode>(FieldProjectionMap{._ridProjection = ProjectionName{ridProj}},
+                                   physicalScan.getScanDefName(),
+                                   physicalScan.useParallelScan());
+
+        NodeProps props = _propsMap.at(&physicalScan);
+        properties::getProperty<properties::ProjectionRequirement>(props._physicalProps)
+            .getProjections() = ProjectionNameVector{ridProj};
+        _propsMap.emplace(newPhysicalScan.cast<Node>(), props);
+
+        ABT seekNode = make<SeekNode>(
+            ridProj, physicalScan.getFieldProjectionMap(), physicalScan.getScanDefName());
+        _propsMap.emplace(seekNode.cast<Node>(), props);
+
+        const int64_t limitSize = limit.getProperty().getLimit();
+        const int64_t numChunks = std::min(_numChunks, limitSize);
+        const int64_t chunkSize = limitSize / numChunks;
+
+        ABT outerNode = make<LimitSkipNode>(properties::LimitSkipRequirement(numChunks, 0),
+                                            std::move(newPhysicalScan));
+        ABT innerNode = make<LimitSkipNode>(properties::LimitSkipRequirement(chunkSize, 0),
+                                            std::move(seekNode));
+
+        const NodeProps& limitProps = _propsMap.at(n.cast<Node>());
+        NodeProps sharedProps = NodeProps{limitProps._planNodeId,
+                                          limitProps._groupId,
+                                          limitProps._logicalProps,
+                                          limitProps._physicalProps,
+                                          boost::none /*ridProjName*/,
+                                          CostType::fromDouble(0),
+                                          CostType::fromDouble(0),
+                                          true /*adjustedCE*/};
+
+        NodeProps outerLimitProps = sharedProps;
+        properties::getProperty<properties::ProjectionRequirement>(outerLimitProps._physicalProps)
+            .getProjections() = ProjectionNameVector{ridProj};
+        _propsMap.emplace(outerNode.cast<Node>(), outerLimitProps);
+
+        _propsMap.emplace(innerNode.cast<Node>(), sharedProps);
+
+        ABT nlj = make<NestedLoopJoinNode>(JoinType::Inner,
+                                           ProjectionNameSet{ridProj},
+                                           Constant::boolean(true),
+                                           std::move(outerNode),
+                                           std::move(innerNode));
+
+        _propsMap.emplace(nlj.cast<Node>(), sharedProps);
+        std::swap(n, nlj);
+    }
+
+    /**
+     * Template to handle all other cases - we don't care or need to do anything here, so we
+     * knock out all the other required implementations at once with this template.
+     */
+    template <typename T, typename... Args>
+    void transport(ABT& n, const T& node, Args&&... args) {
+        static_assert(!std::is_same_v<T, LimitSkipNode>, "Missing LimitSkip handler");
+        return;
+    }
+
+private:
+    NodeToGroupPropsMap& _propsMap;
+    const int64_t _numChunks;
+    const RIDProjectionsMap& _ridProjections;
+};
+
 class SamplingTransport {
     static constexpr size_t kMaxSampleSize = 1000;
 
 public:
-    SamplingTransport(OperationContext* opCtx,
-                      OptPhaseManager phaseManager,
+    SamplingTransport(OptPhaseManager phaseManager,
                       const int64_t numRecords,
-                      std::unique_ptr<cascades::CardinalityEstimator> fallbackCE)
+                      std::unique_ptr<cascades::CardinalityEstimator> fallbackCE,
+                      std::unique_ptr<SamplingExecutor> executor)
         : _phaseManager(std::move(phaseManager)),
-          _opCtx(opCtx),
           _sampleSize(std::min<int64_t>(numRecords, kMaxSampleSize)),
-          _fallbackCE(std::move(fallbackCE)) {}
+          _fallbackCE(std::move(fallbackCE)),
+          _executor(std::move(executor)) {}
 
-    CEType transport(const ABT& n,
+    CEType transport(const ABT::reference_type n,
                      const FilterNode& node,
                      const Metadata& metadata,
                      const cascades::Memo& memo,
                      const properties::LogicalProps& logicalProps,
                      CEType childResult,
                      CEType /*exprResult*/) {
-        if (!properties::hasProperty<properties::IndexingAvailability>(logicalProps)) {
-            return _fallbackCE->deriveCE(metadata, memo, logicalProps, n.ref());
+        if (_phaseManager.getHints()._forceSamplingCEFallBackForFilterNode ||
+            !properties::hasProperty<properties::IndexingAvailability>(logicalProps)) {
+            return _fallbackCE->deriveCE(metadata, memo, logicalProps, n);
         }
 
         SamplingPlanExtractor planExtractor(memo, _phaseManager, _sampleSize);
         // Create a plan with all eval nodes so far and the filter last.
-        ABT abtTree = make<FilterNode>(node.getFilter(), planExtractor.extract(n));
+        ABT abtTree = make<FilterNode>(node.getFilter(), planExtractor.extract(n.copy()));
 
         return estimateFilterCE(metadata, memo, logicalProps, n, std::move(abtTree), childResult);
     }
 
-    CEType transport(const ABT& n,
+    CEType transport(const ABT::reference_type n,
                      const SargableNode& node,
                      const Metadata& metadata,
                      const cascades::Memo& memo,
@@ -191,11 +264,14 @@ public:
                      CEType /*bindResult*/,
                      CEType /*refsResult*/) {
         if (!properties::hasProperty<properties::IndexingAvailability>(logicalProps)) {
-            return _fallbackCE->deriveCE(metadata, memo, logicalProps, n.ref());
+            return _fallbackCE->deriveCE(metadata, memo, logicalProps, n);
         }
 
+        const ScanDefinition& scanDef = getScanDefFromIndexingAvailability(
+            metadata, properties::getPropertyConst<properties::IndexingAvailability>(logicalProps));
+
         SamplingPlanExtractor planExtractor(memo, _phaseManager, _sampleSize);
-        ABT extracted = planExtractor.extract(n);
+        ABT extracted = planExtractor.extract(n.copy());
 
         // Estimate individual requirements separately by potentially re-using cached results.
         // TODO: consider estimating together the entire set of requirements (but caching!)
@@ -215,8 +291,13 @@ public:
                     boost::none /*residualCE*/,
                     lowered);
                 uassert(6624243, "Expected a filter node", lowered._node.is<FilterNode>());
-                const CEType filterCE = estimateFilterCE(
-                    metadata, memo, logicalProps, n, std::move(lowered._node), childResult);
+                // Continue the sampling estimation only if the field from the partial schema is
+                // indexed.
+                const bool isPartialSchemaKeyIndexed = isFieldPathIndexed(key, scanDef);
+                const CEType filterCE = isPartialSchemaKeyIndexed
+                    ? estimateFilterCE(
+                          metadata, memo, logicalProps, n, std::move(lowered._node), childResult)
+                    : _fallbackCE->deriveCE(metadata, memo, logicalProps, n);
                 const SelectivityType sel =
                     childResult > 0.0 ? (filterCE / childResult) : SelectivityType{0.0};
                 selTreeBuilder.atom(sel);
@@ -231,14 +312,14 @@ public:
      * Other ABT types.
      */
     template <typename T, typename... Ts>
-    CEType transport(const ABT& n,
+    CEType transport(ABT::reference_type n,
                      const T& /*node*/,
                      const Metadata& metadata,
                      const cascades::Memo& memo,
                      const properties::LogicalProps& logicalProps,
                      Ts&&...) {
         if (canBeLogicalNode<T>()) {
-            return _fallbackCE->deriveCE(metadata, memo, logicalProps, n.ref());
+            return _fallbackCE->deriveCE(metadata, memo, logicalProps, n);
         }
         return {0.0};
     }
@@ -254,7 +335,7 @@ private:
     CEType estimateFilterCE(const Metadata& metadata,
                             const cascades::Memo& memo,
                             const properties::LogicalProps& logicalProps,
-                            const ABT& n,
+                            const ABT::reference_type n,
                             ABT abtTree,
                             CEType childResult) {
         auto it = _selectivityCacheMap.find(abtTree);
@@ -265,7 +346,7 @@ private:
 
         const auto selectivity = estimateSelectivity(abtTree);
         if (!selectivity) {
-            return _fallbackCE->deriveCE(metadata, memo, logicalProps, n.ref());
+            return _fallbackCE->deriveCE(metadata, memo, logicalProps, n);
         }
 
         _selectivityCacheMap.emplace(std::move(abtTree), *selectivity);
@@ -296,49 +377,39 @@ private:
 
         PlanAndProps planAndProps = _phaseManager.optimizeAndReturnProps(std::move(abt));
 
-        auto env = VariableEnvironment::build(planAndProps._node);
-        SlotVarMap slotMap;
-        auto runtimeEnvironment = std::make_unique<sbe::RuntimeEnvironment>();  // TODO Use factory
-        boost::optional<sbe::value::SlotId> ridSlot;
-        sbe::value::SlotIdGenerator ids;
-        SBENodeLowering g{env,
-                          *runtimeEnvironment,
-                          ids,
-                          _phaseManager.getMetadata(),
-                          planAndProps._map,
-                          internalCascadesOptimizerSamplingCEScanStartOfColl.load()
-                              ? ScanOrder::Forward
-                              : ScanOrder::Random};
-        auto sbePlan = g.optimize(planAndProps._node, slotMap, ridSlot);
-        tassert(6624261, "Unexpected rid slot", !ridSlot);
+        // If internalCascadesOptimizerSampleChunks is a positive integer, sample by chunks using
+        // that value as the number of chunks. Otherwise, perform fully randomized sample.
+        if (const int64_t numChunks = _phaseManager.getHints()._numSamplingChunks; numChunks > 0) {
+            SamplingChunksTransport instance{
+                planAndProps._map, numChunks, _phaseManager.getRIDProjections()};
+            algebra::transport<true>(planAndProps._node, instance);
 
-        // TODO: return errors instead of exceptions?
-        uassert(6624244, "Lowering failed", sbePlan != nullptr);
-        uassert(6624245, "Invalid slot map size", slotMap.size() == 1);
-
-        sbePlan->attachToOperationContext(_opCtx);
-        sbe::CompileCtx ctx(std::move(runtimeEnvironment));
-        sbePlan->prepare(ctx);
-
-        std::vector<sbe::value::SlotAccessor*> accessors;
-        for (auto& [name, slot] : slotMap) {
-            accessors.emplace_back(sbePlan->getAccessor(ctx, slot));
+            OPTIMIZER_DEBUG_LOG(6264807,
+                                5,
+                                "Physical Sampling",
+                                "explain"_attr = ExplainGenerator::explainV2(planAndProps._node));
         }
 
-        sbePlan->open(false);
-        ON_BLOCK_EXIT([&] { sbePlan->close(); });
+        return _executor->estimateSelectivity(
+            _phaseManager.getMetadata(), _sampleSize, planAndProps);
+    }
 
-        while (sbePlan->getNext() != sbe::PlanState::IS_EOF) {
-            const auto [tag, value] = accessors.at(0)->getViewOfValue();
-            if (tag == sbe::value::TypeTags::NumberInt64) {
-                // TODO: check if we get exactly one result from the groupby?
-                return {{static_cast<double>(value) / _sampleSize}};
-            }
-            return boost::none;
-        };
+    const ScanDefinition& getScanDefFromIndexingAvailability(
+        const Metadata& metadata,
+        const properties::IndexingAvailability& indexingAvalability) const {
+        auto scanDefIter = metadata._scanDefs.find(indexingAvalability.getScanDefName());
+        uassert(8073400,
+                "Scan def of indexing avalability is not found",
+                scanDefIter != metadata._scanDefs.cend());
+        return scanDefIter->second;
+    }
 
-        // If nothing passes the filter, estimate 0.0 selectivity. HashGroup will return 0 results.
-        return {{0.0}};
+    /**
+     * Returns true if the field path from the partial schema entry is indexed.
+     */
+    inline bool isFieldPathIndexed(const PartialSchemaKey& key,
+                                   const ScanDefinition& scanDef) const {
+        return scanDef.getIndexedFieldPaths().isIndexed(key._path);
     }
 
     struct NodeRefHash {
@@ -358,19 +429,17 @@ private:
 
     OptPhaseManager _phaseManager;
 
-    // We don't own this.
-    OperationContext* _opCtx;
-
     const int64_t _sampleSize;
     std::unique_ptr<cascades::CardinalityEstimator> _fallbackCE;
+    std::unique_ptr<SamplingExecutor> _executor;
 };
 
-SamplingEstimator::SamplingEstimator(OperationContext* opCtx,
-                                     OptPhaseManager phaseManager,
+SamplingEstimator::SamplingEstimator(OptPhaseManager phaseManager,
                                      const int64_t numRecords,
-                                     std::unique_ptr<cascades::CardinalityEstimator> fallbackCE)
+                                     std::unique_ptr<cascades::CardinalityEstimator> fallbackCE,
+                                     std::unique_ptr<SamplingExecutor> executor)
     : _transport(std::make_unique<SamplingTransport>(
-          opCtx, std::move(phaseManager), numRecords, std::move(fallbackCE))) {}
+          std::move(phaseManager), numRecords, std::move(fallbackCE), std::move(executor))) {}
 
 SamplingEstimator::~SamplingEstimator() {}
 

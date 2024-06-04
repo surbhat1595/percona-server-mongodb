@@ -10,6 +10,7 @@ will simulate automatically logging in as a human would.
 import argparse
 import os
 import json
+import traceback
 
 import geckodriver_autoinstaller
 from pathlib import Path
@@ -77,10 +78,13 @@ def authenticate_azure(activation_endpoint, userCode, username, test_credentials
         landing_header = WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.XPATH, "//p[@id='message'][@class='text-block-body no-margin-top']"))
         )
+
         assert landing_header is not None and "You have signed in" in landing_header.text
         
-    except Exception as e:
-        print(e)
+    except Exception as e:        
+        print("Error: ", e)
+        print("Traceback: ", traceback.format_exc())
+        print("HTML Source: ", driver.page_source)
     else:
         print('Success')
     finally:
@@ -99,6 +103,7 @@ def main():
     with open(Path.home() / args.setupFile) as setup_file:
         setup_information = json.load(setup_file)
         assert args.username in setup_information
+        assert setup_information[args.username]
 
         authenticate_azure(args.activationEndpoint, args.userCode, args.username, setup_information)
 

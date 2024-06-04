@@ -43,7 +43,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -801,8 +800,11 @@ public:
         :  // Don't transactionalize on standalone.
           _isReplSet{repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()},
           // Subclient used by transaction operations.
-          _client{opCtx->getServiceContext()->makeClient(forCommand.toString())},
-          _dbName{DatabaseNameUtil::deserialize(tenant, kAdminDB)},
+          _client{opCtx->getServiceContext()
+                      ->getService(ClusterRole::ShardServer)
+                      ->makeClient(forCommand.toString())},
+          _dbName{DatabaseNameUtil::deserialize(
+              tenant, kAdminDB, SerializationContext::stateDefault())},
           _sessionInfo{LogicalSessionFromClient(UUID::gen())} {
         // Note: We allow the client to be killable. We only make an operation context on this
         // client during runCommand, and that operation context is short-lived. If we get
@@ -932,7 +934,7 @@ private:
         cmdBuilder->append("apiVersion", kOne);
 
         auto svcCtx = _client->getServiceContext();
-        auto sep = svcCtx->getServiceEntryPoint();
+        auto sep = svcCtx->getService(ClusterRole::ShardServer)->getServiceEntryPoint();
         auto opMsgRequest = OpMsgRequestBuilder::create(_dbName, cmdBuilder->obj());
         auto requestMessage = opMsgRequest.serialize();
 
@@ -1107,7 +1109,7 @@ public:
         return {kPwdField};
     }
 };
-MONGO_REGISTER_COMMAND(CmdCreateUser);
+MONGO_REGISTER_COMMAND(CmdCreateUser).forShard();
 
 template <>
 void CmdUMCTyped<CreateUserCommand>::Invocation::typedRun(OperationContext* opCtx) {
@@ -1220,7 +1222,7 @@ public:
         return {kPwdField};
     }
 };
-MONGO_REGISTER_COMMAND(CmdUpdateUser);
+MONGO_REGISTER_COMMAND(CmdUpdateUser).forShard();
 
 template <>
 void CmdUMCTyped<UpdateUserCommand>::Invocation::typedRun(OperationContext* opCtx) {
@@ -1319,7 +1321,7 @@ void CmdUMCTyped<UpdateUserCommand>::Invocation::typedRun(OperationContext* opCt
     uassertStatusOK(status);
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<DropUserCommand>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<DropUserCommand>).forShard();
 template <>
 void CmdUMCTyped<DropUserCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1347,7 +1349,7 @@ void CmdUMCTyped<DropUserCommand>::Invocation::typedRun(OperationContext* opCtx)
             numMatched > 0);
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<DropAllUsersFromDatabaseCommand>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<DropAllUsersFromDatabaseCommand>).forShard();
 template <>
 DropAllUsersFromDatabaseReply CmdUMCTyped<DropAllUsersFromDatabaseCommand>::Invocation::typedRun(
     OperationContext* opCtx) {
@@ -1375,7 +1377,7 @@ DropAllUsersFromDatabaseReply CmdUMCTyped<DropAllUsersFromDatabaseCommand>::Invo
     return reply;
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<GrantRolesToUserCommand>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<GrantRolesToUserCommand>).forShard();
 template <>
 void CmdUMCTyped<GrantRolesToUserCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1410,7 +1412,7 @@ void CmdUMCTyped<GrantRolesToUserCommand>::Invocation::typedRun(OperationContext
     uassertStatusOK(status);
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<RevokeRolesFromUserCommand>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<RevokeRolesFromUserCommand>).forShard();
 template <>
 void CmdUMCTyped<RevokeRolesFromUserCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1445,7 +1447,7 @@ void CmdUMCTyped<RevokeRolesFromUserCommand>::Invocation::typedRun(OperationCont
     uassertStatusOK(status);
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<UsersInfoCommand, UMCInfoParams>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<UsersInfoCommand, UMCInfoParams>).forShard();
 template <>
 UsersInfoReply CmdUMCTyped<UsersInfoCommand, UMCInfoParams>::Invocation::typedRun(
     OperationContext* opCtx) {
@@ -1579,7 +1581,6 @@ UsersInfoReply CmdUMCTyped<UsersInfoCommand, UMCInfoParams>::Invocation::typedRu
         AggregateCommandRequest aggRequest(usersNSS(dbname.tenantId()), std::move(pipeline));
         // Impose no cursor privilege requirements, as cursor is drained internally
         uassertStatusOK(runAggregate(opCtx,
-                                     usersNSS(dbname.tenantId()),
                                      aggRequest,
                                      aggregation_request_helper::serializeToCommandObj(aggRequest),
                                      PrivilegeVector(),
@@ -1605,7 +1606,7 @@ UsersInfoReply CmdUMCTyped<UsersInfoCommand, UMCInfoParams>::Invocation::typedRu
     return reply;
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<CreateRoleCommand>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<CreateRoleCommand>).forShard();
 template <>
 void CmdUMCTyped<CreateRoleCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1663,7 +1664,7 @@ void CmdUMCTyped<CreateRoleCommand>::Invocation::typedRun(OperationContext* opCt
     uassertStatusOK(insertRoleDocument(opCtx, roleObjBuilder.done(), roleName.getTenant()));
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<UpdateRoleCommand>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<UpdateRoleCommand>).forShard();
 template <>
 void CmdUMCTyped<UpdateRoleCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1745,7 +1746,7 @@ void CmdUMCTyped<UpdateRoleCommand>::Invocation::typedRun(OperationContext* opCt
     uassertStatusOK(status);
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<GrantPrivilegesToRoleCommand>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<GrantPrivilegesToRoleCommand>).forShard();
 template <>
 void CmdUMCTyped<GrantPrivilegesToRoleCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1798,7 +1799,7 @@ void CmdUMCTyped<GrantPrivilegesToRoleCommand>::Invocation::typedRun(OperationCo
     uassertStatusOK(status);
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<RevokePrivilegesFromRoleCommand>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<RevokePrivilegesFromRoleCommand>).forShard();
 template <>
 void CmdUMCTyped<RevokePrivilegesFromRoleCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1856,7 +1857,7 @@ void CmdUMCTyped<RevokePrivilegesFromRoleCommand>::Invocation::typedRun(Operatio
     uassertStatusOK(status);
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<GrantRolesToRoleCommand>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<GrantRolesToRoleCommand>).forShard();
 template <>
 void CmdUMCTyped<GrantRolesToRoleCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -1896,7 +1897,7 @@ void CmdUMCTyped<GrantRolesToRoleCommand>::Invocation::typedRun(OperationContext
     uassertStatusOK(status);
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<RevokeRolesFromRoleCommand>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<RevokeRolesFromRoleCommand>).forShard();
 template <>
 void CmdUMCTyped<RevokeRolesFromRoleCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -2002,7 +2003,7 @@ Status retryTransactionOps(OperationContext* opCtx,
     return status;
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<DropRoleCommand>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<DropRoleCommand>).forShard();
 template <>
 void CmdUMCTyped<DropRoleCommand>::Invocation::typedRun(OperationContext* opCtx) {
     const auto& cmd = request();
@@ -2069,7 +2070,7 @@ void CmdUMCTyped<DropRoleCommand>::Invocation::typedRun(OperationContext* opCtx)
     }
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<DropAllRolesFromDatabaseCommand>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<DropAllRolesFromDatabaseCommand>).forShard();
 template <>
 DropAllRolesFromDatabaseReply CmdUMCTyped<DropAllRolesFromDatabaseCommand>::Invocation::typedRun(
     OperationContext* opCtx) {
@@ -2164,7 +2165,7 @@ DropAllRolesFromDatabaseReply CmdUMCTyped<DropAllRolesFromDatabaseCommand>::Invo
  *   "asUserFragment" Render results as a partial user document as-if a user existed which possessed
  *                    these roles. This format may change over time with changes to the auth schema.
  */
-MONGO_REGISTER_COMMAND(CmdUMCTyped<RolesInfoCommand, UMCInfoParams>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<RolesInfoCommand, UMCInfoParams>).forShard();
 template <>
 RolesInfoReply CmdUMCTyped<RolesInfoCommand, UMCInfoParams>::Invocation::typedRun(
     OperationContext* opCtx) {
@@ -2214,7 +2215,8 @@ RolesInfoReply CmdUMCTyped<RolesInfoCommand, UMCInfoParams>::Invocation::typedRu
     return reply;
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<InvalidateUserCacheCommand, UMCInvalidateUserCacheParams>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<InvalidateUserCacheCommand, UMCInvalidateUserCacheParams>)
+    .forShard();
 template <>
 void CmdUMCTyped<InvalidateUserCacheCommand, UMCInvalidateUserCacheParams>::Invocation::typedRun(
     OperationContext* opCtx) {
@@ -2223,7 +2225,8 @@ void CmdUMCTyped<InvalidateUserCacheCommand, UMCInvalidateUserCacheParams>::Invo
     authzManager->invalidateUsersByTenant(opCtx, request().getDbName().tenantId());
 }
 
-MONGO_REGISTER_COMMAND(CmdUMCTyped<GetUserCacheGenerationCommand, UMCGetUserCacheGenParams>);
+MONGO_REGISTER_COMMAND(CmdUMCTyped<GetUserCacheGenerationCommand, UMCGetUserCacheGenParams>)
+    .forShard();
 template <>
 GetUserCacheGenerationReply
 CmdUMCTyped<GetUserCacheGenerationCommand, UMCGetUserCacheGenParams>::Invocation::typedRun(
@@ -2285,7 +2288,7 @@ public:
         return false;
     }
 };
-MONGO_REGISTER_COMMAND(CmdMergeAuthzCollections);
+MONGO_REGISTER_COMMAND(CmdMergeAuthzCollections).forShard();
 
 UserName _extractUserNameFromBSON(const BSONObj& userObj) {
     std::string name;
@@ -2369,7 +2372,6 @@ void _addUser(OperationContext* opCtx,
         if (!status.isOK()) {
             // Match the behavior of mongorestore to continue on failure
             LOGV2_WARNING(20510,
-                          "Could not update user {user} in _mergeAuthzCollections command: {error}",
                           "Could not update user during _mergeAuthzCollections command",
                           "user"_attr = userName,
                           "error"_attr = redact(status));
@@ -2380,7 +2382,6 @@ void _addUser(OperationContext* opCtx,
         if (!status.isOK()) {
             // Match the behavior of mongorestore to continue on failure
             LOGV2_WARNING(20511,
-                          "Could not insert user {user} in _mergeAuthzCollections command: {error}",
                           "Could not insert user during _mergeAuthzCollections command",
                           "user"_attr = userName,
                           "error"_attr = redact(status));
@@ -2459,7 +2460,8 @@ void _processUsers(OperationContext* opCtx,
 
     uassertStatusOK(queryAuthzDocument(
         opCtx,
-        NamespaceStringUtil::deserialize(tenantId, usersCollName),
+        NamespaceStringUtil::deserialize(
+            tenantId, usersCollName, SerializationContext::stateDefault()),
         db.empty() ? BSONObj() : BSON(AuthorizationManager::USER_DB_FIELD_NAME << db),
         BSONObj(),
         [&](const BSONObj& userObj) {
@@ -2529,7 +2531,6 @@ void _addRole(OperationContext* opCtx,
         if (!status.isOK()) {
             // Match the behavior of mongorestore to continue on failure
             LOGV2_WARNING(20512,
-                          "Could not update role {role} in _mergeAuthzCollections command: {error}",
                           "Could not update role during _mergeAuthzCollections command",
                           "role"_attr = roleName,
                           "error"_attr = redact(status));
@@ -2540,7 +2541,6 @@ void _addRole(OperationContext* opCtx,
         if (!status.isOK()) {
             // Match the behavior of mongorestore to continue on failure
             LOGV2_WARNING(20513,
-                          "Could not insert role {role} in _mergeAuthzCollections command: {error}",
                           "Could not insert role during _mergeAuthzCollections command",
                           "role"_attr = roleName,
                           "error"_attr = redact(status));
@@ -2588,7 +2588,8 @@ void _processRoles(OperationContext* opCtx,
 
     uassertStatusOK(queryAuthzDocument(
         opCtx,
-        NamespaceStringUtil::deserialize(tenantId, rolesCollName),
+        NamespaceStringUtil::deserialize(
+            tenantId, rolesCollName, SerializationContext::stateDefault()),
         db.empty() ? BSONObj() : BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << db),
         BSONObj(),
         [&](const BSONObj& roleObj) {

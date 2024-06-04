@@ -39,7 +39,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -118,7 +117,7 @@ public:
         return HandshakeRole::kAuth;
     }
 };
-MONGO_REGISTER_COMMAND(CmdSaslStart);
+MONGO_REGISTER_COMMAND(CmdSaslStart).forRouter().forShard();
 
 class CmdSaslContinue : public SaslContinueCmdVersion1Gen<CmdSaslContinue> {
 public:
@@ -157,7 +156,7 @@ public:
         return HandshakeRole::kAuth;
     }
 };
-MONGO_REGISTER_COMMAND(CmdSaslContinue);
+MONGO_REGISTER_COMMAND(CmdSaslContinue).forRouter().forShard();
 
 SaslReply doSaslStep(OperationContext* opCtx,
                      const SaslPayload& payload,
@@ -225,10 +224,11 @@ void warnIfCompressed(OperationContext* opCtx) {
 SaslReply doSaslStart(OperationContext* opCtx,
                       AuthenticationSession* session,
                       const SaslStartCommand& request) {
-    auto mechanism =
-        uassertStatusOK(SASLServerMechanismRegistry::get(opCtx->getServiceContext())
-                            .getServerMechanism(request.getMechanism(),
-                                                DatabaseNameUtil::serialize(request.getDbName())));
+    auto mechanism = uassertStatusOK(
+        SASLServerMechanismRegistry::get(opCtx->getServiceContext())
+            .getServerMechanism(request.getMechanism(),
+                                DatabaseNameUtil::serialize(request.getDbName(),
+                                                            request.getSerializationContext())));
 
     uassert(ErrorCodes::BadValue,
             "Plaintext mechanisms may not be used with speculativeSaslStart",

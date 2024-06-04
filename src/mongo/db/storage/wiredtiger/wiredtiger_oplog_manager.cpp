@@ -30,7 +30,6 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <limits>
 #include <memory>
@@ -214,7 +213,8 @@ void WiredTigerOplogManager::waitForAllEarlierOplogWritesToBeVisible(
 
 void WiredTigerOplogManager::_updateOplogVisibilityLoop(WiredTigerSessionCache* sessionCache,
                                                         WiredTigerRecordStore* oplogRecordStore) {
-    Client::initThread("OplogVisibilityThread");
+    Client::initThread("OplogVisibilityThread",
+                       getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
     // TODO(SERVER-74657): Please revisit if this thread could be made killable.
     {

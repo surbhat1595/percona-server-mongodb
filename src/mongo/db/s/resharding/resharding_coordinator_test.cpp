@@ -274,6 +274,7 @@ protected:
                                                coordinatorDoc,
                                                ChunkVersion({OID::gen(), Timestamp(1, 2)}, {1, 1}),
                                                BSONObj(),
+                                               boost::none,
                                                boost::none);
         client.insert(CollectionType::ConfigNS, tempNssCatalogEntry.toBSON());
 
@@ -572,6 +573,7 @@ protected:
                 expectedCoordinatorDoc,
                 ChunkVersion({OID::gen(), Timestamp(1, 2)}, {1, 1}),
                 BSONObj(),
+                boost::none,
                 boost::none);
 
             // It's necessary to add the userCanceled field because the call into
@@ -623,7 +625,8 @@ protected:
         // Create original collection's catalog entry as well as both config.chunks and config.tags
         // collections.
         {
-            setupDatabase("db", ShardId("shard0000"));
+            setupDatabase(DatabaseName::createDatabaseName_forTest(boost::none, "db"),
+                          ShardId("shard0000"));
             auto opCtx = operationContext();
             DBDirectClient client(opCtx);
 
@@ -675,8 +678,13 @@ protected:
         expectedCoordinatorDoc.setZones(boost::none);
         expectedCoordinatorDoc.setPresetReshardedChunks(boost::none);
 
-        writeParticipantShardsAndTempCollInfo(
-            opCtx, _metrics.get(), expectedCoordinatorDoc, initialChunks, zones, boost::none);
+        writeParticipantShardsAndTempCollInfo(opCtx,
+                                              _metrics.get(),
+                                              expectedCoordinatorDoc,
+                                              initialChunks,
+                                              zones,
+                                              boost::none,
+                                              boost::none);
 
         // Check that config.reshardingOperations and config.collections entries are updated
         // correctly
@@ -749,51 +757,56 @@ protected:
 
     void removeCoordinatorDocAndReshardingFieldsExpectSuccess(
         OperationContext* opCtx, const ReshardingCoordinatorDocument& coordinatorDoc) {
-        auto optionalDoc = removeOrQuiesceCoordinatorDocAndRemoveReshardingFields(
+        auto updatedCoordinatorDoc = removeOrQuiesceCoordinatorDocAndRemoveReshardingFields(
             opCtx, _metrics.get(), coordinatorDoc);
-        ASSERT(!optionalDoc);
 
+        ASSERT_EQ(updatedCoordinatorDoc.getState(), CoordinatorStateEnum::kDone);
+
+        // Check that the on disk document is same as the in memory document returned above.
         auto expectedCoordinatorDoc = coordinatorDoc;
         expectedCoordinatorDoc.setState(CoordinatorStateEnum::kDone);
+        ASSERT_BSONOBJ_EQ(updatedCoordinatorDoc.toBSON(), expectedCoordinatorDoc.toBSON());
 
         // Check that the entry is removed from config.reshardingOperations
         DBDirectClient client(opCtx);
         auto doc = client.findOne(NamespaceString::kConfigReshardingOperationsNamespace,
-                                  BSON("ns" << expectedCoordinatorDoc.getSourceNss().ns_forTest()));
+                                  BSON("ns" << updatedCoordinatorDoc.getSourceNss().ns_forTest()));
         ASSERT(doc.isEmpty());
 
         // Check that the resharding fields are removed from the config.collections entry and
         // allowMigrations is set back to true.
         auto expectedOriginalCollType = makeOriginalCollectionCatalogEntry(
-            expectedCoordinatorDoc,
+            updatedCoordinatorDoc,
             boost::none,
             _finalEpoch,
             opCtx->getServiceContext()->getPreciseClockSource()->now());
         assertOriginalCollectionCatalogEntryMatchesExpected(
-            opCtx, expectedOriginalCollType, expectedCoordinatorDoc);
+            opCtx, expectedOriginalCollType, updatedCoordinatorDoc);
     }
 
     void quiesceCoordinatorDocAndReshardingFieldsExpectSuccess(
         OperationContext* opCtx, const ReshardingCoordinatorDocument& coordinatorDoc) {
-        auto optionalDoc = removeOrQuiesceCoordinatorDocAndRemoveReshardingFields(
+        auto updatedCoordinatorDoc = removeOrQuiesceCoordinatorDocAndRemoveReshardingFields(
             opCtx, _metrics.get(), coordinatorDoc);
-        ASSERT(optionalDoc);
 
+        // Check that the on disk document is same as the in memory document returned above.
         auto expectedCoordinatorDoc = coordinatorDoc;
         expectedCoordinatorDoc.setState(CoordinatorStateEnum::kQuiesced);
+        expectedCoordinatorDoc.setQuiescePeriodEnd(updatedCoordinatorDoc.getQuiescePeriodEnd());
+        ASSERT_BSONOBJ_EQ(updatedCoordinatorDoc.toBSON(), expectedCoordinatorDoc.toBSON());
 
         // Check that the entry is marked as quiesced in config.reshardingOperations
-        readReshardingCoordinatorDocAndAssertMatchesExpected(opCtx, expectedCoordinatorDoc);
+        readReshardingCoordinatorDocAndAssertMatchesExpected(opCtx, updatedCoordinatorDoc);
 
         // Check that the resharding fields are removed from the config.collections entry and
         // allowMigrations is set back to true.
         auto expectedOriginalCollType = makeOriginalCollectionCatalogEntry(
-            expectedCoordinatorDoc,
+            updatedCoordinatorDoc,
             boost::none,
             _finalEpoch,
             opCtx->getServiceContext()->getPreciseClockSource()->now());
         assertOriginalCollectionCatalogEntryMatchesExpected(
-            opCtx, expectedOriginalCollType, expectedCoordinatorDoc);
+            opCtx, expectedOriginalCollType, updatedCoordinatorDoc);
     }
 
     void transitionToErrorExpectSuccess(ErrorCodes::Error errorCode) {

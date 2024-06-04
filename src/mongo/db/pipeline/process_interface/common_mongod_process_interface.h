@@ -101,7 +101,8 @@ public:
     std::deque<BSONObj> listCatalog(OperationContext* opCtx) const final;
 
     boost::optional<BSONObj> getCatalogEntry(OperationContext* opCtx,
-                                             const NamespaceString& ns) const final;
+                                             const NamespaceString& ns,
+                                             const boost::optional<UUID>& collUUID) const final;
 
     void appendLatencyStats(OperationContext* opCtx,
                             const NamespaceString& nss,
@@ -220,6 +221,13 @@ protected:
                                       OperationContext* opCtx,
                                       const NamespaceString& ns,
                                       TimeseriesOptions userOpts);
+
+    /**
+     * If passed namespace is a timeseries, returns TimeseriesOptions. Otherwise, returns
+     * boost::none.
+     */
+    virtual boost::optional<TimeseriesOptions> _getTimeseriesOptions(OperationContext* opCtx,
+                                                                     const NamespaceString& ns);
 
 private:
     /**

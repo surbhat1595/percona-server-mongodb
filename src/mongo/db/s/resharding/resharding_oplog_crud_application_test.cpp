@@ -40,7 +40,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -275,7 +274,7 @@ public:
                                                BSONObj(),
                                                BSONObj(),
                                                BoundInclusion::kIncludeStartKeyOnly,
-                                               PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                               PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                                InternalPlanner::FORWARD,
                                                InternalPlanner::IXSCAN_FETCH);
 
@@ -338,7 +337,7 @@ private:
         auto rt = RoutingTableHistory::makeNew(nss,
                                                uuid,
                                                shardKey,
-                                               false, /*unsplittable*/
+                                               false, /* unsplittable */
                                                nullptr /* defaultCollator */,
                                                false /* unique */,
                                                epoch,

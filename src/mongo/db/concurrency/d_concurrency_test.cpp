@@ -33,7 +33,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <functional>
 #include <future>
@@ -156,8 +155,8 @@ public:
             clients;
         clients.reserve(k);
         for (int i = 0; i < k; ++i) {
-            auto client =
-                getServiceContext()->makeClient(str::stream() << "test client for thread " << i);
+            auto client = getServiceContext()->getService()->makeClient(
+                str::stream() << "test client for thread " << i);
             auto opCtx = client->makeOperationContext();
             client->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
             clients.emplace_back(std::move(client), std::move(opCtx));
@@ -212,7 +211,7 @@ public:
 TEST_F(DConcurrencyTestFixture, WriteConflictRetryInstantiatesOK) {
     auto opCtx = makeOperationContext();
     getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
-    writeConflictRetry(opCtx.get(), "", NamespaceString(), [] {});
+    writeConflictRetry(opCtx.get(), "", NamespaceString::kEmpty, [] {});
 }
 
 TEST_F(DConcurrencyTestFixture, WriteConflictRetryRetriesFunctionOnWriteConflictException) {
@@ -220,7 +219,7 @@ TEST_F(DConcurrencyTestFixture, WriteConflictRetryRetriesFunctionOnWriteConflict
     getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
     auto&& opDebug = CurOp::get(opCtx.get())->debug();
     ASSERT_EQUALS(0, opDebug.additiveMetrics.writeConflicts.load());
-    ASSERT_EQUALS(100, writeConflictRetry(opCtx.get(), "", NamespaceString(), [&opDebug] {
+    ASSERT_EQUALS(100, writeConflictRetry(opCtx.get(), "", NamespaceString::kEmpty, [&opDebug] {
                       if (0 == opDebug.additiveMetrics.writeConflicts.load()) {
                           throwWriteConflictException(
                               str::stream()
@@ -237,7 +236,7 @@ TEST_F(DConcurrencyTestFixture, WriteConflictRetryPropagatesNonWriteConflictExce
     getClient()->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
     ASSERT_THROWS_CODE(writeConflictRetry(opCtx.get(),
                                           "",
-                                          NamespaceString(),
+                                          NamespaceString::kEmpty,
                                           [] {
                                               uassert(ErrorCodes::OperationFailed, "", false);
                                               MONGO_UNREACHABLE;
@@ -255,7 +254,7 @@ TEST_F(DConcurrencyTestFixture,
     ASSERT_THROWS(writeConflictRetry(
                       opCtx.get(),
                       "",
-                      NamespaceString(),
+                      NamespaceString::kEmpty,
                       [] {
                           throwWriteConflictException(
                               str::stream() << "Verify that WriteConflictExceptions are propogated "
@@ -2144,7 +2143,7 @@ TEST_F(DConcurrencyTestFixture,
     Lock::DBLock dbLock(
         opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "db"), MODE_IX);
     Lock::CollectionLock collLock(
-        opCtx, NamespaceString::createNamespaceString_forTest("db.coll"), MODE_IX);
+        opCtx, NamespaceString::createNamespaceString_forTest("db.coll"), MODE_X);
 
     opCtx->markKilled();
 
@@ -2664,13 +2663,13 @@ TEST_F(DConcurrencyTestFixture, FailPointInLockDoesNotFailUninterruptibleNonInte
     locker1.lockGlobal(opCtx.get(), MODE_IX);
 
     {
-        locker1.lock(resId, MODE_X);
+        locker1.lock(opCtx.get(), resId, MODE_X);
 
         // MODE_S attempt.
         stdx::thread t2([&]() {
             UninterruptibleLockGuard noInterrupt(&locker2);  // NOLINT.
             locker2.lockGlobal(opCtx.get(), MODE_IS);
-            locker2.lock(resId, MODE_S);
+            locker2.lock(opCtx.get(), resId, MODE_S);
         });
 
         // Wait for the thread to attempt to acquire the collection lock in MODE_S.
@@ -2683,13 +2682,13 @@ TEST_F(DConcurrencyTestFixture, FailPointInLockDoesNotFailUninterruptibleNonInte
     }
 
     {
-        locker1.lock(resId, MODE_X);
+        locker1.lock(opCtx.get(), resId, MODE_X);
 
         // MODE_X attempt.
         stdx::thread t3([&]() {
             UninterruptibleLockGuard noInterrupt(&locker3);  // NOLINT.
             locker3.lockGlobal(opCtx.get(), MODE_IX);
-            locker3.lock(resId, MODE_X);
+            locker3.lock(opCtx.get(), resId, MODE_X);
         });
 
         // Wait for the thread to attempt to acquire the collection lock in MODE_X.

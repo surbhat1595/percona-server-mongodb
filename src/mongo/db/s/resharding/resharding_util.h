@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
 #include <iterator>
@@ -367,6 +366,11 @@ std::vector<std::shared_ptr<Instance>> getReshardingStateMachines(OperationConte
 void validateShardDistribution(const std::vector<ShardKeyRange>& shardDistribution,
                                OperationContext* opCtx,
                                const ShardKeyPattern& keyPattern);
+
+/**
+ * Returns true if the provenance is moveCollection or balancerMoveCollection.
+ */
+bool isMoveCollection(boost::optional<ProvenanceEnum> provenance);
 
 }  // namespace resharding
 }  // namespace mongo

@@ -31,7 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
@@ -118,7 +117,7 @@ struct ExpressionVisitorContext {
     };
 
     ExpressionVisitorContext(StageBuilderState& state,
-                             boost::optional<sbe::value::SlotId> rootSlot,
+                             boost::optional<TypedSlot> rootSlot,
                              const PlanStageSlots* slots = nullptr)
         : state(state), rootSlot(std::move(rootSlot)), slots(slots) {}
 
@@ -158,7 +157,7 @@ struct ExpressionVisitorContext {
 
     std::vector<SbExpr> exprStack;
 
-    boost::optional<sbe::value::SlotId> rootSlot;
+    boost::optional<TypedSlot> rootSlot;
 
     // The lexical environment for the expression being traversed. A variable reference takes the
     // form "$$variable_name" in MQL's concrete syntax and gets transformed into a numeric
@@ -174,13 +173,12 @@ struct ExpressionVisitorContext {
  * For the given MatchExpression 'expr', generates a path traversal SBE plan stage sub-tree
  * implementing the comparison expression.
  */
-optimizer::ABT generateTraverseHelper(
-    ExpressionVisitorContext* context,
-    boost::optional<optimizer::ABT>&& inputExpr,
-    const FieldPath& fp,
-    size_t level,
-    sbe::value::FrameIdGenerator* frameIdGenerator,
-    boost::optional<sbe::value::SlotId> topLevelFieldSlot = boost::none) {
+optimizer::ABT generateTraverseHelper(ExpressionVisitorContext* context,
+                                      boost::optional<optimizer::ABT>&& inputExpr,
+                                      const FieldPath& fp,
+                                      size_t level,
+                                      sbe::value::FrameIdGenerator* frameIdGenerator,
+                                      boost::optional<TypedSlot> topLevelFieldSlot = boost::none) {
     using namespace std::literals;
 
     invariant(level < fp.getPathLength());
@@ -191,7 +189,7 @@ optimizer::ABT generateTraverseHelper(
     // Generate an expression to read a sub-field at the current nested level.
     auto fieldName = makeABTConstant(fp.getFieldName(level));
     auto fieldExpr = topLevelFieldSlot
-        ? makeABTVariable(*topLevelFieldSlot)
+        ? makeABTVariable(topLevelFieldSlot->slotId)
         : makeABTFunction("getField"_sd, std::move(*inputExpr), std::move(fieldName));
 
     if (level == fp.getPathLength() - 1) {
@@ -216,13 +214,12 @@ optimizer::ABT generateTraverseHelper(
         "traverseP"_sd, std::move(fieldExpr), std::move(lambdaExpr), optimizer::Constant::int32(1));
 }
 
-optimizer::ABT generateTraverse(
-    ExpressionVisitorContext* context,
-    boost::optional<optimizer::ABT>&& inputExpr,
-    bool expectsDocumentInputOnly,
-    const FieldPath& fp,
-    sbe::value::FrameIdGenerator* frameIdGenerator,
-    boost::optional<sbe::value::SlotId> topLevelFieldSlot = boost::none) {
+optimizer::ABT generateTraverse(ExpressionVisitorContext* context,
+                                boost::optional<optimizer::ABT>&& inputExpr,
+                                bool expectsDocumentInputOnly,
+                                const FieldPath& fp,
+                                sbe::value::FrameIdGenerator* frameIdGenerator,
+                                boost::optional<TypedSlot> topLevelFieldSlot = boost::none) {
     size_t level = 0;
 
     if (expectsDocumentInputOnly) {
@@ -668,6 +665,7 @@ public:
         Intersection,
         Union,
         Equals,
+        IsSubset,
     };
 
     void visit(const ExpressionConstant* expr) final {
@@ -2234,7 +2232,7 @@ public:
     }
     void visit(const ExpressionFieldPath* expr) final {
         SbExpr inputExpr;
-        boost::optional<sbe::value::SlotId> topLevelFieldSlot;
+        boost::optional<TypedSlot> topLevelFieldSlot;
         bool expectsDocumentInputOnly = false;
         auto fp = (expr->getFieldPath().getPathLength() > 1)
             ? boost::make_optional(expr->getFieldPathWithoutCurrentPrefix())
@@ -2244,7 +2242,7 @@ public:
             const auto* slots = _context->slots;
             if (expr->getVariableId() == Variables::kRootId) {
                 // Set inputExpr to refer to the root document.
-                inputExpr = _context->rootSlot ? SbExpr{*_context->rootSlot} : SbExpr{};
+                inputExpr = _context->rootSlot ? SbExpr{_context->rootSlot->slotId} : SbExpr{};
                 expectsDocumentInputOnly = true;
 
                 if (slots && fp) {
@@ -2252,7 +2250,7 @@ public:
                     // to 'expr'.
                     auto fpe = std::make_pair(PlanStageSlots::kPathExpr, fp->fullPath());
                     if (slots->has(fpe)) {
-                        _context->pushExpr(slots->get(fpe));
+                        _context->pushExpr(slots->get(fpe).slotId);
                         return;
                     }
 
@@ -2888,9 +2886,12 @@ public:
 
         generateSetExpression(expr, SetOperation::Intersection);
     }
-
     void visit(const ExpressionSetIsSubset* expr) final {
-        unsupportedExpression(expr->getOpName());
+        tassert(5154700,
+                "$setIsSubset expects two expressions in the input",
+                expr->getChildren().size() == 2);
+
+        generateSetExpression(expr, SetOperation::IsSubset);
     }
     void visit(const ExpressionSetUnion* expr) final {
         if (expr->getChildren().size() == 0) {
@@ -3607,7 +3608,7 @@ private:
 
         // "date" parameter validation.
         inputValidationCases.emplace_back(generateABTFailIfNotCoercibleToDate(
-            std::move(dateVar), ErrorCodes::Error{5157904}, std::move(exprName), "date"_sd));
+            dateVar, ErrorCodes::Error{5157904}, std::move(exprName), "date"_sd));
 
         pushABT(optimizer::make<optimizer::Let>(
             std::move(dateName),
@@ -3997,6 +3998,9 @@ private:
             case SetOperation::Equals:
                 return std::make_pair("setEquals"_sd,
                                       hasCollator ? "collSetEquals"_sd : "setEquals"_sd);
+            case SetOperation::IsSubset:
+                return std::make_pair("setIsSubset"_sd,
+                                      hasCollator ? "collSetIsSubset"_sd : "setIsSubset"_sd);
         }
         MONGO_UNREACHABLE;
     }
@@ -4327,7 +4331,7 @@ private:
 
 SbExpr generateExpression(StageBuilderState& state,
                           const Expression* expr,
-                          boost::optional<sbe::value::SlotId> rootSlot,
+                          boost::optional<TypedSlot> rootSlot,
                           const PlanStageSlots* slots) {
     ExpressionVisitorContext context(state, std::move(rootSlot), slots);
 

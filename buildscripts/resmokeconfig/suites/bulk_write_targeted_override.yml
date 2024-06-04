@@ -1,0 +1,46 @@
+test_kind: js_test
+
+# Override selected targeted tests to run with the bulkWrite override to make sure bulkWrite provides feature
+# parity with regular CRUD ops.
+selector:
+  roots:
+  - jstests/sharding/updateOne_without_shard_key/*.js
+  - jstests/sharding/analyze_shard_key/read_and_write_distribution.js
+  - jstests/sharding/analyze_shard_key/sampling_current_op_and_server_status_rs.js
+  - jstests/sharding/analyze_shard_key/sampling_current_op_and_server_status_sharded.js
+  - jstests/sharding/analyze_shard_key/sample_rates_rs.js
+  - jstests/sharding/analyze_shard_key/sample_rates_sharded.js
+  - jstests/sharding/timeseries_delete_multi.js
+  - jstests/sharding/timeseries_delete_one_with_shard_key.js
+  - jstests/sharding/timeseries_delete_with_meta.js
+  - jstests/sharding/timeseries_insert.js
+  - jstests/sharding/timeseries_multiple_mongos.js
+  - jstests/sharding/timeseries_update.js
+  - jstests/sharding/timeseries_update_multi.js
+  - jstests/sharding/timeseries_update_routing.js
+  - jstests/sharding/timeseries_user_system_buckets_sharding.js
+  - jstests/sharding/timeseries_delete_one_without_shard_key.js
+  - jstests/sharding/timeseries_write_one_stale_sharding_state.js
+  # TODO (SERVER-72793): WouldChangeOwningShard.
+  # - jstests/sharding/timeseries_shardkey_update.js
+  # - jstests/sharding/timeseries_update_one.js
+  # - jstests/sharding/timeseries_upsert.js
+  # TODO (SERVER-80831): Explain.
+  # - jstests/sharding/timeseries_update_multi_explain.js
+  exclude_files:
+  # TODO (SERVER-72793): WouldChangeOwningShard.
+  - jstests/sharding/updateOne_without_shard_key/updateOne_without_shard_key_basic.js
+  - jstests/sharding/updateOne_without_shard_key/write_without_shard_key_metrics.js
+  - jstests/sharding/updateOne_without_shard_key/would_change_owning_shard_test.js
+  # TODO (SERVER-80174): Handle transaction errors.
+  - jstests/sharding/updateOne_without_shard_key/errors.js
+  # Update API version tests should not be run with bulkWrite override.
+  - jstests/sharding/updateOne_without_shard_key/write_without_shard_key_stable_api_test.js
+
+executor:
+  archive:
+    tests: true
+  config:
+    shell_options:
+      nodb: ''
+      eval: await import('jstests/libs/override_methods/single_crud_op_as_bulk_write.js');

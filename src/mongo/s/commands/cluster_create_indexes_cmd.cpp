@@ -120,12 +120,7 @@ public:
                               const RequestParser&,
                               BSONObjBuilder& output) final {
         const NamespaceString nss(CommandHelpers::parseNsCollectionRequired(dbName, cmdObj));
-        LOGV2_DEBUG(22750,
-                    1,
-                    "createIndexes: {namespace} cmd: {command}",
-                    "CMD: createIndexes",
-                    logAttrs(nss),
-                    "command"_attr = redact(cmdObj));
+        LOGV2_DEBUG(22750, 1, "CMD: createIndexes", logAttrs(nss), "command"_attr = redact(cmdObj));
 
         cluster::createDatabase(opCtx, dbName);
 
@@ -216,7 +211,7 @@ public:
         return &::mongo::CreateIndexesCommand::kAuthorizationContract;
     }
 };
-MONGO_REGISTER_COMMAND(CreateIndexesCmd);
+MONGO_REGISTER_COMMAND(CreateIndexesCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

@@ -65,7 +65,7 @@
 #include "mongo/db/pipeline/window_function/window_bounds.h"
 #include "mongo/db/pipeline/window_function/window_function_exec.h"
 #include "mongo/db/pipeline/window_function/window_function_statement.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/sort_pattern.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/string_map.h"
@@ -85,7 +85,7 @@ std::list<boost::intrusive_ptr<DocumentSource>> createFromBson(
 std::list<boost::intrusive_ptr<DocumentSource>> create(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     boost::optional<boost::intrusive_ptr<Expression>> partitionBy,
-    const boost::optional<SortPattern>& sortBy,
+    boost::optional<SortPattern> sortBy,
     std::vector<WindowFunctionStatement> outputFields,
     SbeCompatibility sbeCompatibility);
 
@@ -105,7 +105,7 @@ public:
     DocumentSourceInternalSetWindowFields(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         boost::optional<boost::intrusive_ptr<Expression>> partitionBy,
-        const boost::optional<SortPattern>& sortBy,
+        boost::optional<SortPattern> sortBy,
         std::vector<WindowFunctionStatement> outputFields,
         int64_t maxMemoryBytes,
         SbeCompatibility sbeCompatibility)

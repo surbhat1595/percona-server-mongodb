@@ -31,7 +31,6 @@
 
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <type_traits>
 #include <typeinfo>
@@ -64,10 +63,12 @@
 #include "mongo/s/client/shard.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/cluster_commands_helpers.h"
+#include "mongo/s/cluster_ddl.h"
 #include "mongo/s/cluster_write.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/index_version.h"
 #include "mongo/s/query/document_source_merge_cursors.h"
+#include "mongo/s/request_types/sharded_ddl_commands_gen.h"
 #include "mongo/s/router_role.h"
 #include "mongo/s/shard_version.h"
 #include "mongo/s/shard_version_factory.h"
@@ -86,6 +87,31 @@
 namespace mongo {
 
 using namespace fmt::literals;
+
+namespace {
+
+// Writes to the local shard. It shall only be used to write to collections that are always
+// untracked (e.g. collections under the admin/config db).
+void writeToLocalShard(OperationContext* opCtx,
+                       const BatchedCommandRequest& batchedCommandRequest) {
+    tassert(8144401,
+            "Forbidden to write directly to local shard unless namespace is always untracked",
+            batchedCommandRequest.getNS().isNamespaceAlwaysUntracked());
+    tassert(8144402,
+            "Explicit write concern required for internal cluster operation",
+            batchedCommandRequest.hasWriteConcern());
+
+    const auto cmdResponse =
+        repl::ReplicationCoordinator::get(opCtx)->runCmdOnPrimaryAndAwaitResponse(
+            opCtx,
+            batchedCommandRequest.getNS().dbName(),
+            batchedCommandRequest.toBSON(),
+            [](executor::TaskExecutor::CallbackHandle handle) {},
+            [](executor::TaskExecutor::CallbackHandle handle) {});
+    uassertStatusOK(getStatusFromCommandResult(cmdResponse));
+}
+
+}  // namespace
 
 bool ShardServerProcessInterface::isSharded(OperationContext* opCtx, const NamespaceString& nss) {
     const auto [cm, _] =
@@ -216,29 +242,35 @@ void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
     bool stayTemp,
     const BSONObj& originalCollectionOptions,
     const std::list<BSONObj>& originalIndexes) {
-    auto cachedDbInfo =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, targetNs.dbName()));
-    auto newCmdObj = CommonMongodProcessInterface::_convertRenameToInternalRename(
-        opCtx, sourceNs, targetNs, originalCollectionOptions, originalIndexes);
-    BSONObjBuilder newCmdWithWriteConcernBuilder(std::move(newCmdObj));
-    newCmdWithWriteConcernBuilder.append(WriteConcernOptions::kWriteConcernField,
-                                         opCtx->getWriteConcern().toBSON());
-    newCmdObj = newCmdWithWriteConcernBuilder.done();
-    auto response =
-        executeCommandAgainstDatabasePrimary(opCtx,
-                                             // internalRenameIfOptionsAndIndexesMatch is adminOnly.
-                                             DatabaseName::kAdmin,
-                                             std::move(cachedDbInfo),
-                                             newCmdObj,
-                                             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                             Shard::RetryPolicy::kNoRetry);
-    uassertStatusOKWithContext(response.swResponse,
-                               str::stream() << "failed while running command " << newCmdObj);
-    auto result = response.swResponse.getValue().data;
-    uassertStatusOKWithContext(getStatusFromCommandResult(result),
-                               str::stream() << "failed while running command " << newCmdObj);
-    uassertStatusOKWithContext(getWriteConcernStatusFromCommandResult(result),
-                               str::stream() << "failed while running command " << newCmdObj);
+    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), sourceNs.dbName());
+    router.route(opCtx,
+                 "ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged",
+                 [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
+                     auto newCmdObj = CommonMongodProcessInterface::_convertRenameToInternalRename(
+                         opCtx, sourceNs, targetNs, originalCollectionOptions, originalIndexes);
+                     BSONObjBuilder newCmdWithWriteConcernBuilder(std::move(newCmdObj));
+                     newCmdWithWriteConcernBuilder.append(WriteConcernOptions::kWriteConcernField,
+                                                          opCtx->getWriteConcern().toBSON());
+                     newCmdObj = newCmdWithWriteConcernBuilder.done();
+                     auto response = executeCommandAgainstDatabasePrimary(
+                         opCtx,
+                         // internalRenameIfOptionsAndIndexesMatch is adminOnly.
+                         DatabaseName::kAdmin,
+                         cdb,
+                         newCmdObj,
+                         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                         Shard::RetryPolicy::kNoRetry);
+                     uassertStatusOKWithContext(response.swResponse,
+                                                str::stream() << "failed while running command "
+                                                              << newCmdObj);
+                     auto result = response.swResponse.getValue().data;
+                     uassertStatusOKWithContext(getStatusFromCommandResult(result),
+                                                str::stream() << "failed while running command "
+                                                              << newCmdObj);
+                     uassertStatusOKWithContext(getWriteConcernStatusFromCommandResult(result),
+                                                str::stream() << "failed while running command "
+                                                              << newCmdObj);
+                 });
 }
 
 BSONObj ShardServerProcessInterface::getCollectionOptions(OperationContext* opCtx,
@@ -247,175 +279,224 @@ BSONObj ShardServerProcessInterface::getCollectionOptions(OperationContext* opCt
         return getCollectionOptionsLocally(opCtx, nss);
     }
 
-    auto cachedDbInfo =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nss.dbName()));
-    auto shard = uassertStatusOK(
-        Grid::get(opCtx)->shardRegistry()->getShard(opCtx, cachedDbInfo->getPrimary()));
+    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
+    return router.route(
+        opCtx,
+        "ShardServerProcessInterface::getCollectionOptions",
+        [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
+            const BSONObj filterObj = BSON("name" << nss.coll());
+            const BSONObj cmdObj = BSON("listCollections" << 1 << "filter" << filterObj);
 
-    const BSONObj filterObj = BSON("name" << nss.coll());
-    const BSONObj cmdObj = BSON("listCollections" << 1 << "filter" << filterObj);
+            const auto shard = uassertStatusOK(
+                Grid::get(opCtx)->shardRegistry()->getShard(opCtx, cdb->getPrimary()));
+            Shard::QueryResponse resultCollections;
 
-    Shard::QueryResponse resultCollections;
-    try {
-        resultCollections = uassertStatusOK(
-            shard->runExhaustiveCursorCommand(opCtx,
-                                              ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                              nss.dbName(),
-                                              appendDbVersionIfPresent(cmdObj, cachedDbInfo),
-                                              Milliseconds(-1)));
-    } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
-        return BSONObj{};
-    }
-
-    if (resultCollections.docs.empty()) {
-        return BSONObj{};
-    }
-
-    for (const BSONObj& bsonObj : resultCollections.docs) {
-        // Return first element which matches on name and has options.
-        const BSONElement nameElement = bsonObj["name"];
-        if (!nameElement || nameElement.valueStringDataSafe() != nss.coll()) {
-            continue;
-        }
-
-        const BSONElement optionsElement = bsonObj["options"];
-        if (optionsElement) {
-            auto optionObj = optionsElement.Obj();
-
-            // If the BSON object has field 'info' and the BSON element 'info' has field 'uuid',
-            // then extract the uuid and add to the BSON object to be return. This will ensure that
-            // the BSON object is complaint with the BSON object returned for non-sharded namespace.
-            if (auto infoElement = bsonObj["info"]; infoElement && infoElement["uuid"]) {
-                return optionObj.addField(infoElement["uuid"]);
+            try {
+                resultCollections = uassertStatusOK(shard->runExhaustiveCursorCommand(
+                    opCtx,
+                    ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                    nss.dbName(),
+                    appendDbVersionIfPresent(cmdObj, cdb),
+                    Milliseconds(-1)));
+            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+                return BSONObj{};
             }
 
-            return optionObj.getOwned();
-        }
+            if (resultCollections.docs.empty()) {
+                return BSONObj{};
+            }
 
-        tassert(5983900,
-                str::stream() << "Expected at most one collection with the name "
-                              << nss.toStringForErrorMsg() << ": " << resultCollections.docs.size(),
-                resultCollections.docs.size() <= 1);
-    }
+            for (const BSONObj& bsonObj : resultCollections.docs) {
+                // Return first element which matches on name and has options.
+                const BSONElement nameElement = bsonObj["name"];
+                if (!nameElement || nameElement.valueStringDataSafe() != nss.coll()) {
+                    continue;
+                }
 
-    return BSONObj{};
+                const BSONElement optionsElement = bsonObj["options"];
+                if (optionsElement) {
+                    auto optionObj = optionsElement.Obj();
+
+                    // If the BSON object has field 'info' and the BSON element 'info' has field
+                    // 'uuid', then extract the uuid and add to the BSON object to be return. This
+                    // will ensure that the BSON object is complaint with the BSON object returned
+                    // for non-sharded namespace.
+                    if (auto infoElement = bsonObj["info"]; infoElement && infoElement["uuid"]) {
+                        return optionObj.addField(infoElement["uuid"]);
+                    }
+
+                    return optionObj.getOwned();
+                }
+
+                tassert(5983900,
+                        str::stream()
+                            << "Expected at most one collection with the name "
+                            << nss.toStringForErrorMsg() << ": " << resultCollections.docs.size(),
+                        resultCollections.docs.size() <= 1);
+            }
+            return BSONObj{};
+        });
 }
 
 std::list<BSONObj> ShardServerProcessInterface::getIndexSpecs(OperationContext* opCtx,
                                                               const NamespaceString& ns,
                                                               bool includeBuildUUIDs) {
-    // Note that 'ns' must be an unsharded collection. The indexes for a sharded collection must be
-    // read from a shard with a chunk instead of the primary shard.
-    auto cachedDbInfo =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, ns.dbName()));
-    auto shard = uassertStatusOK(
-        Grid::get(opCtx)->shardRegistry()->getShard(opCtx, cachedDbInfo->getPrimary()));
-    auto cmdObj = BSON("listIndexes" << ns.coll());
-    Shard::QueryResponse indexes;
-    try {
-        indexes = uassertStatusOK(
-            shard->runExhaustiveCursorCommand(opCtx,
-                                              ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                              ns.dbName(),
-                                              appendDbVersionIfPresent(cmdObj, cachedDbInfo),
-                                              Milliseconds(-1)));
-    } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
-        return std::list<BSONObj>();
-    }
-    return std::list<BSONObj>(indexes.docs.begin(), indexes.docs.end());
+    sharding::router::CollectionRouter router(opCtx->getServiceContext(), ns);
+    return router.route(
+        opCtx,
+        "ShardServerProcessInterface::getIndexSpecs",
+        [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) -> std::list<BSONObj> {
+            StatusWith<Shard::QueryResponse> response =
+                loadIndexesFromAuthoritativeShard(opCtx, ns, cri);
+            if (response.getStatus().code() == ErrorCodes::NamespaceNotFound) {
+                return {};
+            }
+            uassertStatusOK(response);
+            std::vector<BSONObj>& indexes = response.getValue().docs;
+            return {std::make_move_iterator(indexes.begin()),
+                    std::make_move_iterator(indexes.end())};
+        });
 }
 
 void ShardServerProcessInterface::createCollection(OperationContext* opCtx,
                                                    const DatabaseName& dbName,
                                                    const BSONObj& cmdObj) {
-    auto cachedDbInfo =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, dbName));
-    BSONObjBuilder finalCmdBuilder(cmdObj);
-    finalCmdBuilder.append(WriteConcernOptions::kWriteConcernField,
-                           opCtx->getWriteConcern().toBSON());
-    BSONObj finalCmdObj = finalCmdBuilder.obj();
-    auto response =
-        executeCommandAgainstDatabasePrimary(opCtx,
-                                             dbName,
-                                             std::move(cachedDbInfo),
-                                             finalCmdObj,
-                                             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                             Shard::RetryPolicy::kIdempotent);
-    uassertStatusOKWithContext(response.swResponse,
-                               str::stream() << "failed while running command " << finalCmdObj);
-    auto result = response.swResponse.getValue().data;
-    uassertStatusOKWithContext(getStatusFromCommandResult(result),
-                               str::stream() << "failed while running command " << finalCmdObj);
-    uassertStatusOKWithContext(getWriteConcernStatusFromCommandResult(result),
-                               str::stream()
-                                   << "write concern failed while running command " << finalCmdObj);
+    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), dbName);
+    router.route(opCtx,
+                 "ShardServerProcessInterface::createCollection",
+                 [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
+                     BSONObjBuilder finalCmdBuilder(cmdObj);
+                     finalCmdBuilder.append(WriteConcernOptions::kWriteConcernField,
+                                            opCtx->getWriteConcern().toBSON());
+                     BSONObj finalCmdObj = finalCmdBuilder.obj();
+                     auto response = executeCommandAgainstDatabasePrimary(
+                         opCtx,
+                         dbName,
+                         cdb,
+                         finalCmdObj,
+                         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                         Shard::RetryPolicy::kIdempotent);
+                     uassertStatusOKWithContext(response.swResponse,
+                                                str::stream() << "failed while running command "
+                                                              << finalCmdObj);
+                     auto result = response.swResponse.getValue().data;
+                     uassertStatusOKWithContext(getStatusFromCommandResult(result),
+                                                str::stream() << "failed while running command "
+                                                              << finalCmdObj);
+                     uassertStatusOKWithContext(getWriteConcernStatusFromCommandResult(result),
+                                                str::stream()
+                                                    << "write concern failed while running command "
+                                                    << finalCmdObj);
+                 });
+}
+
+void ShardServerProcessInterface::createTempCollection(OperationContext* opCtx,
+                                                       const NamespaceString& nss,
+                                                       const BSONObj& collectionOptions) {
+    // Insert an entry on the 'kAggTempCollections' collection on this shard to indicate that 'nss'
+    // is a temporary collection that shall be garbage-collected (dropped) on the next stepup.
+    BatchedCommandRequest bcr(write_ops::InsertCommandRequest{
+        NamespaceString(NamespaceString::kAggTempCollections),
+        std::vector<BSONObj>({BSON(
+            "_id" << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()))})});
+    bcr.setWriteConcern(CommandHelpers::kMajorityWriteConcern.toBSON());
+    writeToLocalShard(opCtx, bcr);
+
+    // Create the collection. Note we don't set the 'temp: true' option. The temporary-ness comes
+    // from having registered on kAggTempCollections.
+    BSONObjBuilder cmd;
+    cmd << "create" << nss.coll();
+    cmd.appendElementsUnique(collectionOptions);
+    createCollection(opCtx, nss.dbName(), cmd.done());
 }
 
 void ShardServerProcessInterface::createIndexesOnEmptyCollection(
     OperationContext* opCtx, const NamespaceString& ns, const std::vector<BSONObj>& indexSpecs) {
-    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), ns.dbName());
+    sharding::router::CollectionRouter router(opCtx->getServiceContext(), ns);
     router.route(
         opCtx,
-        "copying index for empty collection {}"_format(NamespaceStringUtil::serialize(ns)),
-        [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
+        "copying index for empty collection {}"_format(
+            NamespaceStringUtil::serialize(ns, SerializationContext::stateDefault())),
+        [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) {
             BSONObjBuilder cmdBuilder;
             cmdBuilder.append("createIndexes", ns.coll());
             cmdBuilder.append("indexes", indexSpecs);
             cmdBuilder.append(WriteConcernOptions::kWriteConcernField,
                               opCtx->getWriteConcern().toBSON());
-            sharding::router::DBPrimaryRouter::appendCRUDUnshardedRoutingTokenToCommand(
-                cdb->getPrimary(), cdb->getVersion(), &cmdBuilder);
-
             auto cmdObj = cmdBuilder.obj();
+            auto shardResponses = scatterGatherVersionedTargetByRoutingTable(
+                opCtx,
+                ns.dbName(),
+                ns,
+                cri,
+                cmdObj,
+                ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                Shard::RetryPolicy::kNoRetry,
+                BSONObj() /*query*/,
+                BSONObj() /*collation*/,
+                boost::none /*letParameters*/,
+                boost::none /*runtimeConstants*/);
 
-            auto response = std::move(
-                gatherResponses(opCtx,
-                                ns.dbName(),
-                                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                Shard::RetryPolicy::kIdempotent,
-                                std::vector<AsyncRequestsSender::Request>{
-                                    AsyncRequestsSender::Request(cdb->getPrimary(), cmdObj)})
-                    .front());
-
-            uassertStatusOKWithContext(response.swResponse,
-                                       str::stream() << "command was not sent " << cmdObj);
-            const auto& result = response.swResponse.getValue().data;
-            uassertStatusOKWithContext(getStatusFromCommandResult(result),
-                                       str::stream() << "command was sent but failed " << cmdObj);
-            uassertStatusOKWithContext(
-                getWriteConcernStatusFromCommandResult(result),
-                str::stream()
-                    << "command was sent and succeeded, but failed waiting for write concern "
-                    << cmdObj);
+            for (const auto& response : shardResponses) {
+                uassertStatusOKWithContext(response.swResponse,
+                                           str::stream() << "command was not sent " << cmdObj
+                                                         << " to shard " << response.shardId);
+                const auto& result = response.swResponse.getValue().data;
+                uassertStatusOKWithContext(getStatusFromCommandResult(result),
+                                           str::stream() << "command was sent but failed " << cmdObj
+                                                         << " on shard " << response.shardId);
+                uassertStatusOKWithContext(
+                    getWriteConcernStatusFromCommandResult(result),
+                    str::stream()
+                        << "command was sent and succeeded, but failed waiting for write concern "
+                        << cmdObj << " on shard " << response.shardId);
+            }
         });
 }
 
 void ShardServerProcessInterface::dropCollection(OperationContext* opCtx,
                                                  const NamespaceString& ns) {
-    // Build and execute the dropCollection command against the primary shard of the given
+    // Build and execute the _shardsvrDropCollection command against the primary shard of the given
     // database.
-    auto cachedDbInfo =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, ns.dbName()));
-    BSONObjBuilder newCmdBuilder;
-    newCmdBuilder.append("drop", ns.coll());
-    newCmdBuilder.append(WriteConcernOptions::kWriteConcernField,
-                         opCtx->getWriteConcern().toBSON());
-    auto cmdObj = newCmdBuilder.done();
-    auto response =
-        executeCommandAgainstDatabasePrimary(opCtx,
-                                             ns.dbName(),
-                                             std::move(cachedDbInfo),
-                                             cmdObj,
-                                             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                             Shard::RetryPolicy::kIdempotent);
-    uassertStatusOKWithContext(response.swResponse,
-                               str::stream() << "failed while running command " << cmdObj);
-    auto result = response.swResponse.getValue().data;
-    uassertStatusOKWithContext(getStatusFromCommandResult(result),
-                               str::stream() << "failed while running command " << cmdObj);
-    uassertStatusOKWithContext(getWriteConcernStatusFromCommandResult(result),
-                               str::stream()
-                                   << "write concern failed while running command " << cmdObj);
+    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), ns.dbName());
+    router.route(
+        opCtx,
+        "ShardServerProcessInterface::dropCollection",
+        [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
+            ShardsvrDropCollection dropCollectionCommand(ns);
+            BSONObj cmdObj = CommandHelpers::appendMajorityWriteConcern(
+                dropCollectionCommand.toBSON({}), opCtx->getWriteConcern());
+            auto response = executeCommandAgainstDatabasePrimary(
+                opCtx,
+                ns.dbName(),
+                cdb,
+                cmdObj,
+                ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                Shard::RetryPolicy::kIdempotent);
+            uassertStatusOKWithContext(response.swResponse,
+                                       str::stream() << "failed while running command " << cmdObj);
+            auto result = response.swResponse.getValue().data;
+            uassertStatusOKWithContext(getStatusFromCommandResult(result),
+                                       str::stream() << "failed while running command " << cmdObj);
+            uassertStatusOKWithContext(
+                getWriteConcernStatusFromCommandResult(result),
+                str::stream() << "write concern failed while running command " << cmdObj);
+        });
+}
+
+void ShardServerProcessInterface::dropTempCollection(OperationContext* opCtx,
+                                                     const NamespaceString& nss) {
+    // Drop the collection.
+    dropCollection(opCtx, nss);
+
+    // Remove the garbage-collector entry associated to it.
+    BatchedCommandRequest bcr(write_ops::DeleteCommandRequest{
+        NamespaceString(NamespaceString::kAggTempCollections),
+        {write_ops::DeleteOpEntry(BSON("_id" << NamespaceStringUtil::serialize(
+                                           nss, SerializationContext::stateDefault())),
+                                  false /* multi */)}});
+    bcr.setWriteConcern(CommandHelpers::kMajorityWriteConcern.toBSON());
+    writeToLocalShard(opCtx, std::move(bcr));
 }
 
 void ShardServerProcessInterface::createTimeseriesView(OperationContext* opCtx,
@@ -427,6 +508,20 @@ void ShardServerProcessInterface::createTimeseriesView(OperationContext* opCtx,
     } catch (const DBException& ex) {
         _handleTimeseriesCreateError(ex, opCtx, ns, userOpts);
     }
+}
+
+boost::optional<TimeseriesOptions> ShardServerProcessInterface::_getTimeseriesOptions(
+    OperationContext* opCtx, const NamespaceString& ns) {
+    const BSONObj options = getCollectionOptions(opCtx, ns);
+    if (options.isEmpty()) {
+        return boost::none;
+    }
+    const BSONElement timeseries = options["timeseries"];
+    if (!timeseries || !timeseries.isABSONObj()) {
+        return boost::none;
+    }
+    return TimeseriesOptions::parseOwned(IDLParserContext("TimeseriesOptions"),
+                                         timeseries.Obj().getOwned());
 }
 
 Status ShardServerProcessInterface::insertTimeseries(

@@ -48,7 +48,7 @@
 #include "mongo/db/query/projection_ast_util.h"
 #include "mongo/db/query/projection_parser.h"
 #include "mongo/db/query/projection_policies.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/stdx/type_traits.h"
 #include "mongo/unittest/assert.h"
@@ -871,16 +871,9 @@ TEST_F(ProjectionASTTest, ShouldThrowWithPositionalOnExclusion) {
         DBException,
         31395);
 }
-std::string applyHmacForTest(StringData s) {
-    return str::stream() << "HASH<" << s << ">";
-}
 
 TEST_F(ProjectionASTTest, TestASTRedaction) {
-    SerializationOptions options;
-    options.literalPolicy = LiteralSerializationPolicy::kToDebugTypeString;
-    options.transformIdentifiers = true;
-    options.transformIdentifiersCallback = applyHmacForTest;
-
+    SerializationOptions options = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
 
     auto proj = fromjson("{'a.b': 1}");
     BSONObj output = projection_ast::serialize(*parseWithFindFeaturesEnabled(proj).root(), options);

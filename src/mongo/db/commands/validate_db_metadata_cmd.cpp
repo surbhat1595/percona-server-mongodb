@@ -144,10 +144,13 @@ public:
 
             // If there is no database name present in the input, run validation against all the
             // databases.
+            // validateDBMetadata accepts a command parameter `db` which is different than `$db`.
+            // If we have `getDb` which returns the `db` parameter, we should use it.
             auto dbNames = validateCmdRequest.getDb()
                 ? std::vector<DatabaseName>{DatabaseNameUtil::deserialize(
                       validateCmdRequest.getDbName().tenantId(),
-                      validateCmdRequest.getDb()->toString())}
+                      validateCmdRequest.getDb()->toString(),
+                      validateCmdRequest.getSerializationContext())}
                 : collectionCatalog->getAllDbNames();
 
             for (const auto& dbName : dbNames) {
@@ -188,7 +191,7 @@ public:
         bool _validateView(OperationContext* opCtx, const ViewDefinition& view) {
             auto pipelineStatus = view_catalog_helpers::validatePipeline(opCtx, view);
             if (!pipelineStatus.isOK()) {
-                ErrorReplyElement error(NamespaceStringUtil::serialize(view.name()),
+                ErrorReplyElement error(view.name(),
                                         ErrorCodes::APIStrictError,
                                         ErrorCodes::errorString(ErrorCodes::APIStrictError),
                                         pipelineStatus.getStatus().reason());
@@ -225,7 +228,7 @@ public:
             }
             const auto status = collection->checkValidatorAPIVersionCompatability(opCtx);
             if (!status.isOK()) {
-                ErrorReplyElement error(NamespaceStringUtil::serialize(coll),
+                ErrorReplyElement error(coll,
                                         ErrorCodes::APIStrictError,
                                         ErrorCodes::errorString(ErrorCodes::APIStrictError),
                                         status.reason());
@@ -248,7 +251,7 @@ public:
                 const IndexDescriptor* desc = ii->next()->descriptor();
                 if (apiStrict && apiVersion == "1" &&
                     !index_key_validate::isIndexAllowedInAPIVersion1(*desc)) {
-                    ErrorReplyElement error(NamespaceStringUtil::serialize(coll),
+                    ErrorReplyElement error(coll,
                                             ErrorCodes::APIStrictError,
                                             ErrorCodes::errorString(ErrorCodes::APIStrictError),
                                             str::stream()
@@ -269,5 +272,5 @@ public:
         ValidateDBMetadataCommandReply _reply;
     };
 };
-MONGO_REGISTER_COMMAND(ValidateDBMetadataCmd);
+MONGO_REGISTER_COMMAND(ValidateDBMetadataCmd).forShard();
 }  // namespace mongo

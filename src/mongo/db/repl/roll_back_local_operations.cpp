@@ -32,7 +32,6 @@
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
@@ -128,7 +127,6 @@ StatusWith<RollBackLocalOperations::RollbackCommonPoint> RollBackLocalOperations
         _scanned++;
         LOGV2_DEBUG(21656,
                     2,
-                    "Local oplog entry to roll back: {oplogEntry}",
                     "Local oplog entry to roll back",
                     "oplogEntry"_attr = redact(_localOplogValue.first));
         auto status = _rollbackOperation(_localOplogValue.first);

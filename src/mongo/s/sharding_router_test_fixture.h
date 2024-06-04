@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <tuple>
 #include <vector>
@@ -47,6 +46,7 @@
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_shard.h"
+#include "mongo/s/catalog_cache_mock.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/sharding_test_fixture_common.h"
 #include "mongo/transport/session.h"
@@ -162,6 +162,9 @@ protected:
         return result.obj();
     }
 
+protected:
+    ShardingTestFixture(bool withMockCatalogCache);
+
 private:
     std::unique_ptr<ShardingCatalogClient> makeShardingCatalogClient() override;
 
@@ -172,6 +175,16 @@ private:
 
     // For the Grid's arbitrary executor in its executorPool.
     std::unique_ptr<executor::NetworkTestEnv> _networkTestEnvForPool;
+};
+
+class ShardingTestFixtureWithMockCatalogCache : public ShardingTestFixture {
+public:
+    ShardingTestFixtureWithMockCatalogCache()
+        : ShardingTestFixture(true /*withMockCatalogCache*/) {}
+
+    CatalogCacheMock* getCatalogCacheMock() {
+        return checked_cast<CatalogCacheMock*>(Grid::get(operationContext())->catalogCache());
+    }
 };
 
 }  // namespace mongo

@@ -1,8 +1,8 @@
 /**
  * @tags: [
  *   serverless,
- *   requires_fcv_62,
- *   featureFlagShardMerge
+ *   requires_fcv_71,
+ *   requires_shard_merge
  * ]
  */
 
@@ -55,10 +55,6 @@ function cannotStartMigrationWhileShardSplitIsInProgress(protocol) {
     jsTestLog("Starting tenant migration");
     assert.commandFailedWithCode(test.startMigration(migrationOpts),
                                  ErrorCodes.ConflictingServerlessOperation);
-
-    assert.commandFailedWithCode(
-        test.forgetMigration(migrationOpts.migrationIdString, false /* retryOnRetryableErrors */),
-        ErrorCodes.NoSuchTenantMigration);
 
     fp.off();
 

@@ -30,7 +30,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <exception>
 #include <mutex>
 
@@ -54,7 +53,7 @@ namespace mongo {
 
 MoveTimingHelper::MoveTimingHelper(OperationContext* opCtx,
                                    const std::string& where,
-                                   StringData ns,
+                                   const NamespaceString& ns,
                                    const boost::optional<BSONObj>& min,
                                    const boost::optional<BSONObj>& max,
                                    int totalNumSteps,

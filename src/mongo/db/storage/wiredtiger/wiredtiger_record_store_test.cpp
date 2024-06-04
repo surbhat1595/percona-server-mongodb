@@ -31,7 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstring>
 #include <iterator>
 #include <string>
@@ -143,11 +142,11 @@ TEST(WiredTigerRecordStoreTest, Isolation1) {
     }
 
     {
-        auto client1 = harnessHelper->serviceContext()->makeClient("c1");
+        auto client1 = harnessHelper->serviceContext()->getService()->makeClient("c1");
         auto t1 = harnessHelper->newOperationContext(client1.get());
         Lock::GlobalLock gl1(t1.get(), MODE_IX);
 
-        auto client2 = harnessHelper->serviceContext()->makeClient("c2");
+        auto client2 = harnessHelper->serviceContext()->getService()->makeClient("c2");
         auto t2 = harnessHelper->newOperationContext(client2.get());
         boost::optional<Lock::GlobalLock> gl2;
         gl2.emplace(t2.get(), MODE_IX);
@@ -201,11 +200,11 @@ TEST(WiredTigerRecordStoreTest, Isolation2) {
     }
 
     {
-        auto client1 = harnessHelper->serviceContext()->makeClient("c1");
+        auto client1 = harnessHelper->serviceContext()->getService()->makeClient("c1");
         auto t1 = harnessHelper->newOperationContext(client1.get());
         Lock::GlobalLock gl1(t1.get(), MODE_IX);
 
-        auto client2 = harnessHelper->serviceContext()->makeClient("c2");
+        auto client2 = harnessHelper->serviceContext()->getService()->makeClient("c2");
         auto t2 = harnessHelper->newOperationContext(client2.get());
         Lock::GlobalLock gl2(t2.get(), MODE_IX);
 
@@ -315,7 +314,7 @@ TEST(WiredTigerRecordStoreTest, OplogDurableVisibilityOutOfOrder) {
 
     RecordId id2;
     {
-        auto innerClient = harnessHelper->serviceContext()->makeClient("inner");
+        auto innerClient = harnessHelper->serviceContext()->getService()->makeClient("inner");
         ServiceContext::UniqueOperationContext opCtx(
             harnessHelper->newOperationContext(innerClient.get()));
         Lock::GlobalLock globalLock(opCtx.get(), MODE_IX);
@@ -1205,7 +1204,7 @@ TEST(WiredTigerRecordStoreTest, GetLatestOplogTest) {
 
     // Store the client with an uncommitted transaction. Create a new, concurrent client.
     auto client1 = Client::releaseCurrent();
-    Client::initThread("client2");
+    Client::initThread("client2", getGlobalServiceContext()->getService());
 
     ServiceContext::UniqueOperationContext op2(harnessHelper->newOperationContext());
     boost::optional<Lock::GlobalLock> gl2;
@@ -1426,7 +1425,7 @@ TEST(WiredTigerRecordStoreTest, SizeInfoAccurateAfterRollbackWithDelete) {
     // rolling back the WT transaction and before running the rest of the registered changes,
     // allowing the main thread to delete the same rows again.
     stdx::thread abortedThread([&harnessHelper, &rs, &rid, aborted, deleted]() {
-        auto client = harnessHelper->serviceContext()->makeClient("c1");
+        auto client = harnessHelper->serviceContext()->getService()->makeClient("c1");
         auto ctx = harnessHelper->newOperationContext(client.get());
         Lock::GlobalLock globalLock(ctx.get(), MODE_IX);
         WriteUnitOfWork txn(ctx.get());

@@ -37,13 +37,16 @@
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/auth/restriction_environment.h"
 #include "mongo/db/baton.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/rpc/message.h"
+#include "mongo/stdx/variant.h"
 #include "mongo/transport/session_id.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
+#include "mongo/util/net/cidr.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/sockaddr.h"
 #include "mongo/util/time_support.h"
@@ -74,18 +77,7 @@ public:
      */
     using Id = SessionId;
 
-    /**
-     * Tags for groups of connections.
-     */
-    using TagMask = uint32_t;
-
     static const Status ClosedStatus;
-
-    static constexpr TagMask kEmptyTagMask = 0;
-    static constexpr TagMask kKeepOpen = 1;
-    static constexpr TagMask kLatestVersionInternalClientKeepOpen = 4;
-    static constexpr TagMask kExternalClientKeepOpen = 8;
-    static constexpr TagMask kPending = 1 << 31;
 
     virtual ~Session() = default;
 
@@ -172,41 +164,17 @@ public:
     }
 
     virtual const HostAndPort& remote() const = 0;
-    virtual const HostAndPort& local() const = 0;
 
-    virtual const SockAddr& remoteAddr() const = 0;
-    virtual const SockAddr& localAddr() const = 0;
+    virtual void appendToBSON(BSONObjBuilder& bb) const = 0;
 
-    /**
-     * Atomically set all of the session tags specified in the 'tagsToSet' bit field. If the
-     * 'kPending' tag is set, indicating that no tags have yet been specified for the session, this
-     * function also clears that tag as part of the same atomic operation.
-     *
-     * The 'kPending' tag is only for new sessions; callers should not set it directly.
-     */
-    void setTags(TagMask tagsToSet);
+    BSONObj toBSON() const {
+        BSONObjBuilder builder;
+        appendToBSON(builder);
+        return builder.obj();
+    }
 
-    /**
-     * Atomically clears all of the session tags specified in the 'tagsToUnset' bit field. If the
-     * 'kPending' tag is set, indicating that no tags have yet been specified for the session, this
-     * function also clears that tag as part of the same atomic operation.
-     */
-    void unsetTags(TagMask tagsToUnset);
-
-    /**
-     * Loads the session tags, passes them to 'mutateFunc' and then stores the result of that call
-     * as the new session tags, all in one atomic operation.
-     *
-     * In order to ensure atomicity, 'mutateFunc' may get called multiple times, so it should not
-     * perform expensive computations or operations with side effects.
-     *
-     * If the 'kPending' tag is set originally, mutateTags() will unset it regardless of the result
-     * of the 'mutateFunc' call. The 'kPending' tag is only for new sessions; callers should never
-     * try to set it.
-     */
-    void mutateTags(const std::function<TagMask(TagMask)>& mutateFunc);
-
-    TagMask getTags() const;
+    virtual bool shouldOverrideMaxConns(
+        const std::vector<stdx::variant<CIDR, std::string>>& exemptions) const = 0;
 
 #ifdef MONGO_CONFIG_SSL
     /**
@@ -215,13 +183,13 @@ public:
     virtual const std::shared_ptr<SSLManagerInterface>& getSSLManager() const = 0;
 #endif
 
+    virtual const RestrictionEnvironment& getAuthEnvironment() const = 0;
+
 protected:
     Session();
 
 private:
     const Id _id;
-
-    AtomicWord<TagMask> _tags;
 };
 
 }  // namespace transport

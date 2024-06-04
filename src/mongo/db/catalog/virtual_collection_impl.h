@@ -434,6 +434,11 @@ public:
         return false;
     }
 
+    void sanitizeCollectionOptions(OperationContext* opCtx) final {
+        unimplementedTasserted();
+    }
+
+
     bool needsCappedLock() const final {
         unimplementedTasserted();
         return false;
@@ -531,6 +536,12 @@ public:
 
     const CollectionOptions& getCollectionOptions() const final {
         return _options;
+    }
+
+    StatusWith<BSONObj> addCollationDefaultsToIndexSpecsForCreate(
+        OperationContext* opCtx, const BSONObj& indexSpecs) const final {
+        unimplementedTasserted();
+        return Status(ErrorCodes::UnknownError, "unknown");
     }
 
     StatusWith<std::vector<BSONObj>> addCollationDefaultsToIndexSpecsForCreate(

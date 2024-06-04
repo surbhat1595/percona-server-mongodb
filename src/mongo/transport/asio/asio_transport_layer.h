@@ -39,6 +39,7 @@
 #include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/transport/session_manager.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/hierarchical_acquisition.h"
@@ -181,9 +182,8 @@ public:
         stdx::thread _thread;
     };
 
-    AsioTransportLayer(const Options& opts,
-                       ServiceEntryPoint* sep,
-                       const WireSpec& wireSpec = WireSpec::instance());
+    // Note that passing `nullptr` for {sessionManager} will disallow ingress usage.
+    AsioTransportLayer(const Options& opts, std::unique_ptr<SessionManager> sessionManager);
 
     ~AsioTransportLayer() override;
 
@@ -213,12 +213,20 @@ public:
 
     void appendStatsForFTDC(BSONObjBuilder& bob) const override;
 
+    StringData getNameForLogging() const override {
+        return "asio"_sd;
+    }
+
     int listenerPort() const {
         return _listenerPort;
     }
 
     boost::optional<int> loadBalancerPort() const {
         return _listenerOptions.loadBalancerPort;
+    }
+
+    SessionManager* getSessionManager() const {
+        return _sessionManager.get();
     }
 
     /**
@@ -317,7 +325,7 @@ private:
     };
     Listener _listener;
 
-    ServiceEntryPoint* const _sep = nullptr;
+    std::unique_ptr<SessionManager> _sessionManager;
 
     Options _listenerOptions;
     // The real incoming port in case of _listenerOptions.port==0 (ephemeral).

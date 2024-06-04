@@ -7,8 +7,6 @@
  *   command_not_supported_in_serverless,
  *   # TODO SERVER-52419 Remove this tag.
  *   featureFlagBulkWriteCommand,
- *   # TODO SERVER-79506 Remove this tag.
- *   assumes_unsharded_collection,
  * ]
  */
 var coll = db.getCollection("coll");
@@ -35,7 +33,7 @@ var res = db.adminCommand({
 });
 
 assert.commandWorked(res);
-assert.eq(res.numErrors, 0);
+assert.eq(res.numErrors, 0, "bulkWrite command response: " + tojson(res));
 
 assert.eq(coll.find().itcount(), 1);
 assert.eq(coll1.find().itcount(), 0);
@@ -49,7 +47,7 @@ res = db.adminCommand({
 });
 
 assert.commandWorked(res);
-assert.eq(res.numErrors, 0);
+assert.eq(res.numErrors, 0, "bulkWrite command response: " + tojson(res));
 
 assert.eq(coll.find().itcount(), 1);
 assert.eq(coll1.find().itcount(), 1);
@@ -64,7 +62,7 @@ res = db.adminCommand({
 });
 
 assert.commandWorked(res);
-assert.eq(res.numErrors, 0);
+assert.eq(res.numErrors, 0, "bulkWrite command response: " + tojson(res));
 
 assert.eq(coll.find().itcount(), 2);
 assert.eq(coll1.find().itcount(), 0);
@@ -82,7 +80,7 @@ res = db.adminCommand({
 });
 
 assert.commandWorked(res);
-assert.eq(res.numErrors, 0);
+assert.eq(res.numErrors, 0, "bulkWrite command response: " + tojson(res));
 
 assert.eq(1, coll.count({_id: 3}));
 

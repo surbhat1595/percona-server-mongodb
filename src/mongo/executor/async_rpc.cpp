@@ -35,7 +35,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/executor/remote_command_request.h"
@@ -66,15 +65,15 @@ public:
      * Do not call directly - this is not part of the public API.
      */
     ExecutorFuture<AsyncRPCInternalResponse> _sendCommand(
-        const DatabaseName& dbName,
-        BSONObj cmdBSON,
-        Targeter* targeter,
-        OperationContext* opCtx,
         std::shared_ptr<TaskExecutor> exec,
         CancellationToken token,
+        OperationContext* opCtx,
+        Targeter* targeter,
+        const DatabaseName& dbName,
+        BSONObj cmdBSON,
         BatonHandle baton,
         boost::optional<UUID> clientOperationKey) final {
-        auto proxyExec = std::make_shared<ProxyingExecutor>(baton, exec);
+        auto proxyExec = std::make_shared<ProxyingExecutor>(exec, baton);
         return targeter->resolve(token)
             .thenRunOn(proxyExec)
             .then([dbName,

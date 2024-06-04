@@ -39,7 +39,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/timestamp.h"
@@ -77,7 +76,7 @@ using std::vector;
 
 namespace {
 // Pull nested types to top-level scope
-using executor::EgressTagCloser;
+using executor::EgressConnectionCloser;
 using executor::TaskExecutor;
 using CallbackArgs = TaskExecutor::CallbackArgs;
 using CallbackHandle = TaskExecutor::CallbackHandle;
@@ -186,7 +185,7 @@ bool hasMembershipChange(sdam::TopologyDescriptionPtr oldDescription,
 StreamableReplicaSetMonitor::StreamableReplicaSetMonitor(
     const MongoURI& uri,
     std::shared_ptr<TaskExecutor> executor,
-    std::shared_ptr<executor::EgressTagCloser> connectionManager,
+    std::shared_ptr<executor::EgressConnectionCloser> connectionManager,
     std::function<void()> cleanupCallback,
     std::shared_ptr<ReplicaSetMonitorManagerStats> managerStats)
     : ReplicaSetMonitor(cleanupCallback),
@@ -227,7 +226,7 @@ StreamableReplicaSetMonitor::~StreamableReplicaSetMonitor() {
 ReplicaSetMonitorPtr StreamableReplicaSetMonitor::make(
     const MongoURI& uri,
     std::shared_ptr<TaskExecutor> executor,
-    std::shared_ptr<executor::EgressTagCloser> connectionManager,
+    std::shared_ptr<executor::EgressConnectionCloser> connectionManager,
     std::function<void()> cleanupCallback,
     std::shared_ptr<ReplicaSetMonitorManagerStats> managerStats) {
     auto result = std::make_shared<StreamableReplicaSetMonitor>(
@@ -241,7 +240,6 @@ void StreamableReplicaSetMonitor::init() {
     stdx::lock_guard lock(_mutex);
     LOGV2_DEBUG(4333206,
                 kLowerLogLevel,
-                "Starting Replica Set Monitor {uri}",
                 "Starting Replica Set Monitor",
                 "uri"_attr = _uri,
                 "config"_attr = _sdamConfig.toBson());
@@ -300,10 +298,7 @@ void StreamableReplicaSetMonitor::drop() {
             lock, Status{ErrorCodes::ShutdownInProgress, "the ReplicaSetMonitor is shutting down"});
     }
 
-    LOGV2(4333209,
-          "Closing Replica Set Monitor {replicaSet}",
-          "Closing Replica Set Monitor",
-          "replicaSet"_attr = getName());
+    LOGV2(4333209, "Closing Replica Set Monitor", "replicaSet"_attr = getName());
     _queryProcessor->shutdown();
 
     if (_pingMonitor) {
@@ -315,10 +310,7 @@ void StreamableReplicaSetMonitor::drop() {
     }
 
     ReplicaSetMonitorManager::get()->getNotifier().onDroppedSet(getName());
-    LOGV2(4333210,
-          "Done closing Replica Set Monitor {replicaSet}",
-          "Done closing Replica Set Monitor",
-          "replicaSet"_attr = getName());
+    LOGV2(4333210, "Done closing Replica Set Monitor", "replicaSet"_attr = getName());
 }
 
 SemiFuture<HostAndPort> StreamableReplicaSetMonitor::getHostOrRefresh(
@@ -369,7 +361,6 @@ SemiFuture<std::vector<HostAndPort>> StreamableReplicaSetMonitor::getHostsOrRefr
 
     LOGV2_DEBUG(4333212,
                 kLowerLogLevel,
-                "RSM {replicaSet} start async getHosts with {readPref}",
                 "RSM start async getHosts",
                 "replicaSet"_attr = getName(),
                 "readPref"_attr = readPrefToStringFull(criteria));
@@ -437,7 +428,6 @@ SemiFuture<std::vector<HostAndPort>> StreamableReplicaSetMonitor::_enqueueOutsta
                 // outstanding queries.
                 if (query->tryCancel(errorStatus)) {
                     LOGV2_INFO(4333208,
-                               "RSM {replicaSet} host selection timeout: {error}",
                                "RSM host selection timeout",
                                "replicaSet"_attr = self->getName(),
                                "error"_attr = errorStatus.toString());
@@ -692,7 +682,6 @@ void StreamableReplicaSetMonitor::onTopologyDescriptionChangedEvent(
     // Notify external components if there are membership changes in the topology.
     if (hasMembershipChange(previousDescription, newDescription)) {
         LOGV2(4333213,
-              "RSM {replicaSet} Topology Change: {newTopologyDescription}",
               "RSM Topology Change",
               "replicaSet"_attr = getName(),
               "newTopologyDescription"_attr = newDescription->toBSON(),
@@ -842,7 +831,6 @@ void StreamableReplicaSetMonitor::_processOutstanding(
                     const auto latency = _executor->now() - query->start;
                     LOGV2_DEBUG(433214,
                                 kLowerLogLevel,
-                                "RSM {replicaSet} finished async getHosts: {readPref} ({duration})",
                                 "RSM finished async getHosts",
                                 "replicaSet"_attr = getName(),
                                 "readPref"_attr = readPrefToStringFull(query->criteria),

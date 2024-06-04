@@ -173,13 +173,13 @@ public:
         }
 
         // --- counters
-        MetricTree* metricTree = globalMetricTree(/* create */ false);
+        MetricTree& metricTree = getGlobalMetricTree();
         auto metricsEl = cmdObj["metrics"_sd];
-        if (metricTree && (metricsEl.eoo() || metricsEl.trueValue())) {
+        if (metricsEl.eoo() || metricsEl.trueValue()) {
             if (metricsEl.type() == BSONType::Object) {
-                metricTree->appendTo(BSON("metrics" << metricsEl.embeddedObject()), result);
+                metricTree.appendTo(result, BSON("metrics" << metricsEl.embeddedObject()));
             } else {
-                metricTree->appendTo(result);
+                metricTree.appendTo(result);
             }
         }
 
@@ -189,10 +189,7 @@ public:
         timeBuilder.appendNumber("at end", durationCount<Milliseconds>(runElapsed));
         if (runElapsed > Milliseconds(1000)) {
             BSONObj t = timeBuilder.obj();
-            LOGV2(20499,
-                  "serverStatus was very slow: {timeStats}",
-                  "serverStatus was very slow",
-                  "timeStats"_attr = t);
+            LOGV2(20499, "serverStatus was very slow", "timeStats"_attr = t);
 
             bool include_timing = true;
             const auto& elem = cmdObj[kTimingSection];
@@ -212,7 +209,7 @@ private:
     const Date_t _started;
 };
 
-MONGO_REGISTER_COMMAND(CmdServerStatus);
+MONGO_REGISTER_COMMAND(CmdServerStatus).forRouter().forShard();
 
 }  // namespace
 
@@ -267,17 +264,14 @@ public:
 
 class MemBase : public ServerStatusMetric {
 public:
-    MemBase() : ServerStatusMetric(".mem.bits") {}
-
-    void appendAtLeaf(BSONObjBuilder& b) const override {
+    void appendTo(BSONObjBuilder& bob, StringData leafName) const override {
+        BSONObjBuilder b{bob.subobjStart(leafName)};
         b.append("bits", sizeof(int*) == 4 ? 32 : 64);
 
         ProcessInfo p;
-        int v = 0;
         if (p.supported()) {
             b.appendNumber("resident", p.getResidentSize());
-            v = p.getVirtualMemorySize();
-            b.appendNumber("virtual", v);
+            b.appendNumber("virtual", p.getVirtualMemorySize());
             b.appendBool("supported", true);
         } else {
             b.append("note", "not all mem info support on this platform");
@@ -286,7 +280,7 @@ public:
     }
 };
 
-MemBase& memBase = addMetricToTree(std::make_unique<MemBase>());
+MemBase& memBase = addMetricToTree(".mem", std::make_unique<MemBase>());
 
 class HttpClientServerStatus : public ServerStatusSection {
 public:

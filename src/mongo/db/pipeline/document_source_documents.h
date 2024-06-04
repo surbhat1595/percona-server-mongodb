@@ -65,12 +65,11 @@ public:
         return {};
     }
 
-    bool isDocuments() const final {
+    /**
+     * Returns true as the desugared pipeline begins with a $queue stage.
+     */
+    bool startsWithQueue() const final {
         return true;
-    }
-
-    bool allowedToPassthroughFromMongos() const final {
-        return false;
     }
 };
 

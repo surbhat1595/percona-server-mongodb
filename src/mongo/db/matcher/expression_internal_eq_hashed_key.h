@@ -101,14 +101,9 @@ public:
     }
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts) const final {
-        if (opts.literalPolicy == LiteralSerializationPolicy::kToRepresentativeParseableValue) {
-            // We need to make sure the value added to bob is of type NumberLong, so it can be
-            // re-parsed successfully.
-            bob->append(name(), (long long)1);
-            return;
-        }
-        opts.appendLiteral(bob, name(), _rhs);
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final {
+        opts.appendLiteral(bob, name(), _rhs, Value((long long)1));
     }
 };
 

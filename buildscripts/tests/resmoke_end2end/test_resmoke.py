@@ -1,5 +1,6 @@
 """Test resmoke's handling of test/task timeouts and archival."""
 
+import datetime
 import logging
 import json
 import os
@@ -15,6 +16,8 @@ import yaml
 
 from buildscripts.ciconfig.evergreen import parse_evergreen_file
 from buildscripts.resmokelib import config, core, suitesconfig
+from buildscripts.resmokelib.hang_analyzer.attach_core_analyzer_task import matches_generated_task_pattern
+from buildscripts.resmokelib.hang_analyzer.gen_hang_analyzer_tasks import get_generated_task_name
 from buildscripts.resmokelib.utils.dictionary import get_dict_value
 
 
@@ -147,12 +150,26 @@ class TestTimeout(_ResmokeSelftest):
             self.resmoke_process.stop()
         self.assertEqual(return_code, 0)
 
-    def execute_resmoke(self, resmoke_args, sleep_secs=30, **kwargs):
+    def execute_resmoke(self, resmoke_args, sentinel_file, **kwargs):
+        # Since this test is designed to start remoke, wait for it to be up-and-running, and then
+        # kill resmoke, we use a sentinel file to accomplish this.
+
+        # Form sentinel path, and make sure it's absent:
+        sentinel_path = f"{os.environ.get('TMPDIR') or os.environ.get('TMP_DIR') or '/tmp'}/{sentinel_file}.js.sentinel"
+        if os.path.isfile(sentinel_path):
+            os.remove(sentinel_path)
+
+        # Spawn resmoke (async):
         super(TestTimeout, self).execute_resmoke(resmoke_args, **kwargs)
 
-        time.sleep(sleep_secs
-                   )  # TODO: Change to more durable way of ensuring the fixtures have been set up.
+        # Wait for sentinel file to appear; bail if it takes too long:
+        started_polling_datetime = datetime.datetime.now()
+        while not os.path.isfile(sentinel_path):
+            time.sleep(0.1)
+            if datetime.datetime.now() - started_polling_datetime > datetime.timedelta(minutes=5):
+                self.fail("SUT is not available within 99 seconds; aborting test")
 
+        # Kill resmoke:
         self.signal_resmoke()
 
     def test_task_timeout(self):
@@ -169,7 +186,7 @@ class TestTimeout(_ResmokeSelftest):
             "--repeatTests=2",
             "--jobs=2",
         ]
-        self.execute_resmoke(resmoke_args)
+        self.execute_resmoke(resmoke_args, sentinel_file="timeout0")
 
         archival_dirs_to_expect = 4  # 2 tests * 2 mongod
         self.assert_dir_file_count(self.test_dir, self.archival_file, archival_dirs_to_expect)
@@ -191,7 +208,7 @@ class TestTimeout(_ResmokeSelftest):
             "--repeatTests=2",
             "--jobs=2",
         ]
-        self.execute_resmoke(resmoke_args)
+        self.execute_resmoke(resmoke_args, sentinel_file="timeout1")
 
         archival_dirs_to_expect = 8  # (2 tests + 2 stacktrace files) * 2 nodes
         self.assert_dir_file_count(self.test_dir, self.archival_file, archival_dirs_to_expect)
@@ -214,7 +231,7 @@ class TestTimeout(_ResmokeSelftest):
             "jstests/resmoke_selftest/end2end/timeout/nested/top_level_timeout.js",
         ]
 
-        self.execute_resmoke(resmoke_args, sleep_secs=35)
+        self.execute_resmoke(resmoke_args, sentinel_file="inner_level_timeout")
 
         archival_dirs_to_expect = 4  # ((2 tests + 2 stacktrace files) * 2 nodes) / 2 data_file directories
         self.assert_dir_file_count(self.test_dir, self.archival_file, archival_dirs_to_expect)
@@ -315,15 +332,16 @@ class TestTestSelection(_ResmokeSelftest):
         # Additionally can assert on the error message.
         self.assertEqual(
             2,
-            self.execute_resmoke([f"--replay={self.test_dir}/replay",
-                                  "jstests/filename.js"]).wait())
+            self.execute_resmoke(
+                [f"--replay={self.test_dir}/replay", f"{self.testfiles_root}/one.js"]).wait())
 
-        # When multiple positional arguments are presented, they're all treated as test files. Technically errors on file `@<testdir>/replay` not existing. It's not a requirement that this invocation errors in this less specific way.
+        # When multiple positional arguments are presented, they're all treated as test files.
         self.assertEqual(
-            1,
-            self.execute_resmoke([f"@{self.test_dir}/replay", "jstests/filename.js"]).wait())
+            2,
+            self.execute_resmoke([f"@{self.test_dir}/replay",
+                                  f"{self.testfiles_root}/one.js"]).wait())
         self.assertEqual(
-            1,
+            2,
             self.execute_resmoke([f"{self.testfiles_root}/one.js",
                                   f"@{self.test_dir}/replay"]).wait())
 
@@ -370,10 +388,10 @@ class TestSetParameters(_ResmokeSelftest):
             "Running test. Template suite: %s Rewritten suite: %s Resmoke Args: %s Test output file: %s.",
             suite_template, suite_file, resmoke_args, self.shell_output_file)
 
-        resmoke_process = core.programs.make_process(self.logger, [
-            sys.executable, "buildscripts/resmoke.py", "run", f"--suites={suite_file}",
-            f"{self.testfiles_root}/fixture_info.js"
-        ] + resmoke_args)
+        resmoke_process = core.programs.make_process(
+            self.logger,
+            [sys.executable, "buildscripts/resmoke.py", "run", f"--suites={suite_file}"
+             ] + resmoke_args)
         resmoke_process.start()
 
         return resmoke_process
@@ -658,11 +676,26 @@ class TestEvergreenYML(unittest.TestCase):
 
 class TestMultiversionConfig(unittest.TestCase):
     def test_valid_yaml(self):
-        process = subprocess.run([sys.executable, "buildscripts/resmoke.py", "multiversion-config"],
-                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.assertEqual(process.returncode, 0)
-        output = process.stdout
+        file_name = "multiversion-config.yml"
+        subprocess.run([
+            sys.executable, "buildscripts/resmoke.py", "multiversion-config",
+            "--config-file-output", file_name
+        ], check=True)
+        with open(file_name, "r") as file:
+            file_contents = file.read()
+
         try:
-            yaml.safe_load(output)
+            yaml.safe_load(file_contents)
         except Exception:
             self.fail(msg="`resmoke.py multiversion-config` does not output valid yaml.")
+
+        os.remove(file_name)
+
+
+class TestCoreAnalyzerFunctions(unittest.TestCase):
+    def test_generated_task_name(self):
+        task_name = "test_tast_name"
+        execution = "0"
+        generated_task_name = get_generated_task_name(task_name, execution)
+        self.assertEquals(matches_generated_task_pattern(task_name, generated_task_name), execution)
+        self.assertIsNone(matches_generated_task_pattern("not_same_task", generated_task_name))

@@ -50,8 +50,6 @@ selector:
   - jstests/change_streams/queryable_encryption_change_stream.js
 
   exclude_with_any_tags:
-  # This passthrough uses the `simulate_atlas_proxy` override, which some tests are incompatible with.
-  - simulate_atlas_proxy_incompatible
   ##
   # The next tags correspond to the special errors thrown by the
   # set_read_and_write_concerns.js override when it refuses to replace the readConcern or
@@ -72,7 +70,7 @@ executor:
         TestData:
           defaultReadConcernLevel: null
           enableMajorityReadConcern: ''
-          tenant: "636d957b2646ddfaf9b5e13f"
+          tenantId: "636d957b2646ddfaf9b5e13f"
           hashTestNamesForMultitenancy: true
       # Enable causal consistency for change streams suites using 1 node replica sets. See
       # change_streams.yml for detailed explanation.

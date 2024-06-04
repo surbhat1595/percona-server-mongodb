@@ -32,7 +32,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -196,7 +195,8 @@ void StartChunkCloneRequest::appendAsCommand(
     invariant(nss.isValid());
     invariant(fromShardConnectionString.isValid());
 
-    builder->append(kRecvChunkStart, NamespaceStringUtil::serialize(nss));
+    builder->append(kRecvChunkStart,
+                    NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
     builder->append(kParallelMigration, true);
 
     migrationId.appendToBuilder(builder, kMigrationId);

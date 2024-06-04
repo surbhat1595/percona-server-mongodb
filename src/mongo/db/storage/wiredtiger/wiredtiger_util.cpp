@@ -52,10 +52,8 @@
 #include <wiredtiger.h>
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/simple_string_data_comparator.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/timestamp.h"
@@ -65,20 +63,14 @@
 #include "mongo/db/concurrency/exception_util_gen.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/snapshot_window_options_gen.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_parameters_gen.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
-#include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_component_settings.h"
-#include "mongo/logv2/log_manager.h"
-#include "mongo/logv2/log_options.h"
-#include "mongo/logv2/log_severity.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/pcre.h"
@@ -86,6 +78,7 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/static_immortal.h"
 #include "mongo/util/str.h"
+#include "mongo/util/string_map.h"
 #include "mongo/util/testing_proctor.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWiredTiger
@@ -101,9 +94,13 @@ namespace mongo {
 
 namespace {
 
+// TODO SERVER-81069: Remove this.
+MONGO_FAIL_POINT_DEFINE(allowEncryptionOptionsInCreationString);
+
 const std::string kTableChecksFileName = "_wt_table_checks";
 const std::string kTableExtension = ".wt";
 const std::string kWiredTigerBackupFile = "WiredTiger.backup";
+const static StaticImmortal<pcre::Regex> encryptionOptsRegex(R"re(encryption=\([^\)]*\),?)re");
 
 /**
  * Removes the 'kTableChecksFileName' file in the dbpath, if it exists.
@@ -370,7 +367,7 @@ Status WiredTigerUtil::getApplicationMetadata(OperationContext* opCtx,
     WT_CONFIG_ITEM keyItem;
     WT_CONFIG_ITEM valueItem;
     int ret;
-    auto keysSeen = SimpleStringDataComparator::kInstance.makeStringDataUnorderedSet();
+    StringDataSet keysSeen;
     while ((ret = parser.next(&keyItem, &valueItem)) == 0) {
         const StringData key(keyItem.str, keyItem.len);
         if (keysSeen.count(key)) {
@@ -486,6 +483,15 @@ Status WiredTigerUtil::checkTableCreationOptions(const BSONElement& configElem) 
 
     if (config.find("type=lsm") != std::string::npos) {
         return {ErrorCodes::Error(6627201), "Configuration 'type=lsm' is not supported."};
+    }
+
+    if (gFeatureFlagBanEncryptionOptionsInCollectionCreation.isEnabled(
+            serverGlobalParams.featureCompatibility) &&
+        encryptionOptsRegex->matchView(config) &&
+        MONGO_likely(!allowEncryptionOptionsInCreationString.shouldFail())) {
+        return {ErrorCodes::IllegalOperation,
+                "Manual configuration of encryption options as part of 'configString' is not "
+                "supported"};
     }
 
     Status status = wtRCToStatus(
@@ -610,7 +616,6 @@ size_t WiredTigerUtil::getCacheSizeMB(double requestedCacheSizeGB) {
     }
     if (cacheSizeMB > kMaxSizeCacheMB) {
         LOGV2(22429,
-              "Requested cache size: {requestedMB}MB exceeds max; setting to {maximumMB}MB",
               "Requested cache size exceeds max, setting to maximum",
               "requestedMB"_attr = cacheSizeMB,
               "maximumMB"_attr = kMaxSizeCacheMB);
@@ -1292,8 +1297,10 @@ std::string WiredTigerUtil::generateWTVerboseConfiguration() {
         cfg << ",";
 
         int level;
-        // Deliberately skip WT_VERBOSE_DEBUG_1, as it's a bit too noisy.
         switch (severity.toInt()) {
+            case logv2::LogSeverity::Debug(1).toInt():
+                level = WT_VERBOSE_DEBUG_1;
+                break;
             case logv2::LogSeverity::Debug(2).toInt():
                 level = WT_VERBOSE_DEBUG_2;
                 break;
@@ -1320,7 +1327,6 @@ std::string WiredTigerUtil::generateWTVerboseConfiguration() {
 }
 
 void WiredTigerUtil::removeEncryptionFromConfigString(std::string* configString) {
-    static StaticImmortal<pcre::Regex> encryptionOptsRegex(R"re(encryption=\([^\)]*\),?)re");
     encryptionOptsRegex->substitute("", configString, pcre::SUBSTITUTE_GLOBAL);
 }
 

@@ -38,7 +38,6 @@
 #include <utility>
 #include <vector>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/index_entry.h"
@@ -79,6 +78,10 @@ public:
 
     const std::string& toString() const {
         return _info.toString();
+    }
+
+    const query_settings::QuerySettings& querySettings() const {
+        return _info.querySettings();
     }
 
 private:

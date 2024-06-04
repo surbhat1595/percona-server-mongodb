@@ -35,8 +35,9 @@
 #include <vector>
 
 #include "mongo/db/exec/sbe/abt/abt_lower_defs.h"
-#include "mongo/db/exec/sbe/abt/named_slots.h"
+#include "mongo/db/exec/sbe/abt/slots_provider.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
+#include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
@@ -49,7 +50,6 @@
 #include "mongo/db/query/optimizer/syntax/expr.h"
 #include "mongo/db/query/optimizer/syntax/syntax.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
-#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo::optimizer {
@@ -79,10 +79,18 @@ class SBEExpressionLowering {
 public:
     SBEExpressionLowering(const VariableEnvironment& env,
                           VarResolver vr,
-                          const NamedSlotsProvider& namedSlots,
+                          SlotsProvider& providedSlots,
+                          sbe::value::SlotIdGenerator& ids,
+                          sbe::InputParamToSlotMap& inputParamToSlotMap,
                           const Metadata* metadata = nullptr,
                           const NodeProps* np = nullptr)
-        : _env(env), _varResolver(vr), _namedSlots(namedSlots), _metadata(metadata), _np(np) {}
+        : _env(env),
+          _varResolver(vr),
+          _providedSlots(providedSlots),
+          _slotIdGenerator(ids),
+          _inputParamToSlotMap(inputParamToSlotMap),
+          _metadata(metadata),
+          _np(np) {}
 
     // The default noop transport.
     template <typename T, typename... Ts>
@@ -129,7 +137,12 @@ private:
 
     const VariableEnvironment& _env;
     VarResolver _varResolver;
-    const NamedSlotsProvider& _namedSlots;
+    SlotsProvider& _providedSlots;
+    sbe::value::SlotIdGenerator& _slotIdGenerator;
+
+    // Map to record newly allocated slots and the parameter ids they were generated from.
+    // For more details see PlanStageStaticData::inputParamToSlotMap
+    sbe::InputParamToSlotMap& _inputParamToSlotMap;
     const Metadata* _metadata;
     const NodeProps* _np;
 
@@ -147,15 +160,17 @@ enum class ScanOrder {
 class SBENodeLowering {
 public:
     SBENodeLowering(const VariableEnvironment& env,
-                    const NamedSlotsProvider& namedSlots,
+                    SlotsProvider& providedSlots,
                     sbe::value::SlotIdGenerator& ids,
+                    sbe::InputParamToSlotMap& inputParamToSlotMap,
                     const Metadata& metadata,
                     const NodeToGroupPropsMap& nodeToGroupPropsMap,
                     const ScanOrder scanOrder,
                     PlanYieldPolicy* yieldPolicy = nullptr)
         : _env(env),
-          _namedSlots(namedSlots),
+          _providedSlots(providedSlots),
           _slotIdGenerator(ids),
+          _inputParamToSlotMap(inputParamToSlotMap),
           _metadata(metadata),
           _nodeToGroupPropsMap(nodeToGroupPropsMap),
           _scanOrder(scanOrder),
@@ -314,8 +329,8 @@ private:
      * Even when 'projectionNames' is free of duplicates, the output may have duplicates because two
      * projections can map to the same slot.
      */
-    sbe::value::SlotVector convertProjectionsToSlots(const SlotVarMap& slotMap,
-                                                     const ProjectionNameVector& projectionNames);
+    sbe::value::SlotVector convertProjectionsToSlots(
+        const SlotVarMap& slotMap, const ProjectionNameVector& projectionNames) const;
 
     /**
      * During Cascades, projections that a node is required to propagate up the tree are added to
@@ -330,7 +345,13 @@ private:
     sbe::value::SlotVector convertRequiredProjectionsToSlots(
         const SlotVarMap& slotMap,
         const NodeProps& props,
-        const sbe::value::SlotVector& toExclude = {});
+        const sbe::value::SlotVector& toExclude = {}) const;
+
+    /**
+     * If the node pointer exists in _nodeToGroupPropsMap, then return _planNode from the
+     * corresponding entry, otherwise return 0.
+     */
+    PlanNodeId getPlanNodeId(const Node& node) const;
 
     std::unique_ptr<sbe::EExpression> convertBoundsToExpr(SlotVarMap& slotMap,
                                                           bool isLower,
@@ -356,12 +377,14 @@ private:
                        sbe::value::SlotId slot,
                        bool canOverwrite = false);
 
+
     /**
      * Instantiate an expression lowering transporter for use in node lowering.
      */
     SBEExpressionLowering getExpressionLowering(SlotVarMap& slotMap,
                                                 const NodeProps* np = nullptr) {
-        return SBEExpressionLowering{_env, slotMap, _namedSlots, &_metadata, np};
+        return SBEExpressionLowering{
+            _env, slotMap, _providedSlots, _slotIdGenerator, _inputParamToSlotMap, &_metadata, np};
     }
 
     std::unique_ptr<sbe::EExpression> lowerExpression(const ABT& e,
@@ -370,9 +393,11 @@ private:
         return getExpressionLowering(slotMap, np).optimize(e);
     }
     const VariableEnvironment& _env;
-    const NamedSlotsProvider& _namedSlots;
+    SlotsProvider& _providedSlots;
 
     sbe::value::SlotIdGenerator& _slotIdGenerator;
+
+    sbe::InputParamToSlotMap& _inputParamToSlotMap;
 
     const Metadata& _metadata;
     const NodeToGroupPropsMap& _nodeToGroupPropsMap;

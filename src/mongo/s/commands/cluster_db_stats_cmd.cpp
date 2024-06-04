@@ -31,7 +31,6 @@
 #include <vector>
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -179,7 +178,7 @@ public:
             uasserted(ErrorCodes::OperationFailed, errmsg);
         }
 
-        output.append("db", DatabaseNameUtil::serialize(dbName));
+        output.append("db", DatabaseNameUtil::serialize(dbName, cmd.getSerializationContext()));
         aggregateResults(cmd, shardResponses, output);
         return true;
     }
@@ -188,7 +187,7 @@ public:
         DBStats::parse(IDLParserContext{"dbstats.reply"}, resultObj);
     }
 };
-MONGO_REGISTER_COMMAND(CmdDBStats);
+MONGO_REGISTER_COMMAND(CmdDBStats).forRouter();
 
 }  // namespace
 }  // namespace mongo

@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <memory>
 #include <string>
@@ -111,7 +110,7 @@ std::pair<BSONObj, BSONObj> generateUpsertDocument(
     OperationContext* opCtx,
     const UpdateRequest& updateRequest,
     boost::optional<TimeseriesOptions> timeseriesOptions,
-    const StringData::ComparatorInterface* comparator) {
+    const StringDataComparator* comparator) {
     // We are only using this to parse the query for producing the upsert document.
     ParsedUpdateForMongos parsedUpdate(opCtx, &updateRequest);
     uassertStatusOK(parsedUpdate.parseRequest());
@@ -147,8 +146,18 @@ BSONObj constructUpsertResponse(BatchedCommandResponse& writeRes,
     BSONObj reply;
     auto upsertedId = IDLAnyTypeOwned::parseFromBSON(targetDoc.getField(kIdFieldName));
 
-    if (commandName == write_ops::FindAndModifyCommandRequest::kCommandName ||
-        commandName == write_ops::FindAndModifyCommandRequest::kCommandAlias) {
+    if (commandName == BulkWriteCommandRequest::kCommandName) {
+        BulkWriteReplyItem replyItem(0);
+        replyItem.setOk(1);
+        replyItem.setN(writeRes.getN());
+        replyItem.setUpserted(upsertedId);
+        BulkWriteCommandReply bulkWriteReply(
+            BulkWriteCommandResponseCursor(
+                0, {replyItem}, NamespaceString::makeBulkWriteNSS(boost::none)),
+            0);
+        reply = bulkWriteReply.toBSON();
+    } else if (commandName == write_ops::FindAndModifyCommandRequest::kCommandName ||
+               commandName == write_ops::FindAndModifyCommandRequest::kCommandAlias) {
         write_ops::FindAndModifyLastError lastError;
         lastError.setNumDocs(writeRes.getN());
         lastError.setUpdatedExisting(false);
@@ -192,7 +201,8 @@ bool useTwoPhaseProtocol(OperationContext* opCtx,
                          const BSONObj& query,
                          const BSONObj& collation,
                          const boost::optional<BSONObj>& let,
-                         const boost::optional<LegacyRuntimeConstants>& legacyRuntimeConstants) {
+                         const boost::optional<LegacyRuntimeConstants>& legacyRuntimeConstants,
+                         bool isTimeseriesViewRequest) {
     // For existing unittests that do not expect sharding utilities to be initialized, we can set
     // this failpoint if we know the test will not use the two phase write protocol.
     if (!feature_flags::gFeatureFlagUpdateOneWithoutShardKey.isEnabled(
@@ -204,25 +214,25 @@ bool useTwoPhaseProtocol(OperationContext* opCtx,
     auto cri =
         uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
 
-    // Unsharded collections always target the primary shard.
+    // Unsharded collections always target one single shard.
     if (!cri.cm.isSharded()) {
         return false;
     }
 
     auto tsFields = cri.cm.getTimeseriesFields();
-    bool isTimeseries = tsFields.has_value();
 
     // updateOne and deleteOne do not use the two phase protocol for single writes that specify
     // _id in their queries, unless a document is being upserted. An exact _id match requires
     // default collation if the _id value is a collatable type.
     if (isUpdateOrDelete && query.hasField("_id") &&
         CollectionRoutingInfoTargeter::isExactIdQuery(opCtx, nss, query, collation, cri.cm) &&
-        !isUpsert && !isTimeseries) {
+        !isUpsert && !isTimeseriesViewRequest) {
         return false;
     }
 
     auto expCtx = makeExpressionContextWithDefaultsForTargeter(opCtx,
                                                                nss,
+                                                               cri,
                                                                collation,
                                                                boost::none,  // explain
                                                                let,
@@ -234,7 +244,7 @@ bool useTwoPhaseProtocol(OperationContext* opCtx,
     auto shardKey = uassertStatusOK(extractShardKeyFromBasicQueryWithContext(
         expCtx,
         cri.cm.getShardKeyPattern(),
-        !isTimeseries
+        !isTimeseriesViewRequest
             ? query
             : timeseries::getBucketLevelPredicateForRouting(query,
                                                             expCtx,

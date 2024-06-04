@@ -33,7 +33,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <set>
 
 #include "mongo/client/sdam/election_id_set_version_pair.h"
@@ -395,7 +394,6 @@ void TopologyStateMachine::removeServerDescription(TopologyDescription& topology
     topologyDescription.removeServerDescription(serverAddress);
     LOGV2_DEBUG(20220,
                 kLogLevel,
-                "Server '{serverAddress}' was removed from the topology",
                 "Server was removed from the topology",
                 "serverAddress"_attr = serverAddress,
                 "topologyDescription"_attr = topologyDescription.toBSON());

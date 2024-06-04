@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <cstdint>
 #include <string>
@@ -61,6 +60,7 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/s/forwardable_operation_metadata.h"
 #include "mongo/db/s/reshard_collection_coordinator.h"
+#include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/write_unit_of_work.h"
@@ -131,7 +131,7 @@ ExecutorFuture<void> ReshardCollectionCoordinator::_runImpl(
                 uassertStatusOK(
                     Grid::get(opCtx)
                         ->catalogCache()
-                        ->getShardedCollectionRoutingInfoWithPlacementRefresh(opCtx, nss()))
+                        ->getTrackedCollectionRoutingInfoWithPlacementRefresh(opCtx, nss()))
                     .cm;
 
             StateDoc newDoc(_doc);
@@ -160,17 +160,43 @@ ExecutorFuture<void> ReshardCollectionCoordinator::_runImpl(
                 uassert(ErrorCodes::InvalidOptions,
                         "Resharding improvements is not enabled, reject reshardingUUID parameter",
                         !_doc.getReshardingUUID().has_value());
-                if (!resharding::gFeatureFlagMoveCollection.isEnabled(
-                        serverGlobalParams.featureCompatibility)) {
-                    uassert(ErrorCodes::InvalidOptions,
-                            "Move collection is not enabled, reject provenance parameter",
-                            !_doc.getProvenance().has_value());
-                }
+                uassert(ErrorCodes::InvalidOptions,
+                        "Resharding improvements is not enabled, reject feature flag "
+                        "moveCollection or unshardCollection",
+                        !resharding::gFeatureFlagMoveCollection.isEnabled(
+                            serverGlobalParams.featureCompatibility) &&
+                            !resharding::gFeatureFlagUnshardCollection.isEnabled(
+                                serverGlobalParams.featureCompatibility));
             }
+
+            if (!resharding::gFeatureFlagMoveCollection.isEnabled(
+                    serverGlobalParams.featureCompatibility) &&
+                !resharding::gFeatureFlagUnshardCollection.isEnabled(
+                    serverGlobalParams.featureCompatibility)) {
+                uassert(ErrorCodes::InvalidOptions,
+                        "Feature flag move collection or unshard collection is not enabled, reject "
+                        "provenance",
+                        !_doc.getProvenance().has_value() ||
+                            _doc.getProvenance().get() == ProvenanceEnum::kReshardCollection);
+            }
+
             configsvrReshardCollection.setShardDistribution(_doc.getShardDistribution());
             configsvrReshardCollection.setForceRedistribution(_doc.getForceRedistribution());
             configsvrReshardCollection.setReshardingUUID(_doc.getReshardingUUID());
-            configsvrReshardCollection.setProvenance(_doc.getProvenance());
+
+            auto provenance = _doc.getProvenance();
+            if (resharding::isMoveCollection(provenance)) {
+                uassert(ErrorCodes::NamespaceNotFound,
+                        str::stream()
+                            << "MoveCollection can only be called on an unsharded collection.",
+                        !cmOld.isSharded() && cmOld.hasRoutingTable());
+            } else {
+                uassert(ErrorCodes::NamespaceNotSharded,
+                        "Collection has to be a sharded collection.",
+                        cmOld.isSharded());
+            }
+
+            configsvrReshardCollection.setProvenance(provenance);
 
             const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
 
@@ -181,7 +207,7 @@ ExecutorFuture<void> ReshardCollectionCoordinator::_runImpl(
                 CommandHelpers::appendMajorityWriteConcern(configsvrReshardCollection.toBSON({}),
                                                            opCtx->getWriteConcern()),
                 Shard::RetryPolicy::kIdempotent));
-            uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(std::move(cmdResponse)));
+            uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(cmdResponse));
         }));
 }
 

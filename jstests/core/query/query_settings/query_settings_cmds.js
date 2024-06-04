@@ -4,32 +4,22 @@
 //   directly_against_shardsvrs_incompatible,
 //   featureFlagQuerySettings,
 //   does_not_support_stepdowns,
+//   simulate_atlas_proxy_incompatible
 // ]
 //
 
-import {QuerySettingsUtils} from "jstests/core/libs/query_settings_utils.js";
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {QuerySettingsUtils} from "jstests/libs/query_settings_utils.js";
+
+const qsutils = new QuerySettingsUtils(db, jsTestName());
+
+// Creating the collection, because some sharding passthrough suites are failing when explain
+// command is issued on the nonexistent database and collection.
+assert.commandWorked(db.createCollection(jsTestName()));
 
 const adminDB = db.getSiblingDB("admin");
-const coll = db[jsTestName()];
 
-const querySettingsAggPipeline = [
-    {$querySettings: {}},
-    {$project: {queryShapeHash: 0}},
-    {$sort: {representativeQuery: 1}},
-];
-
-const utils = new QuerySettingsUtils(db, coll)
-
-/**
- * Makes a QueryShapeConfiguration object without the QueryShapeHash.
- */
-function makeQueryShapeConfiguration(settings, representativeQuery) {
-    return {settings, representativeQuery};
-}
-
-const queryA = utils.makeQueryInstance({a: 1});
-const queryB = utils.makeQueryInstance({b: "string"});
+const queryA = qsutils.makeFindQueryInstance({a: 1});
+const queryB = qsutils.makeFindQueryInstance({b: "string"});
 const querySettingsA = {
     indexHints: {allowedIndexes: ["a_1", {$natural: 1}]}
 };
@@ -37,48 +27,30 @@ const querySettingsB = {
     indexHints: {allowedIndexes: ["b_1"]}
 };
 
-/**
- * Helper function to assert equality of QueryShapeConfigurations. In order to ease the assertion
- * logic, 'queryShapeHash' field is removed from the QueryShapeConfiguration prior to assertion.
- *
- * Since in sharded clusters the query settings may arrive with a delay to the mongos, the assertion
- * is done via 'assert.soon'.
- */
-function assertQueryShapeConfiguration(expectedQueryShapeConfigurations) {
-    assert.soon(() => {
-        const settingsArray = adminDB.aggregate(querySettingsAggPipeline).toArray();
-        return bsonWoCompare(settingsArray, expectedQueryShapeConfigurations) == 0;
-    });
-}
-
 // Set the 'clusterServerParameterRefreshIntervalSecs' value to 1 second for faster fetching of
 // 'querySettings' cluster parameter on mongos from the configsvr.
-let initParameterRefreshInterval = 0;
-if (FixtureHelpers.isMongos(db)) {
-    const response = assert.commandWorked(
-        db.adminCommand({getParameter: 1, clusterServerParameterRefreshIntervalSecs: 1}));
-    initParameterRefreshInterval = response.clusterServerParameterRefreshIntervalSecs;
-    assert.commandWorked(
-        db.adminCommand({setParameter: 1, clusterServerParameterRefreshIntervalSecs: 1}));
-}
+const clusterParamRefreshSecs = qsutils.setClusterParamRefreshSecs(1);
 
 // Ensure that query settings cluster parameter is empty.
-{ assertQueryShapeConfiguration([]); }
+{ qsutils.assertQueryShapeConfiguration([]); }
 
 // Ensure that 'querySettings' cluster parameter contains QueryShapeConfiguration after invoking
 // setQuerySettings command.
 {
+    qsutils.assertExplainQuerySettings(queryA, undefined);
     assert.commandWorked(db.adminCommand({setQuerySettings: queryA, settings: querySettingsA}));
-    assertQueryShapeConfiguration([makeQueryShapeConfiguration(querySettingsA, queryA)]);
+    qsutils.assertQueryShapeConfiguration(
+        [qsutils.makeQueryShapeConfiguration(querySettingsA, queryA)]);
 }
 
 // Ensure that 'querySettings' cluster parameter contains both QueryShapeConfigurations after
 // invoking setQuerySettings command.
 {
+    qsutils.assertExplainQuerySettings(queryB, undefined);
     assert.commandWorked(db.adminCommand({setQuerySettings: queryB, settings: querySettingsB}));
-    assertQueryShapeConfiguration([
-        makeQueryShapeConfiguration(querySettingsA, queryA),
-        makeQueryShapeConfiguration(querySettingsB, queryB)
+    qsutils.assertQueryShapeConfiguration([
+        qsutils.makeQueryShapeConfiguration(querySettingsA, queryA),
+        qsutils.makeQueryShapeConfiguration(querySettingsB, queryB)
     ]);
 }
 
@@ -91,9 +63,9 @@ if (FixtureHelpers.isMongos(db)) {
             .queryShapeHash;
     assert.commandWorked(
         db.adminCommand({setQuerySettings: queryShapeHashA, settings: querySettingsB}));
-    assertQueryShapeConfiguration([
-        makeQueryShapeConfiguration(querySettingsB, queryA),
-        makeQueryShapeConfiguration(querySettingsB, queryB)
+    qsutils.assertQueryShapeConfiguration([
+        qsutils.makeQueryShapeConfiguration(querySettingsB, queryA),
+        qsutils.makeQueryShapeConfiguration(querySettingsB, queryB)
     ]);
 }
 
@@ -101,10 +73,10 @@ if (FixtureHelpers.isMongos(db)) {
 // by passing a different QueryInstance with the same QueryShape.
 {
     assert.commandWorked(db.adminCommand(
-        {setQuerySettings: utils.makeQueryInstance({b: "test"}), settings: querySettingsA}));
-    assertQueryShapeConfiguration([
-        makeQueryShapeConfiguration(querySettingsB, queryA),
-        makeQueryShapeConfiguration(querySettingsA, queryB)
+        {setQuerySettings: qsutils.makeFindQueryInstance({b: "test"}), settings: querySettingsA}));
+    qsutils.assertQueryShapeConfiguration([
+        qsutils.makeQueryShapeConfiguration(querySettingsB, queryA),
+        qsutils.makeQueryShapeConfiguration(querySettingsA, queryB)
     ]);
 }
 
@@ -112,22 +84,18 @@ if (FixtureHelpers.isMongos(db)) {
 // the 'querySettings' cluster parameter by providing a query instance.
 {
     assert.commandWorked(
-        db.adminCommand({removeQuerySettings: utils.makeQueryInstance({b: "shape"})}));
-    assertQueryShapeConfiguration([makeQueryShapeConfiguration(querySettingsB, queryA)]);
+        db.adminCommand({removeQuerySettings: qsutils.makeFindQueryInstance({b: "shape"})}));
+    qsutils.assertQueryShapeConfiguration(
+        [qsutils.makeQueryShapeConfiguration(querySettingsB, queryA)]);
+    qsutils.assertExplainQuerySettings(queryB, undefined);
 }
 
 // Ensure that query settings cluster parameter is empty by issuing a removeQuerySettings command
 // providing a query shape hash.
 {
-    const queryShapeHashA = adminDB.aggregate([{$querySettings: {}}]).toArray()[0].queryShapeHash;
-    assert.commandWorked(db.adminCommand({removeQuerySettings: queryShapeHashA}));
-    assertQueryShapeConfiguration([]);
+    qsutils.removeAllQuerySettings();
+    qsutils.assertExplainQuerySettings(queryA, undefined);
 }
 
 // Reset the 'clusterServerParameterRefreshIntervalSecs' parameter to its initial value.
-if (FixtureHelpers.isMongos(db)) {
-    assert.commandWorked(db.adminCommand({
-        setParameter: 1,
-        clusterServerParameterRefreshIntervalSecs: initParameterRefreshInterval
-    }));
-}
+clusterParamRefreshSecs.restore();

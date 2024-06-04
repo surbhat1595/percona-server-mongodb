@@ -29,7 +29,6 @@
 
 #include "mongo/db/exec/spool.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <cstddef>
 #include <string>
@@ -111,9 +110,13 @@ void SpoolStage::spill() {
             expCtx()->tempDir + "/" + nextFileName(), _spillStats.get());
     }
 
-    SortedFileWriter<RecordId, NullValue> writer(SortOptions().TempDir(expCtx()->tempDir), _file);
+    auto opts = SortOptions().TempDir(expCtx()->tempDir);
+    opts.FileStats(_spillStats.get());
+
+    SortedFileWriter<RecordId, NullValue> writer(opts, _file);
+    _specificStats.spilledRecords += _buffer.size();
     for (size_t i = 0; i < _buffer.size(); ++i) {
-        writer.addAlreadySorted(std::move(_buffer[i]), NullValue());
+        writer.addAlreadySorted(_buffer[i], NullValue());
     }
     _spillFileIters.emplace_back(writer.done());
     _buffer.clear();
@@ -121,6 +124,7 @@ void SpoolStage::spill() {
     _memTracker.resetCurrent();
     ++_specificStats.spills;
     _specificStats.spilledDataStorageSize = _spillStats->bytesSpilled();
+    _specificStats.spilledUncompressedDataSize = _spillStats->bytesSpilledUncompressed();
 }
 
 PlanStage::StageState SpoolStage::doWork(WorkingSetID* out) {

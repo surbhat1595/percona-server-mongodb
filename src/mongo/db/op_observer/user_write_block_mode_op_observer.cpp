@@ -29,7 +29,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <set>
 #include <utility>
 
@@ -49,8 +48,6 @@
 
 namespace mongo {
 namespace {
-
-const auto documentIdDecoration = OplogDeleteEntryArgs::declareDecoration<BSONObj>();
 
 bool isStandaloneOrPrimary(OperationContext* opCtx, const NamespaceString& nss) {
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
@@ -144,19 +141,10 @@ void UserWriteBlockModeOpObserver::onUpdate(OperationContext* opCtx,
     }
 }
 
-void UserWriteBlockModeOpObserver::aboutToDelete(OperationContext* opCtx,
-                                                 const CollectionPtr& coll,
-                                                 BSONObj const& doc,
-                                                 OplogDeleteEntryArgs* args,
-                                                 OpStateAccumulator* opAccumulator) {
-    if (coll->ns() == NamespaceString::kUserWritesCriticalSectionsNamespace) {
-        documentIdDecoration(args) = doc;
-    }
-}
-
 void UserWriteBlockModeOpObserver::onDelete(OperationContext* opCtx,
                                             const CollectionPtr& coll,
                                             StmtId stmtId,
+                                            const BSONObj& doc,
                                             const OplogDeleteEntryArgs& args,
                                             OpStateAccumulator* opAccumulator) {
     const auto& nss = coll->ns();
@@ -166,10 +154,8 @@ void UserWriteBlockModeOpObserver::onDelete(OperationContext* opCtx,
 
     if (nss == NamespaceString::kUserWritesCriticalSectionsNamespace &&
         !user_writes_recoverable_critical_section_util::inRecoveryMode(opCtx)) {
-        auto& documentId = documentIdDecoration(args);
-        invariant(!documentId.isEmpty());
-
-        const auto& deletedDoc = documentId;
+        const auto& deletedDoc = doc;
+        invariant(!deletedDoc.isEmpty());
         const auto collCSDoc = UserWriteBlockingCriticalSectionDocument::parse(
             IDLParserContext("UserWriteBlockOpObserver"), deletedDoc);
 

@@ -105,10 +105,19 @@ env.Library(
     ],
 )
 
+
+def shouldBuildGRPC(myEnv):
+    return myEnv.TargetOSIs('linux') and myEnv['ENABLE_GRPC_BUILD']
+
+
+if shouldBuildGRPC(env):
+    env.InjectThirdParty(libraries=['grpc'])
+
 env.Library(
     target='shell_options_register',
     source=[
         'shell_options.idl',
+        'shell_options_grpc.idl' if shouldBuildGRPC(env) else [],
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -324,9 +333,10 @@ if not has_option('noshell') and jsEngine:
             # please add that library as a private libdep of
             # mongo_initializers.
             "$BUILD_DIR/mongo/s/write_ops/batch_write_types",
-            "$BUILD_DIR/mongo/transport/transport_layer",
+            "$BUILD_DIR/mongo/transport/transport_layer_manager",
             "$BUILD_DIR/mongo/util/net/ssl_manager",
             "$BUILD_DIR/mongo/util/pcre_wrapper",
+            "$BUILD_DIR/mongo/util/periodic_runner_factory",
             "$BUILD_DIR/mongo/util/signal_handlers",
             "linenoise",
             "mongo_initializers",

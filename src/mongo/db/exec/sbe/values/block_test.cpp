@@ -42,17 +42,21 @@
 
 namespace mongo::sbe {
 
+using TypeTags = value::TypeTags;
+using Value = value::Value;
+using ColumnOpType = value::ColumnOpType;
+
 class SbeValueTest : public SbeStageBuilderTestFixture {};
 
 // Tests that copyValue() behaves correctly when given a TypeTags::valueBlock. Uses MonoBlock as
 // the concrete block type.
 TEST_F(SbeValueTest, SbeValueBlockTypeIsCopyable) {
-    value::MonoBlock block(1, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(123));
+    value::MonoBlock block(1, TypeTags::NumberInt32, value::bitcastFrom<int32_t>(123));
 
-    auto [cpyTag, cpyValue] = value::copyValue(value::TypeTags::valueBlock,
-                                               value::bitcastFrom<value::MonoBlock*>(&block));
+    auto [cpyTag, cpyValue] =
+        value::copyValue(TypeTags::valueBlock, value::bitcastFrom<value::MonoBlock*>(&block));
     value::ValueGuard cpyGuard(cpyTag, cpyValue);
-    ASSERT_EQ(cpyTag, value::TypeTags::valueBlock);
+    ASSERT_EQ(cpyTag, TypeTags::valueBlock);
     auto cpy = value::getValueBlock(cpyValue);
 
     auto extracted = cpy->extract();
@@ -62,13 +66,12 @@ TEST_F(SbeValueTest, SbeValueBlockTypeIsCopyable) {
 // Tests that copyValue() behaves correctly when given a TypeTags::valueBlock. Uses MonoBlock as
 // the concrete block type.
 TEST_F(SbeValueTest, SbeCellBlockTypeIsCopyable) {
-    value::ScalarMonoCellBlock block(
-        1, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(123));
+    value::ScalarMonoCellBlock block(1, TypeTags::NumberInt32, value::bitcastFrom<int32_t>(123));
 
     auto [cpyTag, cpyValue] = value::copyValue(
-        value::TypeTags::cellBlock, value::bitcastFrom<value::ScalarMonoCellBlock*>(&block));
+        TypeTags::cellBlock, value::bitcastFrom<value::ScalarMonoCellBlock*>(&block));
     value::ValueGuard cpyGuard(cpyTag, cpyValue);
-    ASSERT_EQ(cpyTag, value::TypeTags::cellBlock);
+    ASSERT_EQ(cpyTag, TypeTags::cellBlock);
     auto cpy = value::getCellBlock(cpyValue);
 
     auto& vals = cpy->getValueBlock();
@@ -89,9 +92,10 @@ public:
         base->run();
     }
 
-    std::vector<std::unique_ptr<value::CellBlock>> extractCellBlocks(
-        const std::vector<value::CellBlock::PathRequest>& paths,
-        const std::vector<BSONObj>& bsons) {
+    std::pair<std::vector<std::unique_ptr<value::TsBlock>>,
+              std::vector<std::unique_ptr<value::CellBlock>>>
+    extractCellBlocks(const std::vector<value::CellBlock::PathRequest>& paths,
+                      const std::vector<BSONObj>& bsons) {
 
         if (useTsImpl) {
             // Shred the bsons here, produce a time series "bucket"-like thing, and pass it to the
@@ -144,7 +148,8 @@ public:
             value::TsBucketPathExtractor extractor(paths, "time");
             return extractor.extractCellBlocks(_bucketStorage);
         } else {
-            return value::extractCellBlocksFromBsons(paths, bsons);
+            return std::pair(std::vector<std::unique_ptr<value::TsBlock>>(),
+                             value::extractCellBlocksFromBsons(paths, bsons));
         }
     }
 
@@ -163,7 +168,7 @@ BSONObj blockToBsonArr(value::ValueBlock& block) {
 
         BSONObjBuilder tmp;
 
-        if (tag == value::TypeTags::Nothing) {
+        if (tag == TypeTags::Nothing) {
             // Use null as a fill value.
             tmp.appendNull("foo");
         } else {
@@ -195,7 +200,7 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockSimple) {
     value::CellBlock::PathRequest aReq{{value::CellBlock::Get{"a"}, value::CellBlock::Id{}}};
     value::CellBlock::PathRequest bReq{{value::CellBlock::Get{"b"}, value::CellBlock::Id{}}};
 
-    auto cellBlocks = extractCellBlocks({aReq, bReq}, bsons);
+    auto [tsBlocks, cellBlocks] = extractCellBlocks({aReq, bReq}, bsons);
 
     ASSERT_EQ(cellBlocks.size(), 2);
 
@@ -211,6 +216,7 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockSimple) {
         auto& valsOut = cellBlocks[1]->getValueBlock();
         auto numObj = blockToBsonArr(valsOut);
         ASSERT_BSONOBJ_EQ(numObj, fromjson("{result: [1,2,3,null,null]}"));
+
         ASSERT_EQ(posInfoToString(cellBlocks[0]->filterPositionInfo()), "11111");
     }
 }
@@ -230,7 +236,7 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockMissings) {
 
     value::CellBlock::PathRequest aReq{{value::CellBlock::Get{"a"}, value::CellBlock::Id{}}};
 
-    auto cellBlocks = extractCellBlocks({aReq}, bsons);
+    auto [tsBlocks, cellBlocks] = extractCellBlocks({aReq}, bsons);
 
     ASSERT_EQ(cellBlocks.size(), 1);
 
@@ -254,7 +260,7 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockGetTraverse) {
     value::CellBlock::PathRequest req{
         {value::CellBlock::Get{"a"}, value::CellBlock::Traverse{}, value::CellBlock::Id{}}};
 
-    auto cellBlocks = extractCellBlocks({req}, bsons);
+    auto [tsBlocks, cellBlocks] = extractCellBlocks({req}, bsons);
 
     ASSERT_EQ(cellBlocks.size(), 1);
 
@@ -279,7 +285,7 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockSubfield) {
         // Get A Id.
         value::CellBlock::PathRequest req{{value::CellBlock::Get{"a"}, value::CellBlock::Id{}}};
 
-        auto cellBlocks = extractCellBlocks({req}, bsons);
+        auto [tsBlocks, cellBlocks] = extractCellBlocks({req}, bsons);
         ASSERT_EQ(cellBlocks.size(), 1);
 
         auto& valsOut = cellBlocks[0]->getValueBlock();
@@ -295,13 +301,14 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockSubfield) {
         value::CellBlock::PathRequest req{
             {value::CellBlock::Get{"a"}, value::CellBlock::Traverse{}, value::CellBlock::Id{}}};
 
-        auto cellBlocks = extractCellBlocks({req}, bsons);
+        auto [tsBlocks, cellBlocks] = extractCellBlocks({req}, bsons);
         ASSERT_EQ(cellBlocks.size(), 1);
 
         auto& valsOut = cellBlocks[0]->getValueBlock();
         auto numObj = blockToBsonArr(valsOut);
-        ASSERT_BSONOBJ_EQ(
-            numObj, fromjson("{result: [null, null, {b: [2,3]}, {b: [4,5]}, null, {b: [[999]]}]}"));
+        ASSERT_BSONOBJ_EQ(numObj,
+                          fromjson("{result: [{b: 1}, {b: [999, 999]}, {b: [2,3]}, {b: [4,5]}, "
+                                   "null, {b: [[999]]}]}"));
         ASSERT_EQ(posInfoToString(cellBlocks[0]->filterPositionInfo()), "111011");
     }
 
@@ -312,7 +319,7 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockSubfield) {
                                            value::CellBlock::Get{"b"},
                                            value::CellBlock::Id{}}};
 
-        auto cellBlocks = extractCellBlocks({req}, bsons);
+        auto [tsBlocks, cellBlocks] = extractCellBlocks({req}, bsons);
         ASSERT_EQ(cellBlocks.size(), 1);
 
         auto& valsOut = cellBlocks[0]->getValueBlock();
@@ -330,7 +337,7 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockSubfield) {
                                            value::CellBlock::Traverse{},
                                            value::CellBlock::Id{}}};
 
-        auto cellBlocks = extractCellBlocks({req}, bsons);
+        auto [tsBlocks, cellBlocks] = extractCellBlocks({req}, bsons);
         ASSERT_EQ(cellBlocks.size(), 1);
 
         auto& valsOut = cellBlocks[0]->getValueBlock();
@@ -347,8 +354,8 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockFieldDoesNotExist) {
         // These documents have no values at a.b, however MQL semantics demand
         // they must know about the array in 'a' for "$a.b" but not for $match.
         //
-        // This tests that the information kept in Get A Traverse Get B Traverse projection position
-        // info is enough to recover the fact that 'a' had an array.
+        // This tests that the information kept in Get A Traverse Get B Traverse projection
+        // position info is enough to recover the fact that 'a' had an array.
         fromjson("{a: [{OtherField: 123}]}"),
         fromjson("{a: [1, 2, 3]}"),
 
@@ -364,7 +371,7 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockFieldDoesNotExist) {
                                            value::CellBlock::Traverse{},
                                            value::CellBlock::Id{}}};
 
-        auto cellBlocks = extractCellBlocks({req}, bsons);
+        auto [tsBlocks, cellBlocks] = extractCellBlocks({req}, bsons);
         ASSERT_EQ(cellBlocks.size(), 1);
 
         auto& valsOut = cellBlocks[0]->getValueBlock();
@@ -373,4 +380,331 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockFieldDoesNotExist) {
         ASSERT_EQ(posInfoToString(cellBlocks[0]->filterPositionInfo()), "1111000");
     }
 }
+
+class ValueBlockTest : public mongo::unittest::Test {
+public:
+    ValueBlockTest() = default;
+};
+
+static constexpr auto testOp1Type = ColumnOpType{ColumnOpType::kOutputNonNothingOnExpectedInput,
+                                                 TypeTags::Nothing,
+                                                 TypeTags::Boolean,
+                                                 ColumnOpType::ReturnBoolOnMissing{}};
+static const auto testOp1 = value::makeColumnOp<testOp1Type>([](TypeTags tag, Value val) {
+    return std::pair(TypeTags::Boolean, value::bitcastFrom<bool>(value::isString(tag)));
+});
+
+static constexpr auto testOp2Type = ColumnOpType{ColumnOpType::kOutputNonNothingOnExpectedInput,
+                                                 TypeTags::NumberDouble,
+                                                 TypeTags::Boolean,
+                                                 ColumnOpType::ReturnNothingOnMissing{}};
+static const auto testOp2 = value::makeColumnOp<testOp2Type>([](TypeTags tag, Value val) {
+    if (tag == TypeTags::NumberDouble) {
+        double d = value::bitcastTo<double>(val);
+        return std::pair(TypeTags::Boolean, value::bitcastFrom<bool>(d >= 5.0));
+    } else {
+        return std::pair(TypeTags::Nothing, Value{0u});
+    }
+});
+
+static constexpr auto testOp3Type = ColumnOpType{ColumnOpType::kOutputNonNothingOnExpectedInput,
+                                                 TypeTags::Nothing,
+                                                 TypeTags::Boolean,
+                                                 ColumnOpType::ReturnBoolOnMissing{}};
+static const auto testOp3 = value::makeColumnOp<testOp3Type>(
+    [](TypeTags tag, Value val) {
+        return std::pair(TypeTags::Boolean, value::bitcastFrom<bool>(tag != TypeTags::Nothing));
+    },
+    [](const TypeTags* tags, const Value* vals, TypeTags* outTags, Value* outVals, size_t count) {
+        for (size_t i = 0; i < count; ++i) {
+            outTags[i] = TypeTags::Boolean;
+            outVals[i] = value::bitcastFrom<bool>(tags[i] != TypeTags::Nothing);
+        }
+    });
+
+static constexpr auto testOp4Type = ColumnOpType{ColumnOpType::kOutputNonNothingOnExpectedInput,
+                                                 TypeTags::NumberDouble,
+                                                 TypeTags::NumberDouble,
+                                                 ColumnOpType::ReturnNothingOnMissing{}};
+static const auto testOp4 = value::makeColumnOp<testOp4Type>(
+    [](TypeTags tag, Value val) {
+        if (tag == TypeTags::NumberDouble) {
+            double d = value::bitcastTo<double>(val);
+            return std::pair(TypeTags::NumberDouble, value::bitcastFrom<double>(d * 2.0 + 1.0));
+        } else {
+            return std::pair(TypeTags::Nothing, Value{0u});
+        }
+    },
+    [](const TypeTags* tags, const Value* vals, TypeTags* outTags, Value* outVals, size_t count) {
+        for (size_t i = 0; i < count; ++i) {
+            if (tags[i] == TypeTags::NumberDouble) {
+                double d = value::bitcastTo<double>(vals[i]);
+                outTags[i] = TypeTags::NumberDouble;
+                outVals[i] = value::bitcastFrom<double>(d * 2.0 + 1.0);
+            } else {
+                outTags[i] = TypeTags::Nothing;
+                outVals[i] = Value{0u};
+            }
+        }
+    });
+
+// Test HeterogenousBlock::map().
+TEST_F(ValueBlockTest, HeterogeneousBlockMap) {
+    auto block = std::make_unique<value::HeterogeneousBlock>();
+
+    block->push_back(TypeTags::Nothing, Value{0u});
+    block->push_back(TypeTags::Boolean, value::bitcastFrom<bool>(false));
+    block->push_back(TypeTags::NumberDouble, value::bitcastFrom<double>(3.0));
+    block->push_back(TypeTags::NumberDouble, value::bitcastFrom<double>(10.0));
+
+    auto [strTag, strVal] = value::makeNewString("not a small string");
+    block->push_back(strTag, strVal);
+
+    auto outBlock1 = block->map(testOp1);
+    auto output1 = blockToBsonArr(*outBlock1);
+    ASSERT_BSONOBJ_EQ(output1, fromjson("{result: [false, false, false, false, true]}"));
+
+    auto outBlock2 = block->map(testOp2);
+    auto output2 = blockToBsonArr(*outBlock2);
+    ASSERT_BSONOBJ_EQ(output2, fromjson("{result: [null, null, false, true, null]}"));
+
+    auto outBlock3 = block->map(testOp3);
+    auto output3 = blockToBsonArr(*outBlock3);
+    ASSERT_BSONOBJ_EQ(output3, fromjson("{result: [false, true, true, true, true]}"));
+
+    auto outBlock4 = block->map(testOp4);
+    auto output4 = blockToBsonArr(*outBlock4);
+    ASSERT_BSONOBJ_EQ(output4, fromjson("{result: [null, null, 7.0, 21.0, null]}"));
+}
+
+// Test MonoBlock::map().
+TEST_F(ValueBlockTest, MonoBlockMap) {
+    {
+        auto block = std::make_unique<value::MonoBlock>(3, TypeTags::Nothing, Value{0u});
+
+        auto outBlock1 = block->map(testOp1);
+        auto output1 = blockToBsonArr(*outBlock1);
+        ASSERT_BSONOBJ_EQ(output1, fromjson("{result: [false, false, false]}"));
+
+        auto outBlock2 = block->map(testOp2);
+        auto output2 = blockToBsonArr(*outBlock2);
+        ASSERT_BSONOBJ_EQ(output2, fromjson("{result: [null, null, null]}"));
+
+        auto outBlock3 = block->map(testOp3);
+        auto output3 = blockToBsonArr(*outBlock3);
+        ASSERT_BSONOBJ_EQ(output3, fromjson("{result: [false, false, false]}"));
+
+        auto outBlock4 = block->map(testOp4);
+        auto output4 = blockToBsonArr(*outBlock4);
+        ASSERT_BSONOBJ_EQ(output4, fromjson("{result: [null, null, null]}"));
+    }
+
+    {
+        auto block = std::make_unique<value::MonoBlock>(
+            3, TypeTags::NumberDouble, value::bitcastFrom<double>(3.0));
+
+        auto outBlock1 = block->map(testOp1);
+        auto output1 = blockToBsonArr(*outBlock1);
+        ASSERT_BSONOBJ_EQ(output1, fromjson("{result: [false, false, false]}"));
+
+        auto outBlock2 = block->map(testOp2);
+        auto output2 = blockToBsonArr(*outBlock2);
+        ASSERT_BSONOBJ_EQ(output2, fromjson("{result: [false, false, false]}"));
+
+        auto outBlock3 = block->map(testOp3);
+        auto output3 = blockToBsonArr(*outBlock3);
+        ASSERT_BSONOBJ_EQ(output3, fromjson("{result: [true, true, true]}"));
+
+        auto outBlock4 = block->map(testOp4);
+        auto output4 = blockToBsonArr(*outBlock4);
+        ASSERT_BSONOBJ_EQ(output4, fromjson("{result: [7.0, 7.0, 7.0]}"));
+    }
+
+    {
+        auto block = std::make_unique<value::MonoBlock>(
+            2, TypeTags::NumberDouble, value::bitcastFrom<double>(10.0));
+
+        auto outBlock1 = block->map(testOp1);
+        auto output1 = blockToBsonArr(*outBlock1);
+        ASSERT_BSONOBJ_EQ(output1, fromjson("{result: [false, false]}"));
+
+        auto outBlock2 = block->map(testOp2);
+        auto output2 = blockToBsonArr(*outBlock2);
+        ASSERT_BSONOBJ_EQ(output2, fromjson("{result: [true, true]}"));
+
+        auto outBlock3 = block->map(testOp3);
+        auto output3 = blockToBsonArr(*outBlock3);
+        ASSERT_BSONOBJ_EQ(output3, fromjson("{result: [true, true]}"));
+
+        auto outBlock4 = block->map(testOp4);
+        auto output4 = blockToBsonArr(*outBlock4);
+        ASSERT_BSONOBJ_EQ(output4, fromjson("{result: [21.0, 21.0]}"));
+    }
+
+    {
+        auto [strTag, strVal] = value::makeNewString("not a small string");
+        value::ValueGuard strGuard(strTag, strVal);
+        auto block = std::make_unique<value::MonoBlock>(4, strTag, strVal);
+
+        auto outBlock1 = block->map(testOp1);
+        auto output1 = blockToBsonArr(*outBlock1);
+        ASSERT_BSONOBJ_EQ(output1, fromjson("{result: [true, true, true, true]}"));
+
+        auto outBlock2 = block->map(testOp2);
+        auto output2 = blockToBsonArr(*outBlock2);
+        ASSERT_BSONOBJ_EQ(output2, fromjson("{result: [null, null, null, null]}"));
+
+        auto outBlock3 = block->map(testOp3);
+        auto output3 = blockToBsonArr(*outBlock3);
+        ASSERT_BSONOBJ_EQ(output3, fromjson("{result: [true, true, true, true]}"));
+
+        auto outBlock4 = block->map(testOp4);
+        auto output4 = blockToBsonArr(*outBlock4);
+        ASSERT_BSONOBJ_EQ(output4, fromjson("{result: [null, null, null, null]}"));
+    }
+}
+
+class TestBlock : public value::ValueBlock {
+public:
+    TestBlock() = default;
+    TestBlock(const TestBlock& o) : value::ValueBlock(o) {
+        _vals.resize(o._vals.size(), Value{0u});
+        _tags.resize(o._tags.size(), TypeTags::Nothing);
+        for (size_t i = 0; i < o._vals.size(); ++i) {
+            auto [copyTag, copyVal] = copyValue(o._tags[i], o._vals[i]);
+            _vals[i] = copyVal;
+            _tags[i] = copyTag;
+        }
+    }
+    TestBlock(TestBlock&& o)
+        : value::ValueBlock(std::move(o)), _vals(std::move(o._vals)), _tags(std::move(o._tags)) {
+        o._vals = {};
+        o._tags = {};
+    }
+    ~TestBlock() {
+        for (size_t i = 0; i < _vals.size(); ++i) {
+            releaseValue(_tags[i], _vals[i]);
+        }
+    }
+
+    void push_back(TypeTags t, Value v) {
+        _vals.push_back(v);
+        _tags.push_back(t);
+    }
+    boost::optional<size_t> tryCount() const override {
+        return _vals.size();
+    }
+    std::pair<TypeTags, Value> tryMin() const override {
+        return {TypeTags::Nothing, Value{0u}};
+    }
+    std::pair<TypeTags, Value> tryMax() const override {
+        return {TypeTags::Nothing, Value{0u}};
+    }
+    boost::optional<bool> tryDense() const override {
+        return boost::none;
+    }
+    value::DeblockedTagVals deblock(
+        boost::optional<value::DeblockedTagValStorage>& storage) const override {
+        return {_vals.size(), _tags.data(), _vals.data()};
+    }
+    std::unique_ptr<value::ValueBlock> clone() const override {
+        return std::make_unique<TestBlock>(*this);
+    }
+
+private:
+    std::vector<Value> _vals;
+    std::vector<TypeTags> _tags;
+};
+
+// Test ValueBlock::defaultMapImpl().
+TEST_F(ValueBlockTest, TestBlockMap) {
+    auto block = std::make_unique<TestBlock>();
+
+    block->push_back(TypeTags::Nothing, Value{0u});
+    block->push_back(TypeTags::Boolean, value::bitcastFrom<bool>(false));
+    block->push_back(TypeTags::NumberDouble, value::bitcastFrom<double>(3.0));
+    block->push_back(TypeTags::NumberDouble, value::bitcastFrom<double>(10.0));
+
+    auto [strTag, strVal] = value::makeNewString("not a small string");
+    block->push_back(strTag, strVal);
+
+    auto outBlock1 = block->map(testOp1);
+    auto output1 = blockToBsonArr(*outBlock1);
+    ASSERT_BSONOBJ_EQ(output1, fromjson("{result: [false, false, false, false, true]}"));
+
+    auto outBlock2 = block->map(testOp2);
+    auto output2 = blockToBsonArr(*outBlock2);
+    ASSERT_BSONOBJ_EQ(output2, fromjson("{result: [null, null, false, true, null]}"));
+
+    auto outBlock3 = block->map(testOp3);
+    auto output3 = blockToBsonArr(*outBlock3);
+    ASSERT_BSONOBJ_EQ(output3, fromjson("{result: [false, true, true, true, true]}"));
+
+    auto outBlock4 = block->map(testOp4);
+    auto output4 = blockToBsonArr(*outBlock4);
+    ASSERT_BSONOBJ_EQ(output4, fromjson("{result: [null, null, 7.0, 21.0, null]}"));
+}
+
+// Test ValueBlock::tokenize().
+TEST_F(ValueBlockTest, TestTokenize) {
+    auto block = std::make_unique<TestBlock>();
+
+    auto [tag1, val1] = value::makeNewString("foofoofoo"_sd);
+    block->push_back(tag1, val1);
+    auto [tag2, val2] = value::makeNewString("bar"_sd);  // StringSmall
+    block->push_back(tag2, val2);
+    auto [tag3, val3] = value::makeNewString("bazbazbaz"_sd);
+    block->push_back(tag3, val3);
+    auto [tag4, val4] = value::makeNewString("bar"_sd);  // StringSmall
+    block->push_back(tag4, val4);
+    auto [tag5, val5] = value::makeNewString("bar"_sd);  // StringSmall
+    block->push_back(tag5, val5);
+    block->push_back(TypeTags::NumberInt32, value::bitcastFrom<int32_t>(999));
+    block->push_back(TypeTags::Nothing, Value{0u});
+    auto [tag6, val6] = value::makeNewString("foofoofoo"_sd);
+    block->push_back(tag6, val6);
+    block->push_back(TypeTags::Nothing, Value{0u});
+
+    auto [outTokens, outIdxs] = block->tokenize();
+    ASSERT_EQ(outTokens->tryCount(), boost::optional<size_t>(5));
+
+    auto outTokensBson = blockToBsonArr(*outTokens);
+    ASSERT_BSONOBJ_EQ(outTokensBson,
+                      fromjson("{result: [\"foofoofoo\", \"bar\", \"bazbazbaz\", 999, null]}"));
+
+    std::vector<size_t> expIdxs{0, 1, 2, 1, 1, 3, 4, 0, 4};
+    ASSERT_EQ(outIdxs, expIdxs);
+}
+
+// Test MonoBlock::Tokenize().
+TEST_F(ValueBlockTest, MonoBlockTokenize) {
+    {
+        auto [strTag, strVal] = value::makeNewString("not a small string"_sd);
+        value::ValueGuard strGuard(strTag, strVal);
+        auto block = std::make_unique<value::MonoBlock>(4, strTag, strVal);
+
+        auto [outTokens, outIdxs] = block->tokenize();
+        ASSERT_EQ(outTokens->tryCount(), boost::optional<size_t>(1));
+
+        auto outTokensBson = blockToBsonArr(*outTokens);
+        ASSERT_BSONOBJ_EQ(outTokensBson, fromjson("{result: [\"not a small string\"]}"));
+
+        std::vector<size_t> expIdxs{0, 0, 0, 0};
+        ASSERT_EQ(outIdxs, expIdxs);
+    }
+
+    {
+        auto block = std::make_unique<value::MonoBlock>(4, TypeTags::Nothing, Value{0u});
+
+        auto [outTokens, outIdxs] = block->tokenize();
+        ASSERT_EQ(outTokens->tryCount(), boost::optional<size_t>(1));
+
+        auto outTokensBson = blockToBsonArr(*outTokens);
+        ASSERT_BSONOBJ_EQ(outTokensBson, fromjson("{result: [null]}"));
+
+        std::vector<size_t> expIdxs{0, 0, 0, 0};
+        ASSERT_EQ(outIdxs, expIdxs);
+    }
+}
+
 }  // namespace mongo::sbe

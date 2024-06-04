@@ -31,7 +31,6 @@
 #include <boost/container/small_vector.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 #include <algorithm>
-#include <boost/preprocessor/control/iif.hpp>
 #include <iterator>
 #include <list>
 
@@ -214,7 +213,8 @@ bool validShardKeyIndexExists(OperationContext* opCtx,
     // 3. If proposed key is required to be unique, additionally check for exact match.
     if (hasUsefulIndexForKey && requiresUnique) {
         BSONObj eqQuery =
-            BSON("ns" << NamespaceStringUtil::serialize(nss) << "key" << shardKeyPattern.toBSON());
+            BSON("ns" << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())
+                      << "key" << shardKeyPattern.toBSON());
         BSONObj eqQueryResult;
 
         for (const auto& idx : indexes) {
@@ -336,11 +336,12 @@ std::vector<BSONObj> ValidationBehaviorsShardCollection::loadIndexes(
 void ValidationBehaviorsShardCollection::verifyUsefulNonMultiKeyIndex(
     const NamespaceString& nss, const BSONObj& proposedKey) const {
     BSONObj res;
-    auto success = _localClient->runCommand(DatabaseName::kAdmin,
-                                            BSON(kCheckShardingIndexCmdName
-                                                 << NamespaceStringUtil::serialize(nss)
-                                                 << kKeyPatternField << proposedKey),
-                                            res);
+    auto success = _localClient->runCommand(
+        DatabaseName::kAdmin,
+        BSON(kCheckShardingIndexCmdName
+             << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())
+             << kKeyPatternField << proposedKey),
+        res);
     uassert(ErrorCodes::InvalidOptions, res["errmsg"].str(), success);
 }
 
@@ -396,9 +397,11 @@ void ValidationBehaviorsRefineShardKey::verifyUsefulNonMultiKeyIndex(
         _opCtx,
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
         DatabaseName::kAdmin,
-        appendShardVersion(BSON(kCheckShardingIndexCmdName << NamespaceStringUtil::serialize(nss)
-                                                           << kKeyPatternField << proposedKey),
-                           _cri.getShardVersion(_indexShard->getId())),
+        appendShardVersion(
+            BSON(kCheckShardingIndexCmdName
+                 << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())
+                 << kKeyPatternField << proposedKey),
+            _cri.getShardVersion(_indexShard->getId())),
         Shard::RetryPolicy::kIdempotent));
     if (checkShardingIndexRes.commandStatus == ErrorCodes::UnknownError) {
         // CheckShardingIndex returns UnknownError if a compatible shard key index cannot be found,
@@ -479,7 +482,7 @@ std::vector<BSONObj> ValidationBehaviorsReshardingBulkIndex::loadIndexes(
     const NamespaceString& nss) const {
     invariant(_opCtx);
     auto catalogCache = Grid::get(_opCtx)->catalogCache();
-    auto cri = catalogCache->getShardedCollectionRoutingInfo(_opCtx, nss);
+    auto cri = catalogCache->getTrackedCollectionRoutingInfo(_opCtx, nss);
     auto [indexSpecs, _] = MigrationDestinationManager::getCollectionIndexes(
         _opCtx, nss, cri.cm.getMinKeyShardIdWithSimpleCollation(), cri, _cloneTimestamp);
     return indexSpecs;
@@ -489,16 +492,18 @@ void ValidationBehaviorsReshardingBulkIndex::verifyUsefulNonMultiKeyIndex(
     const NamespaceString& nss, const BSONObj& proposedKey) const {
     invariant(_opCtx);
     auto catalogCache = Grid::get(_opCtx)->catalogCache();
-    auto cri = catalogCache->getShardedCollectionRoutingInfo(_opCtx, nss);
+    auto cri = catalogCache->getTrackedCollectionRoutingInfo(_opCtx, nss);
     auto shard = uassertStatusOK(Grid::get(_opCtx)->shardRegistry()->getShard(
         _opCtx, cri.cm.getMinKeyShardIdWithSimpleCollation()));
     auto checkShardingIndexRes = uassertStatusOK(shard->runCommand(
         _opCtx,
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
         DatabaseName::kAdmin,
-        appendShardVersion(BSON(kCheckShardingIndexCmdName << NamespaceStringUtil::serialize(nss)
-                                                           << kKeyPatternField << proposedKey),
-                           cri.getShardVersion(shard->getId())),
+        appendShardVersion(
+            BSON(kCheckShardingIndexCmdName
+                 << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())
+                 << kKeyPatternField << proposedKey),
+            cri.getShardVersion(shard->getId())),
         Shard::RetryPolicy::kIdempotent));
     if (checkShardingIndexRes.commandStatus == ErrorCodes::UnknownError) {
         // CheckShardingIndex returns UnknownError if a compatible shard key index cannot be found,

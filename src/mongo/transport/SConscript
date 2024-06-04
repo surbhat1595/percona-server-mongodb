@@ -53,11 +53,25 @@ env.Library(
 )
 
 env.Library(
+    target='session_util',
+    source=[
+        'session_util.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/util/net/network',
+    ],
+)
+
+env.Library(
     target='transport_layer_mock',
     source=[
         'transport_layer_mock.cpp',
     ],
     LIBDEPS=[
+        'session_util',
         'transport_layer_common',
     ],
     LIBDEPS_PRIVATE=[
@@ -74,7 +88,7 @@ if shouldBuildGRPC(tlEnv):
 tlEnv.Library(
     target='transport_layer_manager',
     source=[
-        'transport_layer_manager.cpp',
+        'transport_layer_manager_impl.cpp',
     ],
     LIBDEPS=[
         'grpc/grpc_transport_layer' if shouldBuildGRPC(tlEnv) else [],
@@ -83,6 +97,7 @@ tlEnv.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/third_party/shim_asio',
         'service_executor',
+        'session_manager',
     ],
 )
 
@@ -91,6 +106,7 @@ tlEnv.Library(
     source=[
         'asio/asio_networking_baton.cpp' if env.TargetOSIs('linux') else [],
         'asio/asio_session_impl.cpp',
+        'asio/asio_session_manager.cpp',
         'asio/asio_tcp_fast_open.cpp',
         'asio/asio_transport_layer.cpp',
         'asio/asio_utils.cpp',
@@ -99,9 +115,9 @@ tlEnv.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base/system_error',
-        '$BUILD_DIR/mongo/db/auth/authentication_restriction',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/util/executor_stats',
+        'session_util',
         'transport_layer_common',
     ],
     LIBDEPS_PRIVATE=[
@@ -113,6 +129,8 @@ tlEnv.Library(
         '$BUILD_DIR/mongo/util/net/ssl_manager',
         '$BUILD_DIR/mongo/util/options_parser/options_parser',
         '$BUILD_DIR/third_party/shim_asio',
+        'service_executor',
+        'session_manager',
     ],
 )
 
@@ -124,7 +142,7 @@ env.Library(
         'transport_layer_egress_init.cpp',
     ],
     LIBDEPS_PRIVATE=[
-        'transport_layer',
+        'transport_layer_manager',
     ],
 )
 
@@ -151,30 +169,28 @@ tlEnv.Library(
 )
 
 env.Library(
-    target='service_entry_point',
+    target='session_manager',
     source=[
-        'service_entry_point_impl.cpp',
-        'service_entry_point_impl.idl',
+        'session_manager_common.idl',
+        'session_manager_common.cpp',
         'session_workflow.cpp',
     ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/db/auth/authentication_restriction',
-        '$BUILD_DIR/mongo/db/dbmessage',
+    LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/query/command_request_response',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/server_feature_flags',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/stats/counters',
-        '$BUILD_DIR/mongo/rpc/message',
-        '$BUILD_DIR/mongo/util/processinfo',
-        'service_executor',
-        'transport_layer_common',
-    ],
-    LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/traffic_recorder',
+        '$BUILD_DIR/mongo/rpc/client_metadata',
+        '$BUILD_DIR/mongo/rpc/message',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         '$BUILD_DIR/mongo/util/net/ssl_manager',
+        '$BUILD_DIR/mongo/util/processinfo',
         'ingress_handshake_metrics',
         'message_compressor',
+        'service_executor',
+        'transport_layer_common',
     ],
 )
 
@@ -252,8 +268,8 @@ tlEnv.CppUnitTest(
         '$BUILD_DIR/third_party/shim_grpc' if shouldBuildGRPC(tlEnv) else [],
         'message_compressor',
         'message_compressor_options_server',
-        'service_entry_point',
         'service_executor',
+        'session_manager',
         'transport_layer',
         'transport_layer_common',
         'transport_layer_manager',
@@ -309,8 +325,9 @@ env.Benchmark(
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/service_context_non_d',
         '$BUILD_DIR/mongo/db/service_context_test_fixture',
-        'service_entry_point',
         'service_executor',
+        'session_manager',
+        'transport_layer_manager',
         'transport_layer_mock',
     ],
 )

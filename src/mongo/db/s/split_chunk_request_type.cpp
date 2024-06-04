@@ -122,12 +122,13 @@ StatusWith<SplitChunkRequest> SplitChunkRequest::parseFromConfigCommand(const BS
         return parseShardNameStatus;
     }
 
-    auto request = SplitChunkRequest(NamespaceStringUtil::deserialize(boost::none, ns),
-                                     std::move(shardName),
-                                     std::move(epoch),
-                                     std::move(timestamp),
-                                     std::move(chunkRangeStatus.getValue()),
-                                     std::move(splitPoints));
+    auto request = SplitChunkRequest(
+        NamespaceStringUtil::deserialize(boost::none, ns, SerializationContext::stateDefault()),
+        std::move(shardName),
+        std::move(epoch),
+        std::move(timestamp),
+        std::move(chunkRangeStatus.getValue()),
+        std::move(splitPoints));
     Status validationStatus = request._validate();
     if (!validationStatus.isOK()) {
         return validationStatus;
@@ -147,7 +148,8 @@ BSONObj SplitChunkRequest::toConfigCommandBSON(const BSONObj& writeConcern) {
 }
 
 void SplitChunkRequest::appendAsConfigCommand(BSONObjBuilder* cmdBuilder) {
-    cmdBuilder->append(kConfigsvrSplitChunk, NamespaceStringUtil::serialize(_nss));
+    cmdBuilder->append(kConfigsvrSplitChunk,
+                       NamespaceStringUtil::serialize(_nss, SerializationContext::stateDefault()));
     cmdBuilder->append(kCollEpoch, _epoch);
     _chunkRange.append(cmdBuilder);
     {

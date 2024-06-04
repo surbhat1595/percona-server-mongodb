@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
 
 #include <memory>
 #include <string>
@@ -49,6 +48,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/util/assert_util.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
+
 
 namespace mongo {
 namespace {
@@ -108,7 +110,8 @@ public:
 };
 
 MONGO_REGISTER_COMMAND(ShardsvrInsertGlobalIndexKeyCmd)
-    .requiresFeatureFlag(&mongo::gFeatureFlagGlobalIndexes);
+    .requiresFeatureFlag(&mongo::gFeatureFlagGlobalIndexes)
+    .forShard();
 
 }  // namespace
 }  // namespace mongo

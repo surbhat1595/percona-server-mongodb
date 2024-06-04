@@ -60,7 +60,7 @@ struct SerializationContext {
      * where it is being called.  Use default if serialization and deserialization should only
      * depened on the state of the feature flags.
      */
-    enum class Source { Default, Command, Storage };
+    enum class Source { Default, Command, Storage, Catalog, AuthPrevalidated };
 
     /**
      * The CallerType enum is currently only applicable to source = Command, and is used in
@@ -81,10 +81,12 @@ struct SerializationContext {
     SerializationContext(Source source = Source::Default,
                          CallerType callerType = CallerType::None,
                          Prefix prefixState = Prefix::Default,
-                         bool nonPrefixedTenantId = false)
+                         bool nonPrefixedTenantId = false,
+                         bool authExpectTenantPrefix = false)
         : _source(source),
           _callerType(callerType),
           _prefixState(prefixState),
+          _authExpectTenantPrefix(authExpectTenantPrefix),
           _nonPrefixedTenantId(nonPrefixedTenantId) {}
 
     /**
@@ -116,16 +118,39 @@ struct SerializationContext {
         return *stateStorageRequest;
     }
 
+    static const SerializationContext& stateCatalog() {
+        static StaticImmortal<SerializationContext> stateCatalog{Source::Catalog, CallerType::None};
+        return *stateCatalog;
+    }
+
     static const SerializationContext& stateDefault() {
         static StaticImmortal<SerializationContext> stateDefault{};
         return *stateDefault;
     }
 
+    static const SerializationContext& stateAuthPrevalidated() {
+        static StaticImmortal<SerializationContext> stateAuthPrevalidated{Source::AuthPrevalidated};
+        return *stateAuthPrevalidated;
+    }
+
     /**
      * Setters for flags that may not be known during construction time, used by producers
      */
+
+    /**
+     * This flag is set/produced at command parsing before the deserializer is called, and
+     * consumed by the serializer.  It indicates whether the tenantId was sourced from the
+     * $tenant field or security token (ie. true), or if it was sourced from parsing the db
+     * string prefix (ie. false).  This is important as the serializer uses this flag to
+     * determine whether the reponse should contain a prefixed tenantId when serializing for
+     * commands when no expectPrefix was given (_prefixState == Default).
+     */
     void setTenantIdSource(bool nonPrefixedTenantId) {
         _nonPrefixedTenantId = nonPrefixedTenantId;
+    }
+
+    void setExpectTenantPrefixForAuth(bool authExpectTenantPrefix) {
+        _authExpectTenantPrefix = authExpectTenantPrefix;
     }
 
     void setPrefixState(bool prefixState) {
@@ -146,6 +171,9 @@ struct SerializationContext {
     }
     bool receivedNonPrefixedTenantId() const {
         return _nonPrefixedTenantId;
+    }
+    bool shouldExpectTenantPrefixForAuth() const {
+        return _authExpectTenantPrefix;
     }
 
     std::string toString() const {
@@ -179,15 +207,9 @@ private:
     Source _source;
     CallerType _callerType;
     Prefix _prefixState;
-
-    /**
-     * This flag is set/produced at command parsing before the deserializer is called, and
-     * consumed by the serializer.  It indicates whether the tenantId was sourced from the
-     * $tenant field or security token (ie. true), or if it was sourced from parsing the db
-     * string prefix (ie. false).  This is important as the serializer uses this flag to
-     * determine whether the reponse should contain a prefixed tenantId when serializing for
-     * commands.
-     */
+    // This flag is for the AuthPrevalidated source. If true, when deserializing, we should expect
+    // that the database name portion may have the correct tenant ID prefixed.
+    bool _authExpectTenantPrefix;
     bool _nonPrefixedTenantId;
 };
 

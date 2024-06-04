@@ -125,8 +125,8 @@ public:
         return _updateOp.getCollation().get_value_or(emptyCollation);
     }
 
-    void setUpdateModification(const write_ops::UpdateModification& updateMod) {
-        _updateOp.setU(updateMod);
+    void setUpdateModification(write_ops::UpdateModification updateMod) {
+        _updateOp.setU(std::move(updateMod));
     }
 
     const write_ops::UpdateModification& getUpdateModification() const {
@@ -300,6 +300,14 @@ public:
         return _allowShardKeyUpdatesWithoutFullShardKeyInQuery;
     }
 
+    void setIsTimeseriesNamespace(OptionalBool isTimeseriesNamespace) {
+        _isTimeseriesNamespace = isTimeseriesNamespace;
+    }
+
+    const OptionalBool& getIsTimeseriesNamespace() const {
+        return _isTimeseriesNamespace;
+    }
+
     std::string toString() const {
         StringBuilder builder;
         builder << " query: " << getQuery();
@@ -335,6 +343,7 @@ public:
         builder << " isExplain: " << static_cast<bool>(_explain);
         builder << " $_allowShardKeyUpdatesWithoutFullShardKeyInQuery: "
                 << _allowShardKeyUpdatesWithoutFullShardKeyInQuery;
+        builder << " isTimeseriesNamespace: " << _isTimeseriesNamespace;
         return builder.str();
     }
 
@@ -366,6 +375,8 @@ private:
     // key.
     OptionalBool _allowShardKeyUpdatesWithoutFullShardKeyInQuery;
 
+    OptionalBool _isTimeseriesNamespace;
+
     // Flags controlling the update.
 
     // God bypasses _id checking and index generation. It is only used on behalf of system
@@ -396,8 +407,8 @@ private:
     // without another query before or after the update.
     ReturnDocOption _returnDocs = ReturnDocOption::RETURN_NONE;
 
-    // Whether or not the update should yield. Defaults to NO_YIELD.
-    PlanYieldPolicy::YieldPolicy _yieldPolicy = PlanYieldPolicy::YieldPolicy::NO_YIELD;
+    // Whether or not the update should yield.
+    PlanYieldPolicy::YieldPolicy _yieldPolicy = PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY;
 };
 
 }  // namespace mongo

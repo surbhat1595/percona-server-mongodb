@@ -36,7 +36,6 @@
 
 #include <absl/container/node_hash_set.h>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/oid.h"
@@ -50,7 +49,6 @@
 #include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
-
 
 namespace mongo {
 

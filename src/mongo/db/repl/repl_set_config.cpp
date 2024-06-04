@@ -43,7 +43,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
@@ -56,6 +55,7 @@
 #include "mongo/db/repl/repl_set_config_params_gen.h"
 #include "mongo/db/repl/repl_set_write_concern_mode_definitions.h"
 #include "mongo/db/repl/split_horizon.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
@@ -193,8 +193,8 @@ Status ReplSetConfig::_initialize(bool forInitiate,
     // Initialize configServer
     //
     if (forInitiate && serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-        !getConfigServer().has_value()) {
-        setConfigServer(true);
+        !getConfigServer_deprecated().has_value()) {
+        setConfigServer_deprecated(true);
     }
 
     //
@@ -405,7 +405,9 @@ Status ReplSetConfig::_validate(bool allowSplitHorizonIP) const {
                       "one non-arbiter member with priority > 0");
     }
 
-    if (getConfigServer()) {
+    if (getConfigServer_deprecated() ||
+        (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup() &&
+         serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer))) {
         if (arbiterCount > 0) {
             return Status(ErrorCodes::BadValue,
                           "Arbiters are not allowed in replica set configurations being used for "
@@ -436,9 +438,22 @@ Status ReplSetConfig::_validate(bool allowSplitHorizonIP) const {
                                            "used for config servers");
         }
     } else if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-        return Status(ErrorCodes::BadValue,
-                      "Nodes started with the --configsvr flag must have configsvr:true in "
-                      "their config");
+        // TODO: SERVER-82024 Remove this when master is 8.1.
+        //
+        // Skip this check to allow upgrading a 7.0 non auto-bootstrapped replica set node to a 8.0
+        // node with auto-bootstrapping enabled despite not having `configsvr:true` in the
+        // replication config. The `configsvr` field will get set during the upgrade process.
+        //
+        // By skipping this check there is the possibility of having a replica
+        // set where some nodes are shard servers and some are config servers. To ensure
+        // that all nodes in the replica set eventually have the same cluster role, the server
+        // fasserts (on startup or replication) if the shard identity document matches the server's
+        // cluster role. For why this is correct and for more context see: SERVER-80249
+        if (!gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+            return Status(ErrorCodes::BadValue,
+                          "Nodes started with the --configsvr flag must have configsvr:true in "
+                          "their config");
+        }
     }
 
     if (!allowMultipleArbiters && arbiterCount > 1) {

@@ -183,16 +183,22 @@ size_t TsBucketToCellBlockStage::estimateCompileTimeSize() const {
     return size;
 }
 
-void TsBucketToCellBlockStage::doRestoreState(bool) {
+void TsBucketToCellBlockStage::doSaveState(bool) {
     if (!slotsAccessible()) {
         return;
     }
 
-    initCellBlocks();
+    for (size_t i = 0; i < _blocksOutAccessor.size(); ++i) {
+        // Copy the CellBlock, which will force any data that's unowned by SBE (owned by storage)
+        // memory to be copied. This also means that any already decompressed data will get copied,
+        // and will not need to be decompressed again.
+        auto [cellBlockTag, cellBlockVal] = _blocksOutAccessor[i].getViewOfValue();
+
+        auto [cpyTag, cpyVal] = value::copyValue(cellBlockTag, cellBlockVal);
+        _blocksOutAccessor[i].reset(true, cpyTag, cpyVal);
+    }
 }
 
-// The underlying storage buffer for the bucket has been updated after getNext() on the child or
-// yielding, so we need to restore states from the updated bucket.
 void TsBucketToCellBlockStage::initCellBlocks() {
     auto [bucketTag, bucketVal] = _bucketAccessor->getViewOfValue();
     invariant(bucketTag == value::TypeTags::bsonObject);
@@ -204,7 +210,8 @@ void TsBucketToCellBlockStage::initCellBlocks() {
         _metaOutAccessor.reset(false, metaTag, metaVal);
     }
 
-    auto cellBlocks = _pathExtractor.extractCellBlocks(bucketObj);
+    auto [tsBlocks, cellBlocks] = _pathExtractor.extractCellBlocks(bucketObj);
+    _tsBlockStorage = std::move(tsBlocks);
     invariant(cellBlocks.size() == _blocksOutAccessor.size());
     for (size_t i = 0; i < cellBlocks.size(); ++i) {
         _blocksOutAccessor[i].reset(true,

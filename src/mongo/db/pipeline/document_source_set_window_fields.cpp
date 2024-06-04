@@ -33,7 +33,6 @@
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 #include <algorithm>
 #include <array>
-#include <boost/preprocessor/control/iif.hpp>
 #include <iterator>
 
 #include <boost/move/utility_core.hpp>
@@ -153,12 +152,8 @@ list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::createFro
         outputFields.push_back(WindowFunctionStatement::parse(outputElem, sortBy, expCtx.get()));
     }
     auto sbeCompatibility = std::min(expCtx->sbeWindowCompatibility, expCtx->sbeCompatibility);
-    // TODO: (SERVER-78708) Add collation support to window stage in sbe
-    if (expCtx->getCollator()) {
-        sbeCompatibility = SbeCompatibility::notCompatible;
-    }
 
-    return create(std::move(expCtx),
+    return create(expCtx,
                   std::move(partitionBy),
                   std::move(sortBy),
                   std::move(outputFields),
@@ -168,7 +163,7 @@ list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::createFro
 list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::create(
     const intrusive_ptr<ExpressionContext>& expCtx,
     optional<intrusive_ptr<Expression>> partitionBy,
-    const optional<SortPattern>& sortBy,
+    optional<SortPattern> sortBy,
     std::vector<WindowFunctionStatement> outputFields,
     SbeCompatibility sbeCompatibility) {
 
@@ -290,8 +285,8 @@ list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::create(
     result.push_back(make_intrusive<DocumentSourceInternalSetWindowFields>(
         expCtx,
         simplePartitionByExpr,
-        sortBy,
-        outputFields,
+        std::move(sortBy),
+        std::move(outputFields),
         internalDocumentSourceSetWindowFieldsMaxMemoryBytes.load(),
         sbeCompatibility));
 
@@ -391,10 +386,6 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSetWindowFields::crea
         outputFields.push_back(WindowFunctionStatement::parse(elem, sortBy, expCtx.get()));
     }
     auto sbeCompatibility = std::min(expCtx->sbeWindowCompatibility, expCtx->sbeCompatibility);
-    // TODO: (SERVER-78708) Add collation support to window stage in sbe
-    if (expCtx->getCollator()) {
-        sbeCompatibility = SbeCompatibility::notCompatible;
-    }
 
     return make_intrusive<DocumentSourceInternalSetWindowFields>(
         expCtx,
@@ -520,13 +511,15 @@ DocumentSource::GetNextResult DocumentSourceInternalSetWindowFields::doGetNext()
     // Populate the output document with the result from each window function.
     auto projSpec = std::make_unique<projection_executor::InclusionNode>(
         ProjectionPolicies{ProjectionPolicies::DefaultIdPolicy::kIncludeId});
-    for (auto&& [fieldName, function] : _executableOutputs) {
+    for (auto&& outputField : _outputFields) {
         try {
             // If we hit a uassert while evaluating expressions on user data, delete the temporary
             // table before aborting the operation.
+            auto& fieldName = outputField.fieldName;
             projSpec->addExpressionForPath(
                 FieldPath(fieldName),
-                ExpressionConstant::create(pExpCtx.get(), function->getNext()));
+                ExpressionConstant::create(pExpCtx.get(),
+                                           _executableOutputs[fieldName]->getNext()));
         } catch (const DBException&) {
             _iterator.finalize();
             throw;

@@ -35,7 +35,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -88,7 +87,9 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
                                  NamespaceString nss,
                                  bool isOpen,
                                  std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
-                                 bool generatedByBonsai)
+                                 bool generatedByBonsai,
+                                 std::unique_ptr<RemoteCursorMap> remoteCursors,
+                                 std::unique_ptr<RemoteExplainVector> remoteExplains)
     : _state{isOpen ? State::kOpened : State::kClosed},
       _opCtx(opCtx),
       _nss(std::move(nss)),
@@ -99,7 +100,9 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
       _stash{std::move(candidates.winner().results)},
       _cq{std::move(cq)},
       _yieldPolicy(std::move(yieldPolicy)),
-      _generatedByBonsai(generatedByBonsai) {
+      _generatedByBonsai(generatedByBonsai),
+      _remoteCursors(std::move(remoteCursors)),
+      _remoteExplains(std::move(remoteExplains)) {
     invariant(!_nss.isEmpty());
     invariant(_root);
 
@@ -123,6 +126,8 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
     }
     _minRecordIdSlot = env->getSlotIfExists("minRecordId"_sd);
     _maxRecordIdSlot = env->getSlotIfExists("maxRecordId"_sd);
+
+    initializeAccessors(_metadataAccessors, _rootData.staticData->metadataSlots);
 
     if (!_stash.empty()) {
         // The PlanExecutor keeps an extra reference to the last object pulled out of the PlanStage
@@ -160,7 +165,9 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
                                                   std::move(candidates.plans),
                                                   isMultiPlan,
                                                   isCachedCandidate,
-                                                  _rootData.debugInfo);
+                                                  _rootData.debugInfo,
+                                                  _remoteExplains.get());
+    _cursorType = _rootData.staticData->cursorType;
 }
 
 void PlanExecutorSBE::saveState() {
@@ -181,15 +188,21 @@ void PlanExecutorSBE::saveState() {
         _root->saveState(relinquishCursor, discardSlotState);
     }
 
-    if (!_yieldPolicy->usesCollectionAcquisitions()) {
+    if (_yieldPolicy && !_yieldPolicy->usesCollectionAcquisitions()) {
         _yieldPolicy->setYieldable(nullptr);
     }
     _lastGetNext = BSONObj();
 }
 
 void PlanExecutorSBE::restoreState(const RestoreContext& context) {
-    if (!_yieldPolicy->usesCollectionAcquisitions()) {
+    if (_yieldPolicy && !_yieldPolicy->usesCollectionAcquisitions()) {
         _yieldPolicy->setYieldable(context.collection());
+    }
+
+    if (_remoteCursors) {
+        for (auto& [_, cursor] : *_remoteCursors) {
+            cursor->setYieldable(context.collection());
+        }
     }
 
     if (_isSaveRecoveryUnitAcrossCommandsEnabled) {
@@ -271,7 +284,8 @@ sbe::PlanState fetchNextImpl(sbe::PlanStage* root,
                              sbe::value::SlotAccessor* recordIdSlot,
                              ObjectType* out,
                              RecordId* dlOut,
-                             bool returnOwnedBson);
+                             bool returnOwnedBson,
+                             const PlanExecutorSBE::MetaDataAccessor* metadata);
 
 template <typename ObjectType>
 PlanExecutor::ExecState PlanExecutorSBE::getNextImpl(ObjectType* out, RecordId* dlOut) {
@@ -288,7 +302,7 @@ PlanExecutor::ExecState PlanExecutorSBE::getNextImpl(ObjectType* out, RecordId* 
         if constexpr (isBson) {
             *out = std::move(doc);
         } else {
-            *out = Document{std::move(doc)};
+            *out = Document{doc};
         }
         if (dlOut && recordId) {
             *dlOut = std::move(*recordId);
@@ -339,8 +353,18 @@ PlanExecutor::ExecState PlanExecutorSBE::getNextImpl(ObjectType* out, RecordId* 
 
         invariant(_state == State::kOpened);
 
-        auto result =
-            fetchNextImpl(_root.get(), _result, _resultRecordId, out, dlOut, _mustReturnOwnedBson);
+        const MetaDataAccessor* metadataAccessors = isDocument ||
+                (_cq && (_cq->getExpCtxRaw()->needsMerge || _cq->getExpCtxRaw()->forPerShardCursor))
+            ? &_metadataAccessors
+            : nullptr;
+        auto result = fetchNextImpl(_root.get(),
+                                    _result,
+                                    _resultRecordId,
+                                    out,
+                                    dlOut,
+                                    _mustReturnOwnedBson,
+                                    metadataAccessors);
+
         if (result == sbe::PlanState::IS_EOF) {
             _root->close();
             _state = State::kClosed;
@@ -358,7 +382,8 @@ PlanExecutor::ExecState PlanExecutorSBE::getNextImpl(ObjectType* out, RecordId* 
                 planExecutorHangBeforeShouldWaitForInserts.pauseWhileSet();
             }
 
-            if (!insert_listener::shouldWaitForInserts(_opCtx, _cq.get(), _yieldPolicy.get())) {
+            if (!_yieldPolicy ||
+                !insert_listener::shouldWaitForInserts(_opCtx, _cq.get(), _yieldPolicy.get())) {
                 return PlanExecutor::ExecState::IS_EOF;
             }
 
@@ -454,7 +479,7 @@ BSONObj PlanExecutorSBE::getPostBatchResumeToken() const {
 }
 
 bool PlanExecutorSBE::usesCollectionAcquisitions() const {
-    return _yieldPolicy->usesCollectionAcquisitions();
+    return _yieldPolicy && _yieldPolicy->usesCollectionAcquisitions();
 }
 
 namespace {
@@ -497,7 +522,8 @@ Value convertToValue(sbe::value::TypeTags tag, sbe::value::Value val) {
             return Value(sbe::value::getStringOrSymbolView(tag, val));
 
         case sbe::value::TypeTags::Array:
-        case sbe::value::TypeTags::ArraySet: {
+        case sbe::value::TypeTags::ArraySet:
+        case sbe::value::TypeTags::ArrayMultiSet: {
             std::vector<Value> vals;
             auto enumerator = sbe::value::ArrayEnumerator{tag, val};
             while (!enumerator.atEnd()) {
@@ -572,13 +598,148 @@ Document convertToDocument(const sbe::value::Object& obj) {
 
 }  // namespace
 
+void PlanExecutorSBE::initializeAccessors(
+    MetaDataAccessor& accessor, const stage_builder::PlanStageMetadataSlots& metadataSlots) {
+    if (auto slot = metadataSlots.searchScoreSlot) {
+        accessor.metadataSearchScore = _root->getAccessor(_rootData.env.ctx, *slot);
+    }
+    if (auto slot = metadataSlots.searchHighlightsSlot) {
+        accessor.metadataSearchHighlights = _root->getAccessor(_rootData.env.ctx, *slot);
+    }
+    if (auto slot = metadataSlots.searchDetailsSlot) {
+        accessor.metadataSearchDetails = _root->getAccessor(_rootData.env.ctx, *slot);
+    }
+    if (auto slot = metadataSlots.searchSortValuesSlot) {
+        accessor.metadataSearchSortValues = _root->getAccessor(_rootData.env.ctx, *slot);
+    }
+    if (auto slot = metadataSlots.sortKeySlot) {
+        accessor.sortKey = _root->getAccessor(_rootData.env.ctx, *slot);
+        if (auto sortSpecSlot = _rootData.env->getSlotIfExists("searchSortSpec"_sd)) {
+            auto [sortSpecTag, sortSpecVal] =
+                _root->getAccessor(_rootData.env.ctx, *sortSpecSlot)->getViewOfValue();
+            if (sortSpecTag != sbe::value::TypeTags::Nothing) {
+                tassert(7856004,
+                        "Incorrect search sort spec type.",
+                        sortSpecTag == sbe::value::TypeTags::sortSpec);
+                auto sortSpec = sbe::value::bitcastTo<sbe::SortSpec*>(sortSpecVal);
+                accessor.isSingleSortKey = sortSpec->getSortPattern().isSingleElementKey();
+            }
+        }
+    }
+    if (auto slot = metadataSlots.searchSequenceToken) {
+        accessor.metadataSearchSequenceToken = _root->getAccessor(_rootData.env.ctx, *slot);
+    }
+}
+
+BSONObj PlanExecutorSBE::MetaDataAccessor::appendToBson(BSONObj doc) const {
+    if (metadataSearchScore || metadataSearchHighlights || metadataSearchDetails ||
+        metadataSearchSortValues || sortKey) {
+        BSONObjBuilder bb(std::move(doc));
+        if (metadataSearchScore) {
+            auto [tag, val] = metadataSearchScore->getViewOfValue();
+            sbe::bson::appendValueToBsonObj(bb, Document::metaFieldSearchScore, tag, val);
+        }
+        if (metadataSearchHighlights) {
+            auto [tag, val] = metadataSearchHighlights->getViewOfValue();
+            sbe::bson::appendValueToBsonObj(bb, Document::metaFieldSearchHighlights, tag, val);
+        }
+        if (metadataSearchDetails) {
+            auto [tag, val] = metadataSearchDetails->getViewOfValue();
+            sbe::bson::appendValueToBsonObj(bb, Document::metaFieldSearchScoreDetails, tag, val);
+        }
+        if (metadataSearchSortValues) {
+            auto [tag, val] = metadataSearchSortValues->getViewOfValue();
+            sbe::bson::appendValueToBsonObj(bb, Document::metaFieldSearchSortValues, tag, val);
+        }
+        if (sortKey) {
+            auto [tag, val] = sortKey->getViewOfValue();
+            if (tag != sbe::value::TypeTags::Nothing) {
+                bb.append(Document::metaFieldSortKey,
+                          DocumentMetadataFields::serializeSortKey(isSingleSortKey,
+                                                                   convertToValue(tag, val)));
+            }
+        }
+        if (metadataSearchSequenceToken) {
+            auto [tag, val] = metadataSearchSequenceToken->getViewOfValue();
+            sbe::bson::appendValueToBsonObj(bb, Document::metaFieldSearchSequenceToken, tag, val);
+        }
+        return bb.obj();
+    }
+    return doc;
+}
+
+Document PlanExecutorSBE::MetaDataAccessor::appendToDocument(Document doc) const {
+    if (metadataSearchScore || metadataSearchHighlights || metadataSearchDetails ||
+        metadataSearchSortValues || sortKey) {
+        MutableDocument out(std::move(doc));
+        if (metadataSearchScore) {
+            auto [tag, val] = metadataSearchScore->getViewOfValue();
+            if (tag != sbe::value::TypeTags::Nothing) {
+                uassert(7856601,
+                        "Metadata search score must be double.",
+                        tag == sbe::value::TypeTags::NumberDouble);
+                out.metadata().setSearchScore(sbe::value::bitcastTo<double>(val));
+            }
+        }
+        if (metadataSearchHighlights) {
+            auto [tag, val] = metadataSearchHighlights->getViewOfValue();
+            if (tag != sbe::value::TypeTags::Nothing) {
+                uassert(7856602,
+                        "Metadata search highlights must be bson array.",
+                        tag == sbe::value::TypeTags::bsonArray);
+                out.metadata().setSearchHighlights(
+                    Value(BSONArray{BSONObj{sbe::value::bitcastTo<const char*>(val)}}));
+            }
+        }
+        if (metadataSearchDetails) {
+            auto [tag, val] = metadataSearchDetails->getViewOfValue();
+            if (tag != sbe::value::TypeTags::Nothing) {
+                uassert(7856603,
+                        "Metadata search score details must be bson object.",
+                        tag == sbe::value::TypeTags::bsonObject);
+                out.metadata().setSearchScoreDetails(
+                    BSONObj{sbe::value::bitcastTo<const char*>(val)});
+            }
+        }
+        if (metadataSearchSortValues) {
+            auto [tag, val] = metadataSearchSortValues->getViewOfValue();
+            if (tag != sbe::value::TypeTags::Nothing) {
+                uassert(7856604,
+                        "Metadata search sort value must be bson object.",
+                        tag == sbe::value::TypeTags::bsonObject);
+                out.metadata().setSearchSortValues(
+                    BSONObj{sbe::value::bitcastTo<const char*>(val)});
+            }
+        }
+        if (sortKey) {
+            auto [tag, val] = sortKey->getViewOfValue();
+            if (tag != sbe::value::TypeTags::Nothing) {
+                out.metadata().setSortKey(convertToValue(tag, val), isSingleSortKey);
+            }
+        }
+        if (metadataSearchSequenceToken) {
+            auto [tag, val] = metadataSearchSequenceToken->getViewOfValue();
+            if (tag != sbe::value::TypeTags::Nothing) {
+                uassert(8104600,
+                        "Metadata search sequence token must be string",
+                        tag == sbe::value::TypeTags::bsonString);
+                out.metadata().setSearchSequenceToken(
+                    Value(sbe::value::getStringOrSymbolView(tag, val)));
+            }
+        }
+        return out.freeze();
+    }
+    return doc;
+}
+
 template <typename ObjectType>
 sbe::PlanState fetchNextImpl(sbe::PlanStage* root,
                              sbe::value::SlotAccessor* resultSlot,
                              sbe::value::SlotAccessor* recordIdSlot,
                              ObjectType* out,
                              RecordId* dlOut,
-                             bool returnOwnedBson) {
+                             bool returnOwnedBson,
+                             const PlanExecutorSBE::MetaDataAccessor* metadata) {
     constexpr bool isDocument = std::is_same_v<ObjectType, Document>;
     constexpr bool isBson = std::is_same_v<ObjectType, BSONObj>;
     static_assert(isDocument || isBson);
@@ -619,11 +780,18 @@ sbe::PlanState fetchNextImpl(sbe::PlanStage* root,
             if constexpr (isBson) {
                 *out = std::move(result);
             } else {
-                *out = Document{std::move(result)};
+                *out = Document{result};
             }
         } else {
             // The query is supposed to return an object.
             MONGO_UNREACHABLE;
+        }
+        if (metadata) {
+            if constexpr (isDocument) {
+                *out = metadata->appendToDocument(std::move(*out));
+            } else {
+                *out = metadata->appendToBson(std::move(*out));
+            }
         }
     }
 
@@ -642,14 +810,16 @@ template sbe::PlanState fetchNextImpl<BSONObj>(sbe::PlanStage* root,
                                                sbe::value::SlotAccessor* recordIdSlot,
                                                BSONObj* out,
                                                RecordId* dlOut,
-                                               bool returnOwnedBson);
+                                               bool returnOwnedBson,
+                                               const PlanExecutorSBE::MetaDataAccessor* metadata);
 
 template sbe::PlanState fetchNextImpl<Document>(sbe::PlanStage* root,
                                                 sbe::value::SlotAccessor* resultSlot,
                                                 sbe::value::SlotAccessor* recordIdSlot,
                                                 Document* out,
                                                 RecordId* dlOut,
-                                                bool returnOwnedBson);
+                                                bool returnOwnedBson,
+                                                const PlanExecutorSBE::MetaDataAccessor* metadata);
 
 // NOTE: We intentionally do not expose overload for the 'Document' type. The only interface to get
 // result from plan in 'Document' type is to call 'PlanExecutorSBE::getNextDocument()'.
@@ -659,6 +829,8 @@ sbe::PlanState fetchNext(sbe::PlanStage* root,
                          BSONObj* out,
                          RecordId* dlOut,
                          bool returnOwnedBson) {
-    return fetchNextImpl(root, resultSlot, recordIdSlot, out, dlOut, returnOwnedBson);
+    // Sending an empty MetaDataAccessor because we currently only deal with search related
+    // metadata, and search query won't reach here.
+    return fetchNextImpl(root, resultSlot, recordIdSlot, out, dlOut, returnOwnedBson, nullptr);
 }
 }  // namespace mongo

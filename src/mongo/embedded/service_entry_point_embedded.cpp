@@ -70,7 +70,7 @@ namespace {
 class EmbeddedClientObserver final : public ServiceContext::ClientObserver {
     void onCreateClient(Client* client) {
         auto seCtx = std::make_unique<transport::ServiceExecutorContext>();
-        seCtx->setUseDedicatedThread(true);
+        seCtx->setThreadModel(seCtx->kSynchronous);
         transport::ServiceExecutorContext::set(client, std::move(seCtx));
     }
     void onDestroyClient(Client*) {}
@@ -179,28 +179,6 @@ Future<DbResponse> ServiceEntryPointEmbedded::handleRequest(OperationContext* op
     checked_cast<PeriodicRunnerEmbedded*>(opCtx->getServiceContext()->getPeriodicRunner())
         ->tryPump();
     return ServiceEntryPointCommon::handleRequest(opCtx, m, std::make_unique<Hooks>());
-}
-
-void ServiceEntryPointEmbedded::startSession(std::shared_ptr<transport::Session> session) {
-    UASSERT_NOT_IMPLEMENTED;
-}
-
-void ServiceEntryPointEmbedded::endAllSessions(transport::Session::TagMask tags) {}
-
-Status ServiceEntryPointEmbedded::start() {
-    UASSERT_NOT_IMPLEMENTED;
-}
-
-bool ServiceEntryPointEmbedded::shutdown(Milliseconds timeout) {
-    UASSERT_NOT_IMPLEMENTED;
-}
-
-void ServiceEntryPointEmbedded::appendStats(BSONObjBuilder*) const {
-    UASSERT_NOT_IMPLEMENTED;
-}
-
-size_t ServiceEntryPointEmbedded::numOpenSessions() const {
-    UASSERT_NOT_IMPLEMENTED;
 }
 
 logv2::LogSeverity ServiceEntryPointEmbedded::slowSessionWorkflowLogSeverity() {

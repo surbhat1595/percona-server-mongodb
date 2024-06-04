@@ -86,7 +86,8 @@ public:
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
         return NamespaceStringUtil::deserialize(dbName.tenantId(),
-                                                CommandHelpers::parseNsFullyQualified(cmdObj));
+                                                CommandHelpers::parseNsFullyQualified(cmdObj),
+                                                SerializationContext::stateDefault());
     }
 
     bool errmsgRun(OperationContext* opCtx,
@@ -127,7 +128,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CheckShardingIndex);
+MONGO_REGISTER_COMMAND(CheckShardingIndex).forShard();
 
 }  // namespace
 }  // namespace mongo

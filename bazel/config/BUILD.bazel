@@ -1,0 +1,259 @@
+load("//bazel/config:configs.bzl", "build_mode", "compiler_type", "use_libunwind", "use_gdbserver", "spider_monkey_dbg")
+
+package(default_visibility = ["//visibility:public"])
+
+# --------------------------------------
+# Compiler types
+# --------------------------------------
+
+compiler_type(
+    name = "compiler_type",
+    build_setting_default = "gcc",
+)
+
+config_setting(
+    name = "compiler_type_clang",
+    flag_values = {
+        "//bazel/config:compiler_type": "clang",
+    },
+)
+
+config_setting(
+    name = "compiler_type_gcc",
+    flag_values = {
+        "//bazel/config:compiler_type": "gcc",
+    },
+)
+
+# --------------------------------------
+# Architecture + OS combinations
+# --------------------------------------
+
+config_setting(
+    name = "linux_aarch64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+config_setting(
+    name = "linux_x86_64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "linux_ppc",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:ppc",
+    ],
+)
+
+config_setting(
+    name = "linux_s390x",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:s390x",
+    ],
+)
+
+config_setting(
+    name = "windows_x86_64",
+    constraint_values = [
+        "@platforms//os:windows",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+# ==========
+# build_mode
+# ==========
+
+build_mode(
+    name = "build_mode",
+    build_setting_default = "dbg",
+)
+
+config_setting(
+    name = "opt_on",
+    flag_values = {"//bazel/config:build_mode": "opt_on"},
+)
+
+config_setting(
+    name = "opt_off",
+    flag_values = {"//bazel/config:build_mode": "opt_off"},
+)
+
+config_setting(
+    name = "opt_debug",
+    flag_values = {"//bazel/config:build_mode": "opt_debug"},
+)
+
+config_setting(
+    name = "opt_size",
+    flag_values = {"//bazel/config:build_mode": "opt_size"},
+)
+
+config_setting(
+    name = "dbg",
+    flag_values = {"//bazel/config:build_mode": "dbg"},
+)
+
+config_setting(
+    name = "release",
+    flag_values = {"//bazel/config:build_mode": "release"},
+)
+
+config_setting(
+    name = "linux_dbg",
+    constraint_values = [
+        "@platforms//os:linux",
+    ],
+    flag_values = {"//bazel/config:build_mode": "dbg"},
+)
+
+config_setting(
+    name = "linux_opt_on",
+    constraint_values = [
+        "@platforms//os:linux",
+    ],
+    flag_values = {"//bazel/config:build_mode": "opt_on"},
+)
+
+config_setting(
+    name = "linux_opt_off",
+    constraint_values = [
+        "@platforms//os:linux",
+    ],
+    flag_values = {"//bazel/config:build_mode": "opt_off"},
+)
+
+# TODO(SERVER-80614): Revisit why we need "optimized + debug" in the first place.
+# Note that we have an unusual setting of "optimized + debug"
+config_setting(
+    name = "linux_opt_debug",
+    constraint_values = [
+        "@platforms//os:linux",
+    ],
+    flag_values = {"//bazel/config:build_mode": "opt_debug"},
+)
+
+config_setting(
+    name = "linux_opt_size",
+    constraint_values = [
+        "@platforms//os:linux",
+    ],
+    flag_values = {"//bazel/config:build_mode": "opt_size"},
+)
+
+config_setting(
+    name = "linux_release",
+    constraint_values = [
+        "@platforms//os:linux",
+    ],
+    flag_values = {"//bazel/config:build_mode": "release"},
+)
+
+config_setting(
+    name = "windows_dbg",
+    constraint_values = [
+        "@platforms//os:windows",
+    ],
+    flag_values = {"//bazel/config:build_mode": "dbg"},
+)
+
+config_setting(
+    name = "windows_opt_on",
+    constraint_values = [
+        "@platforms//os:windows",
+    ],
+    flag_values = {"//bazel/config:build_mode": "opt_on"},
+)
+
+config_setting(
+    name = "windows_opt_off",
+    constraint_values = [
+        "@platforms//os:windows",
+    ],
+    flag_values = {"//bazel/config:build_mode": "opt_off"},
+)
+
+# TODO(SERVER-80614): Revisit why we need "optimized + debug" in the first place.
+# Note that we have an unusual setting of "optimized + debug"
+config_setting(
+    name = "windows_opt_debug",
+    constraint_values = [
+        "@platforms//os:windows",
+    ],
+    flag_values = {"//bazel/config:build_mode": "opt_debug"},
+)
+
+config_setting(
+    name = "windows_opt_size",
+    constraint_values = [
+        "@platforms//os:windows",
+    ],
+    flag_values = {"//bazel/config:build_mode": "opt_size"},
+)
+
+config_setting(
+    name = "windows_release",
+    constraint_values = [
+        "@platforms//os:windows",
+    ],
+    flag_values = {"//bazel/config:build_mode": "release"},
+)
+
+# --------------------------------------
+# Libunwind options
+# --------------------------------------
+
+use_libunwind(
+    name = "use_libunwind",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "use_libunwind_enabled",
+    flag_values = {
+        "//bazel/config:use_libunwind": "True",
+    },
+)
+
+# --------------------------------------
+# gdbserver options
+# --------------------------------------
+
+use_gdbserver(
+    name = "use_gdbserver",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "use_gdbserver_enabled",
+    flag_values = {
+        "//bazel/config:use_gdbserver": "True",
+    }
+)
+
+# --------------------------------------
+# Spider Monkey Debug options
+# --------------------------------------
+
+# TODO(SERVER-82800): use this flag to enable/disable SpiderMonkey debug mode in mozjs when mozjs
+# is ported over to bazel.
+spider_monkey_dbg(
+    name = "spider_monkey_dbg",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "spider_monkey_dbg_enabled",
+    flag_values = {
+        "//bazel/config:spider_monkey_dbg": "True",
+    },
+)

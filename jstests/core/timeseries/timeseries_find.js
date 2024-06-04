@@ -4,9 +4,10 @@
  * @tags: [
  *   # Explain of a resolved view must be executed by mongos.
  *   directly_against_shardsvrs_incompatible,
- *   # This test depends on certain writes ending up in the same bucket. Stepdowns may result in
- *   # writes splitting between two primaries, and thus different buckets.
+ *   # This test depends on certain writes ending up in the same bucket. Stepdowns and tenant
+ *   # migrations may result in writes splitting between two primaries, and thus different buckets.
  *   does_not_support_stepdowns,
+ *   tenant_migration_incompatible,
  *   # Requires pipeline optimization to run in order to produce expected explain output
  *   requires_pipeline_optimization,
  *   # We need a timeseries collection.
@@ -135,3 +136,10 @@ runTest(
 // multiple bounds on 'a.b'.
 runTest([{a: {b: [3, 4]}}, {a: [{b: 1}, {b: 2}]}], {"a.b": {$lt: 2}}, [{a: [{b: 1}, {b: 2}]}]);
 runTest([{a: {b: [3, 4]}}, {a: [{b: 1}, {b: 2}]}], {"a.b": {$gte: 3}}, [{a: {b: [3, 4]}}]);
+
+runTest([{a: {b: [{c: 3}, {c: 4}]}}, {a: [{b: [{c: 1}, {c: 2}]}, {b: {c: 2}}]}],
+        {"a.b.c": {$lt: 2}},
+        [{a: [{b: [{c: 1}, {c: 2}]}, {b: {c: 2}}]}]);
+runTest([{a: {b: [{c: 3}, {c: 4}]}}, {a: [{b: [{c: 1}, {c: 2}]}, {b: {c: 2}}]}],
+        {"a.b.c": {$gte: 3}},
+        [{a: {b: [{c: 3}, {c: 4}]}}]);

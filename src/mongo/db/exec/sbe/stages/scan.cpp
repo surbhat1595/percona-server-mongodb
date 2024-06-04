@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <cstring>
 #include <set>
@@ -431,7 +430,7 @@ void ScanStage::open(bool reOpen) {
 }
 
 value::OwnedValueAccessor* ScanStage::getFieldAccessor(StringData name) {
-    if (size_t pos = _scanFieldNames.findPos(name); pos != IndexedStringVector::npos) {
+    if (size_t pos = _scanFieldNames.findPos(name); pos != StringListSet::npos) {
         return &_scanFieldAccessors[pos];
     }
     return nullptr;
@@ -458,7 +457,7 @@ PlanState ScanStage::getNext() {
     // PlanStage tree if a yield occurs. It's important that we call checkForInterrupt() before
     // checking '_needsToCheckCappedPositionLost' since a call to restoreState() may set
     // '_needsToCheckCappedPositionLost'.
-    checkForInterrupt(_opCtx);
+    checkForInterruptAndYield(_opCtx);
 
     if (_needsToCheckCappedPositionLost) {
         _cursor->save();
@@ -1056,7 +1055,7 @@ void ParallelScanStage::open(bool reOpen) {
                 RecordId lastid{};
                 for (auto& id : rids) {
                     _state->ranges.emplace_back(Range{std::move(lastid), id});
-                    lastid = std::move(id);
+                    lastid = id;
                 }
                 _state->ranges.emplace_back(Range{std::move(lastid), RecordId{}});
             }
@@ -1081,7 +1080,7 @@ boost::optional<Record> ParallelScanStage::nextRange() {
 }
 
 value::OwnedValueAccessor* ParallelScanStage::getFieldAccessor(StringData name) {
-    if (size_t pos = _scanFieldNames.findPos(name); pos != IndexedStringVector::npos) {
+    if (size_t pos = _scanFieldNames.findPos(name); pos != StringListSet::npos) {
         return &_scanFieldAccessors[pos];
     }
     return nullptr;
@@ -1098,7 +1097,7 @@ PlanState ParallelScanStage::getNext() {
         return trackPlanState(PlanState::IS_EOF);
     }
 
-    checkForInterrupt(_opCtx);
+    checkForInterruptAndYield(_opCtx);
 
     boost::optional<Record> nextRecord;
 

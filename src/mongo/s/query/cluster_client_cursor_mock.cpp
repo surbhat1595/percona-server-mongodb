@@ -29,7 +29,6 @@
 
 
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -111,7 +110,7 @@ boost::optional<uint32_t> ClusterClientCursorMock::getQueryHash() const {
     return boost::none;
 }
 
-boost::optional<std::size_t> ClusterClientCursorMock::getQueryStatsStoreKeyHash() const {
+boost::optional<std::size_t> ClusterClientCursorMock::getQueryStatsKeyHash() const {
     return boost::none;
 }
 
@@ -178,7 +177,7 @@ bool ClusterClientCursorMock::shouldOmitDiagnosticInformation() const {
     return false;
 }
 
-std::unique_ptr<query_stats::KeyGenerator> ClusterClientCursorMock::getKeyGenerator() {
+std::unique_ptr<query_stats::Key> ClusterClientCursorMock::getKey() {
     return nullptr;
 }
 

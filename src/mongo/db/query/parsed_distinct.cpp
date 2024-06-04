@@ -36,7 +36,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/parse_number.h"
@@ -270,7 +269,10 @@ StatusWith<ParsedDistinct> ParsedDistinct::parse(OperationContext* opCtx,
                                                  const ExtensionsCallback& extensionsCallback,
                                                  bool isExplain,
                                                  const CollatorInterface* defaultCollator) {
-    IDLParserContext ctx("distinct", false /* apiStrict */, nss.tenantId());
+    SerializationContext sc = SerializationContext::stateCommandRequest();
+    sc.setTenantIdSource(auth::ValidatedTenancyScope::get(opCtx) != boost::none);
+
+    IDLParserContext ctx("distinct", false /* apiStrict */, nss.tenantId(), sc);
 
     DistinctCommandRequest parsedDistinct(nss);
     try {
@@ -331,22 +333,23 @@ StatusWith<ParsedDistinct> ParsedDistinct::parse(OperationContext* opCtx,
         findCommand->setMaxTimeMS(static_cast<unsigned int>(maxTimeMS.getValue()));
     }
 
-    const boost::intrusive_ptr<ExpressionContext> expCtx;
-    auto cq = CanonicalQuery::canonicalize(opCtx,
-                                           std::move(findCommand),
-                                           isExplain,
-                                           expCtx,
-                                           extensionsCallback,
-                                           MatchExpressionParser::kAllowAllSpecialFeatures);
-    if (!cq.isOK()) {
-        return cq.getStatus();
+    auto statusWithCQ = CanonicalQuery::make(
+        {.expCtx = makeExpressionContext(opCtx, *findCommand),
+         .parsedFind = ParsedFindCommandParams{.findCommand = std::move(findCommand),
+                                               .extensionsCallback = extensionsCallback,
+                                               .allowedFeatures =
+                                                   MatchExpressionParser::kAllowAllSpecialFeatures},
+         .explain = isExplain});
+    if (!statusWithCQ.isOK()) {
+        return statusWithCQ.getStatus();
+    }
+    auto cq = std::move(statusWithCQ.getValue());
+
+    if (cq->getFindCommandRequest().getCollation().isEmpty() && defaultCollator) {
+        cq->setCollator(defaultCollator->clone());
     }
 
-    if (cq.getValue()->getFindCommandRequest().getCollation().isEmpty() && defaultCollator) {
-        cq.getValue()->setCollator(defaultCollator->clone());
-    }
-
-    return ParsedDistinct(std::move(cq.getValue()),
+    return ParsedDistinct(std::move(cq),
                           parsedDistinct.getKey().toString(),
                           parsedDistinct.getMirrored().value_or(false),
                           parsedDistinct.getSampleId());

@@ -7,6 +7,8 @@
  *   # We assume that all nodes in a mixed-mode replica set are using compressed inserts to
  *   # a time-series collection.
  *   requires_fcv_71,
+ *   # TODO (SERVER-80521): Re-enable this test once redness is resolve in multiversion suites.
+ *   DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE,
  * ]
  */
 
@@ -44,12 +46,6 @@ const checkConfigParametersAfterCollMod = function() {
     const st = new ShardingTest({shards: 1, rs: {nodes: 1}});
     const mongos = st.s0;
     const db = mongos.getDB(dbName);
-
-    if (!TimeseriesTest.timeseriesScalabilityImprovementsEnabled(st.shard0)) {
-        jsTestLog("Skipping test because the timeseries scalability feature flag is disabled");
-        st.stop();
-        return;
-    }
 
     // Create and shard the time-series collection.
     assert.commandWorked(
@@ -148,13 +144,8 @@ const checkShardRoutingAfterCollMod = function() {
     const shard1 = st.shard1;
     const db = mongos0.getDB(dbName);
 
-    if (!TimeseriesTest.timeseriesScalabilityImprovementsEnabled(mongos0)) {
-        jsTestLog(
-            "Skipped test as the featureFlagTimeseriesScalabilityImprovements feature flag is not enabled.");
-        st.stop();
-        return;
-    }
-
+    assert.commandWorked(
+        mongos0.adminCommand({enableSharding: dbName, primaryShard: shard0.shardName}));
     // Create and shard a time-series collection using custom bucketing parameters.
     assert.commandWorked(db.createCollection(collName, {
         timeseries: {
@@ -164,8 +155,6 @@ const checkShardRoutingAfterCollMod = function() {
             bucketRoundingSeconds: 60
         }
     }));
-    st.ensurePrimaryShard(db.getName(), shard0.shardName);
-    assert.commandWorked(mongos0.adminCommand({enableSharding: dbName}));
     assert.commandWorked(mongos0.adminCommand({
         shardCollection: viewNss,
         key: {[timeField]: 1},

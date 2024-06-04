@@ -55,7 +55,7 @@
 
 namespace mongo {
 
-/* for diagnostic / testing purposes. Enabled via command line. */
+/* For diagnostic / testing purposes. Enabled via command line. See docs/test_commands.md. */
 class CmdSleep : public BasicCommand {
 public:
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -110,20 +110,19 @@ public:
             return;
         }
         // This is not ran in multitenancy since sleep is an internal testing command.
-        auto nss = NamespaceStringUtil::deserialize(boost::none, ns);
-        uassert(50961,
-                "lockTarget is not a valid namespace",
-                NamespaceString::validDBName(nss.dbName()));
+        auto nss =
+            NamespaceStringUtil::deserialize(boost::none, ns, SerializationContext::stateDefault());
+        uassert(50961, "lockTarget is not a valid namespace", DatabaseName::isValid(nss.dbName()));
 
         auto dbMode = mode;
-        if (!nsIsDbOnly(ns)) {
+        if (!nss.isDbOnly()) {
             // Only acquire minimum dbLock mode required for collection lock acquisition.
             dbMode = isSharedLockMode(mode) ? MODE_IS : MODE_IX;
         }
 
         Lock::DBLock dbLock(opCtx, nss.dbName(), dbMode, Date_t::max());
 
-        if (nsIsDbOnly(ns)) {
+        if (nss.isDbOnly()) {
             LOGV2(6001602,
                   "Database lock acquired by sleep command.",
                   "lockMode"_attr = modeName(dbMode));
@@ -241,5 +240,5 @@ public:
     }
 };
 
-MONGO_REGISTER_COMMAND(CmdSleep).testOnly();
+MONGO_REGISTER_COMMAND(CmdSleep).testOnly().forShard();
 }  // namespace mongo

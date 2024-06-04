@@ -30,7 +30,6 @@
 
 #include <algorithm>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <functional>
 #include <list>
@@ -198,7 +197,7 @@ private:
     bool _hasBeenCalled{false};
     BSONObj _msg;
 };
-MONGO_REGISTER_COMMAND(MockReplReconfigCommand);
+MONGO_REGISTER_COMMAND(MockReplReconfigCommand).forShard();
 
 std::ostream& operator<<(std::ostream& builder, mongo::ShardSplitDonorStateEnum state) {
     switch (state) {

@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/db/operation_context.h"
@@ -103,7 +102,7 @@ void RecordStore::cappedTruncateAfter(OperationContext* opCtx,
                                       bool inclusive,
                                       const AboutToDeleteRecordCallback& aboutToDelete) {
     validateWriteAllowed(opCtx);
-    doCappedTruncateAfter(opCtx, end, inclusive, std::move(aboutToDelete));
+    doCappedTruncateAfter(opCtx, end, inclusive, aboutToDelete);
 }
 
 bool RecordStore::haveCappedWaiters() const {
@@ -115,9 +114,9 @@ void RecordStore::notifyCappedWaitersIfNeeded() {
         _cappedInsertNotifier->notifyAll();
 }
 
-Status RecordStore::compact(OperationContext* opCtx) {
+Status RecordStore::compact(OperationContext* opCtx, boost::optional<int64_t> freeSpaceTargetMB) {
     validateWriteAllowed(opCtx);
-    return doCompact(opCtx);
+    return doCompact(opCtx, freeSpaceTargetMB);
 }
 
 

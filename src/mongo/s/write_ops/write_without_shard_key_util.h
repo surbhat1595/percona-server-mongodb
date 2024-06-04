@@ -59,7 +59,7 @@ std::pair<BSONObj, BSONObj> generateUpsertDocument(
     OperationContext* opCtx,
     const UpdateRequest& updateRequest,
     boost::optional<TimeseriesOptions> timeseriesOptions,
-    const StringData::ComparatorInterface* comparator);
+    const StringDataComparator* comparator);
 
 /**
  * Returns true if we can use the two phase protocol to complete a single write without shard
@@ -72,7 +72,8 @@ bool useTwoPhaseProtocol(OperationContext* opCtx,
                          const BSONObj& query,
                          const BSONObj& collation,
                          const boost::optional<BSONObj>& let,
-                         const boost::optional<LegacyRuntimeConstants>& legacyRuntimeConstants);
+                         const boost::optional<LegacyRuntimeConstants>& legacyRuntimeConstants,
+                         bool isTimeseriesViewRequest);
 
 /**
  * Runs and returns the result of running a write without a shard key using the two phase protocol.

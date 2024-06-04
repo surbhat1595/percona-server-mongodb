@@ -62,7 +62,10 @@
 #include "mongo/db/query/find_command_gen.h"
 #include "mongo/db/query/max_time_ms_parser.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/query_test_service_context.h"
 #include "mongo/db/query/tailable_mode_gen.h"
+#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/idl/idl_parser.h"
@@ -87,7 +90,7 @@ static const NamespaceString testns =
 
 TEST(QueryRequestTest, NegativeSkip) {
     FindCommandRequest findCommand(testns);
-    ASSERT_THROWS_CODE(findCommand.setSkip(-1), DBException, 51024);
+    ASSERT_THROWS_CODE(findCommand.setSkip(-1), DBException, ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ZeroSkip) {
@@ -104,7 +107,7 @@ TEST(QueryRequestTest, PositiveSkip) {
 
 TEST(QueryRequestTest, NegativeLimit) {
     FindCommandRequest findCommand(testns);
-    ASSERT_THROWS_CODE(findCommand.setLimit(-1), DBException, 51024);
+    ASSERT_THROWS_CODE(findCommand.setLimit(-1), DBException, ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ZeroLimit) {
@@ -121,7 +124,7 @@ TEST(QueryRequestTest, PositiveLimit) {
 
 TEST(QueryRequestTest, NegativeBatchSize) {
     FindCommandRequest findCommand(testns);
-    ASSERT_THROWS_CODE(findCommand.setBatchSize(-1), DBException, 51024);
+    ASSERT_THROWS_CODE(findCommand.setBatchSize(-1), DBException, ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ZeroBatchSize) {
@@ -138,7 +141,7 @@ TEST(QueryRequestTest, PositiveBatchSize) {
 
 TEST(QueryRequestTest, NegativeMaxTimeMS) {
     FindCommandRequest findCommand(testns);
-    ASSERT_THROWS_CODE(findCommand.setMaxTimeMS(-1), DBException, 51024);
+    ASSERT_THROWS_CODE(findCommand.setMaxTimeMS(-1), DBException, ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ZeroMaxTimeMS) {
@@ -274,30 +277,36 @@ TEST(QueryRequestTest, RequestResumeTokenWithSort) {
 }
 
 TEST(QueryRequestTest, InvalidResumeAfterWrongRecordIdType) {
+    QueryTestServiceContext serviceContext;
+    auto uniqueTxn = serviceContext.makeOperationContext();
+    OperationContext* opCtx = uniqueTxn.get();
     FindCommandRequest findCommand(testns);
     BSONObj resumeAfter = BSON("$recordId" << 1);
     findCommand.setResumeAfter(resumeAfter);
     findCommand.setRequestResumeToken(true);
     // Hint must be explicitly set for the query request to validate.
     findCommand.setHint(fromjson("{$natural: 1}"));
-    ASSERT_NOT_OK(query_request_helper::validateResumeAfter(findCommand.getResumeAfter(),
-                                                            false /* isClusteredCollection */));
+    ASSERT_NOT_OK(query_request_helper::validateResumeAfter(
+        opCtx, findCommand.getResumeAfter(), false /* isClusteredCollection */));
     resumeAfter = BSON("$recordId" << 1LL);
     findCommand.setResumeAfter(resumeAfter);
     ASSERT_OK(query_request_helper::validateFindCommandRequest(findCommand));
-    ASSERT_OK(query_request_helper::validateResumeAfter(findCommand.getResumeAfter(),
-                                                        false /* isClusteredCollection */));
+    ASSERT_OK(query_request_helper::validateResumeAfter(
+        opCtx, findCommand.getResumeAfter(), false /* isClusteredCollection */));
 }
 
 TEST(QueryRequestTest, InvalidResumeAfterExtraField) {
+    QueryTestServiceContext serviceContext;
+    auto uniqueTxn = serviceContext.makeOperationContext();
+    OperationContext* opCtx = uniqueTxn.get();
     FindCommandRequest findCommand(testns);
     BSONObj resumeAfter = BSON("$recordId" << 1LL << "$extra" << 1);
     findCommand.setResumeAfter(resumeAfter);
     findCommand.setRequestResumeToken(true);
     // Hint must be explicitly set for the query request to validate.
     findCommand.setHint(fromjson("{$natural: 1}"));
-    ASSERT_NOT_OK(query_request_helper::validateResumeAfter(findCommand.getResumeAfter(),
-                                                            false /* isClusteredCollection */));
+    ASSERT_NOT_OK(query_request_helper::validateResumeAfter(
+        opCtx, findCommand.getResumeAfter(), false /* isClusteredCollection */));
 }
 
 TEST(QueryRequestTest, ResumeAfterWithHint) {
@@ -313,6 +322,9 @@ TEST(QueryRequestTest, ResumeAfterWithHint) {
 }
 
 TEST(QueryRequestTest, ResumeAfterWithSort) {
+    QueryTestServiceContext serviceContext;
+    auto uniqueTxn = serviceContext.makeOperationContext();
+    OperationContext* opCtx = uniqueTxn.get();
     FindCommandRequest findCommand(testns);
     BSONObj resumeAfter = BSON("$recordId" << 1LL);
     findCommand.setResumeAfter(resumeAfter);
@@ -320,8 +332,8 @@ TEST(QueryRequestTest, ResumeAfterWithSort) {
     // Hint must be explicitly set for the query request to validate.
     findCommand.setHint(fromjson("{$natural: 1}"));
     ASSERT_OK(query_request_helper::validateFindCommandRequest(findCommand));
-    ASSERT_OK(query_request_helper::validateResumeAfter(findCommand.getResumeAfter(),
-                                                        false /* isClusteredCollection */));
+    ASSERT_OK(query_request_helper::validateResumeAfter(
+        opCtx, findCommand.getResumeAfter(), false /* isClusteredCollection */));
     findCommand.setSort(fromjson("{a: 1}"));
     ASSERT_NOT_OK(query_request_helper::validateFindCommandRequest(findCommand));
     findCommand.setSort(fromjson("{$natural: 1}"));
@@ -329,6 +341,9 @@ TEST(QueryRequestTest, ResumeAfterWithSort) {
 }
 
 TEST(QueryRequestTest, ResumeNoSpecifiedRequestResumeToken) {
+    QueryTestServiceContext serviceContext;
+    auto uniqueTxn = serviceContext.makeOperationContext();
+    OperationContext* opCtx = uniqueTxn.get();
     FindCommandRequest findCommand(testns);
     BSONObj resumeAfter = BSON("$recordId" << 1LL);
     findCommand.setResumeAfter(resumeAfter);
@@ -337,11 +352,14 @@ TEST(QueryRequestTest, ResumeNoSpecifiedRequestResumeToken) {
     ASSERT_NOT_OK(query_request_helper::validateFindCommandRequest(findCommand));
     findCommand.setRequestResumeToken(true);
     ASSERT_OK(query_request_helper::validateFindCommandRequest(findCommand));
-    ASSERT_OK(query_request_helper::validateResumeAfter(findCommand.getResumeAfter(),
-                                                        false /* isClusteredCollection */));
+    ASSERT_OK(query_request_helper::validateResumeAfter(
+        opCtx, findCommand.getResumeAfter(), false /* isClusteredCollection */));
 }
 
 TEST(QueryRequestTest, ExplicitEmptyResumeAfter) {
+    QueryTestServiceContext serviceContext;
+    auto uniqueTxn = serviceContext.makeOperationContext();
+    OperationContext* opCtx = uniqueTxn.get();
     FindCommandRequest findCommand(NamespaceString::kRsOplogNamespace);
     BSONObj resumeAfter = fromjson("{}");
     // Hint must be explicitly set for the query request to validate.
@@ -350,8 +368,30 @@ TEST(QueryRequestTest, ExplicitEmptyResumeAfter) {
     ASSERT_OK(query_request_helper::validateFindCommandRequest(findCommand));
     findCommand.setRequestResumeToken(true);
     ASSERT_OK(query_request_helper::validateFindCommandRequest(findCommand));
-    ASSERT_OK(query_request_helper::validateResumeAfter(findCommand.getResumeAfter(),
-                                                        false /* isClusteredCollection */));
+    ASSERT_OK(query_request_helper::validateResumeAfter(
+        opCtx, findCommand.getResumeAfter(), false /* isClusteredCollection */));
+}
+
+TEST(QueryRequestTest, ResumeAfterMismatchInitialSyncId) {
+    QueryTestServiceContext serviceContext;
+    auto uniqueTxn = serviceContext.makeOperationContext();
+    OperationContext* opCtx = uniqueTxn.get();
+    auto replCoord =
+        std::make_unique<repl::ReplicationCoordinatorMock>(serviceContext.getServiceContext());
+    repl::ReplicationCoordinator::set(serviceContext.getServiceContext(), std::move(replCoord));
+
+    FindCommandRequest findCommand(testns);
+    BSONObj resumeAfter =
+        BSON("$recordId" << 1LL << "$initialSyncId"
+                         << uassertStatusOK(UUID::parse("12345678-1234-9876-1234-000000000000")));
+    findCommand.setResumeAfter(resumeAfter);
+    // Hint must be explicitly set for the query request to validate.
+    findCommand.setHint(fromjson("{$natural: 1}"));
+    ASSERT_NOT_OK(query_request_helper::validateFindCommandRequest(findCommand));
+    findCommand.setRequestResumeToken(true);
+    ASSERT_OK(query_request_helper::validateFindCommandRequest(findCommand));
+    ASSERT_NOT_OK(query_request_helper::validateResumeAfter(
+        opCtx, findCommand.getResumeAfter(), false /* isClusteredCollection */));
 }
 
 //
@@ -679,7 +719,7 @@ TEST(QueryRequestTest, ParseFromCommandMaxTimeMSWrongType) {
 
     ASSERT_THROWS_CODE(query_request_helper::makeFromFindCommandForTests(cmdObj),
                        DBException,
-                       ErrorCodes::BadValue);
+                       ErrorCodes::TypeMismatch);
 }
 
 
@@ -875,8 +915,9 @@ TEST(QueryRequestTest, ParseFromCommandNegativeSkipError) {
         "{find: 'testns',"
         "skip: -3,"
         "filter: {a: 3}, '$db': 'test'}");
-    ASSERT_THROWS_CODE(
-        query_request_helper::makeFromFindCommandForTests(cmdObj), DBException, 51024);
+    ASSERT_THROWS_CODE(query_request_helper::makeFromFindCommandForTests(cmdObj),
+                       DBException,
+                       ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ParseFromCommandSkipIsZero) {
@@ -895,8 +936,9 @@ TEST(QueryRequestTest, ParseFromCommandNegativeLimitError) {
         "{find: 'testns',"
         "limit: -3,"
         "filter: {a: 3}, '$db': 'test'}");
-    ASSERT_THROWS_CODE(
-        query_request_helper::makeFromFindCommandForTests(cmdObj), DBException, 51024);
+    ASSERT_THROWS_CODE(query_request_helper::makeFromFindCommandForTests(cmdObj),
+                       DBException,
+                       ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ParseFromCommandLimitIsZero) {
@@ -915,8 +957,9 @@ TEST(QueryRequestTest, ParseFromCommandNegativeBatchSizeError) {
         "{find: 'testns',"
         "batchSize: -10,"
         "filter: {a: 3}, '$db': 'test'}");
-    ASSERT_THROWS_CODE(
-        query_request_helper::makeFromFindCommandForTests(cmdObj), DBException, 51024);
+    ASSERT_THROWS_CODE(query_request_helper::makeFromFindCommandForTests(cmdObj),
+                       DBException,
+                       ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ParseFromCommandBatchSizeZero) {
@@ -1210,74 +1253,66 @@ TEST(QueryRequestTest, ParseFromCommandForbidExtraOption) {
 
 TEST(QueryRequestTest, ParseMaxTimeMSStringValueFails) {
     BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << "foo");
-    ASSERT_THROWS_CODE(parseMaxTimeMSForIDL(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]),
-                       DBException,
-                       ErrorCodes::BadValue);
+    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
+              ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ParseMaxTimeMSBoolValueFails) {
     BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << true);
-    ASSERT_THROWS_CODE(parseMaxTimeMSForIDL(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]),
-                       DBException,
-                       ErrorCodes::BadValue);
+    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
+              ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ParseMaxTimeMSNullValueFails) {
     BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << BSONNULL);
-    ASSERT_THROWS_CODE(parseMaxTimeMSForIDL(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]),
-                       DBException,
-                       ErrorCodes::BadValue);
+    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
+              ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ParseMaxTimeMSUndefinedValueFails) {
     BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << BSONUndefined);
-    ASSERT_THROWS_CODE(parseMaxTimeMSForIDL(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]),
-                       DBException,
-                       ErrorCodes::BadValue);
+    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
+              ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ParseMaxTimeMSEmptyObjectValueFails) {
     const auto emptyObj = BSONObjBuilder().obj();
     BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << emptyObj);
-    ASSERT_THROWS_CODE(parseMaxTimeMSForIDL(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]),
-                       DBException,
-                       ErrorCodes::BadValue);
+    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
+              ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ParseMaxTimeMSNonIntegralValueFails) {
     BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << 100.3);
-    ASSERT_THROWS_CODE(parseMaxTimeMSForIDL(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]),
-                       DBException,
-                       ErrorCodes::BadValue);
+    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
+              ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ParseMaxTimeMSOutOfRangeDoubleFails) {
     BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << 1e200);
-    ASSERT_THROWS_CODE(parseMaxTimeMSForIDL(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]),
-                       DBException,
-                       ErrorCodes::BadValue);
+    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
+              ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ParseMaxTimeMSNegativeValueFails) {
     BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << -400);
-    ASSERT_THROWS_CODE(parseMaxTimeMSForIDL(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]),
-                       DBException,
-                       ErrorCodes::BadValue);
+    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]).getStatus(),
+              ErrorCodes::BadValue);
 }
 
 TEST(QueryRequestTest, ParseMaxTimeMSZeroSucceeds) {
     BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << 0);
-    ASSERT_EQ(parseMaxTimeMSForIDL(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]), 0);
+    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]), 0);
 }
 
 TEST(QueryRequestTest, ParseMaxTimeMSEmptyElementSucceeds) {
     const auto emptyElem = BSONElement();
-    ASSERT_EQ(parseMaxTimeMSForIDL(emptyElem), 0);
+    ASSERT_EQ(parseMaxTimeMS(emptyElem), 0);
 }
 
 TEST(QueryRequestTest, ParseMaxTimeMSPositiveInRangeSucceeds) {
     BSONObj maxTimeObj = BSON(query_request_helper::cmdOptionMaxTimeMS << 300);
-    ASSERT_EQ(parseMaxTimeMSForIDL(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]), 300);
+    ASSERT_EQ(parseMaxTimeMS(maxTimeObj[query_request_helper::cmdOptionMaxTimeMS]), 300);
 }
 
 TEST(QueryRequestTest, ConvertToAggregationSucceeds) {
@@ -1413,6 +1448,8 @@ TEST(QueryRequestTest, ConvertToAggregationWithRequestResumeTokenSucceeds) {
 }
 
 TEST(QueryRequestTest, ConvertToAggregationWithResumeAfterFails) {
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagReshardingImprovements",
+                                                               false);
     FindCommandRequest findCommand(testns);
     BSONObj resumeAfter = BSON("$recordId" << 1LL);
     findCommand.setResumeAfter(resumeAfter);

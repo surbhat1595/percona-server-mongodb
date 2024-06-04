@@ -127,6 +127,10 @@ public:
         return false;
     }
 
+    LogicalOp getLogicalOp() const final {
+        return LogicalOp::opBulkWrite;
+    }
+
     std::string help() const override {
         return "command to apply inserts, updates and deletes in bulk";
     }
@@ -144,7 +148,7 @@ public:
                 "BulkWrite may not be run without featureFlagBulkWriteCommand enabled",
                 gFeatureFlagBulkWriteCommand.isEnabled(serverGlobalParams.featureCompatibility));
 
-            bulk_write_common::validateRequest(_request);
+            bulk_write_common::validateRequest(_request, /*isRouter=*/true);
         }
 
         const BulkWriteCommandRequest& getBulkRequest() const {
@@ -202,7 +206,7 @@ public:
                                              [&] {
                                                  if (!opCtx->getLogicalSessionId())
                                                      return OperationSessionInfoFromClient();
-                                                 // TODO (SERVER-77506): This code path does not
+                                                 // TODO (SERVER-80525): This code path does not
                                                  // clear the setAutocommit field on the presence of
                                                  // TransactionRouter::get
                                                  return OperationSessionInfoFromClient(
@@ -219,7 +223,12 @@ public:
             params.originatingPrivileges = bulk_write_common::getPrivileges(req);
 
             auto queuedDataStage = std::make_unique<RouterStageQueuedData>(opCtx);
-            auto& [replyItems, numErrors] = replyInfo;
+            auto& [replyItems, numErrors, wcErrors, retriedStmtIds] = replyInfo;
+            BulkWriteCommandReply reply;
+            reply.setNumErrors(numErrors);
+            reply.setWriteConcernError(wcErrors);
+            reply.setRetriedStmtIds(retriedStmtIds);
+
             for (auto& replyItem : replyItems) {
                 queuedDataStage->queueResult(replyItem.toBSON());
             }
@@ -245,12 +254,11 @@ public:
                 numRepliesInFirstBatch++;
                 responseSizeTracker.add(nextObj);
             }
-            CurOp::get(opCtx)->setEndOfOpMetrics(numRepliesInFirstBatch);
             if (numRepliesInFirstBatch == replyItems.size()) {
-                return BulkWriteCommandReply(
-                    BulkWriteCommandResponseCursor(
-                        0, std::vector<BulkWriteReplyItem>(std::move(replyItems))),
-                    numErrors);
+                replyItems.resize(numRepliesInFirstBatch);
+                reply.setCursor(BulkWriteCommandResponseCursor(
+                    0, std::vector<BulkWriteReplyItem>(std::move(replyItems)), cursorNss));
+                return reply;
             }
 
             ccc->detachFromOperationContext();
@@ -270,10 +278,9 @@ public:
             CurOp::get(opCtx)->debug().cursorid = cursorId;
 
             replyItems.resize(numRepliesInFirstBatch);
-            return BulkWriteCommandReply(
-                BulkWriteCommandResponseCursor(
-                    cursorId, std::vector<BulkWriteReplyItem>(std::move(replyItems))),
-                numErrors);
+            reply.setCursor(BulkWriteCommandResponseCursor(
+                cursorId, std::vector<BulkWriteReplyItem>(std::move(replyItems)), cursorNss));
+            return reply;
         }
 
         bool runImpl(OperationContext* opCtx,

@@ -168,7 +168,7 @@ server_parameters:
         set_at: [ startup ]
         cpp_varname: gAllowUnsafeUntimestampedWrites
         cpp_vartype: bool
-        default: true
+        default: false
 
     skipDroppingHashedShardKeyIndex:
         description: >-
@@ -180,12 +180,6 @@ server_parameters:
 
 
 feature_flags:
-    featureFlagCollModIndexUnique:
-        description: "When enabled, collMod supports making an index unique"
-        cpp_varname: feature_flags::gCollModIndexUnique
-        default: true
-        version: 6.0
-        shouldBeFCVGated: true
     featureFlagLargeBatchedOperations:
         description:  >-
             Enable support for replicating batched operations over multiple applyOps oplog
@@ -207,12 +201,6 @@ feature_flags:
         cpp_varname: feature_flags::gDerivedMetadata
         default: false
         shouldBeFCVGated: true
-    featureFlagTimeseriesScalabilityImprovements:
-        description: "Enable scalability and usability improvements for time-series collections"
-        cpp_varname: feature_flags::gTimeseriesScalabilityImprovements
-        default: true
-        version: 6.3
-        shouldBeFCVGated: true
     featureFlagInternalWritesAreReplicatedTransactionally:
         description: Feature flag to enable internal writes to use the transactionally replicated WriteUnitOfWork API by default.
         cpp_varname: gFeatureFlagInternalWritesAreReplicatedTransactionally
@@ -227,8 +215,7 @@ feature_flags:
     featureFlagTimeseriesUpdatesSupport:
         description: "Enable support for arbitrary updates on time-series collections"
         cpp_varname: feature_flags::gTimeseriesUpdatesSupport
-        default: true
-        version: 7.1
+        default: false
         shouldBeFCVGated: true
     featureFlagIndexBuildGracefulErrorHandling:
         description: "Enable index build error handling improvements"

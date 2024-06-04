@@ -38,7 +38,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -58,12 +57,15 @@
 #include "mongo/platform/mutex.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/op_msg.h"
+#include "mongo/transport/asio/asio_session_manager.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/service_executor.h"
 #include "mongo/transport/service_executor_synchronous.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/session_workflow_test_util.h"
+#include "mongo/transport/test_fixtures.h"
 #include "mongo/transport/transport_layer.h"
+#include "mongo/transport/transport_layer_manager_impl.h"
 #include "mongo/transport/transport_layer_mock.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -98,54 +100,6 @@ void initializeInstrumentation() {
 Status makeClosedSessionError() {
     return Status{ErrorCodes::SocketException, "Session is closed"};
 }
-
-class NoopReactor : public Reactor {
-public:
-    void run() noexcept override {}
-    void stop() override {}
-
-    void runFor(Milliseconds time) noexcept override {
-        MONGO_UNREACHABLE;
-    }
-
-    void drain() override {
-        MONGO_UNREACHABLE;
-    }
-
-    void schedule(Task) override {
-        MONGO_UNREACHABLE;
-    }
-
-    void dispatch(Task) override {
-        MONGO_UNREACHABLE;
-    }
-
-    bool onReactorThread() const override {
-        MONGO_UNREACHABLE;
-    }
-
-    std::unique_ptr<ReactorTimer> makeTimer() override {
-        MONGO_UNREACHABLE;
-    }
-
-    Date_t now() override {
-        MONGO_UNREACHABLE;
-    }
-
-    void appendStats(BSONObjBuilder&) const {
-        MONGO_UNREACHABLE;
-    }
-};
-
-class TransportLayerMockWithReactor : public TransportLayerMock {
-public:
-    ReactorHandle getReactor(WhichReactor) override {
-        return _mockReactor;
-    }
-
-private:
-    ReactorHandle _mockReactor = std::make_unique<NoopReactor>();
-};
 
 /**
  * Coordinate between a mock Session and ServiceEntryPoint to implement
@@ -211,11 +165,7 @@ public:
 
     class Sep : public MockServiceEntryPoint {
     public:
-        explicit Sep(MockCoordinator* mc) : MockServiceEntryPoint{mc->_sc}, _mc{mc} {}
-
-        void derivedOnClientDisconnect(Client*) override {}
-
-        void onEndSession(const std::shared_ptr<transport::Session>& session) override {}
+        explicit Sep(MockCoordinator* mc) : MockServiceEntryPoint(), _mc{mc} {}
 
         Future<DbResponse> handleRequest(OperationContext* opCtx,
                                          const Message& request) noexcept override {
@@ -244,20 +194,9 @@ public:
         return std::make_shared<Session>(this);
     }
 
-    std::unique_ptr<Sep> makeServiceEntryPoint() {
-        auto p = std::make_unique<Sep>(this);
-        _sep = &*p;
-        return p;
-    }
-
-    Sep* serviceEntryPoint() {
-        return _sep;
-    }
-
 private:
     ServiceContext* _sc;
     int _rounds = 0;
-    Sep* _sep = nullptr;
 };
 
 class SessionWorkflowBm : public benchmark::Fixture {
@@ -293,10 +232,24 @@ public:
         setGlobalServiceContext(ServiceContext::make());
         auto sc = getGlobalServiceContext();
         _coordinator = std::make_unique<MockCoordinator>(sc, exhaustRounds + 1);
-        sc->setServiceEntryPoint(_coordinator->makeServiceEntryPoint());
-        sc->setTransportLayer(std::make_unique<TransportLayerMockWithReactor>());
+        sc->getService()->setServiceEntryPoint(
+            std::make_unique<MockCoordinator::Sep>(_coordinator.get()));
+        _initTransportLayerManager(sc);
+    }
+
+    void _initTransportLayerManager(ServiceContext* svcCtx) {
+        auto sm = std::make_unique<AsioSessionManager>(svcCtx);
+        _sessionManager = sm.get();
+        auto tl = std::make_unique<test::TransportLayerMockWithReactor>(std::move(sm));
+        svcCtx->setTransportLayerManager(
+            std::make_unique<transport::TransportLayerManagerImpl>(std::move(tl)));
         LOGV2_DEBUG(7015136, 3, "About to start sep");
-        invariant(_coordinator->serviceEntryPoint()->start());
+        invariant(svcCtx->getTransportLayerManager()->setup());
+        invariant(svcCtx->getTransportLayerManager()->start());
+    }
+
+    AsioSessionManager* sessionManager() const {
+        return _sessionManager;
     }
 
     void TearDown(benchmark::State& state) override {
@@ -305,8 +258,7 @@ public:
         if (--_configuredThreads)
             return;
         LOGV2_DEBUG(7015138, 3, "TearDown (last)");
-
-        invariant(_coordinator->serviceEntryPoint()->shutdownAndWait(Seconds{10}));
+        getGlobalServiceContext()->getTransportLayerManager()->shutdown();
         setGlobalServiceContext({});
         _savedDefaultReserved.reset();
         _savedUseDedicated.reset();
@@ -315,16 +267,14 @@ public:
     void run(benchmark::State& state) {
         for (auto _ : state) {
             LOGV2_DEBUG(7015139, 3, "run: iteration start");
-            auto sep = _coordinator->serviceEntryPoint();
-            invariant(sep);
             auto session = _coordinator->makeSession();
             invariant(session);
             Future<void> ended = session->observeEnd();
-            sep->startSession(std::move(session));
+            sessionManager()->startSession(std::move(session));
             ended.get();
         }
         LOGV2_DEBUG(7015140, 3, "run: all iterations finished");
-        invariant(_coordinator->serviceEntryPoint()->waitForNoSessions(Seconds{1}));
+        invariant(sessionManager()->waitForNoSessions(Seconds{1}));
     }
 
 private:
@@ -333,6 +283,7 @@ private:
     boost::optional<ScopedValueOverride<size_t>> _savedDefaultReserved;
     boost::optional<ScopedValueOverride<bool>> _savedUseDedicated;
     std::unique_ptr<MockCoordinator> _coordinator;
+    AsioSessionManager* _sessionManager;
 };
 
 /**

@@ -43,9 +43,10 @@
 #define WT_MILLION (WT_MILLION_LITERAL)
 #define WT_BILLION (1000000000)
 
+#define WT_DAY (86400)
 #define WT_MINUTE (60)
 
-#define WT_PROGRESS_MSG_PERIOD (20)
+#define WT_PROGRESS_MSG_PERIOD (20) /* Seconds. */
 
 #define WT_KILOBYTE (1024)
 #define WT_MEGABYTE (1048576)

@@ -72,7 +72,6 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/data_range.h"
 #include "mongo/base/error_codes.h"
@@ -242,7 +241,7 @@ public:
                  std::streamoff fileStartOffset,
                  std::streamoff fileEndOffset,
                  const Settings& settings,
-                 const boost::optional<std::string>& dbName,
+                 const boost::optional<DatabaseName>& dbName,
                  const uint32_t checksum)
         : _settings(settings),
           _file(std::move(file)),
@@ -413,7 +412,7 @@ private:
     std::streamoff _fileStartOffset;    // File offset at which the sorted data range starts.
     std::streamoff _fileCurrentOffset;  // File offset at which we are currently reading from.
     std::streamoff _fileEndOffset;      // File offset at which the sorted data range ends.
-    boost::optional<std::string> _dbName;
+    boost::optional<DatabaseName> _dbName;
 
     // Points to the beginning of a serialized key in the key-value pair currently being read, and
     // used for computing the checksum value. This is set to nullptr after reading each key-value
@@ -1510,7 +1509,7 @@ SortedFileWriter<Key, Value>::createFileIteratorForResume(
     std::streamoff fileStartOffset,
     std::streamoff fileEndOffset,
     const Settings& settings,
-    const boost::optional<std::string>& dbName,
+    const boost::optional<DatabaseName>& dbName,
     const uint32_t checksum) {
 
     return std::shared_ptr<SortIteratorInterface<Key, Value>>(new sorter::FileIterator<Key, Value>(

@@ -62,8 +62,6 @@ class StatusWith;
  */
 namespace query_request_helper {
 
-static constexpr auto kMaxTimeMSOpOnlyField = "maxTimeMSOpOnly";
-
 // Field names for sorting options.
 static constexpr auto kNaturalSortField = "$natural";
 
@@ -76,7 +74,9 @@ Status validateGetMoreCollectionName(StringData collectionName);
  * Returns a non-OK status if '$_resumeAfter' is set to an unexpected value, or the wrong type
  * determined by the collection type.
  */
-Status validateResumeAfter(const mongo::BSONObj& resumeAfter, bool isClusteredCollection);
+Status validateResumeAfter(OperationContext* opCtx,
+                           const mongo::BSONObj& resumeAfter,
+                           bool isClusteredCollection);
 
 /**
  * Returns a non-OK status if any property of the QR has a bad value (e.g. a negative skip
@@ -130,6 +130,9 @@ static constexpr auto metaGeoNearPoint = "geoNearPoint";
 static constexpr auto metaRecordId = "recordId";
 static constexpr auto metaSortKey = "sortKey";
 static constexpr auto metaTextScore = "textScore";
+
+
+static constexpr auto kMaxTimeMSOpOnlyField = "maxTimeMSOpOnly";
 
 // A constant by which 'maxTimeMSOpOnly' values are allowed to exceed the max allowed value for
 // 'maxTimeMS'.  This is because mongod and mongos server processes add a small amount to the

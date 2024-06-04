@@ -49,7 +49,7 @@ namespace mongo {
 using std::string;
 using std::stringstream;
 
-// Testing-only, enabled via command line.
+// Test-only, enabled via command line. See docs/test_commands.md.
 class CPULoadCommand : public BasicCommand {
 public:
     CPULoadCommand() : BasicCommand("cpuload") {}
@@ -110,7 +110,7 @@ public:
     }
 };
 
-MONGO_REGISTER_COMMAND(CPULoadCommand).testOnly();
+MONGO_REGISTER_COMMAND(CPULoadCommand).testOnly().forRouter().forShard();
 
 
 }  // namespace mongo

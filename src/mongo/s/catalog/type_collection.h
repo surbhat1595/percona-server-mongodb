@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <string>
 
@@ -113,6 +112,7 @@ public:
     using CollectionTypeBase::kTimeseriesFieldsFieldName;
     using CollectionTypeBase::kTimestampFieldName;
     using CollectionTypeBase::kUniqueFieldName;
+    using CollectionTypeBase::kUnsplittableFieldName;
     using CollectionTypeBase::kUpdatedAtFieldName;
     using CollectionTypeBase::kUuidFieldName;
 

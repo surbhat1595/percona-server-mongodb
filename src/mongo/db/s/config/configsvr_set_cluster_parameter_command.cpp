@@ -103,9 +103,9 @@ public:
 
                 invocation.normalizeParameter(opCtx,
                                               cmdParamObj,
-                                              boost::none,
+                                              boost::none /* clusterParameterTime */,
+                                              boost::none /* previousTime */,
                                               serverParameter,
-                                              parameterName,
                                               request().getDbName().tenantId(),
                                               false /* skipValidation */);
 
@@ -159,7 +159,7 @@ public:
         return AllowedOnSecondary::kNever;
     }
 };
-MONGO_REGISTER_COMMAND(ConfigsvrSetClusterParameterCommand);
+MONGO_REGISTER_COMMAND(ConfigsvrSetClusterParameterCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

@@ -22,8 +22,8 @@ export var WriteWithoutShardKeyTestUtil = (function() {
         const splitString = nss.split(".");
         const dbName = splitString[0];
 
-        assert.commandWorked(st.s.adminCommand({enablesharding: dbName}));
-        st.ensurePrimaryShard(dbName, st.shard0.shardName);
+        assert.commandWorked(
+            st.s.adminCommand({enablesharding: dbName, primaryShard: st.shard0.shardName}));
         assert.commandWorked(st.s.adminCommand({shardCollection: nss, key: shardKey}));
 
         for (let splitPoint of splitPoints) {
@@ -265,12 +265,10 @@ export var WriteWithoutShardKeyTestUtil = (function() {
     function isWriteWithoutShardKeyFeatureEnabled(conn) {
         // The feature flag spans 6.2 and current master, while the actual logic only exists
         // on 6.3 and later.
-        return (jsTestOptions().mongosBinVersion !== "last-lts" &&
-                jsTestOptions().mongosBinVersion !== "last-continuous" &&
-                assert
-                    .commandWorked(conn.adminCommand(
-                        {getParameter: 1, featureFlagUpdateOneWithoutShardKey: 1}))
-                    .featureFlagUpdateOneWithoutShardKey.value);
+        return assert
+            .commandWorked(
+                conn.adminCommand({getParameter: 1, featureFlagUpdateOneWithoutShardKey: 1}))
+            .featureFlagUpdateOneWithoutShardKey.value;
     }
 
     return {

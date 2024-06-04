@@ -73,7 +73,7 @@ public:
      * Initializes the targeter with the latest routing information for the namespace, which means
      * it may have to block and load information from the config server.
      *
-     * If 'nss' is a sharded time-series collection, replaces this value with namespace string of a
+     * If 'nss' is a tracked time-series collection, replaces this value with namespace string of a
      * time-series buckets collection.
      *
      * If 'expectedEpoch' is specified, the targeter will throws 'StaleEpoch' exception if the epoch
@@ -105,6 +105,7 @@ public:
         OperationContext* opCtx,
         const BatchItemRef& itemRef,
         bool* useTwoPhaseWriteProtocol = nullptr,
+        bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
         std::set<ChunkRange>* chunkRanges = nullptr) const override;
 
     /**
@@ -134,6 +135,11 @@ public:
                              const StaleDbRoutingVersion& staleInfo) override;
 
     /**
+     * Returns if _lastError is StaleConfig type.
+     */
+    bool hasStaleShardResponse() override;
+
+    /**
      * Replaces the targeting information with the latest information from the cache.  If this
      * information is stale WRT the noted stale responses or a remote refresh is needed due
      * to a targeting failure, will contact the config servers to reload the metadata.
@@ -149,7 +155,7 @@ public:
      */
     int getNShardsOwningChunks() const override;
 
-    bool isShardedTimeSeriesBucketsNamespace() const override;
+    bool isTrackedTimeSeriesBucketsNamespace() const override;
 
     bool timeseriesNamespaceNeedsRewrite(const NamespaceString& nss) const;
 
@@ -225,7 +231,7 @@ private:
     NamespaceString _nss;
 
     // Used to identify the original namespace that the user has requested. Note: this will only
-    // be true if the buckets namespace is sharded.
+    // be true if the buckets namespace is tracked by the configsvr.
     bool _isRequestOnTimeseriesViewNamespace = false;
 
     // Stores last error occurred

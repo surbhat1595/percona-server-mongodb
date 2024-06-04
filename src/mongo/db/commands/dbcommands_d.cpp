@@ -29,7 +29,6 @@
 
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -284,12 +283,14 @@ public:
             findCommand->setFilter(query.getOwned());
             findCommand->setSort(sort.getOwned());
 
-            auto statusWithCQ = CanonicalQuery::canonicalize(opCtx, std::move(findCommand));
+            auto statusWithCQ = CanonicalQuery::make(
+                {.expCtx = makeExpressionContext(opCtx, *findCommand),
+                 .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
             if (!statusWithCQ.isOK()) {
                 uasserted(17240, "Can't canonicalize query " + query.toString());
                 return false;
             }
-            std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
+            auto cq = std::move(statusWithCQ.getValue());
 
             // Check shard version at startup.
             // This will throw before we've done any work if shard version is outdated
@@ -315,11 +316,8 @@ public:
                         if (partialOk) {
                             break;  // skipped chunk is probably on another shard
                         }
-                        LOGV2(20452,
-                              "Should have chunk: {expected} have: {observed}",
-                              "Unexpected chunk",
-                              "expected"_attr = n,
-                              "observed"_attr = myn);
+                        LOGV2(
+                            20452, "Unexpected chunk", "expected"_attr = n, "observed"_attr = myn);
                         dumpChunks(opCtx, nss, query, sort);
                         uassert(10040, "chunks out of order", n == myn);
                     }
@@ -392,14 +390,14 @@ public:
         findRequest.setSort(sort);
         std::unique_ptr<DBClientCursor> c = client.find(std::move(findRequest));
         while (c->more()) {
-            LOGV2(20454, "Chunk: {chunk}", "Dumping chunks", "chunk"_attr = c->nextSafe());
+            LOGV2(20454, "Dumping chunks", "chunk"_attr = c->nextSafe());
         }
     }
 };
 
-MONGO_REGISTER_COMMAND(CmdProfile);
-MONGO_REGISTER_COMMAND(SetProfilingFilterGloballyCmd);
-MONGO_REGISTER_COMMAND(CmdFileMD5);
+MONGO_REGISTER_COMMAND(CmdProfile).forShard();
+MONGO_REGISTER_COMMAND(SetProfilingFilterGloballyCmd).forShard();
+MONGO_REGISTER_COMMAND(CmdFileMD5).forShard();
 
 }  // namespace
 }  // namespace mongo

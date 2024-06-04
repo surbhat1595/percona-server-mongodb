@@ -1,6 +1,9 @@
 function activate_venv {
   # check if virtualenv is set up
   if [ -d "${workdir}/venv" ]; then
+    # It's possible for activate to fail without stderr; as a result the cat operation (below) could fail.
+    # To mitigate this, create an empty error log.
+    touch /tmp/activate_error.log
     if [ "Windows_NT" = "$OS" ]; then
       # Need to quote the path on Windows to preserve the separator.
       . "${workdir}/venv/Scripts/activate" 2> /tmp/activate_error.log
@@ -18,6 +21,7 @@ function activate_venv {
       exit 1
     fi
     python=${python}
+    echo "Could not find venv. Setting python to $python."
   fi
 
   if [ "Windows_NT" = "$OS" ]; then
@@ -42,5 +46,5 @@ function activate_venv {
     python -c "import sys; print(sys.path)"
   fi
 
-  echo "python set to $(which $python)"
+  echo "python set to $(which $python) and python version: $($python --version)"
 }

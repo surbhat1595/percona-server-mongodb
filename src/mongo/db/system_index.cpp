@@ -33,7 +33,6 @@
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -52,6 +51,7 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/locker.h"
+#include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/namespace_string.h"
@@ -121,8 +121,6 @@ void generateSystemIndexForExistingCollection(OperationContext* opCtx,
         BSONObj indexSpec = fassert(40452, indexSpecStatus);
 
         LOGV2(22488,
-              "No authorization index detected on {namespace} collection. Attempting to recover by "
-              "creating an index with spec: {indexSpec}",
               "No authorization index detected. Attempting to recover by "
               "creating an index",
               logAttrs(ns),
@@ -133,18 +131,15 @@ void generateSystemIndexForExistingCollection(OperationContext* opCtx,
         IndexBuildsCoordinator::get(opCtx)->createIndex(
             opCtx, collectionUUID, indexSpec, indexConstraints, fromMigrate);
     } catch (const DBException& e) {
-        LOGV2_FATAL_CONTINUE(22490,
-                             "Failed to regenerate index for {namespace}. Exception: {error}",
-                             "Failed to regenerate index",
-                             logAttrs(ns),
-                             "error"_attr = e.what());
+        LOGV2_FATAL_CONTINUE(
+            22490, "Failed to regenerate index", logAttrs(ns), "error"_attr = e.what());
         throw;
     }
 }
 
 }  // namespace
 
-Status verifySystemIndexes(OperationContext* opCtx) {
+Status verifySystemIndexes(OperationContext* opCtx, BSONObjBuilder* startupTimeElapsedBuilder) {
     const NamespaceString& systemUsers = NamespaceString::kAdminUsersNamespace;
     const NamespaceString& systemRoles = NamespaceString::kAdminRolesNamespace;
 
@@ -153,6 +148,10 @@ Status verifySystemIndexes(OperationContext* opCtx) {
         AutoGetCollection collection(opCtx, systemUsers, MODE_X);
 
         if (collection) {
+            auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+                opCtx->getServiceContext()->getFastClockSource(),
+                "Verify indexes for admin.system.users collection",
+                startupTimeElapsedBuilder);
             const IndexCatalog* indexCatalog = collection->getIndexCatalog();
             invariant(indexCatalog);
 
@@ -189,6 +188,10 @@ Status verifySystemIndexes(OperationContext* opCtx) {
 
         // Ensure that system indexes exist for the roles collection, if it exists.
         if (collection) {
+            auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+                opCtx->getServiceContext()->getFastClockSource(),
+                "Verify indexes for admin.system.roles collection",
+                startupTimeElapsedBuilder);
             const IndexCatalog* indexCatalog = collection->getIndexCatalog();
             invariant(indexCatalog);
 

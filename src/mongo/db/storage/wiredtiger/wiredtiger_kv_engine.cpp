@@ -70,7 +70,6 @@
 #include <boost/none.hpp>
 #include <boost/none_t.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <libarchive/archive.h>
 #include <libarchive/archive_entry.h>
@@ -301,7 +300,7 @@ public:
     }
 
     virtual void run() {
-        ThreadClient tc(name(), getGlobalServiceContext());
+        ThreadClient tc(name(), getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
         // TODO(SERVER-74657): Please revisit if this thread could be made killable.
         {
@@ -788,7 +787,6 @@ WiredTigerKVEngine::WiredTigerKVEngine(
                 boost::filesystem::create_directory(journalPath);
             } catch (std::exception& e) {
                 LOGV2_ERROR(22312,
-                            "error creating journal dir {directory} {error}",
                             "Error creating journal directory",
                             "directory"_attr = journalPath.generic_string(),
                             "error"_attr = e.what());
@@ -1319,7 +1317,6 @@ Status WiredTigerKVEngine::_rebuildIdent(OperationContext* opCtx,
     if (filePath) {
         const boost::filesystem::path corruptFile(filePath->string() + ".corrupt");
         LOGV2_WARNING(22352,
-                      "Moving data file {file} to backup as {backup}",
                       "Moving data file to backup",
                       "file"_attr = filePath->generic_string(),
                       "backup"_attr = corruptFile.generic_string());
@@ -1330,7 +1327,7 @@ Status WiredTigerKVEngine::_rebuildIdent(OperationContext* opCtx,
         }
     }
 
-    LOGV2_WARNING(22353, "Rebuilding ident {ident}", "Rebuilding ident", "ident"_attr = identName);
+    LOGV2_WARNING(22353, "Rebuilding ident", "ident"_attr = identName);
 
     // This is safe to call after moving the file because it only reads from the metadata, and not
     // the data file itself.
@@ -1338,7 +1335,6 @@ Status WiredTigerKVEngine::_rebuildIdent(OperationContext* opCtx,
     if (!swMetadata.isOK()) {
         auto status = swMetadata.getStatus();
         LOGV2_ERROR(22357,
-                    "Failed to get metadata for {uri}",
                     "Rebuilding ident failed: failed to get metadata",
                     "uri"_attr = uri,
                     "error"_attr = status);
@@ -1356,7 +1352,6 @@ Status WiredTigerKVEngine::_rebuildIdent(OperationContext* opCtx,
     if (rc != 0) {
         auto status = wtRCToStatus(rc, session);
         LOGV2_ERROR(22358,
-                    "Failed to drop {uri}",
                     "Rebuilding ident failed: failed to drop",
                     "uri"_attr = uri,
                     "error"_attr = status);
@@ -1367,7 +1362,6 @@ Status WiredTigerKVEngine::_rebuildIdent(OperationContext* opCtx,
     if (rc != 0) {
         auto status = wtRCToStatus(rc, session);
         LOGV2_ERROR(22359,
-                    "Failed to create {uri} with config: {config}",
                     "Rebuilding ident failed: failed to create with config",
                     "uri"_attr = uri,
                     "config"_attr = swMetadata.getValue(),
@@ -1506,8 +1500,8 @@ public:
 
     ~StreamingCursorImpl() = default;
 
-    void setCatalogEntries(const stdx::unordered_map<std::string, std::pair<NamespaceString, UUID>>&
-                               identsToNsAndUUID) {
+    void setCatalogEntries(
+        stdx::unordered_map<std::string, std::pair<NamespaceString, UUID>> identsToNsAndUUID) {
         _identsToNsAndUUID = std::move(identsToNsAndUUID);
     }
 
@@ -2915,7 +2909,6 @@ Status WiredTigerKVEngine::recoverOrphanedIdent(OperationContext* opCtx,
     tmpFile += ".tmp";
 
     LOGV2(22332,
-          "Renaming data file {file} to temporary file {temporary}",
           "Renaming data file to temporary",
           "file"_attr = identFilePath->generic_string(),
           "temporary"_attr = tmpFile.generic_string());
@@ -2924,11 +2917,7 @@ Status WiredTigerKVEngine::recoverOrphanedIdent(OperationContext* opCtx,
         return status;
     }
 
-    LOGV2(22333,
-          "Creating new RecordStore for collection {namespace} with UUID: {uuid}",
-          "Creating new RecordStore",
-          logAttrs(nss),
-          "uuid"_attr = options.uuid);
+    LOGV2(22333, "Creating new RecordStore", logAttrs(nss), "uuid"_attr = options.uuid);
 
     status = createRecordStore(opCtx, nss, ident, options);
     if (!status.isOK()) {
@@ -2952,7 +2941,7 @@ Status WiredTigerKVEngine::recoverOrphanedIdent(OperationContext* opCtx,
     }
 
     auto start = Date_t::now();
-    LOGV2(22335, "Salvaging ident {ident}", "Salvaging ident", "ident"_attr = ident);
+    LOGV2(22335, "Salvaging ident", "ident"_attr = ident);
 
     WiredTigerSession sessionWrapper(_conn);
     WT_SESSION* session = sessionWrapper.getSession();
@@ -2964,7 +2953,6 @@ Status WiredTigerKVEngine::recoverOrphanedIdent(OperationContext* opCtx,
                 str::stream() << "Salvaged data for ident " << ident};
     }
     LOGV2_WARNING(22354,
-                  "Could not salvage data. Rebuilding ident: {status_reason}",
                   "Could not salvage data. Rebuilding ident",
                   "ident"_attr = ident,
                   "error"_attr = status.reason());
@@ -3184,7 +3172,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(Operat
     const bool isLogged = false;
     StatusWith<std::string> swConfig =
         WiredTigerRecordStore::generateCreateString(_canonicalName,
-                                                    NamespaceString() /* internal table */,
+                                                    NamespaceString::kEmpty /* internal table */,
                                                     ident,
                                                     CollectionOptions(),
                                                     _rsOptions,
@@ -3204,7 +3192,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(Operat
     uassertStatusOK(wtRCToStatus(session->create(session, uri.c_str(), config.c_str()), session));
 
     WiredTigerRecordStore::Params params;
-    params.nss = NamespaceString();
+    params.nss = NamespaceString::kEmpty;
     params.uuid = boost::none;
     params.ident = ident.toString();
     params.engineName = _canonicalName;
@@ -3370,6 +3358,20 @@ bool WiredTigerKVEngine::supportsDirectoryPerDB() const {
     return true;
 }
 
+void WiredTigerKVEngine::_checkpoint(WT_SESSION* session, bool useTimestamp) {
+    _currentCheckpointIteration.fetchAndAdd(1);
+    if (useTimestamp) {
+        invariantWTOK(session->checkpoint(session, "use_timestamp=true"), session);
+    } else {
+        invariantWTOK(session->checkpoint(session, "use_timestamp=false"), session);
+    }
+    auto checkpointedIteration = _finishedCheckpointIteration.fetchAndAdd(1);
+    LOGV2_FOR_RECOVERY(8097402,
+                       2,
+                       "Finished checkpoint, updated iteration counter",
+                       "checkpointIteration"_attr = checkpointedIteration);
+}
+
 void WiredTigerKVEngine::_checkpoint(OperationContext* opCtx, WT_SESSION* session) try {
     // Ephemeral WiredTiger instances cannot do a checkpoint to disk as there is no disk backing
     // the data.
@@ -3414,7 +3416,8 @@ void WiredTigerKVEngine::_checkpoint(OperationContext* opCtx, WT_SESSION* sessio
     //
     // Third, stableTimestamp >= initialDataTimestamp: Take stable checkpoint. Steady state case.
     if (initialDataTimestamp.asULL() <= 1) {
-        invariantWTOK(session->checkpoint(session, "use_timestamp=false"), session);
+        _checkpoint(session, /*useTimestamp=*/false);
+
         LOGV2_FOR_RECOVERY(5576602,
                            2,
                            "Completed unstable checkpoint.",
@@ -3435,7 +3438,7 @@ void WiredTigerKVEngine::_checkpoint(OperationContext* opCtx, WT_SESSION* sessio
                            "stableTimestamp"_attr = stableTimestamp,
                            "oplogNeededForRollback"_attr = toString(oplogNeededForRollback));
 
-        invariantWTOK(session->checkpoint(session, "use_timestamp=true"), session);
+        _checkpoint(session, /*useTimestamp=*/true);
 
         if (oplogNeededForRollback.isOK()) {
             // Now that the checkpoint is durable, publish the oplog needed to recover from it.
@@ -3459,6 +3462,12 @@ void WiredTigerKVEngine::checkpoint(OperationContext* opCtx) {
     UniqueWiredTigerSession session = _sessionCache->getSession();
     WT_SESSION* s = session->getSession();
     return _checkpoint(opCtx, s);
+}
+
+void WiredTigerKVEngine::forceCheckpoint(bool useStableTimestamp) {
+    UniqueWiredTigerSession session = _sessionCache->getSession();
+    WT_SESSION* s = session->getSession();
+    return _checkpoint(s, useStableTimestamp);
 }
 
 bool WiredTigerKVEngine::hasIdent(OperationContext* opCtx, StringData ident) const {
@@ -3541,7 +3550,6 @@ void WiredTigerKVEngine::_ensureIdentPath(StringData ident) {
                 boost::filesystem::create_directory(subdir);
             } catch (const std::exception& e) {
                 LOGV2_ERROR(22361,
-                            "error creating path {directory} {error}",
                             "Error creating directory",
                             "directory"_attr = subdir.string(),
                             "error"_attr = e.what());
@@ -3776,8 +3784,6 @@ StatusWith<Timestamp> WiredTigerKVEngine::recoverToStableTimestamp(OperationCont
 
     LOGV2_FOR_ROLLBACK(23991,
                        0,
-                       "Rolling back to the stable timestamp. StableTimestamp: {stableTimestamp} "
-                       "Initial Data Timestamp: {initialDataTimestamp}",
                        "Rolling back to the stable timestamp",
                        "stableTimestamp"_attr = stableTimestamp,
                        "initialDataTimestamp"_attr = initialDataTimestamp);

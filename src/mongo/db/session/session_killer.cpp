@@ -32,7 +32,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <iterator>
 #include <utility>
@@ -59,7 +58,7 @@ SessionKiller::SessionKiller(ServiceContext* sc, KillFunc killer)
     _thread = stdx::thread([this, sc] {
         // This is the background killing thread
 
-        ThreadClient tc("SessionKiller", sc);
+        ThreadClient tc("SessionKiller", sc->getService());
 
         // TODO(SERVER-74658): Please revisit if this thread could be made killable.
         {

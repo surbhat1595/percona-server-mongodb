@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <string>
 #include <utility>
 #include <vector>
@@ -103,7 +102,7 @@ protected:
     }
 
     ClientAndCtx makeClientAndCtx(const std::string& clientName) {
-        auto client = getGlobalServiceContext()->makeClient(clientName);
+        auto client = getGlobalServiceContext()->getService()->makeClient(clientName);
         auto opCtx = client->makeOperationContext();
         opCtx->setRecoveryUnit(
             std::unique_ptr<RecoveryUnit>(helper->getEngine()->newRecoveryUnit()),
@@ -168,7 +167,7 @@ protected:
         opCtxs.reserve(num);
 
         for (unsigned i = 0; i < num; ++i) {
-            auto client = getServiceContext()->makeClient(std::to_string(i));
+            auto client = getServiceContext()->getService()->makeClient(std::to_string(i));
 
             auto opCtx = client->makeOperationContext();
             opCtx->setRecoveryUnit(std::unique_ptr<RecoveryUnit>(engine->newRecoveryUnit()),

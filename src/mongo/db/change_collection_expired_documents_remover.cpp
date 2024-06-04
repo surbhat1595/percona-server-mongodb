@@ -81,10 +81,6 @@ namespace mongo {
 // Hangs the change collection remover job before initiating the deletion process of documents.
 MONGO_FAIL_POINT_DEFINE(hangBeforeRemovingExpiredChanges);
 
-// Injects the provided ISO date to currentWallTime which is used to determine if the change
-// collection document is expired or not.
-MONGO_FAIL_POINT_DEFINE(injectCurrentWallTimeForRemovingExpiredDocuments);
-
 namespace {
 
 change_stream_serverless_helpers::TenantSet getConfigDbTenants(OperationContext* opCtx) {
@@ -104,20 +100,14 @@ bool usesUnreplicatedTruncates() {
 }
 
 void removeExpiredDocuments(Client* client) {
-    hangBeforeRemovingExpiredChanges.pauseWhileSet();
-
     bool useUnreplicatedTruncates = usesUnreplicatedTruncates();
 
     try {
         auto opCtx = client->makeOperationContext();
+        hangBeforeRemovingExpiredChanges.pauseWhileSet(opCtx.get());
         const auto clock = client->getServiceContext()->getFastClockSource();
-        auto currentWallTime = clock->now();
-
-        // If the fail point 'injectCurrentWallTimeForRemovingDocuments' is enabled then set the
-        // 'currentWallTime' with the provided wall time.
-        injectCurrentWallTimeForRemovingExpiredDocuments.execute([&](const BSONObj& data) {
-            currentWallTime = data.getField("currentWallTime").date();
-        });
+        auto currentWallTime =
+            change_stream_serverless_helpers::getCurrentTimeForChangeCollectionRemoval(opCtx.get());
 
         // Number of documents removed in the current pass.
         size_t removedCount = 0;
@@ -130,38 +120,31 @@ void removeExpiredDocuments(Client* client) {
             // inserts and prevent users from running out of disk space.
             ScopedAdmissionPriorityForLock skipAdmissionControl(
                 opCtx->lockState(), AdmissionContext::Priority::kImmediate);
-            // Acquire intent-exclusive lock on the change collection.
-            const auto changeCollection =
-                acquireCollection(opCtx.get(),
-                                  CollectionAcquisitionRequest(
-                                      NamespaceString::makeChangeCollectionNSS(tenantId),
-                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
-                                      repl::ReadConcernArgs::get(opCtx.get()),
-                                      AcquisitionPrerequisites::kWrite),
-                                  MODE_IX);
-
-            // Early exit if collection does not exist.
-            if (!changeCollection.exists()) {
-                continue;
-            }
-            // Early exit if running on a secondary and we haven't enabled the unreplicated truncate
-            // maintenance flag (requires opCtx->lockState()->isRSTLLocked()).
-            if (!useUnreplicatedTruncates &&
-                !repl::ReplicationCoordinator::get(opCtx.get())
-                     ->canAcceptWritesForDatabase(opCtx.get(), DatabaseName::kConfig)) {
-                continue;
-            }
 
             auto expiredAfterSeconds =
                 change_stream_serverless_helpers::getExpireAfterSeconds(tenantId);
 
             if (useUnreplicatedTruncates) {
                 removedCount += ChangeStreamChangeCollectionManager::
-                    removeExpiredChangeCollectionsDocumentsWithTruncate(
-                        opCtx.get(),
-                        changeCollection,
-                        currentWallTime - Seconds(expiredAfterSeconds));
+                    removeExpiredChangeCollectionsDocumentsWithTruncate(opCtx.get(), tenantId);
             } else {
+                auto changeCollection =
+                    acquireCollection(opCtx.get(),
+                                      CollectionAcquisitionRequest(
+                                          NamespaceString::makeChangeCollectionNSS(tenantId),
+                                          PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                          repl::ReadConcernArgs::get(opCtx.get()),
+                                          AcquisitionPrerequisites::kWrite),
+                                      MODE_IX);
+
+                // Early exit if the collection does not exist, or when running on a secondary with
+                // replicated deletes.
+                if (!changeCollection.exists() ||
+                    !repl::ReplicationCoordinator::get(opCtx.get())
+                         ->canAcceptWritesForDatabase(opCtx.get(), DatabaseName::kConfig)) {
+                    break;
+                }
+
                 // Get the metadata required for the removal of the expired change collection
                 // documents. Early exit if the metadata is missing, indicating that there is
                 // nothing to remove.

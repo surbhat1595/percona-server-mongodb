@@ -104,7 +104,7 @@ public:
     template <typename F>
     void tryCancelTest(F f) {
         unittest::threadAssertionMonitoredTest([&](unittest::ThreadAssertionMonitor& monitor) {
-            mongo::Client::initThread("tryCancelTest");
+            mongo::Client::initThread("tryCancelTest", getGlobalServiceContext()->getService());
 
             auto opCtx = Base::makeOperationContext();
             Notification<void> opDone;

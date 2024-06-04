@@ -35,7 +35,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -76,7 +75,7 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/attribute_storage.h"
-#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/log_options.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/rpc/message.h"
 #include "mongo/util/assert_util_core.h"
@@ -270,6 +269,11 @@ public:
     BSONObj makeMongotDebugStatsObject() const;
 
     /**
+     * Gets the type of the namespace on which the current operation operates.
+     */
+    std::string getCollectionType(const NamespaceString& nss) const;
+
+    /**
      * Accumulate resolved views.
      */
     void addResolvedViews(const std::vector<NamespaceString>& namespaces,
@@ -329,9 +333,9 @@ public:
     boost::optional<uint32_t> queryHash;
     // The shape of the original query serialized with readConcern, application name, and namespace.
     // If boost::none, query stats should not be collected for this operation.
-    boost::optional<std::size_t> queryStatsStoreKeyHash;
-    // The KeyGenerator used by query stats to generate the query stats store key.
-    std::unique_ptr<query_stats::KeyGenerator> queryStatsKeyGenerator;
+    boost::optional<std::size_t> queryStatsKeyHash;
+    // The Key used by query stats to generate the query stats store key.
+    std::unique_ptr<query_stats::Key> queryStatsKey;
 
     // The query framework that this operation used. Will be unknown for non query operations.
     PlanExecutor::QueryFramework queryFramework{PlanExecutor::QueryFramework::kUnknown};
@@ -424,9 +428,6 @@ public:
     // resolved views per query, a hash map would unlikely provide any benefits.
     std::map<NamespaceString, std::pair<std::vector<NamespaceString>, std::vector<BSONObj>>>
         resolvedViews;
-
-    // Flag to decide if diagnostic information should be omitted.
-    bool shouldOmitDiagnosticInformation{false};
 };
 
 /**
@@ -520,7 +521,7 @@ public:
      * to file under the given LogComponent. Returns 'true' if, in addition to being logged, this
      * operation should also be profiled.
      */
-    bool completeAndLogOperation(logv2::LogComponent logComponent,
+    bool completeAndLogOperation(const logv2::LogOptions& logOptions,
                                  std::shared_ptr<const ProfileFilter> filter,
                                  boost::optional<size_t> responseLength = boost::none,
                                  boost::optional<long long> slowMsOverride = boost::none,
@@ -586,18 +587,11 @@ public:
     std::string getNS() const;
 
     /**
-     * Returns a const pointer to the UserAcquisitionStats for the current operation.
-     * This can only be used for reading (i.e., when logging or profiling).
+     * Returns a non-const copy of the UserAcquisitionStats shared_ptr. The caller takes shared
+     * ownership of the userAcquisitionStats.
      */
-    const UserAcquisitionStats* getReadOnlyUserAcquisitionStats() const {
-        return &_userAcquisitionStats;
-    }
-
-    /**
-     * Returns a non-const raw pointers to UserAcquisitionStats member.
-     */
-    UserAcquisitionStats* getMutableUserAcquisitionStats() {
-        return &_userAcquisitionStats;
+    SharedUserAcquisitionStats getUserAcquisitionStats() const {
+        return _userAcquisitionStats;
     }
 
     /**
@@ -999,6 +993,13 @@ public:
         _tickSource = tickSource;
     }
 
+    void setShouldOmitDiagnosticInformation_inlock(WithLock, bool shouldOmitDiagnosticInfo) {
+        _shouldOmitDiagnosticInformation = shouldOmitDiagnosticInfo;
+    }
+    bool getShouldOmitDiagnosticInformation() const {
+        return _shouldOmitDiagnosticInformation;
+    }
+
 private:
     class CurOpStack;
 
@@ -1089,7 +1090,7 @@ private:
     // is why boost::optional is used and value is generated on demand
     boost::optional<const bool> _rateLimitSample;
 
-    UserAcquisitionStats _userAcquisitionStats;
+    SharedUserAcquisitionStats _userAcquisitionStats{std::make_shared<UserAcquisitionStats>()};
 
     TickSource* _tickSource = globalSystemTickSource();
     // These values are used to calculate the amount of time spent planning a query.
@@ -1103,6 +1104,9 @@ private:
     // We cannot use std::atomic in OpDebug since it is not copy assignable, but using a non-atomic
     // allows for a data race between stopWaitForWriteConcernTimer and curop::reportState.
     std::atomic<Milliseconds> _atomicWaitForWriteConcernDurationMillis{Milliseconds{0}};  // NOLINT
+
+    // Flag to decide if diagnostic information should be omitted.
+    bool _shouldOmitDiagnosticInformation{false};
 };
 
 }  // namespace mongo

@@ -90,7 +90,8 @@ BSONObj selectMedianKey(OperationContext* opCtx,
                         const CollectionRoutingInfo& cri,
                         const ChunkRange& chunkRange) {
     BSONObjBuilder cmd;
-    cmd.append("splitVector", NamespaceStringUtil::serialize(nss));
+    cmd.append("splitVector",
+               NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
     cmd.append("keyPattern", shardKeyPattern.toBSON());
     chunkRange.append(&cmd);
     cmd.appendBool("force", true);
@@ -154,7 +155,8 @@ public:
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
         return NamespaceStringUtil::deserialize(dbName.tenantId(),
-                                                CommandHelpers::parseNsFullyQualified(cmdObj));
+                                                CommandHelpers::parseNsFullyQualified(cmdObj),
+                                                SerializationContext::stateDefault());
     }
 
     bool errmsgRun(OperationContext* opCtx,
@@ -290,7 +292,6 @@ public:
                               ChunkRange(chunk->getMin(), chunk->getMax()));
 
         LOGV2(22758,
-              "Splitting chunk {chunkRange} in {namespace} on shard {shardId} at key {splitPoint}",
               "Splitting chunk",
               "chunkRange"_attr = redact(ChunkRange(chunk->getMin(), chunk->getMax()).toString()),
               "splitPoint"_attr = redact(splitPoint),
@@ -315,7 +316,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(SplitCollectionCmd);
+MONGO_REGISTER_COMMAND(SplitCollectionCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

@@ -40,7 +40,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -194,7 +193,7 @@ void appendFinalIndexFieldsToResult(CreateIndexesReply* reply,
  * Ensures that the options passed in for TTL indexes are valid.
  */
 void validateTTLOptions(OperationContext* opCtx,
-                        const NamespaceString& ns,
+                        const Collection* coll,
                         const CreateIndexesCommand& cmd) {
     if (MONGO_unlikely(skipTTLIndexValidationOnCreateIndex.shouldFail())) {
         LOGV2(
@@ -202,34 +201,23 @@ void validateTTLOptions(OperationContext* opCtx,
         return;
     }
 
-    const auto clusteredAndCapped = [&](LockMode mode) {
-        AutoGetCollection collection(opCtx, ns, mode);
-        if (collection) {
-            const auto c = collection.getCollection().get();
-            if (c->getClusteredInfo() && c->isCapped()) {
-                return true;
-            }
-        }
-        return false;
-    }(MODE_IS);
-
     for (const auto& index : cmd.getIndexes()) {
         uassert(ErrorCodes::Error(6049202),
                 "TTL secondary indexes are not allowed on a capped clustered collection",
-                !(clusteredAndCapped && index_key_validate::isIndexTTL(index)));
+                !(coll && coll->getClusteredInfo() && coll->isCapped() &&
+                  index_key_validate::isIndexTTL(index)));
         uassertStatusOK(index_key_validate::validateIndexSpecTTL(index));
     }
 }
 
 void checkEncryptedFieldIndexRestrictions(OperationContext* opCtx,
-                                          const NamespaceString& ns,
+                                          const Collection* coll,
                                           const CreateIndexesCommand& cmd) {
-    AutoGetCollection collection(opCtx, ns, MODE_IS);
-    if (!collection) {
+    if (!coll) {
         return;
     }
 
-    const auto& encryptConfig = collection->getCollectionOptions().encryptedFieldConfig;
+    const auto& encryptConfig = coll->getCollectionOptions().encryptedFieldConfig;
     if (!encryptConfig) {
         // this collection is not encrypted
         return;
@@ -324,7 +312,7 @@ std::vector<BSONObj> resolveDefaultsAndRemoveExistingIndexes(OperationContext* o
                                                              const CollectionPtr& collection,
                                                              std::vector<BSONObj> indexSpecs) {
     // Normalize the specs' collations, wildcard projections, and partial filters as applicable.
-    auto normalSpecs = IndexBuildsCoordinator::normalizeIndexSpecs(opCtx, collection, indexSpecs);
+    auto normalSpecs = IndexCatalog::normalizeIndexSpecs(opCtx, collection, indexSpecs);
 
     return collection->getIndexCatalog()->removeExistingIndexes(
         opCtx, collection, normalSpecs, false /*removeIndexBuildsToo*/);
@@ -352,8 +340,6 @@ bool indexesAlreadyExist(OperationContext* opCtx,
 
 void assertNoMovePrimaryInProgress(OperationContext* opCtx, const NamespaceString& nss) {
     try {
-        Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
-
         const auto scopedDss =
             DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, nss.dbName());
 
@@ -514,76 +500,70 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
         reply.setCommitQuorum(commitQuorum);
     }
 
-    validateTTLOptions(opCtx, ns, cmd);
-    checkEncryptedFieldIndexRestrictions(opCtx, ns, cmd);
-    addNoteForColumnstoreIndexPreview(cmd, &reply);
-
     // Preliminary checks before handing control over to IndexBuildsCoordinator:
     // 1) We are in a replication mode that allows for index creation.
     // 2) Check sharding state.
     // 3) Check if we can create the index without handing control to the IndexBuildsCoordinator.
     // 4) Check we are not in a multi-document transaction.
     // 5) Check there is enough available disk space to start the index build.
-    boost::optional<UUID> collectionUUID;
-    {
-        AutoGetDb autoDb(opCtx, ns.dbName(), MODE_IX);
-        assertNoMovePrimaryInProgress(opCtx, ns);
+    auto collectionUUID = writeConflictRetry(
+        opCtx, "createCollectionWithIndexes", ns, [&]() -> boost::optional<UUID> {
+            auto collection = acquireCollection(opCtx,
+                                                CollectionAcquisitionRequest::fromOpCtx(
+                                                    opCtx,
+                                                    ns,
+                                                    AcquisitionPrerequisites::OperationType::kWrite,
+                                                    cmd.getCollectionUUID()),
+                                                LockMode::MODE_IX);
 
-        if (!repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, ns)) {
-            uasserted(ErrorCodes::NotWritablePrimary,
-                      str::stream()
-                          << "Not primary while creating indexes in " << ns.toStringForErrorMsg());
-        }
+            validateTTLOptions(opCtx, collection.getCollectionPtr().get(), cmd);
+            checkEncryptedFieldIndexRestrictions(opCtx, collection.getCollectionPtr().get(), cmd);
+            addNoteForColumnstoreIndexPreview(cmd, &reply);
 
-        bool indexExists = writeConflictRetry(opCtx, "createCollectionWithIndexes", ns, [&] {
-            AutoGetCollection collection(
-                opCtx,
-                ns,
-                MODE_IX,
-                AutoGetCollection::Options{}.expectedUUID(cmd.getCollectionUUID()));
+            uassert(ErrorCodes::NotWritablePrimary,
+                    str::stream() << "Not primary while creating indexes in "
+                                  << ns.toStringForErrorMsg(),
+                    repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, ns));
+
+            assertNoMovePrimaryInProgress(opCtx, ns);
             CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, ns)
                 ->checkShardVersionOrThrow(opCtx);
 
             // Before potentially taking an exclusive collection lock, check if all indexes already
             // exist while holding an intent lock.
-            if (collection &&
-                indexesAlreadyExist(opCtx, collection.getCollection(), specs, &reply)) {
-                return true;
+            if (collection.exists() &&
+                indexesAlreadyExist(opCtx, collection.getCollectionPtr(), specs, &reply)) {
+                return boost::none;
             }
 
-            if (collection &&
+            if (collection.exists() &&
                 !UncommittedCatalogUpdates::get(opCtx).isCreatedCollection(opCtx, ns)) {
                 // The collection exists and was not created in the same multi-document transaction
                 // as the createIndexes.
-                collectionUUID = collection->uuid();
                 reply.setCreatedCollectionAutomatically(false);
-                return false;
+                return collection.uuid();
             }
 
-            const bool createCollImplicitly = collection ? false : true;
-
-            runCreateIndexesOnNewCollection(opCtx, ns, specs, createCollImplicitly, &reply);
-            return true;
+            runCreateIndexesOnNewCollection(opCtx, ns, specs, !collection.exists(), &reply);
+            return boost::none;
         });
 
-        if (indexExists) {
-            // No need to proceed if the index either already existed or has just been built.
-            return reply;
-        }
+    if (!collectionUUID) {
+        // No need to proceed if the index either already existed or has just been built.
+        return reply;
+    }
 
-        // If the index does not exist by this point, the index build must go through the index
-        // builds coordinator and take an exclusive lock. We should not take exclusive locks inside
-        // of transactions, so we fail early here if we are inside of a transaction.
-        uassert(ErrorCodes::OperationNotSupportedInTransaction,
-                str::stream() << "Cannot create new indexes on existing collection "
-                              << ns.toStringForErrorMsg() << " in a multi-document transaction.",
-                !opCtx->inMultiDocumentTransaction());
+    // If the index does not exist by this point, the index build must go through the index builds
+    // coordinator and take an exclusive lock. We should not take exclusive locks inside of
+    // transactions, so we fail early here if we are inside of a transaction.
+    uassert(ErrorCodes::OperationNotSupportedInTransaction,
+            str::stream() << "Cannot create new indexes on existing collection "
+                          << ns.toStringForErrorMsg() << " in a multi-document transaction.",
+            !opCtx->inMultiDocumentTransaction());
 
-        if (feature_flags::gIndexBuildGracefulErrorHandling.isEnabled(
-                serverGlobalParams.featureCompatibility)) {
-            uassertStatusOK(
-                IndexBuildsCoordinator::checkDiskSpaceSufficientToStartIndexBuild(opCtx));
-        }
+    if (feature_flags::gIndexBuildGracefulErrorHandling.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        uassertStatusOK(IndexBuildsCoordinator::checkDiskSpaceSufficientToStartIndexBuild(opCtx));
     }
 
     // Use AutoStatsTracker to update Top.
@@ -677,7 +657,9 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
             {
                 // The current OperationContext may be interrupted, which would prevent us from
                 // taking locks. Use a new OperationContext to abort the index build.
-                auto newClient = opCtx->getServiceContext()->makeClient("abort-index-build");
+                auto newClient = opCtx->getServiceContext()
+                                     ->getService(ClusterRole::ShardServer)
+                                     ->makeClient("abort-index-build");
                 AlternativeClientRegion acr(newClient);
                 const auto abortCtx = cc().makeOperationContext();
 
@@ -815,18 +797,13 @@ public:
                         throw;
                     }
                     if (shouldLogMessageOnAlreadyBuildingError) {
-                        LOGV2(
-                            20450,
-                            "Received a request to create indexes: '{indexesFieldName}', but found "
-                            "that at least one of the indexes is already being built, '{error}'. "
-                            "This request will wait for the pre-existing index build to finish "
-                            "before proceeding",
-                            "Received a request to create indexes, "
-                            "but found that at least one of the indexes is already being built."
-                            "This request will wait for the pre-existing index build to finish "
-                            "before proceeding",
-                            "indexesFieldName"_attr = cmd->getIndexes(),
-                            "error"_attr = ex);
+                        LOGV2(20450,
+                              "Received a request to create indexes, "
+                              "but found that at least one of the indexes is already being built."
+                              "This request will wait for the pre-existing index build to finish "
+                              "before proceeding",
+                              "indexesFieldName"_attr = cmd->getIndexes(),
+                              "error"_attr = ex);
                         shouldLogMessageOnAlreadyBuildingError = false;
                     }
                     // Reset the snapshot because we have released locks and need a fresh snapshot
@@ -853,7 +830,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CmdCreateIndexes);
+MONGO_REGISTER_COMMAND(CmdCreateIndexes).forShard();
 
 }  // namespace
 }  // namespace mongo

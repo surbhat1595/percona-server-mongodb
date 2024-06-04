@@ -42,7 +42,7 @@ namespace {
 
 struct ClientAndOpCtx {
     ClientAndOpCtx(ServiceContext* service, std::string desc)
-        : client(service->makeClient(std::move(desc), nullptr)),
+        : client(service->getService()->makeClient(std::move(desc), nullptr)),
           opCtx(client->makeOperationContext()) {}
 
     ServiceContext::UniqueClient client;
@@ -50,6 +50,12 @@ struct ClientAndOpCtx {
 };
 
 class CappedVisibilityTest : public unittest::Test, public ScopedGlobalServiceContextForTest {};
+
+TEST_F(CappedVisibilityTest, EmptySnapshotNoneVisible) {
+    CappedVisibilityObserver observer("test");
+    auto snapshot = observer.makeSnapshot();
+    ASSERT_FALSE(snapshot.isRecordVisible(RecordId(1)));
+}
 
 TEST_F(CappedVisibilityTest, BasicRecordIdHole) {
     CappedVisibilityObserver observer("test");

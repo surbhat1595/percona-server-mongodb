@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <memory>
 #include <utility>
@@ -48,6 +47,8 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/replica_set_endpoint_sharding_state.h"
+#include "mongo/db/replica_set_endpoint_util.h"
 #include "mongo/db/s/balancer_stats_registry.h"
 #include "mongo/db/s/collection_critical_section_document_gen.h"
 #include "mongo/db/s/collection_metadata.h"
@@ -150,8 +151,8 @@ void onConfigDeleteInvalidateCachedCollectionMetadataAndNotify(OperationContext*
     std::string deletedCollection;
     fassert(40479,
             bsonExtractStringField(query, ShardCollectionType::kNssFieldName, &deletedCollection));
-    const NamespaceString deletedNss =
-        NamespaceStringUtil::deserialize(boost::none, deletedCollection);
+    const NamespaceString deletedNss = NamespaceStringUtil::deserialize(
+        boost::none, deletedCollection, SerializationContext::stateDefault());
 
     // Need the WUOW to retain the lock for CollectionPlacementVersionLogOpHandler::commit().
     // TODO SERVER-58223: evaluate whether this is safe or whether acquiring the lock can block.
@@ -203,7 +204,8 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                 if (idElem.str() == ShardIdentityType::IdName) {
                     auto shardIdentityDoc =
                         uassertStatusOK(ShardIdentityType::fromShardIdentityDocument(insertedDoc));
-                    uassertStatusOK(shardIdentityDoc.validate());
+                    uassertStatusOK(shardIdentityDoc.validate(
+                        true /* fassert cluster role matches shard identity document */));
                     /**
                      * Perform shard identity initialization once we are certain that the document
                      * is committed.
@@ -219,6 +221,18 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                         }
                     });
                 }
+            }
+        }
+
+        if (replica_set_endpoint::isFeatureFlagEnabled() &&
+            serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
+            nss == NamespaceString::kConfigsvrShardsNamespace) {
+            if (auto shardId = insertedDoc["_id"].str(); shardId == ShardId::kConfigServerId) {
+                opCtx->recoveryUnit()->onCommit(
+                    [](OperationContext* opCtx, boost::optional<Timestamp>) {
+                        replica_set_endpoint::ReplicaSetEndpointShardingState::get(opCtx)
+                            ->setIsConfigShard(true);
+                    });
             }
         }
 
@@ -243,7 +257,7 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
             opCtx->recoveryUnit()->onCommit(
                 [insertedNss = collCSDoc.getNss(), reason = collCSDoc.getReason().getOwned()](
                     OperationContext* opCtx, boost::optional<Timestamp>) {
-                    if (nsIsDbOnly(NamespaceStringUtil::serialize(insertedNss))) {
+                    if (insertedNss.isDbOnly()) {
                         boost::optional<AutoGetDb> lockDbIfNotPrimary;
                         if (!isStandaloneOrPrimary(opCtx)) {
                             lockDbIfNotPrimary.emplace(opCtx, insertedNss.dbName(), MODE_IX);
@@ -313,7 +327,8 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx,
             fassert(40477,
                     bsonExtractStringField(
                         args.updateArgs->criteria, ShardCollectionType::kNssFieldName, &coll));
-            return NamespaceStringUtil::deserialize(boost::none, coll);
+            return NamespaceStringUtil::deserialize(
+                boost::none, coll, SerializationContext::stateDefault());
         }());
 
         auto enterCriticalSectionFieldNewVal = update_oplog_entry::extractNewValueForField(
@@ -361,11 +376,10 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx,
         // primary, blocking behind the critical section.
 
         // Extract which database was updated
-        // TODO SERVER-67789 Change to extract DatabaseName obj, and use when locking db below.
         std::string db;
         fassert(40478,
                 bsonExtractStringField(
-                    args.updateArgs->criteria, ShardDatabaseType::kNameFieldName, &db));
+                    args.updateArgs->criteria, ShardDatabaseType::kDbNameFieldName, &db));
 
         auto enterCriticalSectionCounterFieldNewVal = update_oplog_entry::extractNewValueForField(
             updateDoc, ShardDatabaseType::kEnterCriticalSectionCounterFieldName);
@@ -375,7 +389,8 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx,
             // block.
             AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
 
-            DatabaseName dbName = DatabaseNameUtil::deserialize(boost::none, db);
+            DatabaseName dbName = DatabaseNameUtil::deserialize(
+                boost::none, db, SerializationContext::stateDefault());
             AutoGetDb autoDb(opCtx, dbName, MODE_X);
             auto scopedDss =
                 DatabaseShardingState::assertDbLockedAndAcquireExclusive(opCtx, dbName);
@@ -392,7 +407,7 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx,
         opCtx->recoveryUnit()->onCommit(
             [updatedNss = collCSDoc.getNss(), reason = collCSDoc.getReason().getOwned()](
                 OperationContext* opCtx, boost::optional<Timestamp>) {
-                if (nsIsDbOnly(NamespaceStringUtil::serialize(updatedNss))) {
+                if (updatedNss.isDbOnly()) {
                     boost::optional<AutoGetDb> lockDbIfNotPrimary;
                     if (!isStandaloneOrPrimary(opCtx)) {
                         lockDbIfNotPrimary.emplace(opCtx, updatedNss.dbName(), MODE_IX);
@@ -568,6 +583,7 @@ void ShardServerOpObserver::onModifyCollectionShardingIndexCatalog(OperationCont
 void ShardServerOpObserver::onDelete(OperationContext* opCtx,
                                      const CollectionPtr& coll,
                                      StmtId stmtId,
+                                     const BSONObj& doc,
                                      const OplogDeleteEntryArgs& args,
                                      OpStateAccumulator* opAccumulator) {
     const auto& nss = coll->ns();
@@ -584,16 +600,16 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
         }
 
         // Extract which database entry is being deleted from the _id field.
-        // TODO SERVER-67789 Change to extract DatabaseName obj, and use when locking db below.
         std::string deletedDatabase;
         fassert(50772,
                 bsonExtractStringField(
-                    documentId, ShardDatabaseType::kNameFieldName, &deletedDatabase));
+                    documentId, ShardDatabaseType::kDbNameFieldName, &deletedDatabase));
 
         // TODO SERVER-58223: evaluate whether this is safe or whether acquiring the lock can block.
         AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
 
-        DatabaseName dbName = DatabaseNameUtil::deserialize(boost::none, deletedDatabase);
+        DatabaseName dbName = DatabaseNameUtil::deserialize(
+            boost::none, deletedDatabase, SerializationContext::stateDefault());
         AutoGetDb autoDb(opCtx, dbName, MODE_X);
         auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(opCtx, dbName);
         scopedDss->clearDbInfo(opCtx);
@@ -616,6 +632,18 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
         }
     }
 
+    if (replica_set_endpoint::isFeatureFlagEnabled() &&
+        serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
+        nss == NamespaceString::kConfigsvrShardsNamespace) {
+        if (auto shardId = documentId["_id"].str(); shardId == ShardId::kConfigServerId) {
+            opCtx->recoveryUnit()->onCommit([](OperationContext* opCtx,
+                                               boost::optional<Timestamp>) {
+                replica_set_endpoint::ReplicaSetEndpointShardingState::get(opCtx)->setIsConfigShard(
+                    false);
+            });
+        }
+    }
+
     if (nss == NamespaceString::kCollectionCriticalSectionsNamespace &&
         !sharding_recovery_util::inRecoveryMode(opCtx)) {
         const auto& deletedDoc = documentId;
@@ -625,7 +653,7 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
         opCtx->recoveryUnit()->onCommit(
             [deletedNss = collCSDoc.getNss(), reason = collCSDoc.getReason().getOwned()](
                 OperationContext* opCtx, boost::optional<Timestamp>) {
-                if (nsIsDbOnly(NamespaceStringUtil::serialize(deletedNss))) {
+                if (deletedNss.isDbOnly()) {
                     boost::optional<AutoGetDb> lockDbIfNotPrimary;
                     if (!isStandaloneOrPrimary(opCtx)) {
                         lockDbIfNotPrimary.emplace(opCtx, deletedNss.dbName(), MODE_IX);
@@ -801,7 +829,14 @@ void ShardServerOpObserver::onCollMod(OperationContext* opCtx,
                                       const BSONObj& collModCmd,
                                       const CollectionOptions& oldCollOptions,
                                       boost::optional<IndexCollModInfo> indexInfo) {
-    abortOngoingMigrationIfNeeded(opCtx, nss);
+    // An empty collMod contains only the top-level "collMod": <collection> field. Empty collMods
+    // are sometimes used for FCV upgrades that modify the catalog in a compatible way with existing
+    // data users. These modifications do not change the underlying data assumptions and are
+    // otherwise a no-op since an empty collMod won't change anything.
+    bool emptyCollMod = collModCmd.nFields() <= 1;
+    if (!emptyCollMod) {
+        abortOngoingMigrationIfNeeded(opCtx, nss);
+    }
 };
 
 void ShardServerOpObserver::onReplicationRollback(OperationContext* opCtx,

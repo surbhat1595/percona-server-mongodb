@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <limits>
 #include <mutex>
 #include <utility>
@@ -221,11 +220,8 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
     const BSONObj idIndexSpec,
     const std::vector<BSONObj>& secondaryIndexSpecs) {
 
-    LOGV2_DEBUG(21753,
-                2,
-                "StorageInterfaceImpl::createCollectionForBulkLoading called for ns: {namespace}",
-                "StorageInterfaceImpl::createCollectionForBulkLoading called",
-                logAttrs(nss));
+    LOGV2_DEBUG(
+        21753, 2, "StorageInterfaceImpl::createCollectionForBulkLoading called", logAttrs(nss));
 
     class StashClient {
     public:
@@ -246,8 +242,12 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
     private:
         ServiceContext::UniqueClient _stashedClient;
     } stash;
-    Client::setCurrent(getGlobalServiceContext()->makeClient(
-        str::stream() << NamespaceStringUtil::serialize(nss) << " loader"));
+    Client::setCurrent(getGlobalServiceContext()
+                           ->getService(ClusterRole::ShardServer)
+                           ->makeClient(str::stream()
+                                        << NamespaceStringUtil::serialize(
+                                               nss, SerializationContext::stateDefault())
+                                        << " loader"));
     auto opCtx = cc().makeOperationContext();
     opCtx->setEnforceConstraints(false);
 
@@ -415,7 +415,6 @@ Status StorageInterfaceImpl::dropReplicatedDatabases(OperationContext* opCtx) {
         opCtx->getServiceContext()->getStorageEngine()->listDatabases();
     invariant(!dbNames.empty());
     LOGV2(21754,
-          "dropReplicatedDatabases - dropping {numDatabases} databases",
           "dropReplicatedDatabases - dropping databases",
           "numDatabases"_attr = dbNames.size());
 
@@ -439,18 +438,14 @@ Status StorageInterfaceImpl::dropReplicatedDatabases(OperationContext* opCtx) {
                 // fixed.
                 LOGV2(21755,
                       "dropReplicatedDatabases - database disappeared after retrieving list of "
-                      "database names but before drop: {dbName}",
-                      "dropReplicatedDatabases - database disappeared after retrieving list of "
                       "database names but before drop",
                       "dbName"_attr = dbName);
             }
         });
     }
     invariant(hasLocalDatabase, "local database missing");
-    LOGV2(21756,
-          "dropReplicatedDatabases - dropped {numDatabases} databases",
-          "dropReplicatedDatabases - dropped databases",
-          "numDatabases"_attr = dbNames.size());
+    LOGV2(
+        21756, "dropReplicatedDatabases - dropped databases", "numDatabases"_attr = dbNames.size());
 
     return Status::OK();
 }
@@ -730,13 +725,13 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
             planExecutor = isFind
                 ? InternalPlanner::collectionScan(opCtx,
                                                   &collection.getCollectionPtr(),
-                                                  PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                                  PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                                   direction)
                 : InternalPlanner::deleteWithCollectionScan(
                       opCtx,
                       collection,
                       makeDeleteStageParamsForDeleteDocuments(),
-                      PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                      PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                       direction);
         } else if (*indexName == kIdIndexName && collection.getCollectionPtr()->isClustered() &&
                    collection.getCollectionPtr()
@@ -783,7 +778,7 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
             planExecutor = isFind
                 ? InternalPlanner::collectionScan(opCtx,
                                                   &collection.getCollectionPtr(),
-                                                  PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                                  PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                                   direction,
                                                   boost::none /* resumeAfterId */,
                                                   minRecord,
@@ -793,7 +788,7 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
                       opCtx,
                       collection,
                       makeDeleteStageParamsForDeleteDocuments(),
-                      PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                      PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                       direction,
                       minRecord,
                       maxRecord,
@@ -835,7 +830,7 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
                                              bounds.first,
                                              bounds.second,
                                              boundInclusion,
-                                             PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                             PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                              direction,
                                              InternalPlanner::IXSCAN_FETCH)
                 : InternalPlanner::deleteWithIndexScan(opCtx,
@@ -845,7 +840,7 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
                                                        bounds.first,
                                                        bounds.second,
                                                        boundInclusion,
-                                                       PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                                       PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                                        direction);
         }
 
@@ -999,7 +994,7 @@ Status _updateWithQuery(OperationContext* opCtx,
                         const Timestamp& ts) {
     invariant(!request.isMulti());  // We only want to update one document for performance.
     invariant(!request.shouldReturnAnyDocs());
-    invariant(PlanYieldPolicy::YieldPolicy::NO_YIELD == request.getYieldPolicy());
+    invariant(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY == request.getYieldPolicy());
 
     auto& nss = request.getNamespaceString();
     return writeConflictRetry(opCtx, "_updateWithQuery", nss, [&] {
@@ -1087,7 +1082,7 @@ Status StorageInterfaceImpl::upsertById(OperationContext* opCtx,
         request.setUpsert(true);
         invariant(!request.isMulti());  // This follows from using an exact _id query.
         invariant(!request.shouldReturnAnyDocs());
-        invariant(PlanYieldPolicy::YieldPolicy::NO_YIELD == request.getYieldPolicy());
+        invariant(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY == request.getYieldPolicy());
 
         // ParsedUpdate needs to be inside the write conflict retry loop because it contains
         // the UpdateDriver whose state may be modified while we are applying the update.
@@ -1158,7 +1153,7 @@ Status StorageInterfaceImpl::deleteByFilter(OperationContext* opCtx,
     request.setNsString(nss);
     request.setQuery(filter);
     request.setMulti(true);
-    request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::NO_YIELD);
+    request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
 
     // This disables the isLegalClientSystemNS() check in getExecutorDelete() which is used to
     // disallow client deletes from unrecognized system collections.
@@ -1211,7 +1206,7 @@ boost::optional<BSONObj> StorageInterfaceImpl::findOplogEntryLessThanOrEqualToTi
     invariant(opCtx->lockState()->isLocked());
 
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec = InternalPlanner::collectionScan(
-        opCtx, &oplog, PlanYieldPolicy::YieldPolicy::NO_YIELD, InternalPlanner::BACKWARD);
+        opCtx, &oplog, PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY, InternalPlanner::BACKWARD);
 
     // A record id in the oplog collection is equivalent to the document's timestamp field.
     RecordId desiredRecordId = RecordId(timestamp.asULL());
@@ -1292,8 +1287,14 @@ Timestamp StorageInterfaceImpl::getEarliestOplogTimestamp(OperationContext* opCt
         return optime.getValue().getTimestamp();
     }
 
+    // The oplog can be empty when an initial syncing node crashes before the oplog application
+    // phase.
+    if (statusWithTimestamp.getStatus() == ErrorCodes::CollectionIsEmpty) {
+        return Timestamp::min();
+    }
+
     tassert(5869102,
-            str::stream() << "Expected oplog entries to exist: " << statusWithTimestamp.getStatus(),
+            str::stream() << "Unexpected status: " << statusWithTimestamp.getStatus(),
             statusWithTimestamp.isOK());
 
     return statusWithTimestamp.getValue();

@@ -28,7 +28,6 @@
  */
 
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <memory>
 #include <mutex>
@@ -370,7 +369,7 @@ void MozJSProxyScope::shutdownThread() {
  */
 void MozJSProxyScope::implThread(MozJSProxyScope* proxy) {
     if (hasGlobalServiceContext()) {
-        Client::initThread("js");
+        Client::initThread("js", getGlobalServiceContext()->getService());
     }
 
     std::unique_ptr<MozJSImplScope> scope;

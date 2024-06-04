@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -121,6 +120,9 @@ struct CollectionUpdateArgs {
     bool changeStreamPreAndPostImagesEnabledForCollection = false;
 
     bool retryableWrite = false;
+
+    // Set if the diff insert operation needs to check for the field's existence.
+    bool mustCheckExistenceForInsertOperations = false;
 
     // Set if OpTimes were reserved for the update ahead of time.
     std::vector<OplogSlot> oplogSlots;
@@ -588,6 +590,12 @@ public:
     virtual bool isMetadataEqual(const BSONObj& otherMetadata) const = 0;
 
     /**
+     * Sanitizes the collection options in order to remove parameters that are local to this mongod
+     * instance.
+     */
+    virtual void sanitizeCollectionOptions(OperationContext* opCtx) = 0;
+
+    /**
      * Specifies whether writes to this collection should X-lock the metadata resource. It is only
      * set for replicated, non-clustered capped collections. Such collections require writes to be
      * serialized on the secondary in order to guarantee insertion order (SERVER-21483). This
@@ -711,6 +719,8 @@ public:
      * specifications will match the form stored in the IndexCatalog should any of these indexes
      * already exist.
      */
+    virtual StatusWith<BSONObj> addCollationDefaultsToIndexSpecsForCreate(
+        OperationContext* opCtx, const BSONObj& indexSpec) const = 0;
     virtual StatusWith<std::vector<BSONObj>> addCollationDefaultsToIndexSpecsForCreate(
         OperationContext* opCtx, const std::vector<BSONObj>& indexSpecs) const = 0;
 

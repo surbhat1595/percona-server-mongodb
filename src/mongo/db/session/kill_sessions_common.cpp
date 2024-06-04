@@ -28,7 +28,6 @@
  */
 
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <mutex>
 
 #include <boost/optional/optional.hpp>
@@ -72,7 +71,6 @@ SessionKiller::Result killSessionsLocalKillOps(OperationContext* opCtx,
                     ScopedKillAllSessionsByPatternImpersonator impersonator(opCtx, *pattern);
 
                     LOGV2(20706,
-                          "Killing op {opId} as part of killing session {lsid}",
                           "Killing op as part of killing session",
                           "opId"_attr = opCtxToKill->getOpID(),
                           "lsid"_attr = lsid->toBSON());
@@ -122,7 +120,7 @@ void killSessionsReport(OperationContext* opCtx, const BSONObj& cmdObj) {
         }
 
         if (client->session()) {
-            attr.add("remote", client->session()->remote());
+            attr.add("session", client->session()->toBSON());
         }
 
         if (auto metadata = ClientMetadata::get(client)) {

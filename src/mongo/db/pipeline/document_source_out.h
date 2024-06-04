@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
 #include <list>
@@ -65,7 +64,7 @@
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
@@ -100,10 +99,6 @@ public:
 
             return Status(ErrorCodes::NamespaceCannotBeSharded,
                           "$out to a sharded collection is not allowed");
-        }
-
-        bool allowedToPassthroughFromMongos() const final {
-            return false;
         }
 
         PrivilegeVector requiredPrivileges(bool isMongos, bool bypassDocumentValidation) const {
@@ -188,11 +183,7 @@ private:
 
         if (_timeseries) {
             uassertStatusOK(pExpCtx->mongoProcessInterface->insertTimeseries(
-                pExpCtx,
-                _tempNs.getTimeseriesViewNamespace(),
-                std::move(insertCommand),
-                _writeConcern,
-                targetEpoch));
+                pExpCtx, _tempNs, std::move(insertCommand), _writeConcern, targetEpoch));
         } else {
             uassertStatusOK(pExpCtx->mongoProcessInterface->insert(
                 pExpCtx, _tempNs, std::move(insertCommand), _writeConcern, targetEpoch));

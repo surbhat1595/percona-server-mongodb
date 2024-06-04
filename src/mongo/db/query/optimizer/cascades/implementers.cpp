@@ -35,7 +35,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <map>
 #include <memory>
@@ -127,6 +126,96 @@ static bool canReturnSortedOutput(const CompoundIntervalReqExpr::Node& intervals
     return canBeSorted && !CompoundIntervalReqExpr::isSingletonDisjunction(intervals);
 }
 
+// Returns true if the given index contains entries for every component of the given shard key. For
+// each component of the shard key, ensures that the given FieldProjectionMap contains an entry for
+// it. Note that projections pushed down into the index scan have keys that encode the position of
+// the component in the index specification; for example, for an index {a: 1, "b.c": 1}, the "b.c"
+// projection is encoded as "<indexKey> 1" rather than "b.c". For this reason, this function also
+// populates 'shardKeyProjections' with the projection names generated and inserted into
+// 'indexProjections'; the i'th entry in 'shardKeyProjections' corresponds to the projection name
+// representing the i'th component of the shard key.
+// If the index does not cover the shard key, this function returns false.
+static bool addShardKeyProjectionsToIndexScan(const IndexCollationSpec& index,
+                                              const ShardingMetadata& shardingMetadata,
+                                              FieldProjectionMap& indexProjections,
+                                              ProjectionNameVector& shardKeyProjections,
+                                              PrefixId& prefixId) {
+    for (auto&& shardKeyField : shardingMetadata.shardKey()) {
+        bool found = false;
+        for (size_t i = 0; i < index.size(); ++i) {
+            const IndexCollationEntry& indexedField = index[i];
+            if (shardKeyField == indexedField) {
+                found = true;
+                FieldNameType indexComponent{encodeIndexKeyName(i)};
+                if (auto it = indexProjections._fieldProjections.find(indexComponent);
+                    it != indexProjections._fieldProjections.end()) {
+                    shardKeyProjections.push_back(it->second);
+                } else {
+                    ProjectionName skProj = prefixId.getNextId("shardKey");
+                    indexProjections._fieldProjections.emplace(indexComponent, skProj);
+                    shardKeyProjections.push_back(std::move(skProj));
+                }
+                break;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Builds filter node required to perform shard filtering on top of IndexScan. The function assumes
+// that 'builder' contains an IndexScanNode with 'fieldProjections' for each component of the shard
+// key.
+static void handleIndexScanRemoveOrphanRequirement(const IndexCollationSpec& shardKey,
+                                                   PhysPlanBuilder& builder,
+                                                   const ProjectionNameVector& shardKeyProjections,
+                                                   const CEType groupCE) {
+    ABTVector shardKeyComponentProjections;
+    for (auto&& name : shardKeyProjections) {
+        shardKeyComponentProjections.push_back(make<Variable>(name));
+    }
+    auto functionCallNode =
+        make<FunctionCall>("shardFilter", std::move(shardKeyComponentProjections));
+    builder.make<FilterNode>(groupCE, std::move(functionCallNode), std::move(builder._node));
+}
+
+static bool equalityOnShardKey(const IndexCollationSpec& shardKey, const PSRExpr::Node& psr) {
+    tassert(7985401, "Encountered partial schema requirements not in DNF", PSRExpr::isDNF(psr));
+    if (!PSRExpr::isSingletonDisjunction(psr)) {
+        return false;
+    }
+    // Keep track of paths in the  the components of the shard key that have equality predicates on
+    // them.
+    OrderPreservingABTSet pathsWithEqualityPredicate;
+    PSRExpr::visitDNF(
+        psr,
+        [&pathsWithEqualityPredicate](const PartialSchemaEntry& entry,
+                                      const PSRExpr::VisitorContext&) {
+            // If the interval for this requirement is an equality, add it to the set.
+            auto interval = entry.second.getIntervals();
+            if (IntervalReqExpr::numLeaves(interval) != 1) {
+                return;
+            }
+            IntervalReqExpr::visitAnyShape(
+                interval,
+                [&entry, &pathsWithEqualityPredicate](const IntervalRequirement& req,
+                                                      const IntervalReqExpr::VisitorContext&) {
+                    if (req.isEquality()) {
+                        pathsWithEqualityPredicate.emplace_back(entry.first._path);
+                    }
+                });
+        });
+    // Ensure that all components of the shard key have an equality predicate.
+    for (auto&& shardKeyComponent : shardKey) {
+        if (!pathsWithEqualityPredicate.find(shardKeyComponent._path.ref())) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /**
  * Takes a logical node and required physical properties, and creates zero or more physical subtrees
  * that can implement that logical node while satisfying those properties.
@@ -142,7 +231,7 @@ static bool canReturnSortedOutput(const CompoundIntervalReqExpr::Node& intervals
  */
 class ImplementationVisitor {
 public:
-    void operator()(const ABT& /*n*/, const ScanNode& node) {
+    void operator()(const ABT::reference_type /*n*/, const ScanNode& node) {
         if (hasProperty<LimitSkipRequirement>(_physProps)) {
             // Cannot satisfy limit-skip.
             return;
@@ -259,7 +348,7 @@ public:
                                  std::move(builder._nodeCEMap));
     }
 
-    void operator()(const ABT& n, const ValueScanNode& node) {
+    void operator()(const ABT::reference_type n, const ValueScanNode& node) {
         if (hasProperty<LimitSkipRequirement>(_physProps)) {
             // Cannot satisfy limit-skip.
             return;
@@ -354,12 +443,12 @@ public:
                                  std::move(builder._nodeCEMap));
     }
 
-    void operator()(const ABT& /*n*/, const MemoLogicalDelegatorNode& /*node*/) {
+    void operator()(const ABT::reference_type /*n*/, const MemoLogicalDelegatorNode& /*node*/) {
         uasserted(6624041,
                   "Must not have logical delegator nodes in the list of the logical nodes");
     }
 
-    void operator()(const ABT& n, const FilterNode& node) {
+    void operator()(const ABT::reference_type n, const FilterNode& node) {
         if (hasProperty<LimitSkipRequirement>(_physProps)) {
             // We cannot satisfy here.
             return;
@@ -374,15 +463,15 @@ public:
 
         PhysProps newProps = _physProps;
         // Add projections we depend on to the requirement.
-        addProjectionsToProperties(newProps, std::move(references));
+        addProjectionsToProperties(newProps, references);
         getProperty<DistributionRequirement>(newProps).setDisableExchanges(true);
 
-        ABT physicalFilter = n;
+        ABT physicalFilter{n};
         optimizeChild<FilterNode, PhysicalRewriteType::Filter>(
             _queue, kDefaultPriority, std::move(physicalFilter), std::move(newProps));
     }
 
-    void operator()(const ABT& n, const EvaluationNode& node) {
+    void operator()(const ABT::reference_type n, const EvaluationNode& node) {
         const ProjectionName& projectionName = node.getProjectionName();
 
         if (const auto* varPtr = node.getProjection().cast<Variable>(); varPtr != nullptr) {
@@ -418,7 +507,7 @@ public:
                 }
             }
 
-            ABT physicalEval = n;
+            ABT physicalEval{n};
             optimizeChild<EvaluationNode, PhysicalRewriteType::RenameProjection>(
                 _queue, kDefaultPriority, std::move(physicalEval), std::move(newProps));
             return;
@@ -453,15 +542,15 @@ public:
         }
 
         addRemoveProjectionsToProperties(
-            newProps, std::move(references), ProjectionNameVector{projectionName});
+            newProps, references, ProjectionNameVector{projectionName});
         getProperty<DistributionRequirement>(newProps).setDisableExchanges(true);
 
-        ABT physicalEval = n;
+        ABT physicalEval{n};
         optimizeChild<EvaluationNode, PhysicalRewriteType::Evaluation>(
             _queue, kDefaultPriority, std::move(physicalEval), std::move(newProps));
     }
 
-    void operator()(const ABT& n, const SargableNode& node) {
+    void operator()(const ABT::reference_type n, const SargableNode& node) {
         if (hasProperty<LimitSkipRequirement>(_physProps)) {
             // Cannot satisfy limit-skip.
             return;
@@ -565,11 +654,11 @@ public:
         const CEType currentGroupCE = ceProperty.getEstimate();
         const PartialSchemaKeyCE& partialSchemaKeyCE = ceProperty.getPartialSchemaKeyCE();
 
+        const bool needsShardFilter =
+            getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove() &&
+            !equalityOnShardKey(scanDef.shardingMetadata().shardKey(), node.getReqMap());
+
         if (indexReqTarget == IndexReqTarget::Index) {
-            if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
-                // TODO SERVER-79608: Implement this implementer for index target.
-                return;
-            }
             ProjectionCollationSpec requiredCollation;
             if (hasProperty<CollationRequirement>(_physProps)) {
                 requiredCollation =
@@ -620,6 +709,22 @@ public:
                 auto residualReqs = candidateIndexEntry._residualRequirements;
                 removeRedundantResidualPredicates(
                     requiredProjections, residualReqs, indexProjectionMap);
+
+                ProjectionNameVector shardKeyProjections;
+                if (needsShardFilter) {
+                    // Ensure that the current index under consideration can cover all components of
+                    // the shard key and 'indexProjectionMap' has entries for all components of the
+                    // shard key.
+                    const bool coversShardKey =
+                        addShardKeyProjectionsToIndexScan(indexDef.getCollationSpec(),
+                                                          scanDef.shardingMetadata(),
+                                                          indexProjectionMap,
+                                                          shardKeyProjections,
+                                                          _prefixId);
+                    if (!coversShardKey) {
+                        continue;
+                    }
+                }
 
                 // Compute the selectivities of predicates covered by index bounds and by residual
                 // predicates.
@@ -738,8 +843,7 @@ public:
                                                0 /*currentEqPrefixIndex*/,
                                                reverseOrder,
                                                candidateIndexEntry._correlatedProjNames.getVector(),
-                                               std::move(indexPredSelMap),
-                                               currentGroupCE,
+                                               indexPredSelMap,
                                                scanGroupCE,
                                                usedSortedMerge);
 
@@ -758,6 +862,13 @@ public:
                     builder.make<UniqueNode>(currentGroupCE,
                                              ProjectionNameVector{ridProjName},
                                              std::move(builder._node));
+                }
+
+                if (needsShardFilter) {
+                    handleIndexScanRemoveOrphanRequirement(scanDef.shardingMetadata().shardKey(),
+                                                           builder,
+                                                           shardKeyProjections,
+                                                           currentGroupCE);
                 }
 
                 optimizeChildrenNoAssert(_queue,
@@ -793,7 +904,6 @@ public:
                 fieldProjectionMap._rootProjection = scanProjectionName;
             }
 
-            // TODO SERVER-79854: Omit shard filtering if there equality on the shard key.
             if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
                 // Add top level fields of the shard key to the fieldProjectionMap used to create
                 // the PhysicalScan.
@@ -841,7 +951,7 @@ public:
 
             // Insert evaluation nodes to project the fields of the shard key if we couldn't push
             // them down to the PhysicalScan and insert a FilterNode which performs shard filtering.
-            if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
+            if (needsShardFilter) {
                 handleScanNodeRemoveOrphansRequirement(scanDef.shardingMetadata().shardKey(),
                                                        builder,
                                                        fieldProjectionMap,
@@ -859,7 +969,7 @@ public:
         }
     }
 
-    void operator()(const ABT& /*n*/, const RIDIntersectNode& node) {
+    void operator()(const ABT::reference_type /*n*/, const RIDIntersectNode& node) {
 
         const auto& indexingAvailability = getPropertyConst<IndexingAvailability>(_logicalProps);
         const std::string& scanDefName = indexingAvailability.getScanDefName();
@@ -1104,7 +1214,7 @@ public:
     }
 
 
-    void operator()(const ABT& /*n*/, const RIDUnionNode& node) {
+    void operator()(const ABT::reference_type /*n*/, const RIDUnionNode& node) {
         const auto& indexingAvailability = getPropertyConst<IndexingAvailability>(_logicalProps);
         const std::string& scanDefName = indexingAvailability.getScanDefName();
         {
@@ -1230,7 +1340,7 @@ public:
         }
     }
 
-    void operator()(const ABT& n, const BinaryJoinNode& node) {
+    void operator()(const ABT::reference_type n, const BinaryJoinNode& node) {
         if (hasProperty<LimitSkipRequirement>(_physProps)) {
             // We cannot satisfy limit-skip requirements.
             return;
@@ -1310,11 +1420,11 @@ public:
         }
 
         // TODO: consider hash join if the predicate is equality.
-        ABT nlj = make<NestedLoopJoinNode>(std::move(node.getJoinType()),
-                                           std::move(node.getCorrelatedProjectionNames()),
-                                           std::move(node.getFilter()),
-                                           std::move(node.getLeftChild()),
-                                           std::move(node.getRightChild()));
+        ABT nlj = make<NestedLoopJoinNode>(node.getJoinType(),
+                                           node.getCorrelatedProjectionNames(),
+                                           node.getFilter(),
+                                           node.getLeftChild(),
+                                           node.getRightChild());
         NestedLoopJoinNode& newNode = *nlj.cast<NestedLoopJoinNode>();
 
         optimizeChildren<NestedLoopJoinNode, PhysicalRewriteType::NLJ>(
@@ -1325,7 +1435,7 @@ public:
                            {&newNode.getRightChild(), std::move(rightPhysProps)}});
     }
 
-    void operator()(const ABT& /*n*/, const UnionNode& node) {
+    void operator()(const ABT::reference_type /*n*/, const UnionNode& node) {
         if (hasProperty<LimitSkipRequirement>(_physProps)) {
             // We cannot satisfy limit-skip requirements.
             return;
@@ -1352,7 +1462,7 @@ public:
             _queue, kDefaultPriority, std::move(physicalUnion), std::move(childProps));
     }
 
-    void operator()(const ABT& n, const GroupByNode& node) {
+    void operator()(const ABT::reference_type n, const GroupByNode& node) {
         if (hasProperty<LimitSkipRequirement>(_physProps)) {
             // We cannot satisfy limit-skip requirements.
             // TODO: consider an optimization where we keep track of at most "limit" groups.
@@ -1461,7 +1571,7 @@ public:
             _queue, kDefaultPriority, std::move(physicalGroupBy), std::move(newProps));
     }
 
-    void operator()(const ABT& n, const UnwindNode& node) {
+    void operator()(const ABT::reference_type n, const UnwindNode& node) {
         const ProjectionName& pidProjectionName = node.getPIDProjectionName();
         const ProjectionNameVector& projectionNames = {(node.getProjectionName()),
                                                        pidProjectionName};
@@ -1489,12 +1599,12 @@ public:
 
         getProperty<DistributionRequirement>(newProps).setDisableExchanges(false);
 
-        ABT physicalUnwind = n;
+        ABT physicalUnwind{n};
         optimizeChild<UnwindNode, PhysicalRewriteType::Unwind>(
             _queue, kDefaultPriority, std::move(physicalUnwind), std::move(newProps));
     }
 
-    void operator()(const ABT& /*n*/, const CollationNode& node) {
+    void operator()(const ABT::reference_type /*n*/, const CollationNode& node) {
         if (getPropertyConst<DistributionRequirement>(_physProps)
                 .getDistributionAndProjections()
                 ._type != DistributionType::Centralized) {
@@ -1508,7 +1618,7 @@ public:
                                    PhysicalRewriteType::Collation>(node);
     }
 
-    void operator()(const ABT& /*n*/, const LimitSkipNode& node) {
+    void operator()(const ABT::reference_type /*n*/, const LimitSkipNode& node) {
         // We can pick-up limit-skip under any distribution (but enforce under centralized or
         // replicated).
 
@@ -1534,13 +1644,13 @@ public:
             _queue, kDefaultPriority, node.getChild(), std::move(newProps));
     }
 
-    void operator()(const ABT& /*n*/, const ExchangeNode& node) {
+    void operator()(const ABT::reference_type /*n*/, const ExchangeNode& node) {
         optimizeSimplePropertyNode<ExchangeNode,
                                    DistributionRequirement,
                                    PhysicalRewriteType::Exchange>(node);
     }
 
-    void operator()(const ABT& n, const RootNode& node) {
+    void operator()(const ABT::reference_type n, const RootNode& node) {
         PhysProps newProps = _physProps;
 
         ABT rootNode = make<Blackhole>();
@@ -1552,7 +1662,7 @@ public:
             rootNode = make<RootNode>(projections, n.cast<RootNode>()->getChild());
         } else {
             setPropertyOverwrite<ProjectionRequirement>(newProps, node.getProperty());
-            rootNode = n;
+            rootNode = n.copy();
         }
 
         getProperty<DistributionRequirement>(newProps).setDisableExchanges(false);
@@ -1562,7 +1672,7 @@ public:
     }
 
     template <typename T>
-    void operator()(const ABT& /*n*/, const T& /*node*/) {
+    void operator()(ABT::reference_type /*n*/, const T& /*node*/) {
         static_assert(!canBeLogicalNode<T>(), "Logical node must implement its visitor.");
     }
 
@@ -2051,6 +2161,15 @@ private:
 
         setPropertyOverwrite<RemoveOrphansRequirement>(leftPhysPropsLocal, {false});
         setPropertyOverwrite<RemoveOrphansRequirement>(rightPhysPropsLocal, {true});
+        // Correct the cost of the inner side of the NLJ to account for the fact that the Seek side
+        // is responsible for filtering orphans and thus will encounter more documents than its CE
+        // indicates. This adjustment allows to prefer plans which perform shard filtering on the
+        // index side if possible, resulting in fewer calls to Seek.
+        auto repEst = hasProperty<RepetitionEstimate>(rightPhysPropsLocal)
+            ? getPropertyConst<RepetitionEstimate>(rightPhysPropsLocal).getEstimate()
+            : 1.0;
+        setPropertyOverwrite<RepetitionEstimate>(rightPhysPropsLocal,
+                                                 {repEst * kOrphansCardinalityFudgeFactor});
         optimizeRIDIntersectHelper(isIndex,
                                    dedupRID,
                                    useMergeJoin,

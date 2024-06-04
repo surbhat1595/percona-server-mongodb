@@ -8,6 +8,7 @@
  */
 
 import {anyEq, desugarSingleStageAggregation} from "jstests/aggregation/extras/utils.js";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const coll = db[jsTestName()];
 coll.drop();
@@ -20,7 +21,7 @@ function buildAndRunCommand(stage) {
 assert.commandFailedWithCode(buildAndRunCommand({$fill: "test"}), ErrorCodes.FailedToParse);
 
 // Fail if 'output' is missing.
-assert.commandFailedWithCode(buildAndRunCommand({$fill: {}}), 40414);
+assert.commandFailedWithCode(buildAndRunCommand({$fill: {}}), ErrorCodes.IDLFailedToParse);
 
 // Fail if 'output' is present but empty.
 assert.commandFailedWithCode(buildAndRunCommand({$fill: {output: {}}}), 6050203);
@@ -237,6 +238,13 @@ function modifyObjectAtPath(orig, path) {
     }
 
     return orig;
+}
+
+// TODO SERVER-82095 remove creation of database once
+// explain behavior will be equal in both standalone and sharded cluster
+if (FixtureHelpers.isMongos(db)) {
+    // Create database
+    assert.commandWorked(db.adminCommand({'enableSharding': db.getName()}));
 }
 
 for (let i = 0; i < testCases.length; i++) {

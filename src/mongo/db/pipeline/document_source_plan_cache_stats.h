@@ -54,7 +54,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/stdx/unordered_set.h"
@@ -89,11 +89,6 @@ public:
 
         bool isInitialSource() const final {
             return true;
-        }
-
-        bool allowedToPassthroughFromMongos() const override {
-            // $planCacheStats must be run locally on a mongod.
-            return false;
         }
 
         ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,

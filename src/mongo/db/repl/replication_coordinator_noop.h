@@ -94,7 +94,7 @@ public:
 
     bool inQuiesceMode() const final;
 
-    void shutdown(OperationContext* opCtx) final;
+    void shutdown(OperationContext* opCtx, BSONObjBuilder* shutdownTimeElapsedBuilder) final;
 
     ServiceContext* getServiceContext() final {
         return _service;
@@ -320,7 +320,7 @@ public:
 
     void waitUntilSnapshotCommitted(OperationContext*, const Timestamp&) final;
 
-    void appendDiagnosticBSON(BSONObjBuilder*) final;
+    void appendDiagnosticBSON(BSONObjBuilder*, StringData) final;
 
     void appendConnectionStats(executor::ConnectionPoolStats* stats) const final;
 

@@ -55,7 +55,7 @@
 #include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/interval.h"
 #include "mongo/db/storage/index_entry_comparison.h"
-#include "mongo/util/indexed_string_vector.h"
+#include "mongo/util/string_listset.h"
 
 /**
  * Contains a set of functions for shallow estimating the size of allocated on the heap objects
@@ -120,12 +120,16 @@ inline size_t estimate(const WindowStage::Window& window) {
     if (window.highBoundExpr) {
         size += size_estimator::estimate(window.highBoundExpr);
     }
-    if (window.initExpr) {
-        size += size_estimator::estimate(window.initExpr);
-    }
-    size += size_estimator::estimate(window.addExpr);
-    if (window.removeExpr) {
-        size += size_estimator::estimate(window.removeExpr);
+    for (size_t i = 0; i < window.initExprs.size(); ++i) {
+        if (window.initExprs[i]) {
+            size += size_estimator::estimate(window.initExprs[i]);
+        }
+        if (window.addExprs[i]) {
+            size += size_estimator::estimate(window.addExprs[i]);
+        }
+        if (window.removeExprs[i]) {
+            size += size_estimator::estimate(window.removeExprs[i]);
+        }
     }
     return size;
 }
@@ -219,7 +223,7 @@ inline size_t estimate(const value::MaterializedRow& row) {
     return size;
 }
 
-inline size_t estimate(const IndexedStringVector& vec) {
+inline size_t estimate(const StringListSet& vec) {
     size_t size = size_estimator::estimate(vec.getUnderlyingVector());
     size += size_estimator::estimate(vec.getUnderlyingMap());
     return size;

@@ -36,7 +36,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <limits>
 #include <numeric>
@@ -74,6 +73,7 @@
 #include "mongo/s/client/shard.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
@@ -155,22 +155,36 @@ ShardId selectBestShard(const ChunkDistributionMap& chunkMap,
 /*
  * Returns a map mapping each tag name to a vector of shard ids with that tag name
  */
-StringMap<std::vector<ShardId>> buildTagsToShardIdsMap(OperationContext* opCtx,
-                                                       const std::vector<TagsType>& tags) {
+StringMap<std::vector<ShardId>> buildTagsToShardIdsMap(
+    OperationContext* opCtx,
+    const std::vector<TagsType>& tags,
+    const boost::optional<std::vector<ShardId>>& availableShardIds = boost::none) {
     StringMap<std::vector<ShardId>> tagToShardIds;
     if (tags.empty()) {
         return tagToShardIds;
     }
 
     // Get all docs in config.shards through a query instead of going through the shard registry
-    // because we need the zones as well
+    // because we need the zones as well. Filter out the shards not contained at availableShardIds,
+    // if set.
+    auto filter = [&] {
+        if (!availableShardIds) {
+            return BSONObj();
+        }
+
+        BSONArrayBuilder availableShardsBuilder;
+        for (auto&& shard : *availableShardIds) {
+            availableShardsBuilder.append(shard);
+        }
+        return BSON(ShardType::name() << BSON("$in" << availableShardsBuilder.arr()));
+    }();
     const auto configServer = Grid::get(opCtx)->shardRegistry()->getConfigShard();
     const auto shardDocs = uassertStatusOK(
         configServer->exhaustiveFindOnConfig(opCtx,
                                              ReadPreferenceSetting(ReadPreference::Nearest),
                                              repl::ReadConcernLevel::kMajorityReadConcern,
                                              NamespaceString::kConfigsvrShardsNamespace,
-                                             BSONObj(),
+                                             filter,
                                              BSONObj(),
                                              boost::none));
     uassert(50986, str::stream() << "Could not find any shard documents", !shardDocs.docs.empty());
@@ -181,9 +195,17 @@ StringMap<std::vector<ShardId>> buildTagsToShardIdsMap(OperationContext* opCtx,
 
     for (const auto& shardDoc : shardDocs.docs) {
         auto parsedShard = uassertStatusOK(ShardType::fromBSON(shardDoc));
+
         for (const auto& tag : parsedShard.getTags()) {
             tagToShardIds[tag].push_back(parsedShard.getName());
         }
+    }
+
+    for (const auto& tag : tags) {
+        uassert(ErrorCodes::CannotCreateChunkDistribution,
+                "The initial split policy is not able to find a chunk distribution that satisfies "
+                "the given set of zones with the current shards",
+                !tagToShardIds[tag.getTag()].empty());
     }
 
     return tagToShardIds;
@@ -347,72 +369,6 @@ InitialSplitPolicy::ShardCollectionConfig InitialSplitPolicy::generateShardColle
     return {std::move(chunks)};
 }
 
-std::unique_ptr<InitialSplitPolicy> InitialSplitPolicy::calculateOptimizationStrategy(
-    OperationContext* opCtx,
-    const ShardKeyPattern& shardKeyPattern,
-    const std::int64_t numInitialChunks,
-    const bool presplitHashedZones,
-    const std::vector<TagsType>& tags,
-    size_t numShards,
-    bool collectionIsEmpty,
-    bool isUnsplittable,
-    boost::optional<ShardId> dataShard) {
-    uassert(ErrorCodes::InvalidOptions,
-            str::stream() << "numInitialChunks is only supported when the collection is empty "
-                             "and has a hashed field in the shard key pattern",
-            !numInitialChunks || (shardKeyPattern.isHashedPattern() && collectionIsEmpty));
-    uassert(ErrorCodes::InvalidOptions,
-            str::stream()
-                << "When the prefix of the hashed shard key is a range field, "
-                   "'numInitialChunks' can only be used when the 'presplitHashedZones' is true",
-            !numInitialChunks || shardKeyPattern.hasHashedPrefix() || presplitHashedZones);
-    uassert(ErrorCodes::InvalidOptions,
-            str::stream() << "dataShard can only be specified in unsplittable collections",
-            !dataShard || (dataShard && isUnsplittable));
-    uassert(ErrorCodes::InvalidOptions,
-            str::stream() << "When dataShard or unsplittable is specified, the collection must be "
-                             "empty and no other option must be specified",
-            !isUnsplittable ||
-                (collectionIsEmpty && !presplitHashedZones && tags.empty() && !numInitialChunks &&
-                 shardKeyPattern.getKeyPattern().toBSON().woCompare((BSON("_id" << 1))) == 0));
-
-    // if unsplittable, the collection is always equivalent to a single chunk collection
-    if (isUnsplittable) {
-        if (dataShard) {
-            return std::make_unique<SingleChunkOnShardSplitPolicy>(opCtx, *dataShard);
-        } else {
-            return std::make_unique<SingleChunkOnPrimarySplitPolicy>();
-        }
-    }
-
-    // If 'presplitHashedZones' flag is set, we always use 'PresplitHashedZonesSplitPolicy', to make
-    // sure we throw the correct assertion if further validation fails.
-    if (presplitHashedZones) {
-        return std::make_unique<PresplitHashedZonesSplitPolicy>(
-            opCtx, shardKeyPattern, tags, numInitialChunks, collectionIsEmpty);
-    }
-
-    // The next preference is to use split points based strategy. This is only possible if the
-    // collection is empty with shard key having a hashed prefix.
-    if (tags.empty() && shardKeyPattern.hasHashedPrefix() && collectionIsEmpty) {
-        return std::make_unique<SplitPointsBasedSplitPolicy>(
-            shardKeyPattern, numShards, numInitialChunks);
-    }
-
-    if (!tags.empty()) {
-        if (collectionIsEmpty) {
-            return std::make_unique<SingleChunkPerTagSplitPolicy>(opCtx, tags);
-        }
-        return std::make_unique<SingleChunkOnPrimarySplitPolicy>();
-    }
-
-    if (collectionIsEmpty) {
-        return std::make_unique<SingleChunkOnPrimarySplitPolicy>();
-    }
-
-    return std::make_unique<SingleChunkOnPrimarySplitPolicy>();
-}
-
 InitialSplitPolicy::ShardCollectionConfig SingleChunkOnPrimarySplitPolicy::createFirstChunks(
     OperationContext* opCtx,
     const ShardKeyPattern& shardKeyPattern,
@@ -455,24 +411,53 @@ InitialSplitPolicy::ShardCollectionConfig SingleChunkOnShardSplitPolicy::createF
     return {std::move(chunks)};
 }
 
+SplitPointsBasedSplitPolicy::SplitPointsBasedSplitPolicy(
+    const ShardKeyPattern& shardKeyPattern,
+    size_t numShards,
+    boost::optional<std::vector<ShardId>> availableShardIds,
+    // TODO SERVER-82611: get rid of the `numInitialChunks` argument.
+    // The `numInitialChunks` parameter was deprecated in SERVER-74747 and should not be used.
+    boost::optional<size_t> numInitialChunks)
+    : _availableShardIds(std::move(availableShardIds)) {
+    // `numInitialChunks` is a test-only paramter
+    uassert(ErrorCodes::InvalidOptions,
+            "numInitialChunks is deprecated",
+            !numInitialChunks || getTestCommandsEnabled());
+
+    size_t numInitialChunksPerShard = 1;
+    // TODO SERVER-81884: update once 8.0 becomes last LTS.
+    if (!feature_flags::gOneChunkPerShardEmptyCollectionWithHashedShardKey.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        numInitialChunksPerShard = 2;
+    }
+
+    size_t numInitialChunksVal = numInitialChunks.value_or(numShards * numInitialChunksPerShard);
+    _splitPoints = calculateHashedSplitPoints(shardKeyPattern, BSONObj(), numInitialChunksVal);
+    _numContiguousChunksPerShard =
+        std::max(numInitialChunksVal / numShards, static_cast<size_t>(1));
+}
+
 InitialSplitPolicy::ShardCollectionConfig SplitPointsBasedSplitPolicy::createFirstChunks(
     OperationContext* opCtx,
     const ShardKeyPattern& shardKeyPattern,
     const SplitPolicyParams& params) {
-
-    // On which shards are the generated chunks allowed to be placed.
-    const auto shardIds = getAllShardIdsShuffled(opCtx);
-
     const auto currentTime = VectorClock::get(opCtx)->getTime();
     const auto validAfter = currentTime.clusterTime().asTimestamp();
-    return generateShardCollectionInitialChunks(
-        params, shardKeyPattern, validAfter, _splitPoints, shardIds, _numContiguousChunksPerShard);
+    return generateShardCollectionInitialChunks(params,
+                                                shardKeyPattern,
+                                                validAfter,
+                                                _splitPoints,
+                                                _availableShardIds ? *_availableShardIds
+                                                                   : getAllShardIdsShuffled(opCtx),
+                                                _numContiguousChunksPerShard);
 }
 
-AbstractTagsBasedSplitPolicy::AbstractTagsBasedSplitPolicy(OperationContext* opCtx,
-                                                           std::vector<TagsType> tags)
-    : _tags(tags) {
-    _tagToShardIds = buildTagsToShardIdsMap(opCtx, tags);
+AbstractTagsBasedSplitPolicy::AbstractTagsBasedSplitPolicy(
+    OperationContext* opCtx,
+    std::vector<TagsType> tags,
+    boost::optional<std::vector<ShardId>> availableShardIds)
+    : _tags(std::move(tags)), _availableShardIds(std::move(availableShardIds)) {
+    _tagToShardIds = buildTagsToShardIdsMap(opCtx, _tags, _availableShardIds);
 }
 
 AbstractTagsBasedSplitPolicy::SplitInfo SingleChunkPerTagSplitPolicy::buildSplitInfoForTag(
@@ -492,7 +477,7 @@ InitialSplitPolicy::ShardCollectionConfig AbstractTagsBasedSplitPolicy::createFi
     const SplitPolicyParams& params) {
     invariant(!_tags.empty());
 
-    const auto shardIds = getAllShardIdsShuffled(opCtx);
+    const auto shardIds = _availableShardIds.value_or(getAllShardIdsShuffled(opCtx));
     const auto currentTime = VectorClock::get(opCtx)->getTime();
     const auto validAfter = currentTime.clusterTime().asTimestamp();
     const auto& keyPattern = shardKeyPattern.getKeyPattern();
@@ -515,12 +500,6 @@ InitialSplitPolicy::ShardCollectionConfig AbstractTagsBasedSplitPolicy::createFi
         // Create chunk for the actual tag - [tag.getMinKey, tag.getMaxKey)
         const auto it = tagToShards.find(tag.getTag());
         invariant(it != tagToShards.end());
-        uassert(50973,
-                str::stream()
-                    << "Cannot shard collection " << tag.getNS().toStringForErrorMsg()
-                    << " due to zone " << tag.getTag()
-                    << " which is not assigned to a shard. Please assign this zone to a shard.",
-                !it->second.empty());
 
         // The buildSplitInfoForTag() should provide split points which are in sorted order. So we
         // don't need to sort them again while generating chunks.
@@ -614,9 +593,16 @@ PresplitHashedZonesSplitPolicy::PresplitHashedZonesSplitPolicy(
     OperationContext* opCtx,
     const ShardKeyPattern& shardKeyPattern,
     std::vector<TagsType> tags,
-    size_t numInitialChunks,
-    bool isCollectionEmpty)
-    : AbstractTagsBasedSplitPolicy(opCtx, tags) {
+    bool isCollectionEmpty,
+    boost::optional<std::vector<ShardId>> availableShardIds,
+    // TODO SERVER-82611: get rid of the `numInitialChunks` argument.
+    // The `numInitialChunks` parameter was deprecated in SERVER-74747 and should not be used.
+    boost::optional<size_t> numInitialChunks)
+    : AbstractTagsBasedSplitPolicy(opCtx, tags, std::move(availableShardIds)) {
+    // `numInitialChunks` is a test-only parameter
+    uassert(ErrorCodes::InvalidOptions,
+            "numInitialChunks is deprecated",
+            !numInitialChunks || getTestCommandsEnabled());
     // Verify that tags have been set up correctly for this split policy.
     _validate(shardKeyPattern, isCollectionEmpty);
 
@@ -632,8 +618,15 @@ PresplitHashedZonesSplitPolicy::PresplitHashedZonesSplitPolicy(
     // created if they are associated with a zone and the zone has to be assigned to a shard.
     invariant(!_numTagsPerShard.empty());
 
+    size_t numInitialChunksPerShard = 1;
+    // TODO SERVER-81884: update once 8.0 becomes last LTS.
+    if (!feature_flags::gOneChunkPerShardEmptyCollectionWithHashedShardKey.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        numInitialChunksPerShard = 2;
+    }
     // If 'numInitialChunks' was not specified, use default value.
-    _numInitialChunks = numInitialChunks ? numInitialChunks : _numTagsPerShard.size() * 2;
+    _numInitialChunks =
+        numInitialChunks.value_or(_numTagsPerShard.size() * numInitialChunksPerShard);
 }
 
 /**

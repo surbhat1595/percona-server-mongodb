@@ -28,8 +28,6 @@ function runTest({testFixture, conn, shardLocal, shardOutput}) {
         // When running against a sharded cluster, configure the collections according to
         // 'shardLocal' and 'shardOutput'.
         if (!isReplSet) {
-            assert.commandWorked(admin.runCommand({enableSharding: dbName}));
-            testFixture.ensurePrimaryShard(dbName, testFixture.shard0.shardName);
             if (shardLocal) {
                 testFixture.shardColl(collName, {_id: 1}, {_id: 0}, {_id: 0}, dbName);
             }
@@ -131,15 +129,17 @@ function runTest({testFixture, conn, shardLocal, shardOutput}) {
                                  ErrorCodes.BSONObjectTooLarge);
 }
 
-// Test against a replica set.
-const rst = new ReplSetTest({nodes: 2});
-rst.startSet();
-rst.initiate();
-rst.awaitSecondaryNodes();
+if (!jsTestOptions().useAutoBootstrapProcedure) {  // TODO: SERVER-80318 Delete block
+    // Test against a replica set.
+    const rst = new ReplSetTest({nodes: 2});
+    rst.startSet();
+    rst.initiate();
+    rst.awaitSecondaryNodes();
 
-runTest({testFixture: rst, conn: rst.getPrimary()});
+    runTest({testFixture: rst, conn: rst.getPrimary()});
 
-rst.stopSet();
+    rst.stopSet();
+}
 
 // Test against a sharded cluster.
 const st = new ShardingTest({shards: 2, mongos: 1});

@@ -31,7 +31,6 @@
 
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <memory>
 #include <vector>
@@ -46,7 +45,7 @@
 #include "mongo/db/matcher/expression_visitor.h"
 #include "mongo/db/matcher/expression_with_placeholder.h"
 #include "mongo/db/matcher/match_details.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -89,7 +88,8 @@ public:
     }
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts) const final;
+                                       const SerializationOptions& opts = {},
+                                       bool includePath = true) const final;
 
     std::unique_ptr<MatchExpression> clone() const final;
 

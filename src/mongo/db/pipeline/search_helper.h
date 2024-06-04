@@ -39,12 +39,17 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/service_context.h"
 #include "mongo/executor/task_executor_cursor.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo {
+static constexpr auto kReturnStoredSourceArg = "returnStoredSource"_sd;
+
+using RemoteCursorMap = absl::flat_hash_map<size_t, std::unique_ptr<executor::TaskExecutorCursor>>;
+using RemoteExplainVector = std::vector<BSONObj>;
 
 /**
  * A class that contains any functions needed to run $seach queries when the enterprise module
@@ -58,6 +63,13 @@ public:
      * Any access of $$SEARCH_META is invalid without enterprise.
      */
     virtual void assertSearchMetaAccessValid(const Pipeline::SourceContainer& pipeline,
+                                             ExpressionContext* expCtx);
+    /**
+     * Overload used to check that $$SEARCH_META is being referenced correctly in a pipeline split
+     * for execution on a sharded cluster.
+     */
+    virtual void assertSearchMetaAccessValid(const Pipeline::SourceContainer& shardsPipeline,
+                                             const Pipeline::SourceContainer& mergePipeline,
                                              ExpressionContext* expCtx);
 
     /**
@@ -114,19 +126,6 @@ public:
     }
 
     /**
-     * Establish a cursor given the search query and CursorResponse from the initial execution.
-     */
-    boost::optional<executor::TaskExecutorCursor> establishSearchCursor(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        const BSONObj& query,
-        CursorResponse&& response,
-        boost::optional<long long> docsRequested = boost::none,
-        std::function<void(BSONObjBuilder& bob)> augmentGetMore = nullptr,
-        const boost::optional<int>& protocolVersion = boost::none) {
-        return boost::none;
-    }
-
-    /**
      * Check if this is a $searchMeta stage.
      */
     virtual bool isSearchStage(DocumentSource* stage) {
@@ -142,20 +141,54 @@ public:
 
     /**
      * Gets the information for the search QSN from DocumentSourceSearch.
-     * The results are returned as a tuple of the format:
-     * <limit, mongotDocsRequested, searchQuery, taskExecutor, intermediateResultsProtocolVersion>
      */
     virtual std::unique_ptr<SearchNode> getSearchNode(DocumentSource* stage) {
         return nullptr;
     }
 
     /**
-     * Executes the initial $search query to get the cursor id and first batch for building the
-     * $search SBE plan.
+     * Executes the cursor for $search query.
      */
-    virtual std::pair<CursorResponse, CursorResponse> establishSearchQueryCursors(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx, const SearchNode* searchNode) {
-        return {CursorResponse(), CursorResponse()};
+    virtual void establishSearchQueryCursors(boost::intrusive_ptr<ExpressionContext> expCtx,
+                                             DocumentSource* stage,
+                                             std::unique_ptr<PlanYieldPolicy> yieldPolicy) {}
+
+    /**
+     * Encode $search/$searchMeta to SBE plan cache.
+     * Returns true if $search/$searchMeta is at the front of the 'pipeline' and encoding is done.
+     */
+    virtual bool encodeSearchForSbeCache(const ExpressionContext* expCtx,
+                                         DocumentSource* ds,
+                                         BufBuilder* bufBuilder) {
+        return false;
+    }
+
+    virtual boost::optional<executor::TaskExecutorCursor> getSearchMetadataCursor(
+        DocumentSource* ds) {
+        return boost::none;
+    }
+
+    virtual std::function<void(BSONObjBuilder& bob)> buildSearchGetMoreFunc(
+        std::function<boost::optional<long long>()> calcDocsNeeded) {
+        return nullptr;
+    }
+
+    /**
+     * Executes the metadata cursor for $search query.
+     */
+    virtual void establishSearchMetaCursor(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                           DocumentSource* stage,
+                                           std::unique_ptr<PlanYieldPolicy>) {}
+
+    virtual std::unique_ptr<RemoteCursorMap> getSearchRemoteCursors(
+        std::vector<std::unique_ptr<InnerPipelineStageInterface>>& cqPipeline) {
+        return nullptr;
+    }
+
+    virtual std::unique_ptr<RemoteExplainVector> getSearchRemoteExplains(
+        const ExpressionContext* expCtx,
+        std::vector<std::unique_ptr<InnerPipelineStageInterface>>& cqPipeline) {
+        return nullptr;
     }
 };
 
@@ -163,5 +196,7 @@ public:
  * A 'ServiceContext' decorator that allows enterprise to set its own version of the above class.
  */
 extern ServiceContext::Decoration<std::unique_ptr<SearchDefaultHelperFunctions>> getSearchHelpers;
+
+extern FailPoint searchReturnEofImmediately;
 
 }  // namespace mongo

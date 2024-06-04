@@ -2,7 +2,7 @@
  * Tests $_requestResumeToken in aggregate command.
  *
  * @tags: [
- *  require_fcv_71,
+ *  requires_fcv_72,
  *  featureFlagReshardingImprovements
  * ]
  */
@@ -43,7 +43,7 @@ assert.commandFailedWithCode(db.runCommand({
                              ErrorCodes.BadValue);
 
 jsTest.log(
-    "aggregate with $requestResumeToken should return PBRT with recordId and initialSyncId.");
+    "aggregate with $requestResumeToken should return PBRT with recordId and an initialSyncId.");
 let res = db.runCommand({
     aggregate: collName,
     pipeline: [],

@@ -52,6 +52,7 @@
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/write_batch.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/stdx/unordered_map.h"
 
@@ -72,20 +73,21 @@ write_ops::UpdateCommandRequest buildSingleUpdateOp(const write_ops::UpdateComma
 void assertTimeseriesBucketsCollection(const Collection* bucketsColl);
 
 /**
- * Returns the document for writing a new bucket with a write batch.
+ * Holds the bucket document used for writing to disk. The uncompressed bucket document is always
+ * set. If the 'gTimeseriesAlwaysUseCompressedBuckets' feature flag is enabled then the compressed
+ * bucket document is also set unless compression fails.
  */
-BSONObj makeNewDocumentForWrite(std::shared_ptr<timeseries::bucket_catalog::WriteBatch> batch,
-                                const BSONObj& metadata);
+struct BucketDocument {
+    BSONObj uncompressedBucket;
+    boost::optional<BSONObj> compressedBucket;
+    bool compressionFailed = false;
+};
 
 /**
- * Returns a new document, compressed, with which to initialize a new bucket containing only the
- * given 'batch'. If compression fails for any reason, an uncompressed document will be returned.
+ * Returns the document for writing a new bucket with a write batch.
  */
-BSONObj makeNewCompressedDocumentForWrite(
-    std::shared_ptr<timeseries::bucket_catalog::WriteBatch> batch,
-    const BSONObj& metadata,
-    const NamespaceString& nss,
-    StringData timeField);
+BucketDocument makeNewDocumentForWrite(
+    std::shared_ptr<timeseries::bucket_catalog::WriteBatch> batch, const BSONObj& metadata);
 
 /**
  * Returns the document for writing a new bucket with 'measurements'. Calculates the min and max
@@ -93,12 +95,13 @@ BSONObj makeNewCompressedDocumentForWrite(
  *
  * The measurements must already be known to fit in the same bucket. No checks will be done.
  */
-BSONObj makeNewDocumentForWrite(
+BucketDocument makeNewDocumentForWrite(
+    const NamespaceString& nss,
     const OID& bucketId,
     const std::vector<BSONObj>& measurements,
     const BSONObj& metadata,
-    const boost::optional<TimeseriesOptions>& options,
-    const boost::optional<const StringData::ComparatorInterface*>& comparator);
+    const TimeseriesOptions& options,
+    const boost::optional<const StringDataComparator*>& comparator);
 
 /**
  * Returns the document for writing a new bucket with 'measurements'. Generates the id and
@@ -109,7 +112,7 @@ BSONObj makeNewDocumentForWrite(
 BSONObj makeBucketDocument(const std::vector<BSONObj>& measurements,
                            const NamespaceString& nss,
                            const TimeseriesOptions& options,
-                           const StringData::ComparatorInterface* comparator);
+                           const StringDataComparator* comparator);
 
 /**
  * Returns an update request to the bucket when the 'measurements' is non-empty. Otherwise, returns
@@ -261,4 +264,45 @@ void performAtomicWritesForUpdate(
     bool fromMigrate,
     StmtId stmtId,
     std::set<OID>* bucketIds);
+
+/**
+ * Change the bucket namespace to time-series view namespace for time-series command.
+ */
+BSONObj timeseriesViewCommand(const BSONObj& cmd, std::string cmdName, StringData viewNss);
+
+/**
+ * Translates the hint provided for an update/delete request on a timeseries view to match the
+ * indexes of the underlying bucket collection.
+ */
+template <typename R>
+void timeseriesHintTranslation(const CollectionPtr& coll, R* request) {
+    // Only translate the hint if it is specified with an index key.
+    auto timeseriesOptions = coll->getTimeseriesOptions();
+    if (timeseries::isHintIndexKey(request->getHint())) {
+        request->setHint(uassertStatusOK(timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(
+            *timeseriesOptions, request->getHint())));
+    }
+}
+
+/**
+ * Performs checks on an update/delete request being performed on a timeseries view.
+ */
+template <typename R>
+void timeseriesRequestChecks(const CollectionPtr& coll,
+                             R* request,
+                             std::function<void(R*, const TimeseriesOptions&)> checkRequestFn) {
+    timeseries::assertTimeseriesBucketsCollection(coll.get());
+    auto timeseriesOptions = coll->getTimeseriesOptions().value();
+    checkRequestFn(request, timeseriesOptions);
+}
+
+/**
+ * Function that performs checks on a delete request being performed on a timeseries collection.
+ */
+void deleteRequestCheckFunction(DeleteRequest* request, const TimeseriesOptions& options);
+
+/**
+ * Function that performs checks on an update request being performed on a timeseries collection.
+ */
+void updateRequestCheckFunction(UpdateRequest* request, const TimeseriesOptions& options);
 }  // namespace mongo::timeseries

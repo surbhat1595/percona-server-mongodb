@@ -35,78 +35,238 @@
 #include "mongo/db/exec/sbe/size_estimator.h"
 
 namespace mongo::sbe {
-IndexedStringVector MakeObjSpec::buildIndexedFieldVector(std::vector<std::string> names) {
-    if (fieldInfos.empty()) {
-        numKeepOrDrops = names.size();
+
+StringListSet MakeObjSpec::buildFieldDict(std::vector<std::string> names) {
+    const bool isClosed = fieldsScopeIsClosed();
+
+    if (actions.empty()) {
+        actions.resize(numFieldsOfInterest);
+        if (isClosed) {
+            for (size_t i = 0; i < actions.size(); ++i) {
+                actions[i] = Keep{};
+            }
+        } else {
+            for (size_t i = 0; i < actions.size(); ++i) {
+                actions[i] = Drop{};
+            }
+        }
+
+        numFieldsOfInterest = actions.size();
         numValueArgs = 0;
-        numMandatoryLambdas = 0;
-        numMandatoryMakeObjs = 0;
         totalNumArgs = 0;
+    } else {
+        tassert(7103500,
+                "Expected 'names' and 'fieldsInfos' to be the same size",
+                names.size() == actions.size());
 
-        fieldInfos = std::vector<FieldInfo>{};
-        fieldInfos.resize(numKeepOrDrops);
+        for (size_t i = 0; i < actions.size(); ++i) {
+            auto& action = actions[i];
+            if (action.isMandatory()) {
+                mandatoryFields.push_back(i);
+            }
+        }
 
-        return IndexedStringVector(std::move(names));
+        initCounters();
     }
 
-    tassert(7103500,
-            "Expected 'names' and 'fieldsInfos' to be the same size",
-            names.size() == fieldInfos.size());
+    return StringListSet(std::move(names));
+}
 
-    std::vector<std::string> keepOrDrops;
+StringListSet MakeObjSpec::buildFieldDict(std::vector<std::string> names,
+                                          const MakeObjInputPlan& inputPlan) {
+    bool isClosed = fieldsScopeIsClosed();
 
-    numKeepOrDrops = 0;
-    numValueArgs = 0;
-    numMandatoryLambdas = 0;
-    numMandatoryMakeObjs = 0;
-    totalNumArgs = 0;
+    if (actions.empty()) {
+        actions.resize(names.size());
+        for (size_t i = 0; i < names.size(); ++i) {
+            actions[i] = isClosed ? FieldAction{Keep{}} : FieldAction{Drop{}};
+        }
+    } else {
+        tassert(8146600,
+                "Expected 'names' and 'fieldsInfos' to be the same size",
+                names.size() == actions.size());
+    }
 
-    size_t endPos = 0;
+    const auto& fieldDict = inputPlan.getFieldDict();
+    size_t n = fieldDict.size();
+    auto newActions = std::vector<sbe::MakeObjSpec::FieldAction>(n);
 
-    for (size_t i = 0; i < names.size(); ++i) {
-        if (fieldInfos[i].isKeepOrDrop()) {
-            ++numKeepOrDrops;
-            keepOrDrops.emplace_back(std::move(names[i]));
+    for (size_t i = 0; i < n; ++i) {
+        if (!inputPlan.isFieldUsed(fieldDict[i])) {
+            // For each field discarded by 'inputPlan', initialize the corresponding entry in
+            // 'newActions' to "Drop".
+            newActions[i] = Drop{};
         } else {
-            if (fieldInfos[i].isValueArg()) {
-                ++numValueArgs;
-            } else if (fieldInfos[i].isLambdaArg() &&
-                       !fieldInfos[i].getLambdaArg().returnsNothingOnMissingInput) {
-                ++numMandatoryLambdas;
-            } else if (fieldInfos[i].isMakeObj() &&
-                       !fieldInfos[i].getMakeObjSpec()->returnsNothingOnMissingInput()) {
-                ++numMandatoryMakeObjs;
-            }
-
-            if (fieldInfos[i].isValueArg() || fieldInfos[i].isLambdaArg()) {
-                ++totalNumArgs;
-            } else if (fieldInfos[i].isMakeObj()) {
-                totalNumArgs += fieldInfos[i].getMakeObjSpec()->totalNumArgs;
-            }
-
-            if (i != endPos) {
-                names[endPos] = std::move(names[i]);
-                fieldInfos[endPos] = std::move(fieldInfos[i]);
-            }
-            ++endPos;
+            // For each field not discardard by 'inputPlan', initialize the corresponding entry in
+            // 'newActions' to "Drop" (if isClosed is true) or "Keep" (if isClosed is false).
+            newActions[i] = isClosed ? FieldAction{Drop{}} : FieldAction{Keep{}};
         }
     }
 
-    if (endPos != names.size()) {
-        names.erase(names.begin() + endPos, names.end());
-        fieldInfos.erase(fieldInfos.begin() + endPos, fieldInfos.end());
+    // Copy the contents of 'actions' over to 'newActions' and populate 'mandatoryFields'.
+    for (size_t i = 0; i < actions.size(); ++i) {
+        auto& action = actions[i];
+
+        size_t pos = fieldDict.findPos(names[i]);
+        if (pos == StringListSet::npos) {
+            tassert(8146601,
+                    "Expected non-dropped field from 'names' to be present in 'fieldDict'",
+                    action.isDrop() && inputPlan.fieldsScopeIsClosed());
+            continue;
+        }
+
+        newActions[pos] = action.clone();
+
+        if (action.isMandatory()) {
+            mandatoryFields.push_back(pos);
+        }
     }
 
-    std::vector<FieldInfo> newFieldInfos;
-    newFieldInfos.resize(numKeepOrDrops);
+    // Update 'fieldsScope' to match 'inputPlan.getFieldsScope()'.
+    fieldsScope = inputPlan.getFieldsScope();
 
-    std::move(fieldInfos.begin(), fieldInfos.end(), std::back_inserter(newFieldInfos));
-    fieldInfos = std::move(newFieldInfos);
+    // Store the updated Actions vector into 'actions'.
+    actions = std::move(newActions);
 
-    std::vector<std::string> newNames = std::move(keepOrDrops);
-    std::move(names.begin(), names.end(), std::back_inserter(newNames));
+    // Initialize 'numInputFields'.
+    numInputFields = inputPlan.numSingleFields();
 
-    return IndexedStringVector(std::move(newNames));
+    // Initialize 'displayOrder'. First we add all the original fields in their original order
+    // and then we add the rest of the fields from the updated Actions vector (skipping any
+    // fields with "default behavior").
+    absl::flat_hash_set<size_t> displayOrderSet;
+
+    for (size_t i = 0; i < names.size(); ++i) {
+        size_t pos = fieldDict.findPos(names[i]);
+        if (pos != StringListSet::npos) {
+            auto& action = actions[i];
+
+            if (isClosed ? action.isKeep() : action.isDrop()) {
+                displayOrderSet.emplace(pos);
+                displayOrder.push_back(pos);
+            }
+        }
+    }
+
+    for (size_t i = 0; i < actions.size(); ++i) {
+        if (!displayOrderSet.count(i)) {
+            auto& action = actions[i];
+
+            if (isClosed ? action.isKeep() : action.isDrop()) {
+                displayOrder.push_back(i);
+            }
+        }
+    }
+
+    initCounters();
+
+    return fieldDict;
+}
+
+void MakeObjSpec::initCounters() {
+    const bool isClosed = fieldsScopeIsClosed();
+
+    numFieldsOfInterest = 0;
+    numValueArgs = 0;
+    totalNumArgs = 0;
+
+    for (size_t i = 0; i < actions.size(); ++i) {
+        if (actions[i].isKeep() || actions[i].isDrop()) {
+            numFieldsOfInterest += static_cast<uint8_t>(isClosed == actions[i].isKeep());
+            continue;
+        }
+
+        ++numFieldsOfInterest;
+
+        if (actions[i].isValueArg()) {
+            ++numValueArgs;
+            ++totalNumArgs;
+        } else if (actions[i].isLambdaArg()) {
+            ++totalNumArgs;
+        } else if (actions[i].isMakeObj()) {
+            totalNumArgs += actions[i].getMakeObjSpec()->totalNumArgs;
+        }
+    }
+}
+
+std::string MakeObjSpec::toString() const {
+    const bool isClosed = fieldsScopeIsClosed();
+
+    StringBuilder builder;
+    builder << "[";
+
+    bool hasDisplayOrder = !displayOrder.empty();
+    size_t n = hasDisplayOrder ? displayOrder.size() : fields.size();
+
+    bool first = true;
+    for (size_t i = 0; i < n; ++i) {
+        size_t pos = hasDisplayOrder ? displayOrder[i] : i;
+
+        auto& name = fields[pos];
+        auto& action = actions[pos];
+
+        if ((action.isKeep() || action.isDrop()) && isClosed == action.isDrop()) {
+            continue;
+        }
+
+        if (!first) {
+            builder << ", ";
+        } else {
+            first = false;
+        }
+
+        builder << name;
+
+        if (!action.isKeep() && !action.isDrop()) {
+            if (action.isValueArg()) {
+                builder << " = Arg(" << action.getValueArgIdx() << ")";
+            } else if (action.isLambdaArg()) {
+                const auto& lambdaArg = action.getLambdaArg();
+                builder << " = LambdaArg(" << lambdaArg.argIdx
+                        << (lambdaArg.returnsNothingOnMissingInput ? "" : ", false") << ")";
+            } else if (action.isMakeObj()) {
+                auto spec = action.getMakeObjSpec();
+                builder << " = MakeObj(" << spec->toString() << ")";
+            }
+        }
+    }
+
+    builder << "], ";
+
+    if (numInputFields) {
+        size_t n = *numInputFields;
+
+        builder << "[";
+
+        bool first = true;
+        for (size_t i = 0; i < n; ++i) {
+            if (!first) {
+                builder << ", ";
+            } else {
+                first = false;
+            }
+
+            builder << fields[i];
+        }
+
+        builder << "], ";
+    }
+
+    builder << (isClosed ? "Closed" : "Open");
+
+    if (nonObjInputBehavior == NonObjInputBehavior::kReturnNothing) {
+        builder << ", RetNothing";
+    } else if (nonObjInputBehavior == NonObjInputBehavior::kReturnInput) {
+        builder << ", RetInput";
+    } else if (traversalDepth.has_value()) {
+        builder << ", NewObj";
+    }
+
+    if (traversalDepth.has_value()) {
+        builder << ", " << *traversalDepth;
+    }
+
+    return builder.str();
 }
 
 size_t MakeObjSpec::getApproximateSize() const {
@@ -114,22 +274,23 @@ size_t MakeObjSpec::getApproximateSize() const {
 
     size += size_estimator::estimate(fields);
 
-    size += size_estimator::estimateContainerOnly(fieldInfos);
+    size += size_estimator::estimateContainerOnly(actions);
 
-    for (size_t i = 0; i < fieldInfos.size(); ++i) {
-        if (fieldInfos[i].isMakeObj()) {
-            size += fieldInfos[i].getMakeObjSpec()->getApproximateSize();
+    for (size_t i = 0; i < actions.size(); ++i) {
+        if (actions[i].isMakeObj()) {
+            size += actions[i].getMakeObjSpec()->getApproximateSize();
         }
     }
 
     return size;
 }
 
-MakeObjSpec::FieldInfo MakeObjSpec::FieldInfo::clone() const {
-    return stdx::visit(OverloadedVisitor{[](KeepOrDrop kd) -> FieldInfo { return kd; },
-                                         [](ValueArg va) -> FieldInfo { return va; },
-                                         [](LambdaArg la) -> FieldInfo { return la; },
-                                         [](const MakeObj& makeObj) -> FieldInfo {
+MakeObjSpec::FieldAction MakeObjSpec::FieldAction::clone() const {
+    return stdx::visit(OverloadedVisitor{[](Keep k) -> FieldAction { return k; },
+                                         [](Drop d) -> FieldAction { return d; },
+                                         [](ValueArg va) -> FieldAction { return va; },
+                                         [](LambdaArg la) -> FieldAction { return la; },
+                                         [](const MakeObj& makeObj) -> FieldAction {
                                              return MakeObj{makeObj.spec->clone()};
                                          }},
                        _data);

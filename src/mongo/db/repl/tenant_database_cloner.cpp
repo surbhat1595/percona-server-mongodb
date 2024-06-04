@@ -32,7 +32,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
 #include <list>
@@ -116,9 +115,9 @@ BaseCloner::AfterStageBehavior TenantDatabaseCloner::listCollectionsStage() {
     // This will be set after a successful listCollections command.
     _operationTime = Timestamp();
 
-    auto collectionInfos =
-        getClient()->getCollectionInfos(DatabaseNameUtil::deserialize(boost::none, _dbName),
-                                        ListCollectionsFilter::makeTypeCollectionFilter());
+    auto collectionInfos = getClient()->getCollectionInfos(
+        DatabaseNameUtil::deserialize(boost::none, _dbName, SerializationContext::stateDefault()),
+        ListCollectionsFilter::makeTypeCollectionFilter());
 
     // Do a majority read on the sync source to make sure the collections listed exist on a majority
     // of nodes in the set. We do not check the rollbackId - rollback would lead to the sync source
@@ -176,8 +175,8 @@ BaseCloner::AfterStageBehavior TenantDatabaseCloner::listCollectionsStage() {
                     .withContext(str::stream() << "Collection info could not be parsed : " << info)
                     .reason());
         }
-        const auto collectionNamespace =
-            NamespaceStringUtil::deserialize(boost::none, _dbName, result.getName());
+        const auto collectionNamespace = NamespaceStringUtil::deserialize(
+            boost::none, _dbName, result.getName(), SerializationContext::stateDefault());
         if (collectionNamespace.isSystem() && !collectionNamespace.isReplicated()) {
             LOGV2_DEBUG(4881602,
                         1,
@@ -228,9 +227,9 @@ BaseCloner::AfterStageBehavior TenantDatabaseCloner::listExistingCollectionsStag
     long long approxTotalDBSizeOnDisk = 0;
 
     std::vector<UUID> clonedCollectionUUIDs;
-    auto collectionInfos =
-        client.getCollectionInfos(DatabaseNameUtil::deserialize(boost::none, _dbName),
-                                  ListCollectionsFilter::makeTypeCollectionFilter());
+    auto collectionInfos = client.getCollectionInfos(
+        DatabaseNameUtil::deserialize(boost::none, _dbName, SerializationContext::stateDefault()),
+        ListCollectionsFilter::makeTypeCollectionFilter());
     for (auto&& info : collectionInfos) {
         ListCollectionResult result;
         try {
@@ -243,8 +242,8 @@ BaseCloner::AfterStageBehavior TenantDatabaseCloner::listExistingCollectionsStag
                     .withContext(str::stream() << "Collection info could not be parsed : " << info)
                     .reason());
         }
-        const auto collectionNamespace =
-            NamespaceStringUtil::deserialize(boost::none, _dbName, result.getName());
+        const auto collectionNamespace = NamespaceStringUtil::deserialize(
+            boost::none, _dbName, result.getName(), SerializationContext::stateDefault());
         if (collectionNamespace.isSystem() && !collectionNamespace.isReplicated()) {
             LOGV2_DEBUG(5271600,
                         1,
@@ -257,7 +256,8 @@ BaseCloner::AfterStageBehavior TenantDatabaseCloner::listExistingCollectionsStag
         clonedCollectionUUIDs.emplace_back(result.getInfo().getUuid());
 
         BSONObj res;
-        client.runCommand(DatabaseNameUtil::deserialize(boost::none, _dbName),
+        client.runCommand(DatabaseNameUtil::deserialize(
+                              boost::none, _dbName, SerializationContext::stateDefault()),
                           BSON("collStats" << result.getName()),
                           res);
         if (auto status = getStatusFromCommandResult(res); !status.isOK()) {
@@ -337,7 +337,8 @@ void TenantDatabaseCloner::postStage() {
         _stats.collectionStats.reserve(_collections.size());
         for (const auto& coll : _collections) {
             _stats.collectionStats.emplace_back();
-            _stats.collectionStats.back().ns = NamespaceStringUtil::serialize(coll.first);
+            _stats.collectionStats.back().ns =
+                NamespaceStringUtil::serialize(coll.first, SerializationContext::stateDefault());
         }
     }
     for (const auto& coll : _collections) {

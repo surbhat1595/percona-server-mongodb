@@ -29,7 +29,6 @@
 
 
 #include <absl/container/node_hash_map.h>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
@@ -121,8 +120,6 @@ bool sustainerAdvanced(const std::vector<repl::MemberData>& prevMemberData,
                        const std::vector<repl::MemberData>& currMemberData) {
     if (currMemberData.size() == 0 || currMemberData.size() != prevMemberData.size()) {
         LOGV2_WARNING(22223,
-                      "Flow control detected a change in topology. PrevMemberSize: "
-                      "{prevSize} CurrMemberSize: {currSize}",
                       "Flow control detected a change in topology",
                       "prevSize"_attr = prevMemberData.size(),
                       "currSize"_attr = currMemberData.size());
@@ -134,8 +131,6 @@ bool sustainerAdvanced(const std::vector<repl::MemberData>& prevMemberData,
 
     if (currSustainerAppliedTs < prevSustainerAppliedTs) {
         LOGV2_WARNING(22224,
-                      "Flow control's sustainer time decreased. PrevSustainer: "
-                      "{prevApplied} CurrSustainer: {currApplied}",
                       "Flow control's sustainer time decreased",
                       "prevApplied"_attr = prevSustainerAppliedTs,
                       "currApplied"_attr = currSustainerAppliedTs);

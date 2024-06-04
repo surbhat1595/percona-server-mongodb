@@ -30,7 +30,6 @@
 #include "mongo/db/update/update_util.h"
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <map>
 #include <memory>
@@ -123,7 +122,8 @@ void produceDocumentForUpsert(OperationContext* opCtx,
     // First: populate the document's immutable paths with equality predicate values from the query,
     // if available. This generates the pre-image document that we will run the update against.
     if (auto* cq = canonicalQuery) {
-        uassertStatusOK(driver->populateDocumentWithQueryFields(*cq->root(), immutablePaths, doc));
+        uassertStatusOK(driver->populateDocumentWithQueryFields(
+            *cq->getPrimaryMatchExpression(), immutablePaths, doc));
     } else {
         fassert(17354, CanonicalQuery::isSimpleIdQuery(request->getQuery()));
         fassert(17352, doc.root().appendElement(request->getQuery()[idFieldName]));
@@ -191,6 +191,7 @@ void makeUpdateRequest(OperationContext* opCtx,
     requestOut->setExplain(explain);
 
     requestOut->setYieldPolicy(PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
+    requestOut->setIsTimeseriesNamespace(request.getIsTimeseriesNamespace());
 }
 
 }  // namespace update

@@ -29,7 +29,6 @@
 
 #include "mongo/db/query/index_bounds.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
 #include <iterator>
@@ -257,6 +256,16 @@ bool OrderedIntervalList::isMaxToMin() const {
 
 bool OrderedIntervalList::isPoint() const {
     return intervals.size() == 1 && intervals[0].isPoint();
+}
+
+bool OrderedIntervalList::containsOnlyPointIntervals() const {
+    for (const auto& interval : intervals) {
+        if (!interval.isPoint()) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 // static

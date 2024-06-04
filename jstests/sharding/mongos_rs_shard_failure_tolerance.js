@@ -17,6 +17,11 @@ TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 TestData.skipCheckOrphans = true;
 TestData.skipCheckShardFilteringMetadata = true;
 
+// The routing table consistency check runs with 'snapshot' level readConcern. This readConcern
+// level cannot be satisfied without a replica set primary, which we won't have because this test
+// removes the replica set primary from a shard.
+TestData.skipCheckRoutingTableConsistency = true;
+
 var st = new ShardingTest({shards: 3, mongos: 1, other: {rs: true, rsOptions: {nodes: 2}}});
 
 var mongos = st.s0;

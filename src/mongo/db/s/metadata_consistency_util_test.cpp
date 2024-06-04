@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 #include "mongo/db/s/metadata_consistency_util.h"
 
@@ -51,6 +50,8 @@
 #include "mongo/unittest/framework.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 
 namespace mongo {
@@ -214,6 +215,22 @@ TEST_F(MetadataConsistencyTest, FindZoneRangeOverlapInconsistency) {
 
     assertOneInconsistencyFound(
         MetadataInconsistencyTypeEnum::kZonesRangeOverlap, _nss, inconsistencies);
+}
+
+TEST_F(MetadataConsistencyTest, FindCorruptedShardKeyInconsistencyForUnsplittableCollection) {
+    const NamespaceString nss =
+        NamespaceString::createNamespaceString_forTest("TestDB", "TestCollUnsplittable");
+    const UUID collUuid = UUID::gen();
+    const KeyPattern keyPattern{BSON("x" << 1)};
+    CollectionType coll{nss, OID::gen(), Timestamp(1), Date_t::now(), collUuid, keyPattern};
+    coll.setUnsplittable(true);
+    const auto inconsistencies =
+        metadata_consistency_util::checkCollectionShardingMetadataConsistency(operationContext(),
+                                                                              coll);
+    assertOneInconsistencyFound(
+        MetadataInconsistencyTypeEnum::kTrackedUnshardedCollectionHasInvalidKey,
+        _nss,
+        inconsistencies);
 }
 
 class MetadataConsistencyRandomRoutingTableTest : public ShardServerTestFixture {

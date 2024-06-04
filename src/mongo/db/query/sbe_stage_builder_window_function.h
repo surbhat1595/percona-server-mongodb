@@ -42,7 +42,17 @@ namespace mongo::stage_builder {
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInit(
     StageBuilderState& state,
     const WindowFunctionStatement& stmt,
-    std::unique_ptr<sbe::EExpression> arg);
+    std::unique_ptr<sbe::EExpression> arg,
+    boost::optional<sbe::value::SlotId> collatorSlot);
+
+/**
+ * Similar to above but takes multiple arguments.
+ */
+std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInit(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> args,
+    boost::optional<sbe::value::SlotId> collatorSlot);
 
 /**
  * Build a list of window function add functions.
@@ -50,7 +60,8 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInit(
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAdd(
     StageBuilderState& state,
     const WindowFunctionStatement& stmt,
-    std::unique_ptr<sbe::EExpression> arg);
+    std::unique_ptr<sbe::EExpression> arg,
+    boost::optional<sbe::value::SlotId> collatorSlot);
 
 /**
  * Similar to above but takes multiple arguments.
@@ -58,7 +69,8 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAdd(
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAdd(
     StageBuilderState& state,
     const WindowFunctionStatement& stmt,
-    StringDataMap<std::unique_ptr<sbe::EExpression>> args);
+    StringDataMap<std::unique_ptr<sbe::EExpression>> args,
+    boost::optional<sbe::value::SlotId> collatorSlot);
 
 /**
  * Build a list of window function remove functions.
@@ -66,7 +78,8 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAdd(
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowRemove(
     StageBuilderState& state,
     const WindowFunctionStatement& stmt,
-    std::unique_ptr<sbe::EExpression> arg);
+    std::unique_ptr<sbe::EExpression> arg,
+    boost::optional<sbe::value::SlotId> collatorSlot);
 
 /**
  * Similar to above but takes multiple arguments.
@@ -79,9 +92,21 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowRemove(
 /**
  * Build a window function finalize functions from the list of intermediate values.
  */
-std::unique_ptr<sbe::EExpression> buildWindowFinalize(StageBuilderState& state,
-                                                      const WindowFunctionStatement& stmt,
-                                                      sbe::value::SlotVector values);
+std::unique_ptr<sbe::EExpression> buildWindowFinalize(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    sbe::value::SlotVector values,
+    boost::optional<sbe::value::SlotId> collatorSlot);
+
+/**
+ * Similar to above but takes multiple arguments.
+ */
+std::unique_ptr<sbe::EExpression> buildWindowFinalize(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    sbe::value::SlotVector values,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> arg,
+    boost::optional<sbe::value::SlotId> collatorSlots);
 
 /**
  * Create a fake AccumulationStatement from the WindowFunctionStatement in order to invoke

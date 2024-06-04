@@ -33,7 +33,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <memory>
 #include <stack>
@@ -161,6 +160,8 @@ public:
     void ignoreAllMultiTimestampConstraints() {
         _multiTimestampConstraintTracker.ignoreAllMultiTimestampConstraints = true;
     }
+
+    void setCacheMaxWaitTimeout(Milliseconds) override;
 
     // ---- WT STUFF
 
@@ -296,6 +297,8 @@ private:
     std::vector<BSONObj> _writeContextForDebugging;
 
     WiredTigerStats _sessionStatsAfterLastOperation;
+
+    Milliseconds _cacheMaxWaitTimeout{0};
 };
 
 }  // namespace mongo

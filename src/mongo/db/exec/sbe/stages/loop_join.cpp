@@ -32,7 +32,6 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/inlined_vector.h>
 #include <absl/meta/type_traits.h>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -198,13 +197,6 @@ PlanState LoopJoinStage::getNext() {
         openInner();
         innerSideMatched = false;
     }
-}
-
-void LoopJoinStage::saveChildrenState(bool relinquishCursor, bool disableSlotAccess) {
-    // LoopJoinStage::getNext() only guarantees that the inner child's getNext() was called. Thus,
-    // it is safe to propagate disableSlotAccess to the inner child, but not to the outer child.
-    _children[1]->saveState(relinquishCursor, disableSlotAccess);
-    _children[0]->saveState(relinquishCursor, false);
 }
 
 void LoopJoinStage::close() {

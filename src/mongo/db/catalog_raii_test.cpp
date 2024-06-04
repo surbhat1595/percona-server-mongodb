@@ -66,7 +66,7 @@ public:
         ClientAndCtx;
 
     ClientAndCtx makeClientWithLocker(const std::string& clientName) {
-        auto client = getServiceContext()->makeClient(clientName);
+        auto client = getServiceContext()->getService()->makeClient(clientName);
         auto opCtx = client->makeOperationContext();
         client->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
         return std::make_pair(std::move(client), std::move(opCtx));
@@ -130,7 +130,6 @@ TEST_F(CatalogRAIITestFixture, AutoGetDBGlobalLockDeadline) {
 TEST_F(CatalogRAIITestFixture, AutoGetDBDeadlineNow) {
     Lock::DBLock dbLock1(client1.second.get(), nss.dbName(), MODE_IX);
     ASSERT(client1.second->lockState()->isDbLockedForMode(nss.dbName(), MODE_IX));
-    AutoGetDb db(client2.second.get(), nss.dbName(), MODE_IX);
     failsWithLockTimeout(
         [&] { AutoGetDb db(client2.second.get(), nss.dbName(), MODE_X, Date_t::now()); },
         Milliseconds(0));
@@ -139,7 +138,6 @@ TEST_F(CatalogRAIITestFixture, AutoGetDBDeadlineNow) {
 TEST_F(CatalogRAIITestFixture, AutoGetDBDeadlineMin) {
     Lock::DBLock dbLock1(client1.second.get(), nss.dbName(), MODE_IX);
     ASSERT(client1.second->lockState()->isDbLockedForMode(nss.dbName(), MODE_IX));
-    AutoGetDb db(client2.second.get(), nss.dbName(), MODE_IX);
     failsWithLockTimeout(
         [&] { AutoGetDb db(client2.second.get(), nss.dbName(), MODE_X, Date_t{}); },
         Milliseconds(0));

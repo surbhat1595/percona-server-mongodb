@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 #include <memory>
 #include <string>
@@ -53,6 +52,9 @@
 #include "mongo/s/request_types/move_primary_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+
 
 namespace mongo {
 namespace {
@@ -83,7 +85,8 @@ public:
                 opCtx,
                 request().getCommandParameter(),
                 request().getExpectedDatabaseVersion(),
-                request().getTo());
+                request().getTo(),
+                request().getSerializationContext());
         }
 
     private:
@@ -120,7 +123,7 @@ private:
         return AllowedOnSecondary::kNever;
     }
 };
-MONGO_REGISTER_COMMAND(ConfigsvrCommitMovePrimaryCommand);
+MONGO_REGISTER_COMMAND(ConfigsvrCommitMovePrimaryCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

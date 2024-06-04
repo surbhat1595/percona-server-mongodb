@@ -43,6 +43,7 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/cluster_server_parameter_cmds_gen.h"
+#include "mongo/db/commands/set_cluster_parameter_command_impl.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -59,22 +60,6 @@
 
 namespace mongo {
 namespace {
-
-void setClusterParameterImpl(OperationContext* opCtx, const SetClusterParameter& request) {
-    ConfigsvrSetClusterParameter configsvrSetClusterParameter(request.getCommandParameter());
-    configsvrSetClusterParameter.setDbName(request.getDbName());
-
-    const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
-
-    const auto cmdResponse = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
-        opCtx,
-        ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-        DatabaseName::kAdmin,
-        configsvrSetClusterParameter.toBSON({}),
-        Shard::RetryPolicy::kIdempotent));
-
-    uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(std::move(cmdResponse)));
-}
 
 class SetClusterParameterCmd final : public TypedCommand<SetClusterParameterCmd> {
 public:
@@ -97,7 +82,16 @@ public:
         using InvocationBase::InvocationBase;
 
         void typedRun(OperationContext* opCtx) {
-            setClusterParameterImpl(opCtx, request());
+            // TODO SERVER-78803: Handle concurrent cluster parameter updates correctly in sharded
+            // clusters.
+            auto service = opCtx->getService();
+            invariant(service->role().hasExclusively(ClusterRole::RouterServer),
+                      "Attempted to run a router-only command directly from the shard role.");
+            static auto impl = getSetClusterParameterImpl(service);
+            impl(opCtx,
+                 request(),
+                 boost::none /* clusterParameterTime */,
+                 boost::none /* previousTime */);
         }
 
     private:
@@ -106,7 +100,7 @@ public:
         }
 
         NamespaceString ns() const override {
-            return NamespaceString();
+            return NamespaceString::kEmpty;
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
@@ -119,10 +113,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(SetClusterParameterCmd);
-
-auto setClusterParameterRegistration =
-    MONGO_WEAK_FUNCTION_REGISTRATION(setClusterParameter, setClusterParameterImpl);
+MONGO_REGISTER_COMMAND(SetClusterParameterCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

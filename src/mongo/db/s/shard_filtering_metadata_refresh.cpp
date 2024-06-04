@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
@@ -220,7 +219,8 @@ SharedSemiFuture<void> recoverRefreshDbVersion(OperationContext* opCtx,
         .then([=,
                serviceCtx = opCtx->getServiceContext(),
                forwardableOpMetadata = ForwardableOperationMetadata(opCtx)] {
-            ThreadClient tc("DbMetadataRefreshThread", serviceCtx);
+            ThreadClient tc("DbMetadataRefreshThread",
+                            serviceCtx->getService(ClusterRole::ShardServer));
             const auto opCtxHolder =
                 CancelableOperationContext(tc->makeOperationContext(), cancellationToken, executor);
             auto opCtx = opCtxHolder.get();
@@ -402,7 +402,8 @@ SharedSemiFuture<void> recoverRefreshCollectionPlacementVersion(
     auto executor = Grid::get(serviceContext)->getExecutorPool()->getFixedExecutor();
     return ExecutorFuture<void>(executor)
         .then([=] {
-            ThreadClient tc("RecoverRefreshThread", serviceContext);
+            ThreadClient tc("RecoverRefreshThread",
+                            serviceContext->getService(ClusterRole::ShardServer));
 
             if (MONGO_unlikely(hangInRecoverRefreshThread.shouldFail())) {
                 hangInRecoverRefreshThread.pauseWhileSet();
@@ -433,7 +434,7 @@ SharedSemiFuture<void> recoverRefreshCollectionPlacementVersion(
 
             auto currentMetadata = forceGetCurrentMetadata(opCtx, nss);
 
-            if (currentMetadata.isSharded()) {
+            if (currentMetadata.hasRoutingTable()) {
                 // Abort and join any ongoing migration if migrations are disallowed for the
                 // namespace.
                 if (!currentMetadata.allowMigrations()) {
@@ -548,8 +549,6 @@ void onCollectionPlacementVersionMismatch(OperationContext* opCtx,
 
     LOGV2_DEBUG(22061,
                 2,
-                "Metadata refresh requested for {namespace} at chunk version "
-                "{chunkVersionReceived}",
                 "Metadata refresh requested for collection",
                 logAttrs(nss),
                 "chunkVersionReceived"_attr = chunkVersionReceived);
@@ -631,7 +630,6 @@ Status onCollectionPlacementVersionMismatchNoExcept(
         return Status::OK();
     } catch (const DBException& ex) {
         LOGV2(22062,
-              "Failed to refresh metadata for {namespace} due to {error}",
               "Failed to refresh metadata for collection",
               logAttrs(nss),
               "error"_attr = redact(ex));
@@ -662,7 +660,6 @@ CollectionMetadata forceGetCurrentMetadata(OperationContext* opCtx, const Namesp
         return CollectionMetadata(cm, shardingState->shardId());
     } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>& ex) {
         LOGV2(505070,
-              "Namespace {namespace} not found, collection may have been dropped",
               "Namespace not found, collection may have been dropped",
               logAttrs(nss),
               "error"_attr = redact(ex));
@@ -763,7 +760,6 @@ Status onDbVersionMismatchNoExcept(OperationContext* opCtx,
         return Status::OK();
     } catch (const DBException& ex) {
         LOGV2(22065,
-              "Failed to refresh databaseVersion for database {db} {error}",
               "Failed to refresh databaseVersion",
               "db"_attr = dbName,
               "error"_attr = redact(ex));

@@ -347,17 +347,99 @@ struct MountRecord {
     std::string superOpt;    //  (11) per-superblock options (see mount(2))
 };
 
+struct DiskStat {
+    int major;
+    int minor;
+    // See https://www.kernel.org/doc/Documentation/ABI/testing/procfs-diskstats
+    const std::vector<std::string> statsLabels = {"deviceName",
+                                                  "reads",
+                                                  "readsMerged",
+                                                  "readsSectors",
+                                                  "readsMs",
+                                                  "writes",
+                                                  "writesMerged",
+                                                  "writesSectors",
+                                                  "writesMs",
+                                                  "ioInProgress",
+                                                  "ioMs",
+                                                  "ioMsWeighted",
+                                                  "discards",
+                                                  "discardsMerged",
+                                                  "discardsSectors",
+                                                  "discardsMs",
+                                                  "flushes",
+                                                  "flushesMs"};
+    std::vector<std::string> statsValues;
+
+    void appendBSON(BSONObjBuilder& bob) const {
+        int iterations = std::min(statsLabels.size(), statsValues.size());
+        for (int i = 0; i < iterations; ++i) {
+            bob.append(statsLabels[i], statsValues[i]);
+        }
+    }
+
+    bool readLine(const std::string& line) {
+        std::istringstream iss(line);
+
+        iss >> major;
+        iss >> minor;
+        if (iss.fail()) {
+            LOGV2(5963301, "Malformed diskstats line", "line"_attr = line);
+            return false;
+        }
+
+        std::string val;
+        while (iss >> val) {
+            statsValues.push_back(val);
+        }
+        return true;
+    }
+};
+
 void appendMountInfo(BSONObjBuilder& bob) {
-    std::ifstream ifs("/proc/self/mountinfo");
-    if (!ifs)
-        return;
-    BSONArrayBuilder arr = bob.subarrayStart("mountInfo");
+    std::set<std::pair<int, int>> majorMinors;
+    std::map<std::pair<int, int>, DiskStat> diskStats;
+    std::ifstream ifs;
+
     std::string line;
-    MountRecord rec;
-    while (ifs && getline(ifs, line)) {
-        if (rec.parseLine(line)) {
-            auto bob = BSONObjBuilder(arr.subobjStart());
-            rec.appendBSON(bob);
+    ifs.open("/proc/diskstats");
+    if (ifs) {
+        while (ifs && getline(ifs, line)) {
+            DiskStat ds;
+            if (ds.readLine(line)) {
+                std::pair<int, int> majorMinor = std::make_pair(ds.major, ds.minor);
+                majorMinors.insert(majorMinor);
+                diskStats.insert({majorMinor, ds});
+            }
+        }
+    }
+    ifs.close();
+
+    std::map<std::pair<int, int>, MountRecord> mountRecords;
+    ifs.open("/proc/self/mountinfo");
+    if (ifs) {
+        while (ifs && getline(ifs, line)) {
+            MountRecord mr;
+            mr.parseLine(line);
+            std::pair<int, int> majorMinor = std::make_pair(mr.major, mr.minor);
+            majorMinors.insert(majorMinor);
+            mountRecords.insert({majorMinor, mr});
+        }
+    }
+    ifs.close();
+
+    BSONArrayBuilder arr = bob.subarrayStart("mountInfo");
+    for (const auto& majorMinor : majorMinors) {
+        auto arrBob = BSONObjBuilder(arr.subobjStart());
+
+        auto mr = mountRecords.find(majorMinor);
+        if (mr != mountRecords.end()) {
+            mr->second.appendBSON(arrBob);
+        }
+
+        auto ds = diskStats.find(majorMinor);
+        if (ds != diskStats.end()) {
+            ds->second.appendBSON(arrBob);
         }
     }
 }
@@ -409,7 +491,7 @@ public:
     /**
      * Read the first 1023 bytes from a file
      */
-    static std::string readLineFromFile(const char* fname) {
+    static std::string parseLineFromFile(const char* fname) {
         FILE* f;
         char fstr[1024] = {0};
 
@@ -492,7 +574,12 @@ public:
     static void getCpuInfo(int& procCount,
                            std::string& modelString,
                            std::string& freq,
-                           std::string& features) {
+                           std::string& features,
+                           std::string& cpuImplementer,
+                           std::string& cpuArchitecture,
+                           std::string& cpuVariant,
+                           std::string& cpuPart,
+                           std::string& cpuRevision) {
 
         procCount = 0;
 
@@ -526,6 +613,26 @@ public:
                                         {"flags",
                                          [&](const std::string& value) {
                                              features = value;
+                                         }},
+                                        {"CPU implementer",
+                                         [&](const std::string& value) {
+                                             cpuImplementer = value;
+                                         }},
+                                        {"CPU architecture",
+                                         [&](const std::string& value) {
+                                             cpuArchitecture = value;
+                                         }},
+                                        {"CPU variant",
+                                         [&](const std::string& value) {
+                                             cpuVariant = value;
+                                         }},
+                                        {"CPU part",
+                                         [&](const std::string& value) {
+                                             cpuPart = value;
+                                         }},
+                                        {"CPU revision",
+                                         [&](const std::string& value) {
+                                             cpuRevision = value;
                                          }},
 #endif
                                     },
@@ -628,14 +735,14 @@ public:
 
         // There is no standard format for name and version so use the kernel version.
         version = "Kernel ";
-        version += LinuxSysHelper::readLineFromFile("/proc/sys/kernel/osrelease");
+        version += LinuxSysHelper::parseLineFromFile("/proc/sys/kernel/osrelease");
     }
 
     /**
      * Get system memory total
      */
     static unsigned long long getSystemMemorySize() {
-        std::string meminfo = readLineFromFile("/proc/meminfo");
+        std::string meminfo = parseLineFromFile("/proc/meminfo");
         size_t lineOff = 0;
         if (!meminfo.empty() && (lineOff = meminfo.find("MemTotal")) != std::string::npos) {
             // found MemTotal line.  capture everything between 'MemTotal:' and ' kB'.
@@ -670,7 +777,7 @@ public:
                  "/sys/fs/cgroup/memory/memory.limit_in_bytes"  // cgroups v1
              }) {
             unsigned long long groupMemBytes = 0;
-            std::string groupLimit = readLineFromFile(file);
+            std::string groupLimit = parseLineFromFile(file);
             if (!groupLimit.empty() && NumberParser{}(groupLimit, &groupMemBytes).isOK()) {
                 return std::min(systemMemBytes, groupMemBytes);
             }
@@ -775,7 +882,7 @@ unsigned long countNumaNodes() {
             // read the second column of first line to determine numa state
             // ('default' = enabled, 'interleave' = disabled).  Logic from version.cpp's warnings.
             std::string line =
-                LinuxSysHelper::readLineFromFile("/proc/self/numa_maps").append(" \0");
+                LinuxSysHelper::parseLineFromFile("/proc/self/numa_maps").append(" \0");
             size_t pos = line.find(' ');
             if (pos != std::string::npos &&
                 line.substr(pos + 1, 10).find("interleave") == std::string::npos) {
@@ -796,6 +903,11 @@ unsigned long countNumaNodes() {
     return 0;
 }
 
+void appendIfExists(BSONObjBuilder* bob, std::string key, std::string value) {
+    if (!value.empty()) {
+        bob->append(key, value);
+    }
+}
 /**
  * Save a BSON obj representing the host system's details
  */
@@ -803,12 +915,21 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
     utsname unameData;
     std::string distroName, distroVersion;
     std::string cpuString, cpuFreq, cpuFeatures;
+    std::string cpuImplementer, cpuArchitecture, cpuVariant, cpuPart, cpuRevision;
     int cpuCount;
     int physicalCores;
     int cpuSockets;
 
-    std::string verSig = LinuxSysHelper::readLineFromFile("/proc/version_signature");
-    LinuxSysHelper::getCpuInfo(cpuCount, cpuString, cpuFreq, cpuFeatures);
+    std::string verSig = LinuxSysHelper::parseLineFromFile("/proc/version_signature");
+    LinuxSysHelper::getCpuInfo(cpuCount,
+                               cpuString,
+                               cpuFreq,
+                               cpuFeatures,
+                               cpuImplementer,
+                               cpuArchitecture,
+                               cpuVariant,
+                               cpuPart,
+                               cpuRevision);
     LinuxSysHelper::getNumPhysicalCores(physicalCores);
     cpuSockets = LinuxSysHelper::getNumCpuSockets();
     LinuxSysHelper::getLinuxDistro(distroName, distroVersion);
@@ -835,7 +956,7 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
     hasNuma = numNumaNodes;
 
     BSONObjBuilder bExtra;
-    bExtra.append("versionString", LinuxSysHelper::readLineFromFile("/proc/version"));
+    bExtra.append("versionString", LinuxSysHelper::parseLineFromFile("/proc/version"));
 #ifdef __BIONIC__
     std::stringstream ss;
     ss << "bionic (android api " << __ANDROID_API__ << ")";
@@ -858,6 +979,14 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
     bExtra.append("pageSize", static_cast<long long>(pageSize));
     bExtra.append("numPages", static_cast<int>(sysconf(_SC_PHYS_PAGES)));
     bExtra.append("maxOpenFiles", static_cast<int>(sysconf(_SC_OPEN_MAX)));
+
+    // Append ARM-specific fields, if they exist.
+    // Can be mapped to model name by referencing sys-utils/lscpu-arm.c
+    appendIfExists(&bExtra, "cpuImplementer", cpuImplementer);
+    appendIfExists(&bExtra, "cpuArchitecture", cpuArchitecture);
+    appendIfExists(&bExtra, "cpuVariant", cpuVariant);
+    appendIfExists(&bExtra, "cpuPart", cpuPart);
+    appendIfExists(&bExtra, "cpuRevision", cpuRevision);
 
     appendMountInfo(bExtra);
 

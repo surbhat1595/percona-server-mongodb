@@ -71,6 +71,7 @@ struct CommitInfo {
 struct WriteBatch {
     WriteBatch() = delete;
     WriteBatch(const BucketHandle& bucketHandle,
+               const BucketKey& bucketKey,
                OperationId opId,
                ExecutionStatsController& stats,
                StringData timeField);
@@ -78,6 +79,7 @@ struct WriteBatch {
     BSONObj toBSON() const;
 
     const BucketHandle bucketHandle;
+    const BucketKey bucketKey;
     const OperationId opId;
     ExecutionStatsController stats;
     StringData timeField;  // Necessary so we can compress on writes, since the compression
@@ -93,6 +95,10 @@ struct WriteBatch {
     uint32_t numPreviouslyCommittedMeasurements = 0;
     StringMap<std::size_t> newFieldNamesToBeInserted;   // Value is hash of string key
     boost::optional<DecompressionResult> decompressed;  // If set, bucket is compressed on-disk.
+
+    bool openedDueToMetadata =
+        false;  // If true, bucket has been opened due to the inserted measurement having different
+                // metadata than available buckets.
 
     AtomicWord<bool> commitRights{false};
     SharedPromise<CommitInfo> promise;

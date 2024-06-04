@@ -45,7 +45,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
@@ -918,7 +917,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_initializeStateDoc(
             // doesn't rollback.
             auto writeOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
             return WaitForMajorityService::get(opCtx->getServiceContext())
-                .waitUntilMajority(writeOpTime, CancellationToken::uncancelable());
+                .waitUntilMajorityForWrite(writeOpTime, CancellationToken::uncancelable());
         })
         .semi();
 }
@@ -1105,14 +1104,15 @@ void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntr
     MutableOplogEntry noopEntry;
     noopEntry.setOpType(repl::OpTypeEnum::kNoop);
 
-    const auto tenantNss = NamespaceStringUtil::deserialize(boost::none, getTenantId() + "_");
+    const auto tenantNss = NamespaceStringUtil::deserialize(
+        boost::none, getTenantId() + "_", SerializationContext::stateDefault());
     noopEntry.setNss(tenantNss);
 
     // Write a fake applyOps with the tenantId as the namespace so that this will be picked
     // up by the committed transaction prefetch pipeline in subsequent migrations.
-    noopEntry.setObject(
-        BSON("applyOps" << BSON_ARRAY(
-                 BSON(OplogEntry::kNssFieldName << NamespaceStringUtil::serialize(tenantNss)))));
+    noopEntry.setObject(BSON(
+        "applyOps" << BSON_ARRAY(BSON(OplogEntry::kNssFieldName << NamespaceStringUtil::serialize(
+                                          tenantNss, SerializationContext::stateDefault())))));
 
     noopEntry.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
     noopEntry.setSessionId(sessionId);
@@ -1210,7 +1210,9 @@ TenantMigrationRecipientService::Instance::_openCommittedTransactionsAggregation
         LOGV2_ERROR(5351100,
                     "Fetch committed transactions aggregation failed",
                     "error"_attr = statusWith.getStatus());
-        uassertStatusOK(statusWith.getStatus());
+        uassertStatusOKWithContext(statusWith.getStatus(),
+                                   "Recipient migration instance committed transactions pre-fetch "
+                                   "aggregation cursor failed");
     }
 
     return std::move(statusWith.getValue());
@@ -1300,8 +1302,10 @@ TenantMigrationRecipientService::Instance::_fetchRetryableWritesOplogBeforeStart
         aggRequest.setCursor(cursor);
     }
 
-    std::unique_ptr<DBClientCursor> cursor = uassertStatusOK(DBClientCursor::fromAggregationRequest(
-        _client.get(), std::move(aggRequest), true /* secondaryOk */, false /* useExhaust */));
+    std::unique_ptr<DBClientCursor> cursor = uassertStatusOKWithContext(
+        DBClientCursor::fromAggregationRequest(
+            _client.get(), std::move(aggRequest), true /* secondaryOk */, false /* useExhaust */),
+        "Recipient migration instance retryable writes pre-fetch aggregation cursor failed");
 
     // cursor->more() will automatically request more from the server if necessary.
     while (cursor->more()) {
@@ -1454,7 +1458,8 @@ void TenantMigrationRecipientService::Instance::_startOplogFetcher() {
         [this, self = shared_from_this()](const Status& s, int rbid) { _oplogFetcherCallback(s); },
         std::move(oplogFetcherConfig));
     _donorOplogFetcher->setConnection(std::move(_oplogFetcherClient));
-    uassertStatusOK(_donorOplogFetcher->startup());
+    uassertStatusOKWithContext(_donorOplogFetcher->startup(),
+                               "Recipient migration instance oplog fetcher failed");
 
     lk.unlock();
     _stopOrHangOnFailPoint(&fpAfterStartingOplogFetcherMigrationRecipientInstance);
@@ -1548,7 +1553,9 @@ void TenantMigrationRecipientService::Instance::_oplogFetcherCallback(Status opl
                               _client->getServerHostAndPort(),
                               now + Milliseconds(tenantMigrationExcludeDonorHostTimeoutMS));
         }
-        _interrupt(oplogFetcherStatus, /*skipWaitingForForgetMigration=*/false);
+        _interrupt(
+            oplogFetcherStatus.withContext("Recipient migration instance oplog fetcher failed"),
+            /*skipWaitingForForgetMigration=*/false);
     }
 }
 
@@ -1912,7 +1919,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_markStateDocAsGarba
         })
         .then([this, self = shared_from_this()](repl::OpTime opTime) {
             return WaitForMajorityService::get(_serviceContext)
-                .waitUntilMajority(opTime, CancellationToken::uncancelable());
+                .waitUntilMajorityForWrite(opTime, CancellationToken::uncancelable());
         })
         .onError([](Status status) {
             // We assume that we only fail with shutDown/stepDown errors (i.e. for
@@ -2084,7 +2091,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_updateStateDocForMa
 
             auto writeOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
             return WaitForMajorityService::get(opCtx->getServiceContext())
-                .waitUntilMajority(writeOpTime, CancellationToken::uncancelable());
+                .waitUntilMajorityForWrite(writeOpTime, CancellationToken::uncancelable());
         })
         .semi();
 }

@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstring>
 #include <type_traits>
 #include <utility>
@@ -74,7 +73,8 @@ StatusWith<TagsType> TagsType::fromBSON(const BSONObj& source) {
             return status;
         }
 
-        tags._ns = NamespaceStringUtil::deserialize(boost::none, tagsNs);
+        tags._ns = NamespaceStringUtil::deserialize(
+            boost::none, tagsNs, SerializationContext::stateDefault());
     }
 
     {
@@ -144,7 +144,9 @@ BSONObj TagsType::toBSON() const {
     BSONObjBuilder builder;
 
     if (_ns)
-        builder.append(ns.name(), NamespaceStringUtil::serialize(getNS()));
+        builder.append(
+            ns.name(),
+            NamespaceStringUtil::serialize(getNS(), SerializationContext::stateDefault()));
     if (_tag)
         builder.append(tag.name(), getTag());
     if (_minKey)

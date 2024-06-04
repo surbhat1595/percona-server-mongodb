@@ -126,6 +126,7 @@ public:
     void onDelete(OperationContext* opCtx,
                   const CollectionPtr& coll,
                   StmtId stmtId,
+                  const BSONObj& doc,
                   const OplogDeleteEntryArgs& args,
                   OpStateAccumulator* opAccumulator = nullptr) override {}
 
@@ -207,9 +208,6 @@ public:
                               const boost::optional<UUID>& dropTargetUUID,
                               bool stayTemp) override {}
 
-    void onApplyOps(OperationContext* opCtx,
-                    const DatabaseName& dbName,
-                    const BSONObj& applyOpCmd) override {}
 
     void onEmptyCapped(OperationContext* opCtx,
                        const NamespaceString& collectionName,

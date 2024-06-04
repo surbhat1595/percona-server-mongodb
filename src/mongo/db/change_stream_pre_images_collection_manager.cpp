@@ -38,7 +38,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -100,7 +99,7 @@ namespace mongo {
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(failPreimagesCollectionCreation);
-MONGO_FAIL_POINT_DEFINE(truncateOnlyOnSecondaries);
+MONGO_FAIL_POINT_DEFINE(preImagesTruncateOnlyOnSecondaries);
 
 const auto getPreImagesCollectionManager =
     ServiceContext::declareDecoration<ChangeStreamPreImagesCollectionManager>();
@@ -257,7 +256,9 @@ void ChangeStreamPreImagesCollectionManager::insertPreImage(OperationContext* op
             insertionStatus != ErrorCodes::DuplicateKey);
     uassertStatusOK(insertionStatus);
 
-    _docsInserted.fetchAndAddRelaxed(1);
+    opCtx->recoveryUnit()->onCommit([this](OperationContext* opCtx, boost::optional<Timestamp>) {
+        _docsInserted.fetchAndAddRelaxed(1);
+    });
 
     if (useUnreplicatedTruncates()) {
         // This is a no-op until the 'tenantId' is registered with the 'truncateManager' in the
@@ -468,6 +469,17 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithTrunca
     // inserts and prevent users from running out of disk space.
     ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
                                                         AdmissionContext::Priority::kImmediate);
+
+    // Truncate markers should track the highest seen RecordId and wall time across pre-images to
+    // guarantee all pre-images are eventually truncated.
+    //
+    // It's possible the tenant's truncate markers aren't initialized yet. Minimize the likelihood
+    // that pre-images inserted during initialization are unaccounted for by relaxing constraints
+    // (to view the most up to date data). This is safe even during secondary batch application
+    // because the truncate marker mechanism is designed to handle unserialized inserts of
+    // pre-images.
+    opCtx->setEnforceConstraints(false);
+
     const auto preImagesColl = acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(NamespaceString::makePreImageCollectionNSS(tenantId),
@@ -478,7 +490,7 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithTrunca
 
 
     if (!preImagesColl.exists() ||
-        (MONGO_unlikely(truncateOnlyOnSecondaries.shouldFail()) &&
+        (MONGO_unlikely(preImagesTruncateOnlyOnSecondaries.shouldFail()) &&
          repl::ReplicationCoordinator::get(opCtx)->getMemberState() ==
              repl::MemberState::RS_PRIMARY)) {
         return 0;

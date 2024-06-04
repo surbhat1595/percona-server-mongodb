@@ -34,7 +34,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <iterator>
@@ -55,7 +54,6 @@
 #include "mongo/db/process_health/fault_facet_impl.h"
 #include "mongo/db/process_health/fault_manager.h"
 #include "mongo/db/process_health/fault_manager_config.h"
-#include "mongo/db/process_health/health_monitoring_gen.h"
 #include "mongo/db/process_health/health_observer_registration.h"
 #include "mongo/db/server_options.h"
 #include "mongo/executor/network_interface.h"
@@ -434,9 +432,7 @@ void FaultManager::setInitialHealthCheckComplete(FaultState,
 }
 
 void FaultManager::schedulePeriodicHealthCheckThread() {
-    if (!feature_flags::gFeatureFlagHealthMonitoring.isEnabled(
-            serverGlobalParams.featureCompatibility) ||
-        _config->periodicChecksDisabledForTests()) {
+    if (_config->periodicChecksDisabledForTests()) {
         return;
     }
 
@@ -503,12 +499,6 @@ FaultManager::~FaultManager() {
 }
 
 SharedSemiFuture<void> FaultManager::startPeriodicHealthChecks() {
-    if (!feature_flags::gFeatureFlagHealthMonitoring.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
-        LOGV2_DEBUG(6187201, 1, "Health checks disabled by feature flag");
-        return Future<void>::makeReady();
-    }
-
     _taskExecutor->startup();
     invariant(state() == FaultState::kStartupCheck);
 

@@ -4,7 +4,9 @@
 // details about the test implementation, see the definition of 'PreImageTruncateAfterShutdownTest'.
 //
 // @tags: [
-//  featureFlagUseUnreplicatedTruncatesForDeletions,
+//  requires_fcv_72,
+//  # Not suitable for inMemory variants given data must persist across shutdowns.
+//  requires_persistence,
 //  assumes_against_mongod_not_mongos,
 //  requires_replication,
 // ]
@@ -33,6 +35,7 @@ preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
     restartWithQueryableBackup: false,
     restartWithRecoverToOplogTimestamp: false,
     restartWithRecoverFromOplogAsStandalone: true,
+    restartWithRepair: false,
 });
 
 // Test as secondary.
@@ -44,6 +47,7 @@ preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
     restartWithQueryableBackup: false,
     restartWithRecoverToOplogTimestamp: false,
     restartWithRecoverFromOplogAsStandalone: true,
+    restartWithRepair: false,
 });
 
 // Test with all options false.
@@ -55,8 +59,19 @@ preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
     restartWithQueryableBackup: false,
     restartWithRecoverToOplogTimestamp: false,
     restartWithRecoverFromOplogAsStandalone: false,
+    restartWithRepair: false,
 });
-
+// Test with '--repair'.
+preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
+    runAsPrimary: false,
+    numExpiredPreImages: 4,
+    numUnexpiredPreImages: 2,
+    cleanShutdown: false,
+    restartWithQueryableBackup: false,
+    restartWithRecoverToOplogTimestamp: false,
+    restartWithRecoverFromOplogAsStandalone: false,
+    restartWithRepair: true,
+});
 // Test with 'queryableBackupMode'.
 preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
     runAsPrimary: true,
@@ -66,6 +81,7 @@ preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
     restartWithQueryableBackup: true,
     restartWithRecoverToOplogTimestamp: false,
     restartWithRecoverFromOplogAsStandalone: false,
+    restartWithRepair: false,
 });
 // Test with 'queryableBackupMode' and 'recoverFromOplogTimestamp'.
 preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
@@ -76,6 +92,7 @@ preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
     restartWithQueryableBackup: true,
     restartWithRecoverToOplogTimestamp: true,
     restartWithRecoverFromOplogAsStandalone: false,
+    restartWithRepair: false,
 });
 // Test with no expired pre images.
 preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
@@ -86,6 +103,7 @@ preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
     restartWithQueryableBackup: false,
     restartWithRecoverToOplogTimestamp: false,
     restartWithRecoverFromOplogAsStandalone: true,
+    restartWithRepair: false,
 });
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -104,6 +122,7 @@ preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
     restartWithQueryableBackup: false,
     restartWithRecoverToOplogTimestamp: false,
     restartWithRecoverFromOplogAsStandalone: true,
+    restartWithRepair: false,
 });
 // Test as secondary.
 preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
@@ -114,6 +133,7 @@ preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
     restartWithQueryableBackup: false,
     restartWithRecoverToOplogTimestamp: false,
     restartWithRecoverFromOplogAsStandalone: true,
+    restartWithRepair: false,
 });
 // Test with 'queryableBackupMode'.
 preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
@@ -124,6 +144,7 @@ preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
     restartWithQueryableBackup: true,
     restartWithRecoverToOplogTimestamp: false,
     restartWithRecoverFromOplogAsStandalone: false,
+    restartWithRepair: false,
 });
 // Test with 'queryableBackupMode' and 'recoverFromOplogTimestamp'.
 preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
@@ -134,6 +155,7 @@ preImageTruncateAfterShutdownTest.testTruncateByOldestOplogTSStandalone({
     restartWithQueryableBackup: true,
     restartWithRecoverToOplogTimestamp: true,
     restartWithRecoverFromOplogAsStandalone: false,
+    restartWithRepair: false,
 });
 
 preImageTruncateAfterShutdownTest.teardown();

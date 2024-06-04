@@ -31,7 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
@@ -462,7 +461,6 @@ StatusWith<TaskExecutor::CallbackHandle> ThreadPoolTaskExecutor::scheduleRemoteC
     const auto cbState = _networkInProgressQueue.back();
     LOGV2_DEBUG(22607,
                 3,
-                "Scheduling remote command request: {request}",
                 "Scheduling remote command request",
                 "request"_attr = redact(scheduledRequest.toString()));
     lk.unlock();
@@ -481,7 +479,6 @@ StatusWith<TaskExecutor::CallbackHandle> ThreadPoolTaskExecutor::scheduleRemoteC
             }
             LOGV2_DEBUG(22608,
                         3,
-                        "Received remote response: {response}",
                         "Received remote response",
                         "response"_attr = redact(response.isOK() ? response.toString()
                                                                  : response.status.toString()));
@@ -711,7 +708,6 @@ StatusWith<TaskExecutor::CallbackHandle> ThreadPoolTaskExecutor::scheduleExhaust
     lk.unlock();
     LOGV2_DEBUG(4495133,
                 3,
-                "Scheduling exhaust remote command request: {request}",
                 "Scheduling exhaust remote command request",
                 "request"_attr = redact(scheduledRequest.toString()));
 
@@ -723,7 +719,6 @@ StatusWith<TaskExecutor::CallbackHandle> ThreadPoolTaskExecutor::scheduleExhaust
 
             LOGV2_DEBUG(4495134,
                         3,
-                        "Received remote response: {response}",
                         "Received remote response",
                         "response"_attr = redact(response.isOK() ? response.toString()
                                                                  : response.status.toString()));

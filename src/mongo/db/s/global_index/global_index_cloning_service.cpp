@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <mutex>
 #include <string>
@@ -248,7 +247,8 @@ void GlobalIndexCloningService::CloningStateMachine::_init(
     _inserter = std::make_unique<GlobalIndexInserter>(
         _metadata.getNss(), indexSpec.getName(), _metadata.getIndexCollectionUUID(), **executor);
 
-    auto client = _serviceContext->makeClient("globalIndexClonerServiceInit");
+    auto client = _serviceContext->getService(ClusterRole::ShardServer)
+                      ->makeClient("globalIndexClonerServiceInit");
 
     // TODO(SERVER-74658): Please revisit if this thread could be made killable.
     {
@@ -298,7 +298,7 @@ ExecutorFuture<void> GlobalIndexCloningService::CloningStateMachine::_runUntilDo
                 })
                 .then([this, cancelToken](const repl::OpTime& readyToCommitOpTime) {
                     return WaitForMajorityService::get(_serviceContext)
-                        .waitUntilMajority(readyToCommitOpTime, cancelToken);
+                        .waitUntilMajorityForWrite(readyToCommitOpTime, cancelToken);
                 });
         })
         .onTransientError([](const Status& status) {})

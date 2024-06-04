@@ -95,9 +95,9 @@ void SessionsCollectionConfigServer::_shardCollectionIfNeeded(OperationContext* 
             Grid::get(opCtx)->shardRegistry()->getNumShards(opCtx) != 0);
 
     ShardsvrCreateCollection shardsvrCollRequest(NamespaceString::kLogicalSessionsNamespace);
-    CreateCollectionRequest requestParamsObj;
+    ShardsvrCreateCollectionRequest requestParamsObj;
     requestParamsObj.setShardKey(BSON("_id" << 1));
-    shardsvrCollRequest.setCreateCollectionRequest(std::move(requestParamsObj));
+    shardsvrCollRequest.setShardsvrCreateCollectionRequest(std::move(requestParamsObj));
     shardsvrCollRequest.setDbName(NamespaceString::kLogicalSessionsNamespace.dbName());
 
     cluster::createCollection(opCtx, shardsvrCollRequest);
@@ -161,7 +161,8 @@ void SessionsCollectionConfigServer::setupSessionsCollection(OperationContext* o
     if (const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
         replCoord->canAcceptWritesFor(opCtx, CollectionType::ConfigNS)) {
         auto filterQuery =
-            BSON("_id" << NamespaceStringUtil::serialize(NamespaceString::kLogicalSessionsNamespace)
+            BSON("_id" << NamespaceStringUtil::serialize(NamespaceString::kLogicalSessionsNamespace,
+                                                         SerializationContext::stateDefault())
                        << CollectionType::kMaxChunkSizeBytesFieldName << BSON("$exists" << false));
         auto updateQuery = BSON("$set" << BSON(CollectionType::kMaxChunkSizeBytesFieldName
                                                << logical_sessions::kMaxChunkSizeBytes));

@@ -35,7 +35,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
@@ -91,13 +90,16 @@
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_group_base.h"
 #include "mongo/db/pipeline/document_source_internal_projection.h"
+#include "mongo/db/pipeline/document_source_internal_replace_root.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/document_source_match.h"
+#include "mongo/db/pipeline/document_source_replace_root.h"
 #include "mongo/db/pipeline/document_source_sample.h"
 #include "mongo/db/pipeline/document_source_sample_from_random_cursor.h"
 #include "mongo/db/pipeline/document_source_set_window_fields.h"
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
+#include "mongo/db/pipeline/document_source_skip.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -117,6 +119,7 @@
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_executor_impl.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/plan_yield_policy_remote_cursor.h"
 #include "mongo/db/query/projection.h"
 #include "mongo/db/query/projection_parser.h"
 #include "mongo/db/query/projection_policies.h"
@@ -204,6 +207,28 @@ boost::intrusive_ptr<DocumentSource> sbeCompatibleProjectionFromSingleDocumentTr
     return projectionStage;
 }
 
+/**
+ * Helper for findSbeCompatibleStagesForPushdown() that creates a
+ * 'DocumentSourceInternalReplaceRoot' from 'stage' if 'stage' is a '$replaceRoot' that can be
+ * pushed down to SBE or returns nullptr otherwise.
+ */
+boost::intrusive_ptr<DocumentSource> sbeCompatibleReplaceRootStage(
+    DocumentSourceSingleDocumentTransformation* replaceRootStage,
+    SbeCompatibility minRequiredCompatibility) {
+    if (replaceRootStage->getType() != TransformerInterface::TransformerType::kReplaceRoot) {
+        return nullptr;
+    }
+
+    const auto& replaceRootTransformation =
+        dynamic_cast<const ReplaceRootTransformation&>(replaceRootStage->getTransformer());
+    if (replaceRootTransformation.sbeCompatibility() < minRequiredCompatibility) {
+        return nullptr;
+    }
+
+    return make_intrusive<DocumentSourceInternalReplaceRoot>(
+        replaceRootStage->getContext(), replaceRootTransformation.getExpression());
+}
+
 // A bit field with a bool flag for each aggregation pipeline stage that can be translated to SBE.
 // The flags can be used to indicate which translations are enabled and/or supported in a particular
 // context.
@@ -216,9 +241,10 @@ struct CompatiblePipelineStages {
     bool transform : 1;
 
     bool match : 1;
+    bool unwind : 1;
     bool sort : 1;
+    bool limitSkip : 1;
     bool search : 1;
-
     bool window : 1;
     bool unpackBucket : 1;
 };
@@ -256,16 +282,18 @@ bool pushDownPipelineStageIfCompatible(
         if (!allowedStages.transform) {
             return false;
         }
-
-        auto projectionStage = sbeCompatibleProjectionFromSingleDocumentTransformation(
-            *transformStage, minRequiredCompatibility);
-        if (!projectionStage) {
-            return false;
+        if (auto replaceRoot =
+                sbeCompatibleReplaceRootStage(transformStage, minRequiredCompatibility)) {
+            stagesForPushdown.emplace_back(
+                std::make_unique<InnerPipelineStageImpl>(replaceRoot, isLastSource));
+            return true;
+        } else if (auto projectionStage = sbeCompatibleProjectionFromSingleDocumentTransformation(
+                       *transformStage, minRequiredCompatibility)) {
+            stagesForPushdown.emplace_back(
+                std::make_unique<InnerPipelineStageImpl>(projectionStage, isLastSource));
+            return true;
         }
-
-        stagesForPushdown.emplace_back(
-            std::make_unique<InnerPipelineStageImpl>(projectionStage, isLastSource));
-        return true;
+        return false;
     } else if (auto matchStage = dynamic_cast<DocumentSourceMatch*>(stage.get())) {
         if (!allowedStages.match || matchStage->sbeCompatibility() < minRequiredCompatibility) {
             return false;
@@ -281,6 +309,15 @@ bool pushDownPipelineStageIfCompatible(
 
         stagesForPushdown.emplace_back(
             std::make_unique<InnerPipelineStageImpl>(sortStage, isLastSource));
+        return true;
+    } else if (dynamic_cast<DocumentSourceLimit*>(stage.get()) ||
+               dynamic_cast<DocumentSourceSkip*>(stage.get())) {
+        if (!allowedStages.limitSkip) {
+            return false;
+        }
+
+        stagesForPushdown.push_back(
+            std::make_unique<InnerPipelineStageImpl>(stage.get(), isLastSource));
         return true;
     } else if (const auto& searchHelpers = getSearchHelpers(opCtx->getServiceContext());
                searchHelpers->isSearchStage(stage.get()) ||
@@ -309,9 +346,44 @@ bool pushDownPipelineStageIfCompatible(
         stagesForPushdown.emplace_back(
             std::make_unique<InnerPipelineStageImpl>(unpackBucketStage, isLastSource));
         return true;
+    } else if (auto unwindStage = dynamic_cast<DocumentSourceUnwind*>(stage.get())) {
+        if (!allowedStages.unwind || unwindStage->sbeCompatibility() < minRequiredCompatibility) {
+            return false;
+        }
+
+        stagesForPushdown.emplace_back(
+            std::make_unique<InnerPipelineStageImpl>(unwindStage, isLastSource));
+        return true;
     }
 
     return false;
+}
+
+/**
+ * After copying as many pipeline stages as possible into the 'stagesForPushdown' pipeline, this
+ * second pass takes off any stages that may not benefit from execution in SBE.
+ */
+void reconsiderStagesForPushdown(
+    std::vector<std::unique_ptr<InnerPipelineStageInterface>>& stagesForPushdown) {
+    // Always push down the entire pipeline when possible.
+    if (stagesForPushdown.empty() || stagesForPushdown.back()->isLastSource()) {
+        return;
+    }
+
+    // When splitting a pipeline between SBE and Classic DocumentSource stages, there is often a
+    // performance penalty for executing an $addFields in SBE only to immediately translate its
+    // output to MutableDocument form for the Classic DocumentSource execution phase. Instead, we
+    // keep the $addFields as a DocumentSource.
+    do {
+        auto projectionStage = dynamic_cast<DocumentSourceInternalProjection*>(
+            stagesForPushdown.back()->documentSource());
+        if (!projectionStage ||
+            projectionStage->projection().type() != projection_ast::ProjectType::kAddition) {
+            return;
+        }
+
+        stagesForPushdown.pop_back();
+    } while (!stagesForPushdown.empty());
 }
 
 // Limit the number of aggregation pipeline stages that can be "pushed down" to the SBE stage
@@ -325,33 +397,52 @@ constexpr size_t kSbeMaxPipelineStages = 100;
 
 /**
  * Finds a prefix of stages from the given pipeline to prepare for pushdown into the inner query
- * layer so that it can be executed using SBE.
+ * layer so that it can be executed using SBE. Unless pushdown is completely disabled by
+ * {'internalQueryFrameworkControl': 'forceClassicEngine'}, a stage can be extracted from the
+ * pipeline if and only if all the stages before it are extracted and it meets the criteria for its
+ * stage type:
+ * $group via 'DocumentSourceGroup':
+ *   - The 'internalQuerySlotBasedExecutionDisableGroupPushdown' knob is false and
+ *   - the $group is not a mering operation that aggregates partial groups
+ *     (DocumentSourceGroupBase::doingMerge()).
  *
- * $group stages ('DocumentSourceGroup') are extracted from the pipeline when all of:
- *    - 'internalQueryFrameworkControl' is not set to "forceClassicEngine".
- *    - 'internalQuerySlotBasedExecutionDisableGroupPushdown' query knob is 'false'.
- *    - DocumentSourceGroup has 'doingMerge=false'.
+ * $lookup via 'DocumentSourceLookUp':
+ *   - The 'internalQuerySlotBasedExecutionDisableLookupPushdown' query knob is false,
+ *   - the $lookup uses only the 'localField'/'foreignField' syntax (no pipelines), and
+ *   - the foreign collection is neither sharded nor a view.
  *
- * $lookup stages ('DocumentSourceLookUp') are extracted when all of:
- *    - 'internalQueryFrameworkControl' is not set to "forceClassicEngine".
- *    - 'internalQuerySlotBasedExecutionDisableLookupPushdown' query knob is 'false'.
- *    - The $lookup uses only the 'localField'/'foreignField' syntax (no pipelines).
- *    - The foreign collection is neither sharded nor a view.
+ * $project via 'DocumentSourceInternalProjection':
+ *   - No additional criteria.
  *
- * $project and $addFields stages (collectively 'DocumentSourceInternalProjection') are extracted
- * when all of:
- *    - 'internalQueryFrameworkControl' is not set to "forceClassicEngine".
- *    - featureFlagSbeFull is enabled (TODO SERVER-72549 remove this comment line: SBE Pushdown)
+ * $addFields via 'DocumentSourceInternalProjection':
+ *   - The stage that _follows_ the $addFields is also pushed down _or_
+ *   - the 'featureFlagSbeFull' flag is enabled.
  *
- * Search is extracted from the pipeline when the following conditions are met:
- *    - When the 'internalQueryFrameworkControl' is not set to "forceClassicEngine".
- *    - When 'featureFlagSearchInSbe' is true.
+ * $replaceRoot/$replaceWith via 'DocumentSourceSingleDocumentTransformation':
+ *   - No additional criteria.
  *
- * $_internalUnpackBucket stages ('DocumentSourceInternalUnpackBucket') are extracted when all of:
- *    - When the 'internalQueryFrameworkControl' is not set to "forceClassicEngine".
- *    - When 'featureFlagTimeSeriesInSbe' is true.
- *    - When ExpressionContext::sbePipelineCompatibility is set to
- *      'SbeCompatibility::fullyCompatible'.
+ * $sort via 'DocumentSourceSort':
+ *   - The sort operation does not produce sort key "meta" fields need by a later merging operation
+ *     (i.e., 'needsMerge' is false).
+ *
+ * $match via 'DocumentSourceMatch':
+ *   - No additional criteria.
+ *
+ * $limit via 'DocumentSourceLimit':
+ *   - No additional criteria.
+ *
+ * $skip via 'DocumentSourceSkip':
+ *   - No additional criteria.
+ *
+ * 'DocumentSourceUnpackBucket':
+ *   - The 'featureFlagSbeFull' flag is enabled.
+ *
+ * 'DocumentSourceSearch':
+ *   - The 'featureFlagSearchInSbe' flag is enabled.
+ *
+ * $_internalUnpackBucket via 'DocumentSourceInternalUnpackBucket':
+ *   - The 'featureFlagTimeSeriesInSbe' flag is enabled and
+ *   - the 'internalQuerySlotBasedExecutionDisableTimeSeriesPushdown', is _not_ enabled,
  */
 std::vector<std::unique_ptr<InnerPipelineStageInterface>> findSbeCompatibleStagesForPushdown(
     const MultipleCollectionAccessor& collections,
@@ -403,16 +494,20 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> findSbeCompatibleStage
         .lookup = !queryKnob.getSbeDisableLookupPushdownForOp() && !isMainCollectionSharded &&
             !collections.isAnySecondaryNamespaceAViewOrSharded(),
 
-        // TODO (SERVER-72549): SBE execution of 'transform' and 'match' stages requires
-        // 'featureFlagSbeFull' to be enabled.
-        .transform = SbeCompatibility::flagGuarded >= minRequiredCompatibility,
-        .match = SbeCompatibility::flagGuarded >= minRequiredCompatibility,
+        .transform = SbeCompatibility::fullyCompatible >= minRequiredCompatibility,
+        .match = SbeCompatibility::fullyCompatible >= minRequiredCompatibility,
+
+        // TODO (SERVER-80226): SBE execution of 'unwind' stages requires 'featureFlagSbeFull' to be
+        // enabled.
+        .unwind = SbeCompatibility::flagGuarded >= minRequiredCompatibility,
 
         // Note: even if its sort pattern is SBE compatible, we cannot push down a $sort stage when
         // the pipeline is the shard part of a sorted-merge query on a sharded collection. It is
         // possible that the merge operation will need a $sortKey field from the sort, and SBE plans
         // do not yet support metadata fields.
-        .sort = (SbeCompatibility::flagGuarded >= minRequiredCompatibility) && !needsMerge,
+        .sort = (SbeCompatibility::fullyCompatible >= minRequiredCompatibility) && !needsMerge,
+
+        .limitSkip = SbeCompatibility::fullyCompatible >= minRequiredCompatibility,
 
         // TODO (SERVER-77229): SBE execution of $search requires 'featureFlagSearchInSbe' to be
         // enabled.
@@ -425,6 +520,7 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> findSbeCompatibleStage
         // TODO (SERVER-80243): Remove 'featureFlagTimeSeriesInSbe' check.
         .unpackBucket = feature_flags::gFeatureFlagTimeSeriesInSbe.isEnabled(
                             serverGlobalParams.featureCompatibility) &&
+            !queryKnob.getSbeDisableTimeSeriesForOp() &&
             cq->getExpCtx()->sbePipelineCompatibility == SbeCompatibility::fullyCompatible,
     };
 
@@ -445,6 +541,16 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> findSbeCompatibleStage
             break;
         }
     }
+
+    if (SbeCompatibility::flagGuarded >= minRequiredCompatibility) {
+        // When 'minRequiredCompatibility' is permissive enough (because featureFlagSbeFull is
+        // enabled), return 'stagesForPushdown' as is, pushing down as many stages as possible.
+    } else {
+        // Otherwise, "reconsider" stages that we don't expect to improve performance when they
+        // execute in SBE.
+        reconsiderStagesForPushdown(stagesForPushdown);
+    }
+
     return stagesForPushdown;
 }
 
@@ -501,35 +607,6 @@ std::unique_ptr<FindCommandRequest> createFindCommand(
     return findCommand;
 }
 
-StatusWith<std::unique_ptr<CanonicalQuery>> createCanonicalQuery(
-    const intrusive_ptr<ExpressionContext>& expCtx,
-    const NamespaceString& nss,
-    std::unique_ptr<FindCommandRequest> findCommand,
-    const QueryMetadataBitSet& metadataRequested,
-    const MatchExpressionParser::AllowedFeatureSet& matcherFeatures,
-    bool isCountLike) {
-    // Reset the 'sbeCompatible' flag before canonicalizing the 'findCommand' to potentially allow
-    // SBE to execute the portion of the query that's pushed down, even if the portion of the query
-    // that is not pushed down contains expressions not supported by SBE.
-    expCtx->sbeCompatibility = SbeCompatibility::fullyCompatible;
-
-    auto cq = CanonicalQuery::canonicalize(expCtx->opCtx,
-                                           std::move(findCommand),
-                                           static_cast<bool>(expCtx->explain),
-                                           expCtx,
-                                           ExtensionsCallbackReal(expCtx->opCtx, &nss),
-                                           matcherFeatures,
-                                           ProjectionPolicies::aggregateProjectionPolicies(),
-                                           {} /* empty pipeline */,
-                                           isCountLike);
-
-    if (cq.isOK()) {
-        // Mark the metadata that's requested by the pipeline on the CQ.
-        cq.getValue()->requestAdditionalMetadata(metadataRequested);
-    }
-    return cq;
-}
-
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExecutor(
     const intrusive_ptr<ExpressionContext>& expCtx,
     const MultipleCollectionAccessor& collections,
@@ -541,8 +618,23 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExe
     const MatchExpressionParser::AllowedFeatureSet& matcherFeatures,
     Pipeline* pipeline,
     bool isCountLike) {
-    auto cq = createCanonicalQuery(
-        expCtx, nss, std::move(findCommand), metadataRequested, matcherFeatures, isCountLike);
+    // Reset the 'sbeCompatible' flag before canonicalizing the 'findCommand' to potentially
+    // allow SBE to execute the portion of the query that's pushed down, even if the portion of
+    // the query that is not pushed down contains expressions not supported by SBE.
+    expCtx->sbeCompatibility = SbeCompatibility::fullyCompatible;
+
+    auto cq = CanonicalQuery::make(
+        {.expCtx = expCtx,
+         .parsedFind =
+             ParsedFindCommandParams{
+                 .findCommand = std::move(findCommand),
+                 .extensionsCallback = ExtensionsCallbackReal(expCtx->opCtx, &nss),
+                 .allowedFeatures = matcherFeatures,
+                 .projectionPolicies = ProjectionPolicies::aggregateProjectionPolicies()},
+         .explain = static_cast<bool>(expCtx->explain),
+         .isCountLike = isCountLike,
+         .isSearchQuery = PipelineD::isSearchPresentAndEligibleForSbe(pipeline)});
+
     if (!cq.isOK()) {
         // Return an error instead of uasserting, since there are cases where the combination of
         // sort and projection will result in a bad query, but when we try with a different
@@ -551,6 +643,9 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExe
         // another attempt.
         return {cq.getStatus()};
     }
+
+    // Mark the metadata that's requested by the pipeline on the CQ.
+    cq.getValue()->requestAdditionalMetadata(metadataRequested);
 
     if (groupForDistinctScan) {
         // When the pipeline includes a $group that groups by a single field
@@ -594,10 +689,10 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExe
     auto extractAndAttachPipelineStages = [&collections, &pipeline, needsMerge{expCtx->needsMerge}](
                                               auto* canonicalQuery, bool attachOnly) {
         if (attachOnly) {
-            canonicalQuery->setPipeline(findSbeCompatibleStagesForPushdown(
+            canonicalQuery->setCqPipeline(findSbeCompatibleStagesForPushdown(
                 collections, canonicalQuery, needsMerge, pipeline));
         } else {
-            trimPipelineStages(pipeline, canonicalQuery->pipeline().size());
+            trimPipelineStages(pipeline, canonicalQuery->cqPipeline().size());
         }
     };
 
@@ -770,12 +865,12 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
     Pipeline* pipeline,
     long long sampleSize,
     long long numRecords,
-    boost::optional<BucketUnpacker> bucketUnpacker) {
+    boost::optional<timeseries::BucketUnpacker> bucketUnpacker) {
     OperationContext* opCtx = expCtx->opCtx;
 
     // Verify that we are already under a collection lock or in a lock-free read. We avoid taking
     // locks ourselves in this function because double-locking forces any PlanExecutor we create to
-    // adopt a NO_YIELD policy.
+    // adopt an INTERRUPT_ONLY policy.
     invariant(opCtx->isLockFreeReadsOp() ||
               opCtx->lockState()->isCollectionLockedForMode(coll->ns(), MODE_IS));
 
@@ -1013,11 +1108,11 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
     return std::move(execStatus.getValue());
 }
 
-std::pair<PipelineD::AttachExecutorCallback, std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>>
-PipelineD::buildInnerQueryExecutorSample(DocumentSourceSample* sampleStage,
-                                         DocumentSourceInternalUnpackBucket* unpackBucketStage,
-                                         const CollectionPtr& collection,
-                                         Pipeline* pipeline) {
+PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorSample(
+    DocumentSourceSample* sampleStage,
+    DocumentSourceInternalUnpackBucket* unpackBucketStage,
+    const CollectionPtr& collection,
+    Pipeline* pipeline) {
     tassert(5422105, "sampleStage cannot be a nullptr", sampleStage);
 
     auto expCtx = pipeline->getContext();
@@ -1025,7 +1120,7 @@ PipelineD::buildInnerQueryExecutorSample(DocumentSourceSample* sampleStage,
     const long long sampleSize = sampleStage->getSampleSize();
     const long long numRecords = collection->getRecordStore()->numRecords(expCtx->opCtx);
 
-    boost::optional<BucketUnpacker> bucketUnpacker;
+    boost::optional<timeseries::BucketUnpacker> bucketUnpacker;
     if (unpackBucketStage) {
         bucketUnpacker = unpackBucketStage->bucketUnpacker().copy();
     }
@@ -1051,38 +1146,24 @@ PipelineD::buildInnerQueryExecutorSample(DocumentSourceSample* sampleStage,
                     collections, std::move(exec), pipeline->getContext(), cursorType);
                 pipeline->addInitialSource(std::move(cursor));
             };
-        return std::pair(std::move(attachExecutorCallback), std::move(exec));
+        return {std::move(exec), std::move(attachExecutorCallback), {}};
     }
-    return std::pair(std::move(attachExecutorCallback), nullptr);
+    return {nullptr, std::move(attachExecutorCallback), {}};
 }
 
-std::pair<PipelineD::AttachExecutorCallback, std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>>
-PipelineD::buildInnerQueryExecutor(const MultipleCollectionAccessor& collections,
-                                   const NamespaceString& nss,
-                                   const AggregateCommandRequest* aggRequest,
-                                   Pipeline* pipeline) {
+PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutor(
+    const MultipleCollectionAccessor& collections,
+    const NamespaceString& nss,
+    const AggregateCommandRequest* aggRequest,
+    Pipeline* pipeline) {
     auto expCtx = pipeline->getContext();
 
     // We will be modifying the source vector as we go.
     Pipeline::SourceContainer& sources = pipeline->_sources;
 
     // We skip the 'requiresInputDocSource' check in the case of pushing $search down into SBE,
-    // as $search has 'requiresInputDocSource' as false. Specifically, we skip this check if
-    // it is a $search pipeline, 'featureFlagSearchInSbe' is enabled and forceClassicEngine
-    // is false.
-    auto firstStageIsSearch =
-        getSearchHelpers(expCtx->opCtx->getServiceContext())->isSearchPipeline(pipeline) ||
-        getSearchHelpers(expCtx->opCtx->getServiceContext())->isSearchMetaPipeline(pipeline);
-
-    // (Ignore FCV check): FCV checking is unnecessary because SBE execution is local to a given
-    // node.
-    auto searchInSbeEnabled = feature_flags::gFeatureFlagSearchInSbe.isEnabledAndIgnoreFCVUnsafe();
-    auto forceClassicEngine =
-        QueryKnobConfiguration::decoration(expCtx->opCtx).getInternalQueryFrameworkControlForOp() ==
-        QueryFrameworkControlEnum::kForceClassicEngine;
-
-    bool skipRequiresInputDocSourceCheck =
-        firstStageIsSearch && searchInSbeEnabled && !forceClassicEngine;
+    // as $search has 'requiresInputDocSource' as false.
+    bool skipRequiresInputDocSourceCheck = isSearchPresentAndEligibleForSbe(pipeline);
 
     if (!skipRequiresInputDocSourceCheck && !sources.empty() &&
         !sources.front()->constraints().requiresInputDocSource) {
@@ -1097,10 +1178,10 @@ PipelineD::buildInnerQueryExecutor(const MultipleCollectionAccessor& collections
 
         // Optimize an initial $sample stage if possible.
         if (collection && sampleStage) {
-            auto [attachExecutorCallback, exec] =
+            auto queryExecutors =
                 buildInnerQueryExecutorSample(sampleStage, unpackBucketStage, collection, pipeline);
-            if (exec) {
-                return std::make_pair(std::move(attachExecutorCallback), std::move(exec));
+            if (queryExecutors.mainExecutor) {
+                return queryExecutors;
             }
         }
     }
@@ -1111,6 +1192,10 @@ PipelineD::buildInnerQueryExecutor(const MultipleCollectionAccessor& collections
         sources.empty() ? nullptr : dynamic_cast<DocumentSourceGeoNear*>(sources.front().get());
     if (geoNearStage) {
         return buildInnerQueryExecutorGeoNear(collections, nss, aggRequest, pipeline);
+    } else if (auto& searchHelper = getSearchHelpers(expCtx->opCtx->getServiceContext());
+               searchHelper->isSearchPipeline(pipeline) ||
+               searchHelper->isSearchMetaPipeline(pipeline)) {
+        return buildInnerQueryExecutorSearch(collections, nss, aggRequest, pipeline);
     } else {
         return buildInnerQueryExecutorGeneric(collections, nss, aggRequest, pipeline);
     }
@@ -1135,9 +1220,10 @@ void PipelineD::buildAndAttachInnerQueryExecutorToPipeline(
     const AggregateCommandRequest* aggRequest,
     Pipeline* pipeline) {
 
-    auto callback = PipelineD::buildInnerQueryExecutor(collections, nss, aggRequest, pipeline);
-    PipelineD::attachInnerQueryExecutorToPipeline(
-        collections, callback.first, std::move(callback.second), pipeline);
+    auto [executor, callback, additionalExec] =
+        buildInnerQueryExecutor(collections, nss, aggRequest, pipeline);
+    tassert(7856010, "Unexpected additional executors", additionalExec.empty());
+    attachInnerQueryExecutorToPipeline(collections, callback, std::move(executor), pipeline);
 }
 
 namespace {
@@ -1290,7 +1376,7 @@ auto buildProjectionForPushdown(const DepsTracker& deps,
 }  // namespace
 
 boost::optional<std::pair<PipelineD::IndexSortOrderAgree, PipelineD::IndexOrderedByMinTime>>
-PipelineD::supportsSort(const BucketUnpacker& bucketUnpacker,
+PipelineD::supportsSort(const timeseries::BucketUnpacker& bucketUnpacker,
                         PlanStage* root,
                         const SortPattern& sort) {
     using SortPatternPart = SortPattern::SortPatternPart;
@@ -1447,7 +1533,7 @@ PipelineD::supportsSort(const BucketUnpacker& bucketUnpacker,
 }  // namespace mongo
 
 boost::optional<std::pair<PipelineD::IndexSortOrderAgree, PipelineD::IndexOrderedByMinTime>>
-PipelineD::checkTimeHelper(const BucketUnpacker& bucketUnpacker,
+PipelineD::checkTimeHelper(const timeseries::BucketUnpacker& bucketUnpacker,
                            BSONObj::iterator& keyPatternIter,
                            bool scanIsForward,
                            const FieldPath& timeSortFieldPath,
@@ -1473,9 +1559,10 @@ PipelineD::checkTimeHelper(const BucketUnpacker& bucketUnpacker,
     return boost::none;
 }
 
-bool PipelineD::sortAndKeyPatternPartAgreeAndOnMeta(const BucketUnpacker& bucketUnpacker,
-                                                    StringData keyPatternFieldName,
-                                                    const FieldPath& sortFieldPath) {
+bool PipelineD::sortAndKeyPatternPartAgreeAndOnMeta(
+    const timeseries::BucketUnpacker& bucketUnpacker,
+    StringData keyPatternFieldName,
+    const FieldPath& sortFieldPath) {
     FieldPath keyPatternFieldPath = FieldPath(keyPatternFieldName);
 
     // If they don't have the same path length they cannot agree.
@@ -1534,13 +1621,64 @@ boost::optional<TraversalPreference> createTimeSeriesTraversalPreference(
     return traversalPreference;
 }
 
-std::pair<PipelineD::AttachExecutorCallback, std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>>
-PipelineD::buildInnerQueryExecutorGeneric(const MultipleCollectionAccessor& collections,
-                                          const NamespaceString& nss,
-                                          const AggregateCommandRequest* aggRequest,
-                                          Pipeline* pipeline) {
-    // Make a last effort to optimize pipeline stages before potentially detaching them to be pushed
-    // down into the query executor.
+PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorSearch(
+    const MultipleCollectionAccessor& collections,
+    const NamespaceString& nss,
+    const AggregateCommandRequest* aggRequest,
+    Pipeline* pipeline) {
+    uassert(7856009,
+            "Cannot have exchange specified in a $search pipeline",
+            !aggRequest || !aggRequest->getExchange());
+
+    auto expCtx = pipeline->getContext();
+    auto& searchHelper = getSearchHelpers(expCtx->opCtx->getServiceContext());
+
+    DocumentSource* searchStage = pipeline->peekFront();
+    auto yieldPolicy = PlanYieldPolicyRemoteCursor::make(
+        expCtx->opCtx, PlanYieldPolicy::YieldPolicy::YIELD_AUTO, collections, nss);
+    auto yieldPolicyPtr = yieldPolicy.get();
+
+    if (!expCtx->explain) {
+        if (searchHelper->isSearchPipeline(pipeline)) {
+            searchHelper->establishSearchQueryCursors(expCtx, searchStage, std::move(yieldPolicy));
+        } else if (searchHelper->isSearchMetaPipeline(pipeline)) {
+            searchHelper->establishSearchMetaCursor(expCtx, searchStage, std::move(yieldPolicy));
+        } else {
+            tasserted(7856008, "Not search pipeline in buildInnerQueryExecutorSearch");
+        }
+    }
+
+    auto [executor, callback, additionalExecutors] =
+        buildInnerQueryExecutorGeneric(collections, nss, aggRequest, pipeline);
+
+    yieldPolicyPtr->registerPlanExecutor(executor.get());
+    const CanonicalQuery* cq = executor->getCanonicalQuery();
+
+    if (!cq->cqPipeline().empty() &&
+        searchHelper->isSearchStage(cq->cqPipeline().front()->documentSource())) {
+        // The $search is pushed down into SBE executor.
+        if (auto cursor = searchHelper->getSearchMetadataCursor(searchStage)) {
+            // Create a yield policy for metadata cursor.
+            auto metadataYieldPolicy = PlanYieldPolicyRemoteCursor::make(
+                expCtx->opCtx, PlanYieldPolicy::YieldPolicy::YIELD_AUTO, collections, nss);
+            auto metadataYieldPolicyPtr = metadataYieldPolicy.get();
+            cursor->updateYieldPolicy(std::move(metadataYieldPolicy));
+
+            additionalExecutors.push_back(uassertStatusOK(getSearchMetadataExecutorSBE(
+                expCtx->opCtx, collections, nss, *cq, std::move(*cursor))));
+            metadataYieldPolicyPtr->registerPlanExecutor(additionalExecutors.back().get());
+        }
+    }
+    return {std::move(executor), callback, std::move(additionalExecutors)};
+}
+
+PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorGeneric(
+    const MultipleCollectionAccessor& collections,
+    const NamespaceString& nss,
+    const AggregateCommandRequest* aggRequest,
+    Pipeline* pipeline) {
+    // Make a last effort to optimize pipeline stages before potentially detaching them to be
+    // pushed down into the query executor.
     pipeline->optimizePipeline();
 
     Pipeline::SourceContainer& sources = pipeline->_sources;
@@ -1598,12 +1736,6 @@ PipelineD::buildInnerQueryExecutorGeneric(const MultipleCollectionAccessor& coll
     if (unpack && !unpack->isSbeCompatible()) {
         expCtx->sbePipelineCompatibility = SbeCompatibility::notCompatible;
     }
-    if (unpack && sort) {
-        // TODO SERVER-79061: disable only the case when it's possible for bounded sort to be used.
-        // NB: tests in jstests/core/timeseries/timeseries_lastpoint.js over-specify the expected
-        // plan shapes and fail when lowered to SBE even if the bounded sort isn't used.
-        expCtx->sbePipelineCompatibility = SbeCompatibility::notCompatible;
-    }
 
     // But in classic it may be eligible for a post-planning sort optimization. We check eligibility
     // and perform the rewrite here.
@@ -1611,6 +1743,22 @@ PipelineD::buildInnerQueryExecutorGeneric(const MultipleCollectionAccessor& coll
     QueryPlannerParams plannerOpts;
     if (timeseriesBoundedSortOptimization) {
         plannerOpts.traversalPreference = createTimeSeriesTraversalPreference(unpack, sort);
+
+        // Whether to use bounded sort or not is determined _after_ the executor is created, based
+        // on whether the chosen collection access stage would support it. Because bounded sort and
+        // streaming group aren't implemented in SBE yet we have to block the whole pipeline from
+        // lowering to SBE so that it has the chance of doing the optimization. To allow as many
+        // sort + group pipelines over time-series to lower to SBE we'll only block those that sort
+        // on time as these are the only ones that _might_ end up using bounded sort.
+        // Note: This check (sort on time after unpacking) also disables the streaming group
+        // optimization, that might happen w/o bounded sort.
+        for (const auto& sortKey : sort->getSortKeyPattern()) {
+            if (sortKey.fieldPath &&
+                *(sortKey.fieldPath) == unpack->bucketUnpacker().getTimeField()) {
+                expCtx->sbePipelineCompatibility = SbeCompatibility::notCompatible;
+                break;
+            }
+        }
     }
 
     // Create the PlanExecutor.
@@ -1849,14 +1997,14 @@ PipelineD::buildInnerQueryExecutorGeneric(const MultipleCollectionAccessor& coll
             collections, std::move(exec), pipeline->getContext(), cursorType, resumeTrackingType);
         pipeline->addInitialSource(std::move(cursor));
     };
-    return std::make_pair(std::move(attachExecutorCallback), std::move(exec));
+    return {std::move(exec), std::move(attachExecutorCallback), {}};
 }
 
-std::pair<PipelineD::AttachExecutorCallback, std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>>
-PipelineD::buildInnerQueryExecutorGeoNear(const MultipleCollectionAccessor& collections,
-                                          const NamespaceString& nss,
-                                          const AggregateCommandRequest* aggRequest,
-                                          Pipeline* pipeline) {
+PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorGeoNear(
+    const MultipleCollectionAccessor& collections,
+    const NamespaceString& nss,
+    const AggregateCommandRequest* aggRequest,
+    Pipeline* pipeline) {
     // $geoNear can only run over the main collection.
     const auto& collection = collections.getMainCollection();
     uassert(ErrorCodes::NamespaceNotFound,
@@ -1889,7 +2037,7 @@ PipelineD::buildInnerQueryExecutorGeoNear(const MultipleCollectionAccessor& coll
                         nullptr, /* sortStage */
                         nullptr, /* rewrittenGroupStage */
                         DepsTracker::kDefaultUnavailableMetadata & ~DepsTracker::kAllGeoNearData,
-                        std::move(fullQuery),
+                        fullQuery,
                         SkipThenLimit{boost::none, boost::none},
                         aggRequest,
                         Pipeline::kGeoNearMatcherFeatures,
@@ -1913,7 +2061,7 @@ PipelineD::buildInnerQueryExecutorGeoNear(const MultipleCollectionAccessor& coll
     };
     // Remove the initial $geoNear; it will be replaced by $geoNearCursor.
     sources.pop_front();
-    return std::make_pair(std::move(attachExecutorCallback), std::move(exec));
+    return {std::move(exec), std::move(attachExecutorCallback), {}};
 }
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::prepareExecutor(
@@ -2096,5 +2244,22 @@ BSONObj PipelineD::getPostBatchResumeToken(const Pipeline* pipeline) {
         return docSourceCursor->getPostBatchResumeToken();
     }
     return BSONObj{};
+}
+
+bool PipelineD::isSearchPresentAndEligibleForSbe(const Pipeline* pipeline) {
+    auto expCtx = pipeline->getContext();
+
+    auto firstStageIsSearch =
+        getSearchHelpers(expCtx->opCtx->getServiceContext())->isSearchPipeline(pipeline) ||
+        getSearchHelpers(expCtx->opCtx->getServiceContext())->isSearchMetaPipeline(pipeline);
+
+    // (Ignore FCV check): FCV checking is unnecessary because SBE execution is local to a given
+    // node.
+    auto searchInSbeEnabled = feature_flags::gFeatureFlagSearchInSbe.isEnabledAndIgnoreFCVUnsafe();
+    auto forceClassicEngine =
+        QueryKnobConfiguration::decoration(expCtx->opCtx).getInternalQueryFrameworkControlForOp() ==
+        QueryFrameworkControlEnum::kForceClassicEngine;
+
+    return firstStageIsSearch && searchInSbeEnabled && !forceClassicEngine;
 }
 }  // namespace mongo

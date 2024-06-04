@@ -40,7 +40,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -144,11 +143,12 @@ void triggerFireAndForgetShardRefreshes(OperationContext* opCtx,
 
             // This is a best-effort attempt to refresh the shard 'shardEntry'. Fire and forget an
             // asynchronous '_flushRoutingTableCacheUpdates' request.
-            shard->runFireAndForgetCommand(opCtx,
-                                           ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                           DatabaseName::kAdmin,
-                                           BSON("_flushRoutingTableCacheUpdates"
-                                                << NamespaceStringUtil::serialize(coll.getNss())));
+            shard->runFireAndForgetCommand(
+                opCtx,
+                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                DatabaseName::kAdmin,
+                BSON("_flushRoutingTableCacheUpdates" << NamespaceStringUtil::serialize(
+                         coll.getNss(), SerializationContext::stateDefault())));
         }
     }
 }
@@ -276,7 +276,8 @@ void refineCollectionShardKeyInTxn(OperationContext* opCtx,
                                            ExecutorPtr txnExec) -> SemiFuture<void> {
         FindCommandRequest collQuery{CollectionType::ConfigNS};
         BSONObjBuilder builder;
-        builder.append(CollectionType::kNssFieldName, NamespaceStringUtil::serialize(nss));
+        builder.append(CollectionType::kNssFieldName,
+                       NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
         if (oldTimestamp.is_initialized()) {
             builder.append(CollectionType::kTimestampFieldName, *oldTimestamp);
         }
@@ -301,7 +302,8 @@ void refineCollectionShardKeyInTxn(OperationContext* opCtx,
         // Update the config.collections entry for the given namespace.
         auto catalogUpdateRequest = BatchedCommandRequest::buildUpdateOp(
             CollectionType::ConfigNS,
-            BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(nss)),
+            BSON(CollectionType::kNssFieldName
+                 << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())),
             collType.toBSON(),
             false /* upsert */,
             false /* multi */);
@@ -309,8 +311,6 @@ void refineCollectionShardKeyInTxn(OperationContext* opCtx,
         uassertStatusOK(updateCollResponse.toStatus());
 
         LOGV2(7648601,
-              "refineCollectionShardKey updated collection entry for {namespace}: took "
-              "{durationMillis} ms. Total time taken: {totalTimeMillis} ms.",
               "refineCollectionShardKey updated collection entry",
               logAttrs(nss),
               "durationMillis"_attr = executionTimer.millis(),
@@ -343,8 +343,6 @@ void refineCollectionShardKeyInTxn(OperationContext* opCtx,
                               << updateCollResponse.getN(),
                 updateCollResponse.getN() == 1);
         LOGV2(7648603,
-              "refineCollectionShardKey: updated chunk entries for {namespace}: took "
-              "{durationMillis} ms. Total time taken: {totalTimeMillis} ms.",
               "refineCollectionShardKey: updated chunk entries",
               logAttrs(nss),
               "durationMillis"_attr = executionTimer.millis(),
@@ -352,7 +350,7 @@ void refineCollectionShardKeyInTxn(OperationContext* opCtx,
         executionTimer.reset();
         auto tagUpdateRequest = BatchedCommandRequest::buildPipelineUpdateOp(
             TagsType::ConfigNS,
-            BSON("ns" << NamespaceStringUtil::serialize(nss)),
+            BSON("ns" << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())),
             tagUpdates,
             false /* upsert */,
             true /* useMultiUpdate */);
@@ -360,8 +358,6 @@ void refineCollectionShardKeyInTxn(OperationContext* opCtx,
         uassertStatusOK(updateTagResponse.toStatus());
 
         LOGV2(7648604,
-              "refineCollectionShardKey: updated zone entries for {namespace}: took "
-              "{durationMillis} ms. Total time taken: {totalTimeMillis} ms.",
               "refineCollectionShardKey: updated zone entries",
               logAttrs(nss),
               "durationMillis"_attr = executionTimer.millis(),
@@ -456,7 +452,7 @@ void ShardingCatalogManager::refineCollectionShardKeyDEPRECATED(
     uassertStatusOK(ShardingLogging::get(opCtx)->logChangeChecked(
         opCtx,
         "refineCollectionShardKey.start",
-        NamespaceStringUtil::serialize(nss),
+        nss,
         BSON("oldKey" << oldShardKeyPattern.toBSON() << "newKey" << newShardKeyPattern.toBSON()
                       << "oldEpoch" << collType.getEpoch() << "newEpoch" << newEpoch),
         ShardingCatalogClient::kLocalWriteConcern,
@@ -480,7 +476,7 @@ void ShardingCatalogManager::refineCollectionShardKeyDEPRECATED(
 
     ShardingLogging::get(opCtx)->logChange(opCtx,
                                            "refineCollectionShardKey.end",
-                                           NamespaceStringUtil::serialize(nss),
+                                           nss,
                                            BSONObj(),
                                            ShardingCatalogClient::kLocalWriteConcern,
                                            _localConfigShard,
@@ -494,8 +490,6 @@ void ShardingCatalogManager::refineCollectionShardKeyDEPRECATED(
     } catch (const DBException& ex) {
         LOGV2(
             51798,
-            "refineCollectionShardKey: failed to best-effort refresh all shards containing chunks "
-            "in {namespace}",
             "refineCollectionShardKey: failed to best-effort refresh all shards containing chunks",
             "error"_attr = ex.toStatus(),
             logAttrs(nss));
@@ -529,7 +523,7 @@ void ShardingCatalogManager::configureCollectionBalancing(
 
         ShardingLogging::get(opCtx)->logChange(opCtx,
                                                "configureCollectionBalancing",
-                                               NamespaceStringUtil::serialize(nss),
+                                               nss,
                                                logChangeDetail.obj(),
                                                ShardingCatalogClient::kMajorityWriteConcern,
                                                _localConfigShard,
@@ -595,8 +589,9 @@ void ShardingCatalogManager::configureCollectionBalancing(
         withTransaction(opCtx,
                         CollectionType::ConfigNS,
                         [this, &nss, &update](OperationContext* opCtx, TxnNumber txnNumber) {
-                            const auto query = BSON(CollectionType::kNssFieldName
-                                                    << NamespaceStringUtil::serialize(nss));
+                            const auto query = BSON(
+                                CollectionType::kNssFieldName << NamespaceStringUtil::serialize(
+                                    nss, SerializationContext::stateDefault()));
                             const auto res = writeToConfigDocumentInTxn(
                                 opCtx,
                                 CollectionType::ConfigNS,
@@ -683,16 +678,17 @@ void ShardingCatalogManager::updateTimeSeriesBucketingParameters(
             }
             updateCmd.append("$set", bucketUp);
 
-            writeToConfigDocumentInTxn(opCtx,
-                                       CollectionType::ConfigNS,
-                                       BatchedCommandRequest::buildUpdateOp(
-                                           CollectionType::ConfigNS,
-                                           BSON(CollectionType::kNssFieldName
-                                                << NamespaceStringUtil::serialize(nss)) /* query */,
-                                           updateCmd.obj() /* update */,
-                                           false /* upsert */,
-                                           false /* multi */),
-                                       txnNumber);
+            writeToConfigDocumentInTxn(
+                opCtx,
+                CollectionType::ConfigNS,
+                BatchedCommandRequest::buildUpdateOp(
+                    CollectionType::ConfigNS,
+                    BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(
+                             nss, SerializationContext::stateDefault())) /* query */,
+                    updateCmd.obj() /* update */,
+                    false /* upsert */,
+                    false /* multi */),
+                txnNumber);
 
             // Bump the chunk version for shards.
             bumpMajorVersionOneChunkPerShard(opCtx,

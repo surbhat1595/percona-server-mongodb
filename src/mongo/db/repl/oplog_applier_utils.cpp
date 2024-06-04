@@ -34,7 +34,6 @@
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -576,7 +575,10 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
                     LOGV2(5863600,
                           "Hanging due to 'hangAfterApplyingCollectionDropOplogEntry' failpoint.");
                 },
-                [&](const BSONObj& data) { return (nss.db_deprecated() == data["dbName"].str()); });
+                [&](const BSONObj& data) {
+                    const auto fpDbName = DatabaseNameUtil::parseFailPointData(data, "dbName");
+                    return nss.dbName() == fpDbName;
+                });
         }
         return status;
     }
@@ -634,12 +636,20 @@ Status OplogApplierUtils::applyOplogBatchCommon(
                 }
 
                 LOGV2_FATAL_CONTINUE(21237,
-                                     "Error applying operation ({oplogEntry}): {error}",
                                      "Error applying operation",
                                      "oplogEntry"_attr = redact(op->toBSONForLogging()),
                                      "error"_attr = causedBy(redact(status)));
                 return status;
             }
+        } catch (const ExceptionFor<ErrorCodes::DuplicateKey>& e) {
+            auto info = e.extraInfo<DuplicateKeyErrorInfo>();
+            LOGV2_FATAL_CONTINUE(5689600,
+                                 "Writer worker caught duplicate key exception",
+                                 "keyPattern"_attr = info->getKeyPattern(),
+                                 "keyValue"_attr = redact(info->getDuplicatedKeyValue()),
+                                 "error"_attr = redact(e.reason()),
+                                 "oplogEntry"_attr = redact(op->toBSONForLogging()));
+            return e.toStatus();
         } catch (const DBException& e) {
             // SERVER-24927 If we have a NamespaceNotFound exception, then this document will be
             // dropped before initial sync or recovery ends anyways and we should ignore it.
@@ -655,7 +665,6 @@ Status OplogApplierUtils::applyOplogBatchCommon(
             }
 
             LOGV2_FATAL_CONTINUE(21238,
-                                 "writer worker caught exception: {error} on: {oplogEntry}",
                                  "Writer worker caught exception",
                                  "error"_attr = redact(e),
                                  "oplogEntry"_attr = redact(op->toBSONForLogging()));

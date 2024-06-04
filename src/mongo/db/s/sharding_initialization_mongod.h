@@ -133,6 +133,7 @@ private:
     void onStepUpBegin(OperationContext* opCtx, long long term) override final {}
     void onStepUpComplete(OperationContext* opCtx, long long term) override final {}
     void onStepDown() override final {}
+    void onRollback() override final {}
     void onBecomeArbiter() override final {}
     inline std::string getServiceName() const override final {
         return "ShardingInitializationMongoD";
@@ -168,7 +169,11 @@ void initializeGlobalShardingStateForConfigServerIfNeeded(OperationContext* opCt
  * Helper method to initialize sharding awareness from the shard identity document if it can be
  * found and load global sharding settings awareness was initialized. See
  * ShardingInitializationMongoD::initializeShardingAwarenessIfNeeded() above for more details.
+ * The optional parameter `startupTimeElapsedBuilder` is for adding time elapsed of tasks done in
+ * this function into one single builder that records the time elapsed during startup. Its default
+ * value is nullptr because we only want to time this function when it is called during startup.
  */
-void initializeShardingAwarenessIfNeededAndLoadGlobalSettings(OperationContext* opCtx);
+void initializeShardingAwarenessIfNeededAndLoadGlobalSettings(
+    OperationContext* opCtx, BSONObjBuilder* startupTimeElapsedBuilder = nullptr);
 
 }  // namespace mongo

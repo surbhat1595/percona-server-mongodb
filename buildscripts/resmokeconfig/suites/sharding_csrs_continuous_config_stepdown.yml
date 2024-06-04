@@ -10,7 +10,6 @@ selector:
   - jstests/sharding/*[aA]uth*.js
   - jstests/sharding/analyze_shard_key/*[aA]uth*.js
   - jstests/sharding/query/*[aA]uth*.js
-  - jstests/sharding/change_streams/*[aA]uth*.js
   - jstests/sharding/cluster_time_across_add_shard.js
 
   - jstests/sharding/internal_txns/internal_client_restrictions.js
@@ -41,7 +40,6 @@ selector:
   - jstests/sharding/hash_basic.js
   - jstests/sharding/hash_shard1.js
   - jstests/sharding/hash_shard_non_empty.js
-  - jstests/sharding/hash_shard_num_chunks.js
   - jstests/sharding/hash_single_shard.js
   - jstests/sharding/key_many.js
   - jstests/sharding/key_string.js
@@ -221,9 +219,13 @@ selector:
   - jstests/sharding/api_params_transaction_sharded.js
   - jstests/sharding/api_params_transaction_unsharded.js
 
-  # TODO SERVER-51495: Re-enable these tests after reshardCollection is resilient to config server
-  # primary failovers.
+  # These tests use the resharding test fixture, which performs its own addShard. Config server stepdowns can
+  # interrupt the addShard operation resulting in the test cluster not being initalized properly.
+  # TODO SERVER-51495: Re-enable these tests after resharding, moveCollection, and unshardCollection
+  # are resilient to config server primary failovers.
   - jstests/sharding/*reshard*.js
+  - jstests/sharding/*move*collection*.js
+  - jstests/sharding/*unshard_collection*.js
 
   # SERVER-51805 splitChunk op is not idempotent
   - jstests/sharding/mongos_get_shard_version.js
@@ -247,6 +249,9 @@ selector:
 
   # Test runs command on a config shard and does not shutdown safely upon transitioning to a dedicated config server.
   - jstests/sharding/fsync_lock_unlock.js
+
+  # Expect the configureQueryAnalyzer command to execute without config server stepdown.
+  - jstests/sharding/analyze_shard_key/configure_query_analyzer_persistence.js
 
   exclude_with_any_tags:
   - does_not_support_stepdowns

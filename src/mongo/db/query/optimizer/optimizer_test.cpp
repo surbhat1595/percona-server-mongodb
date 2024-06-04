@@ -43,6 +43,7 @@
 #include "mongo/db/query/optimizer/props.h"
 #include "mongo/db/query/optimizer/reference_tracker.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
+#include "mongo/db/query/optimizer/rewrites/normalize_projections.h"
 #include "mongo/db/query/optimizer/syntax/expr.h"
 #include "mongo/db/query/optimizer/syntax/path.h"
 #include "mongo/db/query/optimizer/syntax/syntax.h"
@@ -165,8 +166,102 @@ TEST(Optimizer, ConstantEquality) {
                          Constant::boolean(true),
                          Constant::boolean(false));
     auto env = VariableEnvironment::build(tree);
-    ConstEval{env}.optimize(tree);
+    while (ConstEval{env}.optimize(tree))
+        ;
     ASSERT_TRUE(tree.is<Constant>());
+}
+
+TEST(Optimizer, ConstFoldIf) {
+    auto tree = _if("x"_var, _cbool(true), _cbool(false))._n;
+    auto env = VariableEnvironment::build(tree);
+    while (ConstEval{env}.optimize(tree))
+        ;
+
+    // Simplify "if (x) then true else false" -> x.
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT
+        "Variable [x]\n",
+        tree);
+}
+
+TEST(Optimizer, ConstFoldIf1) {
+    auto tree = _if("x"_var, _cbool(false), _cbool(true))._n;
+    auto env = VariableEnvironment::build(tree);
+    while (ConstEval{env}.optimize(tree))
+        ;
+
+    // Simplify "if (x) then false else true" -> NOT x.
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT
+        "UnaryOp [Not]\n"
+        "Variable [x]\n",
+        tree);
+}
+
+TEST(Optimizer, ConstFoldIf2) {
+    auto tree = _if(_unary("Not", "x"_var), "y"_var, "z"_var)._n;
+    auto env = VariableEnvironment::build(tree);
+    while (ConstEval{env}.optimize(tree))
+        ;
+
+    // Simplify "if (not (x)) then y else z" -> "if (x) then z else y"
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT
+        "If []\n"
+        "|   |   Variable [y]\n"
+        "|   Variable [z]\n"
+        "Variable [x]\n",
+        tree);
+}
+
+TEST(Optimizer, ProjRenameLet) {
+    auto tree = _let("var", _binary("Add", "1"_cint64, "2"_cint64), "var"_var)._n;
+
+    auto prefixId = PrefixId::createForTests();
+
+    str::stream s;
+    const auto renameHandler = [&](const ProjectionName& target, const ProjectionName& source) {
+        s << target << ", " << source << "\n";
+    };
+
+    while (ProjNormalize{renameHandler, prefixId}.optimize(tree))
+        ;
+
+    // Variable is renamed.
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT
+        "Let [renamed_0]\n"
+        "|   Variable [renamed_0]\n"
+        "BinaryOp [Add]\n"
+        "|   Const [2]\n"
+        "Const [1]\n",
+        tree);
+
+    ASSERT_STR_EQ_AUTO(  // NOLINT
+        "var, renamed_0\n",
+        s);
+}
+
+TEST(Optimizer, ProjRenameLambdaAbstr) {
+    auto tree = _lambda("var", _binary("Add", "1"_cint64, "var"_var))._n;
+
+    auto prefixId = PrefixId::createForTests();
+
+    str::stream s;
+    const auto renameHandler = [&](const ProjectionName& target, const ProjectionName& source) {
+        s << target << ", " << source << "\n";
+    };
+
+    while (ProjNormalize{renameHandler, prefixId}.optimize(tree))
+        ;
+
+    // Variable is renamed.
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT
+        "LambdaAbstraction [renamed_0]\n"
+        "BinaryOp [Add]\n"
+        "|   Variable [renamed_0]\n"
+        "Const [1]\n",
+        tree);
+
+    ASSERT_STR_EQ_AUTO(  // NOLINT
+        "var, renamed_0\n",
+        s);
 }
 
 TEST(Optimizer, Tracker1) {
@@ -734,6 +829,30 @@ TEST(IntervalNormalize, IntervalNormalizeConstantsFirst) {
         "    {{[Variable [var1], Variable [var2]]}}\n"
         " U \n"
         "    {{[Variable [var3], Const [4]]}}\n"
+        "}\n",
+        intervalExpr);
+}
+
+TEST(IntervalNormalize, MixedTypes) {
+    auto intervalExpr = _disj(_conj(_interval(_incl("str1"_cstr), _incl("str2"_cstr))),
+                              _conj(_interval(_incl("7"_cint64), _incl("8"_cint64))));
+
+    ASSERT_INTERVAL_AUTO(
+        "{\n"
+        "    {{[Const [\"str1\"], Const [\"str2\"]]}}\n"
+        " U \n"
+        "    {{[Const [7], Const [8]]}}\n"
+        "}\n",
+        intervalExpr);
+
+    normalizeIntervals(intervalExpr);
+
+    // Note that numerics are sorted before strings.
+    ASSERT_INTERVAL_AUTO(
+        "{\n"
+        "    {{[Const [7], Const [8]]}}\n"
+        " U \n"
+        "    {{[Const [\"str1\"], Const [\"str2\"]]}}\n"
         "}\n",
         intervalExpr);
 }

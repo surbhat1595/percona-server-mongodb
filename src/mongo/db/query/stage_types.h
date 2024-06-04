@@ -104,6 +104,7 @@ enum StageType {
 
     STAGE_QUEUED_DATA,
     STAGE_RECORD_STORE_FAST_COUNT,
+    STAGE_REPLACE_ROOT,
     STAGE_RETURN_KEY,
     STAGE_SAMPLE_FROM_TIMESERIES_BUCKET,
     STAGE_SHARDING_FILTER,
@@ -135,6 +136,7 @@ enum StageType {
     // collection.
     STAGE_UNPACK_SAMPLED_TS_BUCKET,
 
+    STAGE_UNWIND,
     STAGE_UPDATE,
 
     // Stages for DocumentSources.

@@ -147,7 +147,7 @@ SemiFuture<CollectionAndChangedChunks> ConfigServerCatalogCacheLoader::getChunks
     return ExecutorFuture<void>(_executor)
         .then([=]() {
             ThreadClient tc("ConfigServerCatalogCacheLoader::getChunksSince",
-                            getGlobalServiceContext());
+                            getGlobalServiceContext()->getService());
 
             // TODO(SERVER-74658): Please revisit if this thread could be made killable.
             {
@@ -162,11 +162,11 @@ SemiFuture<CollectionAndChangedChunks> ConfigServerCatalogCacheLoader::getChunks
         .semi();
 }
 
-SemiFuture<DatabaseType> ConfigServerCatalogCacheLoader::getDatabase(StringData dbName) {
+SemiFuture<DatabaseType> ConfigServerCatalogCacheLoader::getDatabase(const DatabaseName& dbName) {
     return ExecutorFuture<void>(_executor)
-        .then([name = dbName.toString()] {
+        .then([dbName] {
             ThreadClient tc("ConfigServerCatalogCacheLoader::getDatabase",
-                            getGlobalServiceContext());
+                            getGlobalServiceContext()->getService());
 
             // TODO(SERVER-74658): Please revisit if this thread could be made killable.
             {
@@ -177,7 +177,7 @@ SemiFuture<DatabaseType> ConfigServerCatalogCacheLoader::getDatabase(StringData 
             auto opCtx = tc->makeOperationContext();
             return Grid::get(opCtx.get())
                 ->catalogClient()
-                ->getDatabase(opCtx.get(), name, repl::ReadConcernLevel::kMajorityReadConcern);
+                ->getDatabase(opCtx.get(), dbName, repl::ReadConcernLevel::kMajorityReadConcern);
         })
         .semi();
 }

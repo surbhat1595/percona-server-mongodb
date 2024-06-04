@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
 #include <algorithm>
@@ -253,11 +252,7 @@ void LockerImpl::dump() const {
             entries.push_back(
                 {it.key(), it->status, it->mode, it->recursiveCount, it->unlockPending});
     }
-    LOGV2(20523,
-          "Locker id {id} status: {requests}",
-          "Locker status",
-          "id"_attr = _id,
-          "requests"_attr = entries);
+    LOGV2(20523, "Locker status", "id"_attr = _id, "requests"_attr = entries);
 }
 
 void LockerImpl::_dumpLockerAndLockManagerRequests() {
@@ -908,9 +903,9 @@ LockResult LockerImpl::_lockBegin(OperationContext* opCtx, ResourceId resId, Loc
 
     // Operations which are holding open an oplog hole cannot block when acquiring locks.
     const ResourceType resType = resId.getType();
-    if (opCtx && !shouldAllowLockAcquisitionOnTimestampedUnitOfWork() &&
-        resType != RESOURCE_METADATA && resType != RESOURCE_MUTEX &&
-        resType != RESOURCE_DDL_DATABASE && resType != RESOURCE_DDL_COLLECTION) {
+    if (!shouldAllowLockAcquisitionOnTimestampedUnitOfWork() && resType != RESOURCE_METADATA &&
+        resType != RESOURCE_MUTEX && resType != RESOURCE_DDL_DATABASE &&
+        resType != RESOURCE_DDL_COLLECTION) {
         invariant(!opCtx->recoveryUnit()->isTimestamped(),
                   str::stream()
                       << "Operation holding open an oplog hole tried to acquire locks. ResourceId: "
@@ -976,7 +971,7 @@ LockResult LockerImpl::_lockBegin(OperationContext* opCtx, ResourceId resId, Loc
         globalStats.recordWait(_id, resId, mode);
         _stats.recordWait(resId, mode);
         _setWaitingResource(resId);
-    } else if (result == LOCK_OK && opCtx && _uninterruptibleLocksRequested == 0) {
+    } else if (result == LOCK_OK && _uninterruptibleLocksRequested == 0) {
         // Lock acquisitions are not allowed to succeed when opCtx is marked as interrupted, unless
         // the caller requested an uninterruptible lock.
         auto interruptStatus = opCtx->checkForInterruptNoAssert();
@@ -1000,9 +995,9 @@ void LockerImpl::_lockComplete(OperationContext* opCtx,
     // requests entering this function have been queued up and will be granted the lock as soon as
     // the lock is released, which is a blocking operation.
     const ResourceType resType = resId.getType();
-    if (opCtx && !shouldAllowLockAcquisitionOnTimestampedUnitOfWork() &&
-        resType != RESOURCE_METADATA && resType != RESOURCE_MUTEX &&
-        resType != RESOURCE_DDL_DATABASE && resType != RESOURCE_DDL_COLLECTION) {
+    if (!shouldAllowLockAcquisitionOnTimestampedUnitOfWork() && resType != RESOURCE_METADATA &&
+        resType != RESOURCE_MUTEX && resType != RESOURCE_DDL_DATABASE &&
+        resType != RESOURCE_DDL_COLLECTION) {
         invariant(!opCtx->recoveryUnit()->isTimestamped(),
                   str::stream()
                       << "Operation holding open an oplog hole tried to acquire locks. ResourceId: "
@@ -1019,7 +1014,7 @@ void LockerImpl::_lockComplete(OperationContext* opCtx,
 
     // This failpoint is used to time out non-intent locks if they cannot be granted immediately
     // for user operations. Testing-only.
-    const bool isUserOperation = opCtx && opCtx->getClient()->isFromUserConnection();
+    const bool isUserOperation = opCtx->getClient()->isFromUserConnection();
     if (!_uninterruptibleLocksRequested && isUserOperation &&
         MONGO_unlikely(failNonIntentLocksIfWaitNeeded.shouldFail())) {
         uassert(ErrorCodes::LockTimeout,
@@ -1050,10 +1045,9 @@ void LockerImpl::_lockComplete(OperationContext* opCtx,
     while (true) {
         // It is OK if this call wakes up spuriously, because we re-evaluate the remaining
         // wait time anyways.
-        // If we have an operation context, we want to use its interruptible wait so that
-        // pending lock acquisitions can be cancelled, so long as no callers have requested an
-        // uninterruptible lock.
-        if (opCtx && _uninterruptibleLocksRequested == 0) {
+        // Unless a caller has requested an uninterruptible lock, we want to use the opCtx's
+        // interruptible wait so that pending lock acquisitions can be cancelled.
+        if (_uninterruptibleLocksRequested == 0) {
             result = _notify.wait(opCtx, waitTime);
         } else {
             result = _notify.wait(waitTime);
@@ -1089,7 +1083,7 @@ void LockerImpl::_lockComplete(OperationContext* opCtx,
             std::string timeoutMessage = str::stream()
                 << "Unable to acquire " << modeName(mode) << " lock on '" << resId.toString()
                 << "' within " << timeout << ".";
-            if (opCtx && opCtx->getClient()) {
+            if (opCtx->getClient()) {
                 timeoutMessage = str::stream()
                     << timeoutMessage << " opId: " << opCtx->getOpID()
                     << ", op: " << opCtx->getClient()->desc()

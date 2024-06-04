@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <exception>
@@ -896,6 +895,19 @@ void BenchRunState::onWorkerFinished() {
     }
 }
 
+namespace {
+void doAuth(DBClientBase& conn, StringData username, StringData password) {
+    try {
+        conn.auth(DatabaseName::kAdmin, username, password);
+    } catch (DBException& e) {
+        e.addContext(
+            "User {} could not authenticate to admin db, dbmin db access is required to use benchRun with auth enabled"_format(
+                username));
+        throw;
+    }
+}
+}  // namespace
+
 BenchRunWorker::BenchRunWorker(size_t id,
                                const BenchRunConfig* config,
                                BenchRunState& brState,
@@ -941,9 +953,7 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
     invariant(bsonTemplateEvaluator.setId(_id) == BsonTemplateEvaluator::StatusSuccess);
 
     if (_config->username != "") {
-        uassertStatusOK(
-            conn->auth(DatabaseName::kAdmin, _config->username, _config->password)
-                .withContext("Authenticating to connection for _benchThread failed"_sd));
+        doAuth(*conn, _config->username, _config->password);
     }
 
     boost::optional<LogicalSessionIdToClient> lsid;
@@ -1104,7 +1114,6 @@ void BenchRunOp::executeOnce(DBClientBase* conn,
 
             if (!this->expectedDoc.isEmpty() && this->expectedDoc.woCompare(result) != 0) {
                 LOGV2_INFO(7056702,
-                           "Bench 'findOne' on: {namespace} expected: {expected} got: {got}",
                            "Bench 'findOne' on namespace got different results then expected",
                            "namespace"_attr = this->ns,
                            "expected"_attr = this->expectedDoc,
@@ -1218,7 +1227,6 @@ void BenchRunOp::executeOnce(DBClientBase* conn,
 
             if (this->expected >= 0 && count != this->expected) {
                 LOGV2_INFO(22797,
-                           "Bench 'find' on: {namespace} expected: {expected} got: {got}",
                            "Bench 'find' on namespace got different results then expected",
                            "namespace"_attr = this->ns,
                            "expected"_attr = this->expected,
@@ -1396,9 +1404,7 @@ void BenchRunWorker::run() {
         auto conn(_config->createConnection());
 
         if (!_config->username.empty()) {
-            uassertStatusOK(
-                conn->auth(DatabaseName::kAdmin, _config->username, _config->password)
-                    .withContext("Authenticating to connection for benchThread failed"_sd));
+            doAuth(*conn, _config->username, _config->password);
         }
 
         BenchRunWorkerStateGuard workerStateGuard(_brState);
@@ -1428,11 +1434,7 @@ void BenchRunner::start() {
         std::unique_ptr<DBClientBase> conn(_config->createConnection());
         // Must authenticate to admin db in order to run serverStatus command
         if (_config->username != "") {
-            uassertStatusOK(
-                conn->auth(DatabaseName::kAdmin, _config->username, _config->password)
-                    .withContext(
-                        "User {} could not authenticate to admin db, dbmin db access is required to use benchRun with auth enabled"_format(
-                            _config->username)));
+            doAuth(*conn, _config->username, _config->password);
         }
 
         // Start the worker threads.
@@ -1470,11 +1472,7 @@ void BenchRunner::stop() {
         std::unique_ptr<DBClientBase> conn(_config->createConnection());
         if (_config->username != "") {
             // this can only fail if admin access was revoked since start of run
-            uassertStatusOK(
-                conn->auth(DatabaseName::kAdmin, _config->username, _config->password)
-                    .withContext(
-                        "User {} could not authenticate to admin db; admin db access is still required to use benchRun with auth enabled"_format(
-                            _config->username)));
+            doAuth(*conn, _config->username, _config->password);
         }
     }
 

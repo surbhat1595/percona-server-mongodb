@@ -55,11 +55,26 @@ std::string DatabaseNameUtil::serialize(const DatabaseName& dbName,
     if (!gMultitenancySupport)
         return dbName.toString();
 
-    if (context.getSource() == SerializationContext::Source::Command)
-        return serializeForCommands(dbName, context);
+    switch (context.getSource()) {
+        case SerializationContext::Source::AuthPrevalidated:
+            return serializeForAuthPrevalidated(dbName, context);
+        case SerializationContext::Source::Command:
+            return serializeForCommands(dbName, context);
+        case SerializationContext::Source::Catalog:
+        case SerializationContext::Source::Storage:
+        case SerializationContext::Source::Default:
+            // Use forStorage as the default serializing rule
+            return serializeForStorage(dbName, context);
+        default:
+            MONGO_UNREACHABLE;
+    }
+}
 
-    // if we're not serializing a Command Reply, use the default serializing rules
-    return serializeForStorage(dbName, context);
+std::string DatabaseNameUtil::serializeForAuthPrevalidated(const DatabaseName& dbName,
+                                                           const SerializationContext& context) {
+    // We want everything in the DatabaseName (tenantId, db) to be present in the serialized output
+    // to prevent loss of information in the prevalidated context.
+    return dbName.toStringWithTenantId();
 }
 
 std::string DatabaseNameUtil::serializeForStorage(const DatabaseName& dbName,
@@ -129,31 +144,54 @@ DatabaseName DatabaseNameUtil::parseFromStringExpectTenantIdInMultitenancyMode(S
 DatabaseName DatabaseNameUtil::deserialize(boost::optional<TenantId> tenantId,
                                            StringData db,
                                            const SerializationContext& context) {
-    if (db.empty()) {
-        return DatabaseName(tenantId, "");
-    }
-
     if (!gMultitenancySupport) {
         uassert(7005302, "TenantId must not be set, but it is: ", tenantId == boost::none);
         return DatabaseName(boost::none, db);
     }
 
-    if (context.getSource() == SerializationContext::Source::Command &&
-        context.getCallerType() == SerializationContext::CallerType::Request)
-        return deserializeForCommands(std::move(tenantId), db, context);
+    if (db.empty()) {
+        return DatabaseName(tenantId, "");
+    }
 
-    // if we're not deserializing a Command Request, use the default deserializing rules
-    return deserializeForStorage(std::move(tenantId), db, context);
+    switch (context.getSource()) {
+        case SerializationContext::Source::AuthPrevalidated:
+            return deserializeForAuthPrevalidated(std::move(tenantId), db, context);
+        case SerializationContext::Source::Catalog:
+            return deserializeForCatalog(std::move(tenantId), db);
+        case SerializationContext::Source::Command:
+            if (context.getCallerType() == SerializationContext::CallerType::Request) {
+                return deserializeForCommands(std::move(tenantId), db, context);
+            }
+            [[fallthrough]];
+        case SerializationContext::Source::Storage:
+        case SerializationContext::Source::Default:
+            // Use forStorage as the default deserializing rule
+            return deserializeForStorage(std::move(tenantId), db, context);
+        default:
+            MONGO_UNREACHABLE;
+    }
+}
+
+DatabaseName DatabaseNameUtil::deserializeForAuthPrevalidated(boost::optional<TenantId> tenantId,
+                                                              StringData db,
+                                                              const SerializationContext& context) {
+    if (context.shouldExpectTenantPrefixForAuth()) {
+        // If there is a tenantId, expect that it's included in the DB string, and that the tenantId
+        // field passed will be empty.
+        uassert(7489600, "TenantId must not be set, but it is", tenantId == boost::none);
+        return DatabaseNameUtil::parseFromStringExpectTenantIdInMultitenancyMode(db);
+    }
+    // Assumes that we are passing in validated and correct values for fields, and skip all checks.
+    return DatabaseName(std::move(tenantId), db);
 }
 
 DatabaseName DatabaseNameUtil::deserializeForStorage(boost::optional<TenantId> tenantId,
                                                      StringData db,
                                                      const SerializationContext& context) {
     if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)) {
-        // TODO SERVER-73113 Uncomment out this conditional to check that we always have a tenantId.
-        /* if (db != "admin" && db != "config" && db != "local")
+        if (db != DatabaseName::kAdmin.db() && db != DatabaseName::kLocal.db() &&
+            db != DatabaseName::kConfig.db() && db != DatabaseName::kExternal.db())
             uassert(7005300, "TenantId must be set", tenantId != boost::none);
-        */
 
         return DatabaseName(std::move(tenantId), db);
     }
@@ -185,6 +223,10 @@ DatabaseName DatabaseNameUtil::deserializeForCommands(boost::optional<TenantId> 
                 return DatabaseName(std::move(tenantId), db);
             case SerializationContext::Prefix::IncludePrefix: {
                 auto dbName = parseFromStringExpectTenantIdInMultitenancyMode(db);
+                if (!dbName.tenantId() && dbName.isInternalDb()) {
+                    return dbName;
+                }
+
                 uassert(
                     8423386,
                     str::stream()
@@ -207,10 +249,8 @@ DatabaseName DatabaseNameUtil::deserializeForCommands(boost::optional<TenantId> 
 
     // We received the tenantId from the prefix.
     auto dbName = parseFromStringExpectTenantIdInMultitenancyMode(db);
-    // TODO SERVER-73113 Uncomment out this conditional to check that we always have a tenantId.
-    // if ((dbName != DatabaseName::kAdmin) && (dbName != DatabaseName::kLocal) &&
-    //     (dbName != DatabaseName::kConfig))
-    //     uassert(8423388, "TenantId must be set", dbName.tenantId() != boost::none);
+    if (!dbName.isInternalDb() && !dbName.isExternalDB())
+        uassert(8423388, "TenantId must be set", dbName.tenantId() != boost::none);
 
     return dbName;
 }
@@ -221,6 +261,22 @@ DatabaseName DatabaseNameUtil::deserializeForCatalog(StringData db,
     // multitenancy and will either return a DatabaseName with (tenantId, nonPrefixedDb) or
     // (none, prefixedDb).
     return DatabaseNameUtil::parseFromStringExpectTenantIdInMultitenancyMode(db);
+}
+
+DatabaseName DatabaseNameUtil::deserializeForCatalog(boost::optional<TenantId> tenantId,
+                                                     StringData db) {
+    // Internally, CollectionCatalog still keys against DatabaseName but needs to address all
+    // tenantIds when pattern matching by passing in boost::none.
+    return DatabaseName(tenantId, db);
+}
+
+DatabaseName DatabaseNameUtil::parseFailPointData(const BSONObj& data, StringData dbFieldName) {
+    const auto db = data.getStringField(dbFieldName);
+    const auto tenantField = data.getField("$tenant");
+    const auto tenantId = tenantField.ok()
+        ? boost::optional<TenantId>(TenantId::parseFromBSON(tenantField))
+        : boost::none;
+    return DatabaseNameUtil::deserialize(tenantId, db, SerializationContext::stateDefault());
 }
 
 DatabaseName DatabaseNameUtil::deserializeForErrorMsg(StringData dbInErrMsg) {

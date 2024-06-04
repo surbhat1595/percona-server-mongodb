@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <cstdint>
 #include <map>
@@ -139,6 +138,7 @@ private:
     void onStepUpBegin(OperationContext* opCtx, long long term) override;
     void onStepUpComplete(OperationContext* opCtx, long long term) override {}
     void onStepDown() override;
+    void onRollback() override {}
     void onBecomeArbiter() override;
     inline std::string getServiceName() const override final {
         return "VectorClockMongoD";
@@ -415,7 +415,8 @@ Future<void> VectorClockMongoD::_doWhileQueueNotEmptyOrError(ServiceContext* ser
                 return !_durableTime;
             }();
 
-            ThreadClient tc("VectorClockStateOperation", service);
+            ThreadClient tc("VectorClockStateOperation",
+                            service->getService(ClusterRole::ShardServer));
             const auto opCtxHolder = tc->makeOperationContext();
             auto* const opCtx = opCtxHolder.get();
 

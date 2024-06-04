@@ -125,6 +125,13 @@ function runTest({forcePooledConnectionsDropped, withUUID}) {
             expectedErrorCode: [
                 ErrorCodes.ReshardCollectionAborted,
                 ErrorCodes.Interrupted,
+                // The query feature used in resharding can be disallowed after FCV downgrade,
+                // resulting in an InvalidOptions error.
+                ErrorCodes.InvalidOptions,
+                // setFCV will abort index build and resharding. Since resharding can also be
+                // building index, it is possible that the index build gets aborted first and
+                // resharding fails on IndexBuildAborted.
+                ErrorCodes.IndexBuildAborted,
             ]
         });
 
@@ -154,6 +161,10 @@ function runTest({forcePooledConnectionsDropped, withUUID}) {
                 ErrorCodes.CommandNotSupported,
                 ErrorCodes.ReshardCollectionAborted,
                 ErrorCodes.Interrupted,
+                // setFCV will abort index build and resharding. Since resharding can also be
+                // building index, it is possible that the index build gets aborted first and
+                // resharding fails on IndexBuildAborted.
+                ErrorCodes.IndexBuildAborted,
             ]
         });
 

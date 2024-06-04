@@ -67,7 +67,7 @@ public:
     size_t estimateCompileTimeSize() const final;
 
 protected:
-    void doRestoreState(bool) final;
+    void doSaveState(bool) final;
 
 private:
     PlanState advanceChild();
@@ -85,5 +85,7 @@ private:
     value::SlotAccessor* _bucketAccessor = nullptr;
     std::vector<value::OwnedValueAccessor> _blocksOutAccessor;
     value::OwnedValueAccessor _metaOutAccessor;
+
+    std::vector<std::unique_ptr<value::TsBlock>> _tsBlockStorage;
 };
 }  // namespace mongo::sbe

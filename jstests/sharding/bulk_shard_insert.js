@@ -6,17 +6,17 @@
  * of 5MB across all sharding tests in wiredTiger.
  * @tags: [resource_intensive]
  */
-import {configureFailPointForRS} from "jstests/libs/fail_point_util.js";
 
-var st = new ShardingTest({shards: 4, chunkSize: 1});
+var st = new ShardingTest({
+    shards: 4,
+    chunkSize: 1,
+    // Double the balancer interval to produce fewer migrations per unit time.
+    // Ensures that the test does not run out of stale shard version retries.
+    other: {configOptions: {setParameter: {balancerMigrationsThrottlingMs: 2000}}}
+});
 
-// Double the balancer interval to produce fewer migrations per unit time so that the test does not
-// run out of stale shard version retries.
-configureFailPointForRS(
-    st.configRS.nodes, 'overrideBalanceRoundInterval', {intervalMs: 2000}, 'alwaysOn');
-
-assert.commandWorked(st.s0.adminCommand({enableSharding: 'TestDB'}));
-st.ensurePrimaryShard('TestDB', st.shard0.shardName);
+assert.commandWorked(
+    st.s0.adminCommand({enableSharding: 'TestDB', primaryShard: st.shard0.shardName}));
 assert.commandWorked(st.s0.adminCommand({shardCollection: 'TestDB.TestColl', key: {Counter: 1}}));
 
 var db = st.s0.getDB('TestDB');

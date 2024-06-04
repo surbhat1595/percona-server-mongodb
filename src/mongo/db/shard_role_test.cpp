@@ -114,7 +114,7 @@ void installDatabaseMetadata(OperationContext* opCtx,
                              const DatabaseVersion& dbVersion) {
     AutoGetDb autoDb(opCtx, dbName, MODE_X, {}, {});
     auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(opCtx, dbName);
-    scopedDss->setDbInfo(opCtx, {dbName.toString_forTest(), ShardId("this"), dbVersion});
+    scopedDss->setDbInfo(opCtx, {dbName, ShardId("this"), dbVersion});
 }
 
 void installUnshardedCollectionMetadata(OperationContext* opCtx, const NamespaceString& nss) {
@@ -144,7 +144,7 @@ void installShardedCollectionMetadata(OperationContext* opCtx,
     auto rt = RoutingTableHistory::makeNew(nss,
                                            uuid,
                                            shardKeyPattern.getKeyPattern(),
-                                           false, /*unsplittable*/
+                                           false, /* unsplittable */
                                            nullptr,
                                            false,
                                            epoch,
@@ -899,7 +899,8 @@ TEST_F(ShardRoleTest, WritesOnMultiDocTransactionsUseLatestCatalog) {
 
     // Drop a collection
     {
-        auto newClient = opCtx()->getServiceContext()->makeClient("AlternativeClient");
+        auto newClient =
+            opCtx()->getServiceContext()->getService()->makeClient("AlternativeClient");
         AlternativeClientRegion acr(newClient);
         auto newOpCtx = cc().makeOperationContext();
         DBDirectClient directClient(newOpCtx.get());
@@ -1630,6 +1631,32 @@ TEST_F(ShardRoleTest, RestoreForWriteFailsIfCollectionIsNowAView) {
     testRestoreFailsIfCollectionIsNowAView(AcquisitionPrerequisites::kWrite);
 }
 
+// Test that collection acquisiton does not change the ReadSource on a secondary when constraints
+// are relaxed.
+TEST_F(ShardRoleTest, ReadSourceDoesNotChangeOnSecondary) {
+    const auto nss = nssUnshardedCollection1;
+    ASSERT_OK(repl::ReplicationCoordinator::get(getGlobalServiceContext())
+                  ->setFollowerMode(repl::MemberState::RS_SECONDARY));
+
+    ASSERT_EQUALS(RecoveryUnit::ReadSource::kNoTimestamp,
+                  opCtx()->recoveryUnit()->getTimestampReadSource());
+
+    opCtx()->setEnforceConstraints(false);
+
+    const auto coll = acquireCollection(
+        opCtx(),
+        CollectionAcquisitionRequest(nss,
+                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     repl::ReadConcernArgs::get(opCtx()),
+                                     AcquisitionPrerequisites::kWrite),
+        MODE_IX);
+
+    ASSERT_TRUE(coll.exists());
+
+    ASSERT_EQUALS(RecoveryUnit::ReadSource::kNoTimestamp,
+                  opCtx()->recoveryUnit()->getTimestampReadSource());
+}
+
 TEST_F(ShardRoleTest, RestoreChangesReadSourceAfterStepUp) {
     const auto nss = nssShardedCollection1;
 
@@ -1966,7 +1993,8 @@ TEST_F(ShardRoleTest, ScopedLocalCatalogWriteFenceWUOWRollbackAfterANotherClient
 
     // Another client creates the collection
     {
-        auto newClient = opCtx()->getServiceContext()->makeClient("MigrationCoordinator");
+        auto newClient =
+            opCtx()->getServiceContext()->getService()->makeClient("MigrationCoordinator");
         auto newOpCtx = newClient->makeOperationContext();
         createTestCollection(newOpCtx.get(), nss);
     }

@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <functional>
 #include <list>
@@ -76,7 +75,7 @@ public:
     bool isRecordVisible(const RecordId& rid) const {
         if (_lowestUncommittedRecord.isNull()) {
             if (_highestRecord.isNull()) {
-                return true;
+                return false;
             } else {
                 return rid <= _highestRecord;
             }

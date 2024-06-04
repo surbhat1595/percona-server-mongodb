@@ -31,7 +31,6 @@
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <fmt/format.h>
 #include <memory>
@@ -64,6 +63,7 @@
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/query_settings_decoration.h"
+#include "mongo/db/query/query_settings_manager.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -86,6 +86,7 @@ namespace {
  * - 'out' is a builder for the explain output.
  */
 void generatePlannerInfo(PlanExecutor* exec,
+                         const BSONObj& cmd,
                          const MultipleCollectionAccessor& collections,
                          BSONObj extraInfo,
                          const SerializationContext& serializationContext,
@@ -97,13 +98,20 @@ void generatePlannerInfo(PlanExecutor* exec,
 
     // Find whether there is an index filter set for the query shape. The 'indexFilterSet' field
     // will always be false in the case of EOF or idhack plans.
-    bool indexFilterSet = false;
     boost::optional<uint32_t> queryHash;
     boost::optional<uint32_t> planCacheKeyHash;
     const auto& mainCollection = collections.getMainCollection();
-    if (mainCollection && exec->getCanonicalQuery()) {
+    auto indexFilterSet = [&]() {
+        if (!mainCollection || !exec->getCanonicalQuery()) {
+            return false;
+        }
         const QuerySettings* querySettings =
             QuerySettingsDecoration::get(mainCollection->getSharedDecorations());
+        return querySettings
+            ->getAllowedIndicesFilter(exec->getCanonicalQuery()->encodeKeyForPlanCacheCommand())
+            .has_value();
+    }();
+    if (mainCollection && exec->getCanonicalQuery()) {
         if (exec->getCanonicalQuery()->isSbeCompatible() &&
             !exec->getCanonicalQuery()->getForceClassicEngine()) {
             const auto planCacheKeyInfo =
@@ -116,11 +124,6 @@ void generatePlannerInfo(PlanExecutor* exec,
             planCacheKeyHash = planCacheKeyInfo.planCacheKeyHash();
             queryHash = planCacheKeyInfo.queryHash();
         }
-        if (auto allowedIndicesFilter = querySettings->getAllowedIndicesFilter(
-                exec->getCanonicalQuery()->encodeKeyForPlanCacheCommand())) {
-            // Found an index filter set on the query shape.
-            indexFilterSet = true;
-        }
     }
     plannerBob.append("indexFilterSet", indexFilterSet);
 
@@ -130,11 +133,16 @@ void generatePlannerInfo(PlanExecutor* exec,
     auto query = exec->getCanonicalQuery();
     if (nullptr != query) {
         BSONObjBuilder parsedQueryBob(plannerBob.subobjStart("parsedQuery"));
-        query->root()->serialize(&parsedQueryBob, {});
+        query->getPrimaryMatchExpression()->serialize(&parsedQueryBob, {});
         parsedQueryBob.doneFast();
 
         if (query->getCollator()) {
             plannerBob.append("collation", query->getCollator()->getSpec().toBSON());
+        }
+
+        auto& querySettings = query->getExpCtx()->getQuerySettings();
+        if (auto querySettingsBSON = querySettings.toBSON(); !querySettingsBSON.isEmpty()) {
+            plannerBob.append("querySettings", querySettingsBSON);
         }
     }
 
@@ -362,7 +370,7 @@ void Explain::explainStages(PlanExecutor* exec,
     out->appendElements(explainVersionToBson(explainer.getVersion()));
 
     if (verbosity >= ExplainOptions::Verbosity::kQueryPlanner) {
-        generatePlannerInfo(exec, collections, extraInfo, serializationContext, out);
+        generatePlannerInfo(exec, command, collections, extraInfo, serializationContext, out);
     }
 
     if (verbosity >= ExplainOptions::Verbosity::kExecStats) {

@@ -35,7 +35,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <memory>
 #include <set>
@@ -173,6 +172,10 @@ std::string DurableCatalog::_newInternalIdent(StringData identStem) {
     buf << identStem;
     buf << _next++ << '-' << _rand;
     return buf.str();
+}
+
+std::string DurableCatalog::_newRand() {
+    return str::stream() << SecureRandom().nextUInt64();
 }
 
 std::string DurableCatalog::getFilesystemPathForDb(const DatabaseName& dbName) const {

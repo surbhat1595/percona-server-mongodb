@@ -91,10 +91,10 @@ public:
             const auto dbName = getDbName();
 
             auto catalogCache = Grid::get(opCtx)->catalogCache();
-            ScopeGuard purgeDatabaseOnExit(
-                [&] { catalogCache->purgeDatabase(DatabaseNameUtil::serialize(dbName)); });
+            ScopeGuard purgeDatabaseOnExit([&] { catalogCache->purgeDatabase(dbName); });
 
-            ConfigsvrCreateDatabase configsvrCreateDatabase{DatabaseNameUtil::serialize(dbName)};
+            ConfigsvrCreateDatabase configsvrCreateDatabase{
+                DatabaseNameUtil::serialize(dbName, request().getSerializationContext())};
             configsvrCreateDatabase.setDbName(DatabaseName::kAdmin);
             configsvrCreateDatabase.setPrimaryShardId(request().getPrimaryShard());
 
@@ -121,7 +121,8 @@ public:
         DatabaseName getDbName() const {
             const auto& cmd = request();
             return DatabaseNameUtil::deserialize(cmd.getDbName().tenantId(),
-                                                 cmd.getCommandParameter());
+                                                 cmd.getCommandParameter(),
+                                                 cmd.getSerializationContext());
         }
         NamespaceString ns() const override {
             return NamespaceString(getDbName());
@@ -141,7 +142,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(EnableShardingCmd);
+MONGO_REGISTER_COMMAND(EnableShardingCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

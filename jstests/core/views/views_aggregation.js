@@ -12,17 +12,20 @@
  *   # Explain of a resolved view must be executed by mongos.
  *   directly_against_shardsvrs_incompatible,
  *   references_foreign_collection,
+ *   # Some of the SBE statistics we check have different values pre-7.1, and this test only checks
+ *   # the values that we expect from the 7.2-and-later SBE.
+ *   requires_fcv_72,
  * ]
  */
 import {assertMergeFailsForAllModesWithCode} from "jstests/aggregation/extras/merge_helpers.js";
 import {arrayEq, assertErrorCode, orderedArrayEq} from "jstests/aggregation/extras/utils.js";
+import {getSingleNodeExplain} from "jstests/libs/analyze_plan.js";
 import {
     FixtureHelpers
 } from "jstests/libs/fixture_helpers.js";  // For arrayEq, assertErrorCode, and
 import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
-// TODO SERVER-72549: Remove 'featureFlagSbeFull' used by SBE Pushdown feature here and below.
-const featureFlagSbeFull = checkSBEEnabled(db, ["featureFlagSbeFull"]);
+const sbeEnabled = checkSBEEnabled(db);
 
 let viewsDB = db.getSiblingDB("views_aggregation");
 assert.commandWorked(viewsDB.dropDatabase());
@@ -166,6 +169,7 @@ assert.commandWorked(viewsDB.runCommand({
 (function testExplainOnView() {
     let explainPlan = assert.commandWorked(
         viewsDB.popSortedView.explain("queryPlanner").aggregate([{$limit: 1}, {$match: {pop: 3}}]));
+    explainPlan = getSingleNodeExplain(explainPlan);
     if (explainPlan.hasOwnProperty("stages")) {
         explainPlan = explainPlan.stages[0].$cursor;
     }
@@ -174,6 +178,7 @@ assert.commandWorked(viewsDB.runCommand({
 
     explainPlan = assert.commandWorked(viewsDB.popSortedView.explain("executionStats")
                                            .aggregate([{$limit: 1}, {$match: {pop: 3}}]));
+    explainPlan = getSingleNodeExplain(explainPlan);
     if (explainPlan.hasOwnProperty("stages")) {
         explainPlan = explainPlan.stages[0].$cursor;
     }
@@ -184,6 +189,7 @@ assert.commandWorked(viewsDB.runCommand({
 
     explainPlan = assert.commandWorked(viewsDB.popSortedView.explain("allPlansExecution")
                                            .aggregate([{$limit: 1}, {$match: {pop: 3}}]));
+    explainPlan = getSingleNodeExplain(explainPlan);
     if (explainPlan.hasOwnProperty("stages")) {
         explainPlan = explainPlan.stages[0].$cursor;
     }
@@ -196,6 +202,7 @@ assert.commandWorked(viewsDB.runCommand({
     // shell explain helper, should continue to work.
     explainPlan = assert.commandWorked(
         viewsDB.popSortedView.aggregate([{$limit: 1}, {$match: {pop: 3}}], {explain: true}));
+    explainPlan = getSingleNodeExplain(explainPlan);
     if (explainPlan.hasOwnProperty("stages")) {
         explainPlan = explainPlan.stages[0].$cursor;
     }
@@ -205,12 +212,13 @@ assert.commandWorked(viewsDB.runCommand({
     // Test allPlansExecution explain mode on the base collection.
     explainPlan = assert.commandWorked(
         viewsDB.coll.explain("allPlansExecution").aggregate([{$limit: 1}, {$match: {pop: 3}}]));
+    explainPlan = getSingleNodeExplain(explainPlan);
     if (explainPlan.hasOwnProperty("stages")) {
         explainPlan = explainPlan.stages[0].$cursor;
     }
     assert.eq(explainPlan.queryPlanner.namespace, "views_aggregation.coll", explainPlan);
     assert(explainPlan.hasOwnProperty("executionStats"), explainPlan);
-    if (featureFlagSbeFull) {
+    if (sbeEnabled) {
         assert.eq(explainPlan.executionStats.nReturned, 0, explainPlan);
     } else {
         assert.eq(explainPlan.executionStats.nReturned, 1, explainPlan);

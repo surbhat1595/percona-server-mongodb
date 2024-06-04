@@ -31,7 +31,6 @@
 
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <iosfwd>
 #include <string>
 #include <type_traits>
@@ -42,6 +41,7 @@
 #include "mongo/base/status.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/platform/compiler.h"
+#include "mongo/unittest/stringify.h"
 #include "mongo/util/assert_util_core.h"
 
 namespace mongo {
@@ -180,6 +180,15 @@ private:
     Status _status;
     boost::optional<T> _t;
 };
+
+template <typename T>
+std::string stringifyForAssert(const StatusWith<T>& sw) {
+    if (sw.isOK()) {
+        return unittest::stringify::invoke(sw.getValue());
+    } else {
+        return unittest::stringify::invoke(sw.getStatus());
+    }
+}
 
 template <typename T>
 auto operator<<(std::ostream& stream, const StatusWith<T>& sw)

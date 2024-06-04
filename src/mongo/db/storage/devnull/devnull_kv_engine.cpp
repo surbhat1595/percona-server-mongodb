@@ -192,6 +192,10 @@ public:
                                         long long numRecords,
                                         long long dataSize) {}
 
+    RecordId getLargestKey(OperationContext* opCtx) const final {
+        return RecordId();
+    }
+
     virtual void reserveRecordIds(OperationContext* opCtx,
                                   std::vector<RecordId>* out,
                                   size_t nRecords) final {
@@ -325,8 +329,11 @@ std::unique_ptr<RecordStore> DevNullKVEngine::getRecordStore(OperationContext* o
 std::unique_ptr<RecordStore> DevNullKVEngine::makeTemporaryRecordStore(OperationContext* opCtx,
                                                                        StringData ident,
                                                                        KeyFormat keyFormat) {
-    return std::make_unique<DevNullRecordStore>(
-        NamespaceString() /* ns */, boost::none /* uuid */, ident, CollectionOptions(), keyFormat);
+    return std::make_unique<DevNullRecordStore>(NamespaceString::kEmpty /* ns */,
+                                                boost::none /* uuid */,
+                                                ident,
+                                                CollectionOptions(),
+                                                keyFormat);
 }
 
 std::unique_ptr<SortedDataInterface> DevNullKVEngine::getSortedDataInterface(
@@ -354,8 +361,8 @@ public:
         return BSONObj();
     }
 
-    void setCatalogEntries(const stdx::unordered_map<std::string, std::pair<NamespaceString, UUID>>&
-                               identsToNsAndUUID) {}
+    void setCatalogEntries(
+        stdx::unordered_map<std::string, std::pair<NamespaceString, UUID>> identsToNsAndUUID) {}
 
     StatusWith<std::deque<BackupBlock>> getNextBatch(OperationContext* opCtx,
                                                      const std::size_t batchSize) {

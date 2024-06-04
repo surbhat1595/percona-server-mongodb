@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <string>
 #include <utility>
 
@@ -166,10 +165,11 @@ void RangeDeleterServiceOpObserver::aboutToDelete(OperationContext* opCtx,
 void RangeDeleterServiceOpObserver::onDelete(OperationContext* opCtx,
                                              const CollectionPtr& coll,
                                              StmtId stmtId,
+                                             const BSONObj& doc,
                                              const OplogDeleteEntryArgs& args,
                                              OpStateAccumulator* opAccumulator) {
     if (coll->ns() == NamespaceString::kRangeDeletionNamespace) {
-        opCtx->recoveryUnit()->onCommit([deletedDoc = std::move(deletedDocumentDecoration(args))](
+        opCtx->recoveryUnit()->onCommit([deletedDoc = deletedDocumentDecoration(args)](
                                             OperationContext* opCtx, boost::optional<Timestamp>) {
             auto deletionTask = RangeDeletionTask::parse(
                 IDLParserContext("RangeDeleterServiceOpObserver"), deletedDoc);

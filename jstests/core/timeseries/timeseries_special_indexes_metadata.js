@@ -4,9 +4,10 @@
  * Tests index creation, index drops, list indexes, hide/unhide index on a time-series collection.
  *
  * @tags: [
- *   # This test depends on certain writes ending up in the same bucket. Stepdowns may result in
- *   # writes splitting between two primaries, and thus different buckets.
+ *   # This test depends on certain writes ending up in the same bucket. Stepdowns and tenant
+ *   # migrations may result in writes splitting between two primaries, and thus different buckets.
  *   does_not_support_stepdowns,
+ *   tenant_migration_incompatible,
  *   # Time series geo functionality requires optimization.
  *   requires_pipeline_optimization,
  *   # We need a timeseries collection.
@@ -103,14 +104,10 @@ TimeseriesTest.run((insert) => {
 
         // Check for the index.
         const keys = timeseriesListIndexesCursor.firstBatch.map(d => d.key);
-        let expectedKeys = [];
+        // The {meta: 1, time: 1} index gets built by default on the time-series bucket collection.
+        let expectedKeys = [{mm: 1, tm: 1}];
         if (FixtureHelpers.isSharded(bucketscoll)) {
             expectedKeys.push({tm: 1});
-        }
-        if (TimeseriesTest.timeseriesScalabilityImprovementsEnabled(db)) {
-            // When enabled, the {meta: 1, time: 1} index gets built by default on the time-series
-            // bucket collection.
-            expectedKeys.push({mm: 1, tm: 1});
         }
         expectedKeys.push(timeseriesIndexSpec);
 

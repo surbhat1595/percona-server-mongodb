@@ -29,7 +29,6 @@
 
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -150,11 +149,7 @@ bool ReplicationConsistencyMarkersImpl::getInitialSyncFlag(OperationContext* opC
         return false;
     }
 
-    LOGV2_DEBUG(21285,
-                3,
-                "returning initial sync flag value of {flag}",
-                "Returning initial sync flag value",
-                "flag"_attr = flag.value());
+    LOGV2_DEBUG(21285, 3, "Returning initial sync flag value", "flag"_attr = flag.value());
     return flag.value();
 }
 
@@ -202,7 +197,6 @@ OpTime ReplicationConsistencyMarkersImpl::getMinValid(OperationContext* opCtx) c
 
     LOGV2_DEBUG(21288,
                 3,
-                "returning minvalid: {minValidString}({minValidBSON})",
                 "Returning minvalid",
                 "minValidString"_attr = minValid.toString(),
                 "minValidBSON"_attr = minValid.toBSON());
@@ -214,7 +208,6 @@ void ReplicationConsistencyMarkersImpl::setMinValid(OperationContext* opCtx,
                                                     const OpTime& minValid) {
     LOGV2_DEBUG(21289,
                 3,
-                "setting minvalid to exactly: {minValidString}({minValidBSON})",
                 "Setting minvalid to exactly",
                 "minValidString"_attr = minValid.toString(),
                 "minValidBSON"_attr = minValid.toBSON());
@@ -231,7 +224,6 @@ void ReplicationConsistencyMarkersImpl::setAppliedThrough(OperationContext* opCt
     invariant(!optime.isNull());
     LOGV2_DEBUG(21291,
                 3,
-                "setting appliedThrough to: {appliedThroughString}({appliedThroughBSON})",
                 "Setting appliedThrough",
                 "appliedThroughString"_attr = optime.toString(),
                 "appliedThroughBSON"_attr = optime.toBSON());
@@ -261,7 +253,6 @@ OpTime ReplicationConsistencyMarkersImpl::getAppliedThrough(OperationContext* op
     }
     LOGV2_DEBUG(21294,
                 3,
-                "returning appliedThrough: {appliedThroughString}({appliedThroughBSON})",
                 "Returning appliedThrough",
                 "appliedThroughString"_attr = appliedThrough->toString(),
                 "appliedThroughBSON"_attr = appliedThrough->toBSON());
@@ -274,8 +265,6 @@ void ReplicationConsistencyMarkersImpl::ensureFastCountOnOplogTruncateAfterPoint
     LOGV2_DEBUG(
         21295,
         3,
-        "Updating cached fast-count on collection {oplogTruncateAfterPointNamespace} in case an "
-        "unclean shutdown caused it to become incorrect.",
         "Updating cached fast-count on oplog truncate after point collection in case an unclean "
         "shutdown caused it to become incorrect",
         "oplogTruncateAfterPointNamespace"_attr = _oplogTruncateAfterPointNss);
@@ -320,7 +309,6 @@ Status ReplicationConsistencyMarkersImpl::_setOplogTruncateAfterPoint(OperationC
                                                                       const Timestamp& timestamp) {
     LOGV2_DEBUG(21296,
                 3,
-                "setting oplog truncate after point to: {oplogTruncateAfterPoint}",
                 "Setting oplog truncate after point",
                 "oplogTruncateAfterPoint"_attr = timestamp.toBSON());
 
@@ -384,7 +372,6 @@ Timestamp ReplicationConsistencyMarkersImpl::getOplogTruncateAfterPoint(
 
     LOGV2_DEBUG(21298,
                 3,
-                "Returning oplog truncate after point: {oplogTruncateAfterPoint}",
                 "Returning oplog truncate after point",
                 "oplogTruncateAfterPoint"_attr = truncatePointTimestamp);
     return truncatePointTimestamp;
@@ -412,7 +399,6 @@ void ReplicationConsistencyMarkersImpl::setOplogTruncateAfterPointToTopOfOplog(
     auto timestamp = _storageInterface->getLatestOplogTimestamp(opCtx);
     LOGV2_DEBUG(21551,
                 3,
-                "Initializing oplog truncate after point: {oplogTruncateAfterPoint}",
                 "Initializing oplog truncate after point",
                 "oplogTruncateAfterPoint"_attr = timestamp);
     setOplogTruncateAfterPoint(opCtx, timestamp);

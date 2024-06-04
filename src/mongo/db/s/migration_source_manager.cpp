@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <mutex>
 #include <string>
 #include <tuple>
@@ -191,17 +190,6 @@ std::shared_ptr<MigrationChunkClonerSource> MigrationSourceManager::getCurrentCl
     return msm->_cloneDriver;
 }
 
-// static
-bool MigrationSourceManager::isMigrating(OperationContext* opCtx,
-                                         NamespaceString const& nss,
-                                         BSONObj const& docToDelete) {
-    const auto scopedCsr =
-        CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss);
-    auto cloner = MigrationSourceManager::getCurrentCloner(*scopedCsr);
-
-    return cloner && cloner->isDocumentInMigratingChunk(docToDelete);
-}
-
 MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
                                                ShardsvrMoveRange&& request,
                                                WriteConcernOptions&& writeConcern,
@@ -219,7 +207,7 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
                           << _args.getToShard())),
       _moveTimingHelper(_opCtx,
                         "from",
-                        NamespaceStringUtil::serialize(_args.getCommandParameter()),
+                        _args.getCommandParameter(),
                         _args.getMin(),
                         _args.getMax(),
                         6,  // Total number of steps
@@ -261,7 +249,7 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
         auto scopedCsr =
             CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss());
 
-        const auto [metadata, indexInfo] = checkCollectionIdentity(
+        auto [metadata, indexInfo] = checkCollectionIdentity(
             _opCtx, nss(), _args.getEpoch(), _args.getCollectionTimestamp());
 
         UUID collectionUUID = autoColl.getCollection()->uuid();
@@ -339,7 +327,17 @@ MigrationSourceManager::~MigrationSourceManager() {
     invariant(!_cloneDriver);
     _stats.totalDonorMoveChunkTimeMillis.addAndFetch(_entireOpTimer.millis());
 
-    _completion.emplaceValue();
+    if (_state == kDone) {
+        _completion.emplaceValue();
+    } else {
+        std::string errMsg = "Migration not completed";
+        if (_coordinator) {
+            const auto& migrationId = _coordinator->getMigrationId();
+            errMsg = str::stream() << "Migration " << migrationId << " not completed";
+        }
+        auto status = Status{ErrorCodes::Interrupted, errMsg};
+        _completion.setError(status);
+    }
 }
 
 void MigrationSourceManager::startClone() {
@@ -351,7 +349,7 @@ void MigrationSourceManager::startClone() {
     uassertStatusOK(ShardingLogging::get(_opCtx)->logChangeChecked(
         _opCtx,
         "moveChunk.start",
-        NamespaceStringUtil::serialize(nss()),
+        nss(),
         BSON("min" << *_args.getMin() << "max" << *_args.getMax() << "from" << _args.getFromShard()
                    << "to" << _args.getToShard()),
         ShardingCatalogClient::kMajorityWriteConcern));
@@ -473,7 +471,8 @@ void MigrationSourceManager::enterCriticalSection() {
     uassertStatusOKWithContext(
         shardmetadatautil::updateShardCollectionsEntry(
             _opCtx,
-            BSON(ShardCollectionType::kNssFieldName << NamespaceStringUtil::serialize(nss())),
+            BSON(ShardCollectionType::kNssFieldName
+                 << NamespaceStringUtil::serialize(nss(), SerializationContext::stateDefault())),
             BSON("$inc" << BSON(ShardCollectionType::kEnterCriticalSectionCounterFieldName << 1)),
             false /*upsert*/),
         "Persist critical section signal for secondaries");
@@ -630,8 +629,6 @@ void MigrationSourceManager::commitChunkMetadataOnConfig() {
 
 
     LOGV2(22018,
-          "Migration succeeded and updated collection placement version to "
-          "{updatedCollectionPlacementVersion}",
           "Migration succeeded and updated collection placement version",
           "updatedCollectionPlacementVersion"_attr = refreshedMetadata.getCollPlacementVersion(),
           "migrationId"_attr = _coordinator->getMigrationId());
@@ -663,7 +660,7 @@ void MigrationSourceManager::commitChunkMetadataOnConfig() {
     ShardingLogging::get(_opCtx)->logChange(
         _opCtx,
         "moveChunk.commit",
-        NamespaceStringUtil::serialize(nss()),
+        nss(),
         BSON("min" << *_args.getMin() << "max" << *_args.getMax() << "from" << _args.getFromShard()
                    << "to" << _args.getToShard() << "counts" << *_recipientCloneCounts),
         ShardingCatalogClient::kMajorityWriteConcern);
@@ -676,8 +673,6 @@ void MigrationSourceManager::commitChunkMetadataOnConfig() {
 
     if (_args.getWaitForDelete()) {
         LOGV2(22019,
-              "Waiting for migration cleanup after chunk commit for the namespace {namespace} "
-              "and range {range}",
               "Waiting for migration cleanup after chunk commit",
               logAttrs(nss()),
               "range"_attr = redact(range.toString()),
@@ -706,7 +701,7 @@ void MigrationSourceManager::_cleanupOnError() noexcept {
     ShardingLogging::get(_opCtx)->logChange(
         _opCtx,
         "moveChunk.error",
-        NamespaceStringUtil::serialize(_args.getCommandParameter()),
+        _args.getCommandParameter(),
         BSON("min" << *_args.getMin() << "max" << *_args.getMax() << "from" << _args.getFromShard()
                    << "to" << _args.getToShard()),
         ShardingCatalogClient::kMajorityWriteConcern);
@@ -807,7 +802,9 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
                 _coordinator->setMigrationDecision(DecisionEnum::kAborted);
             }
 
-            auto newClient = _opCtx->getServiceContext()->makeClient("MigrationCoordinator");
+            auto newClient = _opCtx->getServiceContext()
+                                 ->getService(ClusterRole::ShardServer)
+                                 ->makeClient("MigrationCoordinator");
             AlternativeClientRegion acr(newClient);
             auto newOpCtxPtr = cc().makeOperationContext();
             auto newOpCtx = newOpCtxPtr.get();
@@ -836,8 +833,6 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
         _state = kDone;
     } catch (const DBException& ex) {
         LOGV2_WARNING(5089001,
-                      "Failed to complete the migration {migrationId} with "
-                      "{chunkMigrationRequestParameters} due to: {error}",
                       "Failed to complete the migration",
                       "chunkMigrationRequestParameters"_attr = redact(_args.toBSON({})),
                       "error"_attr = redact(ex),

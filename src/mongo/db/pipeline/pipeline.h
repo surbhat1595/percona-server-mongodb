@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <functional>
 #include <list>
@@ -61,7 +60,7 @@
 #include "mongo/db/query/cursor_response_gen.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/unordered_set.h"
@@ -144,6 +143,15 @@ public:
      * parse-time to return the wrong results.
      */
     static std::unique_ptr<Pipeline, PipelineDeleter> parse(
+        const std::vector<BSONObj>& rawPipeline,
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        PipelineValidatorCallback validator = nullptr);
+
+    /**
+     * Parses sub-pipelines from a $facet aggregation. Like parse(), but skips top-level
+     * validators.
+     */
+    static std::unique_ptr<Pipeline, PipelineDeleter> parseFacetPipeline(
         const std::vector<BSONObj>& rawPipeline,
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         PipelineValidatorCallback validator = nullptr);
@@ -295,6 +303,12 @@ public:
     bool needsPrimaryShardMerger() const;
 
     /**
+     * Returns a specific ShardId that should be merger for this pipeline or boost::none if it is
+     * not needed.
+     */
+    boost::optional<ShardId> needsSpecificShardMerger() const;
+
+    /**
      * Returns 'true' if the pipeline must merge on mongoS.
      */
     bool needsMongosMerger() const;
@@ -442,6 +456,12 @@ public:
         StringData targetStageName, std::function<bool(const DocumentSource* const)> predicate);
 
     /**
+     * Appends another pipeline to the existing pipeline.
+     * NOTE: The other pipeline will be destroyed.
+     */
+    void appendPipeline(std::unique_ptr<Pipeline, PipelineDeleter> otherPipeline);
+
+    /**
      * Performs common validation for top-level or facet pipelines. Throws if the pipeline is
      * invalid.
      *
@@ -491,6 +511,7 @@ private:
         const std::vector<T>& rawPipeline,
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         PipelineValidatorCallback validator,
+        bool isFacetPipeline,
         std::function<BSONObj(T)> getElemFunc);
 
     /**

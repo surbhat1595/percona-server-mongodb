@@ -31,7 +31,6 @@
 
 #include <boost/cstdint.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
 #include <mutex>
@@ -373,10 +372,11 @@ int insertBatchTransactionally(OperationContext* opCtx,
             return numBytes;
         } catch (const DBException& ex) {
             // Stale config errors requires that we refresh shard version, not just try again, so
-            // we let the layer above handle them.
+            // we let the layer above handle them. We set isCommitOrAbort to true to avoid retrying
+            // on errors in ErrorCodes::isRetriableError like InterruptedDueToReplStateChange.
             if (ErrorCodes::isStaleShardVersionError(ex.code()) ||
                 !isTransientTransactionError(
-                    ex.code(), false /* hasWriteConcernError */, false /* isCommitOrAbort */))
+                    ex.code(), false /* hasWriteConcernError */, true /* isCommitOrAbort */))
                 throw;
             logAndBackoff(7973400,
                           MONGO_LOGV2_DEFAULT_COMPONENT,
@@ -505,7 +505,9 @@ void runWithTransactionFromOpCtx(OperationContext* opCtx,
 
     ScopeGuard guard([opCtx, &txnParticipant] {
         try {
-            txnParticipant.abortTransaction(opCtx);
+            if (txnParticipant.transactionIsInProgress()) {
+                txnParticipant.abortTransaction(opCtx);
+            }
         } catch (DBException& e) {
             LOGV2_WARNING(
                 4990200,

@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -105,7 +104,13 @@ resolveCollator(OperationContext* opCtx, BSONObj userCollation, const Collection
             return {nullptr, ExpressionContext::CollationMatchesDefault::kYes};
         } else {
             return {getUserCollator(opCtx, userCollation),
-                    ExpressionContext::CollationMatchesDefault::kYes};
+                    // If the user explicitly provided a simple collation, we can still treat it as
+                    // 'CollationMatchesDefault::kYes', as no collation and simple collation are
+                    // functionally equivalent in the query code.
+                    (SimpleBSONObjComparator::kInstance.evaluate(userCollation ==
+                                                                 CollationSpec::kSimpleSpec))
+                        ? ExpressionContext::CollationMatchesDefault::kYes
+                        : ExpressionContext::CollationMatchesDefault::kNo};
         }
     }
 

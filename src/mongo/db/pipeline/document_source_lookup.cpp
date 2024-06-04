@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
@@ -62,6 +61,7 @@
 #include "mongo/db/pipeline/document_path_support.h"
 #include "mongo/db/pipeline/document_source_documents.h"
 #include "mongo/db/pipeline/document_source_merge_gen.h"
+#include "mongo/db/pipeline/document_source_queue.h"
 #include "mongo/db/pipeline/document_source_sequential_document_cache.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -275,6 +275,7 @@ DocumentSourceLookUp::DocumentSourceLookUp(
 std::vector<BSONObj> extractSourceStage(const std::vector<BSONObj>& pipeline) {
     if (!pipeline.empty() &&
         (pipeline[0].hasField(DocumentSourceDocuments::kStageName) ||
+         pipeline[0].hasField(DocumentSourceQueue::kStageName) ||
          pipeline[0].hasField("$search"_sd))) {
         return {pipeline[0]};
     }
@@ -432,8 +433,7 @@ PrivilegeVector DocumentSourceLookUp::LiteParsed::requiredPrivileges(
     if (!_pipelines.empty()) {
         const LiteParsedPipeline& pipeline = _pipelines[0];
         Privilege::addPrivilegesToPrivilegeVector(
-            &requiredPrivileges,
-            std::move(pipeline.requiredPrivileges(isMongos, bypassDocumentValidation)));
+            &requiredPrivileges, pipeline.requiredPrivileges(isMongos, bypassDocumentValidation));
     }
 
     return requiredPrivileges;
@@ -486,6 +486,9 @@ StageConstraints DocumentSourceLookUp::constraints(Pipeline::SplitState pipeStat
         // This stage will only be on the shards pipeline if $lookup on sharded foreign collections
         // is allowed.
         hostRequirement = HostTypeRequirement::kAnyShard;
+    } else if (_fromNs.isCollectionlessAggregateNS()) {
+        // When the inner pipeline does not target a collection, it can run on any node.
+        hostRequirement = HostTypeRequirement::kRunOnceAnyNode;
     } else {
         // If the pipeline is unsplit or this stage is on the merging part of the pipeline,
         // when $lookup on sharded foreign collections is allowed, the foreign collection is

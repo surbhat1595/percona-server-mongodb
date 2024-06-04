@@ -102,7 +102,8 @@ public:
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
         return NamespaceStringUtil::deserialize(dbName.tenantId(),
-                                                CommandHelpers::parseNsFullyQualified(cmdObj));
+                                                CommandHelpers::parseNsFullyQualified(cmdObj),
+                                                SerializationContext::stateDefault());
     }
 
     bool run(OperationContext* opCtx,
@@ -111,8 +112,9 @@ public:
              BSONObjBuilder& result) override {
         const NamespaceString nss{parseNs(dbName, cmdObj)};
 
-        BSONObjBuilder cmdBuilder(BSON("_configsvrRepairShardedCollectionChunksHistory"
-                                       << NamespaceStringUtil::serialize(nss)));
+        BSONObjBuilder cmdBuilder(
+            BSON("_configsvrRepairShardedCollectionChunksHistory"
+                 << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())));
         if (cmdObj["force"].booleanSafe())
             cmdBuilder.appendBool("force", true);
 
@@ -131,7 +133,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(RepairShardedCollectionChunksHistoryCommand);
+MONGO_REGISTER_COMMAND(RepairShardedCollectionChunksHistoryCommand).forRouter();
 
 }  // namespace
 }  // namespace mongo

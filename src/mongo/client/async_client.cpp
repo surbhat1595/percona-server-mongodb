@@ -30,7 +30,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <memory>
 #include <ratio>
@@ -59,7 +58,7 @@
 #include "mongo/db/connection_health_metrics_parameter_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/wire_version.h"
-#include "mongo/executor/egress_tag_closer_manager.h"
+#include "mongo/executor/egress_connection_closer_manager.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -71,6 +70,7 @@
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/protocol.h"
 #include "mongo/rpc/reply_interface.h"
+#include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future_impl.h"
@@ -101,10 +101,14 @@ Future<AsyncDBClient::Handle> AsyncDBClient::connect(
     Milliseconds timeout,
     std::shared_ptr<ConnectionMetrics> connectionMetrics,
     std::shared_ptr<const transport::SSLConnectionContext> transientSSLContext) {
-    auto tl = context->getTransportLayer();
-    return tl
-        ->asyncConnect(
-            peer, sslMode, std::move(reactor), timeout, connectionMetrics, transientSSLContext)
+    auto tl = context->getTransportLayerManager();
+    return tl->getEgressLayer()
+        ->asyncConnect(peer,
+                       sslMode,
+                       reactor,
+                       timeout,
+                       std::move(connectionMetrics),
+                       std::move(transientSSLContext))
         .then([peer, context](std::shared_ptr<transport::Session> session) {
             return std::make_shared<AsyncDBClient>(peer, std::move(session), context);
         });
@@ -130,9 +134,7 @@ BSONObj AsyncDBClient::_buildHelloRequest(const std::string& appName,
 
     _compressorManager.clientBegin(&bob);
 
-    if (auto wireSpec = WireSpec::instance().get(); wireSpec->isInternalClient) {
-        WireSpec::appendInternalClientWireVersion(wireSpec->outgoing, &bob);
-    }
+    WireSpec::getWireSpec(_svcCtx).appendInternalClientWireVersionIfNeeded(&bob);
 
     if (hook) {
         return hook->augmentHelloRequest(remote(), bob.obj());
@@ -146,7 +148,7 @@ void AsyncDBClient::_parseHelloResponse(BSONObj request,
     uassert(50786,
             "Expected OP_MSG response to 'hello'",
             response->getProtocol() == rpc::Protocol::kOpMsg);
-    auto wireSpec = WireSpec::instance().get();
+    auto wireSpec = WireSpec::getWireSpec(_svcCtx).get();
     auto responseBody = response->getCommandReply();
     uassertStatusOK(getStatusFromCommandResult(responseBody));
 
@@ -154,28 +156,23 @@ void AsyncDBClient::_parseHelloResponse(BSONObj request,
         uassertStatusOK(wire_version::parseWireVersionFromHelloReply(responseBody));
     auto validateStatus = wire_version::validateWireVersion(wireSpec->outgoing, replyWireVersion);
     if (!validateStatus.isOK()) {
-        LOGV2_WARNING(23741,
-                      "Remote host has incompatible wire version: {error}",
-                      "Remote host has incompatible wire version",
-                      "error"_attr = validateStatus);
+        LOGV2_WARNING(
+            23741, "Remote host has incompatible wire version", "error"_attr = validateStatus);
         uasserted(validateStatus.code(),
                   str::stream() << "remote host has incompatible wire version: "
                                 << validateStatus.reason());
     }
 
-    auto& egressTagManager = executor::EgressTagCloserManager::get(_svcCtx);
-    // Tag outgoing connection so it can be kept open on FCV upgrade if it is not to a
-    // server with a lower binary version.
+    auto& egressConnectionCloserManager = executor::EgressConnectionCloserManager::get(_svcCtx);
+    // Mark outgoing connection to keep open so it can be kept open on FCV upgrade if it is
+    // not to a server with a lower binary version.
     if (replyWireVersion.maxWireVersion >= wireSpec->outgoing.maxWireVersion) {
         pauseBeforeMarkKeepOpen.pauseWhileSet();
-        egressTagManager.mutateTags(
-            _peer, [](transport::Session::TagMask tags) { return transport::Session::kKeepOpen; });
+        egressConnectionCloserManager.setKeepOpen(_peer, true);
     } else {
-        // The outgoing connection is to a server with a lower binary version, unset the pending
-        // flag if it's set to ensure that connections will be dropped.
-        egressTagManager.mutateTags(_peer, [](transport::Session::TagMask tags) {
-            return tags & ~transport::Session::kPending;
-        });
+        // The outgoing connection is to a server with a lower binary version, unmark keep open
+        // if it's set in order to ensure that connections will be dropped.
+        egressConnectionCloserManager.setKeepOpen(_peer, false);
     }
 
     _compressorManager.clientFinish(responseBody);
@@ -280,7 +277,7 @@ Future<void> AsyncDBClient::initWireVersion(const std::string& appName,
             _parseHelloResponse(requestObj, cmdReply);
             if (hook) {
                 executor::RemoteCommandResponse cmdResp(*cmdReply, timer.elapsed());
-                uassertStatusOK(hook->validateHost(_peer, requestObj, std::move(cmdResp)));
+                uassertStatusOK(hook->validateHost(_peer, requestObj, cmdResp));
             }
         });
 }
@@ -381,8 +378,8 @@ Future<executor::RemoteCommandResponse> AsyncDBClient::runCommandRequest(
     const BatonHandle& baton,
     boost::optional<std::shared_ptr<Timer>> fromConnAcquiredTimer) {
     auto startTimer = Timer();
-    auto opMsgRequest = OpMsgRequest::fromDBAndBody(
-        std::move(request.dbname), std::move(request.cmdObj), std::move(request.metadata));
+    auto opMsgRequest =
+        OpMsgRequest::fromDBAndBody(request.dbname, std::move(request.cmdObj), request.metadata);
     opMsgRequest.validatedTenancyScope = request.validatedTenancyScope;
     return runCommand(
                std::move(opMsgRequest), baton, request.options.fireAndForget, fromConnAcquiredTimer)
@@ -421,8 +418,8 @@ Future<executor::RemoteCommandResponse> AsyncDBClient::runExhaustCommand(OpMsgRe
 
 Future<executor::RemoteCommandResponse> AsyncDBClient::beginExhaustCommandRequest(
     executor::RemoteCommandRequest request, const BatonHandle& baton) {
-    auto opMsgRequest = OpMsgRequest::fromDBAndBody(
-        std::move(request.dbname), std::move(request.cmdObj), std::move(request.metadata));
+    auto opMsgRequest =
+        OpMsgRequest::fromDBAndBody(request.dbname, std::move(request.cmdObj), request.metadata);
     opMsgRequest.validatedTenancyScope = request.validatedTenancyScope;
 
     return runExhaustCommand(std::move(opMsgRequest), baton);
@@ -442,10 +439,6 @@ void AsyncDBClient::end() {
 
 const HostAndPort& AsyncDBClient::remote() const {
     return _peer;
-}
-
-const HostAndPort& AsyncDBClient::local() const {
-    return _session->local();
 }
 
 }  // namespace mongo

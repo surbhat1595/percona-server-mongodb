@@ -104,19 +104,22 @@ void ElemMatchObjectMatchExpression::debugString(StringBuilder& debug, int inden
     _sub->debugString(debug, indentationLevel + 1);
 }
 
-void ElemMatchObjectMatchExpression::appendSerializedRightHandSide(
-    BSONObjBuilder* bob, const SerializationOptions& opts) const {
+void ElemMatchObjectMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
+                                                                   const SerializationOptions& opts,
+                                                                   bool includePath) const {
     BSONObjBuilder elemMatchBob = bob->subobjStart("$elemMatch");
     SerializationOptions options = opts;
-    options.includePath = true;
-    _sub->serialize(&elemMatchBob, options);
+    _sub->serialize(&elemMatchBob, options, true);
     elemMatchBob.doneFast();
 }
 
 MatchExpression::ExpressionOptimizerFunc ElemMatchObjectMatchExpression::getOptimizer() const {
     return [](std::unique_ptr<MatchExpression> expression) {
         auto& elemExpression = static_cast<ElemMatchObjectMatchExpression&>(*expression);
-        elemExpression._sub = MatchExpression::optimize(std::move(elemExpression._sub));
+        // The Boolean simplifier is disabled since we don't want to simplify sub-expressions, but
+        // simplify the whole expression instead.
+        elemExpression._sub = MatchExpression::optimize(std::move(elemExpression._sub),
+                                                        /* enableSimplification */ false);
 
         return expression;
     };
@@ -174,13 +177,13 @@ void ElemMatchValueMatchExpression::debugString(StringBuilder& debug, int indent
     }
 }
 
-void ElemMatchValueMatchExpression::appendSerializedRightHandSide(
-    BSONObjBuilder* bob, const SerializationOptions& opts) const {
+void ElemMatchValueMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
+                                                                  const SerializationOptions& opts,
+                                                                  bool includePath) const {
     BSONObjBuilder emBob = bob->subobjStart("$elemMatch");
     SerializationOptions options = opts;
-    options.includePath = false;
     for (auto&& child : _subs) {
-        child->serialize(&emBob, options);
+        child->serialize(&emBob, options, false);
     }
     emBob.doneFast();
 }
@@ -190,7 +193,10 @@ MatchExpression::ExpressionOptimizerFunc ElemMatchValueMatchExpression::getOptim
         auto& subs = static_cast<ElemMatchValueMatchExpression&>(*expression)._subs;
 
         for (auto& subExpression : subs)
-            subExpression = MatchExpression::optimize(std::move(subExpression));
+            // The Boolean simplifier is disabled since we don't want to simplify sub-expressions,
+            // but simplify the whole expression instead.
+            subExpression = MatchExpression::optimize(std::move(subExpression),
+                                                      /* enableSimplification */ false);
 
         return expression;
     };
@@ -217,7 +223,8 @@ void SizeMatchExpression::debugString(StringBuilder& debug, int indentationLevel
 }
 
 void SizeMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                        const SerializationOptions& opts) const {
+                                                        const SerializationOptions& opts,
+                                                        bool includePath) const {
     opts.appendLiteral(bob, "$size", _size);
 }
 

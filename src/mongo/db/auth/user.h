@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <set>
 #include <string>
@@ -51,6 +50,7 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/restriction_set.h"
 #include "mongo/db/auth/role_name.h"
+#include "mongo/db/auth/user_acquisition_stats.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/platform/atomic_word.h"
@@ -415,7 +415,8 @@ private:
     RestrictionDocuments _indirectRestrictions;
 };
 
-using UserCache = ReadThroughCache<UserRequest, User>;
+using UserCache =
+    ReadThroughCache<UserRequest, User, CacheNotCausallyConsistent, SharedUserAcquisitionStats>;
 using UserHandle = UserCache::ValueHandle;
 
 }  // namespace mongo

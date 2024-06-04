@@ -34,7 +34,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
 #include <cstdint>
@@ -630,8 +629,11 @@ Status dropIndexesForApplyOps(OperationContext* opCtx,
     BSONObjBuilder bob(cmdObj);
     bob.append("$db", nss.dbName().serializeWithoutTenantPrefix_UNSAFE());
     auto cmdObjWithDb = bob.obj();
-    auto parsed = DropIndexes::parse(
-        IDLParserContext{"dropIndexes", false /* apiStrict */, nss.tenantId()}, cmdObjWithDb);
+    auto parsed = DropIndexes::parse(IDLParserContext{"dropIndexes",
+                                                      false /* apiStrict */,
+                                                      nss.tenantId(),
+                                                      SerializationContext::stateStorageRequest()},
+                                     cmdObjWithDb);
 
     return writeConflictRetry(opCtx, "dropIndexes", nss, [opCtx, &nss, &cmdObj, &parsed] {
         AutoGetCollection collection(opCtx, nss, MODE_X);

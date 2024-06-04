@@ -97,8 +97,8 @@ public:
             }
             threadPoolOptions.threadNamePrefix = "TestReshardCloneCollection-";
             threadPoolOptions.poolName = "TestReshardCloneCollectionThreadPool";
-            threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-                Client::initThread(threadName.c_str());
+            threadPoolOptions.onCreateThread = [opCtx](const std::string& threadName) {
+                Client::initThread(threadName.c_str(), opCtx->getService());
                 auto* client = Client::getCurrent();
                 AuthorizationSession::get(*client)->grantInternalAuthorization(client);
             };
@@ -183,7 +183,7 @@ public:
         return AllowedOnSecondary::kNever;
     }
 };
-MONGO_REGISTER_COMMAND(ReshardingCloneCollectionTestCommand).testOnly();
+MONGO_REGISTER_COMMAND(ReshardingCloneCollectionTestCommand).testOnly().forShard();
 
 }  // namespace
 }  // namespace mongo

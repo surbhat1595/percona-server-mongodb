@@ -32,7 +32,6 @@
 #include <absl/container/node_hash_set.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <exception>
 #include <string>
 #include <vector>
@@ -220,7 +219,7 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
         matchDetails.requestElemMatchKey();
 
         dassert(cq);
-        MONGO_verify(cq->root()->matchesBSON(oldObjValue, &matchDetails));
+        MONGO_verify(cq->getPrimaryMatchExpression()->matchesBSON(oldObjValue, &matchDetails));
 
         std::string matchedField;
         if (matchDetails.hasElemMatchKey())
@@ -286,6 +285,9 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
 
         // Ensure we set the type correctly
         args.source = writeToOrphan ? OperationSource::kFromMigrate : request->source();
+
+        args.mustCheckExistenceForInsertOperations =
+            driver->getUpdateExecutor()->getCheckExistenceForDiffInsertOperations();
 
         args.retryableWrite = write_stage_common::isRetryableWrite(opCtx());
 
@@ -499,18 +501,22 @@ PlanStage::StageState UpdateStage::doWork(WorkingSetID* out) {
         BSONObj oldObj = member->doc.value().toBson();
         invariant(oldObj.isOwned());
 
-        // Save state before making changes.
-        handlePlanStageYield(
+        const auto saveRet = handlePlanStageYield(
             expCtx(),
             "UpdateStage saveState",
             [&] {
                 child()->saveState();
-                return PlanStage::NEED_TIME /* unused */;
+                return PlanStage::NEED_TIME;
             },
             [&] {
                 // yieldHandler
-                std::terminate();
+                memberFreer.dismiss();
+                prepareToRetryWSM(id, out);
             });
+        if (saveRet != PlanStage::NEED_TIME) {
+            return saveRet;
+        }
+
         // If we care about the pre-updated version of the doc, save it out here.
         SnapshotId oldSnapshot = member->doc.snapshotId();
 
@@ -566,38 +572,40 @@ PlanStage::StageState UpdateStage::doWork(WorkingSetID* out) {
 
         // Restore state after modification. As restoreState may restore (recreate) cursors, make
         // sure to restore the state outside of the WritUnitOfWork.
-        //
-        // If this stage is already exhausted it won't use its children stages anymore and therefore
-        // there's no need to restore them. Avoid restoring them so that there's no possibility of
-        // requiring yielding at this point. Restoring from yield could fail due to a sharding
-        // placement change. Throwing a StaleConfig error is undesirable after an "update one"
-        // operation has already performed a write because the router would retry.
-        if (!isEOF()) {
-            const auto restoreStateRet = handlePlanStageYield(
-                expCtx(),
-                "UpdateStage restoreState",
-                [&] {
-                    child()->restoreState(&collectionPtr());
-                    return PlanStage::NEED_TIME;
-                },
-                [&] {
-                    // yieldHandler
-                    // Note we don't need to retry updating anything in this case since the update
-                    // already was committed. However, we still need to return the updated document
-                    // (if it was requested).
-                    if (_params.request->shouldReturnAnyDocs()) {
-                        // member->obj should refer to the document we want to return.
-                        invariant(member->getState() == WorkingSetMember::OWNED_OBJ);
+        const auto stageIsEOF = isEOF();
+        const auto restoreStateRet = handlePlanStageYield(
+            expCtx(),
+            "UpdateStage restoreState",
+            [&] {
+                child()->restoreState(&collectionPtr());
+                return PlanStage::NEED_TIME;
+            },
+            [&] {
+                // yieldHandler
+                // Note we don't need to retry updating anything in this case since the update
+                // already was committed. However, we still need to return the updated document (if
+                // it was requested).
+                if (_params.request->shouldReturnAnyDocs()) {
+                    // member->obj should refer to the document we want to return.
+                    invariant(member->getState() == WorkingSetMember::OWNED_OBJ);
 
-                        _idReturning = id;
-                        // Keep this member around so that we can return it on the next
-                        // work() call.
-                        memberFreer.dismiss();
-                    }
-                    *out = WorkingSet::INVALID_ID;
-                });
+                    _idReturning = id;
+                    // Keep this member around so that we can return it on the next work() call.
+                    memberFreer.dismiss();
+                }
+                *out = WorkingSet::INVALID_ID;
+            });
 
-            if (restoreStateRet != PlanStage::NEED_TIME) {
+        if (restoreStateRet != PlanStage::NEED_TIME) {
+            if (restoreStateRet == PlanStage::NEED_YIELD && stageIsEOF) {
+                // If this stage is already exhausted it won't use its children stages anymore and
+                // therefore it's okay if we failed to restore them. Avoid requesting a yield to the
+                // plan executor. Restoring from yield could fail due to a sharding placement
+                // change. Throwing a StaleConfig error is undesirable after an "update one"
+                // operation has already performed a write because the router would retry. Unset
+                // _idReturning as we'll return the document in this stage iteration.
+                _idReturning = WorkingSet::INVALID_ID;
+            } else {
                 return restoreStateRet;
             }
         }
@@ -710,14 +718,14 @@ void UpdateStage::_checkRestrictionsOnUpdatingShardKeyAreNotViolated(
                     _params.request->getAllowShardKeyUpdatesWithoutFullShardKeyInQuery());
         }
     } else {
-        uassert(31025,
-                "Shard key update is not allowed without specifying the full shard key in the "
-                "query",
-                (_params.canonicalQuery &&
-                 pathsupport::extractFullEqualityMatches(
-                     *(_params.canonicalQuery->root()), shardKeyPaths, &equalities)
-                     .isOK() &&
-                 equalities.size() == shardKeyPathsVector.size()));
+        uassert(
+            31025,
+            "Shard key update is not allowed without specifying the full shard key in the query",
+            (_params.canonicalQuery &&
+             pathsupport::extractFullEqualityMatches(
+                 *(_params.canonicalQuery->getPrimaryMatchExpression()), shardKeyPaths, &equalities)
+                 .isOK() &&
+             equalities.size() == shardKeyPathsVector.size()));
 
         // If this node is a replica set primary node, an attempted update to the shard key value
         // must either be a retryable write or inside a transaction. An update without a transaction

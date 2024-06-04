@@ -182,7 +182,7 @@ TEST_F(AllDatabaseClonerTest, RetriesConnect) {
 
     // Run the cloner in a separate thread.
     stdx::thread clonerThread([&] {
-        Client::initThread("ClonerRunner");
+        Client::initThread("ClonerRunner", getGlobalServiceContext()->getService());
         ASSERT_OK(cloner->run());
     });
 
@@ -245,7 +245,7 @@ TEST_F(AllDatabaseClonerTest, RetriesConnectButFails) {
 
     // Run the cloner in a separate thread.
     stdx::thread clonerThread([&] {
-        Client::initThread("ClonerRunner");
+        Client::initThread("ClonerRunner", getGlobalServiceContext()->getService());
         ASSERT_NOT_OK(cloner->run());
     });
 
@@ -284,7 +284,7 @@ TEST_F(AllDatabaseClonerTest, RetriesListDatabases) {
 
     // Run the cloner in a separate thread.
     stdx::thread clonerThread([&] {
-        Client::initThread("ClonerRunner");
+        Client::initThread("ClonerRunner", getGlobalServiceContext()->getService());
         ASSERT_OK(cloner->run());
     });
 
@@ -361,7 +361,7 @@ TEST_F(AllDatabaseClonerTest, RetriesListDatabasesButRollBackIdChanges) {
 
     // Run the cloner in a separate thread.
     stdx::thread clonerThread([&] {
-        Client::initThread("ClonerRunner");
+        Client::initThread("ClonerRunner", getGlobalServiceContext()->getService());
         ASSERT_NOT_OK(cloner->run());
     });
 
@@ -409,7 +409,7 @@ TEST_F(AllDatabaseClonerTest, RetriesListDatabasesButInitialSyncIdChanges) {
 
     // Run the cloner in a separate thread.
     stdx::thread clonerThread([&] {
-        Client::initThread("ClonerRunner");
+        Client::initThread("ClonerRunner", getGlobalServiceContext()->getService());
         ASSERT_NOT_OK(cloner->run());
     });
 
@@ -459,7 +459,7 @@ TEST_F(AllDatabaseClonerTest, RetriesListDatabasesButTimesOut) {
 
     // Run the cloner in a separate thread.
     stdx::thread clonerThread([&] {
-        Client::initThread("ClonerRunner");
+        Client::initThread("ClonerRunner", getGlobalServiceContext()->getService());
         ASSERT_NOT_OK(cloner->run());
     });
 
@@ -573,7 +573,7 @@ TEST_F(AllDatabaseClonerTest, DatabaseStats) {
     _clock.advance(Minutes(1));
     // Run the cloner in a separate thread.
     stdx::thread clonerThread([&] {
-        Client::initThread("ClonerRunner");
+        Client::initThread("ClonerRunner", getGlobalServiceContext()->getService());
         ASSERT_OK(cloner->run());
     });
 
@@ -716,7 +716,7 @@ TEST_F(AllDatabaseClonerTest,
     _clock.advance(Minutes(1));
     // Run the cloner in a separate thread.
     stdx::thread clonerThread([&] {
-        Client::initThread("ClonerRunner");
+        Client::initThread("ClonerRunner", getGlobalServiceContext()->getService());
         ASSERT_OK(cloner->run());
     });
 
@@ -753,18 +753,22 @@ TEST_F(AllDatabaseClonerTest,
     _clock.advance(Minutes(1));
 
     // Allow the cloner to move to the next DB.
-    timesEntered = dbClonerBeforeFailPoint->setMode(
-        FailPoint::alwaysOn,
-        0,
-        fromjson(str::stream() << "{cloner: 'DatabaseCloner', stage: 'listCollections', database: '"
-                               << adminWithTenantId.toStringWithTenantId_forTest() << "'}"));
+    timesEntered =
+        dbClonerBeforeFailPoint->setMode(
+            FailPoint::alwaysOn,
+            0,
+            fromjson(str::stream()
+                     << "{cloner: 'DatabaseCloner', stage: 'listCollections', $tenant: ObjectId('"
+                     << adminWithTenantId.tenantId()->toString() << "'), database: '"
+                     << adminWithTenantId.toString_forTest() << "'}"));
 
     dbClonerAfterFailPoint->setMode(
         FailPoint::alwaysOn,
         0,
-        fromjson(str::stream() << "{cloner: 'DatabaseCloner', stage: 'listCollections', database: '"
-                               << adminWithTenantId.toStringWithTenantId_forTest() << "'}"));
-
+        fromjson(str::stream()
+                 << "{cloner: 'DatabaseCloner', stage: 'listCollections', $tenant: ObjectId('"
+                 << adminWithTenantId.tenantId()->toString() << "'), database: '"
+                 << adminWithTenantId.toString_forTest() << "'}"));
     // Wait for the failpoint to be reached.
     dbClonerBeforeFailPoint->waitForTimesEntered(timesEntered + 1);
     stats = cloner->getStats();
@@ -784,17 +788,21 @@ TEST_F(AllDatabaseClonerTest,
     _clock.advance(Minutes(1));
 
     // Allow the cloner to move to the tenant admin DB.
-    timesEntered = dbClonerBeforeFailPoint->setMode(
-        FailPoint::alwaysOn,
-        0,
-        fromjson(str::stream() << "{cloner: 'DatabaseCloner', stage: 'listCollections', database: '"
-                               << aabWithTenantId.toStringWithTenantId_forTest() << "'}"));
+    timesEntered =
+        dbClonerBeforeFailPoint->setMode(
+            FailPoint::alwaysOn,
+            0,
+            fromjson(str::stream()
+                     << "{cloner: 'DatabaseCloner', stage: 'listCollections', $tenant: ObjectId('"
+                     << aabWithTenantId.tenantId()->toString() << "'), database: '"
+                     << aabWithTenantId.toString_forTest() << "'}"));
     dbClonerAfterFailPoint->setMode(
         FailPoint::alwaysOn,
         0,
-        fromjson(str::stream() << "{cloner: 'DatabaseCloner', stage: 'listCollections', database: '"
-                               << aabWithTenantId.toStringWithTenantId_forTest() << "'}"));
-
+        fromjson(str::stream()
+                 << "{cloner: 'DatabaseCloner', stage: 'listCollections', $tenant: ObjectId('"
+                 << aabWithTenantId.tenantId()->toString() << "'), database: '"
+                 << aabWithTenantId.toString_forTest() << "'}"));
     // Wait for the failpoint to be reached.
     dbClonerBeforeFailPoint->waitForTimesEntered(timesEntered + 1);
     stats = cloner->getStats();
@@ -813,16 +821,21 @@ TEST_F(AllDatabaseClonerTest,
 
 
     // Allow the cloner to move to the last DB.
-    timesEntered = dbClonerBeforeFailPoint->setMode(
-        FailPoint::alwaysOn,
-        0,
-        fromjson(str::stream() << "{cloner: 'DatabaseCloner', stage: 'listCollections', database: '"
-                               << aWithTenantId.toStringWithTenantId_forTest() << "'}"));
+    timesEntered =
+        dbClonerBeforeFailPoint->setMode(
+            FailPoint::alwaysOn,
+            0,
+            fromjson(str::stream()
+                     << "{cloner: 'DatabaseCloner', stage: 'listCollections', $tenant: ObjectId('"
+                     << aWithTenantId.tenantId()->toString() << "'), database: '"
+                     << aWithTenantId.toString_forTest() << "'}"));
     dbClonerAfterFailPoint->setMode(
         FailPoint::alwaysOn,
         0,
-        fromjson(str::stream() << "{cloner: 'DatabaseCloner', stage: 'listCollections', database: '"
-                               << aWithTenantId.toStringWithTenantId_forTest() << "'}"));
+        fromjson(str::stream()
+                 << "{cloner: 'DatabaseCloner', stage: 'listCollections', $tenant: ObjectId('"
+                 << aWithTenantId.tenantId()->toString() << "'), database: '"
+                 << aWithTenantId.toString_forTest() << "'}"));
 
     // Wait for the failpoint to be reached.
     dbClonerBeforeFailPoint->waitForTimesEntered(timesEntered + 1);

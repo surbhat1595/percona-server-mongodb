@@ -43,6 +43,7 @@
 #include "mongo/db/cloner.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -54,6 +55,7 @@
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/clone_catalog_data_gen.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/str.h"
@@ -120,17 +122,16 @@ public:
 
         const auto cloneCatalogDataRequest =
             CloneCatalogData::parse(IDLParserContext("_shardsvrCloneCatalogData"), cmdObj);
-        const auto dbname = cloneCatalogDataRequest.getCommandParameter().dbName();
+        const auto dbName = cloneCatalogDataRequest.getCommandParameter().dbName();
 
-        uassert(
-            ErrorCodes::InvalidNamespace,
-            str::stream() << "invalid db name specified: " << dbname.toStringForErrorMsg(),
-            NamespaceString::validDBName(dbname, NamespaceString::DollarInDbNameBehavior::Allow));
+        uassert(ErrorCodes::InvalidNamespace,
+                str::stream() << "invalid db name specified: " << dbName.toStringForErrorMsg(),
+                DatabaseName::isValid(dbName, DatabaseName::DollarInDbNameBehavior::Allow));
 
         uassert(ErrorCodes::InvalidOptions,
-                str::stream() << "Can't clone catalog data for " << dbname.toStringForErrorMsg()
+                str::stream() << "Can't clone catalog data for " << dbName.toStringForErrorMsg()
                               << " database",
-                !dbname.isAdminDB() && !dbname.isConfigDB() && !dbname.isLocalDB());
+                !dbName.isAdminDB() && !dbName.isConfigDB() && !dbName.isLocalDB());
 
         auto from = cloneCatalogDataRequest.getFrom();
 
@@ -139,21 +140,37 @@ public:
                 !from.empty());
 
         auto const catalogClient = Grid::get(opCtx)->catalogClient();
-        const auto shardedColls = catalogClient->getAllShardedCollectionsForDb(
-            opCtx,
-            DatabaseNameUtil::serialize(dbname),
-            repl::ReadConcernLevel::kMajorityReadConcern);
+        auto shardedOrUntrackedColls = catalogClient->getShardedCollectionNamespacesForDb(
+            opCtx, dbName, repl::ReadConcernLevel::kMajorityReadConcern, {});
+        const auto databasePrimary =
+            catalogClient->getDatabase(opCtx, dbName, repl::ReadConcernLevel::kMajorityReadConcern)
+                .getPrimary()
+                .toString();
+        auto unsplittableCollsOutsideDbPrimary =
+            catalogClient->getUnsplittableCollectionNamespacesForDbOutsideOfShards(
+                opCtx, dbName, {databasePrimary}, repl::ReadConcernLevel::kMajorityReadConcern);
+
+        std::move(unsplittableCollsOutsideDbPrimary.begin(),
+                  unsplittableCollsOutsideDbPrimary.end(),
+                  std::back_inserter(shardedOrUntrackedColls));
 
         DisableDocumentValidation disableValidation(opCtx);
 
         // Clone the non-ignored collections.
         std::set<std::string> clonedColls;
+        bool forceSameUUIDAsSource = false;
+        {
+            FixedFCVRegion fcvRegion{opCtx};
+            forceSameUUIDAsSource =
+                feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(*fcvRegion);
+        }
 
         Cloner cloner;
         uassertStatusOK(cloner.copyDb(opCtx,
-                                      DatabaseNameUtil::serialize(dbname),
+                                      dbName,
                                       from.toString(),
-                                      shardedColls,
+                                      shardedOrUntrackedColls,
+                                      forceSameUUIDAsSource,
                                       &clonedColls));
         {
             BSONArrayBuilder cloneBarr = result.subarrayStart("clonedColls");
@@ -163,7 +180,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CloneCatalogDataCommand);
+MONGO_REGISTER_COMMAND(CloneCatalogDataCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

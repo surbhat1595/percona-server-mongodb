@@ -86,7 +86,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     VariantCollectionPtrOrAcquisition collection,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     size_t plannerOptions,
-    NamespaceString nss = NamespaceString(),
+    NamespaceString nss = NamespaceString::kEmpty,
     std::unique_ptr<QuerySolution> qs = nullptr);
 
 /**
@@ -103,7 +103,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     VariantCollectionPtrOrAcquisition collection,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     size_t plannerOptions,
-    NamespaceString nss = NamespaceString(),
+    NamespaceString nss = NamespaceString::kEmpty,
     std::unique_ptr<QuerySolution> qs = nullptr);
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
@@ -133,7 +133,9 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     NamespaceString nss,
     std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
     bool isFromPlanCache,
-    bool generatedByBonsai);
+    bool generatedByBonsai,
+    std::unique_ptr<RemoteCursorMap> remoteCursors = nullptr,
+    std::unique_ptr<RemoteExplainVector> remoteExplains = nullptr);
 
 /**
  * Similar to the factory function above in that it also constructs an executor for the winning SBE

@@ -33,7 +33,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <set>
 #include <string>
@@ -350,8 +349,10 @@ static StatusWith<boost::optional<const std::set<RoleName>&>> _userRoles(
     return boost::optional<const std::set<RoleName>&>{};
 }
 
-StatusWith<User> AuthzManagerExternalStateLocal::getUserObject(OperationContext* opCtx,
-                                                               const UserRequest& userReq) try {
+StatusWith<User> AuthzManagerExternalStateLocal::getUserObject(
+    OperationContext* opCtx,
+    const UserRequest& userReq,
+    const SharedUserAcquisitionStats& userAcquisitionStats) try {
     const UserName& userName = userReq.name;
     std::vector<RoleName> directRoles;
     User user(userReq);
@@ -422,9 +423,11 @@ StatusWith<User> AuthzManagerExternalStateLocal::getUserObject(OperationContext*
     return ex.toStatus();
 }
 
-Status AuthzManagerExternalStateLocal::getUserDescription(OperationContext* opCtx,
-                                                          const UserRequest& userReq,
-                                                          BSONObj* result) try {
+Status AuthzManagerExternalStateLocal::getUserDescription(
+    OperationContext* opCtx,
+    const UserRequest& userReq,
+    BSONObj* result,
+    const SharedUserAcquisitionStats& userAcquisitionStats) try {
     const UserName& userName = userReq.name;
     std::vector<RoleName> directRoles;
     BSONObjBuilder resultBuilder;

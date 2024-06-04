@@ -35,7 +35,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -89,7 +88,8 @@ void FallbackOpObserver::onInserts(OperationContext* opCtx,
                 uassertStatusOK(CollectionCatalog::get(opCtx)->createView(
                     opCtx,
                     NamespaceStringUtil::deserialize(nss.dbName().tenantId(),
-                                                     it->doc.getStringField("_id")),
+                                                     it->doc.getStringField("_id"),
+                                                     SerializationContext::stateDefault()),
                     NamespaceStringUtil::deserialize(nss.dbName(),
                                                      it->doc.getStringField("viewOn")),
                     BSONArray{it->doc.getObjectField("pipeline")},
@@ -160,6 +160,7 @@ void FallbackOpObserver::onUpdate(OperationContext* opCtx,
 void FallbackOpObserver::onDelete(OperationContext* opCtx,
                                   const CollectionPtr& coll,
                                   StmtId stmtId,
+                                  const BSONObj& doc,
                                   const OplogDeleteEntryArgs& args,
                                   OpStateAccumulator* opAccumulator) {
     const auto& nss = coll->ns();

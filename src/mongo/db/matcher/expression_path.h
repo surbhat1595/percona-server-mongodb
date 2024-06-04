@@ -195,12 +195,15 @@ public:
         return {true, boost::none};
     }
 
-    void serialize(BSONObjBuilder* out, const SerializationOptions& opts) const override {
-        auto&& rhs = getSerializedRightHandSide(opts);
-        if (opts.includePath) {
-            out->append(opts.serializeFieldPathFromString(path()), rhs);
+    void serialize(BSONObjBuilder* out,
+                   const SerializationOptions& opts = {},
+                   bool includePath = true) const override {
+        if (includePath) {
+            BSONObjBuilder subObj(out->subobjStart(opts.serializeFieldPathFromString(path())));
+            appendSerializedRightHandSide(&subObj, opts, includePath);
+            subObj.doneFast();
         } else {
-            out->appendElements(rhs);
+            appendSerializedRightHandSide(out, opts, includePath);
         }
     }
 
@@ -216,11 +219,13 @@ public:
      * to another expression, if that is possible syntactically.
      */
     virtual void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                               const SerializationOptions& opts = {}) const = 0;
+                                               const SerializationOptions& opts = {},
+                                               bool includePath = true) const = 0;
 
-    BSONObj getSerializedRightHandSide(const SerializationOptions& opts = {}) const {
+    BSONObj getSerializedRightHandSide(const SerializationOptions& opts = {},
+                                       bool includePath = true) const {
         BSONObjBuilder bob;
-        appendSerializedRightHandSide(&bob, opts);
+        appendSerializedRightHandSide(&bob, opts, includePath);
         return bob.obj();
     }
 

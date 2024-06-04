@@ -30,7 +30,6 @@
 #include <absl/container/flat_hash_map.h>
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 #include <algorithm>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <iterator>
 #include <list>
@@ -126,8 +125,8 @@ intrusive_ptr<DocumentSource> DocumentSourceMatch::optimize() {
         return nullptr;
     }
 
-    _matchProcessor->setExpression(
-        MatchExpression::optimize(std::move(_matchProcessor->getExpression())));
+    _matchProcessor->setExpression(MatchExpression::optimize(
+        std::move(_matchProcessor->getExpression()), /* enableSimplification */ false));
 
     return this;
 }

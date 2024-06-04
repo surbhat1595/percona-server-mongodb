@@ -29,7 +29,6 @@
 
 #include <utility>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/db/exec/plan_cache_util.h"
 #include "mongo/db/query/plan_explainer_factory.h"
@@ -80,7 +79,8 @@ std::unique_ptr<PlanExplainer> make(
     std::vector<sbe::plan_ranker::CandidatePlan> rejectedCandidates,
     bool isMultiPlan,
     bool isFromPlanCache,
-    std::shared_ptr<const plan_cache_debug_info::DebugInfoSBE> debugInfoSBE) {
+    std::shared_ptr<const plan_cache_debug_info::DebugInfoSBE> debugInfoSBE,
+    RemoteExplainVector* remoteExplains) {
     // If the plan was recovered from the plan cache, we should already have 'debugInfoSBE'.
     if (isFromPlanCache) {
         invariant(debugInfoSBE);
@@ -96,6 +96,7 @@ std::unique_ptr<PlanExplainer> make(
                                               std::move(rejectedCandidates),
                                               isMultiPlan,
                                               isFromPlanCache,
-                                              debugInfoSBE);
+                                              debugInfoSBE,
+                                              remoteExplains);
 }
 }  // namespace mongo::plan_explainer_factory

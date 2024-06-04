@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <utility>
 #include <vector>
@@ -110,7 +109,7 @@ void setResumeTokenForEvent(const ResumeTokenData& resumeTokenData, MutableDocum
 
 NamespaceString createNamespaceStringFromOplogEntry(Value tid, StringData ns) {
     auto tenantId = tid.missing() ? boost::none : boost::optional<TenantId>{tid.getOid()};
-    return NamespaceStringUtil::deserialize(tenantId, ns);
+    return NamespaceStringUtil::deserialize(tenantId, ns, SerializationContext::stateDefault());
 }
 
 void addTransactionIdFieldsIfPresent(const Document& input, MutableDocument& output) {
@@ -159,9 +158,11 @@ ResumeTokenData ChangeStreamEventTransformation::makeResumeToken(Value tsVal,
     auto clusterTime = tsVal.getTimestamp();
 
     // If we have a resume token, we need to match the version with which it was generated until we
-    // have surpassed it, at which point we can begin generating tokens with our default version.
-    auto version = (clusterTime > _resumeToken.clusterTime) ? _expCtx->changeStreamTokenVersion
-                                                            : _resumeToken.version;
+    // have surpassed all events against which it may have been compared in the original stream, at
+    // which point we can begin generating tokens with our default version.
+    auto version = (clusterTime > _resumeToken.clusterTime || txnOpIndex > _resumeToken.txnOpIndex)
+        ? _expCtx->changeStreamTokenVersion
+        : _resumeToken.version;
 
     // Construct and return the final resume token.
     return {clusterTime, version, txnOpIndex, uuid, operationType, documentKey, opDescription};
@@ -250,16 +251,16 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
                 if (_changeStreamSpec.getShowRawUpdateDescription()) {
                     updateDescription = input[repl::OplogEntry::kObjectFieldName];
                 } else {
-                    const auto& deltaDesc = change_stream_document_diff_parser::parseDiff(
+                    auto deltaDesc = change_stream_document_diff_parser::parseDiff(
                         diffObj.getDocument().toBson());
 
                     updateDescription =
-                        Value(Document{{"updatedFields", deltaDesc.updatedFields},
+                        Value(Document{{"updatedFields", std::move(deltaDesc.updatedFields)},
                                        {"removedFields", std::move(deltaDesc.removedFields)},
                                        {"truncatedArrays", std::move(deltaDesc.truncatedArrays)},
                                        {"disambiguatedPaths",
                                         _changeStreamSpec.getShowExpandedEvents()
-                                            ? Value(deltaDesc.disambiguatedPaths)
+                                            ? Value(std::move(deltaDesc.disambiguatedPaths))
                                             : Value()}});
                 }
             } else if (!oplogVersion.missing() || id.missing()) {

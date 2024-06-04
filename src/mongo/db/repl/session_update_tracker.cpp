@@ -33,7 +33,6 @@
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <utility>
 
@@ -83,6 +82,7 @@ OplogEntry createOplogEntryForTransactionTableUpdate(repl::OpTime opTime,
                                     NamespaceString::kSessionTransactionsTableNamespace,
                                     boost::none,  // uuid
                                     false,        // fromMigrate
+                                    boost::none,  // checkExistenceForDiffInsert
                                     repl::OplogEntry::kOplogVersion,
                                     updateBSON,
                                     o2Field,

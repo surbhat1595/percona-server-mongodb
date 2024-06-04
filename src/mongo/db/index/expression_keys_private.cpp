@@ -35,7 +35,6 @@
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 #include <boost/container/flat_set.hpp>
 #include <boost/container/vector.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <functional>
 #include <iterator>
@@ -616,7 +615,6 @@ void ExpressionKeysPrivate::getFTSKeys(SharedBufferFragmentBuilder& pooledBuffer
 void ExpressionKeysPrivate::getHashKeys(SharedBufferFragmentBuilder& pooledBufferBuilder,
                                         const BSONObj& obj,
                                         const BSONObj& keyPattern,
-                                        HashSeed seed,
                                         int hashVersion,
                                         bool isSparse,
                                         const CollatorInterface* collator,
@@ -671,7 +669,7 @@ void ExpressionKeysPrivate::getHashKeys(SharedBufferFragmentBuilder& pooledBuffe
         if (indexEntry.isNumber()) {
             keyString.appendBSONElement(fieldVal);
         } else {
-            keyString.appendNumberLong(makeSingleHashKey(fieldVal, seed, hashVersion));
+            keyString.appendNumberLong(makeSingleHashKey(fieldVal, hashVersion));
         }
     }
     if (isSparse && !hasFieldValue) {
@@ -684,9 +682,11 @@ void ExpressionKeysPrivate::getHashKeys(SharedBufferFragmentBuilder& pooledBuffe
 }
 
 // static
-long long int ExpressionKeysPrivate::makeSingleHashKey(const BSONElement& e, HashSeed seed, int v) {
+long long int ExpressionKeysPrivate::makeSingleHashKey(const BSONElement& e, int v) {
+    // *** WARNING ***
+    // Changing the seed default will break existing indexes and sharded collections
     massert(16767, "Only HashVersion 0 has been defined", v == 0);
-    return BSONElementHasher::hash64(e, seed);
+    return BSONElementHasher::hash64(e, BSONElementHasher::DEFAULT_HASH_SEED);
 }
 
 void ExpressionKeysPrivate::getS2Keys(SharedBufferFragmentBuilder& pooledBufferBuilder,
@@ -856,8 +856,6 @@ void ExpressionKeysPrivate::getS2Keys(SharedBufferFragmentBuilder& pooledBufferB
 
     if (keysToAdd.size() > params.maxKeysPerInsert) {
         LOGV2_WARNING(23755,
-                      "Insert of geo object generated a high number of keys. num keys: "
-                      "{numKeys} obj inserted: {obj}",
                       "Insert of geo object generated a large number of keys",
                       "obj"_attr = redact(obj),
                       "numKeys"_attr = keysToAdd.size());

@@ -34,22 +34,25 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/cluster_server_parameter_cmds_gen.h"
 #include "mongo/db/commands/query_settings_cmds_gen.h"
-#include "mongo/db/commands/query_settings_utils.h"
+#include "mongo/db/commands/set_cluster_parameter_command_impl.h"
 #include "mongo/db/commands/set_cluster_parameter_invocation.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/query_settings_cluster_parameter_gen.h"
 #include "mongo/db/query/query_settings_gen.h"
 #include "mongo/db/query/query_settings_manager.h"
-#include "mongo/db/query/query_shape.h"
+#include "mongo/db/query/query_settings_utils.h"
+#include "mongo/db/query/query_shape/query_shape.h"
+#include "mongo/db/query/sbe_plan_cache.h"
 #include "mongo/platform/basic.h"
 #include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
-#include <algorithm>
 
 namespace mongo {
 namespace {
 
 using namespace query_settings;
+
+MONGO_FAIL_POINT_DEFINE(querySettingsPlanCacheInvalidation);
 
 static constexpr auto kQuerySettingsClusterParameterName = "querySettings"_sd;
 
@@ -63,21 +66,21 @@ SetClusterParameter makeSetClusterParameterRequest(
     }
     arrayBuilder.done();
     SetClusterParameter setClusterParameterRequest(
-        BSON(kQuerySettingsClusterParameterName << bob.done()));
-
-    // NOTE: Forward the 'dbName' for the SetClusterParameter::toBSON() not to fail on
-    // the invariant.
+        BSON(QuerySettingsManager::kQuerySettingsClusterParameterName << bob.done()));
     setClusterParameterRequest.setDbName(dbName);
     return setClusterParameterRequest;
 }
 
 /**
  * Invokes the setClusterParameter() weak function, which is an abstraction over the corresponding
- * command implementation in sharded clusters (mongos) vs. replica set deployments (mongod).
+ * command implementation in the router-role vs. the shard-role/the replica-set or standalone impl.
  */
-void setClusterParameter(OperationContext* opCtx, const SetClusterParameter& request) {
-    static auto w = MONGO_WEAK_FUNCTION_DEFINITION(setClusterParameter);
-    w(opCtx, request);
+void setClusterParameter(OperationContext* opCtx,
+                         const SetClusterParameter& request,
+                         boost::optional<Timestamp> clusterParameterTime,
+                         boost::optional<LogicalTime> previousTime) {
+    auto w = getSetClusterParameterImpl(opCtx);
+    w(opCtx, request, clusterParameterTime, previousTime);
 }
 
 /**
@@ -96,6 +99,17 @@ QuerySettings mergeQuerySettings(const QuerySettings& lhs, const QuerySettings& 
     }
 
     return querySettings;
+}
+
+/**
+ * Clears the SBE plan cache if 'querySettingsPlanCacheInvalidation' failpoint is set.
+ * Used when setting index filters via query settings interface. See query_settings_passthrough
+ * suite.
+ */
+void testOnlyClearPlanCache(OperationContext* opCtx) {
+    if (MONGO_unlikely(querySettingsPlanCacheInvalidation.shouldFail())) {
+        sbe::getPlanCache(opCtx).clear();
+    }
 }
 
 class SetQuerySettingsCommand final : public TypedCommand<SetQuerySettingsCommand> {
@@ -140,7 +154,11 @@ public:
             // Run SetClusterParameter command with the new value of the 'querySettings' cluster
             // parameter.
             setClusterParameter(
-                opCtx, makeSetClusterParameterRequest(settingsArray, request().getDbName()));
+                opCtx,
+                makeSetClusterParameterRequest(settingsArray, request().getDbName()),
+                boost::none,
+                querySettingsManager.getClusterParameterTime(opCtx,
+                                                             request().getDbName().tenantId()));
             SetQuerySettingsCommandReply reply;
             reply.setQueryShapeConfiguration(std::move(queryShapeConfiguration));
             return reply;
@@ -177,7 +195,11 @@ public:
             // Run SetClusterParameter command with the new value of the 'querySettings' cluster
             // parameter.
             setClusterParameter(
-                opCtx, makeSetClusterParameterRequest(settingsArray, request().getDbName()));
+                opCtx,
+                makeSetClusterParameterRequest(settingsArray, request().getDbName()),
+                boost::none,
+                querySettingsManager.getClusterParameterTime(opCtx,
+                                                             request().getDbName().tenantId()));
             SetQuerySettingsCommandReply reply;
             reply.setQueryShapeConfiguration(*updatedQueryShapeConfigurationIt);
             return reply;
@@ -195,9 +217,8 @@ public:
                     "hash was given.",
                     querySettings.has_value());
 
-            auto expCtx = make_intrusive<ExpressionContext>(opCtx, nullptr, ns());
             auto representativeQueryInfo =
-                createRepresentativeInfo(querySettings->second, expCtx, tenantId);
+                createRepresentativeInfo(querySettings->second, opCtx, tenantId);
             return updateQuerySettings(opCtx,
                                        request().getSettings(),
                                        QueryShapeConfiguration(queryShapeHash,
@@ -209,15 +230,15 @@ public:
             OperationContext* opCtx, const QueryInstance& queryInstance) {
             auto& querySettingsManager = QuerySettingsManager::get(opCtx);
             auto tenantId = request().getDbName().tenantId();
-            auto expCtx = make_intrusive<ExpressionContext>(opCtx, nullptr, ns());
-            auto representativeQueryInfo =
-                createRepresentativeInfo(queryInstance, expCtx, tenantId);
+            auto representativeQueryInfo = createRepresentativeInfo(queryInstance, opCtx, tenantId);
             auto& queryShapeHash = representativeQueryInfo.queryShapeHash;
 
             // If there is already an entry for a given QueryShapeHash, then perform
             // an update, otherwise insert.
             if (auto lookupResult = querySettingsManager.getQuerySettingsForQueryShapeHash(
-                    opCtx, queryShapeHash, tenantId)) {
+                    opCtx,
+                    [&]() { return queryShapeHash; },
+                    representativeQueryInfo.namespaceString)) {
                 return updateQuerySettings(
                     opCtx,
                     request().getSettings(),
@@ -239,16 +260,18 @@ public:
                     "setQuerySettings command is unknown",
                     feature_flags::gFeatureFlagQuerySettings.isEnabled(
                         serverGlobalParams.featureCompatibility));
-            return stdx::visit(OverloadedVisitor{
-                                   [&](const query_shape::QueryShapeHash& queryShapeHash) {
-                                       return setQuerySettingsByQueryShapeHash(opCtx,
-                                                                               queryShapeHash);
-                                   },
-                                   [&](const QueryInstance& queryInstance) {
-                                       return setQuerySettingsByQueryInstance(opCtx, queryInstance);
-                                   },
-                               },
-                               request().getCommandParameter());
+            auto response =
+                stdx::visit(OverloadedVisitor{
+                                [&](const query_shape::QueryShapeHash& queryShapeHash) {
+                                    return setQuerySettingsByQueryShapeHash(opCtx, queryShapeHash);
+                                },
+                                [&](const QueryInstance& queryInstance) {
+                                    return setQuerySettingsByQueryInstance(opCtx, queryInstance);
+                                },
+                            },
+                            request().getCommandParameter());
+            testOnlyClearPlanCache(opCtx);
+            return response;
         }
 
     private:
@@ -257,7 +280,7 @@ public:
         }
 
         NamespaceString ns() const override {
-            return NamespaceString();
+            return NamespaceString::kEmpty;
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
@@ -270,7 +293,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(SetQuerySettingsCommand);
+MONGO_REGISTER_COMMAND(SetQuerySettingsCommand).forRouter().forShard();
 
 class RemoveQuerySettingsCommand final : public TypedCommand<RemoveQuerySettingsCommand> {
 public:
@@ -311,10 +334,8 @@ public:
                                     // Converts 'queryInstance' into QueryShapeHash, for convenient
                                     // comparison during search for the matching
                                     // QueryShapeConfiguration.
-                                    auto expCtx =
-                                        make_intrusive<ExpressionContext>(opCtx, nullptr, ns());
                                     auto representativeQueryInfo =
-                                        createRepresentativeInfo(queryInstance, expCtx, tenantId);
+                                        createRepresentativeInfo(queryInstance, opCtx, tenantId);
 
                                     return representativeQueryInfo.queryShapeHash;
                                 },
@@ -340,7 +361,13 @@ public:
             // Run SetClusterParameter command with the new value of the 'querySettings' cluster
             // parameter.
             setClusterParameter(
-                opCtx, makeSetClusterParameterRequest(settingsArray, request().getDbName()));
+                opCtx,
+                makeSetClusterParameterRequest(settingsArray, request().getDbName()),
+                boost::none,
+                querySettingsManager.getClusterParameterTime(opCtx,
+                                                             request().getDbName().tenantId()));
+
+            testOnlyClearPlanCache(opCtx);
         }
 
     private:
@@ -349,7 +376,7 @@ public:
         }
 
         NamespaceString ns() const override {
-            return NamespaceString();
+            return NamespaceString::kEmpty;
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
@@ -362,6 +389,6 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(RemoveQuerySettingsCommand);
+MONGO_REGISTER_COMMAND(RemoveQuerySettingsCommand).forRouter().forShard();
 }  // namespace
 }  // namespace mongo

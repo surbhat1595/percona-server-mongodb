@@ -36,7 +36,7 @@ env.Benchmark(
 if not get_option("link-model") == "dynamic":
     Return()
 
-env.Library(
+env.BazelLibrary(
     target="visibility_test_libcommon",
     source=[
         "visibility_test_libcommon.cpp",
@@ -80,7 +80,7 @@ env.Library(
     MONGO_API_NAME="visibility_test_lib2",
 )
 
-visibility_test1 = env.Program(
+visibility_test1 = env.BazelProgram(
     target="visibility_test1",
     source=[
         "visibility_test1.cpp",

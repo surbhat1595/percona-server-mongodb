@@ -46,7 +46,7 @@
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/expression_dependencies.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
@@ -74,10 +74,6 @@ static BSONObj toBson(const Document& document) {
 /** Create a Document from a BSONObj. */
 Document fromBson(BSONObj obj) {
     return Document(obj);
-}
-
-std::string applyHmacForTest(StringData s) {
-    return str::stream() << "HASH<" << s << ">";
 }
 
 namespace FieldPath {
@@ -247,9 +243,7 @@ TEST(FieldPath, ScalarVariableWithDottedFieldPathOptimizesToConstantMissingValue
 }
 
 TEST(FieldPath, SerializeWithRedaction) {
-    SerializationOptions options;
-    options.transformIdentifiersCallback = applyHmacForTest;
-    options.transformIdentifiers = true;
+    SerializationOptions options = SerializationOptions::kMarkIdentifiers_FOR_TEST;
 
     auto expCtx = ExpressionContextForTest{};
     intrusive_ptr<Expression> expression =

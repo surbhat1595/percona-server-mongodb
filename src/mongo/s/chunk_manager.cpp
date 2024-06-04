@@ -35,7 +35,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
 #include <compare>
@@ -65,17 +64,6 @@ void checkAllElementsAreOfType(BSONType type, const BSONObj& o) {
     uassert(ErrorCodes::ConflictingOperationInProgress,
             str::stream() << "Not all elements of " << o << " are of type " << typeName(type),
             ChunkMap::allElementsAreOfType(type, o));
-}
-
-bool overlaps(const ChunkInfo& a, const ChunkInfo& b) {
-    // Microbenchmarks results showed that comparing kestrings
-    // is more performant than comparing BSONObj
-    const auto aMinKeyStr = ShardKeyPattern::toKeyString(a.getMin());
-    const auto& aMaxKeyStr = a.getMaxKeyString();
-    const auto bMinKeyStr = ShardKeyPattern::toKeyString(b.getMin());
-    const auto& bMaxKeyStr = b.getMaxKeyString();
-
-    return aMinKeyStr < bMaxKeyStr && aMaxKeyStr > bMinKeyStr;
 }
 
 void checkChunksAreContiguous(const ChunkInfo& left, const ChunkInfo& right) {
@@ -131,7 +119,7 @@ std::vector<std::shared_ptr<ChunkInfo>> flatten(const std::vector<ChunkType>& ch
 
     for (size_t i = 1; i < changedChunkInfos.size(); ++i) {
         auto& chunk = changedChunkInfos[i];
-        if (overlaps(*chunk, *flattened.back())) {
+        if (chunk->overlapsWith(*flattened.back())) {
             if (flattened.back()->getLastmod().isOlderThan(chunk->getLastmod())) {
                 flattened.pop_back();
                 flattened.emplace_back(std::move(chunk));
@@ -239,13 +227,17 @@ void ChunkMap::_mergeAndCommitUpdatedChunkVector(ChunkVectorMap::const_iterator 
     auto prevVectorPtr = _chunkVectorMap.extract(std::prev(pos)).mapped();
     auto mergeVectorPtr = std::make_shared<ChunkVector>();
     mergeVectorPtr->reserve(prevVectorPtr->size() + smallVectorPtr->size());
-    // fill initial part of merged vector with a copy of oldVector
-    mergeVectorPtr->insert(mergeVectorPtr->end(),
-                           std::make_move_iterator(prevVectorPtr->begin()),
-                           std::make_move_iterator(prevVectorPtr->end()));
+
+    // Fill initial part of merged vector with a copy of old vector (prevVectorPtr)
+    // Note that the old vector is potentially shared with previous ChunkMap instances,
+    // thus we copy rather than moving elements to maintain its integrity.
+    mergeVectorPtr->insert(mergeVectorPtr->end(), prevVectorPtr->begin(), prevVectorPtr->end());
+
+    // Fill the rest of merged vector with the small updated vector
     mergeVectorPtr->insert(mergeVectorPtr->end(),
                            std::make_move_iterator(smallVectorPtr->begin()),
                            std::make_move_iterator(smallVectorPtr->end()));
+
     _chunkVectorMap.emplace_hint(
         pos, mergeVectorPtr->back()->getMaxKeyString(), std::move(mergeVectorPtr));
 }
@@ -418,7 +410,7 @@ ChunkMap ChunkMap::_makeUpdated(ChunkVector&& updateChunks) const {
 
         // We have both update and old chunk to peak from
         // If they overlaps we discard the old chunk otherwise we process the one with smaller key
-        if (overlaps(updateChunk, oldChunk)) {
+        if (updateChunk.overlapsWith(oldChunk)) {
             processOldChunk(*(oldChunkIt++), true /* discard */);
             return;
         } else {
@@ -620,7 +612,7 @@ ChunkMap::_overlappingVectorSlotBounds(const std::string& minShardKeyStr,
                                        const std::string& maxShardKeyStr,
                                        bool isMaxInclusive) const {
 
-    const auto itMin = _chunkVectorMap.lower_bound(minShardKeyStr);
+    const auto itMin = _chunkVectorMap.upper_bound(minShardKeyStr);
     const auto itMax = [&]() {
         auto it = isMaxInclusive ? _chunkVectorMap.upper_bound(maxShardKeyStr)
                                  : _chunkVectorMap.lower_bound(maxShardKeyStr);
@@ -744,7 +736,7 @@ void ChunkManager::getShardIdsForRange(const BSONObj& min,
         }
     }
 
-    _rt->optRt->forEachOverlappingChunk(min, max, true, [&](auto& chunkInfo) {
+    _rt->optRt->forEachOverlappingChunk(min, max, true, [&](const auto& chunkInfo) {
         shardIds->insert(chunkInfo->getShardIdAt(_clusterTime));
         if (chunkRanges) {
             chunkRanges->insert(chunkInfo->getRange());
@@ -769,7 +761,7 @@ bool ChunkManager::rangeOverlapsShard(const ChunkRange& range, const ShardId& sh
     bool overlapFound = false;
 
     _rt->optRt->forEachOverlappingChunk(
-        range.getMin(), range.getMax(), false, [&](auto& chunkInfo) {
+        range.getMin(), range.getMax(), false, [&](const auto& chunkInfo) {
             if (chunkInfo->getShardIdAt(_clusterTime) == shardId) {
                 overlapFound = true;
                 return false;
@@ -787,7 +779,7 @@ boost::optional<Chunk> ChunkManager::getNextChunkOnShard(const BSONObj& shardKey
 
     boost::optional<Chunk> optChunk;
     forEachChunk(
-        [&](const Chunk& chunk) {
+        [&](const auto& chunk) {
             if (chunk.getShardId() == shardId) {
                 optChunk.emplace(chunk);
                 return false;
@@ -911,6 +903,7 @@ RoutingTableHistory RoutingTableHistory::makeUpdated(
     boost::optional<TypeCollectionTimeseriesFields> timeseriesFields,
     boost::optional<TypeCollectionReshardingFields> reshardingFields,
     bool allowMigrations,
+    bool unsplittable,
     const std::vector<ChunkType>& changedChunks) const {
 
     auto changedChunkInfos = flatten(changedChunks);
@@ -922,7 +915,7 @@ RoutingTableHistory RoutingTableHistory::makeUpdated(
     return RoutingTableHistory(_nss,
                                _uuid,
                                getShardKeyPattern().getKeyPattern(),
-                               _unsplittable,
+                               unsplittable,
                                CollatorInterface::cloneCollator(getDefaultCollator()),
                                isUnique(),
                                std::move(timeseriesFields),

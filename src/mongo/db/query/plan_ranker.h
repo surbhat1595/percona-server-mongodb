@@ -79,6 +79,10 @@ void logScoringPlan(std::function<std::string()> solution,
 void logScore(double score);
 void logEOFBonus(double eofBonus);
 void logFailedPlan(std::function<std::string()> planSummary);
+void logTieBreaking(double score,
+                    double docsFetchedBonus,
+                    double indexPrefixBonus,
+                    bool isPlanTied);
 }  // namespace log_detail
 
 // Constant used for tie breakers.
@@ -218,4 +222,11 @@ struct BaseCandidatePlan {
 };
 
 using CandidatePlan = BaseCandidatePlan<PlanStage*, WorkingSetID, WorkingSet*>;
+
+/**
+ * Apply index prefix heuristic (see comment to 'getIndexBoundsScore' function in the cpp file) for
+ * the given list of solutions, if the solutions are compatible (have the same plan shape), the
+ * vector of winner indexes are returned, otherwise an empty vector is returned.
+ */
+std::vector<size_t> applyIndexPrefixHeuristic(const std::vector<const QuerySolution*>& solutions);
 }  // namespace mongo::plan_ranker

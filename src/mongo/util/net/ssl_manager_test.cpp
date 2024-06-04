@@ -34,7 +34,7 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/transport/asio/asio_transport_layer.h"
-#include "mongo/transport/service_entry_point.h"
+#include "mongo/transport/session_manager.h"
 #include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/net/ssl/context.hpp"
 #include "mongo/util/net/ssl_manager.h"
@@ -56,7 +56,7 @@ namespace mongo {
 namespace {
 
 // Test implementation needed by ASIO transport.
-class ServiceEntryPointUtil : public ServiceEntryPoint {
+class SessionManagerUtil : public transport::SessionManager {
 public:
     void startSession(std::shared_ptr<transport::Session> session) override {
         stdx::unique_lock<Latch> lk(_mutex);
@@ -65,7 +65,9 @@ public:
         _cv.notify_one();
     }
 
-    void endAllSessions(transport::Session::TagMask tags) override {
+    void endSessionByClient(Client*) override {}
+
+    void endAllSessions(Client::TagMask tags) override {
         LOGV2(2303302, "end all sessions");
         std::vector<std::shared_ptr<transport::Session>> old_sessions;
         {
@@ -88,15 +90,6 @@ public:
     size_t numOpenSessions() const override {
         stdx::unique_lock<Latch> lock(_mutex);
         return _sessions.size();
-    }
-
-    Future<DbResponse> handleRequest(OperationContext* opCtx,
-                                     const Message& request) noexcept override {
-        MONGO_UNREACHABLE;
-    }
-
-    logv2::LogSeverity slowSessionWorkflowLogSeverity() override {
-        MONGO_UNIMPLEMENTED;
     }
 
     void setTransportLayer(transport::TransportLayer* tl) {
@@ -602,15 +595,13 @@ TEST(SSLManager, RotateCertificatesFromFile) {
     std::shared_ptr<SSLManagerInterface> manager =
         SSLManagerInterface::create(params, true /* isSSLServer */);
 
-    ServiceEntryPointUtil sepu;
-
     auto options = [] {
         ServerGlobalParams params;
         params.noUnixSocket = true;
         transport::AsioTransportLayer::Options opts(&params);
         return opts;
     }();
-    transport::AsioTransportLayer tla(options, &sepu);
+    transport::AsioTransportLayer tla(options, std::make_unique<SessionManagerUtil>());
     uassertStatusOK(tla.rotateCertificates(manager, false /* asyncOCSPStaple */));
 }
 
@@ -641,15 +632,13 @@ TEST(SSLManager, RotateClusterCertificatesFromFile) {
     std::shared_ptr<SSLManagerInterface> manager =
         SSLManagerInterface::create(params, false /* isSSLServer */);
 
-    ServiceEntryPointUtil sepu;
-
     auto options = [] {
         ServerGlobalParams params;
         params.noUnixSocket = true;
         transport::AsioTransportLayer::Options opts(&params);
         return opts;
     }();
-    transport::AsioTransportLayer tla(options, &sepu);
+    transport::AsioTransportLayer tla(options, std::make_unique<SessionManagerUtil>());
     uassertStatusOK(tla.rotateCertificates(manager, false /* asyncOCSPStaple */));
 }
 
@@ -709,15 +698,13 @@ TEST(SSLManager, TransientSSLParams) {
     params.sslCAFile = "jstests/libs/ca.pem";
     params.sslClusterFile = "jstests/libs/client.pem";
 
-    ServiceEntryPointUtil sepu;
-
     auto options = [] {
         ServerGlobalParams params;
         params.noUnixSocket = true;
         transport::AsioTransportLayer::Options opts(&params);
         return opts;
     }();
-    transport::AsioTransportLayer tla(options, &sepu);
+    transport::AsioTransportLayer tla(options, std::make_unique<SessionManagerUtil>());
 
     TransientSSLParams transientSSLParams;
     transientSSLParams.sslClusterPEMPayload = loadFile("jstests/libs/client.pem");
@@ -742,15 +729,13 @@ TEST(SSLManager, TransientSSLParamsStressTestWithTransport) {
     params.sslMode.store(::mongo::sslGlobalParams.SSLMode_requireSSL);
     params.sslCAFile = "jstests/libs/ca.pem";
 
-    ServiceEntryPointUtil sepu;
-
     auto options = [] {
         ServerGlobalParams params;
         params.noUnixSocket = true;
         transport::AsioTransportLayer::Options opts(&params);
         return opts;
     }();
-    transport::AsioTransportLayer tla(options, &sepu);
+    transport::AsioTransportLayer tla(options, std::make_unique<SessionManagerUtil>());
 
     TransientSSLParams transientSSLParams;
     transientSSLParams.sslClusterPEMPayload = loadFile("jstests/libs/client.pem");

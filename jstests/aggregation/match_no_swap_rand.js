@@ -10,15 +10,12 @@
  *   requires_pipeline_optimization,
  * ]
  */
-import {getPlanStage, getWinningPlan} from "jstests/libs/analyze_plan.js";
+import {getPlanStage, getQueryPlanner, getWinningPlan} from "jstests/libs/analyze_plan.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 function getWinningPlanForPipeline({coll, pipeline}) {
     const explain = assert.commandWorked(coll.explain().aggregate(pipeline));
-    if ("queryPlanner" in explain) {
-        return getWinningPlan(explain.queryPlanner);
-    }
-    return getWinningPlan(explain.stages[0].$cursor.queryPlanner);
+    return getWinningPlan(getQueryPlanner(explain));
 }
 
 function assertScanFilterEq({coll, pipeline, filter}) {
@@ -135,26 +132,4 @@ function assertScanFilterEq({coll, pipeline, filter}) {
             {$match: {$sampleRate: 0.25}},
         ]
     });
-
-    if (!FeatureFlagUtil.isEnabled(db, "TimeseriesScalabilityImprovements")) {
-        assertScanFilterEq({
-            coll,
-            pipeline: [
-                {
-                    $match: {
-                        $and: [
-                            {$expr: {$lt: ["$m", 50]}},                    // Should split me out.
-                            {$expr: {$lt: [{$rand: {}}, {$const: 0.25}]}}  // Can't split me out.
-                        ]
-                    }
-                },
-            ],
-            filter: {
-                $and: [
-                    {$expr: {$lt: ["$meta", {$const: 50}]}},
-                    {meta: {$_internalExprLt: 50}},
-                ]
-            }
-        });
-    }
 }

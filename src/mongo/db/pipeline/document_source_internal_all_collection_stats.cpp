@@ -29,7 +29,6 @@
 
 #include "mongo/db/pipeline/document_source_internal_all_collection_stats.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <iterator>
 #include <list>
@@ -83,7 +82,7 @@ DocumentSource::GetNextResult DocumentSourceInternalAllCollectionStats::doGetNex
 
         // Avoid computing stats for collections that do not match the absorbed filter on the 'ns'
         // field.
-        if (_absorbedMatch && !_absorbedMatch->getMatchExpression()->matchesBSON(std::move(obj))) {
+        if (_absorbedMatch && !_absorbedMatch->getMatchExpression()->matchesBSON(obj)) {
             continue;
         }
 
@@ -163,10 +162,6 @@ void DocumentSourceInternalAllCollectionStats::serializeToArray(
         auto doc = Document{{getSourceName(), bob.obj()}};
         array.push_back(Value(doc));
     } else {
-        auto opts = explain ? SerializationOptions{.includePath = false,
-                                                   .verbosity = boost::make_optional(
-                                                       ExplainOptions::Verbosity::kQueryPlanner)}
-                            : SerializationOptions{};
         array.push_back(serialize(opts));
         if (_absorbedMatch) {
             _absorbedMatch->serializeToArray(array);

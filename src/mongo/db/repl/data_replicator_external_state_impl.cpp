@@ -32,7 +32,6 @@
 #include <string>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -115,9 +114,6 @@ ChangeSyncSourceAction DataReplicatorExternalStateImpl::shouldStopFetching(
         source, replMetadata, oqMetadata, previousOpTimeFetched, lastOpTimeFetched);
     if (changeSyncSourceAction != ChangeSyncSourceAction::kContinueSyncing) {
         LOGV2(21150,
-              "Canceling oplog query due to OplogQueryMetadata. We have to choose a new "
-              "sync source. Current source: {syncSource}, OpTime {lastAppliedOpTime}, "
-              "its sync source index:{syncSourceIndex}",
               "Canceling oplog query due to OplogQueryMetadata. We have to choose a new "
               "sync source",
               "syncSource"_attr = source,

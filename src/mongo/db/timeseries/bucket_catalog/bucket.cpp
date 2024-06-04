@@ -33,7 +33,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <utility>
 
 #include <boost/optional/optional.hpp>
@@ -76,7 +75,7 @@ bool allCommitted(const Bucket& bucket) {
 bool schemaIncompatible(Bucket& bucket,
                         const BSONObj& input,
                         boost::optional<StringData> metaField,
-                        const StringData::ComparatorInterface* comparator) {
+                        const StringDataComparator* comparator) {
     auto result = bucket.schema.update(input, metaField, comparator);
     return (result == Schema::UpdateStatus::Failed);
 }
@@ -136,10 +135,12 @@ std::shared_ptr<WriteBatch> activeBatch(Bucket& bucket,
     auto it = bucket.batches.find(opId);
     if (it == bucket.batches.end()) {
         it = bucket.batches
-                 .try_emplace(
-                     opId,
-                     std::make_shared<WriteBatch>(
-                         BucketHandle{bucket.bucketId, stripe}, opId, stats, bucket.timeField))
+                 .try_emplace(opId,
+                              std::make_shared<WriteBatch>(BucketHandle{bucket.bucketId, stripe},
+                                                           bucket.key,
+                                                           opId,
+                                                           stats,
+                                                           bucket.timeField))
                  .first;
     }
     return it->second;

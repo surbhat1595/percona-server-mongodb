@@ -30,7 +30,6 @@
 #include "mongo/db/clientcursor.h"
 
 #include <boost/cstdint.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <iosfwd>
 #include <mutex>
 #include <ratio>
@@ -125,11 +124,10 @@ ClientCursor::ClientCursor(ClientCursorParams params,
       _planSummary(_exec->getPlanExplainer().getPlanSummary()),
       _planCacheKey(CurOp::get(operationUsingCursor)->debug().planCacheKey),
       _queryHash(CurOp::get(operationUsingCursor)->debug().queryHash),
-      _queryStatsStoreKeyHash(CurOp::get(operationUsingCursor)->debug().queryStatsStoreKeyHash),
-      _queryStatsKeyGenerator(
-          std::move(CurOp::get(operationUsingCursor)->debug().queryStatsKeyGenerator)),
+      _queryStatsKeyHash(CurOp::get(operationUsingCursor)->debug().queryStatsKeyHash),
+      _queryStatsKey(std::move(CurOp::get(operationUsingCursor)->debug().queryStatsKey)),
       _shouldOmitDiagnosticInformation(
-          CurOp::get(operationUsingCursor)->debug().shouldOmitDiagnosticInformation),
+          CurOp::get(operationUsingCursor)->getShouldOmitDiagnosticInformation()),
       _opKey(operationUsingCursor->getOperationKey()) {
     invariant(_exec);
     invariant(_operationUsingCursor);
@@ -169,10 +167,10 @@ void ClientCursor::dispose(OperationContext* opCtx, boost::optional<Date_t> now)
         return;
     }
 
-    if (_queryStatsStoreKeyHash && opCtx) {
+    if (_queryStatsKeyHash && opCtx) {
         query_stats::writeQueryStats(opCtx,
-                                     _queryStatsStoreKeyHash,
-                                     std::move(_queryStatsKeyGenerator),
+                                     _queryStatsKeyHash,
+                                     std::move(_queryStatsKey),
                                      _metrics.executionTime.value_or(Microseconds{0}).count(),
                                      _firstResponseExecutionTime.value_or(Microseconds{0}).count(),
                                      _metrics.nreturned.value_or(0));
@@ -368,7 +366,8 @@ public:
     }
 
     void run() {
-        ThreadClient tc("clientcursormon", getGlobalServiceContext());
+        ThreadClient tc("clientcursormon",
+                        getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
         while (!globalInShutdownDeprecated()) {
             {
@@ -411,15 +410,14 @@ void collectQueryStatsMongod(OperationContext* opCtx, ClientCursorPin& pinnedCur
     pinnedCursor->incrementCursorMetrics(CurOp::get(opCtx)->debug().additiveMetrics);
 }
 
-void collectQueryStatsMongod(OperationContext* opCtx,
-                             std::unique_ptr<query_stats::KeyGenerator> keyGenerator) {
+void collectQueryStatsMongod(OperationContext* opCtx, std::unique_ptr<query_stats::Key> key) {
     // If we haven't registered a cursor to prepare for getMore requests, we record
     // query stats directly.
     auto& opDebug = CurOp::get(opCtx)->debug();
     int64_t execTime = opDebug.additiveMetrics.executionTime.value_or(Microseconds{0}).count();
     query_stats::writeQueryStats(opCtx,
-                                 opDebug.queryStatsStoreKeyHash,
-                                 std::move(keyGenerator),
+                                 opDebug.queryStatsKeyHash,
+                                 std::move(key),
                                  execTime,
                                  execTime,
                                  opDebug.additiveMetrics.nreturned.value_or(0));

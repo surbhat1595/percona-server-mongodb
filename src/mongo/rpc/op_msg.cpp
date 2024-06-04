@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_type_validated.h"
@@ -177,7 +176,7 @@ OpMsg OpMsg::parse(const Message& message, Client* client) try {
     // comments.
     bool haveBody = false;
     OpMsg msg;
-    BSONObj securityToken;
+    StringData securityToken;
     while (!sectionsBuf.atEof()) {
         const auto sectionKind = sectionsBuf.read<Section>();
         switch (sectionKind) {
@@ -221,7 +220,7 @@ OpMsg OpMsg::parse(const Message& message, Client* client) try {
                 uassert(ErrorCodes::Unauthorized,
                         "Unsupported Security Token provided",
                         gMultitenancySupport);
-                securityToken = sectionsBuf.read<Validated<BSONObj>>();
+                securityToken = sectionsBuf.readCStr();
                 break;
             }
 
@@ -289,7 +288,7 @@ boost::optional<TenantId> parseDollarTenant(const BSONObj body) {
 
 DatabaseName OpMsgRequest::getDbName() const {
     if (!gMultitenancySupport) {
-        return DatabaseNameUtil::deserialize(boost::none, getDatabase());
+        return DatabaseNameUtil::deserialize(boost::none, getDatabase(), getSerializationContext());
     }
     auto tenantId = getValidatedTenantId() ? getValidatedTenantId() : parseDollarTenant(body);
 
@@ -306,6 +305,8 @@ SerializationContext OpMsgRequest::getSerializationContext() const {
     serializationCtx.setTenantIdSource(tenantId ? true : false);
     if (auto const expectPrefix = body.getField("expectPrefix")) {
         serializationCtx.setPrefixState(expectPrefix.boolean());
+    } else if (validatedTenancyScope) {
+        serializationCtx.setPrefixState(validatedTenancyScope->isFromAtlasProxy());
     }
     return serializationCtx;
 }
@@ -332,8 +333,8 @@ bool appendDollarTenant(BSONObjBuilder& builder,
 
 BSONObj appendDollarDbAndTenant(const DatabaseName& dbName,
                                 BSONObj body,
-                                const BSONObj& extraFields,
-                                const SerializationContext& sc) {
+                                const SerializationContext& sc,
+                                const BSONObj& extraFields = {}) {
     auto existingDollarTenant = parseDollarTenant(body);
     BSONObjBuilder builder(std::move(body));
     builder.appendElements(extraFields);
@@ -372,11 +373,10 @@ OpMsgRequest OpMsgRequestBuilder::createWithValidatedTenancyScope(
     const DatabaseName& dbName,
     boost::optional<auth::ValidatedTenancyScope> validatedTenancyScope,
     BSONObj body,
-    const BSONObj& extraFields,
     const SerializationContext& sc) {
     OpMsgRequest request;
 
-    request.body = appendDollarDbAndTenant(dbName, std::move(body), extraFields, sc);
+    request.body = appendDollarDbAndTenant(dbName, std::move(body), sc);
     request.validatedTenancyScope = validatedTenancyScope;
     return request;
 }
@@ -413,7 +413,7 @@ OpMsgRequest OpMsgRequestBuilder::create(const DatabaseName& dbName,
 
     OpMsgRequest request;
 
-    request.body = appendDollarDbAndTenant(dbName, std::move(body), extraFields, sc);
+    request.body = appendDollarDbAndTenant(dbName, std::move(body), sc, extraFields);
     return request;
 }
 
@@ -424,7 +424,7 @@ void serializeHelper(const std::vector<OpMsg::DocumentSequence>& sequences,
                      OpMsgBuilder* output) {
     if (validatedTenancyScope) {
         auto securityToken = validatedTenancyScope->getOriginalToken();
-        if (securityToken.nFields() > 0) {
+        if (!securityToken.empty()) {
             output->setSecurityToken(securityToken);
         }
     }
@@ -463,15 +463,14 @@ void OpMsg::shareOwnershipWith(const ConstSharedBuffer& buffer) {
     }
 }
 
-BSONObjBuilder OpMsgBuilder::beginSecurityToken() {
+void OpMsgBuilder::setSecurityToken(StringData token) {
     invariant(_state == kEmpty);
-    _state = kSecurityToken;
     _buf.appendStruct(Section::kSecurityToken);
-    return BSONObjBuilder(_buf);
+    _buf.appendStr(token, true /* includeEndingNull */);
 }
 
 auto OpMsgBuilder::beginDocSequence(StringData name) -> DocSequenceBuilder {
-    invariant((_state == kEmpty) || (_state == kSecurityToken) || (_state == kDocSequence));
+    invariant((_state == kEmpty) || (_state == kDocSequence));
     invariant(!_openBuilder);
     _openBuilder = true;
     _state = kDocSequence;
@@ -492,7 +491,7 @@ void OpMsgBuilder::finishDocumentStream(DocSequenceBuilder* docSequenceBuilder) 
 }
 
 BSONObjBuilder OpMsgBuilder::beginBody() {
-    invariant((_state == kEmpty) || (_state == kSecurityToken) || (_state == kDocSequence));
+    invariant((_state == kEmpty) || (_state == kDocSequence));
     _state = kBody;
     _buf.appendStruct(Section::kBody);
     invariant(_bodyStart == 0);

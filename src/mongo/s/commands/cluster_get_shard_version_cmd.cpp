@@ -111,7 +111,8 @@ public:
         uassert(ErrorCodes::BadValue,
                 str::stream() << "namespace has invalid type " << typeName(first.type()),
                 first.canonicalType() == canonicalizeBSONType(mongo::String));
-        return NamespaceStringUtil::deserialize(dbName.tenantId(), first.valueStringData());
+        return NamespaceStringUtil::deserialize(
+            dbName.tenantId(), first.valueStringData(), SerializationContext::stateDefault());
     }
 
     bool run(OperationContext* opCtx,
@@ -150,7 +151,6 @@ public:
                 bool exceedsSizeLimit = false;
 
                 LOGV2(22753,
-                      "Routing info requested by getShardVersion: {routingInfo}",
                       "Routing info requested by getShardVersion",
                       "routingInfo"_attr = redact(cm.toString()));
 
@@ -200,7 +200,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(GetShardVersion);
+MONGO_REGISTER_COMMAND(GetShardVersion).forRouter();
 
 }  // namespace
 }  // namespace mongo

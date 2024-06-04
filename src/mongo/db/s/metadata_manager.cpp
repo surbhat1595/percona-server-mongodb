@@ -35,7 +35,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/db/s/migration_util.h"
 #include "mongo/logv2/log.h"
@@ -182,9 +181,6 @@ void MetadataManager::setFilteringMetadata(CollectionMetadata remoteMetadata) {
     if (remoteCollPlacementVersion.isOlderOrEqualThan(activeCollPlacementVersion)) {
         LOGV2_DEBUG(21984,
                     1,
-                    "Ignoring incoming metadata update {activeMetadata} for {namespace} because "
-                    "the active (current) metadata {remoteMetadata} has the same or a newer "
-                    "collection placement version",
                     "Ignoring incoming metadata update for this namespace because the active "
                     "(current) metadata has the same or a newer collection placement version",
                     logAttrs(_nss),
@@ -194,8 +190,6 @@ void MetadataManager::setFilteringMetadata(CollectionMetadata remoteMetadata) {
     }
 
     LOGV2(21985,
-          "Updating metadata {activeMetadata} for {namespace} because the remote metadata "
-          "{remoteMetadata} has a newer collection placement version",
           "Updating metadata for this namespace because the remote metadata has a newer "
           "collection placement version",
           logAttrs(_nss),

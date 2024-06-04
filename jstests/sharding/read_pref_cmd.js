@@ -200,10 +200,10 @@ let testConnReadPreference = function(conn, isMongos, rst, {readPref, expectedNo
             formatProfileQuery(kShardedNs, {distinct: kShardedCollName}));
 
     // Test command that can't be sent to secondary
-    cmdTest({create: kUnshardedCollName},
+    cmdTest({createIndexes: kUnshardedCollName, indexes: [{key: {x: 1}, name: "idx_x"}]},
             allowedOnSecondary.kNever,
             false,
-            formatProfileQuery(kUnshardedNs, {create: kUnshardedCollName}));
+            formatProfileQuery(kUnshardedNs, {createIndexes: kUnshardedCollName}));
 
     // Make sure the unsharded collection is propagated to secondaries before proceeding.
     rst.awaitReplication();
@@ -229,6 +229,7 @@ let testConnReadPreference = function(conn, isMongos, rst, {readPref, expectedNo
     }
 
     // Test inline mapReduce on unsharded collection.
+    conn.getDB(kDbName).runCommand({create: kUnshardedCollName});
     if (isMongos) {
         const comment = 'mapReduce_inline_unsharded_' + ObjectId();
         cmdTest(
@@ -318,12 +319,22 @@ let testConnReadPreference = function(conn, isMongos, rst, {readPref, expectedNo
                 pipeline: [isMongos ? {$project: {_id: true, x: true}} : {$project: {x: 1}}]
             }));
 
-    // Test on non-sharded
-    cmdTest({aggregate: kUnshardedCollName, pipeline: [{$project: {x: 1}}], cursor: {}},
-            allowedOnSecondary.kAlways,
-            false,
-            formatProfileQuery(kUnshardedNs,
-                               {aggregate: kUnshardedCollName, pipeline: [{$project: {x: 1}}]}));
+    const isMultiversion = jsTest.options().shardMixedBinVersions ||
+        jsTest.options().useRandomBinVersionsWithinReplicaSet;
+
+    const isValidMongos =
+        !isMongos || MongoRunner.compareBinVersions(conn.fullOptions.binVersion, "7.1") >= 0;
+    if (!isMultiversion && isValidMongos) {
+        // Test on non-sharded. Skip testing in a multiversion scenario as the format of the
+        // profiler entry will depend on the binary version of each shard as well as mongos.
+        cmdTest({aggregate: kUnshardedCollName, pipeline: [{$project: {x: 1}}], cursor: {}},
+                allowedOnSecondary.kAlways,
+                false,
+                formatProfileQuery(kUnshardedNs, {
+                    aggregate: kUnshardedCollName,
+                    pipeline: [isMongos ? {$project: {_id: true, x: true}} : {$project: {x: 1}}]
+                }));
+    }
 
     // Test $currentOp aggregation stage.
     if (!isMongos) {
@@ -345,9 +356,6 @@ let testConnReadPreference = function(conn, isMongos, rst, {readPref, expectedNo
                 formatProfileQuery(undefined, {comment: curOpComment}),
                 "admin");
     }
-
-    const isMultiversion = jsTest.options().shardMixedBinVersions ||
-        jsTest.options().useRandomBinVersionsWithinReplicaSet;
 
     if (!isMultiversion) {
         let curOpComment = 'lockInfo_' + ObjectId();

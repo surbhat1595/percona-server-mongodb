@@ -49,7 +49,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
@@ -209,8 +209,8 @@ private:
     std::unique_ptr<FieldPath> distanceField;  // Using unique_ptr because FieldPath can't be empty
     BSONObj query;
     bool spherical;
-    boost::optional<double> maxDistance;
-    boost::optional<double> minDistance;
+    boost::intrusive_ptr<Expression> maxDistance;
+    boost::intrusive_ptr<Expression> minDistance;
     boost::optional<double> distanceMultiplier;
     boost::optional<FieldPath> includeLocs;
     boost::optional<FieldPath> keyFieldPath;

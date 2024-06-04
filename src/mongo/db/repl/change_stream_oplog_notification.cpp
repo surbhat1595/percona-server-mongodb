@@ -102,7 +102,7 @@ void notifyChangeStreamsOnShardCollection(OperationContext* opCtx,
             MONGO_UNREACHABLE;
     }
 
-    const auto nssStr = NamespaceStringUtil::serialize(nss);
+    const auto nssStr = NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault());
     cmdBuilder.append(opName, nssStr);
     cmdBuilder.appendElements(cmd);
 
@@ -138,7 +138,8 @@ void notifyChangeStreamsOnDatabaseAdded(OperationContext* opCtx,
 
     for (const auto& dbName : databasesAddedNotification.getNames()) {
         repl::MutableOplogEntry oplogEntry;
-        const auto dbNameStr = DatabaseNameUtil::serialize(dbName);
+        const auto dbNameStr =
+            DatabaseNameUtil::serialize(dbName, SerializationContext::stateDefault());
 
         oplogEntry.setOpType(repl::OpTypeEnum::kNoop);
         oplogEntry.setNss(NamespaceString(dbName));
@@ -164,7 +165,8 @@ void notifyChangeStreamsOnMovePrimary(OperationContext* opCtx,
                                       const ShardId& oldPrimary,
                                       const ShardId& newPrimary) {
     repl::MutableOplogEntry oplogEntry;
-    const auto dbNameStr = DatabaseNameUtil::serialize(dbName);
+    const auto dbNameStr =
+        DatabaseNameUtil::serialize(dbName, SerializationContext::stateDefault());
 
     oplogEntry.setOpType(repl::OpTypeEnum::kNoop);
     oplogEntry.setNss(NamespaceString(dbName));
@@ -186,7 +188,8 @@ void notifyChangeStreamsOnReshardCollectionComplete(OperationContext* opCtx,
         oplogEntry.setNss(notification.getNss());
         oplogEntry.setTid(notification.getNss().tenantId());
         oplogEntry.setUuid(notification.getSourceUUID());
-        const auto nss = NamespaceStringUtil::serialize(notification.getNss());
+        const auto nss = NamespaceStringUtil::serialize(notification.getNss(),
+                                                        SerializationContext::stateDefault());
         {
             const std::string oMessage = str::stream()
                 << "Reshard collection " << nss << " with shard key "

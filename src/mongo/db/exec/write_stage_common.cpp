@@ -29,7 +29,6 @@
 
 #include "mongo/db/exec/write_stage_common.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/cluster_role.h"
@@ -160,7 +159,8 @@ bool ensureStillMatches(const CollectionPtr& collection,
         }
 
         // Make sure the re-fetched doc still matches the predicate.
-        if (cq && !cq->root()->matchesBSON(member->doc.value().toBson(), nullptr)) {
+        if (cq &&
+            !cq->getPrimaryMatchExpression()->matchesBSON(member->doc.value().toBson(), nullptr)) {
             // No longer matches.
             return false;
         }

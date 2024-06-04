@@ -38,7 +38,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/bson/bsonmisc.h"
@@ -154,7 +153,8 @@ NamespaceString constructTemporaryReshardingNss(StringData db, const UUID& sourc
         boost::none,
         db,
         fmt::format(
-            "{}{}", NamespaceString::kTemporaryReshardingCollectionPrefix, sourceUuid.toString()));
+            "{}{}", NamespaceString::kTemporaryReshardingCollectionPrefix, sourceUuid.toString()),
+        SerializationContext::stateDefault());
 }
 
 std::set<ShardId> getRecipientShards(OperationContext* opCtx,
@@ -163,12 +163,7 @@ std::set<ShardId> getRecipientShards(OperationContext* opCtx,
     const auto& tempNss =
         constructTemporaryReshardingNss(sourceNss.db_forSharding(), reshardingUUID);
     auto* catalogCache = Grid::get(opCtx)->catalogCache();
-    auto [cm, _] = uassertStatusOK(catalogCache->getCollectionRoutingInfo(opCtx, tempNss));
-
-    uassert(ErrorCodes::NamespaceNotSharded,
-            str::stream() << "Expected collection " << tempNss.toStringForErrorMsg()
-                          << " to be sharded",
-            cm.isSharded());
+    auto [cm, _] = catalogCache->getTrackedCollectionRoutingInfo(opCtx, tempNss);
 
     std::set<ShardId> recipients;
     cm.getAllShardIds(&recipients);
@@ -505,6 +500,12 @@ void validateShardDistribution(const std::vector<ShardKeyRange>& shardDistributi
             prevMax = *shard.getMax();
         }
     }
+}
+
+bool isMoveCollection(boost::optional<ProvenanceEnum> provenance) {
+    return provenance &&
+        (provenance.get() == ProvenanceEnum::kMoveCollection ||
+         provenance.get() == ProvenanceEnum::kBalancerMoveCollection);
 }
 
 }  // namespace resharding

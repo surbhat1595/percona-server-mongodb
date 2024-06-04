@@ -39,7 +39,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -48,6 +47,7 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/encryption/encryption_options.h"
 #include "mongo/db/encryption/key_id.h"
+#include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/control/storage_control.h"
@@ -87,17 +87,20 @@ namespace {
  */
 void createLockFile(ServiceContext* service);
 
+template <typename Fn>
 void writeMetadata(std::unique_ptr<StorageEngineMetadata> metadata,
                    const StorageEngine::Factory* factory,
                    const StorageGlobalParams& params,
                    const encryption::KeyId* futureConfigured,
-                   StorageEngineInitFlags initFlags) {
+                   StorageEngineInitFlags initFlags,
+                   const Fn& createScopedTimer) {
     if ((initFlags & StorageEngineInitFlags::kSkipMetadataFile) != StorageEngineInitFlags{}) {
         return;
     }
     bool metadataNeedsWriting = false;
     BSONObj options = metadata ? metadata->getStorageEngineOptions()
                                : factory->createMetadataOptions(params);
+    auto scopedTimer = createScopedTimer();
     if (!metadata) {
         metadataNeedsWriting = true;
         metadata = std::make_unique<StorageEngineMetadata>(storageGlobalParams.dbpath);
@@ -118,8 +121,10 @@ void writeMetadata(std::unique_ptr<StorageEngineMetadata> metadata,
 }
 }  // namespace
 
-StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx,
-                                                         const StorageEngineInitFlags initFlags) {
+StorageEngine::LastShutdownState initializeStorageEngine(
+    OperationContext* opCtx,
+    const StorageEngineInitFlags initFlags,
+    BSONObjBuilder* startupTimeElapsedBuilder) {
     ServiceContext* service = opCtx->getServiceContext();
 
     // This should be set once.
@@ -127,6 +132,10 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
         invariant(!service->getStorageEngine());
 
     if ((initFlags & StorageEngineInitFlags::kAllowNoLockFile) == StorageEngineInitFlags{}) {
+        auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+            service->getFastClockSource(),
+            "Create storage engine lock file in the data directory",
+            startupTimeElapsedBuilder);
         createLockFile(service);
     }
 
@@ -193,11 +202,19 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
 
     std::unique_ptr<StorageEngineMetadata> metadata;
     if ((initFlags & StorageEngineInitFlags::kSkipMetadataFile) == StorageEngineInitFlags{}) {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(service->getFastClockSource(),
+                                                "Get metadata describing storage engine",
+                                                startupTimeElapsedBuilder);
         metadata = StorageEngineMetadata::forPath(dbpath);
     }
 
     // Validate options in metadata against current startup options.
     if (metadata.get()) {
+        auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+            service->getFastClockSource(),
+            "Validate options in metadata against current startup options",
+            startupTimeElapsedBuilder);
         uassertStatusOK(factory->validateMetadata(*metadata, storageGlobalParams));
     }
 
@@ -271,16 +288,23 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
         }
     });
     auto& lockFile = StorageEngineLockFile::get(service);
+    auto createScopedTimer = [service, startupTimeElapsedBuilder]() {
+        return createTimeElapsedBuilderScopedTimer(service->getFastClockSource(),
+                                                   "Write a new metadata for storage engine",
+                                                   startupTimeElapsedBuilder);
+    };
     try {
+        auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+            service->getFastClockSource(), "Create storage engine", startupTimeElapsedBuilder);
         if ((initFlags & StorageEngineInitFlags::kForRestart) == StorageEngineInitFlags{}) {
-            auto storageEngine = std::unique_ptr<StorageEngine>(factory->create(
-                opCtx, storageGlobalParams, lockFile ? &*lockFile : nullptr));
+            auto storageEngine = std::unique_ptr<StorageEngine>(
+                factory->create(opCtx, storageGlobalParams, lockFile ? &*lockFile : nullptr));
             service->setStorageEngine(std::move(storageEngine));
         } else {
             auto storageEngineChangeContext = StorageEngineChangeContext::get(service);
             auto token = storageEngineChangeContext->killOpsForStorageEngineChange(service);
-            auto storageEngine = std::unique_ptr<StorageEngine>(factory->create(
-                opCtx, storageGlobalParams, lockFile ? &*lockFile : nullptr));
+            auto storageEngine = std::unique_ptr<StorageEngine>(
+                factory->create(opCtx, storageGlobalParams, lockFile ? &*lockFile : nullptr));
             storageEngineChangeContext->changeStorageEngine(
                 service, std::move(token), std::move(storageEngine));
         }
@@ -292,7 +316,8 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
                       factory,
                       storageGlobalParams,
                       keyIds.futureConfigured.get(),
-                      initFlags);
+                      initFlags,
+                      createScopedTimer);
         LOGV2(29111,
               "Rotated master encryption key",
               "oldKeyIdentifier"_attr = *keyIds.decryption,
@@ -301,6 +326,8 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
     }
 
     if (lockFile) {
+        auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+            service->getFastClockSource(), "Write current PID to file", startupTimeElapsedBuilder);
         uassertStatusOK(lockFile->writePid());
     }
 
@@ -309,7 +336,8 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
                   factory,
                   storageGlobalParams,
                   encryption::WtKeyIds::instance().futureConfigured.get(),
-                  initFlags);
+                  initFlags,
+                  createScopedTimer);
 
     guard.dismiss();
 

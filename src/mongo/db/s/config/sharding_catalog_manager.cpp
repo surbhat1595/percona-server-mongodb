@@ -35,7 +35,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
@@ -164,7 +163,7 @@ OpMsg runCommandInLocalTxn(OperationContext* opCtx,
     lsidBuilder.doneFast();
 
     return OpMsg::parseOwned(
-        opCtx->getServiceContext()
+        opCtx->getService()
             ->getServiceEntryPoint()
             ->handleRequest(opCtx, OpMsgRequest::fromDBAndBody(db, bob.obj()).serialize())
             .get()
@@ -208,7 +207,9 @@ BSONObj commitOrAbortTransaction(OperationContext* opCtx,
     // Swap out the clients in order to get a fresh opCtx. Previous operations in this transaction
     // that have been run on this opCtx would have set the timeout in the locker on the opCtx, but
     // commit should not have a lock timeout.
-    auto newClient = getGlobalServiceContext()->makeClient("ShardingCatalogManager");
+    auto newClient = getGlobalServiceContext()
+                         ->getService(ClusterRole::ShardServer)
+                         ->makeClient("ShardingCatalogManager");
     AlternativeClientRegion acr(newClient);
     auto newOpCtx = cc().makeOperationContext();
     newOpCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
@@ -233,7 +234,7 @@ BSONObj commitOrAbortTransaction(OperationContext* opCtx,
     const auto cmdObj = bob.obj();
 
     const auto replyOpMsg = OpMsg::parseOwned(
-        newOpCtx->getServiceContext()
+        newOpCtx->getService()
             ->getServiceEntryPoint()
             ->handleRequest(newOpCtx.get(),
                             OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin, cmdObj).serialize())
@@ -591,7 +592,8 @@ void setInitializationTimeOnPlacementHistory(
         write_ops::DeleteOpEntry entryDelMarker;
         entryDelMarker.setQ(
             BSON(NamespacePlacementType::kNssFieldName << NamespaceStringUtil::serialize(
-                     ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker)));
+                     ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker,
+                     SerializationContext::stateDefault())));
         entryDelMarker.setMulti(true);
         deleteRequest.setDeletes({entryDelMarker});
 
@@ -1008,7 +1010,9 @@ Status ShardingCatalogManager::_notifyClusterOnNewDatabases(
     try {
         // Setup an AlternativeClientRegion and a non-interruptible Operation Context to ensure that
         // the notification may be also sent out while the node is stepping down.
-        auto altClient = opCtx->getServiceContext()->makeClient("_notifyClusterOnNewDatabases");
+        auto altClient = opCtx->getServiceContext()
+                             ->getService(ClusterRole::ShardServer)
+                             ->makeClient("_notifyClusterOnNewDatabases");
         // TODO(SERVER-74658): Please revisit if this thread could be made killable.
         {
             mongo::stdx::lock_guard<mongo::Client> lk(*altClient.get());
@@ -1393,7 +1397,9 @@ void ShardingCatalogManager::initializePlacementHistory(OperationContext* opCtx)
     // (This operation includes a $merge stage writing into the config database, which requires
     // internal client credentials).
     {
-        auto altClient = opCtx->getServiceContext()->makeClient("initializePlacementHistory");
+        auto altClient = opCtx->getServiceContext()
+                             ->getService(ClusterRole::ShardServer)
+                             ->makeClient("initializePlacementHistory");
         // TODO(SERVER-74658): Please revisit if this thread could be made killable.
         {
             stdx::lock_guard<Client> lk(*altClient.get());
@@ -1484,9 +1490,10 @@ void ShardingCatalogManager::cleanUpPlacementHistory(OperationContext* opCtx,
              << "$" + NamespacePlacementType::kNssFieldName << "mostRecentTimestamp"
              << BSON("$max"
                      << "$" + NamespacePlacementType::kTimestampFieldName)));
-    pipeline.addStage<DocumentSourceMatch>(BSON(
-        "_id" << BSON("$ne" << NamespaceStringUtil::serialize(
-                          ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker))));
+    pipeline.addStage<DocumentSourceMatch>(
+        BSON("_id" << BSON("$ne" << NamespaceStringUtil::serialize(
+                               ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker,
+                               SerializationContext::stateDefault()))));
 
     auto aggRequest = pipeline.buildAsAggregateCommandRequest();
 
@@ -1501,15 +1508,17 @@ void ShardingCatalogManager::cleanUpPlacementHistory(OperationContext* opCtx,
                      &earliestClusterTime](const std::vector<BSONObj>& batch,
                                            const boost::optional<BSONObj>& postBatchResumeToken) {
         for (const auto& obj : batch) {
-            const auto nss = NamespaceStringUtil::deserialize(boost::none, obj["_id"].String());
+            const auto nss = NamespaceStringUtil::deserialize(
+                boost::none, obj["_id"].String(), SerializationContext::stateDefault());
             const auto timeOfMostRecentDoc = obj["mostRecentTimestamp"].timestamp();
             write_ops::DeleteOpEntry stmt;
 
             const auto minTimeToPreserve = std::min(timeOfMostRecentDoc, earliestClusterTime);
-            stmt.setQ(BSON(NamespacePlacementType::kNssFieldName
-                           << NamespaceStringUtil::serialize(nss)
-                           << NamespacePlacementType::kTimestampFieldName
-                           << BSON("$lt" << minTimeToPreserve)));
+            stmt.setQ(
+                BSON(NamespacePlacementType::kNssFieldName
+                     << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())
+                     << NamespacePlacementType::kTimestampFieldName
+                     << BSON("$lt" << minTimeToPreserve)));
             stmt.setMulti(true);
             deleteStatements.emplace_back(std::move(stmt));
         }

@@ -51,7 +51,6 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/iterator/iterator_facade.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 
 #ifdef _WIN32
@@ -247,13 +246,15 @@ BSONObj StartMongoProgram(const BSONObj& a, void* data) {
     return BSON(string("") << runner.pid().asLongLong());
 }
 
-BSONObj RunProgram(const BSONObj& a, void* data, bool isMongo) {
+BSONObj RunProgram(const BSONObj& a, void* data, bool isMongo, bool isQuiet = false) {
     BSONObj env{};
     auto registry = ProgramRegistry::get(getGlobalServiceContext());
     auto runner = registry->createProgramRunner(a, env, isMongo);
-    runner.start();
+
+    runner.start(!isQuiet);
+
     invariant(registry->isPidRegistered(runner.pid()));
-    stdx::thread t(runner, registry->getProgramOutputMultiplexer(), true /* shouldLogOutput */);
+    stdx::thread t(runner, registry->getProgramOutputMultiplexer(), !isQuiet /* shouldLogOutput */);
     registry->registerReaderThread(runner.pid(), std::move(t));
     int exit_code = -123456;  // sentinel value
     registry->waitForPid(runner.pid(), true, &exit_code);
@@ -266,6 +267,13 @@ BSONObj RunMongoProgram(const BSONObj& a, void* data) {
 
 BSONObj RunNonMongoProgram(const BSONObj& a, void* data) {
     return RunProgram(a, data, false);
+}
+
+// This function is identical to RunNonMongoProgram except that it enables flags that
+// disable logging of program outputs and vargs in order to prevent sensitive data from
+// inadvertently being output to logs.
+BSONObj RunNonMongoProgramQuietly(const BSONObj& a, void* data) {
+    return RunProgram(a, data, false, true);
 }
 
 BSONObj ResetDbpath(const BSONObj& a, void* data) {
@@ -409,12 +417,13 @@ inline void kill_wrapper(ProcessId pid, int sig, int port, const BSONObj& opt) {
                 BSONElement authObj = opt["auth"];
 
                 if (!authObj.eoo()) {
-                    auto status = conn.auth(
-                        DatabaseName::kAdmin, authObj["user"].String(), authObj["pwd"].String());
-
-                    if (!status.isOK()) {
-                        cout << "Failed to authenticate before shutdown: " << status.reason()
-                             << endl;
+                    try {
+                        conn.auth(DatabaseName::kAdmin,
+                                  authObj["user"].String(),
+                                  authObj["pwd"].String());
+                    } catch (const DBException& e) {
+                        cout << "Failed to authenticate before shutdown: " << e.reason() << endl;
+                        throw;
                     }
                 }
 
@@ -946,6 +955,7 @@ void installShellUtilsLauncher(Scope& scope) {
     scope.injectNative("run", RunMongoProgram);
     scope.injectNative("_runMongoProgram", RunMongoProgram);
     scope.injectNative("runNonMongoProgram", RunNonMongoProgram);
+    scope.injectNative("runNonMongoProgramQuietly", RunNonMongoProgramQuietly);
     scope.injectNative("_stopMongoProgram", StopMongoProgram);
     scope.injectNative("stopMongoProgramByPid", StopMongoProgramByPid);
     scope.injectNative("rawMongoProgramOutput", RawMongoProgramOutput);

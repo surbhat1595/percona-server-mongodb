@@ -30,7 +30,6 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -265,10 +264,7 @@ void ReplicaSetMonitorManager::removeMonitor(StringData setName) {
             monitor->drop();
         }
         _monitors.erase(it);
-        LOGV2(20187,
-              "Removed ReplicaSetMonitor for replica set {replicaSet}",
-              "Removed ReplicaSetMonitor for replica set",
-              "replicaSet"_attr = setName);
+        LOGV2(20187, "Removed ReplicaSetMonitor for replica set", "replicaSet"_attr = setName);
     }
 }
 
@@ -365,7 +361,8 @@ std::shared_ptr<executor::TaskExecutor> ReplicaSetMonitorManager::getExecutor() 
     return _taskExecutor;
 }
 
-std::shared_ptr<executor::EgressTagCloser> ReplicaSetMonitorManager::_getConnectionManager() {
+std::shared_ptr<executor::EgressConnectionCloser>
+ReplicaSetMonitorManager::_getConnectionManager() {
     invariant(_connectionManager);
     return _connectionManager;
 }

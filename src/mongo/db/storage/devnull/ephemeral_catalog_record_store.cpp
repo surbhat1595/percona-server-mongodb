@@ -40,7 +40,6 @@
 #include <utility>
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/shared_array.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -172,6 +171,10 @@ public:
 
         // Capped iterators die on invalidation rather than advancing.
         return !(_isCapped && _lastMoveWasRestore);
+    }
+
+    uint64_t getCheckpointId() const final {
+        return 0;
     }
 
     void detachFromOperationContext() final {}

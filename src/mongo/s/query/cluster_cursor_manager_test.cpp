@@ -38,7 +38,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -135,7 +134,7 @@ protected:
 
     void killCursorFromDifferentOpCtx(CursorId cursorId) {
         // Set up another client to kill the cursor.
-        auto killCursorClient = getServiceContext()->makeClient("killCursorClient");
+        auto killCursorClient = getServiceContext()->getService()->makeClient("killCursorClient");
         auto killCursorOpCtx = killCursorClient->makeOperationContext();
         AlternativeClientRegion acr(killCursorClient);
         ASSERT_OK(getManager()->killCursor(killCursorOpCtx.get(), cursorId));
@@ -650,7 +649,7 @@ TEST_F(ClusterCursorManagerTest, CorrectlyRecordsOriginatingClient) {
     // Now insert some cursors under a different client.
     const size_t numAltClientCursors = 10;
     {
-        auto otherClient = getServiceContext()->makeClient("otherClient");
+        auto otherClient = getServiceContext()->getService()->makeClient("otherClient");
         auto otherOpCtx = otherClient->makeOperationContext();
         AlternativeClientRegion acr(otherClient);
         for (size_t i = 0; i < numAltClientCursors; ++i) {

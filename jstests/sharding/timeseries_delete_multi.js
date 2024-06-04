@@ -7,6 +7,8 @@
  *   requires_fcv_71,
  *   # To avoid burn-in tests in in-memory build variants
  *   requires_persistence,
+ *   # TODO (SERVER-80521): Re-enable this test once redness is resolve in multiversion suites.
+ *   DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE,
  * ]
  */
 
@@ -189,7 +191,11 @@ const requestConfigurations = {
 
 function getProfilerEntriesForSuccessfulMultiDelete(db) {
     const profilerFilter = {
-        op: 'remove',
+        $or: [
+            {op: 'remove'},
+            {op: 'bulkWrite', "command.delete": {$exists: true}},
+        ],
+        op: {$in: ['remove', 'bulkWrite']},
         ns: `${dbName}.${collName}`,
         // Filters out events recorded because of StaleConfig error.
         ok: {$ne: 0},

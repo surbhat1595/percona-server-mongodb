@@ -8,6 +8,11 @@ TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 TestData.skipCheckOrphans = true;
 TestData.skipCheckShardFilteringMetadata = true;
 
+// The routing table consistency check runs with 'snapshot' level readConcern. This readConcern
+// level cannot be satisfied without a replica set primary, which we won't have because this test
+// removes the replica set primary from a shard.
+TestData.skipCheckRoutingTableConsistency = true;
+
 var numDocs = 2000;
 var baseName = "shard_insert_getlasterror_w2";
 var testDBName = baseName;

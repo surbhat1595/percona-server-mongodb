@@ -260,8 +260,8 @@ roles:
                   - listShards # clusterManager gets this also
                   - netstat
                   - operationMetrics
-                  - replSetGetConfig # clusterMonitor gets this also
-                  - replSetGetStatus # clusterMonitor gets this also
+                  - replSetGetConfig # clusterManager gets this also
+                  - replSetGetStatus # clusterManager gets this also
                   - serverStatus
                   - top
                   - useUUID
@@ -269,6 +269,8 @@ roles:
                   - shardingState
                   - allCollectionStats
                   - shardedDataDistribution
+                  - queryStatsRead
+                  - queryStatsReadTransformed
             - matchType: any_normal
               actions: &clusterMonitorRoleDatabaseActions
                   - collStats
@@ -363,8 +365,6 @@ roles:
                   - setChangeStreamState
                   - getChangeStreamState
                   - querySettings
-                  - queryStatsRead
-                  - queryStatsReadTransformed
                   - checkMetadataConsistency
                   - transitionFromDedicatedConfigServer
                   - transitionToDedicatedConfigServer
@@ -593,6 +593,10 @@ roles:
               collection: 'system.roles'
               actions:
                   - createIndex # Create index on the roles collection.
+            - matchType: exact_namespace
+              collection: 'system.views'
+              actions: 
+                  - dropCollection
 
     root:
         adminOnly: true

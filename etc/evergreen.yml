@@ -60,6 +60,7 @@ include:
 - filename: etc/evergreen_yml_components/variants/ninja.yml
 - filename: etc/evergreen_yml_components/variants/compile_static_analysis.yml
 - filename: etc/evergreen_yml_components/variants/config_shard.yml
+- filename: etc/evergreen_yml_components/perf_tasks.yml
 
 variables:
 
@@ -77,14 +78,34 @@ variables:
   - name: generate_buildid_to_debug_symbols_mapping
     variant: linux-x86-dynamic-compile
 
-- &amazon_linux2_arm64_compile_variant_dependency
+- &linux_x86_compile_variant_dependency
   depends_on:
   - name: archive_dist_test_debug
-    variant: &amazon_linux2_arm64_compile_variant_name amazon-linux2-arm64-compile
+    variant: &linux_x86_compile_variant_name linux-x86-compile #static compile
+  - name: version_gen
+    variant: generate-tasks-for-version
+    omit_generated_tasks: true
+  - name: generate_buildid_to_debug_symbols_mapping
+    variant: linux-x86-compile
+
+- &amazon_linux2_arm64_dynamic_compile_variant_dependency
+  depends_on:
+  - name: archive_dist_test_debug
+    variant: &amazon_linux2_arm64_dynamic_compile_variant_name amazon-linux2-arm64-dynamic-compile
   - name: version_gen
     variant: generate-tasks-for-version
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
+    omit_generated_tasks: true
+  - name: generate_buildid_to_debug_symbols_mapping
+    variant: amazon-linux2-arm64-dynamic-compile
+
+- &amazon_linux2_arm64_compile_variant_dependency
+  depends_on:
+  - name: archive_dist_test_debug
+    variant: &amazon_linux2_arm64_compile_variant_name amazon-linux2-arm64-compile #static compile
+  - name: version_gen
+    variant: generate-tasks-for-version
     omit_generated_tasks: true
   - name: generate_buildid_to_debug_symbols_mapping
     variant: amazon-linux2-arm64-compile
@@ -134,6 +155,13 @@ variables:
   num_scons_link_jobs_available: 0.99
   compile_variant: *linux_x86_dynamic_compile_variant_name
 
+- &linux_x86_expansions
+  multiversion_platform: amazon2
+  multiversion_edition: enterprise
+  repo_edition: enterprise
+  num_scons_link_jobs_available: 0.99
+  compile_variant: *linux_x86_compile_variant_name
+
 - &linux_arm64_generic_expansions
   multiversion_platform: amazon2
   multiversion_edition: enterprise
@@ -143,7 +171,7 @@ variables:
   repo_edition: enterprise
   large_distro_name: amazon2-arm64-large
   num_scons_link_jobs_available: 0.99
-  compile_variant: *amazon_linux2_arm64_compile_variant_name
+  compile_variant: *amazon_linux2_arm64_dynamic_compile_variant_name
 
 # If you add anything to san_options, make sure the appropriate changes are
 # also made to SConstruct.
@@ -229,8 +257,6 @@ variables:
     additional_package_targets: >-
       archive-mongocryptd
       archive-mongocryptd-debug
-      archive-mh
-      archive-mh-debug
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -273,7 +299,7 @@ variables:
   - name: libunwind_tests
   - name: .ocsp
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: .replica_sets .multi_oplog
   - name: sasl
   - name: search
@@ -305,9 +331,118 @@ parameters:
 #######################################
 buildvariants:
 
+- <<: *amazon_linux2_arm64_compile_variant_dependency
+  name: perf-1-node-replSet.arm.aws.2023-09
+  display_name: PERF 1-Node ReplSet ARM AWS 2023-09
+  # Leave off for now
+  modules: &perf_modules
+    - enterprise
+    - dsi
+    - genny
+    - workloads
+    - linkbench
+    - linkbench2
+    - tsbs
+    - YCSB
+    - PrivateWorkloads
+    - flamegraph
+  expansions:
+    <<: *linux_arm64_generic_expansions
+    idle_timeout_factor: 1.5
+    exec_timeout_factor: 1.5
+    mongodb_setup_release: 2022-11
+    mongodb_setup: single-replica
+    infrastructure_provisioning_release: 2023-09
+    infrastructure_provisioning: single
+    workload_setup: 2022-11
+    platform: linux
+    project_dir: &perf_project_dir dsi
+    authentication: enabled
+    storageEngine: wiredTiger
+    compile_variant: *amazon_linux2_arm64_compile_variant_name
+  run_on:
+    - rhel70-small
+  tasks:
+  - name: industry_benchmarks
+  - name: ycsb_60GB
+  - name: ycsb_60GB.long
+  - name: crud_workloads_majority
+  - name: misc_workloads
+  - name: map_reduce_workloads
+  - name: smoke_test
+  - name: canaries_only
+  - name: non_sharded_workloads
+  # - name: bestbuy_agg
+  # - name: bestbuy_agg_merge_different_db
+  # - name: bestbuy_agg_merge_same_db
+  # - name: bestbuy_agg_merge_wordcount
+  # - name: bestbuy_query
+  - name: change_streams_latency
+  - name: change_streams_listen_throughput
+  - name: snapshot_reads
+  - name: linkbench
+  - name: linkbench2
+  - name: tsbs_load
+  # - name: tsbs_query
+  # - name: tsbs_query_finance
+  - name: tsbs_query_manual_bucketing
+  # - name: tsbs_query_fixed_bucketing
+  # - name: tsbs-query-genny
+  # - name: tsbs-query-optimizations
+  # - name: tpcc
+  # - name: tpcc_majority
+  # - name: tpch_1_normalized
+  # - name: tpch_1_denormalized
+  # - name: tpch_10_normalized
+  # - name: tpch_10_denormalized
+
 ###########################################
 #         Linux buildvariants             #
 ###########################################
+- <<: *linux_x86_compile_variant_dependency
+  name: perf-standalone-classic-query-engine.intel.aws.2023-09
+  display_name: PERF Standalone (Classic Query Engine) Intel AWS 2023-09
+  # cron: &cron_query_perf_schedule "0 0 * * 4"  # 00:00 on Thursday
+  activate: false
+  modules: *perf_modules
+  expansions:
+    <<: *linux_x86_expansions
+    idle_timeout_factor: 1.5
+    exec_timeout_factor: 1.5
+    mongodb_setup_release: 2022-11
+    mongodb_setup: standalone-classic-query-engine
+    infrastructure_provisioning_release: 2023-09
+    infrastructure_provisioning: single-intel
+    workload_setup: 2022-11
+    platform: linux
+    project_dir: *perf_project_dir
+    authentication: enabled
+    storageEngine: wiredTiger
+    compile_variant: *linux_x86_compile_variant_name
+  run_on:
+    - amazon2
+  tasks: &classic_engine_tasks
+    - name: schedule_patch_auto_tasks
+    - name: schedule_variant_auto_tasks
+    - name: industry_benchmarks
+    - name: ycsb_60GB
+    - name: ycsb_60GB.long
+    - name: crud_workloads_majority
+    # - name: bestbuy_agg
+    # - name: bestbuy_agg_merge_different_db
+    # - name: bestbuy_agg_merge_same_db
+    # - name: bestbuy_agg_merge_wordcount
+    # - name: bestbuy_query
+    # - name: cursor_manager
+    # - name: map_reduce_workloads
+    # - name: tpcc
+    # - name: tpcc_majority
+    # - name: tpch_1_normalized
+    # - name: tpch_1_denormalized
+    # - name: tpch_10_normalized
+    # - name: tpch_10_denormalized
+    - name: canaries_only
+
 - &linux-64-debug-required-template
   <<: *linux_x86_dynamic_debug_compile_variant_dependency
   name: &linux-64-debug-required linux-64-debug-required
@@ -340,8 +475,7 @@ buildvariants:
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: .ocsp
   - name: .read_write_concern
-  - name: .replica_sets !.encrypt !.ignore_non_generated_replica_sets_jscore_passthrough !.fcbis
-  - name: replica_sets_jscore_passthrough_gen
+  - name: .replica_sets !.encrypt !.fcbis
   - name: replica_sets_reconfig_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
   - name: replica_sets_max_mirroring_large_txns_format_gen
@@ -397,105 +531,6 @@ buildvariants:
   tasks:
   - name: tla_plus
 
-- name: &enterprise-rhel-80-64-bit-coverage enterprise-rhel-80-64-bit-coverage
-  display_name: "~ Enterprise RHEL 8.0 DEBUG Code Coverage"
-  modules:
-  - enterprise
-  run_on:
-  - rhel80-medium
-  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
-  stepback: false
-  expansions:
-    additional_package_targets: >-
-      archive-mongocryptd
-      archive-mongocryptd-debug
-    test_flags: --excludeWithAnyTags=resource_intensive,incompatible_with_gcov
-    compile_flags: >-
-      --allocator=system
-      --dbg=on
-      --gcov
-      --opt=off
-      --ssl
-      MONGO_DISTMOD=rhel80
-      -j$(grep -c ^processor /proc/cpuinfo)
-      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      --link-model=dynamic
-    large_distro_name: rhel80-medium
-    multiversion_platform: rhel80
-    multiversion_edition: enterprise
-    resmoke_jobs_factor: 0.5  # Avoid starting too many mongod's
-    # The gcov instrumentation saves the path the .gcno files were created in as the default path
-    # for the .gcda files. In Evergreen the path will start with /data/mci/[Hashed ID]/src/... where
-    # the hashed ID is unique per task run. GCOV_PREFIX_STRIP is the number of directory levels to
-    # strip from the top of the default path before appending to the GCOV_PREFIX (if any).
-    gcov_environment: GCOV_PREFIX=$(pwd) GCOV_PREFIX_STRIP=4
-    # Mixing --cache and --gcov doesn't work correctly yet. See SERVER-11084
-    exec_timeout_secs: 32400 # 9 hour timeout
-    timeout_secs: 18000 # 5 hour idle timeout
-    use_scons_cache: false
-    gcov_tool: /opt/mongodbtoolchain/v4/bin/gcov
-    num_scons_link_jobs_available: 0.99
-    compile_variant: *enterprise-rhel-80-64-bit-coverage
-  tasks: &enterprise-rhel-80-64-bit-coverage-tasks
-  - name: compile_test_parallel_core_stream_TG
-    distros:
-    - rhel80-large
-  - name: compile_test_parallel_unittest_stream_TG
-    distros:
-    - rhel80-large
-  - name: compile_test_parallel_dbtest_stream_TG
-    distros:
-    - rhel80-large
-  - name: .jscore .common
-  - name: .replica_sets !.ignore_non_generated_replica_sets_jscore_passthrough !.ignore_on_code_coverage
-  - name: replica_sets_jscore_passthrough_gen
-  - name: generate_buildid_to_debug_symbols_mapping
-
-- name: &enterprise-rhel-80-64-bit-coverage-clang enterprise-rhel-80-64-bit-coverage-clang
-  display_name: "~ Enterprise RHEL 8.0 DEBUG Code Coverage (clang)"
-  modules:
-    - enterprise
-  run_on:
-    - rhel80-medium
-  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
-  stepback: false
-  expansions:
-    additional_package_targets: >-
-      archive-mongocryptd
-      archive-mongocryptd-debug
-    test_flags: --excludeWithAnyTags=resource_intensive,incompatible_with_gcov
-    compile_flags: >-
-      --allocator=system
-      --dbg=on
-      --gcov
-      --opt=debug
-      --ssl
-      MONGO_DISTMOD=rhel80
-      -j$(grep -c ^processor /proc/cpuinfo)
-      --variables-files=etc/scons/mongodbtoolchain_stable_clang.vars
-      --link-model=dynamic
-    large_distro_name: rhel80-medium
-    multiversion_platform: rhel80
-    multiversion_edition: enterprise
-    resmoke_jobs_factor: 0.5  # Avoid starting too many mongod's
-    # The gcov instrumentation saves the path the .gcno files were created in as the default path
-    # for the .gcda files. In Evergreen the path will start with /data/mci/[Hashed ID]/src/... where
-    # the hashed ID is unique per task run. GCOV_PREFIX_STRIP is the number of directory levels to
-    # strip from the top of the default path before appending to the GCOV_PREFIX (if any).
-    gcov_environment: GCOV_PREFIX=$(pwd) GCOV_PREFIX_STRIP=4
-    # Mixing --cache and --gcov doesn't work correctly yet. See SERVER-11084
-    exec_timeout_secs: 32400 # 9 hour timeout
-    timeout_secs: 21600 # 7 hour idle timeout
-    use_scons_cache: false
-    # llvm-cov is too old in the v3 toolchain to handle the same options that
-    # gcov does. However, this version of clang still produces .gcda files that
-    # the v3 gcov can read natively anyway, so we don't need it.
-    gcov_tool: /opt/mongodbtoolchain/v4/bin/gcov
-    num_scons_link_jobs_available: 0.99
-    compile_variant: *enterprise-rhel-80-64-bit-coverage-clang
-  tasks:
-    *enterprise-rhel-80-64-bit-coverage-tasks
-
 - name: &stm-daily-cron stm-daily-cron
   modules:
   - enterprise
@@ -512,6 +547,8 @@ buildvariants:
   - name: lint_fuzzer_sanity_all
   - name: powercycle_sentinel
   - name: powercycle_smoke_skip_compile_gen
+  - name: monitor_mongo_fork_10gen
+  - name: daily_task_scanner
 
 - name: tooling-metrics-x86
   display_name: "* Tooling Metrics x86"
@@ -561,7 +598,7 @@ buildvariants:
   tasks:
   - name: compile_test_serial_TG
     distros:
-    - windows-vsCurrent-xlarge
+    - windows-vsCurrent-xxlarge
   - name: compile_build_tools_next_TG
     distros:
     - windows-vsCurrent-xlarge
@@ -660,14 +697,10 @@ buildvariants:
   - name: jsCore_ese
   - name: jsCore_txns_large_txns_format
   - name: .jstestfuzz .common
-  - name: mqlrun
   - name: noPassthrough_gen
   - name: noPassthroughWithMongod_gen
-  - name: .replica_sets .common !.ignore_non_generated_replica_sets_jscore_passthrough
-  - name: .replica_sets .multi_oplog !.ignore_non_generated_replica_sets_jscore_passthrough !.gcm
-  - name: replica_sets_jscore_passthrough_gen
-    distros:
-    - windows-vsCurrent-large
+  - name: .replica_sets .common
+  - name: .replica_sets .multi_oplog !.gcm
   - name: sasl
   - name: .sharding .txns
   - name: sharding_auth_audit_gen
@@ -695,7 +728,6 @@ buildvariants:
     test_flags: >-
       --runAllFeatureFlagTests
       --excludeWithAnyTags=incompatible_with_windows_tls
-      --excludeWithAnyTags=incompatible_with_shard_merge
     external_auth_jobs_max: 1
     # Uncomment expansion and `burn_in_tasks_gen` task below and add resmoke task name to burn-in.
     # WARNING! Task splitting is not supported for burn-in tasks. Large unsplitted `_gen` tasks may
@@ -730,12 +762,10 @@ buildvariants:
   - name: jsCore_txns_large_txns_format
   - name: jsCore_wildcard_indexes
   - name: .jstestfuzz .common
-  - name: mqlrun
   - name: noPassthrough_gen
   - name: noPassthroughWithMongod_gen
-  - name: .replica_sets .common !.ignore_non_generated_replica_sets_jscore_passthrough
-  - name: .replica_sets .multi_oplog !.ignore_non_generated_replica_sets_jscore_passthrough !.gcm
-  - name: replica_sets_jscore_passthrough_gen
+  - name: .replica_sets .common
+  - name: .replica_sets .multi_oplog !.gcm
   - name: sasl
   - name: .sharding .txns
   - name: sharding_auth_audit_gen
@@ -853,7 +883,6 @@ buildvariants:
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.sharding !.aggregation !.jscore !.ssl
   - name: .jscore .common !.decimal !.sharding
-  - name: mqlrun
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough_gen
   - name: sasl
@@ -883,9 +912,8 @@ buildvariants:
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.sharding !.aggregation !.jscore
   - name: .jscore .common !.decimal !.sharding
-  - name: mqlrun
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: sasl
   - name: .crypt
 
@@ -907,10 +935,10 @@ buildvariants:
       enterprise-rhel-80-64-bit-inmem
       enterprise-rhel-80-64-bit-multiversion
     burn_in_tag_compile_task_dependency: archive_dist_test_debug
-    compile_variant: *amazon_linux2_arm64_compile_variant_name
+    compile_variant: *amazon_linux2_arm64_dynamic_compile_variant_name
   depends_on:
   - name: archive_dist_test_debug
-    variant: *amazon_linux2_arm64_compile_variant_name
+    variant: *amazon_linux2_arm64_dynamic_compile_variant_name
   - name: version_gen
     variant: generate-tasks-for-version
     # This is added because of EVG-18211.
@@ -990,11 +1018,10 @@ buildvariants:
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
     distros:
@@ -1015,6 +1042,12 @@ buildvariants:
     distros:
     - rhel80-xlarge
   - name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen
+    distros:
+    - rhel80-xlarge
+  - name: change_streams_change_collection_replica_sets_stepdown_primary_jscore_passthrough_gen
+    distros:
+    - rhel80-xlarge
+  - name: change_streams_change_collection_replica_sets_kill_secondary_jscore_passthrough_gen
     distros:
     - rhel80-xlarge
   - name: retryable_writes_jscore_passthrough_gen
@@ -1115,11 +1148,10 @@ buildvariants:
   # - name: .jstestfuzz !.flow_control
   - name: libunwind_tests
   - name: .multiversion_sanity_check
-  - name: mqlrun
   - name: .multi_shard !.no_debug_mode
   - name: multiversion_gen
   - name: .ocsp
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .read_write_concern .large
     distros:
     - rhel80-medium
@@ -1137,6 +1169,12 @@ buildvariants:
     distros:
     - rhel80-xlarge
   - name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen
+    distros:
+    - rhel80-xlarge
+  - name: change_streams_change_collection_replica_sets_stepdown_primary_jscore_passthrough_gen
+    distros:
+    - rhel80-xlarge
+  - name: change_streams_change_collection_replica_sets_kill_secondary_jscore_passthrough_gen
     distros:
     - rhel80-xlarge
   - name: retryable_writes_jscore_passthrough_gen
@@ -1169,6 +1207,7 @@ buildvariants:
     - rhel80-xlarge
   - name: streams
   - name: streams_auth
+  - name: streams_kafka
   - name: vector_search
   - name: vector_search_auth
   - name: vector_search_ssl
@@ -1190,7 +1229,6 @@ buildvariants:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
       --runAllFeatureFlagTests
-      --excludeWithAnyTags=incompatible_with_shard_merge
     # Uncomment expansion and `burn_in_tasks_gen` task below and add resmoke task name to burn-in.
     # WARNING! Task splitting is not supported for burn-in tasks. Large unsplitted `_gen` tasks may
     # run too long and hit execution timeouts.
@@ -1248,6 +1286,7 @@ buildvariants:
   - name: .encrypt
   - name: feature_flag_multiversion_gen
   - name: idl_tests
+  - name: index_filters_to_query_settings
   - name: initial_sync_fuzzer_gen
   - name: fcv_upgrade_downgrade_replica_sets_jscore_passthrough_gen
   - name: fcv_upgrade_downgrade_sharding_jscore_passthrough_gen
@@ -1261,12 +1300,11 @@ buildvariants:
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
   - name: .multiversion_sanity_check
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
   - name: powercycle_smoke
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.cqf_only
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
     distros:
@@ -1287,6 +1325,12 @@ buildvariants:
     distros:
     - rhel80-medium
   - name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen
+    distros:
+    - rhel80-medium
+  - name: change_streams_change_collection_replica_sets_stepdown_primary_jscore_passthrough_gen
+    distros:
+    - rhel80-medium
+  - name: change_streams_change_collection_replica_sets_kill_secondary_jscore_passthrough_gen
     distros:
     - rhel80-medium
   - name: retryable_writes_jscore_passthrough_gen
@@ -1313,9 +1357,9 @@ buildvariants:
   - name: .updatefuzzer
   - name: secondary_reads_passthrough_gen
   - name: .shard_split
-  - name: .shard_merge
   - name: streams
   - name: streams_auth
+  - name: streams_kafka
   - name: vector_search
   - name: vector_search_auth
   - name: vector_search_ssl
@@ -1341,6 +1385,7 @@ buildvariants:
     max_sub_suites: 5
     test_flags: >-
       --mongodSetParameters="{internalQueryFrameworkControl: forceClassicEngine}"
+      --excludeWithAnyTags=requires_sbe
     large_distro_name: rhel80-medium
   depends_on:
   - name: archive_dist_test_debug
@@ -1357,8 +1402,9 @@ buildvariants:
   - name: .causally_consistent !.sharding
   - name: .change_stream_fuzzer
   - name: .change_streams
-  - name: .concurrency !.large !.ubsan !.no_txns !.compute_mode
-  - name: .concurrency .large !.ubsan !.no_txns !.compute_mode
+  # TODO(SERVER-79848): Remove !.sharded
+  - name: .concurrency !.large !.ubsan !.no_txns !.compute_mode !.sharded
+  - name: .concurrency .large !.ubsan !.no_txns !.compute_mode !.sharded
     distros:
     - rhel80-medium
   - name: .encrypt
@@ -1366,7 +1412,7 @@ buildvariants:
   - name: .jstestfuzz !.flow_control
   - name: .misc_js
   - name: .multi_shard
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.cqf_only
   - name: query_golden_classic
   - name: .random_multiversion_ds
   - name: .read_only
@@ -1407,7 +1453,6 @@ buildvariants:
   - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format
   - name: json_schema
-  - name: mqlrun
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
   - name: .multiversion_sanity_check
@@ -1423,6 +1468,12 @@ buildvariants:
     distros:
     - rhel80-xlarge
   - name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen
+    distros:
+    - rhel80-xlarge
+  - name: change_streams_change_collection_replica_sets_stepdown_primary_jscore_passthrough_gen
+    distros:
+    - rhel80-xlarge
+  - name: change_streams_change_collection_replica_sets_kill_secondary_jscore_passthrough_gen
     distros:
     - rhel80-xlarge
   - name: retryable_writes_jscore_passthrough_gen
@@ -1458,7 +1509,6 @@ buildvariants:
     <<: *enterprise-rhel-80-64-bit-dynamic-all-feature-flags-expansions
     test_flags: >-
       --runAllFeatureFlagTests
-      --excludeWithAnyTags=incompatible_with_shard_merge
       --excludeWithAnyTags=cqf_incompatible
       --mongosSetParameters="{featureFlagCommonQueryFramework: true, internalQueryFrameworkControl: 'tryBonsai'}"
       --mongodSetParameters="{featureFlagCommonQueryFramework: true, internalQueryFrameworkControl: 'tryBonsai'}"
@@ -1476,7 +1526,7 @@ buildvariants:
   #     variant: *linux_x86_dynamic_compile_variant_name
   - name: check_feature_flag_tags
   - name: check_for_todos
-  - name: .aggfuzzer
+  - name: .aggfuzzer .cqf_only
   - name: .aggregation
   - name: aggregation_repeat_queries
   - name: audit
@@ -1486,7 +1536,6 @@ buildvariants:
   - name: unittest_shell_hang_analyzer_gen
   - name: .causally_consistent !.sharding
   - name: .change_streams
-  - name: .change_stream_fuzzer
   # TODO SERVER-57866: Remove the explicit mentions of change stream multitenant suites.
   - name: change_streams_multitenant_passthrough
   - name: change_streams_multitenant_sharded_collections_passthrough
@@ -1517,12 +1566,11 @@ buildvariants:
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
   - name: .multiversion_sanity_check
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
   - name: powercycle_smoke
-  - name: .query_fuzzer
+  - name: .query_fuzzer .cqf_only
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
     distros:
@@ -1560,10 +1608,8 @@ buildvariants:
   - name: sharded_multi_stmt_txn_jscore_passthrough
   - name: .serverless
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen
-  - name: .updatefuzzer
   - name: secondary_reads_passthrough_gen
   - name: .shard_split
-  - name: .shard_merge
   - name: streams
   - name: streams_auth
   - name: query_stats_passthrough
@@ -1658,7 +1704,6 @@ buildvariants:
     # No feature flag tests since they aren't compatible with the older binaries.
     test_flags: >-
       --runNoFeatureFlagTests
-      --excludeWithAnyTags=incompatible_with_shard_merge,
 
 # This variant exists becuase this is the only way to test future multiversion tags
 # version_expansions_gen will pretend we are upgrading to "bv_future_git_tag"
@@ -1719,8 +1764,6 @@ buildvariants:
     additional_package_targets: >-
       archive-mongocryptd
       archive-mongocryptd-debug
-      archive-mh
-      archive-mh-debug
     compile_flags: >-
       --ssl
       MONGO_DISTMOD=rhel80
@@ -1754,7 +1797,7 @@ buildvariants:
   - name: .jstestfuzz .common
   - name: libunwind_tests
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: .replica_sets .multi_oplog !.encrypt
   - name: replica_sets_max_mirroring_large_txns_format_gen
   - name: sasl
@@ -1772,80 +1815,6 @@ buildvariants:
   - name: vector_search_ssl
   - name: selinux_rhel8_enterprise
   - name: generate_buildid_to_debug_symbols_mapping
-
-- name: &enterprise-rhel-80-64-bit-build-metrics enterprise-rhel-80-64-bit-build-metrics
-  display_name: "~ Build Metrics Enterprise RHEL 8.0 "
-  cron: "0 4 * * *" # From the ${project_required_suggested_cron} parameter
-  stepback: false
-  modules:
-  - enterprise
-  run_on:
-  - rhel80-build
-  expansions:
-    compile_flags: >-
-      --ssl
-      MONGO_DISTMOD=rhel80
-      -j$(grep -c ^processor /proc/cpuinfo)
-    repo_edition: enterprise
-    large_distro_name: rhel80-large
-    num_scons_link_jobs_available: 0.1
-  tasks:
-  - name: build_metrics_gen_TG
-
-- name: &enterprise-rhel-80-aarch64-build-metrics enterprise-rhel-80-aarch64-build-metrics
-  display_name: "~ Build Metrics Enterprise AL22 ARM"
-  cron: "0 4 * * *" # From the ${project_required_suggested_cron} parameter
-  stepback: false
-  modules:
-  - enterprise
-  run_on:
-  - amazon2023.0-arm64-large
-  expansions:
-    compile_flags: >-
-      --ssl
-      MONGO_DISTMOD=rhel82
-      -j$(grep -c ^processor /proc/cpuinfo)
-    repo_edition: enterprise
-    large_distro_name: amazon2023.0-arm64-large
-    num_scons_link_jobs_available: 0.1
-  tasks:
-  - name: build_metrics_gen_TG
-
-- name: &macos-enterprise-build-metrics macos-enterprise-build-metrics
-  display_name: "~ Build Metrics Enterprise MacOS"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  stepback: false
-  modules:
-  - enterprise
-  run_on:
-  - macos-1100
-  expansions:
-    num_scons_link_jobs_available: 0.1
-    compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
-    compile_flags: >-
-      --ssl
-      -j$(sysctl -n hw.logicalcpu)
-      --libc++
-      --variables-files=etc/scons/xcode_macosx.vars
-  tasks:
-  - name: build_metrics_gen_TG
-
-- name: &enterprise-windows-build-metrics enterprise-windows-build-metrics
-  display_name: "~ Build Metrics Enterprise Windows"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  stepback: false
-  run_on:
-  - windows-vsCurrent-small
-  expansions:
-    num_scons_link_jobs_available: 0.1
-    compile_flags: >-
-      CPPPATH="c:/sasl/include"
-      LIBPATH="c:/sasl/lib"
-      -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 ))
-      --win-version-min=win10
-    python: '/cygdrive/c/python/python39/python.exe'
-  tasks:
-  - name: build_metrics_gen_TG
 
 - <<: *enterprise-rhel-70-64-bit-template
   name: &hot_backups-rhel-70-64-bit hot_backups-rhel-70-64-bit
@@ -1904,7 +1873,7 @@ buildvariants:
 ###########################################
 
 - &enterprise-amazon-linux2-arm64-all-feature-flags-template
-  <<: *amazon_linux2_arm64_compile_variant_dependency
+  <<: *amazon_linux2_arm64_dynamic_compile_variant_dependency
   name: &enterprise-amazon-linux2-arm64-all-feature-flags enterprise-amazon-linux2-arm64-all-feature-flags
   display_name: "! Amazon Linux 2 arm64 (all feature flags)"
   cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
@@ -1926,7 +1895,7 @@ buildvariants:
     exec_timeout_factor: 1.5
     test_flags: >-
       --runAllFeatureFlagTests
-      --excludeWithAnyTags=incompatible_with_amazon_linux,incompatible_with_shard_merge,requires_external_data_source
+      --excludeWithAnyTags=incompatible_with_amazon_linux,requires_external_data_source
   tasks:
   - name: analyze_shard_key_jscore_passthrough_gen
   - name: query_golden_classic
@@ -1975,23 +1944,23 @@ buildvariants:
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
   - name: .multiversion_sanity_check
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
   - name: powercycle_smoke
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.cqf_only
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
   - name: .read_write_concern !.large
-  - name: .replica_sets !.encrypt !.auth !.ignore_non_generated_replica_sets_jscore_passthrough
-  - name: replica_sets_jscore_passthrough_gen
+  - name: .replica_sets !.encrypt !.auth
   - name: replica_sets_api_version_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
   - name: replica_sets_reconfig_kill_primary_jscore_passthrough_gen
   - name: change_streams_pre_images_replica_sets_stepdown_primary_jscore_passthrough_gen
   - name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen
+  - name: change_streams_change_collection_replica_sets_stepdown_primary_jscore_passthrough_gen
+  - name: change_streams_change_collection_replica_sets_kill_secondary_jscore_passthrough_gen
   - name: retryable_writes_jscore_passthrough_gen
   - name: retryable_writes_jscore_stepdown_passthrough_gen
   - name: .read_only
@@ -2007,7 +1976,6 @@ buildvariants:
     - amazon2-arm64-large
   - name: session_jscore_passthrough
   - name: .shard_split
-  - name: .shard_merge
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: sharding_api_version_jscore_passthrough_gen
   - name: sharding_api_strict_passthrough_gen
@@ -2059,7 +2027,6 @@ buildvariants:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
       --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits
-      --excludeWithAnyTags=incompatible_with_shard_merge
       --runAllFeatureFlagTests
     multiversion_platform: rhel80
     multiversion_edition: enterprise
@@ -2108,7 +2075,7 @@ buildvariants:
     <<: *aubsan-lite-required-expansions
     test_flags: >-
       --mongodSetParameters="{internalQueryFrameworkControl: forceClassicEngine}"
-      --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits
+      --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits,requires_sbe
   tasks:
   - name: .aggregation !.sbe_only
   - name: .auth
@@ -2117,7 +2084,8 @@ buildvariants:
   - name: .change_streams
   # - name: disk_wiredtiger
   - name: .misc_js
-  - name: .concurrency !.ubsan !.no_txns !.kill_terminate !.compute_mode
+  # TODO(SERVER-79848): Remove !.sharded
+  - name: .concurrency !.ubsan !.no_txns !.kill_terminate !.compute_mode !.sharded
   - name: .encrypt
   - name: external_auth
   - name: external_auth_aws
@@ -2131,12 +2099,13 @@ buildvariants:
   - name: jsCore_txns_large_txns_format
   - name: json_schema
   - name: .multi_shard .common
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.cqf_only
   - name: .read_write_concern
   - name: replica_sets_large_txns_format_jscore_passthrough
   - name: .replica_sets !.multi_oplog
   - name: .replica_sets .encrypt
-  - name: .resharding_fuzzer
+  # TODO(SERVER-79848): Re-enable resharding_fuzzer
+  # - name: .resharding_fuzzer
   - name: .retry
   - name: .rollbackfuzzer
   - name: .read_only
@@ -2161,7 +2130,6 @@ buildvariants:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
       --excludeWithAnyTags=requires_ocsp_stapling
-      --excludeWithAnyTags=incompatible_with_shard_merge
       --runAllFeatureFlagTests
   tasks:
   - name: jsCore
@@ -2179,7 +2147,6 @@ buildvariants:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
       --excludeWithAnyTags=requires_ocsp_stapling
-      --excludeWithAnyTags=incompatible_with_shard_merge
       --runAllFeatureFlagTests
   tasks:
   - name: audit
@@ -2211,9 +2178,10 @@ buildvariants:
   - name: jsCore_wildcard_indexes
   - name: json_schema
   - name: .misc_js
+  - name: move_collection_fuzzer_gen
   - name: .multi_shard .common
   - name: query_golden_classic
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.cqf_only
   - name: .read_write_concern
   - name: replica_sets_large_txns_format_jscore_passthrough
   - name: .replica_sets !.multi_oplog
@@ -2231,10 +2199,10 @@ buildvariants:
   - name: .sharding .common !.csrs
   - name: .serverless
   - name: .shard_split
-  - name: .shard_merge
   - name: query_stats_passthrough
   - name: query_stats_passthrough_writeonly
   - name: query_stats_mongos_passthrough
+  - name: unshard_collection_fuzzer_gen
   - name: .updatefuzzer
   - name: .watchdog
 
@@ -2289,7 +2257,7 @@ buildvariants:
   - name: compile_test_serial_TG
   - name: compile_integration_and_test_parallel_stream_TG
   - name: check_feature_flag_tags
-  - name: .aggfuzzer !.feature_flag_guarded
+  - name: .aggfuzzer !.feature_flag_guarded !.timeseries
   - name: .aggregation !.feature_flag_guarded
   - name: audit
   # - name: .auth  # Not passing
@@ -2325,17 +2293,16 @@ buildvariants:
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   # - name: libunwind_tests # Cant be used because tsan does not use libunwind
   # - name: .multiversion_sanity_check # Multiversion does not pass yet, also making this work is going to be pretty tricky
-  - name: mqlrun
   # - name: .multi_shard # Not passing
   # - name: multi_stmt_txn_jscore_passthrough_with_migration_gen # Not passing
   # - name: multiversion_gen # Multiversion does not pass yet, also making this work is going to be pretty tricky
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: query_golden_classic
   # - name: .random_multiversion_ds # Multiversion does not pass yet, also making this work is going to be pretty tricky
   # - name: .read_write_concern .large # Not passing
   #   distros:
   #   - rhel80-medium
-  # - name: .read_write_concern !.large # Not passing
+  - name: .read_write_concern !.large
   # - name: .replica_sets !.encrypt !.auth # Not passing
   #   distros:
   #   - rhel80-xlarge
@@ -2350,10 +2317,16 @@ buildvariants:
   - name: change_streams_pre_images_replica_sets_stepdown_primary_jscore_passthrough_gen
     distros:
     - rhel80-xlarge
-  # - name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen # Not passing
-  #   distros:
-  #   - rhel80-xlarge
-  # - name: retryable_writes_jscore_passthrough_gen # Not passing
+  - name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen
+    distros:
+    - rhel80-xlarge
+  - name: change_streams_change_collection_replica_sets_stepdown_primary_jscore_passthrough_gen
+    distros:
+    - rhel80-xlarge
+  - name: change_streams_change_collection_replica_sets_kill_secondary_jscore_passthrough_gen
+    distros:
+    - rhel80-xlarge
+  - name: retryable_writes_jscore_passthrough_gen
   - name: retryable_writes_jscore_stepdown_passthrough_gen
     distros:
     - rhel80-medium
@@ -2424,14 +2397,9 @@ buildvariants:
   - name: .read_write_concern .large
     distros:
     - rhel80-medium
-  - name: .read_write_concern !.large
   - name: .replica_sets !.encrypt !.auth
     distros:
     - rhel80-xlarge
-  - name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen
-    distros:
-    - rhel80-xlarge
-  - name: retryable_writes_jscore_passthrough_gen
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .txns
   - name: .sharding .common
@@ -2524,6 +2492,7 @@ buildvariants:
     test_flags: >-
       --mongosSetParameters="{initialServiceExecutorUseDedicatedThread: false}"
       --mongodSetParameters="{initialServiceExecutorUseDedicatedThread: false}"
+      --excludeWithAnyTags=requires_external_data_source
     large_distro_name: rhel80-build
     compile_variant: *enterprise-rhel80-fixed-service-executor-64-bit
   tasks:
@@ -2807,7 +2776,7 @@ buildvariants:
     <<: *linux_arm64_generic_expansions
     scons_cache_scope: shared
     scons_cache_mode: all
-    commit_queue_alternate_cache: amazon-linux2-arm64-compile
+    commit_queue_alternate_cache: amazon-linux2-arm64-dynamic-compile
     has_packages: false
     compile_flags: >-
       --ssl
@@ -2842,7 +2811,6 @@ buildvariants:
   - name: validate_commit_message
   - name: lint_large_files_check
   - name: check_feature_flag_tags
-  - name: compile_venv_deps_check
   - name: resmoke_validation_tests
   - name: version_gen_validation
     distros:
@@ -2871,7 +2839,7 @@ buildvariants:
     distros:
     - windows-vsCurrent-large
 
-- <<: *amazon_linux2_arm64_compile_variant_dependency
+- <<: *amazon_linux2_arm64_dynamic_compile_variant_dependency
   name: &amazon-linux2-arm64-fixed-concurrent-transactions amazon-linux2-arm64-fixed-concurrent-transactions
   display_name: "Amazon Linux 2 arm64 (Fixed Concurrent Transactions)"
   cron: "0 0 * * 0" # From the ${project_nightly_cron} parameter. Runs every Sunday.
@@ -2883,10 +2851,10 @@ buildvariants:
     <<: *linux_arm64_generic_expansions
     test_flags: >-
       --mongodSetParameters="{storageEngineConcurrencyAdjustmentAlgorithm: fixedConcurrentTransactions}"
-      --excludeWithAnyTags=incompatible_with_amazon_linux,incompatible_with_shard_merge,requires_external_data_source
+      --excludeWithAnyTags=incompatible_with_amazon_linux,requires_external_data_source
     scons_cache_scope: shared
     scons_cache_mode: all
-    commit_queue_alternate_cache: amazon-linux2-arm64-compile
+    commit_queue_alternate_cache: amazon-linux2-arm64-dynamic-compile
     has_packages: false
   tasks:
   - name: analyze_shard_key_jscore_passthrough_gen
@@ -2936,17 +2904,15 @@ buildvariants:
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
   - name: .multiversion_sanity_check
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
   - name: powercycle_smoke
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
   - name: .read_write_concern !.large
-  - name: .replica_sets !.encrypt !.auth !.ignore_non_generated_replica_sets_jscore_passthrough
-  - name: replica_sets_jscore_passthrough_gen
+  - name: .replica_sets !.encrypt !.auth
   - name: replica_sets_api_version_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
@@ -2995,7 +2961,133 @@ buildvariants:
     max_sub_suites: 3
     test_flags: >-
       --mongodSetParameters="{internalQueryFrameworkControl: forceClassicEngine}"
-      --excludeWithAnyTags=resource_intensive
+      --excludeWithAnyTags=resource_intensive,requires_sbe
+
+- <<: *enterprise-rhel-80-64-bit-dynamic-all-feature-flags-template
+  name: enterprise-rhel-80-64-bit-dynamic-classic-engine-all-feature-flags-required-query-patch-only
+  display_name: "~ Shared Library Enterprise RHEL 8.0 Query Patch Only (Classic Engine all feature flags)"
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter # This is a patch-only variant but we run on mainline to pick up task history.
+  expansions:
+    <<: *enterprise-rhel-80-64-bit-dynamic-all-feature-flags-expansions
+    jstestfuzz_num_generated_files: 20
+    jstestfuzz_concurrent_num_files: 5
+    target_resmoke_time: 30
+    max_sub_suites: 3
+    test_flags: >-
+      --mongodSetParameters="{internalQueryFrameworkControl: forceClassicEngine}"
+      --runAllFeatureFlagTests
+      --excludeWithAnyTags=resource_intensive,requires_sbe
+  tasks:
+  - name: analyze_shard_key_jscore_passthrough_gen
+  - name: query_golden_classic
+  - name: lint_fuzzer_sanity_patch
+  - name: test_api_version_compatibility
+  - name: check_feature_flag_tags
+  - name: check_for_todos
+  - name: .aggfuzzer !.cqf_only
+  - name: .aggregation !.sbe_only
+  - name: aggregation_repeat_queries
+  - name: audit
+  - name: .auth
+  - name: buildscripts_test
+  - name: resmoke_end2end_tests
+  - name: unittest_shell_hang_analyzer_gen
+  - name: .causally_consistent !.sharding
+  - name: .change_streams
+  - name: .change_stream_fuzzer
+  # TODO SERVER-57866: Remove the explicit mentions of change stream multitenant suites.
+  - name: change_streams_multitenant_passthrough
+  - name: change_streams_multitenant_sharded_collections_passthrough
+  - name: .misc_js
+  - name: .clustered_collections
+  # TODO(SERVER-79848): Remove !.sharded
+  - name: .concurrency !.large !.ubsan !.no_txns !.sharded
+  - name: .concurrency .large !.ubsan !.no_txns !.sharded
+    distros:
+    - rhel80-medium
+  - name: .config_fuzzer !.large
+  - name: .config_fuzzer .large
+    distros:
+    - rhel80-medium
+  - name: .config_fuzzer_stress
+    distros:
+    - rhel80-large
+  - name: disk_wiredtiger
+  - name: .encrypt
+  - name: feature_flag_multiversion_gen
+  - name: idl_tests
+  - name: initial_sync_fuzzer_gen
+  - name: fcv_upgrade_downgrade_replica_sets_jscore_passthrough_gen
+  - name: fcv_upgrade_downgrade_sharding_jscore_passthrough_gen
+  - name: fcv_upgrade_downgrade_sharded_collections_jscore_passthrough_gen
+  - name: .jscore .common !.sbe_only
+  - name: jsCore_min_batch_repeat_queries_ese_gsm
+  - name: jsCore_txns_large_txns_format
+  - name: jsCore_wildcard_indexes
+  - name: json_schema
+  - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
+  - name: libunwind_tests
+  - name: .multiversion_sanity_check
+  - name: .multi_shard
+  - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
+  - name: multiversion_gen
+  - name: powercycle_smoke
+  - name: .query_fuzzer !.cqf_only
+  - name: .random_multiversion_ds
+  - name: .read_write_concern .large
+    distros:
+    - rhel80-medium
+  - name: .read_write_concern !.large
+  - name: .replica_sets !.encrypt !.auth
+    distros:
+    - rhel80-medium
+  - name: replica_sets_api_version_jscore_passthrough_gen
+  - name: replica_sets_reconfig_jscore_passthrough_gen
+  - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
+    distros:
+    - rhel80-medium
+  - name: replica_sets_reconfig_kill_primary_jscore_passthrough_gen
+    distros:
+    - rhel80-medium
+  - name: change_streams_pre_images_replica_sets_stepdown_primary_jscore_passthrough_gen
+    distros:
+    - rhel80-medium
+  - name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen
+    distros:
+    - rhel80-medium
+  - name: retryable_writes_jscore_passthrough_gen
+  - name: retryable_writes_jscore_stepdown_passthrough_gen
+    distros:
+    - rhel80-medium
+  - name: .read_only
+  - name: .rollbackfuzzer
+  - name: sasl
+  - name: search
+  - name: search_auth
+  - name: search_pinned_connections_auth
+  - name: search_ssl
+  - name: session_jscore_passthrough
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: sharding_api_version_jscore_passthrough_gen
+  - name: sharding_api_strict_passthrough_gen
+  - name: .sharding .txns
+  - name: .sharding .common
+  - name: sharded_collections_single_writes_without_shard_key_jscore_passthrough_gen
+  - name: sharded_multi_stmt_txn_jscore_passthrough
+  - name: .serverless
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen
+  - name: .updatefuzzer
+  - name: secondary_reads_passthrough_gen
+  - name: .shard_split
+  - name: streams
+  - name: streams_auth
+  - name: streams_kafka
+  - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
+  - name: query_stats_passthrough
+  - name: query_stats_passthrough_writeonly
+  - name: query_stats_mongos_passthrough
 
 - <<: *enterprise-rhel-80-64-bit-dynamic-all-feature-flags-template
   name: &enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required-query-patch-only enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required-query-patch-only
@@ -3010,7 +3102,6 @@ buildvariants:
     test_flags: >-
       --runAllFeatureFlagTests
       --excludeWithAnyTags=resource_intensive
-      --excludeWithAnyTags=incompatible_with_shard_merge
 
 ### Security Patch-Specific Build Variants ###
 - <<: *enterprise-rhel-80-64-bit-dynamic-all-feature-flags-template
@@ -3050,28 +3141,29 @@ buildvariants:
   - name: external_auth_aws
   - name: external_auth_oidc
 
-- name: &enterprise-ubuntu1804-64-libvoidstar enterprise-ubuntu1804-64-libvoidstar
-  display_name: "~ Enterprise Ubuntu 18.04 w/ libvoidstar"
+- name: &enterprise-ubuntu2204-64-libvoidstar enterprise-ubuntu2204-64-libvoidstar
+  display_name: "~ Enterprise Ubuntu 22.04 w/ libvoidstar"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:
-  - ubuntu1804-large
+  - ubuntu2204-large
   stepback: false
   expansions:
-    compile_variant: *enterprise-ubuntu1804-64-libvoidstar
+    compile_variant: *enterprise-ubuntu2204-64-libvoidstar
     # Do not set link-model=dynamic on this build. The antithesis image builder
     # scripts cannot handle the shared library build
     compile_flags: >-
       --ssl
-      --ocsp-stapling=off MONGO_DISTMOD=ubuntu1804
+      --ocsp-stapling=off MONGO_DISTMOD=ubuntu2204
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_clang.vars
       CCFLAGS="-fsanitize-coverage=trace-pc-guard"
       LIBS="voidstar"
-    multiversion_platform: ubuntu1804
+    multiversion_platform: ubuntu2204
     multiversion_edition: enterprise
     repo_edition: enterprise
-    large_distro_name: ubuntu1804-build
+    large_distro_name: ubuntu2204-large
     scons_cache_scope: shared
   tasks:
   - name: compile_and_archive_dist_test_TG
@@ -3115,3 +3207,96 @@ buildvariants:
   - name: compile_dist_test_TG
     distros:
     - windows-vsCurrent-large
+
+###########################################
+#          Copybara buildvariants           #
+###########################################
+
+- name: &copybara-sync-between-repos copybara-sync-between-repos
+  modules:
+  - enterprise
+  display_name: "* Copybara Sync Between Repos"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - ubuntu2204-small
+  stepback: false
+  tasks:
+  - name: sync_repo_with_copybara
+
+###########################################
+#       Build Metrics buildvariants       #
+###########################################
+
+- name: &enterprise-windows-build-metrics enterprise-windows-build-metrics
+  display_name: "~ Build Metrics Enterprise Windows"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  stepback: false
+  run_on:
+  - windows-vsCurrent-small
+  expansions:
+    num_scons_link_jobs_available: 0.1
+    compile_flags: >-
+      CPPPATH="c:/sasl/include"
+      LIBPATH="c:/sasl/lib"
+      -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 ))
+      --win-version-min=win10
+    python: '/cygdrive/c/python/python39/python.exe'
+  tasks:
+  - name: build_metrics_gen_TG
+
+- name: &macos-enterprise-build-metrics macos-enterprise-build-metrics
+  display_name: "~ Build Metrics Enterprise MacOS"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  stepback: false
+  modules:
+  - enterprise
+  run_on:
+  - macos-1100
+  expansions:
+    num_scons_link_jobs_available: 0.1
+    compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
+    compile_flags: >-
+      --ssl
+      -j$(sysctl -n hw.logicalcpu)
+      --libc++
+      --variables-files=etc/scons/xcode_macosx.vars
+  tasks:
+  - name: build_metrics_gen_TG
+
+- name: &enterprise-rhel-80-64-bit-build-metrics enterprise-rhel-80-64-bit-build-metrics
+  display_name: "~ Build Metrics Enterprise RHEL 8.0 "
+  cron: "0 4 * * *" # From the ${project_required_suggested_cron} parameter
+  stepback: false
+  modules:
+  - enterprise
+  run_on:
+  - rhel80-build
+  expansions:
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=rhel80
+      -j$(grep -c ^processor /proc/cpuinfo)
+    repo_edition: enterprise
+    large_distro_name: rhel80-large
+    num_scons_link_jobs_available: 0.1
+  tasks:
+  - name: build_metrics_gen_TG
+
+- name: &enterprise-rhel-80-aarch64-build-metrics enterprise-rhel-80-aarch64-build-metrics
+  display_name: "~ Build Metrics Enterprise AL22 ARM"
+  cron: "0 4 * * *" # From the ${project_required_suggested_cron} parameter
+  stepback: false
+  modules:
+  - enterprise
+  run_on:
+  - amazon2023.0-arm64-large
+  expansions:
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=rhel82
+      -j$(grep -c ^processor /proc/cpuinfo)
+    repo_edition: enterprise
+    large_distro_name: amazon2023.0-arm64-large
+    num_scons_link_jobs_available: 0.1
+  tasks:
+  - name: build_metrics_gen_TG

@@ -91,7 +91,11 @@ using std::endl;
 using std::string;
 using std::stringstream;
 
-/* For testing only, not for general use. Enabled via command-line */
+/**
+ * The commands in this file are for testing only, not for general use.
+ * For more on this topic and how to enable these commands, see docs/test_commands.md.
+ */
+
 class GodInsert : public BasicCommand {
 public:
     GodInsert() : BasicCommand("godinsert") {}
@@ -117,15 +121,13 @@ public:
     std::string help() const override {
         return "internal. for testing only.";
     }
+
     bool run(OperationContext* opCtx,
              const DatabaseName& dbName,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         const NamespaceString nss(CommandHelpers::parseNsCollectionRequired(dbName, cmdObj));
-        LOGV2(20505,
-              "Test-only command 'godinsert' invoked coll:{collection}",
-              "Test-only command 'godinsert' invoked",
-              "collection"_attr = nss.coll());
+        LOGV2(20505, "Test-only command 'godinsert' invoked", "collection"_attr = nss.coll());
         BSONObj obj = cmdObj["obj"].embeddedObjectUserCheck();
 
         Lock::DBLock lk(opCtx, dbName, MODE_X);
@@ -155,9 +157,8 @@ public:
     }
 };
 
-MONGO_REGISTER_COMMAND(GodInsert).testOnly();
+MONGO_REGISTER_COMMAND(GodInsert).testOnly().forShard();
 
-// Testing only, enabled via command-line.
 class CapTrunc : public BasicCommand {
 public:
     CapTrunc() : BasicCommand("captrunc") {}
@@ -212,10 +213,11 @@ public:
             // Scan backwards through the collection to find the document to start truncating
             // from. We will remove 'n' documents, so start truncating from the (n + 1)th
             // document to the end.
-            auto exec = InternalPlanner::collectionScan(opCtx,
-                                                        &collection.getCollection(),
-                                                        PlanYieldPolicy::YieldPolicy::NO_YIELD,
-                                                        InternalPlanner::BACKWARD);
+            auto exec =
+                InternalPlanner::collectionScan(opCtx,
+                                                &collection.getCollection(),
+                                                PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
+                                                InternalPlanner::BACKWARD);
 
             for (int i = 0; i < n + 1; ++i) {
                 PlanExecutor::ExecState state = exec->getNext(static_cast<BSONObj*>(nullptr), &end);
@@ -235,9 +237,8 @@ public:
     }
 };
 
-MONGO_REGISTER_COMMAND(CapTrunc).testOnly();
+MONGO_REGISTER_COMMAND(CapTrunc).testOnly().forShard();
 
-// Testing-only, enabled via command line.
 class EmptyCapped : public BasicCommand {
 public:
     EmptyCapped() : BasicCommand("emptycapped") {}
@@ -267,7 +268,7 @@ public:
     }
 };
 
-MONGO_REGISTER_COMMAND(EmptyCapped).testOnly();
+MONGO_REGISTER_COMMAND(EmptyCapped).testOnly().forShard();
 
 class DurableHistoryReplicatedTestCmd : public BasicCommand {
 public:
@@ -351,7 +352,7 @@ public:
     }
 };
 
-MONGO_REGISTER_COMMAND(DurableHistoryReplicatedTestCmd).testOnly();
+MONGO_REGISTER_COMMAND(DurableHistoryReplicatedTestCmd).testOnly().forShard();
 
 // TODO SERVER-80003 remove this test command when 8.0 branches off.
 class TimeseriesCatalogBucketParamsChangedTestCmd : public BasicCommand {
@@ -401,7 +402,7 @@ public:
     }
 };
 
-MONGO_REGISTER_COMMAND(TimeseriesCatalogBucketParamsChangedTestCmd).testOnly();
+MONGO_REGISTER_COMMAND(TimeseriesCatalogBucketParamsChangedTestCmd).testOnly().forShard();
 
 }  // namespace
 

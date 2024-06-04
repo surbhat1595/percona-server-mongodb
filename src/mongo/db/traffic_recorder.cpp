@@ -38,7 +38,6 @@
 #include <utility>
 
 #include <boost/filesystem/path.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/data_builder.h"
 #include "mongo/base/data_range_cursor.h"
@@ -139,9 +138,7 @@ public:
                         uassertStatusOK(db.writeAndAdvance<LittleEndian<uint32_t>>(0));
                         uassertStatusOK(db.writeAndAdvance<LittleEndian<uint64_t>>(packet.id));
                         uassertStatusOK(db.writeAndAdvance<Terminated<'\0', StringData>>(
-                            StringData(packet.local)));
-                        uassertStatusOK(db.writeAndAdvance<Terminated<'\0', StringData>>(
-                            StringData(packet.remote)));
+                            StringData(packet.session)));
                         uassertStatusOK(db.writeAndAdvance<LittleEndian<uint64_t>>(
                             packet.now.toMillisSinceEpoch()));
                         uassertStatusOK(db.writeAndAdvance<LittleEndian<uint64_t>>(packet.order));
@@ -181,8 +178,7 @@ public:
                     const uint64_t order,
                     const Message& message) {
         try {
-            _pcqPipe.producer.push(
-                {ts->id(), ts->local().toString(), ts->remote().toString(), now, order, message});
+            _pcqPipe.producer.push({ts->id(), ts->toBSON().toString(), now, order, message});
             return true;
         } catch (const ExceptionFor<ErrorCodes::ProducerConsumerQueueProducerQueueDepthExceeded>&) {
             invariant(!shouldAlwaysRecordTraffic);
@@ -231,8 +227,7 @@ public:
 private:
     struct TrafficRecordingPacket {
         const uint64_t id;
-        const std::string local;
-        const std::string remote;
+        const std::string session;
         const Date_t now;
         const uint64_t order;
         const Message message;

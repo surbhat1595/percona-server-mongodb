@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
 #include <functional>
@@ -92,6 +91,7 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/s/config/index_on_config.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
+#include "mongo/db/s/drop_agg_temp_collections.h"
 #include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/periodic_sharded_index_consistency_checker.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
@@ -140,6 +140,8 @@
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/session.h"
+#include "mongo/transport/session_manager.h"
+#include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/concurrency/thread_pool.h"
@@ -170,7 +172,8 @@ auto makeThreadPool(const std::string& poolName, const std::string& threadName) 
     threadPoolOptions.threadNamePrefix = threadName + "-";
     threadPoolOptions.poolName = poolName;
     threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-        Client::initThread(threadName.c_str());
+        Client::initThread(threadName.c_str(),
+                           getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
         {
             stdx::lock_guard<Client> lk(cc());
@@ -866,7 +869,7 @@ HostAndPort ReplicationCoordinatorExternalStateImpl::getClientHostAndPort(
 }
 
 void ReplicationCoordinatorExternalStateImpl::closeConnections() {
-    _service->getServiceEntryPoint()->endAllSessions(transport::Session::kKeepOpen);
+    _service->getTransportLayerManager()->endAllSessions(Client::kKeepOpen);
 }
 
 void ReplicationCoordinatorExternalStateImpl::onStepDownHook() {
@@ -1012,6 +1015,10 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
 
             const bool scheduleAsyncRefresh = true;
             resharding::clearFilteringMetadata(opCtx, scheduleAsyncRefresh);
+
+            // Schedule a drop of the temporary collections used by aggregations ($out
+            // specifically).
+            dropAggTempCollections(opCtx);
         }
         // The code above will only be executed after a stepdown happens, however the code below
         // needs to be executed also on startup, and the enabled check might fail in shards during
@@ -1093,11 +1100,11 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
         !ShardingState::get(opCtx)->enabled()) {
         // Note this must be called after the config server has created the cluster ID and also
         // after the onStepUp logic for the shard role because this triggers sharding state
-        // initialization which will transition some components into the "primary" state, like the
-        // TransactionCoordinatorService, and they would fail if the onStepUp logic attempted the
-        // same transition.
+        // initialization which will transition some components into the "primary" state, like
+        // the TransactionCoordinatorService, and they would fail if the onStepUp logic
+        // attempted the same transition.
         ShardingCatalogManager::get(opCtx)->installConfigShardIdentityDocument(opCtx);
-        if (gFeatureFlagAllMongodsAreSharded.isEnabled(serverGlobalParams.featureCompatibility)) {
+        if (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
             ShardingReady::get(opCtx)->scheduleTransitionToConfigShard(opCtx);
         }
     }
@@ -1161,11 +1168,7 @@ void ReplicationCoordinatorExternalStateImpl::_dropAllTempCollections(OperationC
         if (dbName == DatabaseName::kLocal)
             continue;
 
-        LOGV2_DEBUG(21309,
-                    2,
-                    "Removing temporary collections from {db}",
-                    "Removing temporary collections",
-                    logAttrs(dbName));
+        LOGV2_DEBUG(21309, 2, "Removing temporary collections", logAttrs(dbName));
         Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
         clearTempCollections(opCtx, dbName);
     }
@@ -1212,9 +1215,6 @@ void ReplicationCoordinatorExternalStateImpl::notifyOplogMetadataWaiters(
                 [committedOpTime, reaper](const executor::TaskExecutor::CallbackArgs& args) {
                     if (MONGO_unlikely(dropPendingCollectionReaperHang.shouldFail())) {
                         LOGV2(21310,
-                              "fail point dropPendingCollectionReaperHang enabled. "
-                              "Blocking until fail point is disabled. "
-                              "committedOpTime: {committedOpTime}",
                               "fail point dropPendingCollectionReaperHang enabled. "
                               "Blocking until fail point is disabled",
                               "committedOpTime"_attr = committedOpTime);

@@ -31,7 +31,6 @@
 
 #include <algorithm>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
@@ -98,7 +97,7 @@ SbExpr makeBalancedBooleanOpTree(sbe::EPrimBinary::Op logicOp,
     std::vector<std::unique_ptr<sbe::EExpression>> exprs;
     exprs.reserve(leaves.size());
     for (auto&& e : leaves) {
-        exprs.emplace_back(e.extractExpr(state));
+        exprs.emplace_back(e.extractExpr(state).expr);
     }
     return SbExpr{makeBalancedBooleanOpTree(logicOp, std::move(exprs))};
 }

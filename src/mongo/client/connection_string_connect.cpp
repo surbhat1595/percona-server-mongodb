@@ -38,7 +38,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -57,6 +56,10 @@
 #include "mongo/platform/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/ssl_options.h"
+
+#ifdef MONGO_CONFIG_GRPC
+#include "mongo/client/dbclient_grpc_stream.h"
+#endif
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -83,20 +86,39 @@ StatusWith<std::unique_ptr<DBClientBase>> ConnectionString::connect(
                 Status(ErrorCodes::BadValue,
                        "Invalid standalone connection string with empty server list.");
             for (const auto& server : _servers) {
-                auto c = std::make_unique<DBClientConnection>(
-                    true, 0, newURI, DBClientConnection::HandshakeValidationHook(), apiParameters);
+                std::unique_ptr<DBClientSession> c;
+#ifdef MONGO_CONFIG_GRPC
+                if (newURI.isGRPC()) {
+                    c = std::make_unique<DBClientGRPCStream>();
+                } else
+#endif
+                {
+                    c = std::make_unique<DBClientConnection>(
+                        /* autoReconnect */ true,
+                        /* socket timeout */ 0,
+                        newURI,
+                        DBClientConnection::HandshakeValidationHook(),
+                        apiParameters);
+                    c->setSoTimeout(socketTimeout);
+                }
 
-                c->setSoTimeout(socketTimeout);
-                LOGV2_DEBUG(20109,
+#ifdef MONGO_CONFIG_GRPC
+                LOGV2_DEBUG(8050201,
                             1,
-                            "Creating new connection to: {hostAndPort}",
                             "Creating new connection",
-                            "hostAndPort"_attr = server);
-                lastError = c->connect(
-                    server,
-                    applicationName,
-                    transientSSLParams ? boost::make_optional(*transientSSLParams) : boost::none);
-                if (!lastError.isOK()) {
+                            "hostAndPort"_attr = server,
+                            "gRPC"_attr = newURI.isGRPC());
+#else
+                LOGV2_DEBUG(20109, 1, "Creating new connection", "hostAndPort"_attr = server);
+#endif
+
+                try {
+                    c->connect(server,
+                               applicationName,
+                               transientSSLParams ? boost::make_optional(*transientSSLParams)
+                                                  : boost::none);
+                } catch (const DBException& e) {
+                    lastError = e.toStatus();
                     continue;
                 }
 
@@ -144,7 +166,6 @@ StatusWith<std::unique_ptr<DBClientBase>> ConnectionString::connect(
                 _connectHook->connect(*this, errmsg, socketTimeout, apiParameters);
 
             LOGV2(20111,
-                  "Replacing connection to {oldConnString} with {newConnString}",
                   "Replacing connection string",
                   "oldConnString"_attr = this->toString(),
                   "newConnString"_attr =

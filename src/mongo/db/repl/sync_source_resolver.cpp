@@ -29,7 +29,6 @@
 
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <memory>
 #include <mutex>
@@ -238,8 +237,6 @@ Status SyncSourceResolver::_scheduleFetcher(std::unique_ptr<Fetcher> fetcher) {
         _fetcher = std::move(fetcher);
     } else {
         LOGV2_ERROR(21776,
-                    "Error scheduling fetcher to evaluate host as sync source, "
-                    "host:{host}, error: {error}",
                     "Error scheduling fetcher to evaluate host as sync source",
                     "host"_attr = fetcher->getSource(),
                     "error"_attr = status);
@@ -253,8 +250,6 @@ OpTime SyncSourceResolver::_parseRemoteEarliestOpTime(const HostAndPort& candida
         // Remote oplog is empty.
         const auto until = _taskExecutor->now() + kOplogEmptyDenylistDuration;
         LOGV2(5579703,
-              "Denylisting {candidate} due to empty oplog for {denylistDuration} "
-              "until: {denylistUntil}",
               "Denylisting candidate due to empty oplog",
               "candidate"_attr = candidate,
               "denylistDuration"_attr = kOplogEmptyDenylistDuration,
@@ -268,8 +263,6 @@ OpTime SyncSourceResolver::_parseRemoteEarliestOpTime(const HostAndPort& candida
         // First document in remote oplog is empty.
         const auto until = _taskExecutor->now() + kFirstOplogEntryEmptyDenylistDuration;
         LOGV2(5579704,
-              "Denylisting {candidate} due to empty first document for "
-              "{denylistDuration} until: {denylistUntil}",
               "Denylisting candidate due to empty first document",
               "candidate"_attr = candidate,
               "denylistDuration"_attr = kFirstOplogEntryEmptyDenylistDuration,
@@ -282,9 +275,6 @@ OpTime SyncSourceResolver::_parseRemoteEarliestOpTime(const HostAndPort& candida
     if (!remoteEarliestOpTime.isOK()) {
         const auto until = _taskExecutor->now() + kFirstOplogEntryNullTimestampDenylistDuration;
         LOGV2(5579705,
-              "Denylisting {candidate} due to error parsing OpTime from the oldest oplog entry "
-              "for {denylistDuration} until: {denylistUntil}. Error: "
-              "{error}, Entry: {oldestOplogEntry}",
               "Denylisting candidate due to error parsing OpTime from the oldest oplog entry",
               "candidate"_attr = candidate,
               "denylistDuration"_attr = kFirstOplogEntryNullTimestampDenylistDuration,
@@ -299,8 +289,6 @@ OpTime SyncSourceResolver::_parseRemoteEarliestOpTime(const HostAndPort& candida
         // First document in remote oplog is empty.
         const auto until = _taskExecutor->now() + kFirstOplogEntryNullTimestampDenylistDuration;
         LOGV2(5579706,
-              "Denylisting {candidate} due to null timestamp in first document for "
-              "{denylistDuration} until: {denylistUntil}",
               "Denylisting candidate due to null timestamp in first document",
               "candidate"_attr = candidate,
               "denylistDuration"_attr = kFirstOplogEntryNullTimestampDenylistDuration,
@@ -334,8 +322,6 @@ void SyncSourceResolver::_firstOplogEntryFetcherCallback(
         // We got an error.
         const auto until = _taskExecutor->now() + kFetcherErrorDenylistDuration;
         LOGV2(5579707,
-              "Denylisting {candidate} due to error: '{error}' for "
-              "{denylistDuration} until: {denylistUntil}",
               "Denylisting candidate due to error",
               "candidate"_attr = candidate,
               "error"_attr = queryResult.getStatus(),
@@ -361,10 +347,6 @@ void SyncSourceResolver::_firstOplogEntryFetcherCallback(
         const auto until = _taskExecutor->now() + denylistDuration;
 
         LOGV2(5579708,
-              "We are too stale to use {candidate} as a sync source. Denylisting this sync source "
-              "because our last fetched timestamp: {lastOpTimeFetchedTimestamp} is before "
-              "their earliest timestamp: {remoteEarliestOpTimeTimestamp} for "
-              "{denylistDuration} until: {denylistUntil}",
               "We are too stale to use candidate as a sync source. Denylisting this sync source "
               "because our last fetched timestamp is before their earliest timestamp",
               "candidate"_attr = candidate,
@@ -445,8 +427,6 @@ void SyncSourceResolver::_rbidRequestCallback(
     } catch (const DBException& ex) {
         const auto until = _taskExecutor->now() + kFetcherErrorDenylistDuration;
         LOGV2(5579709,
-              "Denylisting {candidate} due to error: '{error}' for {denylistDuration} "
-              "until: {denylistUntil}",
               "Denylisting candidate due to error",
               "candidate"_attr = candidate,
               "error"_attr = ex,
@@ -515,9 +495,6 @@ void SyncSourceResolver::_requiredOpTimeFetcherCallback(
         // We got an error.
         const auto until = _taskExecutor->now() + kFetcherErrorDenylistDuration;
         LOGV2(5579710,
-              "Denylisting {candidate} due to required optime fetcher error: "
-              "'{error}' for {denylistDuration} until: {denylistUntil}. "
-              "required optime: {requiredOpTime}",
               "Denylisting candidate due to required optime fetcher error",
               "candidate"_attr = candidate,
               "error"_attr = queryResult.getStatus(),
@@ -536,10 +513,6 @@ void SyncSourceResolver::_requiredOpTimeFetcherCallback(
         const auto until = _taskExecutor->now() + kNoRequiredOpTimeDenylistDuration;
         LOGV2_WARNING(
             5579711,
-            "We cannot use {candidate} as a sync source because it does not contain the necessary "
-            "operations for us to reach a consistent state: {error} last fetched optime: "
-            "{lastOpTimeFetched}. required optime: {requiredOpTime}. Denylisting this sync source "
-            "for {denylistDuration} until: {denylistUntil}",
             "We cannot use candidate as a sync source because it does not contain the necessary "
             "operations for us to reach a consistent state. Denylisting this sync source",
             "candidate"_attr = candidate.toString(),
@@ -603,7 +576,6 @@ Status SyncSourceResolver::_finishCallback(const SyncSourceResolverResponse& res
         _onCompletion(response);
     } catch (...) {
         LOGV2_WARNING(21775,
-                      "sync source resolver finish callback threw exception: {error}",
                       "Sync source resolver finish callback threw exception",
                       "error"_attr = exceptionToStatus());
     }

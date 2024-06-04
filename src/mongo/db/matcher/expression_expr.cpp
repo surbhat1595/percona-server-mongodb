@@ -28,7 +28,6 @@
  */
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <utility>
 
@@ -92,7 +91,9 @@ Value ExprMatchExpression::evaluateExpression(const MatchableDocument* doc) cons
     return _expression->evaluate(document, &variables);
 }
 
-void ExprMatchExpression::serialize(BSONObjBuilder* out, const SerializationOptions& opts) const {
+void ExprMatchExpression::serialize(BSONObjBuilder* out,
+                                    const SerializationOptions& opts,
+                                    bool includePath) const {
     *out << "$expr" << _expression->serialize(opts);
 }
 
@@ -193,8 +194,9 @@ MatchExpression::ExpressionOptimizerFunc ExprMatchExpression::getOptimizer() con
     return [](std::unique_ptr<MatchExpression> expression) {
         auto& exprMatchExpr = static_cast<ExprMatchExpression&>(*expression);
 
-        // If '_expression' can be rewritten to a MatchExpression, we will return a $and node with
-        // both the original ExprMatchExpression and the MatchExpression rewrite as children.
+        //  $expr expressions can't take advantage of indexes. We attempt to rewrite the expressions
+        //  as a conjunction of internal match expressions, so the query planner can use the
+        //  internal match expressions to potentially generate an index scan.
         // Exiting early prevents additional calls to optimize from performing additional rewrites
         // and adding duplicate MatchExpression sub-trees to the tree.
         if (exprMatchExpr._rewriteResult) {
@@ -210,11 +212,18 @@ MatchExpression::ExpressionOptimizerFunc ExprMatchExpression::getOptimizer() con
             RewriteExpr::rewrite(exprMatchExpr._expression, exprMatchExpr._expCtx->getCollator());
 
         if (exprMatchExpr._rewriteResult->matchExpression()) {
+            // If '_expression' can be rewritten to a MatchExpression, we will return a $and node
+            // with both the original ExprMatchExpression and the MatchExpression rewrite as
+            // children. The rewritten expression might not be equivalent to the original one so we
+            // still have to keep the latter for correctness.
             auto andMatch = std::make_unique<AndMatchExpression>();
             andMatch->add(exprMatchExpr._rewriteResult->releaseMatchExpression());
             andMatch->add(std::move(expression));
             // Re-optimize the new AND in order to make sure that any AND children are absorbed.
-            expression = MatchExpression::optimize(std::move(andMatch));
+            // The Boolean simplifier is disabled since we don't want to simplify sub-expressions,
+            // but simplify the whole expression instead.
+            expression =
+                MatchExpression::optimize(std::move(andMatch), /* enableSimplification */ false);
         }
 
         // Replace trivially true expression with an empty AND since the planner doesn't always

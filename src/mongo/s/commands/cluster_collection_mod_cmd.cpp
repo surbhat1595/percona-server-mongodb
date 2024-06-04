@@ -109,8 +109,12 @@ public:
                                  const BSONObj& cmdObj) const override {
         auto* client = opCtx->getClient();
         const NamespaceString nss(CommandHelpers::parseNsCollectionRequired(dbName, cmdObj));
-        return auth::checkAuthForCollMod(
-            client->getOperationContext(), AuthorizationSession::get(client), nss, cmdObj, true);
+        return auth::checkAuthForCollMod(client->getOperationContext(),
+                                         AuthorizationSession::get(client),
+                                         nss,
+                                         cmdObj,
+                                         true,
+                                         SerializationContext::stateCommandRequest());
     }
 
     bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -124,12 +128,7 @@ public:
                               BSONObjBuilder& result) final {
         const auto& cmd = requestParser.request();
         auto nss = cmd.getNamespace();
-        LOGV2_DEBUG(22748,
-                    1,
-                    "collMod: {namespace} cmd: {command}",
-                    "CMD: collMod",
-                    logAttrs(nss),
-                    "command"_attr = redact(cmdObj));
+        LOGV2_DEBUG(22748, 1, "CMD: collMod", logAttrs(nss), "command"_attr = redact(cmdObj));
 
         auto swDbInfo = Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, cmd.getDbName());
         if (swDbInfo == ErrorCodes::NamespaceNotFound) {
@@ -207,7 +206,7 @@ public:
         return &::mongo::CollMod::kAuthorizationContract;
     }
 };
-MONGO_REGISTER_COMMAND(CollectionModCmd);
+MONGO_REGISTER_COMMAND(CollectionModCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

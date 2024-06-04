@@ -282,6 +282,7 @@ PID
 POS
 POSIX
 PPC
+PREFETCH
 PRId
 PRIu
 PRNG
@@ -424,7 +425,9 @@ WideCharToMultiByte
 WinNT
 WiredTiger
 WiredTiger's
+WiredTigerCC
 WiredTigerCheckpoint
+WiredTigerChunkCache
 WiredTigerHS
 WiredTigerLAS
 WiredTigerLog
@@ -447,7 +450,7 @@ aa
 aaa
 abcdef
 abcdefghijklmnopqrstuvwxyz
-acstu
+acSstu
 addl
 addr
 addrs
@@ -822,6 +825,7 @@ icount
 idlems
 idx
 ie
+iface
 ifdef's
 iiSii
 iiiS
@@ -1009,6 +1013,7 @@ nlpo
 nocase
 noclear
 nocrypto
+noexcept
 nolock
 nonces
 nonliteral
@@ -1026,6 +1031,7 @@ nrecs
 nsec
 nset
 nul
+nullptr
 num
 numSymbols
 numbare
@@ -1079,6 +1085,7 @@ pre
 pread
 prealloc
 precomp
+prefetch
 preload
 prepend
 prepended
@@ -1286,6 +1293,7 @@ txnid
 txp
 txt
 typedef
+typeof
 uS
 ui
 uint
@@ -1346,6 +1354,7 @@ vd
 vdata
 vec
 vectorized
+verifier
 vfprintf
 vh
 vm

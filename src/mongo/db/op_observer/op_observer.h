@@ -132,8 +132,6 @@ struct OplogUpdateEntryArgs {
  * the onDelete() method within the same implementation.
  */
 struct OplogDeleteEntryArgs : Decorable<OplogDeleteEntryArgs> {
-    const BSONObj* deletedDoc = nullptr;
-
     // "fromMigrate" indicates whether the delete was induced by a chunk migration, and so
     // should be ignored by the user as an internal maintenance operation and not a real delete.
     bool fromMigrate = false;
@@ -143,8 +141,12 @@ struct OplogDeleteEntryArgs : Decorable<OplogDeleteEntryArgs> {
     RetryableFindAndModifyLocation retryableFindAndModifyLocation =
         RetryableFindAndModifyLocation::kNone;
 
-    // Set if OpTime were reserved for the delete ahead of time.
-    std::vector<OplogSlot> oplogSlots;
+    // Set if OpTimes were reserved for the delete ahead of time for this retryable
+    // "findAndModify" operation.
+    // Implies 'retryableFindAndModifyLocation' is set to kSideCollection but the
+    // other way round (because of multi-doc transactions).
+    // See reserveOplogSlotsForRetryableFindAndModify() in collection_write_path.cpp.
+    std::vector<OplogSlot> retryableFindAndModifyOplogSlots;
 };
 
 struct IndexCollModInfo {
@@ -303,13 +305,16 @@ public:
      *
      * "ns" name of the collection from which deleteState.idDoc will be deleted.
      *
+     * "doc" holds the pre-image of the document to be deleted.
+     *
      * "args" is a reference to information detailing whether the pre-image of the doc should be
-     * preserved with deletion. If `retryableWritePreImageRecordingType != kNotRetryable`, then the
-     * opObserver must store the `deletedDoc` in addition to the documentKey.
+     * preserved with deletion. OpObserverImpl::aboutToDelete() initializes the documentKey as a
+     * decoration on OplogDeleteEntryArgs.
      */
     virtual void onDelete(OperationContext* opCtx,
                           const CollectionPtr& coll,
                           StmtId stmtId,
+                          const BSONObj& doc,
                           const OplogDeleteEntryArgs& args,
                           OpStateAccumulator* opAccumulator = nullptr) = 0;
 
@@ -472,9 +477,6 @@ public:
                                     const BSONObj& storageMetadata,
                                     bool isDryRun) = 0;
 
-    virtual void onApplyOps(OperationContext* opCtx,
-                            const DatabaseName& dbName,
-                            const BSONObj& applyOpCmd) = 0;
     virtual void onEmptyCapped(OperationContext* opCtx,
                                const NamespaceString& collectionName,
                                const UUID& uuid) = 0;

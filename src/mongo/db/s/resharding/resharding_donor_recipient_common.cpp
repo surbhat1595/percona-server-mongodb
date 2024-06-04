@@ -32,7 +32,6 @@
 #include <absl/container/node_hash_set.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <fmt/format.h>
 #include <initializer_list>
@@ -316,6 +315,7 @@ ReshardingDonorDocument constructDonorDocumentFromReshardingFields(
                                  reshardingFields.getDonorFields()->getTempReshardingNss(),
                                  reshardingFields.getDonorFields()->getReshardingKey().toBSON());
     commonMetadata.setStartTime(reshardingFields.getStartTime());
+    commonMetadata.setProvenance(reshardingFields.getProvenance());
     donorDoc.setCommonReshardingMetadata(std::move(commonMetadata));
 
     return donorDoc;
@@ -347,6 +347,7 @@ ReshardingRecipientDocument constructRecipientDocumentFromReshardingFields(
                                                    nss,
                                                    metadata.getShardKeyPattern().toBSON());
     commonMetadata.setStartTime(reshardingFields.getStartTime());
+    commonMetadata.setProvenance(reshardingFields.getProvenance());
 
     ReshardingRecipientMetrics metrics;
     metrics.setApproxDocumentsToCopy(recipientFields->getApproxDocumentsToCopy());
@@ -428,7 +429,8 @@ void clearFilteringMetadata(OperationContext* opCtx,
         }
 
         AsyncTry([svcCtx = opCtx->getServiceContext(), nss] {
-            ThreadClient tc("TriggerReshardingRecovery", svcCtx);
+            ThreadClient tc("TriggerReshardingRecovery",
+                            svcCtx->getService(ClusterRole::ShardServer));
             auto opCtx = tc->makeOperationContext();
             onCollectionPlacementVersionMismatch(
                 opCtx.get(), nss, boost::none /* chunkVersionReceived */);

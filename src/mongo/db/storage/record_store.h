@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -614,11 +613,13 @@ public:
     }
 
     /**
-     * Attempt to reduce the storage space used by this RecordStore.
+     * Attempt to reduce the storage space used by this RecordStore. If the freeSpaceTargetMB is
+     * provided, compaction will only proceed if the free storage space available is greater than
+     * the provided value.
      *
      * Only called if compactSupported() returns true.
      */
-    Status compact(OperationContext* opCtx);
+    Status compact(OperationContext* opCtx, boost::optional<int64_t> freeSpaceTargetMB);
 
     /**
      * Performs record store specific validation to ensure consistency of underlying data
@@ -671,6 +672,15 @@ public:
      * WriteUnitOfWork.
      */
     void waitForAllEarlierOplogWritesToBeVisible(OperationContext* opCtx) const;
+
+    /**
+     * Returns the largest RecordId in the RecordStore, regardless of visibility rules. If the store
+     * is empty, returns a null RecordId.
+     *
+     * May throw WriteConflictException in certain cache-stuck scenarios even if the operation isn't
+     * part of a WriteUnitOfWork.
+     */
+    virtual RecordId getLargestKey(OperationContext* opCtx) const = 0;
 
     /**
      * Reserve a range of contiguous RecordIds. Returns the first valid RecordId in the range. Must
@@ -777,7 +787,7 @@ protected:
                                        const RecordId& end,
                                        bool inclusive,
                                        const AboutToDeleteRecordCallback& aboutToDelete) = 0;
-    virtual Status doCompact(OperationContext* opCtx) {
+    virtual Status doCompact(OperationContext* opCtx, boost::optional<int64_t> freeSpaceTargetMB) {
         MONGO_UNREACHABLE;
     }
 

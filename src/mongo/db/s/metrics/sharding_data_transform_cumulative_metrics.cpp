@@ -29,7 +29,6 @@
 
 #include "mongo/db/s/metrics/sharding_data_transform_cumulative_metrics.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <utility>
 
@@ -52,7 +51,15 @@ constexpr auto kEstimateNotAvailable = -1;
 
 struct Metrics {
     ReshardingCumulativeMetrics _resharding;
+    ReshardingCumulativeMetrics _moveCollection;
+    ReshardingCumulativeMetrics _balancerMoveCollection;
+    ReshardingCumulativeMetrics _unshardCollection;
     global_index::GlobalIndexCumulativeMetrics _globalIndexes;
+
+    Metrics()
+        : _moveCollection{"moveCollection"},
+          _balancerMoveCollection{"balancerMoveCollection"},
+          _unshardCollection{"unshardCollection"} {};
 };
 using MetricsPtr = std::unique_ptr<Metrics>;
 const auto getMetrics = ServiceContext::declareDecoration<MetricsPtr>();
@@ -69,6 +76,24 @@ ShardingDataTransformCumulativeMetrics* ShardingDataTransformCumulativeMetrics::
     return &metrics->_resharding;
 }
 
+ShardingDataTransformCumulativeMetrics*
+ShardingDataTransformCumulativeMetrics::getForMoveCollection(ServiceContext* context) {
+    auto& metrics = getMetrics(context);
+    return &metrics->_moveCollection;
+}
+
+ShardingDataTransformCumulativeMetrics*
+ShardingDataTransformCumulativeMetrics::getForBalancerMoveCollection(ServiceContext* context) {
+    auto& metrics = getMetrics(context);
+    return &metrics->_balancerMoveCollection;
+}
+
+ShardingDataTransformCumulativeMetrics*
+ShardingDataTransformCumulativeMetrics::getForUnshardCollection(ServiceContext* context) {
+    auto& metrics = getMetrics(context);
+    return &metrics->_unshardCollection;
+}
+
 ShardingDataTransformCumulativeMetrics* ShardingDataTransformCumulativeMetrics::getForGlobalIndexes(
     ServiceContext* context) {
     auto& metrics = getMetrics(context);
@@ -78,9 +103,9 @@ ShardingDataTransformCumulativeMetrics* ShardingDataTransformCumulativeMetrics::
 ShardingDataTransformCumulativeMetrics::ShardingDataTransformCumulativeMetrics(
     const std::string& rootSectionName, std::unique_ptr<NameProvider> fieldNameProvider)
     : _rootSectionName{rootSectionName},
+      _operationWasAttempted{false},
       _fieldNames{std::move(fieldNameProvider)},
-      _instanceMetricsForAllRoles(ShardingDataTransformMetrics::kRoleCount),
-      _operationWasAttempted{false} {}
+      _instanceMetricsForAllRoles(ShardingDataTransformMetrics::kRoleCount) {}
 
 ShardingDataTransformCumulativeMetrics::UniqueScopedObserver
 ShardingDataTransformCumulativeMetrics::registerInstanceMetrics(const InstanceObserver* metrics) {
@@ -148,10 +173,6 @@ void ShardingDataTransformCumulativeMetrics::reportForServerStatus(BSONObjBuilde
     root.append(_fieldNames->getForCountSucceeded(), _countSucceeded.load());
     root.append(_fieldNames->getForCountFailed(), _countFailed.load());
     root.append(_fieldNames->getForCountCanceled(), _countCancelled.load());
-    root.append(_fieldNames->getForCountSameKeyStarted(), _countSameKeyStarted.load());
-    root.append(_fieldNames->getForCountSameKeySucceeded(), _countSameKeySucceeded.load());
-    root.append(_fieldNames->getForCountSameKeyFailed(), _countSameKeyFailed.load());
-    root.append(_fieldNames->getForCountSameKeyCanceled(), _countSameKeyCancelled.load());
     root.append(_fieldNames->getForLastOpEndingChunkImbalance(),
                 _lastOpEndingChunkImbalance.load());
     {
@@ -245,36 +266,20 @@ void ShardingDataTransformCumulativeMetrics::deregisterMetrics(
     getMetricsSetForRole(role).erase(metricsIterator);
 }
 
-void ShardingDataTransformCumulativeMetrics::onStarted(bool isSameKeyResharding) {
-    if (isSameKeyResharding) {
-        _countSameKeyStarted.fetchAndAdd(1);
-    } else {
-        _countStarted.fetchAndAdd(1);
-    }
+void ShardingDataTransformCumulativeMetrics::onStarted() {
+    _countStarted.fetchAndAdd(1);
 }
 
-void ShardingDataTransformCumulativeMetrics::onSuccess(bool isSameKeyResharding) {
-    if (isSameKeyResharding) {
-        _countSameKeySucceeded.fetchAndAdd(1);
-    } else {
-        _countSucceeded.fetchAndAdd(1);
-    }
+void ShardingDataTransformCumulativeMetrics::onSuccess() {
+    _countSucceeded.fetchAndAdd(1);
 }
 
-void ShardingDataTransformCumulativeMetrics::onFailure(bool isSameKeyResharding) {
-    if (isSameKeyResharding) {
-        _countSameKeyFailed.fetchAndAdd(1);
-    } else {
-        _countFailed.fetchAndAdd(1);
-    }
+void ShardingDataTransformCumulativeMetrics::onFailure() {
+    _countFailed.fetchAndAdd(1);
 }
 
-void ShardingDataTransformCumulativeMetrics::onCanceled(bool isSameKeyResharding) {
-    if (isSameKeyResharding) {
-        _countSameKeyCancelled.fetchAndAdd(1);
-    } else {
-        _countCancelled.fetchAndAdd(1);
-    }
+void ShardingDataTransformCumulativeMetrics::onCanceled() {
+    _countCancelled.fetchAndAdd(1);
 }
 
 void ShardingDataTransformCumulativeMetrics::setLastOpEndingChunkImbalance(int64_t imbalanceCount) {

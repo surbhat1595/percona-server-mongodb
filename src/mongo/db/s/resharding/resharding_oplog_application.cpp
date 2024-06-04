@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <string>
 #include <utility>
@@ -268,7 +267,7 @@ void ReshardingOplogApplicationRules::_applyInsert_inlock(OperationContext* opCt
         auto request = UpdateRequest();
         request.setNamespaceString(_myStashNss);
         request.setQuery(idQuery);
-        request.setUpdateModification(updateMod);
+        request.setUpdateModification(std::move(updateMod));
         request.setUpsert(false);
         request.setFromOplogApplication(true);
 
@@ -303,7 +302,7 @@ void ReshardingOplogApplicationRules::_applyInsert_inlock(OperationContext* opCt
         auto request = UpdateRequest();
         request.setNamespaceString(_outputNss);
         request.setQuery(idQuery);
-        request.setUpdateModification(updateMod);
+        request.setUpdateModification(std::move(updateMod));
         request.setUpsert(false);
         request.setFromOplogApplication(true);
 

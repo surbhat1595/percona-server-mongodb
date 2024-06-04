@@ -98,7 +98,8 @@ public:
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
         return NamespaceStringUtil::deserialize(dbName.tenantId(),
-                                                CommandHelpers::parseNsFullyQualified(cmdObj));
+                                                CommandHelpers::parseNsFullyQualified(cmdObj),
+                                                SerializationContext::stateDefault());
     }
 
     bool run(OperationContext* opCtx,
@@ -114,32 +115,25 @@ public:
         uassert(6464401,
                 "Sharding a Queryable Encryption state collection is not allowed",
                 !nss.isFLE2StateCollection());
+        auto clusterRequest = ShardCollection::parse(IDLParserContext("ShardCollection"), cmdObj);
+        auto shardsvrRequest =
+            ShardsvrCreateCollectionRequest::parse(IDLParserContext("ShardCollection"), cmdObj);
+        shardsvrRequest.setShardKey(clusterRequest.getKey());
 
-        auto shardCollRequest = ShardCollection::parse(IDLParserContext("ShardCollection"), cmdObj);
+        ShardsvrCreateCollection shardsvrCollCmd(nss);
+        shardsvrCollCmd.setShardsvrCreateCollectionRequest(shardsvrRequest);
+        shardsvrCollCmd.setDbName(nss.dbName());
 
-        ShardsvrCreateCollection shardsvrCollRequest(nss);
-        CreateCollectionRequest requestParamsObj;
-        requestParamsObj.setShardKey(shardCollRequest.getKey());
-        requestParamsObj.setUnique(shardCollRequest.getUnique());
-        requestParamsObj.setNumInitialChunks(shardCollRequest.getNumInitialChunks());
-        requestParamsObj.setPresplitHashedZones(shardCollRequest.getPresplitHashedZones());
-        requestParamsObj.setCollation(shardCollRequest.getCollation());
-        requestParamsObj.setTimeseries(shardCollRequest.getTimeseries());
-        requestParamsObj.setCollectionUUID(shardCollRequest.getCollectionUUID());
-        requestParamsObj.setImplicitlyCreateIndex(shardCollRequest.getImplicitlyCreateIndex());
-        requestParamsObj.setEnforceUniquenessCheck(shardCollRequest.getEnforceUniquenessCheck());
-        shardsvrCollRequest.setCreateCollectionRequest(std::move(requestParamsObj));
-        shardsvrCollRequest.setDbName(nss.dbName());
-
-        cluster::createCollection(opCtx, shardsvrCollRequest);
+        cluster::createCollection(opCtx, shardsvrCollCmd);
 
         // Add only collectionsharded as a response parameter and remove the version to maintain the
         // same format as before.
-        result.append("collectionsharded", NamespaceStringUtil::serialize(nss));
+        result.append("collectionsharded",
+                      NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(ShardCollectionCmd);
+MONGO_REGISTER_COMMAND(ShardCollectionCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

@@ -34,7 +34,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <memory>
 #include <queue>
@@ -112,7 +111,7 @@ LogicalRewriter::RewriteSet LogicalRewriter::_substitutionSet = {
 LogicalRewriter::LogicalRewriter(const Metadata& metadata,
                                  Memo& memo,
                                  PrefixId& prefixId,
-                                 const RewriteSet rewriteSet,
+                                 RewriteSet rewriteSet,
                                  const DebugInfo& debugInfo,
                                  const QueryHints& hints,
                                  const PathToIntervalFn& pathToInterval,
@@ -309,8 +308,9 @@ ReorderDependencies computeDependencies(ABT::reference_type aboveNodeRef,
     // child.
     const auto aboveNodeVarNames = collectVariableReferences(aboveNodeRef);
 
-    ABT belowNode = belowNodeRef;
-    VariableEnvironment env = VariableEnvironment::build(belowNode, &ctx.getMemo());
+    ABT belowNode{belowNodeRef};
+    VariableEnvironment env =
+        VariableEnvironment::build(belowNode, &ctx.getMemo(), false /*computeLastRefs*/);
     const DefinitionsMap belowNodeDefs = env.hasDefinitions(belowNode.ref())
         ? env.getDefinitions(belowNode.ref())
         : DefinitionsMap{};
@@ -357,7 +357,7 @@ static void addEmptyValueScanNode(RewriteContext& ctx) {
     ctx.addNode(newNode, true /*substitute*/);
 }
 
-static void defaultPropagateEmptyValueScanNode(const ABT& n, RewriteContext& ctx) {
+static void defaultPropagateEmptyValueScanNode(const ABT::reference_type n, RewriteContext& ctx) {
     if (n.cast<ValueScanNode>()->getArraySize() == 0) {
         addEmptyValueScanNode(ctx);
     }
@@ -371,8 +371,8 @@ template <class AboveType,
 void defaultReorder(ABT::reference_type aboveNode,
                     ABT::reference_type belowNode,
                     RewriteContext& ctx) {
-    ABT newParent = belowNode;
-    ABT newChild = aboveNode;
+    ABT newParent{belowNode};
+    ABT newChild{aboveNode};
 
     std::swap(BelowChildAccessor<BelowType>()(newParent),
               AboveChildAccessor<AboveType>()(newChild));
@@ -418,10 +418,10 @@ struct SubstituteReorder<FilterNode, UnionNode> {
     void operator()(ABT::reference_type aboveNode,
                     ABT::reference_type belowNode,
                     RewriteContext& ctx) const {
-        ABT newParent = belowNode;
+        ABT newParent{belowNode};
 
         for (auto& childOfChild : newParent.cast<UnionNode>()->nodes()) {
-            ABT aboveCopy = aboveNode;
+            ABT aboveCopy{aboveNode};
             std::swap(aboveCopy.cast<FilterNode>()->getChild(), childOfChild);
             std::swap(childOfChild, aboveCopy);
         }
@@ -561,7 +561,7 @@ struct SubstituteMerge<CollationNode, CollationNode> {
     void operator()(ABT::reference_type aboveNode,
                     ABT::reference_type belowNode,
                     RewriteContext& ctx) const {
-        ABT newRoot = aboveNode;
+        ABT newRoot{aboveNode};
         // Retain above property.
         newRoot.cast<CollationNode>()->getChild() = belowNode.cast<CollationNode>()->getChild();
 
@@ -576,7 +576,7 @@ struct SubstituteMerge<LimitSkipNode, LimitSkipNode> {
                     RewriteContext& ctx) const {
         using namespace properties;
 
-        ABT newRoot = aboveNode;
+        ABT newRoot{aboveNode};
         LimitSkipNode& aboveCollationNode = *newRoot.cast<LimitSkipNode>();
         const LimitSkipNode& belowCollationNode = *belowNode.cast<LimitSkipNode>();
 
@@ -762,7 +762,7 @@ static void convertFilterToSargableNode(ABT::reference_type node,
         // keep the original Filter node. But this means the Filter-to-Sargable rewrite could apply
         // again, to avoid rewriting endlessly we need to avoid scheduling this rewrite. So we pass
         // 'addExistingNodeWithNewChild = true'.
-        ABT newNode = node;
+        ABT newNode{node};
         newNode.cast<FilterNode>()->getChild() = std::move(sargableNode);
         ctx.addNode(newNode, true /*substitute*/, true /*addExistingNodeWithNewChild*/);
     } else {
@@ -848,9 +848,8 @@ public:
             return {{simplified->negated, make<PathConstant>(std::move(simplified->newNode))}};
         } else if (negate) {
             // we can still negate the inner expression.
-            return {{true,
-                     make<PathConstant>(
-                         make<UnaryOp>(Operations::Not, std::move(constant.getConstant())))}};
+            return {
+                {true, make<PathConstant>(make<UnaryOp>(Operations::Not, constant.getConstant()))}};
         }
         return {};
     }
@@ -861,8 +860,7 @@ public:
         } else if (negate) {
             // We can still negate the inner expression.
             return {{true,
-                     make<PathDefault>(
-                         make<UnaryOp>(Operations::Not, std::move(pathDefault.getDefault())))}};
+                     make<PathDefault>(make<UnaryOp>(Operations::Not, pathDefault.getDefault()))}};
         }
         return {};
     }
@@ -1119,10 +1117,12 @@ struct SubstituteConvert<FilterNode> {
             return;
         }
 
-        if (auto filter = NotPushdown::simplify(filterNode.getFilter(), ctx.getPrefixId())) {
-            ctx.addNode(make<FilterNode>(std::move(*filter), filterNode.getChild()),
-                        true /*substitute*/);
-            return;
+        if (ctx.getHints()._enableNotPushdown) {
+            if (auto filter = NotPushdown::simplify(filterNode.getFilter(), ctx.getPrefixId())) {
+                ctx.addNode(make<FilterNode>(std::move(*filter), filterNode.getChild()),
+                            true /*substitute*/);
+                return;
+            }
         }
 
         convertFilterToSargableNode(node, filterNode, ctx, scanProjName);
@@ -1213,9 +1213,7 @@ struct SubstituteConvert<EvaluationNode> {
         PSRExpr::visitDNF(
             conversion->_reqMap, [&](PartialSchemaEntry& entry, const PSRExpr::VisitorContext&) {
                 auto& [key, req] = entry;
-                req = {evalNode.getProjectionName(),
-                       std::move(req.getIntervals()),
-                       req.getIsPerfOnly()};
+                req = {evalNode.getProjectionName(), req.getIntervals(), req.getIsPerfOnly()};
 
                 uassert(6624114,
                         "Eval partial schema requirement must contain a variable name.",
@@ -1613,13 +1611,13 @@ static void splitSargableNodeToReduceFetching(IntervalReqSplitResult splitResult
     auto leftReqExpr = leftReqsBuilder.finish();
     auto rightReqExpr = rightReqsBuilder.finish();
     // Convert everything back to DNF.
-    leftReqExpr = convertToDNF<PartialSchemaEntry, PSRExprBuilder>(std::move(*leftReqExpr),
-                                                                   {{._isDNF = true}});
+    leftReqExpr =
+        convertToDNF<PartialSchemaEntry, PSRExprBuilder>(*leftReqExpr, {{._isDNF = true}});
     if (!leftReqExpr) {
         return;
     }
-    rightReqExpr = convertToDNF<PartialSchemaEntry, PSRExprBuilder>(std::move(*rightReqExpr),
-                                                                    {{._isDNF = true}});
+    rightReqExpr =
+        convertToDNF<PartialSchemaEntry, PSRExprBuilder>(*rightReqExpr, {{._isDNF = true}});
     if (!rightReqExpr) {
         return;
     }
@@ -1659,7 +1657,7 @@ static void splitSargableNodeToReduceFetching(IntervalReqSplitResult splitResult
         ProjectionNameVector{scanProjectionName, std::move(splitResult.boundProjectionName)},
         std::move(leftChild),
         std::move(rightChild));
-    const auto& result = ctx.addNode(std::move(newRoot), false /*substitute*/);
+    const auto& result = ctx.addNode(newRoot, false /*substitute*/);
     incrementSplitCount(result.second, ctx.getAboveNodeId(), ctx.getSargableSplitCountMap());
 }
 
@@ -1818,16 +1816,16 @@ struct ExploreConvert<SargableNode> {
             }
             // Convert everything back to DNF.
             if (!PSRExpr::isDNF(leftReqs)) {
-                auto conversion = convertToDNF<PartialSchemaEntry, PSRExprBuilder>(
-                    std::move(leftReqs), {{._isDNF = true}});
+                auto conversion =
+                    convertToDNF<PartialSchemaEntry, PSRExprBuilder>(leftReqs, {{._isDNF = true}});
                 if (!conversion) {
                     continue;
                 }
                 leftReqs = std::move(*conversion);
             }
             if (!PSRExpr::isDNF(rightReqs)) {
-                auto conversion = convertToDNF<PartialSchemaEntry, PSRExprBuilder>(
-                    std::move(rightReqs), {{._isDNF = true}});
+                auto conversion =
+                    convertToDNF<PartialSchemaEntry, PSRExprBuilder>(rightReqs, {{._isDNF = true}});
                 if (!conversion) {
                     continue;
                 }

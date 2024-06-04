@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
 #include <cstdint>
@@ -79,6 +78,15 @@ CompressionResult compressBucket(const BSONObj& bucketDoc,
                                  const NamespaceString& nss,
                                  bool validateDecompression) try {
     CompressionResult result;
+
+    ON_BLOCK_EXIT([&] {
+        tassert(8000400,
+                fmt::format("Couldn't compress time-series bucket {} for collection {}",
+                            bucketDoc.toString(),
+                            nss.toStringForErrorMsg()),
+                result.compressedBucket ||
+                    MONGO_unlikely(simulateBsonColumnCompressionDataLoss.shouldFail()));
+    });
 
     // Helper for uncompressed measurements
     struct Measurement {
@@ -429,9 +437,9 @@ bool isCompressedBucket(const BSONObj& bucketDoc) {
             versionField && isNumericBSONType(versionField.type()));
     auto version = versionField.Number();
 
-    if (version == 1) {
+    if (version == kTimeseriesControlUncompressedVersion) {
         return false;
-    } else if (version == 2) {
+    } else if (version == kTimeseriesControlCompressedVersion) {
         return true;
     } else {
         uasserted(6540602, "Invalid bucket version");

@@ -118,14 +118,27 @@ inline auto _cnull() {
     return ExprHolder{Constant::null()};
 }
 
+// Nothing constant.
+inline auto _cnothing() {
+    return ExprHolder{Constant::nothing()};
+}
+
 // Boolean constant.
 inline auto _cbool(const bool val) {
     return ExprHolder{Constant::boolean(val)};
 }
 
-// Array constant.
+// Array constant. We expect the arguments to be Constants.
 inline auto _carray(auto&&... elements) {
-    return ExprHolder{Constant::array(std::forward<decltype(elements)>(elements)...)};
+    using namespace sbe::value;
+
+    auto [tag, val] = makeNewArray();
+    auto arr = getArrayView(val);
+    (arr->push_back(copyValue(elements._n.template cast<Constant>()->get().first,
+                              elements._n.template cast<Constant>()->get().second)),
+     ...);
+
+    return ExprHolder{make<Constant>(tag, val)};
 }
 
 // Empty Array constant.
@@ -140,7 +153,7 @@ inline auto _cempobj() {
 
 // Variable.
 inline auto operator"" _var(const char* c, size_t len) {
-    return ExprHolder{make<Variable>(ProjectionName{{c, len}})};
+    return ExprHolder{make<Variable>(ProjectionName{StringData{c, len}})};
 }
 
 // Vector of variable names.
@@ -296,8 +309,8 @@ inline auto _collation(std::vector<std::string> spec, NodeHolder input) {
     ProjectionCollationSpec pcspec;
     for (const auto& s : spec) {
         if (const auto pos = s.find(':'); pos < s.size() - 1) {
-            const auto& projName = s.substr(0, pos);
-            const auto& collSpec = s.substr(pos + 1);
+            std::string projName = s.substr(0, pos);
+            std::string collSpec = s.substr(pos + 1);
 
             CollationOp op;
             if (collSpec == "1") {

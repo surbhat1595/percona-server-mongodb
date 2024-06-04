@@ -58,17 +58,16 @@ class ClonerImpl {
 public:
     virtual ~ClonerImpl() = default;
     virtual Status copyDb(OperationContext* opCtx,
-                          const std::string& dBName,
+                          const DatabaseName& dbName,
                           const std::string& masterHost,
-                          const std::vector<NamespaceString>& shardedColls,
+                          const std::vector<NamespaceString>& shardedOrTrackedOutsideDbPrimary,
+                          bool forceSameUUIDAsSource,
                           std::set<std::string>* clonedColls) = 0;
 
-    virtual Status setupConn(OperationContext* opCtx,
-                             const std::string& dBName,
-                             const std::string& masterHost) = 0;
+    virtual Status setupConn(OperationContext* opCtx, const std::string& masterHost) = 0;
 
     virtual StatusWith<std::vector<BSONObj>> getListOfCollections(
-        OperationContext* opCtx, const std::string& dBName, const std::string& masterHost) = 0;
+        OperationContext* opCtx, const DatabaseName& dbName, const std::string& masterHost) = 0;
 };
 
 class DefaultClonerImpl : public ClonerImpl {
@@ -82,17 +81,16 @@ public:
      *              ignored and the collection list is fetched from the remote via _conn.
      */
     Status copyDb(OperationContext* opCtx,
-                  const std::string& dBName,
+                  const DatabaseName& dbName,
                   const std::string& masterHost,
-                  const std::vector<NamespaceString>& shardedColls,
+                  const std::vector<NamespaceString>& shardedOrTrackedOutsideDbPrimary,
+                  bool forceSameUUIDAsSource,
                   std::set<std::string>* clonedColls) override;
 
-    Status setupConn(OperationContext* opCtx,
-                     const std::string& dBName,
-                     const std::string& masterHost) override;
+    Status setupConn(OperationContext* opCtx, const std::string& masterHost) override;
 
     StatusWith<std::vector<BSONObj>> getListOfCollections(OperationContext* opCtx,
-                                                          const std::string& dBName,
+                                                          const DatabaseName& dbName,
                                                           const std::string& masterHost) override;
 
 private:
@@ -100,13 +98,14 @@ private:
 
     // Filters a database's collection list and removes collections that should not be cloned.
     StatusWith<std::vector<BSONObj>> _filterCollectionsForClone(
-        const std::string& fromDBName, const std::list<BSONObj>& initialCollections);
+        const DatabaseName& fromDBName, const std::list<BSONObj>& initialCollections);
 
     struct CreateCollectionParams {
         std::string collectionName;
         BSONObj collectionInfo;
         BSONObj idIndexSpec;
-        bool shardedColl = false;
+        bool shardedOrTrackedOutsideDbPrimary = false;
+        bool forceSameUUIDAsSource = false;
     };
 
     // Executes 'createCollection' for each collection described in 'createCollectionParams', in
@@ -114,7 +113,7 @@ private:
     Status _createCollectionsForDb(
         OperationContext* opCtx,
         const std::vector<CreateCollectionParams>& createCollectionParams,
-        const std::string& dbName);
+        const DatabaseName& dbName);
 
     /*
      * Returns the _id index spec from 'indexSpecs', or an empty BSONObj if none is found.
@@ -122,13 +121,12 @@ private:
     static BSONObj _getIdIndexSpec(const std::list<BSONObj>& indexSpecs);
 
     void _copy(OperationContext* opCtx,
-               const std::string& toDBName,
+               const DatabaseName& toDBName,
                const NamespaceString& nss,
                const BSONObj& from_opts,
                const BSONObj& from_id_index);
 
     void _copyIndexes(OperationContext* opCtx,
-                      const std::string& toDBName,
                       const NamespaceString& nss,
                       const BSONObj& from_opts,
                       const std::list<BSONObj>& from_indexes);
@@ -152,13 +150,14 @@ public:
     Cloner& operator=(const Cloner&) = delete;
 
     Status copyDb(OperationContext* opCtx,
-                  const std::string& dBName,
+                  const DatabaseName& dbName,
                   const std::string& masterHost,
-                  const std::vector<NamespaceString>& shardedColls,
+                  const std::vector<NamespaceString>& shardedOrTrackedOutsideDbPrimary,
+                  bool forceSameUUIDAsSource,
                   std::set<std::string>* clonedColls);
 
     StatusWith<std::vector<BSONObj>> getListOfCollections(OperationContext* opCtx,
-                                                          const std::string& dBName,
+                                                          const DatabaseName& dbName,
                                                           const std::string& masterHost);
 
 private:

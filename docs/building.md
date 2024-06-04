@@ -1,5 +1,4 @@
-Building MongoDB
-================
+# Building MongoDB
 
 Please note that prebuilt binaries are available on
 [mongodb.org](http://www.mongodb.org/downloads) and may be the easiest
@@ -28,8 +27,7 @@ MongoDB supports the following architectures: arm64, ppc64le, s390x,
 and x86-64.  More detailed platform instructions can be found below.
 
 
-MongoDB Tools
---------------
+## MongoDB Tools
 
 The MongoDB command line tools (`mongodump`, `mongorestore`,
 `mongoimport`, `mongoexport`, etc) have been rewritten in
@@ -40,20 +38,23 @@ The source for the tools is now available at
 [mongodb/mongo-tools](https://github.com/mongodb/mongo-tools).
 
 
-Python Prerequisites
----------------
+## Python Prerequisites
 
 In order to build MongoDB, Python 3.9+ is required, and several Python
 modules must be installed. Python 3 is included in macOS 10.15 and later.
 For earlier macOS versions, Python 3 can be installed using Homebrew or
 MacPorts or similar.
 
-To install the required Python modules, run:
-
-    $ python3 -m pip install -r etc/pip/compile-requirements.txt
+MongoDB manages our python dependencies with poetry.
+You can see other install instructions for poetry by reading this [install guide](https://python-poetry.org/).
 
 Installing the requirements inside a python3 based virtualenv
-dedicated to building MongoDB is recommended.
+dedicated to building MongoDB is optional but recommended.
+
+    $ python3 -m venv <venv_path> --prompt mongo # Optional (venv_path can be a path of your choice)
+    $ source <venv_path>/bin/activate # Optional (might be slightly different based on the your shell)
+    $ python3 -m pip install 'poetry==1.5.1'
+    $ python3 -m poetry install --no-root --sync
 
 Note: In order to compile C-based Python modules, you'll also need the
 Python and OpenSSL C headers. Run:
@@ -62,9 +63,11 @@ Python and OpenSSL C headers. Run:
 * Ubuntu (20.04 and newer)/Debian (Bullseye and newer) - `apt install python-dev-is-python3 libssl-dev`
 * Ubuntu (18.04 and older)/Debian (Buster and older) - `apt install python3.7-dev libssl-dev`
 
+Note: If you are seeing errors involving "Prompt dismissed.." you might need to run the following command before poetry install.
 
-SCons
----------------
+    $ export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring
+
+## SCons
 
 If you only want to build the database server `mongod`:
 
@@ -97,8 +100,7 @@ tests, etc):
     $ python3 buildscripts/scons.py install-all-meta
 
 
-SCons Targets
---------------
+## SCons Targets
 
 The following targets can be named on the scons command line to build and
 install a subset of components:
@@ -117,8 +119,7 @@ minimal set of "core" server components, while `install-servers` is intended
 for a functional end-user installation. If you are testing, you should use the
 `install-core` or `install-devcore` targets instead.
 
-Where to find Binaries
-----------------------
+## Where to find Binaries
 
 The build system will produce an installation tree into
 `$DESTDIR/$PREFIX`. `DESTDIR` by default is `build/install` while
@@ -126,8 +127,7 @@ The build system will produce an installation tree into
 targets all built binaries will be in `build/install/bin` by default.
 
 
-Windows
---------------
+## Windows
 
 Build requirements:
 * Visual Studio 2022 version 17.0 or newer
@@ -136,21 +136,18 @@ Build requirements:
 Or download a prebuilt binary for Windows at www.mongodb.org.
 
 
-Debian/Ubuntu
---------------
+## Debian/Ubuntu
 
 To install dependencies on Debian or Ubuntu systems:
 
     # apt-get install build-essential
 
 
-OS X
---------------
+## OS X
 
 Install Xcode 13.0 or newer.
 
-FreeBSD
---------------
+## FreeBSD
 
 Install the following ports:
 
@@ -161,8 +158,7 @@ Install the following ports:
 Add `CC=clang12 CXX=clang++12` to the `scons` options, when building.
 
 
-OpenBSD
---------------
+## OpenBSD
 Install the following ports:
 
   * `devel/libexecinfo`

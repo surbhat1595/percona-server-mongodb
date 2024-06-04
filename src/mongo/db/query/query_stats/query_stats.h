@@ -53,27 +53,101 @@
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/query_stats/key_generator.h"
 #include "mongo/db/query/query_stats/query_stats_entry.h"
+#include "mongo/db/query/query_stats/rate_limiting.h"
 #include "mongo/db/service_context.h"
 
 namespace mongo::query_stats {
 
+extern CounterMetric queryStatsStoreSizeEstimateBytesMetric;
+
 struct QueryStatsPartitioner {
     // The partitioning function for use with the 'Partitioned' utility.
-    std::size_t operator()(const std::size_t k, const std::size_t nPartitions) const {
-        return k % nPartitions;
+    std::size_t operator()(const std::size_t hash, const std::size_t nPartitions) const {
+        return hash % nPartitions;
     }
 };
 
 struct QueryStatsStoreEntryBudgetor {
-    size_t operator()(const std::size_t key, const std::shared_ptr<QueryStatsEntry>& value) {
-        return sizeof(decltype(key)) + value->size();
+    size_t operator()(const std::size_t hash, const QueryStatsEntry& value) {
+        return sizeof(decltype(value)) + sizeof(decltype(hash)) + value.key->size();
+    }
+};
+
+/*
+ * 'QueryStatsStore insertion and eviction listener implementation. This class adjusts the
+ * 'queryStatsStoreSize' serverStatus metric when entries are inserted or evicted.
+ */
+struct QueryStatsStoreInsertionEvictionListener {
+    void onInsert(const std::size_t&, const QueryStatsEntry&, size_t estimatedSize) {
+        queryStatsStoreSizeEstimateBytesMetric.increment(estimatedSize);
+    }
+
+    void onEvict(const std::size_t&, const QueryStatsEntry&, size_t estimatedSize) {
+        queryStatsStoreSizeEstimateBytesMetric.decrement(estimatedSize);
+    }
+
+    void onClear(size_t estimatedSize) {
+        queryStatsStoreSizeEstimateBytesMetric.decrement(estimatedSize);
     }
 };
 using QueryStatsStore = PartitionedCache<std::size_t,
-                                         std::shared_ptr<QueryStatsEntry>,
+                                         QueryStatsEntry,
                                          QueryStatsStoreEntryBudgetor,
-                                         QueryStatsPartitioner>;
+                                         QueryStatsPartitioner,
+                                         QueryStatsStoreInsertionEvictionListener>;
 
+/**
+ * A manager for the queryStats store allows a "pointer swap" on the queryStats store itself. The
+ * usage patterns are as follows:
+ *
+ * - Updating the queryStats store uses the `getQueryStatsStore()` method. The queryStats store
+ *   instance is obtained, entries are looked up and mutated, or created anew.
+ * - The queryStats store is "reset". This involves atomically allocating a new instance, once
+ * there are no more updaters (readers of the store "pointer"), and returning the existing
+ * instance.
+ */
+class QueryStatsStoreManager {
+public:
+    template <typename... QueryStatsStoreArgs>
+    QueryStatsStoreManager(size_t cacheSize, size_t numPartitions)
+        : _queryStatsStore(std::make_unique<QueryStatsStore>(cacheSize, numPartitions)),
+          _maxSize(cacheSize) {}
+
+    /**
+     * Acquire the instance of the queryStats store.
+     */
+    QueryStatsStore& getQueryStatsStore() {
+        return *_queryStatsStore;
+    }
+
+    size_t getMaxSize() {
+        return _maxSize;
+    }
+
+    /**
+     * Resize the queryStats store and return the number of evicted
+     * entries.
+     */
+    size_t resetSize(size_t cacheSize) {
+        _maxSize = cacheSize;
+        return _queryStatsStore->reset(cacheSize);
+    }
+
+private:
+    std::unique_ptr<QueryStatsStore> _queryStatsStore;
+
+    /**
+     * Max size of the queryStats store. Tracked here to avoid having to recompute after it's
+     * divided up into partitions.
+     */
+    size_t _maxSize;
+};
+
+const auto queryStatsStoreDecoration =
+    ServiceContext::declareDecoration<std::unique_ptr<QueryStatsStoreManager>>();
+
+const auto queryStatsRateLimiter =
+    ServiceContext::declareDecoration<std::unique_ptr<RateLimiting>>();
 /**
  * Acquire a reference to the global queryStats store.
  */
@@ -108,7 +182,7 @@ bool isQueryStatsFeatureEnabled(bool requiresFullQueryStatsFeatureFlag);
  *   optimizing it, in order to preserve the user's input for the query shape.
  * - Calling this affects internal state. It should be called exactly once for each request for
  *   which query stats may be collected.
- * - The std::function argument to construct an abstracted KeyGenerator is provided to break
+ * - The std::function argument to construct an abstracted Key is provided to break
  *   library cycles so this library does not need to know how to parse everything. It is done as a
  *   deferred construction callback to ensure that this feature does not impact performance if
  *   collecting stats is not needed due to the feature being disabled or the request being rate
@@ -120,7 +194,7 @@ bool isQueryStatsFeatureEnabled(bool requiresFullQueryStatsFeatureFlag);
  */
 void registerRequest(OperationContext* opCtx,
                      const NamespaceString& collection,
-                     std::function<std::unique_ptr<KeyGenerator>(void)> makeKeyGenerator,
+                     std::function<std::unique_ptr<Key>(void)> makeKey,
                      bool requiresFullQueryStatsFeatureFlag = true);
 
 /**
@@ -135,7 +209,7 @@ void registerRequest(OperationContext* opCtx,
  */
 void writeQueryStats(OperationContext* opCtx,
                      boost::optional<size_t> queryStatsKeyHash,
-                     std::unique_ptr<KeyGenerator> keyGenerator,
+                     std::unique_ptr<Key> key,
                      uint64_t queryExecMicros,
                      uint64_t firstResponseExecMicros,
                      uint64_t docsReturned);

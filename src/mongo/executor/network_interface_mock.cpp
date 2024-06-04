@@ -32,7 +32,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
@@ -244,11 +243,9 @@ void NetworkInterfaceMock::shutdown() {
                                                        "Shutting down mock network",
                                                        Milliseconds(0)}};
         if (op.processResponse(std::move(response))) {
-            LOGV2_WARNING(
-                22590,
-                "Mock network interface shutting down with outstanding request: {request}",
-                "Mock network interface shutting down with outstanding request",
-                "request"_attr = op.getRequest());
+            LOGV2_WARNING(22590,
+                          "Mock network interface shutting down with outstanding request",
+                          "request"_attr = op.getRequest());
         }
     }
     lk.lock();

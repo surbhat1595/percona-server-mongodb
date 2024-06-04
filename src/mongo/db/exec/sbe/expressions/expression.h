@@ -32,7 +32,6 @@
 #include <absl/container/inlined_vector.h>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -43,7 +42,7 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
-#include "mongo/db/exec/sbe/abt/named_slots.h"
+#include "mongo/db/exec/sbe/abt/slots_provider.h"
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
@@ -71,22 +70,7 @@ public:
      */
     using Vector = absl::InlinedVector<std::unique_ptr<EExpression>, 2>;
 
-    EExpression() noexcept = default;
-
     virtual ~EExpression() = default;
-
-    EExpression(EExpression&& other) noexcept : _nodes(std::move(other._nodes)) {}
-
-    EExpression(const EExpression&) = delete;
-
-    EExpression& operator=(EExpression&& other) noexcept {
-        if (this != &other) {
-            _nodes = std::move(other._nodes);
-        }
-        return *this;
-    }
-
-    EExpression& operator=(const EExpression&) = delete;
 
     /**
      * The idiomatic C++ pattern of object cloning. Expressions must be fully copyable as every

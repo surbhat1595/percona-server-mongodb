@@ -152,7 +152,6 @@ std::vector<std::string> getAddrsForHost(const std::string& iporhost,
     if (err) {
         auto ec = addrInfoError(err);
         LOGV2_WARNING(21207,
-                      "getaddrinfo(\"{host}\") failed: {error}",
                       "getaddrinfo() failed",
                       "host"_attr = iporhost,
                       "error"_attr = errorMessage(ec),
@@ -172,10 +171,7 @@ std::vector<std::string> getAddrsForHost(const std::string& iporhost,
                 addr->ai_addr, addr->ai_addrlen, host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST);
             if (err) {
                 auto ec = addrInfoError(err);
-                LOGV2_WARNING(21208,
-                              "getnameinfo() failed: {error}",
-                              "getnameinfo() failed",
-                              "error"_attr = errorMessage(ec));
+                LOGV2_WARNING(21208, "getnameinfo() failed", "error"_attr = errorMessage(ec));
                 continue;
             }
             out.push_back(host);
@@ -284,25 +280,26 @@ bool isSelfSlowPath(const HostAndPort& hostAndPort,
         // We need to avoid the "hello" call triggered by a normal connect, which would cause a
         // deadlock. 'isSelf' is called by the Replication Coordinator when validating a replica set
         // configuration document, but the "hello" command requires a lock on the replication
-        // coordinator to execute. As such we call we call 'connectSocketOnly', which does not call
+        // coordinator to execute. As such we call we call 'connectNoHello', which does not call
         // "hello".
-        auto connectSocketResult = conn.connectSocketOnly(hostAndPort, boost::none);
-        if (!connectSocketResult.isOK()) {
+        try {
+            conn.connectNoHello(hostAndPort, boost::none);
+        } catch (const DBException& e) {
             LOGV2(4834700,
-                  "isSelf could not connect via connectSocketOnly",
+                  "isSelf could not connect via connectNoHello",
                   "hostAndPort"_attr = hostAndPort,
-                  "error"_attr = connectSocketResult);
+                  "error"_attr = e);
             return false;
         }
 
         if (auth::isInternalAuthSet()) {
-            auto authInternalUserResult =
+            try {
                 conn.authenticateInternalUser(auth::StepDownBehavior::kKeepConnectionOpen);
-            if (!authInternalUserResult.isOK()) {
+            } catch (const DBException& e) {
                 LOGV2(4834701,
                       "isSelf could not authenticate internal user",
                       "hostAndPort"_attr = hostAndPort,
-                      "error"_attr = authInternalUserResult);
+                      "error"_attr = e);
                 return false;
             }
         }
@@ -313,7 +310,6 @@ bool isSelfSlowPath(const HostAndPort& hostAndPort,
         return me;
     } catch (const std::exception& e) {
         LOGV2_WARNING(21209,
-                      "couldn't check isSelf ({hostAndPort}) {error}",
                       "Couldn't check isSelf",
                       "hostAndPort"_attr = hostAndPort,
                       "error"_attr = e.what());
@@ -335,10 +331,7 @@ std::vector<std::string> getBoundAddrs(const bool ipv6enabled) {
 
     if (getifaddrs(&addrs)) {
         auto ec = lastSystemError();
-        LOGV2_WARNING(21210,
-                      "getifaddrs failure: {error}",
-                      "getifaddrs() failed",
-                      "error"_attr = errorMessage(ec));
+        LOGV2_WARNING(21210, "getifaddrs() failed", "error"_attr = errorMessage(ec));
         return out;
     }
     ON_BLOCK_EXIT([&] { freeifaddrs(addrs); });
@@ -360,10 +353,8 @@ std::vector<std::string> getBoundAddrs(const bool ipv6enabled) {
                 0,
                 NI_NUMERICHOST);
             if (err) {
-                LOGV2_WARNING(21211,
-                              "getnameinfo() failed: {error}",
-                              "getnameinfo() failed",
-                              "error"_attr = errorMessage(addrInfoError(err)));
+                LOGV2_WARNING(
+                    21211, "getnameinfo() failed", "error"_attr = errorMessage(addrInfoError(err)));
                 continue;
             }
             out.push_back(host);
@@ -400,10 +391,8 @@ std::vector<std::string> getBoundAddrs(const bool ipv6enabled) {
     }
 
     if (err != NO_ERROR) {
-        LOGV2_WARNING(21212,
-                      "GetAdaptersAddresses() failed: {error}",
-                      "GetAdaptersAddresses() failed",
-                      "error"_attr = errorMessage(systemError(err)));
+        LOGV2_WARNING(
+            21212, "GetAdaptersAddresses() failed", "error"_attr = errorMessage(systemError(err)));
         return out;
     }
 
@@ -422,7 +411,6 @@ std::vector<std::string> getBoundAddrs(const bool ipv6enabled) {
                     AF_INET, &(sock->sin_addr), addrstr, INET_ADDRSTRLEN, 0, ec);
                 if (ec) {
                     LOGV2_WARNING(21213,
-                                  "inet_ntop failed during IPv4 address conversion: {error}",
                                   "inet_ntop failed during IPv4 address conversion",
                                   "error"_attr = ec.message());
                     continue;
@@ -437,7 +425,6 @@ std::vector<std::string> getBoundAddrs(const bool ipv6enabled) {
                     AF_INET6, &(sock->sin6_addr), addrstr, INET6_ADDRSTRLEN, 0, ec);
                 if (ec) {
                     LOGV2_WARNING(21214,
-                                  "inet_ntop failed during IPv6 address conversion: {error}",
                                   "inet_ntop failed during IPv6 address conversion",
                                   "error"_attr = ec.message());
                     continue;

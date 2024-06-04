@@ -5,7 +5,7 @@
  * @tags: [
  *   # To avoid burn-in tests in in-memory build variants
  *   requires_persistence,
- *   requires_fcv_71,
+ *   featureFlagTimeseriesUpdatesSupport,
  * ]
  */
 
@@ -295,7 +295,10 @@ const requestConfigurations = {
 
 function getProfilerEntriesForSuccessfulMultiUpdate(db) {
     const profilerFilter = {
-        op: 'update',
+        $or: [
+            {op: 'update'},
+            {op: 'bulkWrite', "command.update": {$exists: true}},
+        ],
         ns: `${dbName}.${collName}`,
         // Filters out events recorded because of StaleConfig error.
         ok: {$ne: 0},

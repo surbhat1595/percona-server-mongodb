@@ -40,7 +40,6 @@
 
 #include "api_common.h"
 #include "stitch_support/stitch_support.h"
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -87,7 +86,7 @@ namespace mongo {
 
 using StitchSupportStatusImpl = StatusForAPI<stitch_support_v1_error>;
 
-const NamespaceString kDummyNamespaceStr = NamespaceString();
+const NamespaceString kDummyNamespaceStr = NamespaceString::kEmpty;
 
 /**
  * C interfaces that use enterCXX() must provide a translateException() function that converts any
@@ -361,7 +360,7 @@ stitch_support_v1_matcher* matcher_create(stitch_support_v1_lib* const lib,
     }
     // standalone lib, this client is not part of any mongo server
     // server thread concepts such as handling interrupts due to step down/up do not apply
-    auto client = lib->serviceContext->makeClient("stitch_support");
+    auto client = lib->serviceContext->getService()->makeClient("stitch_support");
     return new stitch_support_v1_matcher(std::move(client), filter, collator);
 }
 
@@ -383,7 +382,7 @@ stitch_support_v1_projection* projection_create(stitch_support_v1_lib* const lib
 
     // standalone lib, this client is not part of any mongo server
     // server thread concepts such as handling interrupts due to step down/up do not apply
-    auto client = lib->serviceContext->makeClient("stitch_support");
+    auto client = lib->serviceContext->getService()->makeClient("stitch_support");
     return new stitch_support_v1_projection(std::move(client), spec, matcher, collator);
 }
 
@@ -406,7 +405,7 @@ stitch_support_v1_update* update_create(stitch_support_v1_lib* const lib,
 
     // standalone lib, this client is not part of any mongo server
     // server thread concepts such as handling interrupts due to step down/up do not apply
-    auto client = lib->serviceContext->makeClient("stitch_support");
+    auto client = lib->serviceContext->getService()->makeClient("stitch_support");
     return new stitch_support_v1_update(
         std::move(client), updateExpr, arrayFilters, matcher, collator);
 }

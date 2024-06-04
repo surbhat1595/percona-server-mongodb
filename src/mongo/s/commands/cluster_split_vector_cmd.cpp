@@ -75,7 +75,8 @@ public:
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
         return NamespaceStringUtil::deserialize(dbName.tenantId(),
-                                                CommandHelpers::parseNsFullyQualified(cmdObj));
+                                                CommandHelpers::parseNsFullyQualified(cmdObj),
+                                                SerializationContext::stateDefault());
     }
 
     bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -141,7 +142,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(SplitVectorCmd);
+MONGO_REGISTER_COMMAND(SplitVectorCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

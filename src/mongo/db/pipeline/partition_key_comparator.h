@@ -28,7 +28,6 @@
  */
 #pragma once
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <utility>
 
@@ -80,7 +79,7 @@ public:
 
 private:
     Value evaluateAndCoerce(Document doc) {
-        // We assume that partitioning is acheived by sorting, and missing fields and nulls are
+        // We assume that partitioning is achieved by sorting, and missing fields and nulls are
         // considered equivalent in sorting. Documents with missing fields and nulls may
         // interleave with each other, resulting in these documents processed into many separate
         // partitions (null, missing, null, missing). However, it is still guranteed that all nulls

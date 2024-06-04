@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -190,8 +189,8 @@ public:
 
         const auto updateOp = BatchedCommandRequest::buildUpdateOp(
             CollectionType::ConfigNS,
-            BSON(CollectionType::kNssFieldName
-                 << NamespaceStringUtil::serialize(getNameSpace())) /* query */,
+            BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(
+                     getNameSpace(), SerializationContext::stateDefault())) /* query */,
             updateCmd.obj() /* update */,
             false /* upsert */,
             false /* multi */);
@@ -223,7 +222,10 @@ public:
         boundsArrayBuilder.append(_lowerBoundKey).append(_upperBoundKey);
 
         BSONObjBuilder commandBuilder;
-        commandBuilder.append(kCommandName, NamespaceStringUtil::serialize(getNameSpace()))
+        commandBuilder
+            .append(kCommandName,
+                    NamespaceStringUtil::serialize(getNameSpace(),
+                                                   SerializationContext::stateDefault()))
             .appendArray(kBounds, boundsArrayBuilder.arr())
             .append(kShardName, getTarget().toString())
             .append(kEpoch, _version.epoch())
@@ -266,7 +268,10 @@ public:
 
     BSONObj serialise() const override {
         BSONObjBuilder commandBuilder;
-        commandBuilder.append(kCommandName, NamespaceStringUtil::serialize(getNameSpace()))
+        commandBuilder
+            .append(kCommandName,
+                    NamespaceStringUtil::serialize(getNameSpace(),
+                                                   SerializationContext::stateDefault()))
             .append(kKeyPattern, _shardKeyPattern)
             .append(kMinValue, _lowerBoundKey)
             .append(kMaxValue, _upperBoundKey)
@@ -314,11 +319,11 @@ struct CommandSubmissionParameters {
     CommandSubmissionParameters(UUID id, const std::shared_ptr<CommandInfo>& commandInfo)
         : id(id), commandInfo(commandInfo) {}
 
-    CommandSubmissionParameters(CommandSubmissionParameters&& rhs)
+    CommandSubmissionParameters(CommandSubmissionParameters&& rhs) noexcept
         : id(rhs.id), commandInfo(std::move(rhs.commandInfo)) {}
 
     const UUID id;
-    const std::shared_ptr<CommandInfo> commandInfo;
+    std::shared_ptr<CommandInfo> commandInfo;
 };
 
 /**

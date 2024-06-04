@@ -44,7 +44,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/update/update_driver.h"
 
 namespace mongo {
@@ -81,6 +81,7 @@ public:
         constraints.canSwapWithMatch = false;
         constraints.canSwapWithSkippingOrLimitingStage = true;
         constraints.isAllowedWithinUpdatePipeline = true;
+        constraints.checkExistenceForDiffInsertOperations = true;
         constraints.isIndependentOfAnyCollection = false;
         return constraints;
     }

@@ -37,7 +37,6 @@
 #include <absl/container/node_hash_set.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -81,7 +80,11 @@ RecordId find(OperationContext* opCtx,
               const NamespaceString& viewName) {
     const IndexCatalogEntry* entry = systemViews->getIndexCatalog()->findIdIndex(opCtx)->getEntry();
     return entry->accessMethod()->asSortedData()->findSingle(
-        opCtx, systemViews, entry, BSON("_id" << NamespaceStringUtil::serialize(viewName)));
+        opCtx,
+        systemViews,
+        entry,
+        BSON("_id" << NamespaceStringUtil::serialize(viewName,
+                                                     SerializationContext::stateDefault())));
 }
 
 StatusWith<std::unique_ptr<CollatorInterface>> parseCollator(OperationContext* opCtx,
@@ -142,7 +145,8 @@ Status ViewsForDatabase::reload(OperationContext* opCtx, const CollectionPtr& sy
         }
 
         auto viewName = NamespaceStringUtil::deserialize(systemViews->ns().tenantId(),
-                                                         view.getStringField("_id"));
+                                                         view.getStringField("_id"),
+                                                         SerializationContext::stateDefault());
 
         if (auto status = _upsertIntoMap(
                 opCtx,
@@ -319,7 +323,8 @@ Status ViewsForDatabase::_upsertIntoCatalog(OperationContext* opCtx,
     // Build the BSON definition for this view to be saved in the durable view catalog and/or to
     // insert in the viewMap. If the collation is empty, omit it from the definition altogether.
     BSONObjBuilder viewDefBuilder;
-    viewDefBuilder.append("_id", NamespaceStringUtil::serialize(view.name()));
+    viewDefBuilder.append(
+        "_id", NamespaceStringUtil::serialize(view.name(), SerializationContext::stateDefault()));
     viewDefBuilder.append("viewOn", view.viewOn().coll());
     viewDefBuilder.append("pipeline", view.pipeline());
     if (auto collator = view.defaultCollator()) {
@@ -343,7 +348,8 @@ Status ViewsForDatabase::_upsertIntoCatalog(OperationContext* opCtx,
         }
     } else {
         CollectionUpdateArgs args(oldView.value());
-        args.criteria = BSON("_id" << NamespaceStringUtil::serialize(view.name()));
+        args.criteria = BSON("_id" << NamespaceStringUtil::serialize(
+                                 view.name(), SerializationContext::stateDefault()));
         args.update = viewObj;
 
         collection_internal::updateDocument(opCtx,
@@ -388,11 +394,8 @@ void ViewsForDatabase::remove(OperationContext* opCtx,
 
 void ViewsForDatabase::clear(OperationContext* opCtx) {
     for (auto&& [name, view] : _viewMap) {
-        audit::logDropView(opCtx->getClient(),
-                           view->name(),
-                           NamespaceStringUtil::serialize(view->viewOn()),
-                           view->pipeline(),
-                           ErrorCodes::OK);
+        audit::logDropView(
+            opCtx->getClient(), view->name(), view->viewOn(), view->pipeline(), ErrorCodes::OK);
     }
 
     _viewMap.clear();

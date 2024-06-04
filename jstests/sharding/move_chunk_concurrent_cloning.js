@@ -17,8 +17,8 @@ const runParallelMoveChunk = (numThreads) => {
     const kPadding = new Array(1024).join("x");
 
     let testDB = st.s.getDB('test');
-    assert.commandWorked(testDB.adminCommand({enableSharding: 'test'}));
-    st.ensurePrimaryShard('test', st.shard0.shardName);
+    assert.commandWorked(
+        testDB.adminCommand({enableSharding: 'test', primaryShard: st.shard0.shardName}));
     assert.commandWorked(testDB.adminCommand({shardCollection: 'test.user', key: {x: 1}}));
 
     let shardKeyVal = 0;
@@ -39,9 +39,13 @@ const runParallelMoveChunk = (numThreads) => {
     const kInitialLoadFinalKey = shardKeyVal;
 
     print(`Running tests with chunkMigrationConcurrency == ${kThreadCount}`);
+    const kMaxBufferBytes = 17 * 1024 * 1024;
     st._rs.forEach((replSet) => {
-        assert.commandWorked(replSet.test.getPrimary().adminCommand(
-            {setParameter: 1, chunkMigrationConcurrency: kThreadCount}));
+        assert.commandWorked(replSet.test.getPrimary().adminCommand({
+            setParameter: 1,
+            chunkMigrationConcurrency: kThreadCount,
+            chunkMigrationFetcherMaxBufferedSizeBytesPerThread: kMaxBufferBytes
+        }));
     });
 
     const configCollEntry =

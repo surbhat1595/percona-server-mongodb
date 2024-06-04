@@ -34,9 +34,10 @@
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/query/sbe_stage_builder_abt_holder_def.h"
+#include "mongo/db/query/sbe_stage_builder_type_signature.h"
 
 #include "mongo/db/exec/sbe/abt/abt_lower_defs.h"
-#include "mongo/db/exec/sbe/abt/named_slots.h"
+#include "mongo/db/exec/sbe/abt/slots_provider.h"
 #include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
 #include "mongo/db/query/optimizer/node_defs.h"
 #include "mongo/db/query/optimizer/syntax/expr.h"
@@ -58,7 +59,30 @@ boost::optional<std::pair<sbe::FrameId, sbe::value::SlotId>> getSbeLocalVariable
 
 optimizer::ABT makeABTVariable(sbe::value::SlotId slot);
 
-std::unique_ptr<sbe::EExpression> abtToExpr(optimizer::ABT& abt, StageBuilderState& state);
+/**
+ * Associate an expression with a signature representing all the possible types that the value
+ * evalutated at runtime by the corresponding VM code can assume.
+ */
+struct TypedExpression {
+    std::unique_ptr<sbe::EExpression> expr;
+    TypeSignature typeSignature;
+};
+
+using VariableTypes = stdx::
+    unordered_map<optimizer::ProjectionName, TypeSignature, optimizer::ProjectionName::Hasher>;
+
+// Run constant folding on the provided ABT tree and return its type signature. If the type
+// information in the slotInfo is available, it is used to assign a type to the visible slots.
+TypeSignature constantFold(optimizer::ABT& abt,
+                           StageBuilderState& state,
+                           const VariableTypes* slotInfo = nullptr);
+
+// Optimize and convert the provided ABT tree into an equivalent EExpression tree, returning its
+// type signature. If the type information in the slotInfo is available, it is used to assign a type
+// to the visible slots.
+TypedExpression abtToExpr(optimizer::ABT& abt,
+                          StageBuilderState& state,
+                          const VariableTypes* slotInfo = nullptr);
 
 /**
  * The SbVar class is used to represent variables in the SBE stage builder. "SbVar" is short for
@@ -91,16 +115,8 @@ public:
         return isLocalVar() ? boost::make_optional(std::pair(*_frameId, _slotId)) : boost::none;
     }
 
-    sbe::EVariable getEVariable() const {
-        return _frameId ? sbe::EVariable(*_frameId, _slotId) : sbe::EVariable(_slotId);
-    }
-
     optimizer::ProjectionName getABTName() const {
         return _frameId ? getABTLocalVariableName(*_frameId, _slotId) : getABTVariableName(_slotId);
-    }
-
-    operator sbe::EVariable() const {
-        return getEVariable();
     }
 
     operator optimizer::ProjectionName() const {
@@ -280,14 +296,14 @@ public:
         _storage = false;
     }
 
-    EExpr getExpr(StageBuilderState& state) const;
+    TypedExpression getExpr(StageBuilderState& state) const;
 
     /**
      * Extract the expression on top of the stack as an SBE EExpression node. If the expression is
      * stored as an ABT node, it is lowered into an SBE expression, using the provided map to
      * convert variable names into slot ids.
      */
-    EExpr extractExpr(StageBuilderState& state);
+    TypedExpression extractExpr(StageBuilderState& state);
 
     /**
      * Extract the expression on top of the stack as an ABT node. Throws an exception if the

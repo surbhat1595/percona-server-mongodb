@@ -42,6 +42,7 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection_compact.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/compact_gen.h"
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
@@ -86,7 +87,7 @@ public:
         return "compact collection\n"
                "warning: this operation locks the database and is slow. you can cancel with "
                "killOp()\n"
-               "{ compact : <collection_name>, [force:<bool>] }\n"
+               "{ compact : <collection_name>, [force:<bool>], [freeSpaceTargetMB:<int64_t>] }\n"
                "  force - allows to run on a replica set primary\n";
     }
 
@@ -98,13 +99,20 @@ public:
              BSONObjBuilder& result) override {
         NamespaceString nss = CommandHelpers::parseNsCollectionRequired(dbName, cmdObj);
 
+        auto sc = SerializationContext::stateCommandRequest();
+        sc.setTenantIdSource(auth::ValidatedTenancyScope::get(opCtx) != boost::none);
+
         repl::ReplicationCoordinator* replCoord = repl::ReplicationCoordinator::get(opCtx);
+        auto params = CompactCommand::parse(
+            IDLParserContext("compact", false /*apiStrict*/, dbName.tenantId(), sc), cmdObj);
+        bool force = params.getForce() && *params.getForce();
+
         uassert(ErrorCodes::IllegalOperation,
                 "will not run compact on an active replica set primary as this will slow down "
                 "other running operations. use force:true to force",
-                !replCoord->getMemberState().primary() || cmdObj["force"].trueValue());
+                !replCoord->getMemberState().primary() || force);
 
-        StatusWith<int64_t> status = compactCollection(opCtx, nss);
+        StatusWith<int64_t> status = compactCollection(opCtx, params.getFreeSpaceTargetMB(), nss);
         uassertStatusOK(status.getStatus());
 
         int64_t bytesFreed = status.getValue();
@@ -119,5 +127,5 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CompactCmd);
+MONGO_REGISTER_COMMAND(CompactCmd).forShard();
 }  // namespace mongo

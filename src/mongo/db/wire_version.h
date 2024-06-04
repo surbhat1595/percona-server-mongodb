@@ -37,8 +37,7 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/platform/mutex.h"
-#include "mongo/stdx/mutex.h"
+#include "mongo/db/service_context.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/version/releases.h"
 
@@ -131,6 +130,8 @@ struct WireVersionInfo {
 
 class WireSpec {
 public:
+    static WireSpec& getWireSpec(ServiceContext* sc);
+
     struct Specification {
         // incomingExternalClient.minWireVersion - Minimum version that the server accepts on
         // incoming requests from external clients. We should bump this whenever we don't want to
@@ -187,11 +188,10 @@ public:
     };
 
 public:
-    static WireSpec& instance();
-
     /**
      * Appends the min and max versions in 'wireVersionInfo' to 'builder' in the format expected for
-     * reporting information about the internal client.
+     * reporting information about the internal client, if the WireSpec represents the internal
+     * client.
      *
      * Intended for use as part of performing the isMaster/hello handshake with a remote node. When
      * an internal clients make a connection to another node in the cluster, it includes internal
@@ -205,22 +205,23 @@ public:
      *
      * This information can be used to ensure correctness during upgrade in mixed version clusters.
      */
-    static void appendInternalClientWireVersion(WireVersionInfo wireVersionInfo,
-                                                BSONObjBuilder* builder);
+    void appendInternalClientWireVersionIfNeeded(BSONObjBuilder* builder);
 
     void initialize(Specification spec);
 
     void reset(Specification spec);
 
-    // Calling `get()` on uninitialized instances of `WireSpec` is prohibited.
-    std::shared_ptr<const Specification> get() const;
+    // Calling `get()` on uninitialized instances of `WireSpec` is an invariant failure.
+    std::shared_ptr<const Specification> get();
 
+    // Do not call this, it requires the caller to hold the lock on _spec.
     bool isInitialized() const {
         return _spec ? true : false;
     }
 
 private:
-    // Ensures concurrent accesses to `get()` and `reset()` are thread-safe.
+    // Ensures concurrent accesses to `get()`, `appendInternalClientWireVersionIfNeeded()`, and
+    // `reset()` are thread-safe.
     mutable Mutex _mutex = MONGO_MAKE_LATCH("WireSpec::_mutex");
 
     std::shared_ptr<const Specification> _spec;

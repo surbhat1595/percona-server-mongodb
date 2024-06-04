@@ -95,7 +95,11 @@ public:
             audit::logEnableSharding(opCtx->getClient(), dbname);
 
             auto dbt = ShardingCatalogManager::get(opCtx)->createDatabase(
-                opCtx, dbname, request().getPrimaryShardId());
+                opCtx,
+                DatabaseNameUtil::deserialize(
+                    boost::none, dbname, request().getSerializationContext()),
+                request().getPrimaryShardId(),
+                request().getSerializationContext());
 
             return {dbt.getVersion()};
         }
@@ -133,7 +137,7 @@ private:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(ConfigSvrCreateDatabaseCommand);
+MONGO_REGISTER_COMMAND(ConfigSvrCreateDatabaseCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

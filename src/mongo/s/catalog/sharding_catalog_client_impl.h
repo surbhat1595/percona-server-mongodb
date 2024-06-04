@@ -106,7 +106,7 @@ public:
         const Milliseconds& maxTimeout = Shard::kDefaultConfigCommandTimeout) override;
 
     DatabaseType getDatabase(OperationContext* opCtx,
-                             StringData db,
+                             const DatabaseName& db,
                              repl::ReadConcernLevel readConcernLevel) override;
 
     std::vector<DatabaseType> getAllDBs(OperationContext* opCtx,
@@ -120,19 +120,42 @@ public:
                                  const UUID& uuid,
                                  repl::ReadConcernLevel readConcernLevel) override;
 
+    std::vector<CollectionType> getShardedCollections(OperationContext* opCtx,
+                                                      const DatabaseName& db,
+                                                      repl::ReadConcernLevel readConcernLevel,
+                                                      const BSONObj& sort) override;
 
     std::vector<CollectionType> getCollections(OperationContext* opCtx,
-                                               StringData db,
+                                               const DatabaseName& db,
                                                repl::ReadConcernLevel readConcernLevel,
                                                const BSONObj& sort) override;
 
-    std::vector<NamespaceString> getAllShardedCollectionsForDb(OperationContext* opCtx,
-                                                               StringData dbName,
-                                                               repl::ReadConcernLevel readConcern,
-                                                               const BSONObj& sort) override;
+    std::vector<NamespaceString> getShardedCollectionNamespacesForDb(
+        OperationContext* opCtx,
+        const DatabaseName& dbName,
+        repl::ReadConcernLevel readConcern,
+        const BSONObj& sort = BSONObj()) override;
 
-    StatusWith<std::vector<std::string>> getDatabasesForShard(OperationContext* opCtx,
-                                                              const ShardId& shardName) override;
+    std::vector<NamespaceString> getCollectionNamespacesForDb(
+        OperationContext* opCtx,
+        const DatabaseName& dbName,
+        repl::ReadConcernLevel readConcern,
+        const BSONObj& sort = BSONObj()) override;
+
+    std::vector<NamespaceString> getUnsplittableCollectionNamespacesForDb(
+        OperationContext* opCtx,
+        const DatabaseName& dbName,
+        repl::ReadConcernLevel readConcern,
+        const BSONObj& sort = BSONObj()) override;
+
+    std::vector<NamespaceString> getUnsplittableCollectionNamespacesForDbOutsideOfShards(
+        OperationContext* opCtx,
+        const DatabaseName& dbName,
+        const std::vector<ShardId>& excludedShards,
+        repl::ReadConcernLevel readConcern) override;
+
+    StatusWith<std::vector<DatabaseName>> getDatabasesForShard(OperationContext* opCtx,
+                                                               const ShardId& shardName) override;
 
     StatusWith<std::vector<ChunkType>> getChunks(
         OperationContext* opCtx,
@@ -160,7 +183,7 @@ public:
                                                            const NamespaceString& nss) override;
 
     std::vector<NamespaceString> getAllNssThatHaveZonesForDatabase(
-        OperationContext* opCtx, const StringData& dbName) override;
+        OperationContext* opCtx, const DatabaseName& dbName) override;
 
     StatusWith<repl::OpTimeWith<std::vector<ShardType>>> getAllShards(
         OperationContext* opCtx, repl::ReadConcernLevel readConcern) override;
@@ -274,7 +297,7 @@ private:
      */
     StatusWith<repl::OpTimeWith<DatabaseType>> _fetchDatabaseMetadata(
         OperationContext* opCtx,
-        const std::string& dbName,
+        const DatabaseName& dbName,
         const ReadPreferenceSetting& readPref,
         repl::ReadConcernLevel readConcernLevel);
 

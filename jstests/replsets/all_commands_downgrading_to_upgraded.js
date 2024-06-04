@@ -110,6 +110,7 @@ const allCommands = {
     _shardsvrDropIndexCatalogEntryParticipant: {skip: isAnInternalCommand},
     _shardsvrDropIndexes: {skip: isAnInternalCommand},
     _shardsvrCreateCollectionParticipant: {skip: isAnInternalCommand},
+    _shardsvrCoordinateMultiUpdate: {skip: isAnInternalCommand},
     _shardsvrGetStatsForBalancing: {skip: isAnInternalCommand},
     _shardsvrInsertGlobalIndexKey: {skip: isAnInternalCommand},
     _shardsvrDeleteGlobalIndexKey: {skip: isAnInternalCommand},
@@ -184,6 +185,10 @@ const allCommands = {
             }));
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         }
+    },
+    abortUnshardCollection: {
+        // Skipping command because it requires testing through a parallel shell.
+        skip: requiresParallelShell,
     },
     addShard: {
         skip: "cannot add shard while in downgrading FCV state",
@@ -1618,11 +1623,7 @@ const allCommands = {
     waitForFailPoint: {
         skip: isAnInternalCommand,
     },
-    waitForOngoingChunkSplits: {
-        command: {waitForOngoingChunkSplits: 1},
-        isShardedOnly: true,
-        isShardSvrOnly: true,
-    },
+    getShardingReady: {skip: isAnInternalCommand},
     whatsmysni: {
         command: {whatsmysni: 1},
         isAdminCommand: true,

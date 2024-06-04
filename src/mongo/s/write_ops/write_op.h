@@ -60,18 +60,28 @@ enum WriteOpState {
     // responses
     WriteOpState_Pending,
 
+    // This is used for WriteType::WriteWithoutShardKeyWithId to defer responses for child write ops
+    // with n = 0 from shards only until we are sure that there won't be a retry of broadcast.
+    WriteOpState_Deferred,
+
     // Op was successful, write completed
     // We assume all states higher than this one are *final*
     WriteOpState_Completed,
 
+    // This is used for WriteType::WriteWithoutShardKeyWithId for child write ops only when we
+    // decide we do not need to send the child op request or wait for its response from the targeted
+    // shard.
+    WriteOpState_NoOp,
+
     // Op failed with some error
     WriteOpState_Error,
+};
 
-    // Op was cancelled before sending (only child write ops can be cancelled)
-    WriteOpState_Cancelled,
-
-    // Catch-all error state.
-    WriteOpState_Unknown
+enum class WriteType {
+    Ordinary,
+    TimeseriesRetryableUpdate,
+    WithoutShardKeyOrId,
+    WithoutShardKeyWithId,
 };
 
 /**
@@ -95,7 +105,7 @@ struct ChildWriteOp {
     // filled when state > _Pending
     std::unique_ptr<ShardEndpoint> endpoint;
 
-    // filled when state == _Error or (optionally) when state == _Cancelled
+    // filled when state == _Error
     boost::optional<write_ops::WriteError> error;
 
     // filled when state == _Complete and this is an op from a bulkWrite command.
@@ -166,7 +176,8 @@ public:
     void targetWrites(OperationContext* opCtx,
                       const NSTargeter& targeter,
                       std::vector<std::unique_ptr<TargetedWrite>>* targetedWrites,
-                      bool* useTwoPhaseWriteProtocol = nullptr);
+                      bool* useTwoPhaseWriteProtocol = nullptr,
+                      bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr);
 
     /**
      * Returns the number of child writes that were last targeted.
@@ -180,7 +191,7 @@ public:
      * Can only be called when state is _Pending, or is a no-op if called when the state
      * is still _Ready (and therefore no writes are pending).
      */
-    void cancelWrites();
+    void resetWriteToReady();
 
     /**
      * Marks the targeted write as finished for this write op. Optionally, if this write is part of
@@ -201,11 +212,31 @@ public:
     void noteWriteError(const TargetedWrite& targetedWrite, const write_ops::WriteError& error);
 
     /**
+     * Marks the write op complete if n is 1 along with transitioning any pending child write ops to
+     * WriteOpState::NoOp. If n is 0 then defers the state update of the child write op until later.
+     */
+    void noteWriteWithoutShardKeyWithIdResponse(const TargetedWrite& targetedWrite, int n);
+
+    /**
+     * Sets the reply for this write op directly, and forces the state to _Completed.
+     *
+     * Should only be used when in state _Ready.
+     */
+    void setOpComplete(boost::optional<BulkWriteReplyItem> bulkWriteReplyItem);
+
+    /**
      * Sets the error for this write op directly, and forces the state to _Error.
      *
      * Should only be used when in state _Ready.
      */
     void setOpError(const write_ops::WriteError& error);
+
+    /**
+     * Sets the WriteType for this WriteOp.
+     */
+    void setWriteType(WriteType writeType);
+
+    WriteType getWriteType();
 
     /**
      * Combines the pointed-to BulkWriteReplyItems into a single item. Used for merging the results
@@ -232,7 +263,8 @@ private:
     // filled when state == _Error
     boost::optional<write_ops::WriteError> _error;
 
-    // filled when state == _Complete and this is an op from a bulkWrite command.
+    // filled for bulkWrite op when state == _Complete or before we reset state to _Ready after
+    // receiving successful replies from some shards with a retryable error.
     boost::optional<BulkWriteReplyItem> _bulkWriteReplyItem;
 
     // Whether this write is part of a transaction.
@@ -240,6 +272,8 @@ private:
 
     // stores the shards where this write operation succeeded
     absl::flat_hash_set<ShardId> _successfulShardSet;
+
+    WriteType _writeType{WriteType::Ordinary};
 };
 // First value is write item index in the batch, second value is child write op index
 typedef std::pair<int, int> WriteOpRef;

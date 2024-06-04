@@ -30,7 +30,6 @@
 #include <utility>
 #include <vector>
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/db/exec/document_value/document.h"
@@ -166,7 +165,7 @@ void SortStageSimple::spool(WorkingSetID wsid) {
 
     auto sortKey = _sortKeyGen.computeSortKeyFromDocument(member->doc.value());
 
-    _sortExecutor.add(std::move(sortKey), member->doc.value().toBson());
+    _sortExecutor.add(sortKey, member->doc.value().toBson());
     _ws->free(wsid);
 }
 

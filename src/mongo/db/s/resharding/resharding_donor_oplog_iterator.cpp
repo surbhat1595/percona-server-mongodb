@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
 
@@ -126,7 +125,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> ReshardingDonorOplogIterator::makePip
 
     stages.emplace_back(DocumentSourceSort::create(expCtx, BSON("_id" << 1)));
 
-    return Pipeline::create(std::move(stages), std::move(expCtx));
+    return Pipeline::create(std::move(stages), expCtx);
 }
 
 std::vector<repl::OplogEntry> ReshardingDonorOplogIterator::_fillBatch(Pipeline& pipeline) {
@@ -174,15 +173,6 @@ ExecutorFuture<std::vector<repl::OplogEntry>> ReshardingDonorOplogIterator::getN
         auto opCtx = factory.makeOperationContext(&cc());
         ScopeGuard guard([&] { dispose(opCtx.get()); });
 
-        // A primary which steps down may briefly continue running the ReshardingDonorOplogIterator
-        // as a secondary. AutoGetCollectionForReadBase forbids reads on a secondary from using the
-        // default RecoveryUnit::ReadSource of kNoTimestamp when the operation expects to conflict
-        // with secondary oplog application. We opt out of enforcing this constraint to avoid
-        // triggering an fassert() when briefly running as a secondary. This is acceptable because
-        // any inconsistent reads as a secondary won't have a real effect because the node won't be
-        // able to perform more writes.
-        opCtx->setEnforceConstraints(false);
-
         Timer fetchTimer;
         if (_pipeline) {
             _pipeline->reattachToOperationContext(opCtx.get());
@@ -219,7 +209,7 @@ ExecutorFuture<std::vector<repl::OplogEntry>> ReshardingDonorOplogIterator::getN
                 return future_util::withCancellation(_insertNotifier->awaitInsert(_resumeToken),
                                                      cancelToken);
             })
-            .then([this, cancelToken, executor, factory] {
+            .then([this, cancelToken, executor, factory]() mutable {
                 return getNextBatch(std::move(executor), cancelToken, factory);
             });
     }

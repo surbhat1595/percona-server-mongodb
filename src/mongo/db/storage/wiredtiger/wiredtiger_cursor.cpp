@@ -28,7 +28,6 @@
  */
 
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <wiredtiger.h>
 
 #include "mongo/base/error_codes.h"
@@ -91,7 +90,7 @@ WiredTigerCursor::WiredTigerCursor(const std::string& uri,
         // A WiredTiger table will not be available in the latest checkpoint if the checkpoint
         // thread hasn't run after the initial WiredTiger table was created.
         if (!_isCheckpoint) {
-            LOGV2_FATAL_NOTRACE(50883, "{ex}", "Cursor not found", "error"_attr = ex);
+            LOGV2_FATAL_NOTRACE(50883, "Cursor not found", "error"_attr = ex);
         }
         throw;
     }
@@ -104,10 +103,6 @@ WiredTigerCursor::~WiredTigerCursor() {
     } else {
         _session->releaseCursor(_tableID, _cursor, _config);
     }
-}
-
-void WiredTigerCursor::reset() {
-    invariantWTOK(_cursor->reset(_cursor), _cursor->session);
 }
 
 WiredTigerBulkLoadCursor::WiredTigerBulkLoadCursor(const std::string& indexUri,
@@ -128,8 +123,6 @@ WiredTigerBulkLoadCursor::WiredTigerBulkLoadCursor(const std::string& indexUri,
     }
 
     LOGV2_WARNING(51783,
-                  "failed to create WiredTiger bulk cursor: {error} falling back to non-bulk "
-                  "cursor for index {index}",
                   "Failed to create WiredTiger bulk cursor, falling back to non-bulk",
                   "error"_attr = wiredtiger_strerror(err),
                   "index"_attr = indexUri);

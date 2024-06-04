@@ -1,4 +1,3 @@
-import {AssertLevel, setGlobalAssertLevel} from "jstests/concurrency/fsm_libs/assert.js";
 import {Cluster} from "jstests/concurrency/fsm_libs/cluster.js";
 import {parseConfig} from "jstests/concurrency/fsm_libs/parse_config.js";
 import {ThreadManager} from "jstests/concurrency/fsm_libs/thread_mgr.js";
@@ -6,7 +5,7 @@ import {uniqueCollName, uniqueDBName} from "jstests/concurrency/fsm_utils/name_u
 
 export const runner = (function() {
     function validateExecutionMode(mode) {
-        var allowedKeys = ['composed', 'parallel', 'serial'];
+        var allowedKeys = ['parallel', 'serial'];
 
         Object.keys(mode).forEach(function(option) {
             assert.contains(option,
@@ -14,9 +13,6 @@ export const runner = (function() {
                             'invalid option: ' + tojson(option) +
                                 '; valid options are: ' + tojson(allowedKeys));
         });
-
-        mode.composed = mode.composed || false;
-        assert.eq('boolean', typeof mode.composed);
 
         mode.parallel = mode.parallel || false;
         assert.eq('boolean', typeof mode.parallel);
@@ -45,13 +41,9 @@ export const runner = (function() {
             'threadMultiplier'
         ];
 
-        if (mode.parallel || mode.composed) {
+        if (mode.parallel) {
             allowedKeys.push('numSubsets');
             allowedKeys.push('subsetSize');
-        }
-        if (mode.composed) {
-            allowedKeys.push('composeProb');
-            allowedKeys.push('iterations');
         }
 
         Object.keys(options).forEach(function(option) {
@@ -76,12 +68,6 @@ export const runner = (function() {
             assert(Number.isInteger(options.iterations),
                    'expected number of iterations to be an integer');
             assert.gt(options.iterations, 0);
-        }
-
-        if (typeof options.composeProb !== 'undefined') {
-            assert.eq('number', typeof options.composeProb);
-            assert.gt(options.composeProb, 0);
-            assert.lte(options.composeProb, 1);
         }
 
         if (typeof options.dbNamePrefix !== 'undefined') {
@@ -400,9 +386,9 @@ export const runner = (function() {
 
     async function loadWorkloadContext(workloads, context, executionOptions, applyMultipliers) {
         for (const workload of workloads) {
+            print(`Loading FSM workload: ${workload}`);
             const {$config} = await import(workload);
             assert.neq('undefined', typeof $config, '$config was not defined by ' + workload);
-            print(tojson($config));
             context[workload] = {config: parseConfig($config)};
             if (applyMultipliers) {
                 context[workload].config.iterations *= executionOptions.iterationMultiplier;
@@ -575,30 +561,10 @@ export const runner = (function() {
         validateCleanupOptions(cleanupOptions);
         Object.freeze(cleanupOptions);  // immutable after validation (and normalization)
 
-        if (executionMode.composed) {
-            clusterOptions.sameDB = true;
-            clusterOptions.sameCollection = true;
-        }
-
-        // Determine how strong to make assertions while simultaneously executing
-        // different workloads.
-        var assertLevel = AssertLevel.OWN_DB;
-        if (clusterOptions.sameDB) {
-            // The database is shared by multiple workloads, so only make the asserts
-            // that apply when the collection is owned by an individual workload.
-            assertLevel = AssertLevel.OWN_COLL;
-        }
-        if (clusterOptions.sameCollection) {
-            // The collection is shared by multiple workloads, so only make the asserts
-            // that always apply.
-            assertLevel = AssertLevel.ALWAYS;
-        }
-        setGlobalAssertLevel(assertLevel);
-
         var context = {};
         await loadWorkloadContext(
             workloads, context, executionOptions, true /* applyMultipliers */);
-        var threadMgr = new ThreadManager(clusterOptions, executionMode);
+        var threadMgr = new ThreadManager(clusterOptions);
 
         var cluster = new Cluster(clusterOptions);
         cluster.setup();
@@ -679,16 +645,6 @@ export const runner = (function() {
                     workloads, clusterOptions, {parallel: true}, executionOptions, cleanupOptions);
             },
 
-        composed:
-            async function composed(workloads, clusterOptions, executionOptions, cleanupOptions) {
-                clusterOptions = clusterOptions || {};
-                executionOptions = executionOptions || {};
-                cleanupOptions = cleanupOptions || {};
-
-                await runWorkloads(
-                    workloads, clusterOptions, {composed: true}, executionOptions, cleanupOptions);
-            },
-
         internals: {
             validateExecutionOptions,
             prepareCollections,
@@ -705,4 +661,3 @@ export const runner = (function() {
 
 export const runWorkloadsSerially = runner.serial;
 export const runWorkloadsInParallel = runner.parallel;
-export const runCompositionOfWorkloads = runner.composed;

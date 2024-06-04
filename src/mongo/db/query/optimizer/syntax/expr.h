@@ -30,7 +30,6 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <ostream>
 #include <string>
@@ -414,6 +413,10 @@ public:
     }
 
     const ABT& getInput() const {
+        return get<1>();
+    }
+
+    ABT& getInput() {
         return get<1>();
     }
 };

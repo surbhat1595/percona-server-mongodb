@@ -94,7 +94,7 @@ public:
 
     bool inQuiesceMode() const override;
 
-    void shutdown(OperationContext* opCtx) override;
+    void shutdown(OperationContext* opCtx, BSONObjBuilder* shutdownTimeElapsedBuilder) override;
 
     // Returns the ServiceContext where this instance runs.
     ServiceContext* getServiceContext() override {
@@ -330,7 +330,7 @@ public:
 
     void waitUntilSnapshotCommitted(OperationContext*, const Timestamp&) override;
 
-    void appendDiagnosticBSON(BSONObjBuilder*) override;
+    void appendDiagnosticBSON(BSONObjBuilder*, StringData) override;
 
     void appendConnectionStats(executor::ConnectionPoolStats* stats) const override;
 

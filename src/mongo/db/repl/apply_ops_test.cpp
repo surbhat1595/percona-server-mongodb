@@ -81,24 +81,9 @@ namespace {
  */
 class OpObserverMock : public OpObserverNoop {
 public:
-    /**
-     * Called by applyOps() when ops are applied atomically.
-     */
-    void onApplyOps(OperationContext* opCtx,
-                    const DatabaseName& dbName,
-                    const BSONObj& applyOpCmd) override;
-
     // If not empty, holds the command object passed to last invocation of onApplyOps().
     BSONObj onApplyOpsCmdObj;
 };
-
-void OpObserverMock::onApplyOps(OperationContext* opCtx,
-                                const DatabaseName& dbName,
-                                const BSONObj& applyOpCmd) {
-    ASSERT_FALSE(applyOpCmd.isEmpty());
-    // Get owned copy because 'applyOpCmd' may be a temporary BSONObj created by applyOps().
-    onApplyOpsCmdObj = applyOpCmd.getOwned();
-}
 
 /**
  * Test fixture for applyOps().
@@ -180,7 +165,6 @@ TEST_F(ApplyOpsTest, CommandInNestedApplyOpsReturnsSuccess) {
     auto cmdObj = BSON("applyOps" << BSON_ARRAY(innerApplyOpsObj));
 
     ASSERT_OK(applyOps(opCtx.get(), nss.dbName(), cmdObj, mode, &resultBuilder));
-    ASSERT_BSONOBJ_EQ({}, _opObserver->onApplyOpsCmdObj);
 }
 
 /**
@@ -297,13 +281,14 @@ OplogEntry makeOplogEntry(OpTypeEnum opType,
                               NamespaceString::createNamespaceString_forTest("a.a"),  // namespace
                               boost::none,                                            // uuid
                               boost::none,                                            // fromMigrate
-                              OplogEntry::kOplogVersion,                              // version
-                              oField,                                                 // o
-                              boost::none,                                            // o2
-                              {},                                                     // sessionInfo
-                              boost::none,                                            // upsert
-                              Date_t(),       // wall clock time
-                              stmtIds,        // statement ids
+                              boost::none,                // checkExistenceForDiffInsert
+                              OplogEntry::kOplogVersion,  // version
+                              oField,                     // o
+                              boost::none,                // o2
+                              {},                         // sessionInfo
+                              boost::none,                // upsert
+                              Date_t(),                   // wall clock time
+                              stmtIds,                    // statement ids
                               boost::none,    // optime of previous write within same transaction
                               boost::none,    // pre-image optime
                               boost::none,    // post-image optime

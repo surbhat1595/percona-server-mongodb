@@ -142,6 +142,10 @@ def setup_args_parser():
     parser.add_argument('--direct-depends', action='append', default=[],
                         help="Print the nodes which depends on a given node.")
 
+    parser.add_argument(
+        '--program-depends', action='append', default=[],
+        help="Print the programs which depend (transitively or directly) on a given node.")
+
     parser.add_argument('--common-depends', nargs='+', action='append', default=[],
                         help="Print the nodes which have a common dependency on all N nodes.")
 
@@ -175,6 +179,12 @@ def setup_args_parser():
     parser.add_argument(
         '--indegree-one', action='store_true', default=False, help=
         "Find candidate nodes for merging by searching the graph for nodes with only one node which depends on them."
+    )
+
+    parser.add_argument(
+        '--bazel-conv-candidates', action='store_true', default=False, help=
+        "Find candidate nodes ready for bazel conversion. This effectively means the node is currently not being built "
+        "with bazel and the node does not have any dependency nodes that are not being built in bazel."
     )
 
     args = parser.parse_args()
@@ -242,6 +252,11 @@ def main():
             libdeps_analyzer.DirectDependents(libdeps_graph,
                                               strip_build_dir(build_dir, analyzer_args)))
 
+    for analyzer_args in args.program_depends:
+        analysis.append(
+            libdeps_analyzer.TransitiveProgramDependents(libdeps_graph,
+                                                         strip_build_dir(build_dir, analyzer_args)))
+
     for analyzer_args in args.common_depends:
         analysis.append(
             libdeps_analyzer.CommonDependents(libdeps_graph,
@@ -280,6 +295,9 @@ def main():
 
     if args.indegree_one:
         analysis.append(libdeps_analyzer.InDegreeOne(libdeps_graph))
+
+    if args.bazel_conv_candidates:
+        analysis.append(libdeps_analyzer.BazelConversionCandidates(libdeps_graph))
 
     analysis += libdeps_analyzer.linter_factory(libdeps_graph, args.lint)
 

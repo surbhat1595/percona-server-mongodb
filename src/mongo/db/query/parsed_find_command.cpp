@@ -30,13 +30,11 @@
 #include "mongo/db/query/parsed_find_command.h"
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -52,6 +50,9 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 
 namespace mongo {
 
@@ -328,40 +329,20 @@ StatusWith<QueryMetadataBitSet> isValid(const MatchExpression* root,
     return unavailableMetadata;
 }
 
-StatusWith<std::pair<boost::intrusive_ptr<ExpressionContext>, std::unique_ptr<ParsedFindCommand>>>
-parse(OperationContext* opCtx,
-      std::unique_ptr<FindCommandRequest> findCommand,
-      const ExtensionsCallback& extensionsCallback,
-      MatchExpressionParser::AllowedFeatureSet allowedFeatures,
-      const ProjectionPolicies& projectionPolicies) {
-    // Make the expCtx.
-    invariant(findCommand->getNamespaceOrUUID().isNamespaceString());
-    auto expCtx = make_intrusive<ExpressionContext>(
-        opCtx, *findCommand, resolveCollator(opCtx, findCommand), true /* mayDbProfile */);
-    auto swResult = parseWithValidatedCollator(
-        expCtx, std::move(findCommand), extensionsCallback, allowedFeatures, projectionPolicies);
-    if (!swResult.isOK()) {
-        return swResult.getStatus();
-    }
-
-    return std::pair{std::move(expCtx), std::move(swResult.getValue())};
-}
-
 StatusWith<std::unique_ptr<ParsedFindCommand>> parse(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    std::unique_ptr<FindCommandRequest> findCommand,
-    const ExtensionsCallback& extensionsCallback,
-    MatchExpressionParser::AllowedFeatureSet allowedFeatures,
-    const ProjectionPolicies& projectionPolicies) {
+    const boost::intrusive_ptr<ExpressionContext>& expCtx, ParsedFindCommandParams&& params) {
     // A collator can enter through both the FindCommandRequest and ExpressionContext arguments.
     // This invariant ensures that both collators are the same because downstream we
     // pull the collator from only one of the ExpressionContext carrier.
-    auto collator = resolveCollator(expCtx->opCtx, findCommand);
+    auto collator = resolveCollator(expCtx->opCtx, params.findCommand);
     if (collator.get() && expCtx->getCollator()) {
         invariant(CollatorInterface::collatorsMatch(collator.get(), expCtx->getCollator()));
     }
-    return parseWithValidatedCollator(
-        expCtx, std::move(findCommand), extensionsCallback, allowedFeatures, projectionPolicies);
+    return parseWithValidatedCollator(expCtx,
+                                      std::move(params.findCommand),
+                                      params.extensionsCallback,
+                                      params.allowedFeatures,
+                                      params.projectionPolicies);
 }
 }  // namespace parsed_find_command
 }  // namespace mongo

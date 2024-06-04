@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -167,7 +166,8 @@ public:
 
     virtual bool inQuiesceMode() const override;
 
-    virtual void shutdown(OperationContext* opCtx) override;
+    virtual void shutdown(OperationContext* opCtx,
+                          BSONObjBuilder* shutdownTimeElapsedBuilder) override;
 
     virtual const ReplSettings& getSettings() const override;
 
@@ -417,7 +417,7 @@ public:
     virtual void waitUntilSnapshotCommitted(OperationContext* opCtx,
                                             const Timestamp& untilSnapshot) override;
 
-    virtual void appendDiagnosticBSON(BSONObjBuilder*) override;
+    void appendDiagnosticBSON(BSONObjBuilder*, StringData) override;
 
     virtual void appendConnectionStats(executor::ConnectionPoolStats* stats) const override;
 

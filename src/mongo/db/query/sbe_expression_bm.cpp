@@ -136,18 +136,22 @@ public:
             &_spoolIdGenerator,
             &_inListsSet,
             &_collatorsMap,
+            _expCtx,
             false /* needsMerge */,
             false /* allowDiskUse */
         };
 
-        auto evalExpr = stage_builder::generateExpression(state, expression.get(), _inputSlotId);
+        auto evalExpr = stage_builder::generateExpression(
+            state,
+            expression.get(),
+            stage_builder::TypedSlot{_inputSlotId, stage_builder::TypeSignature::kAnyScalarType});
 
         LOGV2_DEBUG(6979801,
                     1,
                     "sbe expression benchmark PlanStage",
                     "stage"_attr = debugPrint(stage.get()));
 
-        auto expr = evalExpr.extractExpr(state);
+        auto expr = evalExpr.extractExpr(state).expr;
         LOGV2_DEBUG(6979802,
                     1,
                     "sbe expression benchmark EExpression",
@@ -196,6 +200,7 @@ private:
     sbe::value::SpoolIdGenerator _spoolIdGenerator;
     stage_builder::StageBuilderState::InListsSet _inListsSet;
     stage_builder::StageBuilderState::CollatorsMap _collatorsMap;
+    boost::intrusive_ptr<ExpressionContext> _expCtx;
 
     sbe::value::SlotId _inputSlotId;
     std::unique_ptr<TimeZoneDatabase> _timeZoneDB;

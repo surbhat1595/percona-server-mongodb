@@ -34,7 +34,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -126,7 +125,9 @@ StatusWith<std::unique_ptr<ExpressionWithPlaceholder>> ExpressionWithPlaceholder
 }
 
 void ExpressionWithPlaceholder::optimizeFilter() {
-    _filter = MatchExpression::optimize(std::move(_filter));
+    // The Boolean simplifier is disabled since we don't want to simplify sub-expressions, but
+    // simplify the whole expression instead.
+    _filter = MatchExpression::optimize(std::move(_filter), /* enableSimplification */ false);
 
     auto newPlaceholder = parseTopLevelFieldName(_filter.get());
     invariant(newPlaceholder.getStatus());

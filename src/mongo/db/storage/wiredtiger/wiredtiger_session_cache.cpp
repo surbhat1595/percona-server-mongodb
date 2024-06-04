@@ -35,7 +35,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <wiredtiger.h>
 
 #include "mongo/base/error_codes.h"
@@ -248,19 +247,9 @@ void WiredTigerSessionCache::waitUntilDurable(OperationContext* opCtx,
     // For inMemory storage engines, the data is "as durable as it's going to get".
     // That is, a restart is equivalent to a complete node failure.
     if (isEphemeral()) {
-        auto journalListener = [&]() -> JournalListener* {
-            // The JournalListener may not be set immediately, so we must check under a mutex so as
-            // not to access the variable while setting a JournalListener. A JournalListener is only
-            // allowed to be set once, so using the pointer outside of a mutex is safe.
-            stdx::unique_lock<Latch> lk(_journalListenerMutex);
-            return _journalListener;
-        }();
-        if (journalListener && useListener == UseJournalListener::kUpdate) {
-            // Update the JournalListener before we return. Does a write while fetching the
-            // timestamp if primary. As far as listeners are concerned, all writes are as 'durable'
-            // as they are ever going to get on an inMemory storage engine.
-            auto token = _journalListener->getToken(opCtx);
-            journalListener->onDurable(token);
+        auto [journalListener, token] = _getJournalListenerWithToken(opCtx, useListener);
+        if (token) {
+            journalListener->onDurable(token.value());
         }
         return;
     }
@@ -284,62 +273,34 @@ void WiredTigerSessionCache::waitUntilDurable(OperationContext* opCtx,
     // waiters, as a log flush is much cheaper than a full checkpoint.
     if ((syncType == Fsync::kCheckpointStableTimestamp || syncType == Fsync::kCheckpointAll) &&
         !isEphemeral()) {
-        UniqueWiredTigerSession session = getSession();
-        WT_SESSION* s = session->getSession();
         auto encryptionKeyDB = _engine->getEncryptionKeyDB();
-        std::unique_ptr<WiredTigerSession> session2;
-        WT_SESSION* s2 = nullptr;
+        std::unique_ptr<WiredTigerSession> encryptionKeyDbSession;
+        WT_SESSION* ekdbSession = nullptr;
         if (encryptionKeyDB) {
-            session2 = std::make_unique<WiredTigerSession>(encryptionKeyDB->getConnection());
-            s2 = session2->getSession();
+            encryptionKeyDbSession =
+                std::make_unique<WiredTigerSession>(encryptionKeyDB->getConnection());
+            ekdbSession = encryptionKeyDbSession->getSession();
         }
-        {
-            auto journalListener = [&]() -> JournalListener* {
-                // The JournalListener may not be set immediately, so we must check under a mutex so
-                // as not to access the variable while setting a JournalListener. A JournalListener
-                // is only allowed to be set once, so using the pointer outside of a mutex is safe.
-                stdx::unique_lock<Latch> lk(_journalListenerMutex);
-                return _journalListener;
-            }();
-            boost::optional<JournalListener::Token> token;
-            if (journalListener && useListener == UseJournalListener::kUpdate) {
-                // Update a persisted value with the latest write timestamp that is safe across
-                // startup recovery in the repl layer. Then report that timestamp as durable to the
-                // repl layer below after we have flushed in-memory data to disk.
-                // Note: only does a write if primary, otherwise just fetches the timestamp.
-                token = journalListener->getToken(opCtx);
-            }
 
+        auto [journalListener, token] = _getJournalListenerWithToken(opCtx, useListener);
+
+        getKVEngine()->forceCheckpoint(syncType == Fsync::kCheckpointStableTimestamp);
+
+        if (ekdbSession) {
             auto config = syncType == Fsync::kCheckpointStableTimestamp ? "use_timestamp=true"
                                                                         : "use_timestamp=false";
-
-            invariantWTOK(s->checkpoint(s, config), s);
-            if (s2)
-                invariantWTOK(s2->checkpoint(s2, config), s2);
-
-            if (token) {
-                journalListener->onDurable(token.value());
-            }
+            invariantWTOK(ekdbSession->checkpoint(ekdbSession, config), ekdbSession);
         }
+
+        if (token) {
+            journalListener->onDurable(token.value());
+        }
+
         LOGV2_DEBUG(22418, 4, "created checkpoint (forced)");
         return;
     }
 
-    auto journalListener = [&]() -> JournalListener* {
-        // The JournalListener may not be set immediately, so we must check under a mutex so as not
-        // to access the variable while setting a JournalListener. A JournalListener is only allowed
-        // to be set once, so using the pointer outside of a mutex is safe.
-        stdx::unique_lock<Latch> lk(_journalListenerMutex);
-        return _journalListener;
-    }();
-    boost::optional<JournalListener::Token> token;
-    if (journalListener && useListener == UseJournalListener::kUpdate) {
-        // Update a persisted value with the latest write timestamp that is safe across startup
-        // recovery in the repl layer. Then report that timestamp as durable to the repl layer below
-        // after we have flushed in-memory data to disk.
-        // Note: only does a write if primary, otherwise just fetches the timestamp.
-        token = journalListener->getToken(opCtx);
-    }
+    auto [journalListener, token] = _getJournalListenerWithToken(opCtx, useListener);
 
     uint32_t start = _lastSyncTime.load();
     // Do the remainder in a critical section that ensures only a single thread at a time
@@ -348,6 +309,14 @@ void WiredTigerSessionCache::waitUntilDurable(OperationContext* opCtx,
     uint32_t current = _lastSyncTime.loadRelaxed();  // synchronized with writes through mutex
     if (current != start) {
         // Someone else synced already since we read lastSyncTime, so we're done!
+
+        // Unconditionally unlock mutex here to run operations that do not require synchronization.
+        // The JournalListener is the only operation that meets this criteria currently.
+        lk.unlock();
+        if (token) {
+            journalListener->onDurable(token.value());
+        }
+
         return;
     }
     _lastSyncTime.store(current + 1);
@@ -374,24 +343,14 @@ void WiredTigerSessionCache::waitUntilDurable(OperationContext* opCtx,
     audit::fsyncAuditLog();
 #endif
 
-    // Use the journal when available, or a checkpoint otherwise.
-    if (!isEphemeral()) {
-        invariantWTOK(_waitUntilDurableSession->log_flush(_waitUntilDurableSession, "sync=on"),
-                      _waitUntilDurableSession);
-        LOGV2_DEBUG(22419, 4, "flushed journal");
-    } else {
-        invariantWTOK(_waitUntilDurableSession->checkpoint(_waitUntilDurableSession, nullptr),
-                      _waitUntilDurableSession);
-        LOGV2_DEBUG(22420, 4, "created checkpoint");
-    }
+    // Flush the journal.
+    invariantWTOK(_waitUntilDurableSession->log_flush(_waitUntilDurableSession, "sync=on"),
+                  _waitUntilDurableSession);
+    LOGV2_DEBUG(22419, 4, "flushed journal");
 
     // keyDB is always durable (opened with journal enabled)
     if (_keyDBSession) {
         invariantWTOK(_keyDBSession->log_flush(_keyDBSession, "sync=on"), _keyDBSession);
-    }
-
-    if (token) {
-        journalListener->onDurable(token.value());
     }
 
     // The session is reset periodically so that WT doesn't consider it a rogue session and log
@@ -399,6 +358,13 @@ void WiredTigerSessionCache::waitUntilDurable(OperationContext* opCtx,
     if (_timeSinceLastDurabilitySessionReset.millis() > (5 * 60 * 1000 /* 5 minutes */)) {
         _waitUntilDurableSession->reset(_waitUntilDurableSession);
         _timeSinceLastDurabilitySessionReset.reset();
+    }
+
+    // Unconditionally unlock mutex here to run operations that do not require synchronization.
+    // The JournalListener is the only operation that meets this criteria currently.
+    lk.unlock();
+    if (token) {
+        journalListener->onDurable(token.value());
     }
 }
 
@@ -588,6 +554,27 @@ bool WiredTigerSessionCache::isEngineCachingCursors() {
 void WiredTigerSessionCache::WiredTigerSessionDeleter::operator()(
     WiredTigerSession* session) const {
     session->_cache->releaseSession(session);
+}
+
+std::pair<JournalListener*, boost::optional<JournalListener::Token>>
+WiredTigerSessionCache::_getJournalListenerWithToken(OperationContext* opCtx,
+                                                     UseJournalListener useListener) {
+    auto journalListener = [&]() -> JournalListener* {
+        // The JournalListener may not be set immediately, so we must check under a mutex so
+        // as not to access the variable while setting a JournalListener. A JournalListener
+        // is only allowed to be set once, so using the pointer outside of a mutex is safe.
+        stdx::unique_lock<Latch> lk(_journalListenerMutex);
+        return _journalListener;
+    }();
+    boost::optional<JournalListener::Token> token;
+    if (journalListener && useListener == UseJournalListener::kUpdate) {
+        // Update a persisted value with the latest write timestamp that is safe across
+        // startup recovery in the repl layer. Then report that timestamp as durable to the
+        // repl layer below after we have flushed in-memory data to disk.
+        // Note: only does a write if primary, otherwise just fetches the timestamp.
+        token = journalListener->getToken(opCtx);
+    }
+    return std::make_pair(journalListener, token);
 }
 
 }  // namespace mongo

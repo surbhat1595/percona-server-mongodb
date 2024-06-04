@@ -63,7 +63,7 @@ ABT::reference_type PathFusion::follow(ABT::reference_type n) {
 bool PathFusion::fuse(ABT& lhs, const ABT& rhs) {
     if (auto rhsComposeM = rhs.cast<PathComposeM>(); rhsComposeM != nullptr) {
         for (const auto& branch : collectComposed(rhs)) {
-            if (_info[branch.cast<PathSyntaxSort>()]._isConst && fuse(lhs, branch)) {
+            if (_info[branch.cast<PathSyntaxSort>()]._isConst && fuse(lhs, branch.copy())) {
                 return true;
             }
         }
@@ -85,11 +85,15 @@ bool PathFusion::fuse(ABT& lhs, const ABT& rhs) {
     if (auto lhsTraverse = lhs.cast<PathTraverse>(); lhsTraverse != nullptr) {
         if (auto rhsTraverse = rhs.cast<PathTraverse>();
             rhsTraverse != nullptr && lhsTraverse->getMaxDepth() == rhsTraverse->getMaxDepth()) {
+            // If the LHS and RHS are PathTraverses with equal depth, we can try to fuse the inner
+            // paths.
             return fuse(lhsTraverse->getPath(), rhsTraverse->getPath());
         }
 
         auto rhsType = _info[rhs.cast<PathSyntaxSort>()]._type;
         if (rhsType != Type::unknown && rhsType != Type::array) {
+            // If we know that the RHS is a non-array, we can eliminate the PathTraverse since it is
+            // an unecessary operation.
             auto result = std::exchange(lhsTraverse->getPath(), make<Blackhole>());
             std::swap(lhs, result);
             return fuse(lhs, rhs);
@@ -109,6 +113,22 @@ bool PathFusion::fuse(ABT& lhs, const ABT& rhs) {
 
     if (auto rhsConst = rhs.cast<PathConstant>(); rhsConst != nullptr) {
         if (auto lhsCmp = lhs.cast<PathCompare>(); lhsCmp != nullptr) {
+            // We can directly inline the comparison since we know it is a comparison to a
+            // constant.
+            if (lhsCmp->op() == Operations::EqMember) {
+                auto result = make<PathConstant>(make<If>(
+                    make<FunctionCall>("isArray", makeSeq(lhsCmp->getVal())),
+                    make<BinaryOp>(Operations::EqMember, rhsConst->getConstant(), lhsCmp->getVal()),
+                    make<BinaryOp>(Operations::Eq,
+                                   make<BinaryOp>(Operations::Cmp3w,
+                                                  rhsConst->getConstant(),
+                                                  lhsCmp->getVal()),
+                                   Constant::int64(0))));
+
+                std::swap(lhs, result);
+                return true;
+            }
+
             auto result = make<PathConstant>(make<BinaryOp>(
                 lhsCmp->op(),
                 make<BinaryOp>(Operations::Cmp3w, rhsConst->getConstant(), lhsCmp->getVal()),
@@ -303,6 +323,10 @@ void PathFusion::transport(ABT& n, const PathComposeM& path, ABT& p1, ABT& p2) {
         _changed = true;
     } else if (p2InfoIt->second._type == Type::object) {
         auto left = collectComposed(p1);
+
+        // We can remove any PathObj elements in this loop because we know that p2 will produce an
+        // object and that p2 will be applied after p1 is applied to the input (so the final output
+        // of the PathComposeM will be an object).
         for (auto l : left) {
             if (l.is<PathObj>()) {
                 _redundant.emplace(l.cast<PathSyntaxSort>());
@@ -352,30 +376,36 @@ void PathFusion::tryFuseComposition(ABT& n, ABT& input) {
             }
 
             // Overwrite field with the latest value.
-            if (fieldMap.insert_or_assign(fieldPtr->name(), branch).second) {
+            if (fieldMap.insert_or_assign(fieldPtr->name(), branch.copy()).second) {
                 orderedFieldNames.push_back(fieldPtr->name());
             } else {
                 updated = true;
             }
         } else if (auto keepPtr = branch.cast<PathKeep>()) {
+            // This loop checks to see if we can delete any field values depending on if they are
+            // kept by this PathKeep.
             for (auto it = fieldMap.begin(); it != fieldMap.cend();) {
                 if (keepPtr->getNames().count(it->first) == 0) {
                     // Field is not kept, erase.
                     fieldMap.erase(it++);
                     updated = true;
                 } else {
+                    // Field is kept, we can leave the value of the field.
                     it++;
                 }
             }
 
             auto newKeepSet = keepPtr->getNames();
             if (toKeep) {
+                // This loop finds the intersection between fields kept by any previous PathKeeps
+                // and the current PathKeep.
                 for (auto it = newKeepSet.begin(); it != newKeepSet.end();) {
                     if (toKeep->count(*it) == 0) {
-                        // Field was not previously kept.
+                        // Field was not previously kept, so there is no such field to keep anymore.
                         newKeepSet.erase(it++);
                         updated = true;
                     } else {
+                        // Field was kept by a previous PathKeep.
                         it++;
                     }
                 }

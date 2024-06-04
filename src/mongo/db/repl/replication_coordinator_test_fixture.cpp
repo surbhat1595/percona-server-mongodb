@@ -36,7 +36,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -180,7 +179,7 @@ void ReplCoordTest::init() {
     _externalState = externalState.get();
     executor::ThreadPoolMock::Options tpOptions;
     tpOptions.onCreateThread = []() {
-        Client::initThread("replexec");
+        Client::initThread("replexec", getGlobalServiceContext()->getService());
 
         stdx::lock_guard<Client> lk(cc());
         cc().setSystemOperationUnkillableByStepdown(lk);
@@ -488,7 +487,7 @@ void ReplCoordTest::runSingleNodeElection(OperationContext* opCtx) {
 void ReplCoordTest::shutdown(OperationContext* opCtx) {
     invariant(_callShutdown);
     _net->exitNetwork();
-    _repl->shutdown(opCtx);
+    _repl->shutdown(opCtx, nullptr /* shutdownTimeElapsedBuilder */);
     _callShutdown = false;
 }
 

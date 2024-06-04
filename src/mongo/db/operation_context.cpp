@@ -31,7 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <string>
 #include <thread>
@@ -51,6 +50,7 @@
 #include "mongo/platform/compiler.h"
 #include "mongo/platform/random.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/transport/baton.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
@@ -265,16 +265,42 @@ Status OperationContext::checkForInterruptNoAssert() noexcept {
     }
 
     if (_markKillOnClientDisconnect) {
-        const auto now = getServiceContext()->getFastClockSource()->now();
+        if (auto status = _checkClientConnected(); !status.isOK()) {
+            return status;
+        }
+    }
 
-        if (now > _lastClientCheck + Milliseconds(500)) {
-            _lastClientCheck = now;
+    return Status::OK();
+}
 
-            if (!getClient()->session()->isConnected()) {
-                markKilled(ErrorCodes::ClientDisconnect);
-                return Status(ErrorCodes::ClientDisconnect,
-                              "operation was interrupted because a client disconnected");
-            }
+void OperationContext::_schedulePeriodicClientConnectedCheck() {
+    if (!_baton) {
+        return;
+    }
+
+    auto nextCheck = _lastClientCheck + Seconds(1);
+    _baton->waitUntil(nextCheck, getCancellationToken()).getAsync([&](auto waitStatus) {
+        if (!waitStatus.isOK()) {
+            return;
+        }
+        if (!_checkClientConnected().isOK()) {
+            return;
+        }
+        _schedulePeriodicClientConnectedCheck();
+    });
+}
+
+Status OperationContext::_checkClientConnected() {
+    const auto now = getServiceContext()->getFastClockSource()->now();
+
+    if (now > _lastClientCheck + Milliseconds(500)) {
+        _lastClientCheck = now;
+
+        auto client = getClient();
+        if (!client->session()->isConnected()) {
+            markKilled(client->getDisconnectErrorCode());
+            return Status(client->getDisconnectErrorCode(),
+                          "operation was interrupted because a client disconnected");
         }
     }
 
@@ -354,7 +380,7 @@ void OperationContext::markKilled(ErrorCodes::Error killCode) {
         invariant(!ErrorExtraInfo::parserFor(killCode));
     }
 
-    if (killCode == ErrorCodes::ClientDisconnect) {
+    if (killCode == getClient()->getDisconnectErrorCode()) {
         LOGV2(20883, "Interrupted operation as its client disconnected", "opId"_attr = getOpID());
     }
 
@@ -374,6 +400,10 @@ void OperationContext::markKilled(ErrorCodes::Error killCode) {
 }
 
 void OperationContext::markKillOnClientDisconnect() {
+    if (!getClient()) {
+        return;
+    }
+
     if (getClient()->isInDirectClient()) {
         return;
     }
@@ -382,13 +412,18 @@ void OperationContext::markKillOnClientDisconnect() {
         return;
     }
 
-    if (getClient() && getClient()->session()) {
+    if (auto session = getClient()->session()) {
         _lastClientCheck = getServiceContext()->getFastClockSource()->now();
 
         _markKillOnClientDisconnect = true;
 
         if (_baton) {
-            _baton->markKillOnClientDisconnect();
+            if (auto networkingBaton = _baton->networking(); networkingBaton &&
+                networkingBaton->getTransportLayer() == session->getTransportLayer()) {
+                networkingBaton->markKillOnClientDisconnect();
+            } else {
+                _schedulePeriodicClientConnectedCheck();
+            }
         }
     }
 }

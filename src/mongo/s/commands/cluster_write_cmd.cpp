@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/error_extra_info.h"
@@ -45,6 +44,7 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/client/read_preference.h"
+#include "mongo/db/commands/write_commands_common.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/fle_crud.h"
@@ -405,7 +405,10 @@ bool ClusterWriteCmd::handleWouldChangeOwningShardError(OperationContext* opCtx,
                 // insert a new one.
                 updatedShardKey = wouldChangeOwningShardErrorInfo &&
                     documentShardKeyUpdateUtil::updateShardKeyForDocumentLegacy(
-                                      opCtx, nss, *wouldChangeOwningShardErrorInfo);
+                                      opCtx,
+                                      nss,
+                                      *wouldChangeOwningShardErrorInfo,
+                                      nss.isTimeseriesBucketsCollection());
 
                 // If the operation was an upsert, record the _id of the new document.
                 if (updatedShardKey && wouldChangeOwningShardErrorInfo->getShouldUpsert()) {
@@ -458,7 +461,10 @@ bool ClusterWriteCmd::handleWouldChangeOwningShardError(OperationContext* opCtx,
             try {
                 // Delete the original document and insert the new one
                 updatedShardKey = documentShardKeyUpdateUtil::updateShardKeyForDocumentLegacy(
-                    opCtx, nss, *wouldChangeOwningShardErrorInfo);
+                    opCtx,
+                    nss,
+                    *wouldChangeOwningShardErrorInfo,
+                    nss.isTimeseriesBucketsCollection());
 
                 // If the operation was an upsert, record the _id of the new document.
                 if (updatedShardKey && wouldChangeOwningShardErrorInfo->getShouldUpsert()) {
@@ -633,20 +639,10 @@ bool ClusterWriteCmd::InvocationBase::runImpl(OperationContext* opCtx,
 
             invariant(_updateMetrics);
             for (auto&& update : _batchedRequest.getUpdateRequest().getUpdates()) {
-                // If this was a pipeline style update, record that pipeline-style was used and
-                // which stages were being used.
-                auto updateMod = update.getU();
-                if (updateMod.type() == write_ops::UpdateModification::Type::kPipeline) {
-                    auto pipeline =
-                        LiteParsedPipeline(_batchedRequest.getNS(), updateMod.getUpdatePipeline());
-                    pipeline.tickGlobalStageCounters();
-                    _updateMetrics->incrementExecutedWithAggregationPipeline();
-                }
-
-                // If this command had arrayFilters option, record that it was used.
-                if (update.getArrayFilters()) {
-                    _updateMetrics->incrementExecutedWithArrayFilters();
-                }
+                incrementUpdateMetrics(update.getU(),
+                                       _batchedRequest.getNS(),
+                                       *_updateMetrics,
+                                       update.getArrayFilters());
             }
             break;
         case BatchedCommandRequest::BatchType_Delete:
@@ -721,7 +717,8 @@ bool ClusterWriteCmd::InvocationBase::_runExplainWithoutShardKey(
                 query,
                 collation,
                 _batchedRequest.getLet(),
-                _batchedRequest.getLegacyRuntimeConstants())) {
+                _batchedRequest.getLegacyRuntimeConstants(),
+                false /* isTimeseriesViewRequest */)) {
             // Explain currently cannot be run within a transaction, so each command is instead run
             // separately outside of a transaction, and we compose the results at the end.
             auto clusterQueryWithoutShardKeyExplainRes = [&] {

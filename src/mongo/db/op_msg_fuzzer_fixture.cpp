@@ -32,7 +32,6 @@
 #include <utility>
 #include <vector>
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/initializer.h"
@@ -55,6 +54,7 @@
 #include "mongo/db/s/collection_sharding_state_factory_standalone.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_entry_point_mongod.h"
+#include "mongo/db/session_manager_mongod.h"
 #include "mongo/db/storage/control/storage_control.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_engine_init.h"
@@ -101,15 +101,15 @@ OpMsgFuzzerFixture::OpMsgFuzzerFixture(bool skipGlobalInitializers)
 
     _serviceContext = getGlobalServiceContext();
     _setAuthorizationManager();
-    _serviceContext->setServiceEntryPoint(
-        std::make_unique<ServiceEntryPointMongod>(_serviceContext));
+    _serviceContext->getService()->setServiceEntryPoint(
+        std::make_unique<ServiceEntryPointMongod>());
 
     auto observerRegistry = std::make_unique<OpObserverRegistry>();
     _serviceContext->setOpObserver(std::move(observerRegistry));
 
     _serviceContext->setPeriodicRunner(makePeriodicRunner(_serviceContext));
 
-    _clientStrand = ClientStrand::make(_serviceContext->makeClient("test", _session));
+    _clientStrand = ClientStrand::make(_serviceContext->getService()->makeClient("test", _session));
     auto clientGuard = _clientStrand->bind();
     auto opCtx = _serviceContext->makeOperationContext(clientGuard.get());
 
@@ -170,7 +170,10 @@ int OpMsgFuzzerFixture::testOneInput(const char* Data, size_t Size) {
     Message msg(std::move(sb));
 
     try {
-        _serviceContext->getServiceEntryPoint()->handleRequest(opCtx.get(), msg).get();
+        _serviceContext->getService()
+            ->getServiceEntryPoint()
+            ->handleRequest(opCtx.get(), msg)
+            .get();
     } catch (const AssertionException&) {
         // We need to catch exceptions caused by invalid inputs
     }

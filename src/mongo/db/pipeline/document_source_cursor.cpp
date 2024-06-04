@@ -34,7 +34,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/bson/bsontypes.h"
@@ -49,6 +48,7 @@
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_settings_gen.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/logv2/log.h"
@@ -373,8 +373,10 @@ DocumentSourceCursor::DocumentSourceCursor(
       _queryFramework(_exec->getQueryFramework()) {
     // It is illegal for both 'kEmptyDocuments' to be set and _resumeTrackingType to be other than
     // 'kNone'.
-    invariant(cursorType != CursorType::kEmptyDocuments ||
-              resumeTrackingType == ResumeTrackingType::kNone);
+    uassert(ErrorCodes::InvalidOptions,
+            "The resumeToken is not compatible with this query",
+            cursorType != CursorType::kEmptyDocuments ||
+                resumeTrackingType == ResumeTrackingType::kNone);
 
     // Later code in the DocumentSourceCursor lifecycle expects that '_exec' is in a saved state.
     _exec->saveState();

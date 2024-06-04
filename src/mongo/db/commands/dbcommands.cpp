@@ -38,7 +38,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -181,7 +180,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(CmdDropDatabase);
+MONGO_REGISTER_COMMAND(CmdDropDatabase).forShard();
 
 /* drop collection */
 class CmdDrop : public DropCmdVersion1Gen<CmdDrop> {
@@ -248,7 +247,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(CmdDrop);
+MONGO_REGISTER_COMMAND(CmdDrop).forShard();
 
 class CmdDataSize final : public TypedCommand<CmdDataSize> {
 public:
@@ -436,7 +435,7 @@ public:
         return Request::kCommandDescription.toString();
     }
 };
-MONGO_REGISTER_COMMAND(CmdDataSize);
+MONGO_REGISTER_COMMAND(CmdDataSize).forShard();
 
 Rarely _collStatsSampler;
 
@@ -484,6 +483,11 @@ public:
         }
 
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* reply) final {
+            // Critical to monitoring and observability, categorize the command as immediate
+            // priority.
+            ScopedAdmissionPriorityForLock skipAdmissionControl(
+                opCtx->lockState(), AdmissionContext::Priority::kImmediate);
+
             if (_collStatsSampler.tick())
                 LOGV2_WARNING(7024600,
                               "The collStats command is deprecated. For more information, see "
@@ -509,7 +513,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(CmdCollStats);
+MONGO_REGISTER_COMMAND(CmdCollStats).forShard();
 
 class CollectionModCommand : public TypedCommand<CollectionModCommand> {
 public:
@@ -559,7 +563,8 @@ public:
                                                       AuthorizationSession::get(opCtx->getClient()),
                                                       request().getNamespace(),
                                                       unparsedRequest().body,
-                                                      false));
+                                                      false,
+                                                      request().getSerializationContext()));
         }
 
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* reply) final {
@@ -621,7 +626,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(CollectionModCommand);
+MONGO_REGISTER_COMMAND(CollectionModCommand).forShard();
 
 class CmdDbStats final : public TypedCommand<CmdDbStats> {
 public:
@@ -656,6 +661,11 @@ public:
         }
 
         Reply typedRun(OperationContext* opCtx) {
+            // Critical to monitoring and observability, categorize the command as immediate
+            // priority.
+            ScopedAdmissionPriorityForLock skipAdmissionControl(
+                opCtx->lockState(), AdmissionContext::Priority::kImmediate);
+
             const auto& cmd = request();
             const auto& dbname = cmd.getDbName();
 
@@ -664,8 +674,7 @@ public:
 
             uassert(ErrorCodes::InvalidNamespace,
                     str::stream() << "Invalid db name: " << dbname.toStringForErrorMsg(),
-                    NamespaceString::validDBName(dbname,
-                                                 NamespaceString::DollarInDbNameBehavior::Allow));
+                    DatabaseName::isValid(dbname, DatabaseName::DollarInDbNameBehavior::Allow));
 
             {
                 CurOp::get(opCtx)->ensureStarted();
@@ -733,7 +742,7 @@ public:
         return Request::kCommandDescription.toString();
     }
 };
-MONGO_REGISTER_COMMAND(CmdDbStats);
+MONGO_REGISTER_COMMAND(CmdDbStats).forShard();
 
 // Provides the means to asynchronously run `buildinfo` commands.
 class BuildInfoExecutor final : public AsyncRequestExecutor {
@@ -741,6 +750,10 @@ public:
     BuildInfoExecutor() : AsyncRequestExecutor("BuildInfoExecutor") {}
 
     Status handleRequest(std::shared_ptr<RequestExecutionContext> rec) {
+        // Critical to observability and diagnosability, categorize as immediate priority.
+        ScopedAdmissionPriorityForLock skipAdmissionControl(rec->getOpCtx()->lockState(),
+                                                            AdmissionContext::Priority::kImmediate);
+
         auto result = rec->getReplyBuilder()->getBodyBuilder();
         VersionInfoInterface::instance().appendBuildInfo(&result);
         appendStorageEngineList(rec->getOpCtx()->getServiceContext(), &result);
@@ -801,6 +814,10 @@ public:
              const DatabaseName&,
              const BSONObj& jsobj,
              BSONObjBuilder& result) final {
+        // Critical to monitoring and observability, categorize the command as immediate
+        // priority.
+        ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+                                                            AdmissionContext::Priority::kImmediate);
         VersionInfoInterface::instance().appendBuildInfo(&result);
         appendStorageEngineList(opCtx->getServiceContext(), &result);
         return true;
@@ -811,7 +828,7 @@ public:
         return BuildInfoExecutor::get(opCtx->getServiceContext())->schedule(std::move(rec));
     }
 };
-MONGO_REGISTER_COMMAND(CmdBuildInfo);
+MONGO_REGISTER_COMMAND(CmdBuildInfo).forShard();
 
 }  // namespace
 }  // namespace mongo

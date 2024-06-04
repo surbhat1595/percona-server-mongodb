@@ -39,7 +39,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -157,7 +156,7 @@ FeaturesReply FeaturesCmd::Invocation::typedRun(OperationContext*) {
     reply.setOidMachine(static_cast<long>(OID::getMachineId()));
     return reply;
 }
-MONGO_REGISTER_COMMAND(FeaturesCmd);
+MONGO_REGISTER_COMMAND(FeaturesCmd).forRouter().forShard();
 
 struct AnyDbNoTenant {
     static constexpr bool kAdminOnly = false;
@@ -176,7 +175,11 @@ void HostInfoCmd::Invocation::doCheckAuthorization(OperationContext* opCtx) cons
                 ActionType::hostInfo));
 }
 template <>
-HostInfoReply HostInfoCmd::Invocation::typedRun(OperationContext*) {
+HostInfoReply HostInfoCmd::Invocation::typedRun(OperationContext* opCtx) {
+    // Critical to observability and diagnosability, categorize as immediate priority.
+    ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+                                                        AdmissionContext::Priority::kImmediate);
+
     ProcessInfo p;
 
     HostInfoSystemReply system;
@@ -208,7 +211,7 @@ HostInfoReply HostInfoCmd::Invocation::typedRun(OperationContext*) {
 
     return reply;
 }
-MONGO_REGISTER_COMMAND(HostInfoCmd);
+MONGO_REGISTER_COMMAND(HostInfoCmd).forRouter().forShard();
 
 // { getCmdLineOpts: 1}
 using GetCmdLineOptsCmd = GenericTC<GetCmdLineOptsCommand>;
@@ -222,13 +225,17 @@ void GetCmdLineOptsCmd::Invocation::doCheckAuthorization(OperationContext* opCtx
                 ActionType::getCmdLineOpts));
 }
 template <>
-GetCmdLineOptsReply GetCmdLineOptsCmd::Invocation::typedRun(OperationContext*) {
+GetCmdLineOptsReply GetCmdLineOptsCmd::Invocation::typedRun(OperationContext* opCtx) {
+    // Critical to observability and diagnosability, categorize as immediate priority.
+    ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+                                                        AdmissionContext::Priority::kImmediate);
+
     GetCmdLineOptsReply reply;
     reply.setArgv(serverGlobalParams.argvArray);
     reply.setParsed(serverGlobalParams.parsedOpts);
     return reply;
 }
-MONGO_REGISTER_COMMAND(GetCmdLineOptsCmd);
+MONGO_REGISTER_COMMAND(GetCmdLineOptsCmd).forRouter().forShard();
 
 // { logRotate: 1 || string }
 using LogRotateCmd = GenericTC<LogRotateCommand>;
@@ -269,7 +276,7 @@ OkReply LogRotateCmd::Invocation::typedRun(OperationContext* opCtx) {
 
     return OkReply();
 }
-MONGO_REGISTER_COMMAND(LogRotateCmd);
+MONGO_REGISTER_COMMAND(LogRotateCmd).forRouter().forShard();
 
 // { getLog: '*' or 'logName' }
 // We use BasicCommand here instead of TypedCommand
@@ -310,6 +317,10 @@ public:
              const DatabaseName&,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) final {
+        // Critical to observability and diagnosability, categorize as immediate priority.
+        ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+                                                            AdmissionContext::Priority::kImmediate);
+
         if (MONGO_unlikely(hangInGetLog.shouldFail())) {
             LOGV2(5113600, "Hanging in getLog");
             hangInGetLog.pauseWhileSet();
@@ -347,7 +358,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(GetLogCmd);
+MONGO_REGISTER_COMMAND(GetLogCmd).forRouter().forShard();
 
 // { clearLog: 'name' }
 using ClearLogCmd = GenericTC<ClearLogCommand>;
@@ -369,7 +380,7 @@ OkReply ClearLogCmd::Invocation::typedRun(OperationContext* opCtx) {
 
     return OkReply();
 }
-MONGO_REGISTER_COMMAND(ClearLogCmd).testOnly();
+MONGO_REGISTER_COMMAND(ClearLogCmd).testOnly().forRouter().forShard();
 
 }  // namespace
 }  // namespace mongo

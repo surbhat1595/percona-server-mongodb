@@ -30,7 +30,6 @@
 
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <iterator>
 #include <memory>
@@ -76,7 +75,6 @@ namespace {
 
 const char kMinKey[] = "min";
 const char kMaxKey[] = "max";
-const char kShouldMigrate[] = "shouldMigrate";
 
 }  // namespace
 
@@ -125,7 +123,8 @@ StatusWith<long long> retrieveCollectionShardSize(OperationContext* opCtx,
 
     const Minutes maxTimeMSOverride{10};
     const auto cmdObj =
-        BSON("dataSize" << NamespaceStringUtil::serialize(ns) << "estimate" << estimate);
+        BSON("dataSize" << NamespaceStringUtil::serialize(ns, SerializationContext::stateDefault())
+                        << "estimate" << estimate);
     auto statStatus = shardStatus.getValue()->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryPreferred},
@@ -185,15 +184,14 @@ StatusWith<std::vector<BSONObj>> selectChunkSplitPoints(OperationContext* opCtx,
     return response.getSplitKeys();
 }
 
-StatusWith<boost::optional<ChunkRange>> splitChunkAtMultiplePoints(
-    OperationContext* opCtx,
-    const ShardId& shardId,
-    const NamespaceString& nss,
-    const ShardKeyPattern& shardKeyPattern,
-    const OID& epoch,
-    const Timestamp& timestamp,
-    const ChunkRange& chunkRange,
-    const std::vector<BSONObj>& splitPoints) {
+Status splitChunkAtMultiplePoints(OperationContext* opCtx,
+                                  const ShardId& shardId,
+                                  const NamespaceString& nss,
+                                  const ShardKeyPattern& shardKeyPattern,
+                                  const OID& epoch,
+                                  const Timestamp& timestamp,
+                                  const ChunkRange& chunkRange,
+                                  const std::vector<BSONObj>& splitPoints) {
     invariant(!splitPoints.empty());
 
     auto splitPointsBeginIt = splitPoints.begin();
@@ -227,7 +225,8 @@ StatusWith<boost::optional<ChunkRange>> splitChunkAtMultiplePoints(
     }
 
     BSONObjBuilder cmd;
-    cmd.append("splitChunk", NamespaceStringUtil::serialize(nss));
+    cmd.append("splitChunk",
+               NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
     cmd.append("from", shardId.toString());
     cmd.append("keyPattern", shardKeyPattern.toBSON());
     cmd.append("epoch", epoch);
@@ -261,7 +260,6 @@ StatusWith<boost::optional<ChunkRange>> splitChunkAtMultiplePoints(
 
     if (!status.isOK()) {
         LOGV2(22878,
-              "Split chunk {request} failed: {error}",
               "Split chunk request against shard failed",
               "request"_attr = redact(cmdObj),
               "shardId"_attr = shardId,
@@ -269,28 +267,30 @@ StatusWith<boost::optional<ChunkRange>> splitChunkAtMultiplePoints(
         return status.withContext("split failed");
     }
 
-    BSONElement shouldMigrateElement;
-    status = bsonExtractTypedField(cmdResponse, kShouldMigrate, Object, &shouldMigrateElement);
-    if (status.isOK()) {
-        auto chunkRangeStatus = ChunkRange::fromBSON(shouldMigrateElement.embeddedObject());
-        if (!chunkRangeStatus.isOK()) {
-            return chunkRangeStatus.getStatus();
-        }
+    return Status::OK();
+}
 
-        return boost::optional<ChunkRange>(std::move(chunkRangeStatus.getValue()));
-    } else if (status != ErrorCodes::NoSuchKey) {
-        LOGV2_WARNING(
-            22879,
-            "Chunk migration will be skipped because splitChunk returned invalid response: "
-            "{response}. Extracting {field} field failed: {error}",
-            "Chunk migration will be skipped because extracting field from splitChunk response "
-            "failed",
-            "response"_attr = redact(cmdResponse),
-            "field"_attr = kShouldMigrate,
-            "error"_attr = redact(status));
+ShardId selectLeastLoadedShard(OperationContext* opCtx) {
+    auto shardRegistry = Grid::get(opCtx)->shardRegistry();
+    auto allShardIds = shardRegistry->getAllShardIds(opCtx);
+    uassert(ErrorCodes::ShardNotFound, "No shards found", !allShardIds.empty());
+
+    ShardId candidateShardId = allShardIds[0];
+
+    auto candidateSize = uassertStatusOK(retrieveTotalShardSize(opCtx, candidateShardId));
+
+    for (size_t i = 1; i < allShardIds.size(); i++) {
+        const ShardId shardId = allShardIds[i];
+
+        const auto currentSize = uassertStatusOK(retrieveTotalShardSize(opCtx, shardId));
+
+        if (currentSize < candidateSize) {
+            candidateSize = currentSize;
+            candidateShardId = shardId;
+        }
     }
 
-    return boost::optional<ChunkRange>();
+    return candidateShardId;
 }
 
 }  // namespace shardutil

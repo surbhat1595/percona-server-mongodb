@@ -34,7 +34,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -90,9 +89,8 @@ Status insertDatabaseEntryForBackwardCompatibility(OperationContext* opCtx,
 
     DBDirectClient client(opCtx);
     auto commandResponse = client.runCommand([&] {
-        auto dbMetadata = DatabaseType(DatabaseNameUtil::serialize(dbName),
-                                       ShardId::kConfigServerId,
-                                       DatabaseVersion::makeFixed());
+        auto dbMetadata =
+            DatabaseType(dbName, ShardId::kConfigServerId, DatabaseVersion::makeFixed());
 
         write_ops::InsertCommandRequest insertOp(NamespaceString::kShardConfigDatabasesNamespace);
         insertOp.setDocuments({dbMetadata.toBSON()});
@@ -210,11 +208,7 @@ public:
                 criticalSectionSignal->get(opCtx);
 
             if (Base::request().getSyncFromConfig()) {
-                LOGV2_DEBUG(21981,
-                            1,
-                            "Forcing remote routing table refresh for {db}",
-                            "Forcing remote routing table refresh",
-                            "db"_attr = dbName);
+                LOGV2_DEBUG(21981, 1, "Forcing remote routing table refresh", "db"_attr = dbName);
                 uassertStatusOK(onDbVersionMismatchNoExcept(opCtx, dbName, boost::none));
             }
 
@@ -226,7 +220,8 @@ public:
     private:
         DatabaseName _dbName() const {
             return DatabaseNameUtil::deserialize(boost::none,
-                                                 Base::request().getCommandParameter());
+                                                 Base::request().getCommandParameter(),
+                                                 Base::request().getSerializationContext());
         }
     };
 };
@@ -240,7 +235,7 @@ public:
         return false;
     }
 };
-MONGO_REGISTER_COMMAND(FlushDatabaseCacheUpdatesCmd);
+MONGO_REGISTER_COMMAND(FlushDatabaseCacheUpdatesCmd).forShard();
 
 class FlushDatabaseCacheUpdatesWithWriteConcernCmd final
     : public FlushDatabaseCacheUpdatesCmdBase<FlushDatabaseCacheUpdatesWithWriteConcernCmd> {
@@ -251,7 +246,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(FlushDatabaseCacheUpdatesWithWriteConcernCmd);
+MONGO_REGISTER_COMMAND(FlushDatabaseCacheUpdatesWithWriteConcernCmd).forShard();
 
 }  // namespace
 }  // namespace mongo

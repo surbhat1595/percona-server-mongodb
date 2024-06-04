@@ -38,7 +38,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -144,7 +143,7 @@ public:
     }
     void visit(const ModMatchExpression* expr) final {
         countParam(expr->getDivisorInputParamId());
-        countParam(expr->getRemainder());
+        countParam(expr->getRemainderInputParamId());
     }
     void visit(const NorMatchExpression* expr) final {}
     void visit(const NotMatchExpression* expr) final {}
@@ -526,6 +525,63 @@ TEST(MatchExpressionParameterizationVisitor, OrMatchExpressionSetsThreeParamWith
 }
 
 TEST(MatchExpressionParameterizationVisitor,
+     MapIsUsedForParamIdLookupsAfterContextSizeExceedsThreshold) {
+    MatchExpressionParameterizationVisitorContext context{};
+    std::vector<std::unique_ptr<MatchExpression>> expressions;
+
+    auto expectedSize = context.kUseMapThreshold;
+
+    auto addExpressions = [&]() {
+        for (size_t i = 0; i < expectedSize; i++) {
+            BSONObj gt = BSON("$gt" << static_cast<int>(i));
+            expressions.emplace_back(std::make_unique<GTMatchExpression>("a"_sd, gt["$gt"]));
+        }
+    };
+
+    // Add the same set of 50 expressions twice. For duplicate expressions, param ids will be reused
+    // by doing a lookup on the map.
+    addExpressions();
+    addExpressions();
+
+    OrMatchExpression expr{std::move(expressions)};
+    walkExpression(&context, &expr);
+
+    // Ensure param ids were reused for duplicate expressions.
+    ASSERT_EQ(expectedSize, context.inputParamIdToExpressionMap.size());
+    // The tasserts in MatchExpressionParameterizationVisitorContext::nextReusableInputParamId
+    // ensure the map is actually used for lookups once the amount of input param ids exceeds
+    // kUseMapThreshold.
+    ASSERT_TRUE(context.inputParamIdToExpressionMap.usingMap());
+}
+
+TEST(MatchExpressionParameterizationVisitor,
+     MapIsNotUsedForParamIdLookupsUntilContextSizeExceedsThreshold) {
+    MatchExpressionParameterizationVisitorContext context{};
+    std::vector<std::unique_ptr<MatchExpression>> expressions;
+
+    auto expectedSize = context.kUseMapThreshold - 1;
+
+    auto addExpressions = [&]() {
+        for (size_t i = 0; i < expectedSize; i++) {
+            BSONObj gt = BSON("$gt" << static_cast<int>(i));
+            expressions.emplace_back(std::make_unique<GTMatchExpression>("a"_sd, gt["$gt"]));
+        }
+    };
+
+    // Add the same set of 49 expressions twice. For duplicate expressions, param ids will be reused
+    // by doing a lookup on the vector.
+    addExpressions();
+    addExpressions();
+
+    OrMatchExpression expr{std::move(expressions)};
+    walkExpression(&context, &expr);
+
+    // Ensure param ids were reused for duplicate expressions.
+    ASSERT_EQ(expectedSize, context.inputParamIdToExpressionMap.size());
+    ASSERT_FALSE(context.inputParamIdToExpressionMap.usingMap());
+}
+
+TEST(MatchExpressionParameterizationVisitor,
      AutoParametrizationWalkerSetsCorrectNumberOfParamsIds) {
     BSONObj equalityExpr = BSON("x" << 1);
     BSONObj gtExpr = BSON("y" << BSON("$gt" << 2));
@@ -543,7 +599,7 @@ TEST(MatchExpressionParameterizationVisitor,
         boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
         StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
         ASSERT_TRUE(result.isOK());
-        auto expression = result.getValue().get();
+        MatchExpression* expression = result.getValue().get();
 
         auto inputParamIdToExpressionMap = MatchExpression::parameterize(expression);
         ASSERT_EQ(6, inputParamIdToExpressionMap.size());
@@ -554,7 +610,7 @@ TEST(MatchExpressionParameterizationVisitor,
         boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
         StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
         ASSERT_TRUE(result.isOK());
-        auto expression = result.getValue().get();
+        MatchExpression* expression = result.getValue().get();
 
         auto inputParamIdToExpressionMap = MatchExpression::parameterize(expression, 6);
         ASSERT_EQ(6, inputParamIdToExpressionMap.size());
@@ -565,11 +621,30 @@ TEST(MatchExpressionParameterizationVisitor,
         boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
         StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
         ASSERT_TRUE(result.isOK());
-        auto expression = result.getValue().get();
+        MatchExpression* expression = result.getValue().get();
 
+        // This tests the optional limit on the maximum number of parameters allowed.
         auto inputParamIdToExpressionMap = MatchExpression::parameterize(expression, 5);
-        ASSERT_EQ(0, inputParamIdToExpressionMap.size());
-        ASSERT_EQ(0, countInputParams(expression));
+        ASSERT_EQ(5, inputParamIdToExpressionMap.size());
+        ASSERT_EQ(5, countInputParams(expression));
+    }
+
+    {
+        // Test that the optional number of parameters limit is all-or-nothing for a binary op.
+        BSONObj query2 = BSON("a" << BSON("$mod" << BSON_ARRAY(1 << 2)) << "b"
+                                  << BSON("$mod" << BSON_ARRAY(3 << 4)));
+        boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+        StatusWithMatchExpression result = MatchExpressionParser::parse(query2, expCtx);
+        ASSERT_TRUE(result.isOK());
+        MatchExpression* expression = result.getValue().get();
+
+        // Both operands of a binary op must be parameterized or not parameterized. There are two
+        // binary ops for a total of four possible parameters, each of which has a unique value so
+        // cannot share a prior parameter. With a limit of 3, the first two get parameterized but
+        // the last two do not.
+        auto inputParamIdToExpressionMap = MatchExpression::parameterize(expression, 3);
+        ASSERT_EQ(2, inputParamIdToExpressionMap.size());
+        ASSERT_EQ(2, countInputParams(expression));
     }
 }
 }  // namespace mongo

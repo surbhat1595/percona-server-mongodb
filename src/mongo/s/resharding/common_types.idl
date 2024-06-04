@@ -89,6 +89,15 @@ enums:
             kRunning: "running"
             kInactive: "inactive"
 
+    Provenance:
+        description: "The source operation that called this resharding operation."
+        type: string
+        values:
+            kReshardCollection: "reshardCollection"
+            kMoveCollection: "moveCollection"
+            kUnshardCollection: "unshardCollection"
+            kBalancerMoveCollection: "balancerMoveCollection"
+
 structs:
     CommonReshardingMetadata:
         description: "Immutable metadata shared across all node types for a resharding operation."
@@ -128,7 +137,7 @@ structs:
                 description: >-
                     The resharding UUID provided by the user, used to identify retries.
             provenance:
-                type: string
+                type: Provenance
                 description: "The source operation that called this resharding operation."
                 optional: true
 
@@ -222,6 +231,18 @@ structs:
             oplogApplied:
                 type: long
                 description: "Number of oplog entries applied on this recipient shard."
+                optional: true
+            totalNumDocuments:
+                type: long
+                description: "Number of documents on this recipient shard for the resharded collection."
+                optional: true
+            totalDocumentSize:
+                type: long
+                description: "Total size of all documents on this recipient shard for the resharded collection."
+                optional: true
+            numOfIndexes:
+                type: long
+                description: "Number of indexes on this recipient shard for the resharded collection."
                 optional: true
 
     ReshardingApproxCopySize:

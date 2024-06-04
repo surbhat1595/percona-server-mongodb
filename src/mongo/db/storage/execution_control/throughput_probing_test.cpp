@@ -35,7 +35,6 @@
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/storage/execution_control/throughput_probing_gen.h"
@@ -104,7 +103,8 @@ protected:
     }
 
     ServiceContext::UniqueServiceContext _svcCtx = ServiceContext::make();
-    ServiceContext::UniqueClient _client = _svcCtx->makeClient("ThroughputProbingTest");
+    ServiceContext::UniqueClient _client =
+        _svcCtx->getService()->makeClient("ThroughputProbingTest");
 
     MockPeriodicRunner* _runner;
     MockTicketHolder _readTicketHolder;

@@ -30,7 +30,6 @@
 
 // IWYU pragma: no_include "cxxabi.h"
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <functional>
 #include <mutex>
@@ -82,7 +81,7 @@ void PeriodicRunnerImpl::PeriodicJobImpl::_run() {
     _thread = stdx::thread([this, startPromise = std::move(startPromise)]() mutable {
         ON_BLOCK_EXIT([this] { _stopPromise.emplaceValue(); });
 
-        ThreadClient client(_job.name, _serviceContext, nullptr);
+        ThreadClient client(_job.name, _serviceContext->getService(), Client::noSession());
 
         if (!_job.isKillableByStepdown) {
             stdx::lock_guard<Client> lk(*client.get());

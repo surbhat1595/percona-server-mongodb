@@ -129,6 +129,11 @@ def _get_bson_type_check(bson_element, ctxt_name, ast_type):
         return '%s.checkAndAssertTypes(%s, %s)' % (ctxt_name, bson_element, type_list)
 
 
+def _get_required_fields(struct):
+    # type: (ast.Struct) -> List[ast.Field]
+    return list(filter(_is_required_serializer_field, struct.fields))
+
+
 def _get_all_fields(struct):
     # type: (ast.Struct) -> List[ast.Field]
     """Get a list of all the fields, including the command field."""
@@ -179,6 +184,11 @@ def _gen_field_element_name(field):
     # type: (ast.Field) -> str
     """Get the name for a BSONElement pointer in field iteration."""
     return "BSONElement_%s" % (common.title_case(field.cpp_name))
+
+
+def _gen_mark_present(field_name):
+    # type: (str) -> str
+    return f'_hasMembers.markPresent(static_cast<size_t>(RequiredFields::{field_name}));'
 
 
 def _get_constant(name):
@@ -660,8 +670,13 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         body = cpp_type_info.get_setter_body(
             _get_field_member_name(field),
             _get_field_member_validator_name(field) if field.validator is not None else '')
-        set_has = f'{_get_has_field_member_name(field)} = true;' if is_serial else ''
-        self._writer.write_line(f'void {memfn}({param_type} value) {{ {body} {set_has} }}')
+        set_has = _gen_mark_present(field.cpp_name) if is_serial else ''
+
+        with self._block(f'void {memfn}({param_type} value) {{', '}'):
+            self._writer.write_line(f'{body}')
+            if (set_has):
+                self._writer.write_line(set_has)
+        self._writer.write_empty_line()
 
     def gen_constexpr_getters(self):
         # type: () -> None
@@ -734,6 +749,10 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                         'static constexpr auto kCommandAlias = "${command_alias}"_sd;',
                         command_alias=struct.command_alias))
 
+    def gen_required_field_enum(self, struct):
+        self._writer.write_line('enum class RequiredFields : size_t { %s };' % ', '.join(
+            [f.cpp_name for f in _get_required_fields(struct)]))
+
     def gen_authorization_contract_declaration(self, struct):
         # type: (ast.Struct) -> None
         """Generate the authorization contract declaration."""
@@ -773,9 +792,6 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                 self._writer.write_line(
                     common.template_args('${name}${value},', name=enum_value.name,
                                          value=enum_type_info.get_cpp_value_assignment(enum_value)))
-
-        self._writer.write_line("static constexpr uint32_t kNum%s = %d;" %
-                                (enum_type_info.get_cpp_type_name(), len(idl_enum.values)))
 
     def gen_op_msg_request_methods(self, command):
         # type: (ast.Command) -> None
@@ -1090,6 +1106,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
             'mongo/idl/idl_parser.h',
             'mongo/rpc/op_msg.h',
             'mongo/stdx/unordered_map.h',
+            'mongo/util/decimal_counter.h',
             'mongo/util/serialization_context.h',
         ] + spec.globals.cpp_includes
 
@@ -1113,7 +1130,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
         # Include serialization options only if there is a struct which is part of a query shape.
         if any(struct.query_shape_component for struct in spec.structs):
-            header_list.append('mongo/db/query/serialization_options.h')
+            header_list.append('mongo/db/query/query_shape/serialization_options.h')
 
         header_list.sort()
 
@@ -1205,6 +1222,9 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
                     self.write_unindented_line('private:')
 
+                    self.gen_required_field_enum(struct)
+                    self.write_empty_line()
+
                     if struct.generate_comparison_operators:
                         self.gen_comparison_operators_declarations(struct)
 
@@ -1226,12 +1246,12 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                             if not (field.type and field.type.internal_only):
                                 self.gen_member(field)
 
-                    # Write serializer member variables
-                    # Note: we write these out second to ensure the bit fields can be packed by
-                    # the compiler.
-                    for field in struct.fields:
-                        if _is_required_serializer_field(field):
-                            self.gen_serializer_member(field)
+                    # Write the HasMember member variable. Note that this is a noop class in
+                    # non-debug builds, and is marked MONGO_COMPILER_NO_UNIQUE_ADDRESS so that the
+                    # compiler knows that it should be optimized to take up no space when possible.
+                    self._writer.write_line(
+                        'MONGO_COMPILER_NO_UNIQUE_ADDRESS mongo::idl::HasMembers<%s> _hasMembers;' %
+                        len(_get_required_fields(struct)))
                     # Write constexpr struct data
                     self.gen_constexpr_members(struct)
 
@@ -1253,6 +1273,16 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
             for command in spec.commands:
                 if command.api_version:
                     self.generate_versioned_command_base_class(command)
+
+        # Specialize `mongo::idlEnumCount<E>` for each enum `E``.
+        with self.gen_namespace_block("mongo"):
+            for idl_enum in spec.enums:
+                enum_type_info = enum_types.get_type_info(idl_enum)
+                cpp_namespace = idl_enum.cpp_namespace
+                cpp_name = enum_type_info.get_cpp_type_name()
+                full_cpp_name = "::{}::{}".format(cpp_namespace, cpp_name)
+                self._writer.write_line("template<> constexpr inline size_t idlEnumCount<%s> = %d;"
+                                        % (full_cpp_name, len(idl_enum.values)))
 
 
 class _CppSourceFileWriter(_CppFileWriterBase):
@@ -1337,7 +1367,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         cpp_type_info = cpp_types.get_cpp_type_from_cpp_type_name(field, ast_type.cpp_type, True)
         cpp_type = cpp_type_info.get_type_name()
 
-        self._writer.write_line('std::uint32_t expectedFieldNumber{0};')
+        self._writer.write_line('DecimalCounter<std::uint32_t> expectedFieldNumber{0};')
         self._writer.write_line(
             'const IDLParserContext arrayCtxt(%s, &ctxt, %s, getSerializationContext());' %
             (_get_field_constant_name(field), tenant))
@@ -1350,19 +1380,8 @@ class _CppSourceFileWriter(_CppFileWriterBase):
 
             self._writer.write_line(
                 'const auto arrayFieldName = arrayElement.fieldNameStringData();')
-            self._writer.write_line('std::uint32_t fieldNumber;')
-            self._writer.write_empty_line()
 
-            # Check the array field names are integers
-            self._writer.write_line('Status status = NumberParser{}(arrayFieldName, &fieldNumber);')
-            with self._predicate('MONGO_likely(status.isOK())'):
-
-                # Check that the array field names are sequential
-                with self._predicate('MONGO_unlikely(fieldNumber != expectedFieldNumber)'):
-                    self._writer.write_line('arrayCtxt.throwBadArrayFieldNumberSequence(' +
-                                            'fieldNumber, expectedFieldNumber);')
-                self._writer.write_empty_line()
-
+            with self._predicate('MONGO_likely(arrayFieldName == expectedFieldNumber)'):
                 check = _get_bson_type_check('arrayElement', 'arrayCtxt', ast_type)
                 check = "MONGO_likely(%s)" % (check) if check is not None else check
 
@@ -1383,7 +1402,9 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                     self._writer.write_line('values.emplace_back(%s);' % (array_value))
 
             with self._block('else {', '}'):
-                self._writer.write_line('arrayCtxt.throwBadArrayFieldNumberValue(arrayFieldName);')
+                self._writer.write_line(
+                    'arrayCtxt.throwBadArrayFieldNumberSequence(arrayFieldName, expectedFieldNumber);'
+                )
 
             self._writer.write_line('++expectedFieldNumber;')
 
@@ -1501,6 +1522,9 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                 beginning_str = '} else '
                 self._writer.indent()
             object_value = '%s::parse(ctxt, %s)' % (variant_type.cpp_type, bson_element)
+            if field.optional:
+                cpp_type_info = cpp_types.get_cpp_type(field)
+                object_value = '%s(%s)' % (cpp_type_info.get_getter_setter_type(), object_value)
 
             if field.chained_struct_field:
                 self._writer.write_line(
@@ -1524,7 +1548,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             field_usage_check.add(field, bson_element)
 
             if _is_required_serializer_field(field):
-                self._writer.write_line('%s = true;' % (_get_has_field_member_name(field)))
+                self._writer.write_line(_gen_mark_present(field.cpp_name))
 
     def gen_field_deserializer(self, field, field_type, bson_object, bson_element,
                                field_usage_check, tenant, is_command_field=False, check_type=True,
@@ -1686,8 +1710,8 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             self._writer.write_line('firstFieldFound = true;')
             self._writer.write_line('continue;')
 
-    def _gen_initializer_vars(self, constructor, is_command):
-        # type: (struct_types.MethodInfo, bool) -> List[str]
+    def _gen_initializer_vars(self, constructor, is_command, is_catalog_ctxt):
+        # type: (struct_types.MethodInfo, bool, bool) -> List[str]
         """
         Iterate through our list of constructor arguments, which includes serializationContext.
 
@@ -1696,12 +1720,13 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         parseProtected().
 
         If the structure is not a top-level struct (ie. not a command or is_command_reply resolves
-        to false), we want to grab the context from the incoming argument. If the incoming argument
-        isn't set we want to use the default constructor. Once we have our expression, we need to
-        put it at the beginning of the list.  This is important because we will be consuming the
-        local copy of the _serializationContext in the same initializer list when we are passing it
-        into the constructor of a nested struct.  In C++, initializer lists are ordered by
-        declaration order, which also identifies the order of initialization.
+        to false), we want to grab the context from the incoming argument. If we set the structure
+        to use a catalog context through the `is_catalog_ctxt` IDL flag, serialze for catalog instead.
+        If the incoming argument isn't set we want to use the default constructor. Once we have our 
+        expression, we need to put it at the beginning of the list.  This is important because we 
+        will be consuming the local copy of the _serializationContext in the same initializer list 
+        when we are passing it into the constructor of a nested struct.  In C++, initializer lists 
+        are ordered by declaration order, which also identifies the order of initialization.
         """
 
         initializer_vars = []  # type: List[str]
@@ -1714,8 +1739,12 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             # For now, _serializationContext is the only internal_only type, so additional work
             # around this will be deferred.
             if arg.name == 'serializationContext':
-                sc_conditional = 'SerializationContext::stateCommandRequest()' if is_command \
-                    else '_isCommandReply ? SerializationContext::stateCommandReply() : SerializationContext()'
+                if is_catalog_ctxt:
+                    sc_conditional = 'SerializationContext::stateCatalog()'
+                elif is_command:
+                    sc_conditional = 'SerializationContext::stateCommandRequest()'
+                else:
+                    sc_conditional = '_isCommandReply ? SerializationContext::stateCommandReply() : SerializationContext::stateDefault()'
 
                 # this obj is passed in as a boost::optional, so we set the default if no value
                 initializer_var = arg.name + '.value_or(%s)' % sc_conditional
@@ -1732,7 +1761,8 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         # type: (ast.Struct, struct_types.MethodInfo, bool) -> None
         """Generate the C++ constructor definition."""
 
-        initializers = self._gen_initializer_vars(constructor, isinstance(struct, ast.Command))
+        initializers = self._gen_initializer_vars(constructor, isinstance(struct, ast.Command),
+                                                  struct.is_catalog_ctxt)
 
         # Serialize non-has fields first
         # Initialize int and other primitive fields to -1 to prevent Coverity warnings.
@@ -1768,25 +1798,17 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                 initializers.append('_dbName(_nssOrUUID.dbName())')
                 initializes_db_name = True
 
-        # Serialize has fields third
-        # Add _has{FIELD} bool members to ensure fields are set before serialization.
-        for field in struct.fields:
-            if _is_required_serializer_field(field) and not (field.name == "$db"
-                                                             and initializes_db_name):
-                if default_init:
-                    initializers.append('%s(false)' % _get_has_field_member_name(field))
-                else:
-                    initializers.append('%s(true)' % _get_has_field_member_name(field))
-
-        if initializes_db_name:
-            initializers.append('_hasDbName(true)')
-
         initializers_str = ''
         if initializers:
             initializers_str = ': ' + ', '.join(initializers)
 
         with self._block('%s %s {' % (constructor.get_definition(), initializers_str), '}'):
-            self._writer.write_line('// Used for initialization only')
+            for field in _get_required_fields(struct):
+                if not (field.name == "$db" and initializes_db_name) and not default_init:
+                    self._writer.write_line(_gen_mark_present(field.cpp_name))
+            if initializes_db_name:
+                self._writer.write_line(_gen_mark_present('dbName'))
+        self._writer.write_empty_line()
 
     def gen_constructors(self, struct):
         # type: (ast.Struct) -> None
@@ -1880,11 +1902,15 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                         'setSerializationContext(SerializationContext::stateCommandRequest());')
 
         else:
-            # set the local serializer flags according to the constexpr set by is_command_reply
-            self._writer.write_empty_line()
-            self._writer.write_line(
-                'setSerializationContext(_isCommandReply ? SerializationContext::stateCommandReply() : ctxt.getSerializationContext());'
-            )
+            if struct.is_catalog_ctxt:
+                self._writer.write_line(
+                    'setSerializationContext(ctxt.getSerializationContext() == SerializationContext::stateDefault() ? SerializationContext::stateCatalog() : ctxt.getSerializationContext());'
+                )
+            else:
+                # set the local serializer flags according to the constexpr set by is_command_reply
+                self._writer.write_line(
+                    'setSerializationContext(_isCommandReply ? SerializationContext::stateCommandReply() : ctxt.getSerializationContext());'
+                )
 
         self._writer.write_empty_line()
 
@@ -2185,8 +2211,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                             field_usage_check.add(field, "sequence.name")
 
                             if _is_required_serializer_field(field):
-                                self._writer.write_line(
-                                    '%s = true;' % (_get_has_field_member_name(field)))
+                                self._writer.write_line(_gen_mark_present(field.cpp_name))
 
                             self.gen_doc_sequence_deserializer(field,
                                                                "request.getValidatedTenantId()")
@@ -2221,8 +2246,10 @@ class _CppSourceFileWriter(_CppFileWriterBase):
 
         # Generate custom serialization
         template_params = {
-            'field_name': _get_field_constant_name(field), 'access_member': _access_member(field),
-            'serialization_context': '_serializationContext'
+            'field_name': _get_field_constant_name(field),
+            'access_member': _access_member(field),
+            'serialization_context': '_serializationContext',
+            'serialization_options': 'options',
         }
 
         with self._with_template(template_params):
@@ -2260,41 +2287,51 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                         assert False
 
             elif field.type.bson_serialization_type[0] == 'any':
-                # Any types are special
-                # Array variants - we pass an array builder
-                # Non-array variants - we pass the field name they should use, and a BSONObjBuilder.
-                method_name = writer.get_method_name(field.type.serializer)
-                template_params['method_name'] = method_name
+
+                def maybe_add_serialization_context(*args):
+                    """Append 'SerializationContext' arg if needed."""
+                    if field.type.deserialize_with_tenant:
+                        args += ('${serialization_context}', )
+                    return args
+
+                def maybe_add_serialization_options(*args):
+                    """Append 'SerializationOptions' arg if needed."""
+                    if field.query_shape == ast.QueryShapeFieldType.CUSTOM:
+                        args += ('${serialization_options}', )
+                    return args
+
+                def generate_args_template(*args):
+                    """Simply return a string, with all the arguments separated by a comma."""
+                    return ", ".join(args)
+
+                def generate_call_site(serializer, subject, *args):
+                    """Generate either a function or a method invocation with the appropriate arguments."""
+                    args = maybe_add_serialization_context(*args)
+                    args = maybe_add_serialization_options(*args)
+                    if writer.is_function(serializer):
+                        # It should be invoked as 'function(subject, ...args);'
+                        return f"{serializer}({generate_args_template(subject, *args)});"
+                    else:
+                        # It should be invoked as 'subject.method(...args);'
+                        truncated_serializer = writer.get_method_name(serializer)
+                        return f"{subject}.{truncated_serializer}({generate_args_template(*args)});"
 
                 if field.type.is_array:
+                    # Array variants - we pass an array builder
                     self._writer.write_template(
                         'BSONArrayBuilder arrayBuilder(builder->subarrayStart(${field_name}));')
                     with self._block('for (const auto& item : ${access_member}) {', '}'):
-                        # Call a method like class::method(BSONArrayBuilder*)
-                        self._writer.write_template('item.${method_name}(&arrayBuilder);')
+                        template = generate_call_site(
+                            field.type.serializer,
+                            'item',
+                            '&arrayBuilder',
+                        )
+                        self._writer.write_template(template)
                 else:
-                    if writer.is_function(field.type.serializer):
-                        # SerializationContext bound to deserialize_with_tenant
-                        if field.type.deserialize_with_tenant:
-                            # Call a method like method(value, StringData, BSONObjBuilder*, SerializationContext)
-                            self._writer.write_template(
-                                '${method_name}(${access_member}, ${field_name}, builder, ${serialization_context});'
-                            )
-                        else:
-                            # Call a method like method(value, StringData, BSONObjBuilder*)
-                            self._writer.write_template(
-                                '${method_name}(${access_member}, ${field_name}, builder);')
-                    else:
-                        # SerializationContext bound to deserialize_with_tenant
-                        if field.type.deserialize_with_tenant:
-                            # Call a method like class::method(StringData, BSONObjBuilder*, SerializationContext)
-                            self._writer.write_template(
-                                '${access_member}.${method_name}(${field_name}, builder, ${serialization_context});'
-                            )
-                        else:
-                            # Call a method like class::method(StringData, BSONObjBuilder*)
-                            self._writer.write_template(
-                                '${access_member}.${method_name}(${field_name}, builder);')
+                    # Non-array variants - we pass the field name they should use, and a BSONObjBuilder.
+                    template = generate_call_site(field.type.serializer, '${access_member}',
+                                                  '${field_name}', 'builder')
+                    self._writer.write_template(template)
 
             else:
                 method_name = writer.get_method_name(field.type.serializer)
@@ -2504,8 +2541,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         ]
 
         if required_fields:
-            assert_fields_set = ' && '.join(required_fields)
-            self._writer.write_line('invariant(%s);' % assert_fields_set)
+            self._writer.write_line('_hasMembers.required();')
             self._writer.write_empty_line()
 
         # Serialize the namespace as the first field

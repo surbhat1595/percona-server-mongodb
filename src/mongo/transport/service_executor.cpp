@@ -32,7 +32,6 @@
 #include <thread>
 #include <utility>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -43,6 +42,7 @@
 #include "mongo/transport/service_executor_fixed.h"
 #include "mongo/transport/service_executor_reserved.h"
 #include "mongo/transport/service_executor_synchronous.h"
+#include "mongo/transport/transport_layer.h"
 #include "mongo/util/assert_util_core.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/decorable.h"
@@ -64,9 +64,32 @@ auto getServiceExecutorStats =
 auto getServiceExecutorContext =
     Client::declareDecoration<std::unique_ptr<ServiceExecutorContext>>();
 
-void incrThreadingModelStats(ServiceExecutorStats& stats, bool useDedicatedThread, int step) {
-    (useDedicatedThread ? stats.usesDedicated : stats.usesBorrowed) += step;
+void incrThreadingModelStats(ServiceExecutorStats& stats, bool usesDedicatedThread, int step) {
+    (usesDedicatedThread ? stats.usesDedicated : stats.usesBorrowed) += step;
 }
+
+// This is at best a naive solution. There could be a world where numOpenSessions() changes
+// very quickly. We are not taking locks on the SessionManager, so we may chose to schedule
+// onto the ServiceExecutorReserved when it is no longer necessary. The upside is that we
+// will automatically shift to the ServiceExecutorSynchronous after the first command loop.
+bool shouldUseReserved(Client* client) {
+    auto sm = client->session()->getTransportLayer()->getSessionManager();
+    return sm->numOpenSessions() > sm->maxOpenSessions();
+}
+
+template <typename Func>
+void forEachServiceExecutor(ServiceContext* svcCtx, const Func& func) {
+    const auto call = [&]<typename T>(std::type_identity<T>) {
+        if (auto exec = T::get(svcCtx))
+            func(exec);
+    };
+
+    call(std::type_identity<ServiceExecutorSynchronous>{});
+    call(std::type_identity<ServiceExecutorReserved>{});
+    call(std::type_identity<ServiceExecutorFixed>{});
+    call(std::type_identity<ServiceExecutorInline>{});
+}
+
 }  // namespace
 
 ServiceExecutorStats ServiceExecutorStats::get(ServiceContext* ctx) noexcept {
@@ -85,20 +108,19 @@ void ServiceExecutorContext::set(Client* client,
     invariant(!serviceExecutorContext);
 
     seCtx._client = client;
-    seCtx._sep = client->getServiceContext()->getServiceEntryPoint();
 
     {
         auto&& syncStats = *getServiceExecutorStats(client->getServiceContext());
         if (seCtx._canUseReserved)
             ++syncStats->limitExempt;
-        incrThreadingModelStats(*syncStats, seCtx._useDedicatedThread, 1);
+        incrThreadingModelStats(*syncStats, seCtx.usesDedicatedThread(), 1);
     }
 
     LOGV2_DEBUG(4898000,
                 kDiagnosticLogLevel,
                 "Setting initial ServiceExecutor context for client",
                 "client"_attr = client->desc(),
-                "useDedicatedThread"_attr = seCtx._useDedicatedThread,
+                "usesDedicatedThread"_attr = seCtx.usesDedicatedThread(),
                 "canUseReserved"_attr = seCtx._canUseReserved);
     serviceExecutorContext = std::move(seCtxPtr);
 }
@@ -111,26 +133,29 @@ void ServiceExecutorContext::reset(Client* client) noexcept {
                 kDiagnosticLogLevel,
                 "Resetting ServiceExecutor context for client",
                 "client"_attr = client->desc(),
-                "threadingModel"_attr = seCtx->_useDedicatedThread,
+                "threadingModel"_attr = seCtx->usesDedicatedThread(),
                 "canUseReserved"_attr = seCtx->_canUseReserved);
     auto stats = *getServiceExecutorStats(client->getServiceContext());
     if (seCtx->_canUseReserved)
         --stats->limitExempt;
-    incrThreadingModelStats(*stats, seCtx->_useDedicatedThread, -1);
+    incrThreadingModelStats(*stats, seCtx->usesDedicatedThread(), -1);
+    seCtx.reset();
 }
 
-void ServiceExecutorContext::setUseDedicatedThread(bool b) noexcept {
-    if (b == _useDedicatedThread)
+void ServiceExecutorContext::setThreadModel(ThreadModel model) {
+    if (_threadModel == model)
         return;
-    auto prev = std::exchange(_useDedicatedThread, b);
+
+    auto prev = std::exchange(_threadModel, model);
     if (!_client)
         return;
+
     auto stats = *getServiceExecutorStats(_client->getServiceContext());
-    incrThreadingModelStats(*stats, prev, -1);
-    incrThreadingModelStats(*stats, _useDedicatedThread, +1);
+    incrThreadingModelStats(*stats, prev != ThreadModel::kFixed, -1);
+    incrThreadingModelStats(*stats, model != ThreadModel::kFixed, +1);
 }
 
-void ServiceExecutorContext::setCanUseReserved(bool canUseReserved) noexcept {
+void ServiceExecutorContext::setCanUseReserved(bool canUseReserved) {
     if (_canUseReserved == canUseReserved) {
         // Nothing to do.
         return;
@@ -147,35 +172,37 @@ void ServiceExecutorContext::setCanUseReserved(bool canUseReserved) noexcept {
     }
 }
 
-ServiceExecutor* ServiceExecutorContext::getServiceExecutor() noexcept {
+ServiceExecutor* ServiceExecutorContext::getServiceExecutor() {
     invariant(_client);
 
     if (_getServiceExecutorForTest)
         return _getServiceExecutorForTest();
 
-    if (!_useDedicatedThread)
-        return ServiceExecutorFixed::get(_client->getServiceContext());
+    switch (_threadModel) {
+        case ThreadModel::kInline:
+            return ServiceExecutorInline::get(_client->getServiceContext());
+        case ThreadModel::kFixed:
+            return ServiceExecutorFixed::get(_client->getServiceContext());
+        case ThreadModel::kSynchronous: {
+            if (_canUseReserved && !_hasUsedSynchronous && shouldUseReserved(_client)) {
+                if (auto exec = ServiceExecutorReserved::get(_client->getServiceContext())) {
+                    // All conditions are met:
+                    // * We are allowed to use the reserved
+                    // * We have not used the synchronous
+                    // * We should use the reserved
+                    // * The reserved executor exists
+                    return exec;
+                }
+            }
 
-    auto shouldUseReserved = [&] {
-        // This is at best a naive solution. There could be a world where numOpenSessions() changes
-        // very quickly. We are not taking locks on the ServiceEntryPoint, so we may chose to
-        // schedule onto the ServiceExecutorReserved when it is no longer necessary. The upside is
-        // that we will automatically shift to the ServiceExecutorSynchronous after the first
-        // command loop.
-        return _sep->numOpenSessions() > _sep->maxOpenSessions();
-    };
-
-    if (_canUseReserved && !_hasUsedSynchronous && shouldUseReserved()) {
-        if (auto exec = transport::ServiceExecutorReserved::get(_client->getServiceContext())) {
-            // We are allowed to use the reserved, we have not used the synchronous, we should use
-            // the reserved, and the reserved exists.
-            return exec;
+            // Once we use the ServiceExecutorSynchronous, we shouldn't use the
+            // ServiceExecutorReserved.
+            _hasUsedSynchronous = true;
+            return ServiceExecutorSynchronous::get(_client->getServiceContext());
         }
     }
 
-    // Once we use the ServiceExecutorSynchronous, we shouldn't use the ServiceExecutorReserved.
-    _hasUsedSynchronous = true;
-    return transport::ServiceExecutorSynchronous::get(_client->getServiceContext());
+    MONGO_UNREACHABLE;
 }
 
 void ServiceExecutor::yieldIfAppropriate() const {
@@ -190,28 +217,28 @@ void ServiceExecutor::yieldIfAppropriate() const {
     }
 }
 
-void ServiceExecutor::shutdownAll(ServiceContext* serviceContext, Date_t deadline) {
-    auto getTimeout = [&] {
-        auto now = serviceContext->getPreciseClockSource()->now();
-        return std::max(Milliseconds{0}, deadline - now);
-    };
+void ServiceExecutor::startupAll(ServiceContext* svcCtx) {
+    // Starts each ServiceExecutor in turn until complete or one of them fails.
+    forEachServiceExecutor(svcCtx, [&](ServiceExecutor* exec) { exec->start(); });
+}
 
-    if (auto status = transport::ServiceExecutorFixed::get(serviceContext)->shutdown(getTimeout());
-        !status.isOK()) {
-        LOGV2(4907202, "Failed to shutdown ServiceExecutorFixed", "error"_attr = status);
-    }
+void ServiceExecutor::shutdownAll(ServiceContext* svcCtx, Milliseconds timeout) {
+    auto clock = svcCtx->getPreciseClockSource();
+    auto deadline = clock->now() + timeout;
 
-    if (auto exec = transport::ServiceExecutorReserved::get(serviceContext)) {
-        if (auto status = exec->shutdown(getTimeout()); !status.isOK()) {
-            LOGV2(4907201, "Failed to shutdown ServiceExecutorReserved", "error"_attr = status);
+    forEachServiceExecutor(svcCtx, [&](ServiceExecutor* exec) {
+        const auto myTimeout = std::max(Milliseconds{0}, deadline - clock->now());
+        if (auto status = exec->shutdown(myTimeout); !status.isOK()) {
+            LOGV2(4907200,
+                  "Failed to shutdown ServiceExecutor",
+                  "executor"_attr = exec->getName(),
+                  "error"_attr = status);
         }
-    }
+    });
+}
 
-    if (auto status =
-            transport::ServiceExecutorSynchronous::get(serviceContext)->shutdown(getTimeout());
-        !status.isOK()) {
-        LOGV2(4907200, "Failed to shutdown ServiceExecutorSynchronous", "error"_attr = status);
-    }
+void ServiceExecutor::appendAllServerStats(BSONObjBuilder* builder, ServiceContext* svcCtx) {
+    forEachServiceExecutor(svcCtx, [&](ServiceExecutor* exec) { exec->appendStats(builder); });
 }
 
 }  // namespace mongo::transport

@@ -29,7 +29,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <typeinfo>
 #include <utility>
@@ -312,7 +311,7 @@ CollectionType ConfigServerTestFixture::setupCollection(const NamespaceString& n
     auto dbDoc = findOneOnConfigCollection(
         operationContext(),
         NamespaceString::kConfigDatabasesNamespace,
-        BSON(DatabaseType::kNameFieldName << nss.db_forTest().toString()));
+        BSON(DatabaseType::kDbNameFieldName << nss.db_forTest().toString()));
     if (!dbDoc.isOK()) {
         // If the database is not setup, choose the first available shard as primary to implicitly
         // create the db
@@ -321,7 +320,7 @@ CollectionType ConfigServerTestFixture::setupCollection(const NamespaceString& n
         invariant(swShardDoc.isOK(),
                   "At least one shard should be setup when initializing a collection");
         auto shard = uassertStatusOK(ShardType::fromBSON(swShardDoc.getValue()));
-        setupDatabase(nss.db_forTest().toString(), ShardId(shard.getName()));
+        setupDatabase(nss.dbName(), ShardId(shard.getName()));
     }
 
     CollectionType coll(nss,
@@ -393,7 +392,7 @@ StatusWith<ChunkVersion> ConfigServerTestFixture::getCollectionPlacementVersion(
     return chunkType.getValue().getVersion();
 }
 
-DatabaseType ConfigServerTestFixture::setupDatabase(const std::string& dbName,
+DatabaseType ConfigServerTestFixture::setupDatabase(const DatabaseName& dbName,
                                                     const ShardId& primaryShard,
                                                     const DatabaseVersion& dbVersion) {
     DatabaseType db(dbName, primaryShard, dbVersion);

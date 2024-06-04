@@ -12,7 +12,12 @@ const kExpireAfterSeconds = 1;
 
 const replicaSet = new ChangeStreamMultitenantReplicaSetTest({
     nodes: 1,
-    changeCollectionExpiredDocumentsRemoverJobSleepSeconds: kExpiredChangeRemovalJobSleepSeconds
+    nodeOptions: {
+        setParameter: {
+            changeCollectionExpiredDocumentsRemoverJobSleepSeconds:
+                kExpiredChangeRemovalJobSleepSeconds
+        }
+    }
 });
 
 const primary = replicaSet.getPrimary();
@@ -64,9 +69,16 @@ assert.commandWorked(tenantConn.adminCommand(
     {setClusterParameter: {changeStreams: {expireAfterSeconds: kExpireAfterSeconds}}}));
 
 // Ensure purging job deletes the expired oplog entries about insertion into test collection.
-assert.soon(() => {
-    // All change collection entries are removed but one.
-    return changeCollection.count() === 1;
+//
+// 'soonNoExcept' is used here because performing the slow count may sometimes race with a
+// concurrent truncate. This would cause a CappedPositionLost error to be thrown. As that error is
+// temporary, we ignore it and retry the operation.
+assert.soonNoExcept(() => {
+    // Using fast-count relies on reading the metadata document count. Depending on whether removal
+    // uses replicated deletes or unreplicated truncates, this count may or may not be correct since
+    // it's only an approximation. To avoid accuracy issues, we perform a slow count which will
+    // provide an accurate document count.
+    return changeCollection.aggregate([{$count: "count"}]).toArray()[0].count == 1;
 });
 
 // Ensure that FTDC collected the purging job information of the change collection.

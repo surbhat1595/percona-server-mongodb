@@ -29,7 +29,6 @@
 
 #include "mongo/db/concurrency/d_concurrency.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <string>
 
 #include <boost/move/utility_core.hpp>
@@ -62,21 +61,13 @@ bool Lock::ResourceMutex::isAtLeastReadLocked(Locker* locker) {
 
 void Lock::ResourceLock::_lock(LockMode mode, Date_t deadline) {
     invariant(_result == LOCK_INVALID);
-    if (_opCtx)
-        _opCtx->lockState()->lock(_opCtx, _rid, mode, deadline);
-    else
-        _locker->lock(_rid, mode, deadline);
-
+    _opCtx->lockState()->lock(_opCtx, _rid, mode, deadline);
     _result = LOCK_OK;
 }
 
 void Lock::ResourceLock::_unlock() {
     if (_isLocked()) {
-        if (_opCtx)
-            _opCtx->lockState()->unlock(_rid);
-        else
-            _locker->unlock(_rid);
-
+        _opCtx->lockState()->unlock(_rid);
         _result = LOCK_INVALID;
     }
 }

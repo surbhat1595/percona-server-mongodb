@@ -1,5 +1,6 @@
 var s = new ShardingTest({});
 var db = s.getDB("test");
+assert.commandWorked(s.s0.adminCommand({enablesharding: 'test', primaryShard: s.shard0.shardName}));
 
 assert.commandWorked(db.foo.insert({_id: 1}));
 assert.commandWorked(db.foo.renameCollection('bar'));
@@ -13,8 +14,6 @@ assert.eq(db.bar.findOne(), {_id: 2}, '2.1');
 assert.eq(db.bar.count(), 1, '2.2');
 assert.eq(db.foo.count(), 0, '2.3');
 
-assert.commandWorked(s.s0.adminCommand({enablesharding: 'test'}));
-s.ensurePrimaryShard('test', s.shard0.shardName);
 assert.commandWorked(
     s.s0.adminCommand({enablesharding: 'otherDBSamePrimary', primaryShard: s.shard0.shardName}));
 
@@ -83,6 +82,22 @@ assert.eq(1, s.getDB('otherDBSamePrimary').foo.countDocuments({}));
     // Target collection existing on non-primary shard: rename with `dropTarget=true` must succeed
     assert.commandWorked(
         s.s0.getDB('test').goodcollection.renameCollection('superbadcollection', true));
+}
+
+// Renaming of system collections must fail
+{
+    function assertRenameFailed(dbName, fromCollName) {
+        const fromColl = s.s0.getDB(dbName).getCollection(fromCollName);
+        const initDocNum = fromColl.find().itcount();
+        assert.commandFailedWithCode(fromColl.renameCollection('new'), ErrorCodes.IllegalOperation);
+        assert.eq(initDocNum, fromColl.find().itcount());
+    }
+
+    assertRenameFailed('config', 'shards');
+    assertRenameFailed('config', 'inexistent');
+
+    assertRenameFailed('admin', 'system.version');
+    assertRenameFailed('admin', 'inexistent');
 }
 
 s.stop();

@@ -34,7 +34,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/catalog/collection.h"
@@ -237,17 +236,21 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
     Snapshotted<Document> memberDoc = member->doc;
     BSONObj bsonObjDoc = memberDoc.value().toBson();
 
-    handlePlanStageYield(
+    const auto saveRet = handlePlanStageYield(
         expCtx(),
         "DeleteStage saveState",
         [&] {
             child()->saveState();
-            return PlanStage::NEED_TIME /* unused */;
+            return PlanStage::NEED_TIME;
         },
         [&] {
             // yieldHandler
-            std::terminate();
+            memberFreer.dismiss();
+            prepareToRetryWSM(id, out);
         });
+    if (saveRet != PlanStage::NEED_TIME) {
+        return saveRet;
+    }
 
     // Do the write, unless this is an explain.
     if (!_params->isExplain) {
@@ -310,38 +313,41 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
     // As restoreState may restore (recreate) cursors, cursors are tied to the transaction in which
     // they are created, and a WriteUnitOfWork is a transaction, make sure to restore the state
     // outside of the WriteUnitOfWork.
-    //
-    // If this stage is already exhausted it won't use its children stages anymore and therefore
-    // there's no need to restore them. Avoid restoring them so that there's no possibility of
-    // requiring yielding at this point. Restoring from yield could fail due to a sharding placement
-    // change. Throwing a StaleConfig error is undesirable after a "delete one" operation has
-    // already performed a write because the router would retry.
-    if (!isEOF()) {
-        const auto restoreStateRet = handlePlanStageYield(
-            expCtx(),
-            "DeleteStage restoreState",
-            [&] {
-                child()->restoreState(&collectionPtr());
-                return PlanStage::NEED_TIME;
-            },
-            [&] {
-                // yieldHandler
-                // Note we don't need to retry anything in this case since the delete already was
-                // committed. However, we still need to return the deleted document (if it was
-                // requested).
-                if (_params->returnDeleted) {
-                    // member->obj should refer to the deleted document.
-                    invariant(member->getState() == WorkingSetMember::OWNED_OBJ);
+    const auto stageIsEOF = isEOF();
+    const auto restoreStateRet = handlePlanStageYield(
+        expCtx(),
+        "DeleteStage restoreState",
+        [&] {
+            child()->restoreState(&collectionPtr());
+            return PlanStage::NEED_TIME;
+        },
+        [&] {
+            // yieldHandler
+            // Note we don't need to retry anything in this case since the delete already was
+            // committed. However, we still need to return the deleted document (if it was
+            // requested).
+            if (_params->returnDeleted) {
+                // member->obj should refer to the deleted document.
+                invariant(member->getState() == WorkingSetMember::OWNED_OBJ);
 
-                    _idReturning = id;
-                    // Keep this member around so that we can return it on
-                    // the next work() call.
-                    memberFreer.dismiss();
-                }
-                *out = WorkingSet::INVALID_ID;
-            });
-        if (restoreStateRet != PlanStage::NEED_TIME) {
-            return ret;
+                _idReturning = id;
+                // Keep this member around so that we can return it on the next work() call.
+                memberFreer.dismiss();
+            }
+            *out = WorkingSet::INVALID_ID;
+        });
+
+    if (restoreStateRet != PlanStage::NEED_TIME) {
+        if (restoreStateRet == PlanStage::NEED_YIELD && stageIsEOF) {
+            // If this stage is already exhausted it won't use its children stages anymore and
+            // therefore it's okay if we failed to restore them. Avoid requesting a yield to the
+            // plan executor. Restoring from yield could fail due to a sharding placement change.
+            // Throwing a StaleConfig error is undesirable after an "delete one" operation has
+            // already performed a write because the router would retry. Unset _idReturning as we'll
+            // return the document in this stage iteration.
+            _idReturning = WorkingSet::INVALID_ID;
+        } else {
+            return restoreStateRet;
         }
     }
 

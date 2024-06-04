@@ -146,7 +146,8 @@ public:
                             // Note that captured objects of the lambda are destroyed by the
                             // executor thread after setting the shared state as ready.
                             auto scopedMigrationLocal(std::move(scopedMigration));
-                            ThreadClient tc("MoveChunk", serviceContext);
+                            ThreadClient tc("MoveChunk",
+                                            serviceContext->getService(ClusterRole::ShardServer));
                             auto uniqueOpCtx = Client::getCurrent()->makeOperationContext();
                             auto executorOpCtx = uniqueOpCtx.get();
                             Status status = {ErrorCodes::InternalError, "Uninitialized value"};
@@ -176,7 +177,6 @@ public:
                             } catch (const DBException& e) {
                                 status = e.toStatus();
                                 LOGV2_WARNING(23777,
-                                              "Chunk move failed with {error}",
                                               "Error while doing moveChunk",
                                               "error"_attr = redact(status));
 
@@ -285,7 +285,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(ShardsvrMoveRangeCommand);
+MONGO_REGISTER_COMMAND(ShardsvrMoveRangeCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

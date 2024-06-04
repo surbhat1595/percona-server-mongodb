@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <iterator>
 #include <list>
 #include <memory>
@@ -62,7 +61,6 @@
 #include "mongo/db/auth/builtin_roles.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/restriction_set.h"
-#include "mongo/db/auth/user_acquisition_stats.h"
 #include "mongo/db/commands/authentication_commands.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/global_settings.h"
@@ -171,10 +169,15 @@ bool loggedCommandOperatesOnAuthzData(const NamespaceString& nss, const BSONObj&
     } else if (cmdName == "dropDatabase") {
         return true;
     } else if (cmdName == "renameCollection") {
-        const NamespaceString fromNamespace = NamespaceString::createNamespaceStringForAuth(
-            boost::none, cmdObj.firstElement().valueStringDataSafe());
+        auto context = SerializationContext::stateAuthPrevalidated();
+        // Mark the context as should expect tenant prefix for auth to signify that the NS string we
+        // are passing in may be prefixed with a tenantId.
+        context.setExpectTenantPrefixForAuth(true);
+
+        const NamespaceString fromNamespace = NamespaceStringUtil::deserialize(
+            boost::none, cmdObj.firstElement().valueStringDataSafe(), context);
         const NamespaceString toNamespace =
-            NamespaceString::createNamespaceStringForAuth(boost::none, cmdObj.getStringField("to"));
+            NamespaceStringUtil::deserialize(boost::none, cmdObj.getStringField("to"), context);
 
         if (fromNamespace.isAdminDB() || toNamespace.isAdminDB()) {
             return isAuthzCollection(fromNamespace.coll()) || isAuthzCollection(toNamespace.coll());
@@ -387,7 +390,10 @@ bool AuthorizationManagerImpl::hasAnyPrivilegeDocuments(OperationContext* opCtx)
 Status AuthorizationManagerImpl::getUserDescription(OperationContext* opCtx,
                                                     const UserName& userName,
                                                     BSONObj* result) {
-    return _externalState->getUserDescription(opCtx, UserRequest(userName, boost::none), result);
+    return _externalState->getUserDescription(opCtx,
+                                              UserRequest(userName, boost::none),
+                                              result,
+                                              CurOp::get(opCtx)->getUserAcquisitionStats());
 }
 
 Status AuthorizationManagerImpl::hasValidAuthSchemaVersionDocumentForInitialSync(
@@ -489,9 +495,11 @@ StatusWith<UserHandle> AuthorizationManagerImpl::acquireUser(OperationContext* o
     }
 #endif
 
+    auto userAcquisitionStats = CurOp::get(opCtx)->getUserAcquisitionStats();
     if (authUserCacheBypass.shouldFail()) {
         // Bypass cache and force a fresh load of the user.
-        auto loadedUser = uassertStatusOK(_externalState->getUserObject(opCtx, request));
+        auto loadedUser =
+            uassertStatusOK(_externalState->getUserObject(opCtx, request, userAcquisitionStats));
         // We have to inject into the cache in order to get a UserHandle.
         auto userHandle =
             _userCache.insertOrAssignAndGet(request, std::move(loadedUser), Date_t::now());
@@ -502,15 +510,16 @@ StatusWith<UserHandle> AuthorizationManagerImpl::acquireUser(OperationContext* o
 
     // Track wait time and user cache access statistics for the current op for logging. An extra
     // second of delay is added via the failpoint for testing.
-    UserAcquisitionStatsHandle userAcquisitionStatsHandle =
-        UserAcquisitionStatsHandle(CurOp::get(opCtx)->getMutableUserAcquisitionStats(),
-                                   opCtx->getServiceContext()->getTickSource(),
-                                   kCache);
+    UserAcquisitionStatsHandle userAcquisitionStatsHandle = UserAcquisitionStatsHandle(
+        userAcquisitionStats.get(), opCtx->getServiceContext()->getTickSource(), kCache);
     if (authUserCacheSleep.shouldFail()) {
         sleepsecs(1);
     }
 
-    auto cachedUser = _userCache.acquire(opCtx, userRequest);
+    auto cachedUser = _userCache.acquire(opCtx,
+                                         userRequest,
+                                         CacheCausalConsistency::kLatestCached,
+                                         CurOp::get(opCtx)->getUserAcquisitionStats());
 
     userAcquisitionStatsHandle.recordTimerEnd();
     invariant(cachedUser);
@@ -612,7 +621,8 @@ Status AuthorizationManagerImpl::refreshExternalUsers(OperationContext* opCtx) {
     bool isRefreshed{false};
     for (const auto& cachedUser : cachedUsers) {
         UserRequest request(cachedUser->getName(), boost::none);
-        auto storedUserStatus = _externalState->getUserObject(opCtx, request);
+        auto storedUserStatus = _externalState->getUserObject(
+            opCtx, request, CurOp::get(opCtx)->getUserAcquisitionStats());
         if (!storedUserStatus.isOK()) {
             // If the user simply is not found, then just invalidate the cached user and continue.
             if (storedUserStatus.getStatus().code() == ErrorCodes::UserNotFound) {
@@ -711,17 +721,22 @@ AuthorizationManagerImpl::UserCacheImpl::UserCacheImpl(
           _mutex,
           service,
           threadPool,
-          [this](OperationContext* opCtx, const UserRequest& userReq, UserHandle cachedUser) {
-              return _lookup(opCtx, userReq, cachedUser);
+          [this](OperationContext* opCtx,
+                 const UserRequest& userReq,
+                 const UserHandle& cachedUser,
+                 const SharedUserAcquisitionStats& userAcquisitionStats) {
+              return _lookup(opCtx, userReq, cachedUser, userAcquisitionStats);
           },
           cacheSize),
       _authSchemaVersionCache(authSchemaVersionCache),
       _externalState(externalState) {}
 
 AuthorizationManagerImpl::UserCacheImpl::LookupResult
-AuthorizationManagerImpl::UserCacheImpl::_lookup(OperationContext* opCtx,
-                                                 const UserRequest& userReq,
-                                                 const UserHandle& unusedCachedUser) {
+AuthorizationManagerImpl::UserCacheImpl::_lookup(
+    OperationContext* opCtx,
+    const UserRequest& userReq,
+    const UserHandle& unusedCachedUser,
+    const SharedUserAcquisitionStats& userAcquisitionStats) {
     LOGV2_DEBUG(20238, 1, "Getting user record", "user"_attr = userReq.name);
 
     // Number of times to retry a user document that fetches due to transient AuthSchemaIncompatible
@@ -739,7 +754,8 @@ AuthorizationManagerImpl::UserCacheImpl::_lookup(OperationContext* opCtx,
             case schemaVersion28SCRAM:
             case schemaVersion26Final:
             case schemaVersion26Upgrade:
-                return LookupResult(uassertStatusOK(_externalState->getUserObject(opCtx, userReq)));
+                return LookupResult(uassertStatusOK(
+                    _externalState->getUserObject(opCtx, userReq, userAcquisitionStats)));
             case schemaVersion24:
                 _authSchemaVersionCache->invalidateAll();
 

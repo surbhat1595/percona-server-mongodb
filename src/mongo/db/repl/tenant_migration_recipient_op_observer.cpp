@@ -35,7 +35,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
@@ -238,6 +237,7 @@ void TenantMigrationRecipientOpObserver::aboutToDelete(OperationContext* opCtx,
 void TenantMigrationRecipientOpObserver::onDelete(OperationContext* opCtx,
                                                   const CollectionPtr& coll,
                                                   StmtId stmtId,
+                                                  const BSONObj& doc,
                                                   const OplogDeleteEntryArgs& args,
                                                   OpStateAccumulator* opAccumulator) {
     if (coll->ns() == NamespaceString::kTenantMigrationRecipientsNamespace &&

@@ -91,18 +91,17 @@ using unittest::assertGet;
 
 const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
 
-class CatalogCacheRefreshTest : public CatalogCacheTestFixture {
+class CatalogCacheRefreshTest : public RouterCatalogCacheTestFixture {
 protected:
     void setUp() override {
-        CatalogCacheTestFixture::setUp();
+        RouterCatalogCacheTestFixture::setUp();
 
         setupNShards(2);
     }
 
     void expectGetDatabase() {
         expectFindSendBSONObjVector(kConfigHostAndPort, [&]() {
-            DatabaseType db(
-                kNss.db_forTest().toString(), {"0"}, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
+            DatabaseType db(kNss.dbName(), {"0"}, DatabaseVersion(UUID::gen(), Timestamp(1, 1)));
             return std::vector<BSONObj>{db.toBSON()};
         }());
     }
@@ -245,8 +244,7 @@ TEST_F(CatalogCacheRefreshTest, DatabaseBSONCorrupted) {
         FAIL(str::stream() << "Returning corrupted database entry did not fail and returned "
                            << cri.cm.toString());
     } catch (const DBException& ex) {
-        constexpr int kParseError = 40414;
-        ASSERT_EQ(ErrorCodes::Error(kParseError), ex.code());
+        ASSERT_EQ(ErrorCodes::IDLFailedToParse, ex.code());
     }
 }
 
@@ -279,8 +277,7 @@ TEST_F(CatalogCacheRefreshTest, CollectionBSONCorrupted) {
         FAIL(str::stream() << "Returning corrupted collection entry did not fail and returned "
                            << cri.cm.toString());
     } catch (const DBException& ex) {
-        constexpr int kParseError = 40414;
-        ASSERT_EQ(ErrorCodes::Error(kParseError), ex.code());
+        ASSERT_EQ(ErrorCodes::IDLFailedToParse, ex.code());
     }
 }
 

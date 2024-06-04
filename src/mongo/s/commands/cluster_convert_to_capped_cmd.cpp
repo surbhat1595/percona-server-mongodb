@@ -34,7 +34,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -156,7 +155,7 @@ public:
             &result);
     }
 };
-MONGO_REGISTER_COMMAND(ConvertToCappedCmd);
+MONGO_REGISTER_COMMAND(ConvertToCappedCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

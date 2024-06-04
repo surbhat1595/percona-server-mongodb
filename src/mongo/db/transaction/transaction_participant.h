@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -433,7 +432,7 @@ public:
         // builder.
         void _reportTransactionStats(OperationContext* opCtx,
                                      BSONObjBuilder* builder,
-                                     repl::ReadConcernArgs readConcernArgs) const;
+                                     const repl::ReadConcernArgs& readConcernArgs) const;
 
         TransactionParticipant* _tp;
     };  // class Observer
@@ -879,7 +878,7 @@ public:
         // Commits the storage-transaction on the OperationContext.
         //
         // This should be called *without* the Client being locked.
-        void _commitStorageTransaction(OperationContext* opCtx);
+        void _commitStorageTransaction(OperationContext* opCtx, bool isSplitPreparedTxn = false);
 
         // Commits a "split prepared" transaction. Prepared transactions processed on secondaries
         // may split the storage writes into multiple RecoveryUnits. This method will be invoked by
@@ -891,7 +890,7 @@ public:
         void _commitSplitPreparedTxnOnPrimary(OperationContext* opCtx,
                                               repl::SplitPrepareSessionManager* splitPrepareManager,
                                               const Timestamp& commitTimestamp,
-                                              const Timestamp& durableTimestamp);
+                                              const Timestamp& durableTimestamp) noexcept;
 
         // Stash transaction resources.
         void _stashActiveTransaction(OperationContext* opCtx);
@@ -905,8 +904,9 @@ public:
         // Aborts a "split prepared" transaction. Prepared transactions processed on secondaries may
         // split the storage writes into multiple RecoveryUnits. This method will be invoked by a
         // primary such that it looks for all recovery units and aborts them.
-        void _abortSplitPreparedTxnOnPrimary(OperationContext* opCtx,
-                                             repl::SplitPrepareSessionManager* splitPrepareManager);
+        void _abortSplitPreparedTxnOnPrimary(
+            OperationContext* opCtx,
+            repl::SplitPrepareSessionManager* splitPrepareManager) noexcept;
 
         // Factors out code for clarity from _abortActiveTransaction.
         void _finishAbortingActiveTransaction(OperationContext* opCtx,
@@ -919,7 +919,9 @@ public:
         void _abortTransactionOnSession(OperationContext* opCtx);
 
         // Clean up the transaction resources unstashed on operation context.
-        void _cleanUpTxnResourceOnOpCtx(OperationContext* opCtx, TerminationCause terminationCause);
+        void _cleanUpTxnResourceOnOpCtx(OperationContext* opCtx,
+                                        TerminationCause terminationCause,
+                                        bool isSplitPreparedTxn = false);
 
         // Checks if the command can be run on this transaction based on the state of the
         // transaction.
@@ -1197,6 +1199,15 @@ private:
 
         // Contains a list of affected namespaces to be reported to transaction coordinator.
         std::vector<NamespaceString> affectedNamespaces;
+
+        // Maintains a copy of ReadConcernArgs, this allows the worker thread to perform
+        // intermediate changes to its own ReadConcernArgs when fetching the transaction state or
+        // reading retryability history. Those changes would race with monitoring and are inocuous
+        // in nature.
+        //
+        // This value is set at the beginning of a transaction and reflects the user's ReadConcern
+        // preferences.
+        repl::ReadConcernArgs readConcernArgs;
     } _o;
 
     /**

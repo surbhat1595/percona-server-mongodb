@@ -5,7 +5,10 @@ const startTime = Date.now();
 assert.neq(typeof db, 'undefined', 'No `db` object, is the shell connected to a mongod?');
 
 let runCheckOnReplSet = function(db) {
-    let primaryInfo = db.isMaster();
+    // Always use admin database, this is important when running on multitenant suites, to bypass
+    // the tenantId requirement.
+    let adminDB = db.getSiblingDB('admin');
+    let primaryInfo = adminDB.isMaster();
 
     assert(primaryInfo.ismaster,
            'shell is not connected to the primary or master node: ' + tojson(primaryInfo));

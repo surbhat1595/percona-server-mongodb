@@ -191,8 +191,6 @@ buildvariants:
     additional_package_targets: >-
       archive-mongocryptd
       archive-mongocryptd-debug
-      archive-mh
-      archive-mh-debug
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -255,10 +253,9 @@ buildvariants:
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .read_write_concern .large
     distros:
     - amazon2-arm64-large
@@ -367,7 +364,7 @@ buildvariants:
   run_on:
   - amazon2023.0-small
   expansions:
-    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -422,10 +419,9 @@ buildvariants:
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .read_write_concern .large
     distros:
     - amazon2023.0-large
@@ -483,7 +479,7 @@ buildvariants:
   run_on:
   - amazon2023.0-small
   expansions:
-    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     compile_flags: >-
       --ssl
       MONGO_DISTMOD=amazon2023
@@ -503,6 +499,7 @@ buildvariants:
     repo_edition: enterprise
     scons_cache_scope: shared
     compile_variant: enterprise-amazon2023-lto
+    large_distro_name: amazon2023.0-large
   tasks:
   - name: compile_test_and_package_serial_lto_no_unittests_TG
     distros:
@@ -534,10 +531,9 @@ buildvariants:
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .read_write_concern .large
     distros:
     - amazon2023.0-large
@@ -644,7 +640,7 @@ buildvariants:
   run_on:
   - amazon2023.0-arm64-small
   expansions:
-    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -702,10 +698,9 @@ buildvariants:
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .read_write_concern .large
     distros:
     - amazon2023.0-arm64-large
@@ -763,7 +758,7 @@ buildvariants:
   run_on:
   - amazon2023.0-arm64-small
   expansions:
-    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     compile_flags: >-
       --ssl
       MONGO_DISTMOD=amazon2023
@@ -786,6 +781,7 @@ buildvariants:
     repo_edition: enterprise
     scons_cache_scope: shared
     compile_variant: enterprise-amazon2023-arm64-lto
+    large_distro_name: amazon2023.0-arm64-large
   tasks:
   - name: compile_test_and_package_serial_lto_no_unittests_TG
     distros:
@@ -820,10 +816,9 @@ buildvariants:
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .read_write_concern .large
     distros:
     - amazon2023.0-arm64-large
@@ -866,6 +861,31 @@ buildvariants:
   #   distros:
   #   - ubuntu2204-arm64-large
   - name: generate_buildid_to_debug_symbols_mapping
+
+- name: enterprise-debian10-64
+  display_name: Jepsen Tests on Enterprise Debian 10
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  modules:
+  - enterprise
+  run_on:
+  - debian10-test
+  expansions:
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=debian10
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --use-diagnostic-latches=off
+    scons_cache_scope: shared
+    large_distro_name: debian10-build
+    compile_variant: enterprise-debian10-64
+  tasks:
+  - name: compile_and_archive_dist_test_TG
+    distros:
+    - debian10-build
+  - name: .jepsen_docker
+    distros:
+    - debian10-large
 
 - name: debian11
   display_name: Debian 11
@@ -935,8 +955,6 @@ buildvariants:
     additional_package_targets: >-
       archive-mongocryptd
       archive-mongocryptd-debug
-      archive-mh
-      archive-mh-debug
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -971,7 +989,120 @@ buildvariants:
   - name: .jscore .common !.decimal !.sharding !.feature_flag_guarded
   - name: .jstestfuzz .common
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
+  - name: sasl
+  - name: sharding_auth_audit_gen
+  - name: .stitch
+  - name: .crypt
+  - name: .publish_crypt
+  - name: test_packages
+    distros:
+    - ubuntu2204-large
+  - name: .publish
+  - name: generate_buildid_to_debug_symbols_mapping
+
+- name: debian12
+  display_name: Debian 12
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - debian12-small
+  expansions:
+    push_path: linux
+    push_bucket: downloads.mongodb.org
+    push_name: linux
+    push_arch: x86_64-debian12
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=debian12
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --use-diagnostic-latches=off
+    test_flags: --excludeWithAnyTags=requires_external_data_source,requires_latch_analyzer
+    multiversion_platform: debian12
+    multiversion_edition: targeted
+    has_packages: true
+    packager_script: packager.py
+    packager_arch: x86_64
+    packager_distro: debian12
+    repo_edition: org
+    scons_cache_scope: shared
+    large_distro_name: debian12-large
+    compile_variant: debian12
+  tasks:
+  - name: compile_test_and_package_serial_no_unittests_TG
+    distros:
+    - debian12-large
+  - name: .aggfuzzer .common !.feature_flag_guarded !.multiversion
+  - name: aggregation !.feature_flag_guarded
+  - name: aggregation_auth
+  - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .misc_js
+  - name: .concurrency .common
+  - name: concurrency_replication_causal_consistency_gen
+  - name: disk_wiredtiger
+  - name: .jscore .common !.decimal !.feature_flag_guarded
+  - name: .jstestfuzz .common
+  - name: replica_sets_gen
+  - name: .replica_sets .common
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .common !.csrs !.encrypt !.multiversion
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
+  - name: .ssl
+  - name: .stitch
+  - name: test_packages
+    distros:
+    - ubuntu2204-large
+  - name: .publish
+  - name: generate_buildid_to_debug_symbols_mapping
+
+- name: enterprise-debian12-64
+  display_name: Enterprise Debian 12
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  modules:
+  - enterprise
+  run_on:
+  - debian12-small
+  expansions:
+    additional_package_targets: >-
+      archive-mongocryptd
+      archive-mongocryptd-debug
+    push_path: linux
+    push_bucket: downloads.10gen.com
+    push_name: linux
+    push_arch: x86_64-enterprise-debian12
+    compile_flags: >-
+      --ssl MONGO_DISTMOD=debian12
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --use-diagnostic-latches=off
+    test_flags: --excludeWithAnyTags=requires_external_data_source,requires_latch_analyzer
+    crypt_task_compile_flags: >-
+      SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique"
+      CCFLAGS="-fno-gnu-unique"
+    multiversion_platform: debian12
+    multiversion_edition: enterprise
+    has_packages: true
+    packager_script: packager_enterprise.py
+    packager_arch: x86_64
+    packager_distro: debian12
+    repo_edition: enterprise
+    scons_cache_scope: shared
+    large_distro_name: debian12-large
+    compile_variant: enterprise-debian12-64
+  tasks:
+  - name: compile_test_and_package_serial_no_unittests_TG
+    distros:
+    - debian12-large
+  - name: .aggfuzzer .common !.feature_flag_guarded !.multiversion
+  - name: audit
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
+  - name: .jscore .common !.decimal !.sharding !.feature_flag_guarded
+  - name: .jstestfuzz .common
+  - name: replica_sets_auth_gen
+  - name: replica_sets_jscore_passthrough_gen
   - name: sasl
   - name: sharding_auth_audit_gen
   - name: .stitch
@@ -1161,8 +1292,6 @@ buildvariants:
     additional_package_targets: >-
       archive-mongocryptd
       archive-mongocryptd-debug
-      archive-mh
-      archive-mh-debug
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -1220,11 +1349,10 @@ buildvariants:
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
     distros:
@@ -1245,6 +1373,12 @@ buildvariants:
     distros:
     - rhel80-medium
   - name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen
+    distros:
+    - rhel80-medium
+  - name: change_streams_change_collection_replica_sets_stepdown_primary_jscore_passthrough_gen
+    distros:
+    - rhel80-medium
+  - name: change_streams_change_collection_replica_sets_kill_secondary_jscore_passthrough_gen
     distros:
     - rhel80-medium
   - name: .resharding_fuzzer
@@ -1351,8 +1485,6 @@ buildvariants:
     additional_package_targets: >-
       archive-mongocryptd
       archive-mongocryptd-debug
-      archive-mh
-      archive-mh-debug
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -1390,7 +1522,7 @@ buildvariants:
   - name: jsCore_txns_large_txns_format
   - name: .jstestfuzz .common
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: .replica_sets .multi_oplog
   - name: sasl
   - name: search
@@ -1472,7 +1604,7 @@ buildvariants:
   run_on:
   - rhel90-small
   expansions: &enterprise-rhel-90-64-bit-expansions
-    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
+    additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -1514,7 +1646,7 @@ buildvariants:
   - name: libunwind_tests
   - name: .ocsp
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: .replica_sets .multi_oplog
   - name: sasl
   - name: search
@@ -1601,8 +1733,6 @@ buildvariants:
     additional_package_targets: >-
       archive-mongocryptd
       archive-mongocryptd-debug
-      archive-mh
-      archive-mh-debug
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -1641,7 +1771,7 @@ buildvariants:
   - name: jsCore_txns_large_txns_format
   - name: .jstestfuzz .common
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: .replica_sets .multi_oplog
   - name: sasl
   - name: search
@@ -1776,7 +1906,7 @@ buildvariants:
   - name: .jscore .common !.decimal !.sharding !.feature_flag_guarded
   - name: .jstestfuzz .common
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: sasl
   - name: sharding_auth_audit_gen
   - name: .stitch
@@ -1833,7 +1963,7 @@ buildvariants:
   - name: .jscore .common !.decimal !.sharding !.feature_flag_guarded
   - name: .jstestfuzz .common
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: sasl
   - name: sharding_auth_audit_gen
   - name: .stitch
@@ -1946,10 +2076,10 @@ buildvariants:
   - name: libunwind_tests
   # - name: multiversion_gen
   - name: replica_sets_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: .sharding .txns
   - name: sharding_gen
-  - name: sharding_jscore_passthrough
+  - name: sharding_jscore_passthrough_gen
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -2002,10 +2132,10 @@ buildvariants:
   - name: libunwind_tests
   # - name: multiversion_gen
   - name: replica_sets_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: .sharding .txns
   - name: sharding_gen
-  - name: sharding_jscore_passthrough
+  - name: sharding_jscore_passthrough_gen
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -2026,8 +2156,6 @@ buildvariants:
     additional_package_targets: >-
       archive-mongocryptd
       archive-mongocryptd-debug
-      archive-mh
-      archive-mh-debug
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -2065,13 +2193,14 @@ buildvariants:
   - name: .encrypt !.aggregation !.replica_sets !.sharding !.jscore
   - name: external_auth
   - name: external_auth_aws
+  - name: external_auth_oidc_azure
   - name: .jscore .common !.decimal !.sharding !.feature_flag_guarded
   - name: jsCore_auth
   - name: .jstestfuzz .common
   - name: libunwind_tests
   - name: .ocsp
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: sasl
   - name: sharding_auth_audit_gen
   - name: test_packages
@@ -2092,8 +2221,6 @@ buildvariants:
     additional_package_targets: >-
       archive-mongocryptd
       archive-mongocryptd-debug
-      archive-mh
-      archive-mh-debug
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -2138,7 +2265,7 @@ buildvariants:
   - name: libunwind_tests
   - name: .ocsp
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: sasl
   - name: sharding_auth_audit_gen
   - name: test_packages
@@ -2156,7 +2283,7 @@ buildvariants:
   modules:
   - enterprise
   run_on:
-  - ubuntu1804-arm64-build
+  - ubuntu2004-arm64
   expansions:
     additional_package_targets: >-
       archive-mongocryptd
@@ -2185,8 +2312,11 @@ buildvariants:
     multiversion_edition: enterprise
     scons_cache_scope: shared
     compile_variant: enterprise-ubuntu2004-arm64
+    large_distro_name: ubuntu2004-arm64-large
   tasks:
   - name: compile_test_and_package_serial_no_unittests_TG
+    distros:
+    - ubuntu2004-arm64-large
   - name: aggregation !.feature_flag_guarded
   - name: aggregation_wildcard_fuzzer_gen
   - name: .auth !.audit !.multiversion !.jscore
@@ -2202,7 +2332,7 @@ buildvariants:
   - name: .replica_sets .common
   - name: .sharding .txns
   - name: sharding_gen
-  - name: sharding_jscore_passthrough
+  - name: sharding_jscore_passthrough_gen
   - name: .ssl
   - name: .stitch
   - name: .crypt
@@ -2217,7 +2347,7 @@ buildvariants:
   display_name: Ubuntu 20.04 arm64
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
-  - ubuntu1804-arm64-build
+  - ubuntu2004-arm64-small
   expansions:
     push_path: linux
     push_bucket: downloads.mongodb.org
@@ -2241,10 +2371,13 @@ buildvariants:
     multiversion_edition: targeted
     scons_cache_scope: shared
     compile_variant: ubuntu2004-arm64
+    large_distro_name: ubuntu2004-arm64-large
   tasks:
   - name: compile_test_and_package_serial_no_unittests_TG
+    distros:
+    - ubuntu2004-arm64-large
   - name: jsCore
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: test_packages
     distros:
     - ubuntu1804-arm64-build
@@ -2258,7 +2391,7 @@ buildvariants:
   modules:
   - enterprise
   run_on:
-  - ubuntu2204-arm64-large
+  - ubuntu2204-arm64-small
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     push_path: linux
@@ -2279,8 +2412,11 @@ buildvariants:
     multiversion_edition: enterprise
     scons_cache_scope: shared
     compile_variant: enterprise-ubuntu2204-arm64
+    large_distro_name: ubuntu2204-arm64-large
   tasks:
   - name: compile_test_and_package_serial_no_unittests_TG
+    distros:
+    - ubuntu2204-arm64-large
   - name: aggregation !.feature_flag_guarded
   - name: aggregation_wildcard_fuzzer_gen
   - name: .auth !.audit !.multiversion !.jscore
@@ -2296,7 +2432,7 @@ buildvariants:
   - name: .replica_sets .common
   - name: .sharding .txns
   - name: sharding_gen
-  - name: sharding_jscore_passthrough
+  - name: sharding_jscore_passthrough_gen
   - name: .ssl
   - name: .stitch
   - name: .crypt
@@ -2314,7 +2450,7 @@ buildvariants:
   display_name: Ubuntu 22.04 arm64
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
-  - ubuntu2204-arm64-large
+  - ubuntu2204-arm64-small
   expansions:
     push_path: linux
     push_bucket: downloads.mongodb.org
@@ -2333,10 +2469,13 @@ buildvariants:
     multiversion_edition: targeted
     scons_cache_scope: shared
     compile_variant: ubuntu2204-arm64
+    large_distro_name: ubuntu2204-arm64-large
   tasks:
   - name: compile_test_and_package_serial_no_unittests_TG
+    distros:
+    - ubuntu2204-arm64-large
   - name: jsCore
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: test_packages
     distros:
     - ubuntu2204-arm64-large
@@ -2392,7 +2531,7 @@ buildvariants:
   - name: .jstestfuzz !.initsync !.flow_control !.stepdowns
   - name: multiversion_gen
   - name: multiversion_auth_gen
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .read_write_concern
   - name: replica_sets_gen
   - name: replica_sets_jscore_passthrough_gen
@@ -2418,8 +2557,6 @@ buildvariants:
       archive-mongocryptd
       archive-mongocryptd-debug
       msi
-      archive-mh
-      archive-mh-debug
     content_type: application/zip
     compile_flags: >-
       --ssl
@@ -2471,10 +2608,10 @@ buildvariants:
   - name: .jstestfuzz !.initsync !.flow_control !.stepdowns
   - name: multiversion_gen
   - name: multiversion_auth_gen
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .read_write_concern
   - name: replica_sets_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .txns
   - name: .sharding .common !.csrs !.gcm
@@ -2523,7 +2660,7 @@ buildvariants:
   - name: .jstestfuzz .interrupt
   - name: .jstestfuzz .common
   - name: .jstestfuzz .session
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .read_write_concern !.linearize
   - name: replica_sets_gen
   - name: replica_sets_kill_secondaries_jscore_passthrough
@@ -2575,7 +2712,7 @@ buildvariants:
   - name: .jstestfuzz .interrupt
   - name: .jstestfuzz .common
   - name: .jstestfuzz .session
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .read_write_concern !.linearize
   - name: replica_sets_gen
   - name: replica_sets_kill_secondaries_jscore_passthrough
@@ -2602,8 +2739,6 @@ buildvariants:
     additional_package_targets: >-
       archive-mongocryptd
       archive-mongocryptd-debug
-      archive-mh
-      archive-mh-debug
     push_path: osx
     push_bucket: downloads.10gen.com
     push_name: macos
@@ -2626,9 +2761,8 @@ buildvariants:
   - name: .encrypt !.replica_sets !.sharding !.aggregation !.jscore
   - name: .jscore .common !.decimal !.sharding !.feature_flag_guarded
   - name: .jstestfuzz .common
-  - name: mqlrun
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: sasl
   - name: push
   - name: .crypt
@@ -2646,8 +2780,6 @@ buildvariants:
     additional_package_targets: >-
       archive-mongocryptd
       archive-mongocryptd-debug
-      archive-mh
-      archive-mh-debug
     push_path: osx
     push_bucket: downloads.10gen.com
     push_name: macos
@@ -2670,9 +2802,8 @@ buildvariants:
   - name: .encrypt !.replica_sets !.sharding !.aggregation !.jscore
   - name: .jscore .common !.decimal !.sharding !.feature_flag_guarded
   - name: .jstestfuzz .common
-  - name: mqlrun
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: sasl
   - name: push
   - name: .crypt
@@ -2739,6 +2870,9 @@ buildvariants:
     - amazon2-build
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
+  - name: streams
+  - name: streams_auth
+  - name: streams_kafka
 
 - name: &security-daily-cron security-daily-cron
   modules:

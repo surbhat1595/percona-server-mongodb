@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
@@ -82,7 +81,7 @@
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/sort_pattern.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/update/pattern_cmp.h"
@@ -3089,9 +3088,7 @@ public:
 class ExpressionSetIsSubset : public ExpressionFixedArity<ExpressionSetIsSubset, 2> {
 public:
     explicit ExpressionSetIsSubset(ExpressionContext* const expCtx)
-        : ExpressionFixedArity<ExpressionSetIsSubset, 2>(expCtx) {
-        expCtx->sbeCompatibility = SbeCompatibility::notCompatible;
-    }
+        : ExpressionFixedArity<ExpressionSetIsSubset, 2>(expCtx) {}
     ExpressionSetIsSubset(ExpressionContext* const expCtx, ExpressionVector&& children)
         : ExpressionFixedArity<ExpressionSetIsSubset, 2>(expCtx, std::move(children)) {}
 
@@ -3268,12 +3265,16 @@ class ExpressionInternalFindAllValuesAtPath final
     : public ExpressionFixedArity<ExpressionInternalFindAllValuesAtPath, 1> {
 public:
     explicit ExpressionInternalFindAllValuesAtPath(ExpressionContext* expCtx)
-        : ExpressionFixedArity<ExpressionInternalFindAllValuesAtPath, 1>(expCtx) {}
+        : ExpressionFixedArity<ExpressionInternalFindAllValuesAtPath, 1>(expCtx) {
+        expCtx->sbeCompatibility = SbeCompatibility::notCompatible;
+    }
 
     explicit ExpressionInternalFindAllValuesAtPath(ExpressionContext* expCtx,
                                                    ExpressionVector&& children)
         : ExpressionFixedArity<ExpressionInternalFindAllValuesAtPath, 1>(expCtx,
-                                                                         std::move(children)) {}
+                                                                         std::move(children)) {
+        expCtx->sbeCompatibility = SbeCompatibility::notCompatible;
+    }
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const {
         return "$_internalFindAllValuesAtPath";
@@ -4743,4 +4744,9 @@ public:
         return visitor->visit(this);
     }
 };
+
+static boost::intrusive_ptr<Expression> parseParenthesisExprObj(ExpressionContext* expCtx,
+                                                                BSONElement expr,
+                                                                const VariablesParseState& vpsIn);
+
 }  // namespace mongo

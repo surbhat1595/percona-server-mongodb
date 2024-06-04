@@ -34,7 +34,6 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/iterator/transform_iterator.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <cstdint>
 #include <fmt/format.h>
@@ -138,6 +137,8 @@ MONGO_FAIL_POINT_DEFINE(hangInRemoveIndexBuildEntryAfterCommitOrAbort);
 MONGO_FAIL_POINT_DEFINE(hangIndexBuildOnSetupBeforeTakingLocks);
 MONGO_FAIL_POINT_DEFINE(hangAbortIndexBuildByBuildUUIDAfterLocks);
 MONGO_FAIL_POINT_DEFINE(hangOnStepUpAsyncTaskBeforeCheckingCommitQuorum);
+
+extern FailPoint skipWriteConflictRetries;
 
 IndexBuildsCoordinator::IndexBuildsSSS::IndexBuildsSSS()
     : ServerStatusSection("indexBuilds"),
@@ -566,7 +567,7 @@ Status IndexBuildsCoordinator::checkDiskSpaceSufficientToStartIndexBuild(Operati
     }
 
     // Must hold the global lock to ensure safe access to storageGlobalParams.dbpath.
-    dassert(opCtx->lockState()->isLocked());
+    Lock::GlobalLock globalLock{opCtx, MODE_IS};
     const auto availableBytes = getAvailableDiskSpaceBytesInDbPath(storageGlobalParams.dbpath);
     const int64_t requiredBytes = gIndexBuildMinAvailableDiskSpaceMB.load() * 1024 * 1024;
     if (availableBytes <= requiredBytes) {
@@ -1648,6 +1649,24 @@ void IndexBuildsCoordinator::_completeExternalAbort(OperationContext* opCtx,
     try {
         _completeAbort(opCtx, replState, indexBuildEntryColl, signalAction);
     } catch (const DBException& e) {
+        // In production code, we should not encounter any write conflict exceptions from
+        // the abort logic. It is only through the use of a fail point that the internal write
+        // conflict retry logic is disabled and we may get a WriteConflict here.
+        // This index build is now in an inconsistent state and we should continue to crash the
+        // server. But we will log a warning message to alert users of the CI system that this is
+        // fine.
+        if (e.code() == ErrorCodes::WriteConflict &&
+            MONGO_unlikely(skipWriteConflictRetries.shouldFail()) &&
+            opCtx->getClient()->isFromUserConnection()) {
+            LOGV2_WARNING(
+                7912300,
+                "Failed to abort index build due to write conflict. This is only possible "
+                "in a test environment with the  skipWriteConflictRetries fail point "
+                "enabled. Index build is now in  an inconsistent and unrecoverable state. "
+                "Proceeding to shut down server with a fatal assertion.",
+                "buildUUID"_attr = replState->buildUUID);
+        }
+
         LOGV2_FATAL(4656011,
                     "Failed to abort index build after partially tearing-down index build state",
                     "buildUUID"_attr = replState->buildUUID,
@@ -1734,7 +1753,8 @@ void IndexBuildsCoordinator::onStepUp(OperationContext* opCtx) {
 
     PromiseAndFuture<void> promiseAndFuture;
     _stepUpThread = stdx::thread([this, &promiseAndFuture] {
-        Client::initThread("IndexBuildsCoordinator-StepUp");
+        Client::initThread("IndexBuildsCoordinator-StepUp",
+                           getGlobalServiceContext()->getService(ClusterRole::ShardServer));
         auto threadCtx = Client::getCurrent()->makeOperationContext();
         threadCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
         promiseAndFuture.promise.emplaceValue();
@@ -1752,55 +1772,56 @@ void IndexBuildsCoordinator::_onStepUpAsyncTaskFn(OperationContext* opCtx) {
     auto indexBuilds = activeIndexBuilds.getAllIndexBuilds();
     const auto signalCommitQuorumAndRetrySkippedRecords =
         [this, opCtx](const std::shared_ptr<ReplIndexBuildState>& replState) {
-            if (replState->protocol != IndexBuildProtocol::kTwoPhase) {
-                return;
-            }
-
-            // We don't need to check if we are primary because the opCtx is interrupted at
-            // stepdown, so it is guaranteed that if taking the locks succeeds, we are primary.
-            // Take an intent lock, the actual index build should keep running in parallel.
-            // This also prevents the concurrent index build from aborting or committing
-            // while we check if the commit quorum has to be signaled or check the skipped records.
-            const NamespaceStringOrUUID dbAndUUID(replState->dbName, replState->collectionUUID);
-            AutoGetCollection autoColl(opCtx, dbAndUUID, MODE_IX);
-
-            // The index build hasn't yet completed its initial setup, and persisted state like
-            // commit quorum information is absent. There's nothing to do here.
-            if (replState->isSettingUp()) {
-                return;
-            }
-
-            // The index build might have committed or aborted while looping and not holding the
-            // collection lock. Re-checking if it is still active after taking locks would not solve
-            // the issue, as build can still be registered as active, even if it is in an aborted or
-            // committed state.
-            if (replState->isAborting() || replState->isAborted() || replState->isCommitted()) {
-                return;
-            }
-
-            if (!_signalIfCommitQuorumNotEnabled(opCtx, replState)) {
-                // This reads from system.indexBuilds collection to see if commit quorum got
-                // satisfied.
-                try {
-                    hangOnStepUpAsyncTaskBeforeCheckingCommitQuorum.pauseWhileSet();
-
-                    if (_signalIfCommitQuorumIsSatisfied(opCtx, replState)) {
-                        // The index build has been signalled to commit. As retrying skipped records
-                        // during step-up is done to prevent waiting until commit time, if the build
-                        // has already been signalled to commit, we may skip the retry during
-                        // step-up.
-                        return;
-                    }
-                } catch (DBException& ex) {
-                    // If the operation context is interrupted (shutdown, stepdown, killOp), stop
-                    // the verification process and exit.
-                    opCtx->checkForInterrupt();
-
-                    fassert(31440, ex.toStatus());
-                }
-            }
-
             try {
+                if (replState->protocol != IndexBuildProtocol::kTwoPhase) {
+                    return;
+                }
+
+                // We don't need to check if we are primary because the opCtx is interrupted at
+                // stepdown, so it is guaranteed that if taking the locks succeeds, we are primary.
+                // Take an intent lock, the actual index build should keep running in parallel.
+                // This also prevents the concurrent index build from aborting or committing
+                // while we check if the commit quorum has to be signaled or check the skipped
+                // records.
+                const NamespaceStringOrUUID dbAndUUID(replState->dbName, replState->collectionUUID);
+                AutoGetCollection autoColl(opCtx, dbAndUUID, MODE_IX);
+
+                // The index build hasn't yet completed its initial setup, and persisted state like
+                // commit quorum information is absent. There's nothing to do here.
+                if (replState->isSettingUp()) {
+                    return;
+                }
+
+                // The index build might have committed or aborted while looping and not holding the
+                // collection lock. Re-checking if it is still active after taking locks would not
+                // solve the issue, as build can still be registered as active, even if it is in an
+                // aborted or committed state.
+                if (replState->isAborting() || replState->isAborted() || replState->isCommitted()) {
+                    return;
+                }
+
+                if (!_signalIfCommitQuorumNotEnabled(opCtx, replState)) {
+                    // This reads from system.indexBuilds collection to see if commit quorum got
+                    // satisfied.
+                    try {
+                        hangOnStepUpAsyncTaskBeforeCheckingCommitQuorum.pauseWhileSet();
+
+                        if (_signalIfCommitQuorumIsSatisfied(opCtx, replState)) {
+                            // The index build has been signalled to commit. As retrying skipped
+                            // records during step-up is done to prevent waiting until commit time,
+                            // if the build has already been signalled to commit, we may skip the
+                            // retry during step-up.
+                            return;
+                        }
+                    } catch (DBException& ex) {
+                        // If the operation context is interrupted (shutdown, stepdown, killOp),
+                        // stop the verification process and exit.
+                        opCtx->checkForInterrupt();
+
+                        fassert(31440, ex.toStatus());
+                    }
+                }
+
                 // Unlike the primary, secondaries cannot fail immediately when detecting key
                 // generation errors; they instead temporarily store them in the 'skipped records'
                 // table, to validate them on commit. As an optimisation to potentially detect
@@ -2514,11 +2535,7 @@ IndexBuildsCoordinator::PostSetupAction IndexBuildsCoordinator::_setUpIndexBuild
         const auto& status = ex.toStatus();
         if (IndexBuildsCoordinator::isCreateIndexesErrorSafeToIgnore(status,
                                                                      options.indexConstraints)) {
-            LOGV2_DEBUG(20662,
-                        1,
-                        "Ignoring indexing error: {error}",
-                        "Ignoring indexing error",
-                        "error"_attr = redact(status));
+            LOGV2_DEBUG(20662, 1, "Ignoring indexing error", "error"_attr = redact(status));
             return PostSetupAction::kCompleteIndexBuildEarly;
         }
 
@@ -2672,7 +2689,8 @@ namespace {
 
 template <typename Func>
 void runOnAlternateContext(OperationContext* opCtx, std::string name, Func func) {
-    auto newClient = opCtx->getServiceContext()->makeClient(name);
+    auto newClient =
+        opCtx->getServiceContext()->getService(ClusterRole::ShardServer)->makeClient(name);
 
     // TODO(SERVER-74657): Please revisit if this thread could be made killable.
     {
@@ -3610,7 +3628,7 @@ std::vector<BSONObj> IndexBuildsCoordinator::prepareSpecListForCreate(
     }
 
     // Normalize the specs' collations, wildcard projections, and any other fields as applicable.
-    auto normalSpecs = normalizeIndexSpecs(opCtx, collection, indexSpecs);
+    auto normalSpecs = indexCatalog->normalizeIndexSpecs(opCtx, collection, indexSpecs);
 
     // Remove any index specifications which already exist in the catalog.
     auto resultSpecs = indexCatalog->removeExistingIndexes(
@@ -3624,38 +3642,6 @@ std::vector<BSONObj> IndexBuildsCoordinator::prepareSpecListForCreate(
     }
 
     return resultSpecs;
-}
-
-// Returns normalized versions of 'indexSpecs' for the catalog.
-std::vector<BSONObj> IndexBuildsCoordinator::normalizeIndexSpecs(
-    OperationContext* opCtx,
-    const CollectionPtr& collection,
-    const std::vector<BSONObj>& indexSpecs) {
-    // This helper function may be called before the collection is created, when we are attempting
-    // to check whether the candidate index collides with any existing indexes. If 'collection' is
-    // nullptr, skip normalization. Since the collection does not exist there cannot be a conflict,
-    // and we will normalize once the candidate spec is submitted to the IndexBuildsCoordinator.
-    if (!collection) {
-        return indexSpecs;
-    }
-
-    // Add collection-default collation where needed and normalize the collation in each index spec.
-    auto normalSpecs =
-        uassertStatusOK(collection->addCollationDefaultsToIndexSpecsForCreate(opCtx, indexSpecs));
-
-    // We choose not to normalize the spec's partialFilterExpression at this point, if it exists.
-    // Doing so often reduces the legibility of the filter to the end-user, and makes it difficult
-    // for clients to validate (via the listIndexes output) whether a given partialFilterExpression
-    // is equivalent to the filter that they originally submitted. Omitting this normalization does
-    // not impact our internal index comparison semantics, since we compare based on the parsed
-    // MatchExpression trees rather than the serialized BSON specs.
-    //
-    // For similar reasons we do not normalize index projection objects here, if any, so their
-    // original forms get persisted in the catalog. Projection normalization to detect whether a
-    // candidate new index would duplicate an existing index is done only in the memory-only
-    // 'IndexDescriptor._normalizedProjection' field.
-
-    return normalSpecs;
 }
 
 }  // namespace mongo

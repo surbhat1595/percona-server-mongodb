@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -126,7 +125,7 @@ protected:
                                       StringData collName,
                                       Date_t timestamp,
                                       const std::string& what,
-                                      const std::string& ns,
+                                      const NamespaceString& ns,
                                       const BSONObj& detail);
 
     virtual std::unique_ptr<ShardingCatalogClient> makeShardingCatalogClient() {

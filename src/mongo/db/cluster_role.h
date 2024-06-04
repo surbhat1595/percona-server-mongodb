@@ -29,8 +29,16 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <initializer_list>
+#include <ostream>
+#include <sstream>
+#include <string>
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/logv2/log_service.h"
 
 namespace mongo {
 
@@ -83,5 +91,24 @@ public:
 private:
     uint8_t _roleMask;
 };
+
+/**
+ * Returns a BSON array of strings representing each of the roles in `role`.
+ */
+BSONArray toBSON(ClusterRole role);
+
+std::ostream& operator<<(std::ostream& os, ClusterRole r);
+
+inline std::string toString(ClusterRole r) {
+    std::ostringstream os;
+    os << r;
+    return os.str();
+}
+
+/**
+ * Returns the LogService corresponding to `role`. Requires ClusterRole::Shard,
+ * ClusterRole::Router, or ClusterRole::None.
+ */
+logv2::LogService toLogService(ClusterRole role);
 
 }  // namespace mongo

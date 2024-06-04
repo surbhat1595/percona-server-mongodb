@@ -12,6 +12,7 @@
 //   requires_capped,
 //   requires_non_retryable_commands,
 //   requires_non_retryable_writes,
+//   requires_scripting,
 //   # Tenant migrations don't support applyOps.
 //   tenant_migration_incompatible,
 //   # This test has statements that do not support non-local read concern.
@@ -21,6 +22,7 @@
 // Integration tests for the collation feature.
 import {
     getPlanStage,
+    getSingleNodeExplain,
     getWinningPlan,
     isCollscan,
     isIxscan,
@@ -285,16 +287,19 @@ assert.commandWorked(coll.createIndex({a: 1}, {collation: {locale: "fr_CA"}}));
 // Query has simple collation, but index has fr_CA collation.
 explainRes = coll.find({a: "foo"}).explain();
 assert.commandWorked(explainRes);
+explainRes = getSingleNodeExplain(explainRes);
 assert(planHasStage(testDb, getWinningPlan(explainRes.queryPlanner), "COLLSCAN"));
 
 // Query has en_US collation, but index has fr_CA collation.
 explainRes = coll.find({a: "foo"}).collation({locale: "en_US"}).explain();
 assert.commandWorked(explainRes);
+explainRes = getSingleNodeExplain(explainRes);
 assert(planHasStage(testDb, getWinningPlan(explainRes.queryPlanner), "COLLSCAN"));
 
 // Matching collations.
 explainRes = coll.find({a: "foo"}).collation({locale: "fr_CA"}).explain();
 assert.commandWorked(explainRes);
+explainRes = getSingleNodeExplain(explainRes);
 assert(planHasStage(testDb, getWinningPlan(explainRes.queryPlanner), "IXSCAN"));
 
 // Should not be possible to create a text index with an explicit non-simple collation.
@@ -360,6 +365,7 @@ coll.drop();
 assert.commandWorked(testDb.createCollection(coll.getName(), {collation: {locale: "en_US"}}));
 assert.commandWorked(coll.createIndex({a: 1}, {collation: {locale: "en_US"}}));
 var explain = coll.explain("queryPlanner").aggregate([{$match: {a: "foo"}}]);
+explain = getSingleNodeExplain(explain);
 assert(isIxscan(testDb, getWinningPlan(explain.queryPlanner)));
 
 // Aggregation should not use index when no collation specified and collection default
@@ -369,6 +375,7 @@ coll.drop();
 assert.commandWorked(testDb.createCollection(coll.getName(), {collation: {locale: "en_US"}}));
 assert.commandWorked(coll.createIndex({a: 1}, {collation: {locale: "simple"}}));
 var explain = coll.explain("queryPlanner").aggregate([{$match: {a: "foo"}}]);
+explain = getSingleNodeExplain(explain);
 assert(isCollscan(testDb, getWinningPlan(explain.queryPlanner)));
 
 // Explain of aggregation with collation should succeed.

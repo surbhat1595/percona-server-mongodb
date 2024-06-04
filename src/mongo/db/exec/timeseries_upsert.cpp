@@ -35,7 +35,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 
 #include "mongo/base/error_codes.h"
@@ -80,7 +79,7 @@ TimeseriesUpsertStage::TimeseriesUpsertStage(ExpressionContext* expCtx,
                                              WorkingSet* ws,
                                              std::unique_ptr<PlanStage> child,
                                              CollectionAcquisition coll,
-                                             BucketUnpacker bucketUnpacker,
+                                             timeseries::BucketUnpacker bucketUnpacker,
                                              std::unique_ptr<MatchExpression> residualPredicate,
                                              std::unique_ptr<MatchExpression> originalPredicate,
                                              const UpdateRequest& request)

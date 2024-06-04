@@ -31,7 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
 #include <forward_list>
@@ -112,7 +111,7 @@ void BlockedOp::start(ServiceContext* serviceContext) {
 
     _latchState.mutex.lock();
     _latchState.thread = stdx::thread([this, serviceContext]() mutable {
-        ThreadClient tc("DiagnosticCaptureTestLatch", serviceContext);
+        ThreadClient tc("DiagnosticCaptureTestLatch", serviceContext->getService());
 
         // TODO(SERVER-74659): Please revisit if this thread could be made killable.
         {
@@ -128,7 +127,7 @@ void BlockedOp::start(ServiceContext* serviceContext) {
     });
 
     _interruptibleState.thread = stdx::thread([this, serviceContext]() mutable {
-        ThreadClient tc("DiagnosticCaptureTestInterruptible", serviceContext);
+        ThreadClient tc("DiagnosticCaptureTestInterruptible", serviceContext->getService());
 
         // TODO(SERVER-74659): Please revisit if this thread could be made killable.
         {
@@ -182,20 +181,14 @@ void BlockedOp::join() {
 }
 
 void BlockedOp::setIsContended(bool value) {
-    LOGV2(23128,
-          "Setting isContended to {value}",
-          "Setting isContended",
-          "value"_attr = (value ? "true" : "false"));
+    LOGV2(23128, "Setting isContended", "value"_attr = (value ? "true" : "false"));
     stdx::lock_guard lk(_m);
     _latchState.isContended = value;
     _cv.notify_one();
 }
 
 void BlockedOp::setIsWaiting(bool value) {
-    LOGV2(23129,
-          "Setting isWaiting to {value}",
-          "Setting isWaiting",
-          "value"_attr = (value ? "true" : "false"));
+    LOGV2(23129, "Setting isWaiting", "value"_attr = (value ? "true" : "false"));
     stdx::lock_guard lk(_m);
     _interruptibleState.isWaiting = value;
     _cv.notify_one();

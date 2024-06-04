@@ -33,7 +33,6 @@
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/catalog/catalog_test_fixture.h"
@@ -67,7 +66,7 @@ public:
         ClientAndCtx;
 
     ClientAndCtx makeClientWithLocker(const std::string& clientName) {
-        auto client = getServiceContext()->makeClient(clientName);
+        auto client = getServiceContext()->getService()->makeClient(clientName);
         auto opCtx = client->makeOperationContext();
         client->swapLockState(std::make_unique<LockerImpl>(opCtx->getServiceContext()));
         return std::make_pair(std::move(client), std::move(opCtx));

@@ -6,6 +6,8 @@
  *   requires_fcv_71,
  *   # To avoid burn-in tests in in-memory build variants
  *   requires_persistence,
+ *   # TODO (SERVER-80521): Re-enable this test once redness is resolve in multiversion suites.
+ *   DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE,
  * ]
  */
 
@@ -24,9 +26,8 @@ const primaryDB = primary.getDB(dbName);
 const otherShard = st.shard1;
 const otherDB = otherShard.getDB(dbName);
 
-testDB.dropDatabase();
-assert.commandWorked(mongos.adminCommand({enableSharding: dbName}));
-st.ensurePrimaryShard(testDB.getName(), primary.shardName);
+assert.commandWorked(
+    mongos.adminCommand({enableSharding: dbName, primaryShard: primary.shardName}));
 
 const shard0RoutingValues = {
     shardNumber: 0,

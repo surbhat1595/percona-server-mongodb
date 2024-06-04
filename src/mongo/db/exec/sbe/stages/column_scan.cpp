@@ -30,7 +30,6 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/meta/type_traits.h>
-#include <boost/preprocessor/control/iif.hpp>
 #include <list>
 
 #include <boost/move/utility_core.hpp>
@@ -143,7 +142,7 @@ void ColumnScanStage::prepare(CompileCtx& ctx) {
                           << "' in collection '" << _coll.getCollName()->toStringForErrorMsg()
                           << "'",
             indexDesc);
-    _weakIndexCatalogEntry = indexCatalog->getEntryShared(indexDesc);
+    _columnIndexIdent = indexDesc->getEntry()->getIdent();
 }
 
 value::SlotAccessor* ColumnScanStage::getAccessor(CompileCtx& ctx, value::SlotId slot) {
@@ -202,11 +201,11 @@ void ColumnScanStage::doRestoreState(bool relinquishCursor) {
     }
 
     _coll.restoreCollection(_opCtx, _collUuid);
-
-    auto indexCatalogEntry = _weakIndexCatalogEntry.lock();
+    auto desc = _coll.getPtr()->getIndexCatalog()->findIndexByIdent(_opCtx, _columnIndexIdent);
     uassert(ErrorCodes::QueryPlanKilled,
             str::stream() << "query plan killed :: index '" << _columnIndexName << "' dropped",
-            indexCatalogEntry && !indexCatalogEntry->isDropped());
+            desc);
+
 
     if (_rowStoreCursor) {
         if (relinquishCursor) {
@@ -292,11 +291,12 @@ void ColumnScanStage::open(bool reOpen) {
     }
 
     if (_columnCursors.empty()) {
-        auto entry = _weakIndexCatalogEntry.lock();
+        auto desc = _coll.getPtr()->getIndexCatalog()->findIndexByIdent(_opCtx, _columnIndexIdent);
         tassert(6610210,
                 str::stream() << "expected IndexCatalogEntry for index named: " << _columnIndexName,
-                static_cast<bool>(entry));
+                static_cast<bool>(desc));
 
+        auto entry = desc->getEntry();
         auto iam = static_cast<ColumnStoreAccessMethod*>(entry->accessMethod());
 
         for (size_t i = 0; i < _paths.size(); i++) {
@@ -350,10 +350,11 @@ void ColumnScanStage::readParentsIntoObj(StringData path,
     // If we inserted a new entry, replace the null with an actual cursor.
     if (inserted) {
         invariant(!it->second);
-        auto entry = _weakIndexCatalogEntry.lock();
+        auto desc = _coll.getPtr()->getIndexCatalog()->findIndexByIdent(_opCtx, _columnIndexIdent);
         tassert(6610211,
                 str::stream() << "expected IndexCatalogEntry for index named: " << _columnIndexName,
-                static_cast<bool>(entry));
+                static_cast<bool>(desc));
+        auto entry = desc->getEntry();
         auto iam = static_cast<ColumnStoreAccessMethod*>(entry->accessMethod());
 
         it->second =
@@ -558,7 +559,7 @@ PlanState ColumnScanStage::getNext() {
     // call.
     disableSlotAccess();
 
-    checkForInterrupt(_opCtx);
+    checkForInterruptAndYield(_opCtx);
 
     if (_scanTracker.isScanningRowstore()) {
         _scanTracker.track();

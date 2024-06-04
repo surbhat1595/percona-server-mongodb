@@ -7,10 +7,12 @@
  *   not_allowed_with_security_token,
  *   # Queries on mongoS may not request or provide a resume token.
  *   assumes_against_mongod_not_mongos,
- *   # Resuming may not work properly with stepdowns.
+ *   # Resuming may not work properly with stepdowns/tenant migration.
  *   does_not_support_stepdowns,
+ *   tenant_migration_incompatible,
  *   # We need a timeseries collection.
  *   requires_timeseries,
+ *   cannot_run_during_upgrade_downgrade,
  * ]
  */
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";

@@ -37,7 +37,6 @@
 #include <boost/date_time/time_duration.hpp>
 #include <boost/iterator/iterator_traits.hpp>
 #include <boost/operators.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdio>
 #include <deque>
 #include <iterator>
@@ -268,7 +267,6 @@ Status BalancerConfiguration::_refreshChunkSizeSettings(OperationContext* opCtx)
 
     if (settings.getMaxChunkSizeBytes() != getMaxChunkSizeBytes()) {
         LOGV2(22640,
-              "Changing MaxChunkSize setting to {newMaxChunkSizeMB}MB from {oldMaxChunkSizeMB}MB",
               "Changing MaxChunkSize setting",
               "newMaxChunkSizeMB"_attr = settings.getMaxChunkSizeBytes() / (1024 * 1024),
               "oldMaxChunkSizeMB"_attr = getMaxChunkSizeBytes() / (1024 * 1024));

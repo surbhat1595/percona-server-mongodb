@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -74,6 +73,9 @@
 #include "mongo/s/catalog/type_changelog.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_tags.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
+
 
 namespace mongo {
 namespace {
@@ -853,7 +855,9 @@ protected:
 
         const auto onlyZonesOverlappingWithChunkFilter = [&]() {
             BSONObjBuilder queryBuilder;
-            queryBuilder.append(TagsType::ns(), NamespaceStringUtil::serialize(_nss));
+            queryBuilder.append(
+                TagsType::ns(),
+                NamespaceStringUtil::serialize(_nss, SerializationContext::stateDefault()));
             BSONArrayBuilder norBuilder(queryBuilder.subarrayStart("$nor"));
             norBuilder.append(BSON(TagsType::min() << BSON("$gte" << chunkMaxKey)));
             norBuilder.append(BSON(TagsType::max() << BSON("$lte" << chunkMinKey)));

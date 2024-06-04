@@ -135,6 +135,11 @@ public:
                         ->getShardedCollectionRoutingInfoWithPlacementRefresh(opCtx, ns()))
                     .cm;
 
+            uassert(ErrorCodes::NamespaceNotSharded,
+                    str::stream() << "Can't execute " << Request::kCommandName
+                                  << " on unsharded collection " << ns().toStringForErrorMsg(),
+                    chunkManager.isSharded());
+
             uassert(ErrorCodes::InvalidOptions,
                     "bounds can only have exactly 2 elements",
                     !request().getBounds() || request().getBounds()->size() == 2);
@@ -152,14 +157,11 @@ public:
             const auto toStatus = Grid::get(opCtx)->shardRegistry()->getShard(opCtx, destination);
 
             if (!toStatus.isOK()) {
-                LOGV2_OPTIONS(
-                    22755,
-                    {logv2::UserAssertAfterLog(ErrorCodes::ShardNotFound)},
-                    "Could not move chunk in {namespace} to {toShardId} because that shard"
-                    " does not exist",
-                    "moveChunk destination shard does not exist",
-                    "toShardId"_attr = destination,
-                    logAttrs(ns()));
+                LOGV2_OPTIONS(22755,
+                              {logv2::UserAssertAfterLog(ErrorCodes::ShardNotFound)},
+                              "moveChunk destination shard does not exist",
+                              "toShardId"_attr = destination,
+                              logAttrs(ns()));
             }
 
 
@@ -254,7 +256,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(MoveChunkCmd);
+MONGO_REGISTER_COMMAND(MoveChunkCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

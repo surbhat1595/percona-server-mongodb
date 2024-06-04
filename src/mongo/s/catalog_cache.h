@@ -67,7 +67,7 @@ static constexpr int kMaxNumStaleVersionRetries = 10;
 
 class ComparableDatabaseVersion;
 
-using DatabaseTypeCache = ReadThroughCache<std::string, DatabaseType, ComparableDatabaseVersion>;
+using DatabaseTypeCache = ReadThroughCache<DatabaseName, DatabaseType, ComparableDatabaseVersion>;
 using DatabaseTypeValueHandle = DatabaseTypeCache::ValueHandle;
 using CachedDatabaseInfo = DatabaseTypeValueHandle;
 
@@ -182,7 +182,8 @@ public:
      * and returns it. If the database was not in cache, all the sharded collections will be in the
      * 'needsRefresh' state.
      */
-    StatusWith<CachedDatabaseInfo> getDatabase(OperationContext* opCtx, const DatabaseName& dbName);
+    virtual StatusWith<CachedDatabaseInfo> getDatabase(OperationContext* opCtx,
+                                                       const DatabaseName& dbName);
 
     /**
      * Blocking method to get both the placement information and the index information for a
@@ -264,6 +265,28 @@ public:
     StatusWith<CollectionRoutingInfo> getShardedCollectionRoutingInfoWithPlacementRefresh(
         OperationContext* opCtx, const NamespaceString& nss);
 
+
+    /**
+     * Same as getCollectionRoutingInfo above, but throws NamespaceNotFound error if the namespace
+     * is not tracked.
+     */
+    CollectionRoutingInfo getTrackedCollectionRoutingInfo(OperationContext* opCtx,
+                                                          const NamespaceString& nss);
+
+    /**
+     * Same as getCollectionRoutingInfoWithRefresh above, but in addition returns a
+     * NamespaceNotFound error if the collection is not tracked.
+     */
+    StatusWith<CollectionRoutingInfo> getTrackedCollectionRoutingInfoWithRefresh(
+        OperationContext* opCtx, const NamespaceString& nss);
+
+    /**
+     * Same as getCollectionRoutingInfoWithPlacementRefresh above, but in addition returns a
+     * NamespaceNotFound error if the collection is not tracked.
+     */
+    StatusWith<CollectionRoutingInfo> getTrackedCollectionRoutingInfoWithPlacementRefresh(
+        OperationContext* opCtx, const NamespaceString& nss);
+
     /**
      * Advances the version in the cache for the given database.
      *
@@ -301,7 +324,7 @@ public:
      * Non-blocking method, which removes the entire specified database (including its collections)
      * from the cache.
      */
-    void purgeDatabase(StringData dbName);
+    void purgeDatabase(const DatabaseName& dbName);
 
     /**
      * Non-blocking method, which removes all databases (including their collections) from the
@@ -319,7 +342,7 @@ public:
      * refresh. Will cause all further targetting attempts to block on a catalog cache refresh,
      * even if they do not require causal consistency.
      */
-    void invalidateDatabaseEntry_LINEARIZABLE(const StringData& dbName);
+    void invalidateDatabaseEntry_LINEARIZABLE(const DatabaseName& dbName);
 
     /**
      * Non-blocking method that marks the current collection entry for the namespace as needing
@@ -339,7 +362,7 @@ private:
 
     private:
         LookupResult _lookupDatabase(OperationContext* opCtx,
-                                     const std::string& dbName,
+                                     const DatabaseName& dbName,
                                      const ValueHandle& dbType,
                                      const ComparableDatabaseVersion& previousDbVersion);
 

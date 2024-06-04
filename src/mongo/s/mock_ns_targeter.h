@@ -92,6 +92,7 @@ public:
         OperationContext* opCtx,
         const BatchItemRef& itemRef,
         bool* useTwoPhaseWriteProtocol = nullptr,
+        bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
         std::set<ChunkRange>* chunkRanges = nullptr) const override {
         return _targetQuery(itemRef.getUpdateRef().getFilter(), chunkRanges);
     }
@@ -135,6 +136,11 @@ public:
         // No-op
     }
 
+    bool hasStaleShardResponse() override {
+        // No-op
+        return false;
+    }
+
     bool refreshIfNeeded(OperationContext* opCtx) override {
         // No-op
         return false;
@@ -145,12 +151,12 @@ public:
         return 0;
     }
 
-    bool isShardedTimeSeriesBucketsNamespace() const override {
-        return _isShardedTimeSeriesBucketsNamespace;
+    bool isTrackedTimeSeriesBucketsNamespace() const override {
+        return _isTrackedTimeSeriesBucketsNamespace;
     }
 
-    void setIsShardedTimeSeriesBucketsNamespace(bool isShardedTimeSeriesBucketsNamespace) {
-        _isShardedTimeSeriesBucketsNamespace = isShardedTimeSeriesBucketsNamespace;
+    void setIsTrackedTimeSeriesBucketsNamespace(bool isTrackedTimeSeriesBucketsNamespace) {
+        _isTrackedTimeSeriesBucketsNamespace = isTrackedTimeSeriesBucketsNamespace;
     }
 
 private:
@@ -166,7 +172,7 @@ private:
 
     std::vector<MockRange> _mockRanges;
 
-    bool _isShardedTimeSeriesBucketsNamespace = false;
+    bool _isTrackedTimeSeriesBucketsNamespace = false;
 };
 
 void assertEndpointsEqual(const ShardEndpoint& endpointA, const ShardEndpoint& endpointB);

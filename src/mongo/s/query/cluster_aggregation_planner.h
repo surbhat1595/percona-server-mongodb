@@ -45,6 +45,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/shard_id.h"
 #include "mongo/s/catalog_cache.h"
@@ -71,20 +72,24 @@ ClusterClientCursorGuard buildClusterCursor(OperationContext* opCtx,
                                             ClusterClientCursorParams&&);
 
 /**
- *  Returns the "collation" and "uuid" for the collection given by "nss" with the following
- *  semantics:
- *  - The "collation" parameter will be set to the default collation for the collection or the
- *    simple collation if there is no default. If the collection does not exist or if the aggregate
- *    is on the collectionless namespace, this will be set to an empty object.
- *  - The "uuid" is retrieved from the chunk manager for sharded collections or the listCollections
- *    output for unsharded collections. The UUID will remain unset if the aggregate is on the
- *    collectionless namespace.
+ *  Returns the collation for aggregation targeting 'nss' with the following semantics:
+ *  - Return 'collation' if the aggregation is collectionless.
+ *  - If 'nss' is tracked, we return 'collation' if it is non-empty. If it is empty, we return the
+ * collection default collation if there is one and the simple collation otherwise.
+ *  - If 'nss' is untracked, we return an empty BSONObj as we will infer the correct collation when
+ * the command reaches the primary shard. The exception is when
+ * 'requiresCollationForParsingUnshardedAggregate' is true: in this case, we must contact the
+ * primary shard to infer the collation as it is required during parsing.
+ *
+ *  TODO SERVER-81991: Delete 'requiresCollationForParsingUnshardedAggregate' parameter once all
+ * unsharded collections are tracked in the sharding catalog as unsplittable along with their
+ * collation.
  */
-std::pair<BSONObj, boost::optional<UUID>> getCollationAndUUID(
-    OperationContext* opCtx,
-    const boost::optional<ChunkManager>& cm,
-    const NamespaceString& nss,
-    const BSONObj& collation);
+BSONObj getCollation(OperationContext* opCtx,
+                     const boost::optional<ChunkManager>& cm,
+                     const NamespaceString& nss,
+                     const BSONObj& collation,
+                     bool requiresCollationForParsingUnshardedAggregate);
 
 /**
  * This structure contains information for targeting an aggregation pipeline in a sharded cluster.
@@ -96,17 +101,12 @@ struct AggregationTargeter {
      */
     static AggregationTargeter make(
         OperationContext* opCtx,
-        const NamespaceString& executionNss,
         std::function<std::unique_ptr<Pipeline, PipelineDeleter>()> buildPipelineFn,
         boost::optional<CollectionRoutingInfo> cri,
-        stdx::unordered_set<NamespaceString> involvedNamespaces,
-        bool hasChangeStream,
-        bool startsWithDocuments,
-        bool allowedToPassthrough,
+        sharded_agg_helpers::PipelineDataSource pipelineDataSource,
         bool perShardCursor);
 
     enum TargetingPolicy {
-        kPassthrough,
         kMongosRequired,
         kAnyShard,
         kSpecificShardOnly,
@@ -115,18 +115,6 @@ struct AggregationTargeter {
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline;
     boost::optional<CollectionRoutingInfo> cri;
 };
-
-/**
- * Runs a pipeline on the primary shard. See 'runPipelineOnSpecificShardOnly' for more details.
- */
-Status runPipelineOnPrimaryShard(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                 const ClusterAggregate::Namespaces& namespaces,
-                                 const ChunkManager& cm,
-                                 boost::optional<ExplainOptions::Verbosity> explain,
-                                 Document serializedCommand,
-                                 const PrivilegeVector& privileges,
-                                 bool eligibleForSampling,
-                                 BSONObjBuilder* out);
 
 /**
  * Runs a pipeline on mongoS, having first validated that it is eligible to do so. This can be a
@@ -151,26 +139,22 @@ Status dispatchPipelineAndMerge(OperationContext* opCtx,
                                 const ClusterAggregate::Namespaces& namespaces,
                                 const PrivilegeVector& privileges,
                                 BSONObjBuilder* result,
-                                bool hasChangeStream,
-                                bool startsWithDocuments,
+                                sharded_agg_helpers::PipelineDataSource pipelineDataSource,
                                 bool eligibleForSampling);
 
 /**
- * Runs a pipeline on a specific shard. Used for running a pipeline on the primary shard (i.e. by
- * 'runPipelineOnPrimaryShard') and on a specifc shard  (i.e. by per shard $changeStream cursors).
- * If 'forPerShardCursor' is true shard versions will not be added to the request sent to mongod.
- * If 'eligibleForSampling' is true, attaches a unique sample id to the request for that shard if
- * the collection has query sampling enabled and the rate-limited sampler successfully generates a
- * sample id for it.
+ * Runs a pipeline on a specific shard. Used for running a pipeline on a specifc shard (i.e. by per
+ * shard $changeStream cursors). This function will not add a shard version to the request sent to
+ * mongod. If 'eligibleForSampling' is true, attaches a unique sample id to the request for that
+ * shard if the collection has query sampling enabled and the rate-limited sampler successfully
+ * generates a sample id for it.
  */
 Status runPipelineOnSpecificShardOnly(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                       const ClusterAggregate::Namespaces& namespaces,
-                                      boost::optional<DatabaseVersion> dbVersion,
                                       boost::optional<ExplainOptions::Verbosity> explain,
                                       Document serializedCommand,
                                       const PrivilegeVector& privileges,
                                       ShardId shardId,
-                                      bool forPerShardCursor,
                                       bool eligibleForSampling,
                                       BSONObjBuilder* out);
 

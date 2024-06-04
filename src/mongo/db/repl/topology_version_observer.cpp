@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <mutex>
 #include <type_traits>
@@ -190,7 +189,8 @@ void TopologyVersionObserver::_cacheHelloResponse(
 
 void TopologyVersionObserver::_workerThreadBody() noexcept try {
     invariant(_serviceContext);
-    ThreadClient tc(kTopologyVersionObserverName, _serviceContext);
+    ThreadClient tc(kTopologyVersionObserverName,
+                    _serviceContext->getService(ClusterRole::ShardServer));
 
     // This thread may be interrupted by replication state changes and this is safe because
     // _cacheHelloResponse is the only place where an opCtx is used and already has logic for

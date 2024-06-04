@@ -33,7 +33,6 @@ selector:
   - jstests/core/**/geo_2d_explain.js  # executionSuccess in different spot in explain().
   - jstests/core/**/geo_s2explain.js  # inputStage in different spot in explain().
   - jstests/core/**/geo_s2sparse.js  # keysPerIndex in different spot in validate().
-  - jstests/core/**/or_to_in.js # queryPlanner in different spot in explain()
   # The following tests fail because they count indexes. These counts do not take into account the
   # additional hashed shard key indexes that are automatically added by this passthrough.
   - jstests/core/**/bad_index_plugin.js
@@ -46,8 +45,6 @@ selector:
   - jstests/core/**/dbcase2.js
   - jstests/core/**/no_db_created.js
   - jstests/core/**/killop_drop_collection.js # Uses fsyncLock.
-  # TODO SERVER-61050
-  - jstests/core/timeseries/timeseries_merge.js
   # This test uses `benchRun` which spawns connections which do not inherit the causal session.
   - jstests/core/**/benchrun_pipeline_updates.js
 
@@ -128,5 +125,3 @@ executor:
           replication:
             heartbeats: 2
     num_rs_nodes_per_shard: 2
-    enable_sharding:
-    - test

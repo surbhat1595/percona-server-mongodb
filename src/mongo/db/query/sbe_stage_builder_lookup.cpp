@@ -41,7 +41,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -1184,9 +1183,9 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         _state.data->foreignHashJoinCollections.emplace(eqLookupNode->foreignCollection);
     }
 
-    auto localReqs = reqs.copy().set(kResult);
+    auto localReqs = reqs.copy().clearMRInfo().setResult();
     auto [localStage, localOutputs] = build(eqLookupNode->children[0].get(), localReqs);
-    SlotId localDocumentSlot = localOutputs.get(PlanStageSlots::kResult);
+    SlotId localDocumentSlot = localOutputs.get(PlanStageSlots::kResult).slotId;
 
     auto [matchedDocumentsSlot, foreignStage] = [&, localStage = std::move(localStage)]() mutable
         -> std::pair<SlotId, std::unique_ptr<sbe::PlanStage>> {

@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <compare>
 #include <cstddef>
 #include <iosfwd>
@@ -177,7 +176,7 @@ class ReplSetConfig : private MutableReplSetConfig {
 public:
     typedef std::vector<MemberConfig>::const_iterator MemberIterator;
 
-    using ReplSetConfigBase::kConfigServerFieldName;
+    using ReplSetConfigBase::kConfigServer_deprecatedFieldName;
     using ReplSetConfigBase::kConfigTermFieldName;
     static constexpr char kMajorityWriteConcernModeName[] = "$majority";
     static constexpr char kVotingMembersWriteConcernModeName[] = "$votingMembers";
@@ -206,7 +205,7 @@ public:
     static const Milliseconds kDefaultCatchUpTakeoverDelay;
 
     // Methods inherited from the base IDL class.  Do not include any setters here.
-    using ReplSetConfigBase::getConfigServer;
+    using ReplSetConfigBase::getConfigServer_deprecated;
     using ReplSetConfigBase::getConfigTerm;
     using ReplSetConfigBase::getConfigVersion;
     using ReplSetConfigBase::getProtocolVersion;

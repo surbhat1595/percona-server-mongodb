@@ -46,14 +46,14 @@ optimizer::ProjectionName getABTVariableName(sbe::value::SlotId slot) {
     constexpr StringData prefix = "__s"_sd;
     str::stream varName;
     varName << prefix << slot;
-    return optimizer::ProjectionName{varName};
+    return optimizer::ProjectionName{std::string(varName)};
 }
 
 optimizer::ProjectionName getABTLocalVariableName(sbe::FrameId frameId, sbe::value::SlotId slotId) {
     constexpr StringData prefix = "__l"_sd;
     str::stream varName;
     varName << prefix << frameId << "_" << slotId;
-    return optimizer::ProjectionName{varName};
+    return optimizer::ProjectionName{std::string(varName)};
 }
 
 boost::optional<sbe::value::SlotId> getSbeVariableInfo(const optimizer::ProjectionName& var) {
@@ -117,10 +117,11 @@ optimizer::ABT makeVariable(optimizer::ProjectionName var) {
     return optimizer::make<optimizer::Variable>(std::move(var));
 }
 
-EExpr abtToExpr(optimizer::ABT& abt, StageBuilderState& state) {
+TypeSignature constantFold(optimizer::VariableEnvironment& env,
+                           optimizer::ABT& abt,
+                           StageBuilderState& state,
+                           const VariableTypes* slotInfo) {
     auto& runtimeEnv = *state.env;
-
-    auto env = optimizer::VariableEnvironment::build(abt);
 
     // Do not use descriptive names here.
     auto prefixId = optimizer::PrefixId::create(false /*useDescriptiveNames*/);
@@ -138,6 +139,7 @@ EExpr abtToExpr(optimizer::ABT& abt, StageBuilderState& state) {
         collator = sbe::value::bitcastTo<const CollatorInterface*>(collatorValue);
     }
 
+    TypeSignature signature = TypeSignature::kAnyScalarType;
     bool modified = false;
     do {
         // Run the constant folding to eliminate lambda applications as they are not directly
@@ -147,13 +149,38 @@ EExpr abtToExpr(optimizer::ABT& abt, StageBuilderState& state) {
         constEval.optimize(abt);
 
         TypeChecker typeChecker;
-        typeChecker.typeCheck(abt);
+        if (slotInfo) {
+            for (const auto& var : *slotInfo) {
+                typeChecker.bind(var.first, var.second);
+            }
+        }
+        signature = typeChecker.typeCheck(abt);
 
         modified = typeChecker.modified();
         if (modified) {
             env.rebuild(abt);
         }
     } while (modified);
+
+    return signature;
+}
+
+TypeSignature constantFold(optimizer::ABT& abt,
+                           StageBuilderState& state,
+                           const VariableTypes* slotInfo) {
+    auto env = optimizer::VariableEnvironment::build(abt);
+
+    return constantFold(env, abt, state, slotInfo);
+}
+
+TypedExpression abtToExpr(optimizer::ABT& abt,
+                          StageBuilderState& state,
+                          const VariableTypes* slotInfo) {
+    auto env = optimizer::VariableEnvironment::build(abt);
+
+    TypeSignature signature = constantFold(env, abt, state, slotInfo);
+
+    auto& runtimeEnv = *state.env;
 
     auto varResolver = optimizer::VarResolver([](const optimizer::ProjectionName& var) {
         if (auto slotId = getSbeVariableInfo(var)) {
@@ -169,8 +196,11 @@ EExpr abtToExpr(optimizer::ABT& abt, StageBuilderState& state) {
     });
 
     // And finally convert to the SBE expression.
-    optimizer::SBEExpressionLowering exprLower{env, std::move(varResolver), runtimeEnv};
-    return exprLower.optimize(abt);
+    sbe::value::SlotIdGenerator ids;
+    auto staticData = std::make_unique<stage_builder::PlanStageStaticData>();
+    optimizer::SBEExpressionLowering exprLower{
+        env, std::move(varResolver), runtimeEnv, ids, staticData->inputParamToSlotMap};
+    return {exprLower.optimize(abt), signature};
 }
 
 SbVar::SbVar(const optimizer::ProjectionName& name) {
@@ -191,15 +221,15 @@ SbVar::SbVar(const optimizer::ProjectionName& name) {
 
 SbExpr::SbExpr(const abt::HolderPtr& a) : _storage(abt::wrap(a->_value)) {}
 
-EExpr SbExpr::extractExpr(StageBuilderState& state) {
+TypedExpression SbExpr::extractExpr(StageBuilderState& state) {
     if (hasSlot()) {
         auto slotId = stdx::get<sbe::value::SlotId>(_storage);
-        return sbe::makeE<sbe::EVariable>(slotId);
+        return {sbe::makeE<sbe::EVariable>(slotId), TypeSignature::kAnyScalarType};
     }
 
     if (stdx::holds_alternative<LocalVarInfo>(_storage)) {
         auto [frameId, slotId] = stdx::get<LocalVarInfo>(_storage);
-        return sbe::makeE<sbe::EVariable>(frameId, slotId);
+        return {sbe::makeE<sbe::EVariable>(frameId, slotId), TypeSignature::kAnyScalarType};
     }
 
     if (stdx::holds_alternative<abt::HolderPtr>(_storage)) {
@@ -207,13 +237,13 @@ EExpr SbExpr::extractExpr(StageBuilderState& state) {
     }
 
     if (stdx::holds_alternative<bool>(_storage)) {
-        return EExpr{};
+        return {EExpr{}, TypeSignature::kAnyScalarType};
     }
 
-    return std::move(stdx::get<EExpr>(_storage));
+    return {std::move(stdx::get<EExpr>(_storage)), TypeSignature::kAnyScalarType};
 }
 
-EExpr SbExpr::getExpr(StageBuilderState& state) const {
+TypedExpression SbExpr::getExpr(StageBuilderState& state) const {
     return clone().extractExpr(state);
 }
 

@@ -36,7 +36,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
 #include <initializer_list>
@@ -58,6 +57,7 @@
 #include "mongo/db/query/optimizer/utils/path_utils.h"
 #include "mongo/db/query/optimizer/utils/strong_alias.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/map_utils.h"
 
 
 namespace mongo::optimizer {
@@ -215,18 +215,10 @@ CollationSplitResult splitCollationSpec(const boost::optional<ProjectionName>& r
 }
 
 PartialSchemaReqConversion::PartialSchemaReqConversion(PSRExpr::Node reqMap)
-    : _bound(),
-      _reqMap(std::move(reqMap)),
-      _hasIntersected(false),
-      _hasTraversed(false),
-      _retainPredicate(false) {}
+    : _bound(), _reqMap(std::move(reqMap)), _retainPredicate(false) {}
 
 PartialSchemaReqConversion::PartialSchemaReqConversion(ABT bound)
-    : _bound(std::move(bound)),
-      _reqMap(psr::makeNoOp()),
-      _hasIntersected(false),
-      _hasTraversed(false),
-      _retainPredicate(false) {}
+    : _bound(std::move(bound)), _reqMap(psr::makeNoOp()), _retainPredicate(false) {}
 
 /**
  * Helper class that builds PartialSchemaRequirements property from an EvalFilter or an EvalPath.
@@ -338,7 +330,6 @@ public:
                     "Cannot detect empty intervals without providing a constant folder",
                     !hasEmptyInterval);
 
-            leftResult->_hasIntersected = true;
             return leftResult;
         }
         // From this point on we only handle additive composition.
@@ -440,6 +431,10 @@ public:
                 });
 
             leftReqMap = std::move(*resultReqs.finish());
+            // If either argument is an over-approximation, then so is the result.
+            if (rightResult->_retainPredicate) {
+                leftResult->_retainPredicate = true;
+            }
             return leftResult;
         }
         // Left and right don't all use the same key.
@@ -623,11 +618,7 @@ public:
             // disjunctions.
         }
 
-        auto result = prependGetOrTraverse<PathTraverse>(n, std::move(inputResult));
-        if (result) {
-            result->_hasTraversed = true;
-        }
-        return result;
+        return prependGetOrTraverse<PathTraverse>(n, std::move(inputResult));
     }
 
     /**
@@ -1141,7 +1132,7 @@ static void extendCompoundInterval(const IndexCollationSpec& indexCollationSpec,
                                    const size_t indexField,
                                    IntervalReqExpr::Node interval) {
     const bool reverse = indexCollationSpec.at(indexField)._op == CollationOp::Descending;
-    if (!combineCompoundIntervalsDNF(expr, std::move(interval), reverse)) {
+    if (!combineCompoundIntervalsDNF(expr, interval, reverse)) {
         uasserted(6624159, "Cannot combine compound interval with simple interval.");
     }
 }
@@ -1320,7 +1311,7 @@ static bool computeCandidateIndexEntry(PrefixId& prefixId,
                     // Only regular requirements are added to residual predicates.
                     const ProjectionName& tempProjName = getExistingOrTempProjForFieldName(
                         prefixId, FieldNameType{encodeIndexKeyName(indexField)}, fieldProjMap);
-                    residualReqs.atom(PartialSchemaKey{tempProjName, std::move(*fusedPath._suffix)},
+                    residualReqs.atom(PartialSchemaKey{tempProjName, fusedPath._suffix->copy()},
                                       req->second,
                                       index);
                 }
@@ -1616,21 +1607,10 @@ static void consolidateEqDisjunctions(ABTVector& childResults) {
             pathCompare != nullptr && pathCompare->getVal().is<Constant>()) {
             switch (pathCompare->op()) {
                 case Operations::EqMember: {
-                    // Unpack this node's values into the new eqMembersArray.
-                    const auto [arrayTag, arrayVal] = pathCompare->getVal().cast<Constant>()->get();
-                    if (arrayTag != sbe::value::TypeTags::Array) {
-                        continue;
-                    }
-
-                    const auto valsArray = sbe::value::getArrayView(arrayVal);
-                    for (size_t j = 0; j < valsArray->size(); j++) {
-                        const auto [tag, val] = valsArray->getAt(j);
-                        // If this is found to be a bottleneck, could be implemented with moving,
-                        // rather than copying, the values into the array (same in Eq case).
-                        const auto [newTag, newVal] = sbe::value::copyValue(tag, val);
-                        eqMembersArray->push_back(newTag, newVal);
-                    }
-                    break;
+                    // This is unreachable since the PSR is assumed to be in DNF form when converted
+                    // to a filter node. This means that any EqMember from translation would have
+                    // first been decomposed into individual EQ predicates under a disjunction.
+                    tasserted(7987902, "Unexpected eqMember");
                 }
                 case Operations::Eq: {
                     // Copy this node's value into the new eqMembersArray.
@@ -1991,11 +1971,16 @@ ResidualRequirementsWithOptionalCE::Node createResidualReqsWithEmptyCE(const PSR
     return std::move(*b.finish());
 }
 
+
 void applyProjectionRenames(ProjectionRenames projectionRenames, ABT& node) {
-    for (auto&& [targetProjName, sourceProjName] : projectionRenames) {
-        node = make<EvaluationNode>(
-            std::move(targetProjName), make<Variable>(std::move(sourceProjName)), std::move(node));
-    }
+    // "move" data out of map to avoid potential copies.
+    extractFromMap(std::move(projectionRenames),
+                   [&node](ProjectionName targetProjName, ProjectionName sourceProjName) {
+                       // Wrap given node in projection renames using evaluation nodes.
+                       node = make<EvaluationNode>(std::move(targetProjName),
+                                                   make<Variable>(std::move(sourceProjName)),
+                                                   std::move(node));
+                   });
 }
 
 void removeRedundantResidualPredicates(const ProjectionNameOrderPreservingSet& requiredProjections,
@@ -2010,17 +1995,19 @@ void removeRedundantResidualPredicates(const ProjectionNameOrderPreservingSet& r
 
         ResidualRequirements::visitDisjuncts(
             *residualReqs,
-            [&](const ResidualRequirements::Node& child,
-                const ResidualRequirements::VisitorContext&) {
+            // We pass the child as a non-const ref so we can std::move out of it. Even though
+            // `residualReqs` is used later on in this function we reassign `result` to it below, so
+            // we're not using after a move.
+            [&](ResidualRequirements::Node& child, const ResidualRequirements::VisitorContext&) {
                 newReqs.pushConj();
 
                 ResidualRequirements::visitConjuncts(
                     child,
-                    [&](const ResidualRequirements::Node& atom,
+                    [&](ResidualRequirements::Node& atom,
                         const ResidualRequirements::VisitorContext&) {
                         ResidualRequirements::visitAtom(
                             atom,
-                            [&](const ResidualRequirement& residReq,
+                            [&](ResidualRequirement& residReq,
                                 const ResidualRequirements::VisitorContext&) {
                                 auto& [key, req, ce] = residReq;
 
@@ -2053,8 +2040,7 @@ void removeRedundantResidualPredicates(const ProjectionNameOrderPreservingSet& r
 
                 newReqs.pop();
             });
-        auto result = newReqs.finish();
-        std::swap(result, residualReqs);
+        residualReqs = newReqs.finish();
     }
 
     // Remove unused projections from the field projection map.
@@ -2402,7 +2388,6 @@ public:
                            const std::vector<bool>& reverseOrder,
                            ProjectionNameVector correlatedProjNames,
                            const std::map<size_t, SelectivityType>& indexPredSelMap,
-                           const CEType currentGroupCE,
                            const CEType scanGroupCE,
                            const bool useSortedMerge)
         : _prefixId(prefixId),
@@ -2420,7 +2405,7 @@ public:
           _scanGroupCE(scanGroupCE) {
         // Collect estimates for predicates satisfied with the current equality prefix.
         // TODO: rationalize cardinality estimates: estimate number of unique groups.
-        CEType indexCE = currentGroupCE;
+        CEType indexCE = _scanGroupCE;
         if (!_currentEqPrefix._predPosSet.empty()) {
             std::vector<SelectivityType> currentSels;
             for (const size_t index : _currentEqPrefix._predPosSet) {
@@ -2542,7 +2527,6 @@ public:
                                          _reverseOrder,
                                          currentCorrelatedProjNames,
                                          _indexPredSelMap,
-                                         currentCE,
                                          _scanGroupCE,
                                          _useSortedMerge);
 
@@ -2602,7 +2586,7 @@ public:
             for (size_t indexField = 0; indexField < _indexFieldCount; indexField++) {
                 const FieldNameType indexKey{encodeIndexKeyName(indexField)};
                 if (auto it = childFields.find(indexKey); it != childFields.end()) {
-                    const auto tempProjName =
+                    auto tempProjName =
                         _prefixId.getNextId(isConjunction ? "conjunction" : "disjunction");
                     it->second = tempProjName;
                     if (indexField < correlatedProjNames.size()) {
@@ -2781,7 +2765,6 @@ PhysPlanBuilder lowerEqPrefixes(PrefixId& prefixId,
                                 const std::vector<bool>& reverseOrder,
                                 ProjectionNameVector correlatedProjNames,
                                 const std::map<size_t, SelectivityType>& indexPredSelMap,
-                                const CEType indexCE,
                                 const CEType scanGroupCE,
                                 const bool useSortedMerge) {
     IntervalLowerTransport lowerTransport(prefixId,
@@ -2796,7 +2779,6 @@ PhysPlanBuilder lowerEqPrefixes(PrefixId& prefixId,
                                           reverseOrder,
                                           std::move(correlatedProjNames),
                                           indexPredSelMap,
-                                          indexCE,
                                           scanGroupCE,
                                           useSortedMerge);
     return lowerTransport.lower(eqPrefixes.at(eqPrefixIndex)._interval);
@@ -2807,6 +2789,26 @@ bool hasProperIntervals(const PSRExpr::Node& reqs) {
     return PSRExpr::any(reqs, [](const PartialSchemaEntry& e) {
         return !isIntervalReqFullyOpenDNF(e.second.getIntervals());
     });
+}
+
+class CountElementsTransport {
+public:
+    template <typename T, typename... Ts>
+    void transport(const T& /*node*/, Ts&&... /*args*/) {
+        _count++;
+    }
+
+    size_t doCount(const ABT& node) {
+        algebra::transport<false>(node, *this);
+        return _count;
+    }
+
+private:
+    size_t _count = 0;
+};
+
+size_t countElements(const ABT& node) {
+    return CountElementsTransport{}.doCount(node);
 }
 
 }  // namespace mongo::optimizer

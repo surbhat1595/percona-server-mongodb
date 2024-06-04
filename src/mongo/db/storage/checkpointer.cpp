@@ -28,7 +28,6 @@
  */
 
 
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <chrono>
 #include <cstdint>
@@ -85,7 +84,7 @@ void Checkpointer::set(ServiceContext* serviceCtx, std::unique_ptr<Checkpointer>
 }
 
 void Checkpointer::run() {
-    ThreadClient tc(name(), getGlobalServiceContext());
+    ThreadClient tc(name(), getGlobalServiceContext()->getService());
     LOGV2_DEBUG(22307, 1, "Starting thread", "threadName"_attr = name());
 
     {

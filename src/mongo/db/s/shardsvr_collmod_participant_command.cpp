@@ -80,8 +80,9 @@ void releaseCriticalSectionInEmptySession(OperationContext* opCtx,
                                           const BSONObj& reason) {
     auto txnParticipant = TransactionParticipant::get(opCtx);
     if (txnParticipant) {
-        auto newClient =
-            getGlobalServiceContext()->makeClient("ShardsvrMovePrimaryExitCriticalSection");
+        auto newClient = getGlobalServiceContext()
+                             ->getService(ClusterRole::ShardServer)
+                             ->makeClient("ShardsvrMovePrimaryExitCriticalSection");
         AlternativeClientRegion acr(newClient);
         auto newOpCtx = CancelableOperationContext(
             cc().makeOperationContext(),
@@ -154,7 +155,9 @@ public:
                 auto service = ShardingRecoveryService::get(opCtx);
                 const auto reason = BSON("command"
                                          << "ShardSvrParticipantBlockCommand"
-                                         << "ns" << NamespaceStringUtil::serialize(bucketNs));
+                                         << "ns"
+                                         << NamespaceStringUtil::serialize(
+                                                bucketNs, SerializationContext::stateDefault()));
                 // In order to guarantee replay protection ShardsvrCollModParticipant will run
                 // within a retryable write. Any local transaction or retryable write spawned by
                 // this command (such as the release of the critical section) using the original
@@ -211,7 +214,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(ShardSvrCollModParticipantCommand);
+MONGO_REGISTER_COMMAND(ShardSvrCollModParticipantCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

@@ -131,6 +131,7 @@ repl::OplogEntry makeOplogEntry(
                                 kNs,             // namespace
                                 boost::none,     // uuid
                                 boost::none,     // fromMigrate
+                                boost::none,     // checkExistenceForDiffInsert
                                 0,               // version
                                 object,          // o
                                 object2,         // o2
@@ -278,7 +279,7 @@ public:
             insertRequest.serialize({}, &insertBuilder);
             sessionInfo.serialize(&insertBuilder);
 
-            Client::initThread("test-insert-thread");
+            Client::initThread("test-insert-thread", getGlobalServiceContext()->getService());
             auto innerOpCtx = Client::getCurrent()->makeOperationContext();
 
             auto opMsgRequest = OpMsgRequestBuilder::create(
@@ -701,7 +702,7 @@ TEST_F(SessionCatalogMigrationDestinationTest, OplogEntriesWithDifferentSession)
 
     {
         // XXX TODO USE A DIFFERENT OPERATION CONTEXT!
-        auto client2 = getServiceContext()->makeClient("client2");
+        auto client2 = getServiceContext()->getService()->makeClient("client2");
         AlternativeClientRegion acr(client2);
         auto opCtx2 = cc().makeOperationContext();
         setUpSessionWithTxn(opCtx2.get(), sessionId2, 42);
@@ -2041,7 +2042,7 @@ TEST_F(SessionCatalogMigrationDestinationTest,
 
     // Check nothing was written for session 1
     {
-        auto c1 = getServiceContext()->makeClient("c1");
+        auto c1 = getServiceContext()->getService()->makeClient("c1");
         AlternativeClientRegion acr(c1);
         auto opCtx1 = cc().makeOperationContext();
         auto opCtx = opCtx1.get();
@@ -2053,7 +2054,7 @@ TEST_F(SessionCatalogMigrationDestinationTest,
 
     // Check session 2 was correctly updated
     {
-        auto c2 = getServiceContext()->makeClient("c2");
+        auto c2 = getServiceContext()->getService()->makeClient("c2");
         AlternativeClientRegion acr(c2);
         auto opCtx2 = cc().makeOperationContext();
         auto opCtx = opCtx2.get();
@@ -2087,7 +2088,7 @@ TEST_F(SessionCatalogMigrationDestinationTest, MigratingKnownStmtWhileOplogTrunc
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(getServiceContext());
 
     auto getLastWriteOpTime = [&]() {
-        auto c1 = getServiceContext()->makeClient("c1");
+        auto c1 = getServiceContext()->getService()->makeClient("c1");
         AlternativeClientRegion acr(c1);
         auto innerOpCtx = cc().makeOperationContext();
         setUpSessionWithTxn(innerOpCtx.get(), *sessionInfo.getSessionId(), 19);

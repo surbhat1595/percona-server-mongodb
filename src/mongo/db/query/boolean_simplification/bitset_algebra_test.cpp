@@ -28,9 +28,7 @@
  */
 
 #include "mongo/db/query/boolean_simplification/bitset_algebra.h"
-
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo::boolean_simplification {
 constexpr size_t nbits = 64;
@@ -56,7 +54,7 @@ TEST(MintermOperationsTest, AAndNotB) {
 TEST(MintermOperationsTest, AAndNotA) {
     Minterm a{"1", "1"};
     Minterm na{"0", "1"};
-    Maxterm expectedResult{a.size()};
+    Maxterm expectedResult{};
 
     auto result = a & na;
     ASSERT_EQ(expectedResult, result);
@@ -83,7 +81,7 @@ TEST(MintermOperationsTest, ACDAndB) {
 TEST(MintermOperationsTest, ComplexExpr) {
     Minterm acnbd{"1101", "1111"};
     Minterm b{"0010", "0010"};
-    Maxterm expectedResult{b.size()};
+    Maxterm expectedResult{};
 
     auto result = acnbd & b;
     ASSERT_EQ(expectedResult, result);
@@ -100,6 +98,14 @@ TEST(MintermOperationsTest, Not) {
 
     auto result = ~a;
     ASSERT_EQ(expectedResult, result);
+}
+
+TEST(MintermOperationsTest, CanAbsorb) {
+    ASSERT_TRUE(Minterm("001", "001").canAbsorb({"011", "011"}));
+    ASSERT_TRUE(Minterm("001", "001").canAbsorb({"001", "001"}));
+    ASSERT_TRUE(Minterm("001", "001").canAbsorb({"001", "101"}));
+    ASSERT_FALSE(Minterm("001", "001").canAbsorb({"000", "001"}));
+    ASSERT_FALSE(Minterm("000", "001").canAbsorb({"001", "001"}));
 }
 
 TEST(MaxtermOperationsTest, ABOrC) {
@@ -210,6 +216,24 @@ TEST(MaxtermOperationsTest, ComplexAnd2) {
     ASSERT_EQ(expectedResult, result);
 }
 
+TEST(MaxtermOperationsTest, NotTrue) {
+    Maxterm alwaysTrue{};
+    alwaysTrue.appendEmpty();
+
+    Maxterm alwaysFalse{};
+
+    ASSERT_EQ(alwaysFalse, ~alwaysTrue);
+}
+
+TEST(MaxtermOperationsTest, NotFalse) {
+    Maxterm alwaysFalse{};
+
+    Maxterm alwaysTrue{};
+    alwaysTrue.appendEmpty();
+
+    ASSERT_EQ(alwaysTrue, ~alwaysFalse);
+}
+
 // not (BC | A~D)
 TEST(MaxtermOperationsTest, ComplexNot) {
     Maxterm bcOrAnd{
@@ -226,5 +250,129 @@ TEST(MaxtermOperationsTest, ComplexNot) {
 
     auto result = ~bcOrAnd;
     ASSERT_EQ(expectedResult, result);
+}
+
+TEST(ExtractCommonPredicatesTest, PositiveAndNegativeCommonPredicates) {
+    Maxterm maxterm{
+        {"11000", "11010"},
+        {"01000", "11010"},
+        {"01001", "01011"},
+        {"11000", "11011"},
+        {"01000", "01111"},
+    };
+
+    Minterm expectedCommonPredicate{"01000", "01010"};
+
+    Maxterm expectedMaxterm = {
+        {"10000", "10000"},
+        {"00000", "10000"},
+        {"00001", "00001"},
+        {"10000", "10001"},
+        {"00000", "00101"},
+    };
+
+    auto [commonPredicates, outputMaxterm] = extractCommonPredicates(maxterm);
+
+    ASSERT_EQ(expectedCommonPredicate, commonPredicates);
+    ASSERT_EQ(expectedMaxterm, outputMaxterm);
+};
+
+TEST(ExtractCommonPredicatesTest, PositiveOnlyCommonPredicates) {
+    Maxterm maxterm{
+        {"00111", "10111"},
+        {"10111", "10111"},
+        {"10101", "11101"},
+        {"01101", "11101"},
+        {"00101", "11101"},
+    };
+
+    Minterm expectedCommonPredicate{"00101", "00101"};
+
+    Maxterm expectedMaxterm{
+        {"00010", "10010"},
+        {"10010", "10010"},
+        {"10000", "11000"},
+        {"01000", "11000"},
+        {"00000", "11000"},
+    };
+
+    auto [commonPredicates, outputMaxterm] = extractCommonPredicates(maxterm);
+
+    ASSERT_EQ(expectedCommonPredicate, commonPredicates);
+    ASSERT_EQ(expectedMaxterm, outputMaxterm);
+}
+
+TEST(ExtractCommonPredicatesTest, NegativeOnlyCommonPredicates) {
+    Maxterm maxterm{
+        {"00010", "10111"},
+        {"00110", "10111"},
+        {"00100", "11101"},
+        {"01000", "11101"},
+        {"00000", "11101"},
+    };
+
+    Minterm expectedCommonPredicate{"00000", "10001"};
+
+    Maxterm expectedMaxterm{
+        {"00010", "00110"},
+        {"00110", "00110"},
+        {"00100", "01100"},
+        {"01000", "01100"},
+        {"00000", "01100"},
+    };
+
+    auto [commonPredicates, outputMaxterm] = extractCommonPredicates(maxterm);
+
+    ASSERT_EQ(expectedCommonPredicate, commonPredicates);
+    ASSERT_EQ(expectedMaxterm, outputMaxterm);
+}
+
+TEST(ExtractCommonPredicatesTest, NoCommonPredicates) {
+    Maxterm maxterm{
+        {"00001", "00011"},
+        {"00010", "00110"},
+        {"00100", "01100"},
+        {"01000", "11000"},
+        {"10000", "11000"},
+    };
+
+    auto [commonPredicates, outputMaxterm] = extractCommonPredicates(maxterm);
+
+    ASSERT_TRUE(commonPredicates.isAlwaysTrue());
+    ASSERT_EQ(maxterm, outputMaxterm);
+}
+
+TEST(ExtractCommonPredicatesTest, AlwaysFalseInput) {
+    Maxterm maxterm{};
+
+    ASSERT_TRUE(maxterm.isAlwaysFalse());
+
+    auto [commonPredicates, outputMaxterm] = extractCommonPredicates(maxterm);
+    ASSERT_TRUE(commonPredicates.isAlwaysTrue());
+    ASSERT_TRUE(outputMaxterm.isAlwaysFalse());
+}
+
+TEST(ExtractCommonPredicatesTest, AlwaysTrueInput) {
+    Maxterm maxterm{};
+    maxterm.appendEmpty();
+
+    ASSERT_TRUE(maxterm.isAlwaysTrue());
+
+    auto [commonPredicates, outputMaxterm] = extractCommonPredicates(maxterm);
+    ASSERT_TRUE(commonPredicates.isAlwaysTrue());
+    ASSERT_TRUE(outputMaxterm.isAlwaysTrue());
+}
+
+TEST(ExtractCommonPredicatesTest, CommonPredicatesOnly) {
+    Maxterm maxterm{
+        {"00100", "00110"},
+        {"00100", "00110"},
+    };
+
+    Minterm expectedCommonPredicates{"00100", "00110"};
+
+    auto [commonPredicates, outputMaxterm] = extractCommonPredicates(maxterm);
+    ASSERT_EQ(expectedCommonPredicates, commonPredicates);
+    ASSERT_TRUE(outputMaxterm.isAlwaysTrue());
 }
 }  // namespace mongo::boolean_simplification

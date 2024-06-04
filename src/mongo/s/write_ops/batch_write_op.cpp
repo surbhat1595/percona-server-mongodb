@@ -27,12 +27,13 @@
  *    it in the license file.
  */
 
+#include "mongo/rpc/write_concern_error_detail.h"
+#include "mongo/s/write_ops/write_op.h"
 #include <absl/container/node_hash_map.h>
 #include <absl/meta/type_traits.h>
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
 #include <cstdint>
@@ -214,6 +215,32 @@ int getEncryptionInformationSize(const BatchedCommandRequest& req) {
 
 }  // namespace
 
+boost::optional<WriteConcernErrorDetail> mergeWriteConcernErrors(
+    const std::vector<ShardWCError>& wcErrors) {
+    if (!wcErrors.size())
+        return boost::none;
+
+    StringBuilder msg;
+    auto errCode = wcErrors.front().error.toStatus().code();
+    if (wcErrors.size() != 1) {
+        msg << "Multiple errors reported :: ";
+        errCode = ErrorCodes::WriteConcernFailed;
+    }
+
+    for (auto it = wcErrors.begin(); it != wcErrors.end(); ++it) {
+        if (it != wcErrors.begin()) {
+            msg << " :: and :: ";
+        }
+
+        msg << it->error.toString() << " at " << it->shardName;
+    }
+
+    WriteConcernErrorDetail wce;
+    wce.setStatus(Status(errCode, msg.str()));
+
+    return boost::optional<WriteConcernErrorDetail>(wce);
+}
+
 // 'baseCommandSizeBytes' specifies the base size of a batch command request prior to adding any
 // individual operations to it. This function will ensure that 'baseCommandSizeBytes' plus the
 // result of calling 'getWriteSizeFn' on each write added to a batch will not result in a command
@@ -258,6 +285,11 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
     //  [{ skey : [c,x] }],
     //  [{ skey : y }, { skey : z }]
     //
+    // For retryable timeseries updates and writes without shard key, they are always batched in its
+    // own batch for both the ordered and unordered cases. This means that when we encounter a
+    // retryable timeseries update or a write without shard key, we would either send out what we
+    // previously have batched first (e.g. when !batchMap.empty()) or send out that single write in
+    // its own batch.
 
     WriteType writeType = WriteType::Ordinary;
 
@@ -266,15 +298,14 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
 
     for (auto& writeOp : writeOps) {
         bool useTwoPhaseWriteProtocol = false;
-
+        bool isNonTargetedWriteWithoutShardKeyWithExactId = false;
         // Only target Ready op.
         if (writeOp.getWriteState() != WriteOpState_Ready)
             continue;
 
-        // If we got a write without shard key or a time-series retryable update in the previous
-        // iteration, it should be sent in its own batch.
-        if (writeType == WriteType::WithoutShardKeyOrId ||
-            writeType == WriteType::TimeseriesRetryableUpdate) {
+        // If we got a non Ordinary write in the previous iteration, it should be sent in its own
+        // batch.
+        if (writeType != WriteType::Ordinary) {
             break;
         }
 
@@ -282,7 +313,11 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
         std::vector<std::unique_ptr<TargetedWrite>> writes;
         auto targetStatus = [&] {
             try {
-                writeOp.targetWrites(opCtx, targeter, &writes, &useTwoPhaseWriteProtocol);
+                writeOp.targetWrites(opCtx,
+                                     targeter,
+                                     &writes,
+                                     &useTwoPhaseWriteProtocol,
+                                     &isNonTargetedWriteWithoutShardKeyWithExactId);
                 return Status::OK();
             } catch (const DBException& ex) {
                 return ex.toStatus();
@@ -298,7 +333,7 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
                         // NOTE: We may repeatedly cancel a write op here, but that's fast and we
                         // want to cancel before erasing the TargetedWrite* (which owns the
                         // cancelled targeting info) for reporting reasons.
-                        writeOps[write->writeOpRef.first].cancelWrites();
+                        writeOps[write->writeOpRef.first].resetWriteToReady();
                     }
 
                     it = batchMap.erase(it);
@@ -332,7 +367,7 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
 
                 // Send out what we have, but don't record an error yet, since there may be an error
                 // in the writes before this point.
-                writeOp.cancelWrites();
+                writeOp.resetWriteToReady();
                 break;
             }
         }
@@ -342,7 +377,7 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
         if (ordered && !batchMap.empty()) {
             dassert(batchMap.size() == 1u);
             if (isNewBatchRequiredOrdered(writes, batchMap)) {
-                writeOp.cancelWrites();
+                writeOp.resetWriteToReady();
                 break;
             }
         }
@@ -351,7 +386,7 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
 
         if (wouldMakeBatchesTooBig(writes, estWriteSizeBytes, batchMap)) {
             invariant(!batchMap.empty());
-            writeOp.cancelWrites();
+            writeOp.resetWriteToReady();
             break;
         }
 
@@ -359,14 +394,20 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
         // the same shard with a different shardVersion.
         if (!ordered &&
             isNewBatchRequiredUnordered(targeter.getNS(), writes, nsShardIdMap, nsEndpointMap)) {
-            writeOp.cancelWrites();
+            writeOp.resetWriteToReady();
             break;
         }
 
-        if (targeter.isShardedTimeSeriesBucketsNamespace() &&
+        if (targeter.isTrackedTimeSeriesBucketsNamespace() &&
             writeOp.getWriteItem().getOpType() == BatchedCommandRequest::BatchType_Update &&
-            opCtx->isRetryableWrite() && !opCtx->inMultiDocumentTransaction() && batchMap.empty()) {
-            writeType = WriteType::TimeseriesRetryableUpdate;
+            opCtx->isRetryableWrite() && !opCtx->inMultiDocumentTransaction()) {
+            if (!batchMap.empty()) {
+                writeOp.resetWriteToReady();
+                break;
+            } else {
+                writeType = WriteType::TimeseriesRetryableUpdate;
+                writeOp.setWriteType(WriteType::TimeseriesRetryableUpdate);
+            }
         }
 
         // Check if an updateOne or deleteOne necessitates using the two phase write in the case
@@ -388,12 +429,19 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
             if (!isMultiWrite && useTwoPhaseWriteProtocol) {
                 // Writes without shard key should be in their own batch.
                 if (!batchMap.empty()) {
-                    writeOp.cancelWrites();
+                    writeOp.resetWriteToReady();
                     break;
                 } else {
                     writeType = WriteType::WithoutShardKeyOrId;
+                    writeOp.setWriteType(writeType);
                 }
             };
+
+            if (!isMultiWrite && isNonTargetedWriteWithoutShardKeyWithExactId &&
+                !opCtx->inMultiDocumentTransaction() && batchMap.empty()) {
+                writeType = WriteType::WithoutShardKeyWithId;
+                writeOp.setWriteType(writeType);
+            }
         }
 
         // Targeting went ok, add to appropriate TargetedBatch
@@ -607,7 +655,7 @@ BatchedCommandRequest BatchWriteOp::buildBatchRequest(
         wcb.setEncryptionInformation(
             _clientRequest.getWriteCommandRequestBase().getEncryptionInformation());
 
-        if (targeter.isShardedTimeSeriesBucketsNamespace() &&
+        if (targeter.isTrackedTimeSeriesBucketsNamespace() &&
             !_clientRequest.getNS().isTimeseriesBucketsCollection()) {
             wcb.setIsTimeseriesNamespace(true);
         }
@@ -660,9 +708,6 @@ void BatchWriteOp::noteBatchResponse(const TargetedWriteBatch& targetedBatch,
         return;
     }
 
-    // Stop tracking targeted batch
-    _targeted.erase(&targetedBatch);
-
     // Increment stats for this batch
     _incBatchStats(response);
 
@@ -675,7 +720,7 @@ void BatchWriteOp::noteBatchResponse(const TargetedWriteBatch& targetedBatch,
     if (response.isWriteConcernErrorSet()) {
         // For BatchWriteOp, all writes in the batch should share the same endpoint since they
         // target the same shard and namespace. So we just use the endpoint from the first write.
-        _wcErrors.emplace_back(targetedBatch.getWrites()[0]->endpoint,
+        _wcErrors.emplace_back(targetedBatch.getWrites()[0]->endpoint.shardName,
                                *response.getWriteConcernError());
     }
 
@@ -719,11 +764,15 @@ void BatchWriteOp::noteBatchResponse(const TargetedWriteBatch& targetedBatch,
         // Finish the response (with error, if needed)
         if (!writeError) {
             if (!ordered || !lastError) {
-                writeOp.noteWriteComplete(*write);
+                if (writeOp.getWriteType() == WriteType::WithoutShardKeyWithId) {
+                    writeOp.noteWriteWithoutShardKeyWithIdResponse(*write, response.getN());
+                } else {
+                    writeOp.noteWriteComplete(*write);
+                }
             } else {
                 // We didn't actually apply this write - cancel so we can retarget
                 dassert(writeOp.getNumTargeted() == 1u);
-                writeOp.cancelWrites();
+                writeOp.resetWriteToReady();
             }
         } else {
             writeOp.noteWriteError(*write, *writeError);
@@ -759,6 +808,10 @@ void BatchWriteOp::noteBatchResponse(const TargetedWriteBatch& targetedBatch,
             _upsertedIds.push_back(std::move(upsertedId));
         }
     }
+}
+
+WriteOp& BatchWriteOp::getWriteOp(int index) {
+    return _writeOps[index];
 }
 
 void BatchWriteOp::noteBatchError(const TargetedWriteBatch& targetedBatch,
@@ -802,10 +855,6 @@ void BatchWriteOp::abortBatch(const write_ops::WriteError& error) {
     }
 
     dassert(isFinished());
-}
-
-void BatchWriteOp::forgetTargetedBatchesOnTransactionAbortingError() {
-    _targeted.clear();
 }
 
 bool BatchWriteOp::isFinished() {
@@ -882,30 +931,8 @@ void BatchWriteOp::buildClientResponse(BatchedCommandResponse* batchResp) {
         }
     }
 
-    if (!_wcErrors.empty()) {
-        WriteConcernErrorDetail* error = new WriteConcernErrorDetail;
-
-        // Generate the multi-error message below
-        if (_wcErrors.size() == 1) {
-            auto status = _wcErrors.front().error.toStatus();
-            error->setStatus(status.withReason(str::stream()
-                                               << status.reason() << " at "
-                                               << _wcErrors.front().endpoint.shardName));
-        } else {
-            StringBuilder msg;
-            msg << "multiple errors reported : ";
-
-            for (auto it = _wcErrors.begin(); it != _wcErrors.end(); ++it) {
-                const auto& wcError = *it;
-                if (it != _wcErrors.begin()) {
-                    msg << " :: and :: ";
-                }
-                msg << wcError.error.toStatus().toString() << " at " << wcError.endpoint.shardName;
-            }
-
-            error->setStatus({ErrorCodes::WriteConcernFailed, msg.str()});
-        }
-        batchResp->setWriteConcernError(error);
+    if (auto wce = mergeWriteConcernErrors(_wcErrors)) {
+        batchResp->setWriteConcernError(new WriteConcernErrorDetail(wce.value()));
     }
 
     //

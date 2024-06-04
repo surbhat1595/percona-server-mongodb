@@ -89,16 +89,17 @@ Status checkForOverlappingZonedKeyRange(OperationContext* opCtx,
                                         const ChunkRange& range,
                                         const std::string& zoneName,
                                         const KeyPattern& shardKeyPattern) {
-    DistributionStatus chunkDist(nss, ShardToChunksMap{});
+    ZoneInfo zoneInfo;
 
-    auto tagStatus = configServer->exhaustiveFindOnConfig(
-        opCtx,
-        kConfigPrimarySelector,
-        repl::ReadConcernLevel::kLocalReadConcern,
-        TagsType::ConfigNS,
-        BSON(TagsType::ns(NamespaceStringUtil::serialize(nss))),
-        BSONObj(),
-        0);
+    auto tagStatus =
+        configServer->exhaustiveFindOnConfig(opCtx,
+                                             kConfigPrimarySelector,
+                                             repl::ReadConcernLevel::kLocalReadConcern,
+                                             TagsType::ConfigNS,
+                                             BSON(TagsType::ns(NamespaceStringUtil::serialize(
+                                                 nss, SerializationContext::stateDefault()))),
+                                             BSONObj(),
+                                             0);
     if (!tagStatus.isOK()) {
         return tagStatus.getStatus();
     }
@@ -113,7 +114,7 @@ Status checkForOverlappingZonedKeyRange(OperationContext* opCtx,
         // Always extend ranges to full shard key to be compatible with tags created before
         // the zone commands were implemented.
         const auto& parsedTagDoc = tagParseStatus.getValue();
-        auto overlapStatus = chunkDist.addRangeToZone(
+        auto overlapStatus = zoneInfo.addRangeToZone(
             ZoneRange(shardKeyPattern.extendRangeBound(parsedTagDoc.getMinKey(), false),
                       shardKeyPattern.extendRangeBound(parsedTagDoc.getMaxKey(), false),
                       parsedTagDoc.getTag()));
@@ -123,7 +124,7 @@ Status checkForOverlappingZonedKeyRange(OperationContext* opCtx,
     }
 
     auto overlapStatus =
-        chunkDist.addRangeToZone(ZoneRange(range.getMin(), range.getMax(), zoneName));
+        zoneInfo.addRangeToZone(ZoneRange(range.getMin(), range.getMax(), zoneName));
     if (!overlapStatus.isOK()) {
         return overlapStatus;
     }
@@ -143,16 +144,17 @@ ChunkRange includeFullShardKey(OperationContext* opCtx,
                                const NamespaceString& nss,
                                const ChunkRange& range,
                                KeyPattern* shardKeyPatternOut) {
-    auto findCollResult = uassertStatusOK(configServer->exhaustiveFindOnConfig(
-                                              opCtx,
-                                              kConfigPrimarySelector,
-                                              repl::ReadConcernLevel::kLocalReadConcern,
-                                              CollectionType::ConfigNS,
-                                              BSON(CollectionType::kNssFieldName
-                                                   << NamespaceStringUtil::serialize(nss)),
-                                              BSONObj(),
-                                              1))
-                              .docs;
+    auto findCollResult =
+        uassertStatusOK(configServer->exhaustiveFindOnConfig(
+                            opCtx,
+                            kConfigPrimarySelector,
+                            repl::ReadConcernLevel::kLocalReadConcern,
+                            CollectionType::ConfigNS,
+                            BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(
+                                     nss, SerializationContext::stateDefault())),
+                            BSONObj(),
+                            1))
+            .docs;
     uassert(ErrorCodes::NamespaceNotSharded,
             str::stream() << nss.toStringForErrorMsg() << " is not sharded",
             !findCollResult.empty());
@@ -377,7 +379,8 @@ void ShardingCatalogManager::assignKeyRangeToZone(OperationContext* opCtx,
     }
 
     BSONObjBuilder updateBuilder;
-    updateBuilder.append(TagsType::ns(), NamespaceStringUtil::serialize(nss));
+    updateBuilder.append(TagsType::ns(),
+                         NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
     updateBuilder.append(TagsType::min(), actualRange.getMin());
     updateBuilder.append(TagsType::max(), actualRange.getMax());
     updateBuilder.append(TagsType::tag(), zoneName);
@@ -385,7 +388,7 @@ void ShardingCatalogManager::assignKeyRangeToZone(OperationContext* opCtx,
     uassertStatusOK(_localCatalogClient->updateConfigDocument(
         opCtx,
         TagsType::ConfigNS,
-        BSON(TagsType::ns(NamespaceStringUtil::serialize(nss))
+        BSON(TagsType::ns(NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()))
              << TagsType::min(actualRange.getMin())),
         updateBuilder.obj(),
         true,
@@ -408,7 +411,8 @@ void ShardingCatalogManager::removeKeyRangeFromZone(OperationContext* opCtx,
     }
 
     BSONObjBuilder removeBuilder;
-    removeBuilder.append(TagsType::ns(), NamespaceStringUtil::serialize(nss));
+    removeBuilder.append(TagsType::ns(),
+                         NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
     removeBuilder.append(TagsType::min(), actualRange.getMin());
     removeBuilder.append(TagsType::max(), actualRange.getMax());
 

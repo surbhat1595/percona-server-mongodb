@@ -33,6 +33,7 @@
 #include "mongo/s/cluster_ddl.h"
 #include "mongo/s/commands/shard_collection_gen.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -81,16 +82,24 @@ public:
                 "collection yet",
                 !nss.isFLE2StateCollection());
 
-            ShardsvrCreateCollection shardsvrCollRequest(nss);
-            CreateCollectionRequest requestParamsObj;
-            requestParamsObj.setShardKey(BSON("_id" << 1));
-            requestParamsObj.setTimeseries(req.getTimeseries());
-            requestParamsObj.setCollectionUUID(req.getCollectionUUID());
-            requestParamsObj.setUnsplittable(true);
-            requestParamsObj.setDataShard(req.getDataShard());
-            shardsvrCollRequest.setCreateCollectionRequest(std::move(requestParamsObj));
-            shardsvrCollRequest.setDbName(nss.dbName());
+            bool isTrackUnshardedEnabled =
+                feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(
+                    serverGlobalParams.featureCompatibility);
 
+            uassert(ErrorCodes::IllegalOperation,
+                    "cannot create an unsplittable collection if "
+                    "featureFlagTrackUnshardedCollectionsOnShardingCatalog is unset",
+                    isTrackUnshardedEnabled);
+
+            ShardsvrCreateCollection shardsvrCollRequest(nss);
+            auto svrRequest = ShardsvrCreateCollectionRequest::parse(
+                IDLParserContext("createUnsplittableCollection"), req.toBSON({}));
+            svrRequest.setShardKey(BSON("_id" << 1));
+            svrRequest.setUnsplittable(true);
+            svrRequest.setDataShard(req.getDataShard());
+            svrRequest.setIsFromCreateUnsplittableCollectionTestCommand(true);
+            shardsvrCollRequest.setDbName(nss.dbName());
+            shardsvrCollRequest.setShardsvrCreateCollectionRequest(svrRequest);
             cluster::createCollection(opCtx, shardsvrCollRequest);
         }
 
@@ -127,7 +136,7 @@ public:
     }
 };
 
-MONGO_REGISTER_COMMAND(CreateUnsplittableCollectionCommand).testOnly();
+MONGO_REGISTER_COMMAND(CreateUnsplittableCollectionCommand).testOnly().forRouter();
 
 }  // namespace
 }  // namespace mongo

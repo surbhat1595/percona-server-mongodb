@@ -24,7 +24,8 @@ function getAdditionalParameters(cmdObj) {
      "updates",
      "deletes",
      "collectionUUID",
-     "encryptionInformation"]
+     "encryptionInformation",
+     "isTimeseriesNamespace"]
         .forEach(property => {
             if (cmdCopy.hasOwnProperty(property)) {
                 delete cmdCopy[property];
@@ -40,8 +41,11 @@ function runCommandSingleOpBulkWriteOverride(
         BulkWriteUtils.processCRUDOp(dbName, cmdNameLower, cmdObj);
         let additionalParameters = getAdditionalParameters(cmdObj);
         try {
-            let response = BulkWriteUtils.flushCurrentBulkWriteBatch(
-                conn, originalRunCommand, makeRunCommandArgs, additionalParameters);
+            let response = BulkWriteUtils.flushCurrentBulkWriteBatch(conn,
+                                                                     null /* lsid */,
+                                                                     originalRunCommand,
+                                                                     makeRunCommandArgs,
+                                                                     additionalParameters);
             assert.eq(response.length, 1);
             BulkWriteUtils.resetBulkWriteBatch();
             return response[0];
@@ -55,6 +59,8 @@ function runCommandSingleOpBulkWriteOverride(
     // Non-CRUD op, run command as normal and return results.
     return originalRunCommand.apply(conn, makeRunCommandArgs(cmdObj));
 }
+
+TestData.runningWithBulkWriteOverride = true;  // See update_metrics.js.
 
 OverrideHelpers.prependOverrideInParallelShell(
     "jstests/libs/override_methods/single_crud_op_as_bulk_write.js");

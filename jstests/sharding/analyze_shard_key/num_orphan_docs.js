@@ -69,8 +69,7 @@ function testAnalyzeShardKeyShardedCollection(st) {
     assert.commandWorked(coll.createIndex(candidateKey));
     assert.commandWorked(coll.insert(docs, {writeConcern}));
 
-    assert.commandWorked(st.s.adminCommand({enableSharding: dbName}));
-    st.ensurePrimaryShard(dbName, st.shard0.shardName);
+    assert.commandWorked(st.s.adminCommand({movePrimary: dbName, to: st.shard0.shardName}));
     assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: currentKey}));
 
     // Analyze a shard key while no shards have orphan documents. Chunk distribution:
@@ -184,7 +183,7 @@ const setParameterOpts = {
     st.stop();
 }
 
-{
+if (!jsTestOptions().useAutoBootstrapProcedure) {  // TODO: SERVER-80318 Remove block
     const rst =
         new ReplSetTest({nodes: numNodesPerRS, nodeOptions: {setParameter: setParameterOpts}});
     rst.startSet();

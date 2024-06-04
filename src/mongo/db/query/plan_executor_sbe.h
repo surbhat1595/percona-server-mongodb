@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <deque>
 #include <memory>
 #include <queue>
@@ -69,6 +68,20 @@
 namespace mongo {
 class PlanExecutorSBE final : public PlanExecutor {
 public:
+    struct MetaDataAccessor {
+        BSONObj appendToBson(BSONObj doc) const;
+        Document appendToDocument(Document doc) const;
+        // Only for $search queries, holds the metadata returned from mongot.
+        sbe::value::SlotAccessor* metadataSearchScore{nullptr};
+        sbe::value::SlotAccessor* metadataSearchHighlights{nullptr};
+        sbe::value::SlotAccessor* metadataSearchDetails{nullptr};
+        sbe::value::SlotAccessor* metadataSearchSortValues{nullptr};
+        sbe::value::SlotAccessor* metadataSearchSequenceToken{nullptr};
+
+        sbe::value::SlotAccessor* sortKey{nullptr};
+        bool isSingleSortKey{true};
+    };
+
     PlanExecutorSBE(OperationContext* opCtx,
                     std::unique_ptr<CanonicalQuery> cq,
                     std::unique_ptr<optimizer::AbstractABTPrinter> optimizerData,
@@ -77,7 +90,9 @@ public:
                     NamespaceString nss,
                     bool isOpen,
                     std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
-                    bool generatedByBonsai);
+                    bool generatedByBonsai,
+                    std::unique_ptr<RemoteCursorMap> remoteCursors = nullptr,
+                    std::unique_ptr<RemoteExplainVector> remoteExplains = nullptr);
 
     CanonicalQuery* getCanonicalQuery() const override {
         return _cq.get();
@@ -190,9 +205,19 @@ public:
 
     bool usesCollectionAcquisitions() const override final;
 
+    /**
+     * For queries that have multiple executors, this can be used to differentiate between them.
+     */
+    boost::optional<StringData> getExecutorType() const override final {
+        return CursorType_serializer(_cursorType);
+    }
+
 private:
     template <typename ObjectType>
     ExecState getNextImpl(ObjectType* out, RecordId* dlOut);
+
+    void initializeAccessors(MetaDataAccessor& accessor,
+                             const stage_builder::PlanStageMetadataSlots& metadataSlots);
 
     enum class State { kClosed, kOpened };
 
@@ -227,6 +252,8 @@ private:
     // Only for clustered collection scans, holds the maximum record ID of the scan, if applicable.
     boost::optional<sbe::value::SlotId> _maxRecordIdSlot;
 
+    MetaDataAccessor _metadataAccessors;
+
     // NOTE: '_stash' stores documents as BSON. Currently, one of the '_stash' is usages is to store
     // documents received from the plan during multiplanning. This means that the documents
     // generated during multiplanning cannot exceed maximum BSON size. $group and $lookup CAN
@@ -259,6 +286,15 @@ private:
 
     // Indicates whether this executor was constructed via Bonsai/CQF.
     bool _generatedByBonsai{false};
+
+    /**
+     * For commands that return multiple cursors, this value will contain the type of cursor.
+     * Default to a regular result cursor.
+     */
+    CursorTypeEnum _cursorType = CursorTypeEnum::DocumentResult;
+
+    std::unique_ptr<RemoteCursorMap> _remoteCursors;
+    std::unique_ptr<RemoteExplainVector> _remoteExplains;
 };
 
 /**

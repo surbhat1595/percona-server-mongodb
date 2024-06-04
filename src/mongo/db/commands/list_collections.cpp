@@ -40,7 +40,6 @@
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/checked_cast.h"
@@ -533,7 +532,7 @@ public:
                                                 std::move(ws),
                                                 std::move(root),
                                                 &CollectionPtr::null,
-                                                PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                                PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                                 false, /* whether owned BSON must be returned */
                                                 cursorNss));
 
@@ -608,7 +607,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(CmdListCollections);
+MONGO_REGISTER_COMMAND(CmdListCollections).forShard();
 
 }  // namespace
 }  // namespace mongo

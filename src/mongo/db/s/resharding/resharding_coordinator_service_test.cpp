@@ -29,7 +29,6 @@
 
 #include <absl/container/node_hash_map.h>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -133,7 +132,7 @@ public:
         return std::make_shared<ReshardingCoordinator>(
             this,
             ReshardingCoordinatorDocument::parse(IDLParserContext("ReshardingCoordinatorStateDoc"),
-                                                 std::move(initialState)),
+                                                 initialState),
             std::make_shared<ExternalStateForTest>(),
             _serviceContext);
     }
@@ -427,7 +426,7 @@ public:
             opCtx->getServiceContext()->getPreciseClockSource()->now());
         client.insert(CollectionType::ConfigNS, originalNssCatalogEntry.toBSON());
 
-        DatabaseType dbDoc(coordinatorDoc.getSourceNss().db_forTest().toString(),
+        DatabaseType dbDoc(coordinatorDoc.getSourceNss().dbName(),
                            coordinatorDoc.getDonorShards().front().getId(),
                            DatabaseVersion{UUID::gen(), Timestamp(1, 1)});
         client.insert(NamespaceString::kConfigDatabasesNamespace, dbDoc.toBSON());

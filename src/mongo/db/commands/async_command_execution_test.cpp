@@ -34,7 +34,6 @@
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -155,7 +154,7 @@ void killAsyncCommand(AsyncCommandExecutionTest::TestState& state) {
 void AsyncCommandExecutionTest::runTestForCommand(StringData command) {
     BSONObj syncResponse, asyncResponse;
 
-    auto client = getServiceContext()->makeClient("Client");
+    auto client = getServiceContext()->getService()->makeClient("Client");
     auto strand = ClientStrand::make(std::move(client));
 
     {

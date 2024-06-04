@@ -61,6 +61,10 @@ public:
              const DatabaseName&,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
+        // Critical to monitoring and observability, categorize the command as immediate priority.
+        ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+                                                            AdmissionContext::Priority::kImmediate);
+
         if (cmdObj["forShell"].trueValue())
             NotPrimaryErrorTracker::get(opCtx->getClient()).disable();
 
@@ -87,7 +91,7 @@ private:
         return ActionSet{ActionType::replSetGetStatus};
     }
 };
-MONGO_REGISTER_COMMAND(CmdReplSetGetStatus);
+MONGO_REGISTER_COMMAND(CmdReplSetGetStatus).forShard();
 
 }  // namespace repl
 }  // namespace mongo

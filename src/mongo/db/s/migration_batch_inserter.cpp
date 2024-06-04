@@ -36,7 +36,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
@@ -124,7 +123,7 @@ void runWithoutSession(OperationContext* opCtx, Callable callable) {
 
 
 void MigrationBatchInserter::onCreateThread(const std::string& threadName) {
-    Client::initThread(threadName, getGlobalServiceContext(), nullptr);
+    Client::initThread(threadName, getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 }
 
 void MigrationBatchInserter::run(Status status) const try {
@@ -194,7 +193,7 @@ void MigrationBatchInserter::run(Status status) const try {
             // Revert to the original DocumentValidationSettings for opCtx
         }
 
-        persistUpdatedNumOrphans(opCtx, _collectionUuid, _range, batchNumCloned);
+        rangedeletionutil::persistUpdatedNumOrphans(opCtx, _collectionUuid, _range, batchNumCloned);
         _migrationProgress->updateMaxOptime(
             repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp());
 
@@ -236,9 +235,6 @@ void MigrationBatchInserter::run(Status status) const try {
 } catch (const DBException& e) {
     stdx::lock_guard<Client> lk(*_innerOpCtx->getClient());
     _innerOpCtx->getServiceContext()->killOperation(lk, _innerOpCtx, ErrorCodes::Error(6718402));
-    LOGV2(6718407,
-          "Batch application failed: {error}",
-          "Batch application failed",
-          "error"_attr = e.toStatus());
+    LOGV2(6718407, "Batch application failed", "error"_attr = e.toStatus());
 }
 }  // namespace mongo

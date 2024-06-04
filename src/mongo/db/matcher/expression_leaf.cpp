@@ -30,7 +30,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/numeric/conversion/converter_policies.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
 #include <cmath>
@@ -105,7 +104,7 @@ bool ComparisonMatchExpressionBase::equivalent(const MatchExpression* other) con
 
     // Please, keep BSONElementComparator consistent with MatchExpressionHasher defined in
     // db/matcher/expression_hasher.cpp.
-    const StringData::ComparatorInterface* stringComparator = nullptr;
+    const StringDataComparator* stringComparator = nullptr;
     BSONElementComparator eltCmp(BSONElementComparator::FieldNamesMode::kIgnore, stringComparator);
     return path() == realOther->path() && eltCmp.evaluate(_rhs == realOther->_rhs);
 }
@@ -117,8 +116,9 @@ void ComparisonMatchExpressionBase::debugString(StringBuilder& debug, int indent
     _debugStringAttachTagInfo(&debug);
 }
 
-void ComparisonMatchExpressionBase::appendSerializedRightHandSide(
-    BSONObjBuilder* bob, const SerializationOptions& opts) const {
+void ComparisonMatchExpressionBase::appendSerializedRightHandSide(BSONObjBuilder* bob,
+                                                                  const SerializationOptions& opts,
+                                                                  bool includePath) const {
     opts.appendLiteral(bob, name(), _rhs);
 }
 
@@ -317,26 +317,17 @@ void RegexMatchExpression::debugString(StringBuilder& debug, int indentationLeve
 }
 
 void RegexMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                         const SerializationOptions& opts) const {
-    // Sadly we cannot use the fast/short syntax to append this, we need to be careful to generate a
-    // valid regex, and the default string "?" is not valid.
-    if (opts.literalPolicy == LiteralSerializationPolicy::kToRepresentativeParseableValue) {
-        bob->append("$regex", "\\?");
-    } else {
-        // May generate {$regex: "?string"} - invalid regex but we don't care since it's not
-        // parseable it's just saying "there was a string here."
-        opts.appendLiteral(bob, "$regex", _regex);
-    }
+                                                         const SerializationOptions& opts,
+                                                         bool includePath) const {
+    // We need to be careful to generate a valid regex representative value, and the default string
+    // "?" is not valid.
+    opts.appendLiteral(bob, "$regex", _regex, Value("\\?"_sd));
 
     if (!_flags.empty()) {
-        if (opts.literalPolicy == LiteralSerializationPolicy::kToRepresentativeParseableValue) {
-            // We need to make sure the $options value can be re-parsed as legal regex options, so
-            // we'll set the representative value in this case to be the empty string rather than
-            // "?", which is the standard representative for string values.
-            bob->append("$options", "");
-        } else {
-            opts.appendLiteral(bob, "$options", _flags);
-        }
+        // We need to make sure the $options value can be re-parsed as legal regex options, so
+        // we'll set the representative value in this case to be the empty string rather than
+        // "?", which is the standard representative for string values.
+        opts.appendLiteral(bob, "$options", _flags, Value(""_sd));
     }
 }
 
@@ -406,7 +397,8 @@ void ModMatchExpression::debugString(StringBuilder& debug, int indentationLevel)
 }
 
 void ModMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                       const SerializationOptions& opts) const {
+                                                       const SerializationOptions& opts,
+                                                       bool includePath) const {
     bob->append("$mod",
                 BSON_ARRAY(opts.serializeLiteral(_divisor) << opts.serializeLiteral(_remainder)));
 }
@@ -439,7 +431,8 @@ void ExistsMatchExpression::debugString(StringBuilder& debug, int indentationLev
 }
 
 void ExistsMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                          const SerializationOptions& opts) const {
+                                                          const SerializationOptions& opts,
+                                                          bool includePath) const {
     opts.appendLiteral(bob, "$exists", true);
 }
 
@@ -524,6 +517,7 @@ void InMatchExpression::serializeToShape(BSONObjBuilder* bob,
         _equalities->getFirstOfEachType(opts.inMatchExprSortAndDedupElements);
 
     std::vector<Value> firstOfEachType;
+    firstOfEachType.reserve(firstElementOfEachType.size());
     for (auto&& elem : firstElementOfEachType) {
         firstOfEachType.emplace_back(elem);
     }
@@ -536,7 +530,8 @@ void InMatchExpression::serializeToShape(BSONObjBuilder* bob,
 }
 
 void InMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                      const SerializationOptions& opts) const {
+                                                      const SerializationOptions& opts,
+                                                      bool includePath) const {
     if (opts.literalPolicy != LiteralSerializationPolicy::kUnchanged) {
         serializeToShape(bob, opts);
         return;
@@ -836,7 +831,8 @@ void BitTestMatchExpression::debugString(StringBuilder& debug, int indentationLe
 }
 
 void BitTestMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                           const SerializationOptions& opts) const {
+                                                           const SerializationOptions& opts,
+                                                           bool includePath) const {
     std::string opString = "";
 
     switch (matchType()) {

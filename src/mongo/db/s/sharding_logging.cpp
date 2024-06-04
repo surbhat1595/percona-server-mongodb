@@ -30,7 +30,6 @@
 
 #include <string>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -77,10 +76,6 @@ const auto shardingLogging = ServiceContext::declareDecoration<ShardingLogging>(
 
 }  // namespace
 
-ShardingLogging::ShardingLogging() = default;
-
-ShardingLogging::~ShardingLogging() = default;
-
 ShardingLogging* ShardingLogging::get(ServiceContext* serviceContext) {
     return &shardingLogging(serviceContext);
 }
@@ -91,7 +86,7 @@ ShardingLogging* ShardingLogging::get(OperationContext* operationContext) {
 
 Status ShardingLogging::logAction(OperationContext* opCtx,
                                   const StringData what,
-                                  const StringData ns,
+                                  const NamespaceString& ns,
                                   const BSONObj& detail,
                                   std::shared_ptr<Shard> configShard,
                                   ShardingCatalogClient* catalogClient) {
@@ -108,10 +103,7 @@ Status ShardingLogging::logAction(OperationContext* opCtx,
         if (result.isOK()) {
             _actionLogCollectionCreated.store(1);
         } else {
-            LOGV2(22078,
-                  "Couldn't create config.actionlog collection: {error}",
-                  "Couldn't create config.actionlog collection",
-                  "error"_attr = result);
+            LOGV2(22078, "Couldn't create config.actionlog collection", "error"_attr = result);
             return result;
         }
     }
@@ -127,7 +119,7 @@ Status ShardingLogging::logAction(OperationContext* opCtx,
 
 Status ShardingLogging::logChangeChecked(OperationContext* opCtx,
                                          const StringData what,
-                                         const StringData ns,
+                                         const NamespaceString& ns,
                                          const BSONObj& detail,
                                          const WriteConcernOptions& writeConcern,
                                          std::shared_ptr<Shard> configShard,
@@ -153,10 +145,7 @@ Status ShardingLogging::logChangeChecked(OperationContext* opCtx,
         if (result.isOK()) {
             _changeLogCollectionCreated.store(1);
         } else {
-            LOGV2(22079,
-                  "Couldn't create config.changelog collection: {error}",
-                  "Couldn't create config.changelog collection",
-                  "error"_attr = result);
+            LOGV2(22079, "Couldn't create config.changelog collection", "error"_attr = result);
             return result;
         }
     }
@@ -168,16 +157,16 @@ Status ShardingLogging::logChangeChecked(OperationContext* opCtx,
 Status ShardingLogging::_log(OperationContext* opCtx,
                              const StringData logCollName,
                              const StringData what,
-                             const StringData operationNS,
+                             const NamespaceString& operationNS,
                              const BSONObj& detail,
                              const WriteConcernOptions& writeConcern,
                              ShardingCatalogClient* catalogClient) {
     Date_t now = Grid::get(opCtx)->getNetwork()->now();
 
     const auto& session = opCtx->getClient()->session();
-    const int port = session ? session->local().port() : serverGlobalParams.port;
+    const std::string sessionStr = session ? fmt::format(":{}", session->toBSON().toString()) : "";
     const std::string serverName = str::stream()
-        << Grid::get(opCtx)->getNetwork()->getHostName() << ":" << port;
+        << Grid::get(opCtx)->getNetwork()->getHostName() << sessionStr;
     const std::string changeId = str::stream()
         << serverName << "-" << now.toString() << "-" << OID::gen();
 
@@ -193,13 +182,12 @@ Status ShardingLogging::_log(OperationContext* opCtx,
     }
     changeLog.setClientAddr(opCtx->getClient()->clientAddress(true));
     changeLog.setTime(now);
-    changeLog.setNS(operationNS.toString());
+    changeLog.setNS(operationNS);
     changeLog.setWhat(what.toString());
     changeLog.setDetails(detail);
 
     BSONObj changeLogBSON = changeLog.toBSON();
     LOGV2(22080,
-          "About to log metadata event into {namespace}: {event}",
           "About to log metadata event",
           "namespace"_attr = logCollName,
           "event"_attr = redact(changeLogBSON));

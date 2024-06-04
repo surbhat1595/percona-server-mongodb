@@ -7,15 +7,14 @@
  *   assumes_read_preference_unchanged,
  *   # Fail points in this test do not exist on mongos.
  *   assumes_against_mongod_not_mongos,
- *   # This test depends on certain writes ending up in the same bucket. Stepdowns may result in
- *   # writes splitting between two primaries, and thus different buckets.
+ *   # This test depends on certain writes ending up in the same bucket. Stepdowns and tenant
+ *   # migrations may result in writes splitting between two primaries, and thus different buckets.
  *   does_not_support_stepdowns,
+ *   tenant_migration_incompatible,
  *   # We need a timeseries collection.
  *   requires_timeseries,
  *   # Uses parallel shell to wait on fail point
  *   uses_parallel_shell,
- *   # TODO(SERVER-80252): Uses namespace strings which are too long for Serverless
- *   simulate_atlas_proxy_incompatible,
  * ]
  */
 import {waitForCurOpByFailPoint} from "jstests/libs/curop_helpers.js";

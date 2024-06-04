@@ -30,7 +30,6 @@
 #include "mongo/db/query/optimizer/utils/path_utils.h"
 
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <map>
 #include <string>
 
@@ -90,15 +89,15 @@ boost::optional<ABT> decomposeToFilterNodes(const ABT& input,
         subPathRef = newPath->getPath().ref();
     }
 
-    ABT subPath = subPathRef;
+    ABT subPath{subPathRef};
     if (auto composition = collectComposedBounded(subPath, maxDepth);
         composition.size() >= minDepth) {
         // Remove the path composition and insert two filter nodes.
         ABT result = input;
         for (const auto& element : composition) {
-            result =
-                make<FilterNode>(make<EvalFilter>(appendFieldPath(fieldPath, element), pathInput),
-                                 std::move(result));
+            result = make<FilterNode>(
+                make<EvalFilter>(appendFieldPath(fieldPath, element.copy()), pathInput),
+                std::move(result));
         }
         return result;
     }
@@ -326,7 +325,7 @@ public:
     }
 };
 
-bool pathEndsInTraverse(const optimizer::ABT& path) {
+bool pathEndsInTraverse(const optimizer::ABT::reference_type path) {
     PathEndsInTraverseId t;
     return optimizer::algebra::transport<false>(path, t);
 }

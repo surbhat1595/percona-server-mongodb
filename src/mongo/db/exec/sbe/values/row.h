@@ -31,7 +31,6 @@
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
@@ -39,7 +38,7 @@
 #include <vector>
 
 #include "mongo/base/string_data.h"
-#include "mongo/base/string_data_comparator_interface.h"
+#include "mongo/base/string_data_comparator.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/exec/sbe/values/slot_util.h"
@@ -113,6 +112,7 @@ public:
     struct SorterDeserializeSettings {
         const CollatorInterface* collator{nullptr};
     };
+    static void deserializeForSorterIntoRow(BufReader&, const SorterDeserializeSettings&, RowType&);
     static RowType deserializeForSorter(BufReader& buf, const SorterDeserializeSettings&);
     void serializeForSorter(BufBuilder& buf) const;
     int memUsageForSorter() const;
@@ -131,12 +131,16 @@ public:
      * If 'numPrefixValsToRead' is provided, then only the given number of values from 'keyString'
      * are decoded into the resulting 'MaterializedRow'. The remaining suffix values in the
      * 'keyString' are ignored.
+     *
+     * If non-null 'collator' is provided during serialization, then any strings in the row are
+     * encoded as ICU collation keys prior to being KeyString-encoded.
      */
     static RowType deserializeFromKeyString(
         const key_string::Value& keyString,
         BufBuilder* valueBufferBuilder,
         boost::optional<size_t> numPrefixValsToRead = boost::none);
-    void serializeIntoKeyString(key_string::Builder& builder) const;
+    void serializeIntoKeyString(key_string::Builder& builder,
+                                const CollatorInterface* collator = nullptr) const;
 
 protected:
     void release() {
@@ -356,7 +360,7 @@ private:
 
 template <typename RowType>
 struct RowEq {
-    using ComparatorType = StringData::ComparatorInterface;
+    using ComparatorType = StringDataComparator;
 
     explicit RowEq(const ComparatorType* comparator = nullptr) : _comparator(comparator) {}
 

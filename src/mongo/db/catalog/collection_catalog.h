@@ -32,7 +32,6 @@
 #include <absl/container/flat_hash_set.h>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <functional>
 #include <immer/detail/util.hpp>
@@ -660,6 +659,8 @@ public:
      */
     const HistoricalCatalogIdTracker& catalogIdTracker() const;
     HistoricalCatalogIdTracker& catalogIdTracker();
+
+    class BatchedCollectionWrite;
 
 private:
     friend class CollectionCatalog::iterator;

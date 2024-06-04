@@ -137,8 +137,7 @@ function testAnalyzeShardKeysShardedCollection(st, mongodConns) {
     jsTest.log(
         `Testing analyzing a shard key for a sharded collection: ${tojson({dbName, collName})}`);
 
-    assert.commandWorked(st.s.adminCommand({enableSharding: dbName}));
-    st.ensurePrimaryShard(dbName, st.shard0.name);
+    assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
     assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: currentShardKey}));
     assert.commandWorked(st.s.adminCommand({split: ns, middle: currentShardKeySplitPoint}));
     assert.commandWorked(st.s.adminCommand(
@@ -207,7 +206,7 @@ const setParameterOpts = {
     st.stop();
 }
 
-{
+if (!jsTestOptions().useAutoBootstrapProcedure) {  // TODO: SERVER-80318 Remove block
     const rst =
         new ReplSetTest({nodes: numNodesPerRS, nodeOptions: {setParameter: setParameterOpts}});
     rst.startSet();

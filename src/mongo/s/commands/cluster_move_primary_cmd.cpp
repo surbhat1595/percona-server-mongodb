@@ -75,7 +75,7 @@ public:
                 // Invalidate the routing table cache entry for this database in order to reload it
                 // at the next access, even if sending the command to the primary shard fails (e.g.,
                 // NetworkError).
-                Grid::get(opCtx)->catalogCache()->purgeDatabase(dbNss.db_forSharding());
+                Grid::get(opCtx)->catalogCache()->purgeDatabase(dbNss.dbName());
             });
 
             const auto dbInfo = uassertStatusOK(
@@ -134,7 +134,7 @@ private:
         return "Reassigns the primary shard holding all un-sharded collections in the database";
     }
 };
-MONGO_REGISTER_COMMAND(MovePrimaryCommand);
+MONGO_REGISTER_COMMAND(MovePrimaryCommand).forRouter();
 
 }  // namespace
 }  // namespace mongo

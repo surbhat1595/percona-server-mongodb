@@ -59,9 +59,5 @@ public:
     StringData getForCountReadsDuringCriticalSection() const;
     StringData getForAllShardsLowestRemainingOperationTimeEstimatedSecs() const;
     StringData getForAllShardsHighestRemainingOperationTimeEstimatedSecs() const;
-    StringData getForIsSameKeyResharding() const;
-    StringData getForIndexesToBuild() const;
-    StringData getForIndexesBuilt() const;
-    StringData getForIndexBuildTimeElapsed() const;
 };
 }  // namespace mongo

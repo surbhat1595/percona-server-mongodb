@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/parse_number.h"
@@ -307,7 +306,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CmdGet);
+MONGO_REGISTER_COMMAND(CmdGet).forRouter().forShard();
 
 class CmdSet : public BasicCommand {
 public:
@@ -445,7 +444,6 @@ public:
                 uassertStatusOK(foundParameter->second->set(parameter, boost::none));
             } catch (const DBException& ex) {
                 LOGV2(20496,
-                      "Error setting parameter {parameterName} to {newValue} errMsg: {error}",
                       "Error setting parameter to new value",
                       "parameterName"_attr = parameterName,
                       "newValue"_attr = redact(parameter.toString(false)),
@@ -464,15 +462,12 @@ public:
 
             if (oldValue) {
                 LOGV2(23435,
-                      "Successfully set parameter {parameterName} to {newValue} (was "
-                      "{oldValue})",
                       "Successfully set parameter to new value",
                       "parameterName"_attr = parameterName,
                       "newValue"_attr = redact(parameter.toString(false)),
                       "oldValue"_attr = redact(oldValue.toString(false)));
             } else {
                 LOGV2(23436,
-                      "Successfully set parameter {parameterName} to {newValue}",
                       "Successfully set parameter to new value",
                       "parameterName"_attr = parameterName,
                       "newValue"_attr = redact(parameter.toString(false)));
@@ -488,7 +483,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CmdSet);
+MONGO_REGISTER_COMMAND(CmdSet).forRouter().forShard();
 
 void LogLevelServerParameter::append(OperationContext*,
                                      BSONObjBuilder* builder,

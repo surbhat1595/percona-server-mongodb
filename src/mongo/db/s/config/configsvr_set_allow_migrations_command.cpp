@@ -107,7 +107,9 @@ public:
                 // the replay protection comes from the oplog write with a specific txnNumber. Using
                 // ACR also prevents having deadlocks with the shutdown thread because the
                 // cancellation of the new operation context is linked to the parent one.
-                auto newClient = opCtx->getServiceContext()->makeClient("SetAllowMigrations");
+                auto newClient = opCtx->getServiceContext()
+                                     ->getService(ClusterRole::ShardServer)
+                                     ->makeClient("SetAllowMigrations");
                 AlternativeClientRegion acr(newClient);
                 auto executor =
                     Grid::get(opCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
@@ -185,7 +187,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(ConfigsvrSetAllowMigrationsCommand);
+MONGO_REGISTER_COMMAND(ConfigsvrSetAllowMigrationsCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <utility>
 
@@ -60,9 +59,14 @@ public:
     DocumentKey(BSONObj id, boost::optional<BSONObj> _shardKey)
         : _id(id.getOwned()), _shardKey(std::move(_shardKey)) {
         invariant(!id.isEmpty());
+
+        if (_shardKey) {
+            _shardKey = _shardKey->getOwned();
+        }
     }
 
     BSONObj getId() const;
+    boost::optional<BSONObj> getShardKey() const;
 
     BSONObj getShardKeyAndId() const;
 
@@ -76,6 +80,9 @@ private:
  * and the _id field, of the given document.
  */
 DocumentKey getDocumentKey(const CollectionPtr& coll, BSONObj const& doc);
+
+
+DocumentKey getDocumentKey(const ShardKeyPattern& shardKeyPattern, BSONObj const& doc);
 
 /**
  * Provides access to the DocumentKey attached to this OperationContext.

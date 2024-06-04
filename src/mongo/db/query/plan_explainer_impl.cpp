@@ -35,7 +35,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <memory>
 #include <set>
@@ -546,8 +545,11 @@ void statsToBSON(const PlanStageStats& stats,
                               static_cast<long long>(spec->totalDataSizeBytes));
             bob->appendBool("usedDisk", (spec->spills > 0));
             bob->appendNumber("spills", static_cast<long long>(spec->spills));
+            bob->appendNumber("spilledRecords", static_cast<long long>(spec->spilledRecords));
             bob->appendNumber("spilledDataStorageSize",
                               static_cast<long long>(spec->spilledDataStorageSize));
+            bob->appendNumber("spilledUncompressedDataSize",
+                              static_cast<long long>(spec->spilledUncompressedDataSize));
         }
     }
 

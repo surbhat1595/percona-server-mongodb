@@ -963,6 +963,92 @@ struct MatchNode : public QuerySolutionNode {
 };
 
 /**
+ * UnwindNode is used for $unwind aggregation stages that are pushed down to SBE.
+ */
+struct UnwindNode : public QuerySolutionNode {
+    UnwindNode(std::unique_ptr<QuerySolutionNode> child,
+               const FieldPath& fieldPath,
+               bool preserveNullAndEmptyArrays,
+               const boost::optional<FieldPath>& indexPath)
+        : QuerySolutionNode(std::move(child)),
+          fieldPath{fieldPath},
+          preserveNullAndEmptyArrays{preserveNullAndEmptyArrays},
+          indexPath(indexPath) {}
+
+    virtual StageType getType() const {
+        return STAGE_UNWIND;
+    }
+
+    /**
+     * Data from the unwind node is considered fetched iff the child provides fetched data.
+     */
+    bool fetched() const {
+        return children[0]->fetched();
+    }
+
+    FieldAvailability getFieldAvailability(const std::string& field) const {
+        return children[0]->getFieldAvailability(field);
+    }
+
+    bool sortedByDiskLoc() const {
+        return children[0]->sortedByDiskLoc();
+    }
+
+    const ProvidedSortSet& providedSorts() const {
+        return children[0]->providedSorts();
+    }
+
+    void appendToString(str::stream* ss, int indent) const final;
+    std::unique_ptr<QuerySolutionNode> clone() const final;
+
+    // Path in the document to the field to unwind.
+    FieldPath fieldPath;
+
+    // Iff true, then if the path is null, missing, or an empty array, unwind outputs the document.
+    bool preserveNullAndEmptyArrays;
+
+    // Optional output path in which to return the array index unwound to this output doc.
+    const boost::optional<FieldPath>& indexPath;
+};  // struct UnwindNode
+
+/**
+ * ReplaceRootNode is used for $replaceRoot aggregation stages that are pushed down to SBE.
+ */
+struct ReplaceRootNode : public QuerySolutionNode {
+    ReplaceRootNode(std::unique_ptr<QuerySolutionNode> child,
+                    boost::intrusive_ptr<Expression> newRoot)
+        : QuerySolutionNode(std::move(child)), newRoot(newRoot) {}
+
+    virtual StageType getType() const {
+        return STAGE_REPLACE_ROOT;
+    }
+
+    /**
+     * Data from the replaceRoot node is considered fetched iff the child provides fetched data.
+     */
+    bool fetched() const {
+        return children[0]->fetched();
+    }
+
+    FieldAvailability getFieldAvailability(const std::string& field) const {
+        return FieldAvailability::kNotProvided;
+    }
+
+    bool sortedByDiskLoc() const {
+        return children[0]->sortedByDiskLoc();
+    }
+
+    const ProvidedSortSet& providedSorts() const {
+        return children[0]->providedSorts();
+    }
+
+    void appendToString(str::stream* ss, int indent) const final;
+    std::unique_ptr<QuerySolutionNode> clone() const final;
+
+    boost::intrusive_ptr<Expression> newRoot;
+};
+
+/**
  * We have a few implementations of the projection functionality. They are chosen by constructing
  * a type derived from this abstract struct. The most general implementation 'ProjectionNodeDefault'
  * is much slower than the fast-path implementations. We only really have all the information
@@ -1197,6 +1283,8 @@ struct SortNodeSimple final : public SortNode {
 
 struct LimitNode : public QuerySolutionNode {
     LimitNode() {}
+    LimitNode(std::unique_ptr<QuerySolutionNode> child, long long limit)
+        : QuerySolutionNode(std::move(child)), limit(limit) {}
     virtual ~LimitNode() {}
 
     virtual StageType getType() const {
@@ -1225,6 +1313,8 @@ struct LimitNode : public QuerySolutionNode {
 
 struct SkipNode : public QuerySolutionNode {
     SkipNode() {}
+    SkipNode(std::unique_ptr<QuerySolutionNode> child, long long skip)
+        : QuerySolutionNode(std::move(child)), skip(skip) {}
     virtual ~SkipNode() {}
 
     virtual StageType getType() const {
@@ -1738,14 +1828,15 @@ struct SearchNode : public QuerySolutionNode {
     SearchNode(bool isSearchMeta,
                BSONObj searchQuery,
                boost::optional<long long> limit,
-               boost::optional<int> intermediateResultsProtocolVersion)
+               boost::optional<BSONObj> sortSpec,
+               size_t remoteCursorId,
+               boost::optional<BSONObj> remoteCursorVars)
         : isSearchMeta(isSearchMeta),
           searchQuery(searchQuery),
           limit(limit),
-          intermediateResultsProtocolVersion(intermediateResultsProtocolVersion) {
-        // TODO SERVER-78565: Support $search in SBE plan cache
-        eligibleForPlanCache = false;
-    }
+          sortSpec(sortSpec),
+          remoteCursorId(remoteCursorId),
+          remoteCursorVars(remoteCursorVars) {}
 
     StageType getType() const override {
         return STAGE_SEARCH;
@@ -1785,12 +1876,9 @@ struct SearchNode : public QuerySolutionNode {
      */
     boost::optional<long long> limit;
 
-    /**
-     * Protocol version if it must be communicated via the search request.
-     * If we are in a sharded environment but are targeting unsharded collection we may have a
-     * protocol version even though it should not be sent to mongot.
-     */
-    boost::optional<int> intermediateResultsProtocolVersion;
+    boost::optional<BSONObj> sortSpec;
+    size_t remoteCursorId;
+    boost::optional<BSONObj> remoteCursorVars;
 };
 
 /**
@@ -1799,7 +1887,7 @@ struct SearchNode : public QuerySolutionNode {
  */
 struct UnpackTsBucketNode : public QuerySolutionNode {
     UnpackTsBucketNode(std::unique_ptr<QuerySolutionNode> child,
-                       const BucketSpec& spec,
+                       const timeseries::BucketSpec& spec,
                        std::unique_ptr<MatchExpression> eventFilter,
                        std::unique_ptr<MatchExpression> wholeBucketFilter,
                        bool includeMeta)
@@ -1810,7 +1898,7 @@ struct UnpackTsBucketNode : public QuerySolutionNode {
           includeMeta(includeMeta) {
         tassert(7969700,
                 "Only support unpacking with a statically known set of fields.",
-                bucketSpec.behavior() == BucketSpec::Behavior::kInclude);
+                bucketSpec.behavior() == timeseries::BucketSpec::Behavior::kInclude);
     }
 
     StageType getType() const override {
@@ -1853,7 +1941,7 @@ struct UnpackTsBucketNode : public QuerySolutionNode {
                                                     includeMeta);
     }
 
-    BucketSpec bucketSpec;
+    timeseries::BucketSpec bucketSpec;
     std::unique_ptr<MatchExpression> eventFilter = nullptr;
     std::unique_ptr<MatchExpression> wholeBucketFilter = nullptr;
     bool includeMeta = false;

@@ -53,7 +53,8 @@
 #include "mongo/db/startup_warnings_common.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
-#include "mongo/transport/service_entry_point.h"
+#include "mongo/transport/session_manager.h"
+#include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/str.h"
 
@@ -205,7 +206,6 @@ void logMongodStartupWarnings(const StorageGlobalParams& storageParams,
                 if ((where == std::string::npos) || (++where == line.size())) {
                     LOGV2_WARNING_OPTIONS(22165,
                                           {logv2::LogTag::kStartupWarnings},
-                                          "Cannot parse numa_maps at line: {line}",
                                           "Cannot parse numa_maps",
                                           "line"_attr = line);
                 }
@@ -287,27 +287,8 @@ void logMongodStartupWarnings(const StorageGlobalParams& storageParams,
                               "error"_attr = transparentHugePagesDefragResult.getStatus().reason());
     }
 
-    // Check if vm.max_map_count is high enough, as per SERVER-51233
-    {
-        size_t maxConns = svcCtx->getServiceEntryPoint()->maxOpenSessions();
-        size_t requiredMapCount = 2 * maxConns;
-
-        std::fstream f("/proc/sys/vm/max_map_count", ios_base::in);
-        size_t val;
-        f >> val;
-
-        if (val < requiredMapCount) {
-            LOGV2_WARNING_OPTIONS(5123300,
-                                  {logv2::LogTag::kStartupWarnings},
-                                  "** WARNING: Maximum number of memory map areas per process is "
-                                  "too low. Current value of vm.max_map_count is {currentValue}, "
-                                  "recommended minimum is {recommendedMinimum} for currently "
-                                  "configured maximum connections ({maxConns})",
-                                  "vm.max_map_count is too low",
-                                  "currentValue"_attr = val,
-                                  "recommendedMinimum"_attr = requiredMapCount,
-                                  "maxConns"_attr = maxConns);
-        }
+    if (auto tlm = svcCtx->getTransportLayerManager()) {
+        tlm->checkMaxOpenSessionsAtStartup();
     }
 #endif  // __linux__
 
@@ -320,9 +301,6 @@ void logMongodStartupWarnings(const StorageGlobalParams& storageParams,
         if (rlnofile.rlim_cur < minNumFiles) {
             LOGV2_WARNING_OPTIONS(22184,
                                   {logv2::LogTag::kStartupWarnings},
-                                  "** WARNING: Soft rlimits too low. The limit for open file "
-                                  "descriptors is {currentValue}, recommended "
-                                  "minimum is {recommendedMinimum}",
                                   "Soft rlimits for open file descriptors too low",
                                   "currentValue"_attr = rlnofile.rlim_cur,
                                   "recommendedMinimum"_attr = minNumFiles);
@@ -331,7 +309,6 @@ void logMongodStartupWarnings(const StorageGlobalParams& storageParams,
         auto ec = lastSystemError();
         LOGV2_WARNING_OPTIONS(22186,
                               {logv2::LogTag::kStartupWarnings},
-                              "getrlimit failed: {error}",
                               "getrlimit failed",
                               "error"_attr = errorMessage(ec));
     }
@@ -347,9 +324,6 @@ void logMongodStartupWarnings(const StorageGlobalParams& storageParams,
         if ((rlmemlock.rlim_cur / ProcessInfo::getPageSize()) < minLockedPages) {
             LOGV2_WARNING_OPTIONS(22188,
                                   {logv2::LogTag::kStartupWarnings},
-                                  "** WARNING: Soft rlimits too low. The limit for locked memory "
-                                  "size is {lockedMemoryBytes} "
-                                  "bytes, it should be at least {minLockedMemoryBytes} bytes",
                                   "Soft rlimit for locked memory too low",
                                   "lockedMemoryBytes"_attr = rlmemlock.rlim_cur,
                                   "minLockedMemoryBytes"_attr =
@@ -359,7 +333,6 @@ void logMongodStartupWarnings(const StorageGlobalParams& storageParams,
         auto ec = lastSystemError();
         LOGV2_WARNING_OPTIONS(22190,
                               {logv2::LogTag::kStartupWarnings},
-                              "** WARNING: getrlimit failed: {error}",
                               "getrlimit failed",
                               "error"_attr = errorMessage(ec));
     }

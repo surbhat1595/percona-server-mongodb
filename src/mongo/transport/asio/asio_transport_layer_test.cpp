@@ -57,6 +57,7 @@
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/test_fixtures.h"
 #include "mongo/transport/transport_layer.h"
+#include "mongo/transport/transport_layer_manager_impl.h"
 #include "mongo/transport/transport_options_gen.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/assert_that.h"
@@ -216,36 +217,39 @@ AsioTransportLayer::Options defaultTLAOptions() {
     return opts;
 }
 
-std::unique_ptr<AsioTransportLayer> makeTLA(ServiceEntryPoint* sep,
+std::unique_ptr<AsioTransportLayer> makeTLA(std::unique_ptr<SessionManager> sessionManager,
                                             const AsioTransportLayer::Options& options) {
-    auto tla = std::make_unique<AsioTransportLayer>(options, sep);
+    auto tla = std::make_unique<AsioTransportLayer>(options, std::move(sessionManager));
     ASSERT_OK(tla->setup());
     ASSERT_OK(tla->start());
     return tla;
 }
 
-std::unique_ptr<AsioTransportLayer> makeTLA(ServiceEntryPoint* sep) {
-    return makeTLA(sep, defaultTLAOptions());
+std::unique_ptr<AsioTransportLayer> makeTLA(std::unique_ptr<SessionManager> sessionManager) {
+    return makeTLA(std::move(sessionManager), defaultTLAOptions());
 }
 
 /**
- * Properly setting up and tearing down the MockSEP and AsioTransportLayer is
+ * Properly setting up and tearing down the MockSessionManager and AsioTransportLayer is
  * tricky. Most tests can delegate the details to this TestFixture.
  */
 class TestFixture {
 public:
-    TestFixture() : _tla{makeTLA(&_sep)} {}
+    TestFixture() : TestFixture(defaultTLAOptions()) {}
 
-    explicit TestFixture(const AsioTransportLayer::Options& options)
-        : _tla{makeTLA(&_sep, options)} {}
+    explicit TestFixture(const AsioTransportLayer::Options& options) {
+        auto sm = std::make_unique<test::MockSessionManager>();
+        _sessionManager = sm.get();
+        _tla = makeTLA(std::move(sm), options);
+    }
 
     ~TestFixture() {
-        _sep.endAllSessions({});
+        _sessionManager->endAllSessions({});
         _tla->shutdown();
     }
 
-    test::MockSEP& sep() {
-        return _sep;
+    test::MockSessionManager& sessionManager() {
+        return *_sessionManager;
     }
 
     AsioTransportLayer& tla() {
@@ -276,7 +280,7 @@ public:
 
 private:
     std::unique_ptr<AsioTransportLayer> _tla;
-    test::MockSEP _sep;
+    test::MockSessionManager* _sessionManager;
 
     FailPoint& _hangBeforeAccept = asioTransportLayerHangBeforeAcceptCallback;
     FailPoint& _hangDuringAccept = asioTransportLayerHangDuringAcceptCallback;
@@ -288,7 +292,7 @@ private:
 TEST(AsioTransportLayer, ListenerPortZeroTreatedAsEphemeral) {
     Notification<bool> connected;
     TestFixture tf;
-    tf.sep().setOnStartSession([&](auto&&) { connected.set(true); });
+    tf.sessionManager().setOnStartSession([&](auto&&) { connected.set(true); });
 
     int port = tf.tla().listenerPort();
     ASSERT_GT(port, 0);
@@ -319,7 +323,7 @@ TEST(AsioTransportLayer, TCPResetAfterConnectionIsSilentlySwallowed) {
     TestFixture tf;
 
     AtomicWord<int> sessionsCreated{0};
-    tf.sep().setOnStartSession([&](auto&&) { sessionsCreated.fetchAndAdd(1); });
+    tf.sessionManager().setOnStartSession([&](auto&&) { sessionsCreated.fetchAndAdd(1); });
 
     LOGV2(6109515, "connecting");
     auto& fp = asioTransportLayerHangDuringAcceptCallback;
@@ -395,7 +399,8 @@ TEST(AsioTransportLayer, TCPCheckQueueDepth) {
 TEST(AsioTransportLayer, ThrowOnNetworkErrorInEnsureSync) {
     TestFixture tf;
     Notification<test::SessionThread*> mockSessionCreated;
-    tf.sep().setOnStartSession([&](test::SessionThread& st) { mockSessionCreated.set(&st); });
+    tf.sessionManager().setOnStartSession(
+        [&](test::SessionThread& st) { mockSessionCreated.set(&st); });
 
     ConnectionThread connectThread(tf.tla().listenerPort(), &setNoLinger);
 
@@ -421,7 +426,7 @@ TEST(AsioTransportLayer, ThrowOnNetworkErrorInEnsureSync) {
 TEST(AsioTransportLayer, SourceSyncTimeoutTimesOut) {
     TestFixture tf;
     Notification<StatusWith<Message>> received;
-    tf.sep().setOnStartSession([&](test::SessionThread& st) {
+    tf.sessionManager().setOnStartSession([&](test::SessionThread& st) {
         st.session().setTimeout(Milliseconds{500});
         st.schedule([&](auto& session) { received.set(session.sourceMessage()); });
     });
@@ -433,7 +438,7 @@ TEST(AsioTransportLayer, SourceSyncTimeoutTimesOut) {
 TEST(AsioTransportLayer, SourceSyncTimeoutSucceeds) {
     TestFixture tf;
     Notification<StatusWith<Message>> received;
-    tf.sep().setOnStartSession([&](test::SessionThread& st) {
+    tf.sessionManager().setOnStartSession([&](test::SessionThread& st) {
         st.session().setTimeout(Milliseconds{500});
         st.schedule([&](auto& session) { received.set(session.sourceMessage()); });
     });
@@ -446,7 +451,8 @@ TEST(AsioTransportLayer, SourceSyncTimeoutSucceeds) {
 TEST(AsioTransportLayer, SwitchTimeoutModes) {
     TestFixture tf;
     Notification<test::SessionThread*> mockSessionCreated;
-    tf.sep().setOnStartSession([&](test::SessionThread& st) { mockSessionCreated.set(&st); });
+    tf.sessionManager().setOnStartSession(
+        [&](test::SessionThread& st) { mockSessionCreated.set(&st); });
 
     SyncClient conn(tf.tla().listenerPort());
     auto& st = *mockSessionCreated.get();
@@ -590,7 +596,7 @@ void runTfoScenario(bool serverOn, bool clientOn, bool expectTfo) {
 
     // Minimal test service. Consumes one `Message` from an incoming connection,
     // pushing it to the `received` queue.
-    tf.sep().setOnStartSession([&](test::SessionThread& st) {
+    tf.sessionManager().setOnStartSession([&](test::SessionThread& st) {
         st.schedule([&](auto& session) { received.push(session.sourceMessage()); });
     });
 
@@ -764,18 +770,20 @@ public:
     };
 
     void setUp() override {
-        auto sep = std::make_unique<test::MockSEP>();
-        auto tl = makeTLA(sep.get());
-        getServiceContext()->setServiceEntryPoint(std::move(sep));
-        getServiceContext()->setTransportLayer(std::move(tl));
+        auto* svcCtx = getServiceContext();
+        svcCtx->getService()->setServiceEntryPoint(
+            std::make_unique<test::ServiceEntryPointUnimplemented>());
+        auto tl = makeTLA(std::make_unique<test::MockSessionManager>());
+        svcCtx->setTransportLayerManager(
+            std::make_unique<transport::TransportLayerManagerImpl>(std::move(tl)));
     }
 
     void tearDown() override {
-        getServiceContext()->getTransportLayer()->shutdown();
+        getServiceContext()->getTransportLayerManager()->shutdown();
     }
 
     AsioTransportLayer& tla() {
-        auto tl = getServiceContext()->getTransportLayer();
+        auto tl = getServiceContext()->getTransportLayerManager()->getEgressLayer();
         return *checked_cast<AsioTransportLayer*>(tl);
     }
 };
@@ -850,8 +858,9 @@ TEST_F(AsioTransportLayerWithServiceContextTest, ShutdownDuringSSLHandshake) {
     params.sslClusterPEMPayload = loadFile("jstests/libs/client.pem");
     params.targetedClusterConnectionString = ConnectionString::forLocal();
 
-    auto status = conn.connectSocketOnly({testHostName(), port}, std::move(params));
-    ASSERT_EQ(status, ErrorCodes::HostUnreachable);
+    ASSERT_THROWS_CODE(conn.connectNoHello({testHostName(), port}, std::move(params)),
+                       DBException,
+                       ErrorCodes::HostUnreachable);
 }
 #endif  // _WIN32
 #endif  // MONGO_CONFIG_SSL
@@ -875,8 +884,8 @@ public:
         _fixture.reset();
     }
 
-    test::MockSEP& sep() {
-        return _fixture->sep();
+    test::MockSessionManager& sessionManager() {
+        return _fixture->sessionManager();
     }
 
     StatusWith<std::shared_ptr<Session>> connect(HostAndPort remote) {
@@ -885,7 +894,7 @@ public:
 
     void doDifferentiatesConnectionsCase(bool useRouterPort) {
         auto isFromRouterPort = std::make_shared<Notification<bool>>();
-        sep().setOnStartSession([isFromRouterPort](test::SessionThread& st) {
+        sessionManager().setOnStartSession([isFromRouterPort](test::SessionThread& st) {
             isFromRouterPort->set(st.session().isFromRouterPort());
         });
         HostAndPort target{testHostName(), useRouterPort ? kRouterPort : kMainPort};
@@ -932,12 +941,12 @@ public:
      * Emplaces a Promise with the first ingress session. Can optionally accept
      * further sessions, of which it takes co-ownership.
      */
-    class FirstSessionSEP : public ServiceEntryPoint {
+    class FirstSessionManager : public SessionManager {
     public:
-        explicit FirstSessionSEP(Promise<std::shared_ptr<Session>> promise)
+        explicit FirstSessionManager(Promise<std::shared_ptr<Session>> promise)
             : _promise(std::move(promise)) {}
 
-        ~FirstSessionSEP() override {
+        ~FirstSessionManager() override {
             _join();
         }
 
@@ -946,10 +955,6 @@ public:
         }
 
         void appendStats(BSONObjBuilder*) const override {}
-
-        Future<DbResponse> handleRequest(OperationContext*, const Message&) noexcept override {
-            MONGO_UNREACHABLE;
-        }
 
         void startSession(std::shared_ptr<Session> session) override {
             stdx::lock_guard lk{_mutex};
@@ -962,9 +967,11 @@ public:
             invariant(_allowMultipleSessions, "Unexpected multiple ingress sessions");
         }
 
-        void endAllSessions(Session::TagMask) override {
+        void endAllSessions(Client::TagMask tags) override {
             _join();
         }
+
+        void endSessionByClient(Client*) override {}
 
         bool shutdown(Milliseconds) override {
             _join();
@@ -974,10 +981,6 @@ public:
         size_t numOpenSessions() const override {
             stdx::lock_guard lk{_mutex};
             return _sessions.size();
-        }
-
-        logv2::LogSeverity slowSessionWorkflowLogSeverity() override {
-            MONGO_UNIMPLEMENTED;
         }
 
         void setAllowMultipleSessions() {
@@ -1009,26 +1012,29 @@ public:
         }
     };
 
-    virtual void configureSep(FirstSessionSEP& sep) {}
+    virtual void configureSessionManager(FirstSessionManager& mgr) {}
 
     void setUp() override {
         auto pf = makePromiseFuture<std::shared_ptr<Session>>();
-        auto servCtx = getServiceContext();
-        auto sep = std::make_unique<FirstSessionSEP>(std::move(pf.promise));
-        configureSep(*sep);
-        servCtx->setServiceEntryPoint(std::move(sep));
+        auto sessionManager = std::make_unique<FirstSessionManager>(std::move(pf.promise));
+        configureSessionManager(*sessionManager);
 
-        auto tla = makeTLA(servCtx->getServiceEntryPoint());
-        const auto listenerPort = tla->listenerPort();
-        servCtx->setTransportLayer(std::move(tla));
+        auto tl = makeTLA(std::move(sessionManager));
+        const auto listenerPort = tl->listenerPort();
+
+        auto* svcCtx = getServiceContext();
+        svcCtx->getService()->setServiceEntryPoint(
+            std::make_unique<test::ServiceEntryPointUnimplemented>());
+        svcCtx->setTransportLayerManager(
+            std::make_unique<transport::TransportLayerManagerImpl>(std::move(tl)));
 
         _connThread = std::make_unique<ConnectionThread>(listenerPort);
-        _client = servCtx->makeClient("NetworkBatonTest", pf.future.get());
+        _client = svcCtx->getService()->makeClient("NetworkBatonTest", pf.future.get());
     }
 
     void tearDown() override {
         _connThread.reset();
-        getServiceContext()->getTransportLayer()->shutdown();
+        getServiceContext()->getTransportLayerManager()->shutdown();
     }
 
     Client& client() {
@@ -1051,8 +1057,8 @@ private:
 class IngressAsioNetworkingBatonTest : public AsioNetworkingBatonTest {};
 
 class EgressAsioNetworkingBatonTest : public AsioNetworkingBatonTest {
-    void configureSep(FirstSessionSEP& sep) override {
-        sep.setAllowMultipleSessions();
+    void configureSessionManager(FirstSessionManager& mgr) override {
+        mgr.setAllowMultipleSessions();
     }
 };
 
@@ -1312,7 +1318,8 @@ class EgressSessionWithScopedReactor {
 public:
     EgressSessionWithScopedReactor(ServiceContext* sc)
         : _sc(sc),
-          _reactor(sc->getTransportLayer()->getReactor(TransportLayer::kNewReactor)),
+          _reactor(sc->getTransportLayerManager()->getEgressLayer()->getReactor(
+              TransportLayer::kNewReactor)),
           _reactorThread([&] { _reactor->run(); }),
           _session(_makeEgressSession()) {}
 
@@ -1327,11 +1334,13 @@ public:
 
 private:
     std::shared_ptr<Session> _makeEgressSession() {
-        auto tla = checked_cast<AsioTransportLayer*>(_sc->getTransportLayer());
+        auto tla =
+            checked_cast<AsioTransportLayer*>(_sc->getTransportLayerManager()->getEgressLayer());
 
         HostAndPort localTarget(testHostName(), tla->listenerPort());
 
-        return _sc->getTransportLayer()
+        return _sc->getTransportLayerManager()
+            ->getEgressLayer()
             ->asyncConnect(localTarget,
                            ConnectSSLMode::kGlobalSSLMode,
                            _reactor,

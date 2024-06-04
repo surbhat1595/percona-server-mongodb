@@ -36,11 +36,11 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
 #include <iterator>
 #include <numeric>
+#include <sstream>
 #include <string_view>
 
 #include "mongo/bson/bsonobjbuilder.h"
@@ -274,20 +274,22 @@ std::unique_ptr<sbe::EExpression> makeNewBsonObject(std::vector<std::string> fie
             "Expected 'fields' and 'values' to be the same size",
             fields.size() == values.size());
 
-    std::vector<sbe::MakeObjSpec::FieldInfo> fieldInfos;
+    std::vector<sbe::MakeObjSpec::FieldAction> fieldActions;
     for (size_t i = 0; i < fields.size(); ++i) {
-        fieldInfos.emplace_back(i);
+        fieldActions.emplace_back(sbe::MakeObjSpec::ValueArg{i});
     }
 
-    auto makeObjSpec = makeConstant(
-        sbe::value::TypeTags::makeObjSpec,
-        sbe::value::bitcastFrom<sbe::MakeObjSpec*>(new sbe::MakeObjSpec(
-            sbe::MakeObjSpec::FieldBehavior::kOpen, std::move(fields), std::move(fieldInfos))));
+    auto makeObjSpec =
+        makeConstant(sbe::value::TypeTags::makeObjSpec,
+                     sbe::value::bitcastFrom<sbe::MakeObjSpec*>(new sbe::MakeObjSpec(
+                         FieldListScope::kOpen, std::move(fields), std::move(fieldActions))));
     auto makeObjRoot = makeNothingConstant();
+    auto hasInputFieldsExpr = makeBoolConstant(false);
     sbe::EExpression::Vector makeObjArgs;
-    makeObjArgs.reserve(2 + values.size());
+    makeObjArgs.reserve(3 + values.size());
     makeObjArgs.push_back(std::move(makeObjSpec));
     makeObjArgs.push_back(std::move(makeObjRoot));
+    makeObjArgs.push_back(std::move(hasInputFieldsExpr));
     std::move(values.begin(), values.end(), std::back_inserter(makeObjArgs));
 
     return sbe::makeE<sbe::EFunction>("makeBsonObj", std::move(makeObjArgs));
@@ -309,7 +311,7 @@ std::unique_ptr<sbe::EExpression> makeShardKeyFunctionForPersistedDocuments(
         const auto& fieldRef = shardKeyPaths[i];
 
         auto shardKeyBinding = sbe::makeE<sbe::EVariable>(
-            slots.get(std::make_pair(PlanStageSlots::kField, fieldRef.getPart(0))));
+            slots.get(std::make_pair(PlanStageSlots::kField, fieldRef.getPart(0))).slotId);
         if (fieldRef.numParts() > 1) {
             for (size_t level = 1; level < fieldRef.numParts(); ++level) {
                 shardKeyBinding = makeFunction(
@@ -615,7 +617,7 @@ bool indexKeyConsistencyCheckCallback(OperationContext* opCtx,
                 // (or if the index is dropped).
                 uassert(ErrorCodes::QueryPlanKilled,
                         str::stream() << "query plan killed :: index dropped: " << indexIdent,
-                        indexDesc && entry && !entry->isDropped());
+                        indexDesc && entry);
 
                 auto [newIt, _] = entryMap.emplace(indexIdent, entry);
 
@@ -686,14 +688,14 @@ std::unique_ptr<sbe::PlanStage> makeLoopJoinForFetch(std::unique_ptr<sbe::PlanSt
                                                 indexIdentSlot,
                                                 indexKeySlot,
                                                 indexKeyPatternSlot,
-                                                boost::none,
+                                                boost::none /* oplogTsSlot */,
                                                 std::move(fields),
                                                 std::move(fieldSlots),
                                                 seekRecordIdSlot,
                                                 boost::none /* minRecordIdSlot */,
                                                 boost::none /* maxRecordIdSlot */,
                                                 true /* forward */,
-                                                nullptr,
+                                                nullptr /* yieldPolicy */,
                                                 planNodeId,
                                                 std::move(callbacks));
 
@@ -705,7 +707,7 @@ std::unique_ptr<sbe::PlanStage> makeLoopJoinForFetch(std::unique_ptr<sbe::PlanSt
         std::move(slotsToForward),
         sbe::makeSV(
             seekRecordIdSlot, snapshotIdSlot, indexIdentSlot, indexKeySlot, indexKeyPatternSlot),
-        nullptr,
+        nullptr /* predicate */,
         planNodeId);
 }
 
@@ -773,17 +775,16 @@ std::unique_ptr<sbe::PlanStage> rehydrateIndexKey(std::unique_ptr<sbe::PlanStage
 }
 
 namespace {
-struct GetProjectionNodesData {
+struct GetProjectNodesData {
     projection_ast::ProjectType projectType = projection_ast::ProjectType::kInclusion;
     std::vector<std::string> paths;
-    std::vector<ProjectionNode> nodes;
+    std::vector<ProjectNode> nodes;
 };
-using GetProjectionNodesContext =
-    projection_ast::PathTrackingVisitorContext<GetProjectionNodesData>;
+using GetProjectNodesContext = projection_ast::PathTrackingVisitorContext<GetProjectNodesData>;
 
-class GetProjectionNodesVisitor final : public projection_ast::ProjectionASTConstVisitor {
+class GetProjectNodesVisitor final : public projection_ast::ProjectionASTConstVisitor {
 public:
-    explicit GetProjectionNodesVisitor(GetProjectionNodesContext* context) : _context{context} {}
+    explicit GetProjectNodesVisitor(GetProjectNodesContext* context) : _context{context} {}
 
     void visit(const projection_ast::BooleanConstantASTNode* node) final {
         bool isInclusion = _context->data().projectType == projection_ast::ProjectType::kInclusion;
@@ -822,16 +823,16 @@ private:
         return _context->fullPath().fullPath();
     }
 
-    GetProjectionNodesContext* _context;
+    GetProjectNodesContext* _context;
 };
 }  // namespace
 
-std::pair<std::vector<std::string>, std::vector<ProjectionNode>> getProjectionNodes(
+std::pair<std::vector<std::string>, std::vector<ProjectNode>> getProjectNodes(
     const projection_ast::Projection& projection) {
-    GetProjectionNodesContext ctx{{projection.type(), {}, {}}};
-    GetProjectionNodesVisitor visitor(&ctx);
+    GetProjectNodesContext ctx{{projection.type(), {}, {}}};
+    GetProjectNodesVisitor visitor(&ctx);
 
-    projection_ast::PathTrackingConstWalker<GetProjectionNodesData> walker{&ctx, {}, {&visitor}};
+    projection_ast::PathTrackingConstWalker<GetProjectNodesData> walker{&ctx, {}, {&visitor}};
 
     tree_walker::walk<true, projection_ast::ASTNode>(projection.root(), &walker);
 
@@ -859,7 +860,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
         sbe::SlotExprPairVector projects;
         for (size_t i = 0; i < fields.size(); ++i) {
             auto name = std::make_pair(PlanStageSlots::kField, StringData(fields[i]));
-            auto fieldSlot = slots != nullptr ? slots->getIfExists(name) : boost::none;
+            auto fieldSlot = slots->getSlotIfExists(name);
             if (fieldSlot) {
                 outputSlots.emplace_back(*fieldSlot);
             } else {
@@ -905,7 +906,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
             if (auto slot = slots->getIfExists(name); slot) {
                 // We found a kField slot. Assign it to 'node->value' and mark 'node' as "visited",
                 // and add 'node' to 'roots'.
-                node->value = *slot;
+                node->value = slot->slotId;
                 roots.emplace_back(node);
             }
         };
@@ -943,7 +944,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
                 auto getFieldExpr =
                     makeFunction("getField"_sd,
                                  parent->value.hasSlot() ? makeVariable(*parent->value.getSlot())
-                                                         : parent->value.extractExpr(state),
+                                                         : parent->value.extractExpr(state).expr,
                                  makeStrConstant(node->name));
 
                 auto hasOneChildToVisit = [&] {
@@ -999,6 +1000,407 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
     }
 
     return {std::move(stage), std::move(outputSlots)};
+}
+
+ProjectionEffects::ProjectionEffects(bool isInclusion,
+                                     const std::vector<std::string>& paths,
+                                     const std::vector<ProjectNode>& nodes) {
+    _defaultEffect = isInclusion ? kDrop : kKeep;
+
+    // Loop over 'paths' / 'nodes'.
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const auto& node = nodes[i];
+        const auto& path = paths[i];
+        bool isDottedPath = path.find('.') != std::string::npos;
+        StringData f = getTopLevelField(path);
+
+        if (!isDottedPath) {
+            _fields.emplace_back(f.toString());
+
+            if (node.isBool()) {
+                _effects.emplace(f.toString(), isInclusion ? kKeep : kDrop);
+            } else if (node.isExpr() || node.isSbExpr()) {
+                _effects.emplace(f.toString(), kCreate);
+            } else if (node.isSlice()) {
+                _effects.emplace(f.toString(), kModify);
+            }
+        } else {
+            auto it = _effects.find(f);
+            if (it == _effects.end()) {
+                _fields.emplace_back(f.toString());
+
+                if (node.isBool() || node.isSlice()) {
+                    _effects.emplace(f.toString(), kModify);
+                } else if (node.isExpr() || node.isSbExpr()) {
+                    _effects.emplace(f.toString(), kCreate);
+                }
+            } else {
+                if (it->second != kCreate && (node.isExpr() || node.isSbExpr())) {
+                    it->second = kCreate;
+                }
+            }
+        }
+    }
+}
+
+ProjectionEffects::ProjectionEffects(const FieldSet& keepFieldSet) {
+    bool isClosed = keepFieldSet.getScope() == FieldListScope::kClosed;
+
+    _defaultEffect = isClosed ? kDrop : kKeep;
+
+    for (auto&& name : keepFieldSet.getList()) {
+        _fields.emplace_back(name);
+        _effects[name] = isClosed ? kKeep : kDrop;
+    }
+}
+
+ProjectionEffects::ProjectionEffects(const FieldSet& nonDroppedFieldSet,
+                                     const FieldSet& modifiedOrCreatedFieldSet,
+                                     const FieldSet& createdFieldSet,
+                                     std::vector<std::string> displayOrder) {
+    tassert(8238900,
+            "Expected 'createdFieldSet' to be a closed FieldSet",
+            createdFieldSet.getScope() == FieldListScope::kClosed);
+
+    bool ndIsClosed = nonDroppedFieldSet.getScope() == FieldListScope::kClosed;
+    bool mocIsClosed = modifiedOrCreatedFieldSet.getScope() == FieldListScope::kClosed;
+
+    _defaultEffect = mocIsClosed ? (ndIsClosed ? kDrop : kKeep) : kModify;
+
+    for (auto&& name : createdFieldSet.getList()) {
+        _fields.emplace_back(name);
+        _effects[name] = kCreate;
+    }
+
+    for (auto&& name : modifiedOrCreatedFieldSet.getList()) {
+        if (!_effects.count(name) && (mocIsClosed || nonDroppedFieldSet.count(name))) {
+            _fields.emplace_back(name);
+            _effects[name] = mocIsClosed ? kModify : kKeep;
+        }
+    }
+
+    for (auto&& name : nonDroppedFieldSet.getList()) {
+        if (!_effects.count(name) && !modifiedOrCreatedFieldSet.count(name)) {
+            _fields.emplace_back(name);
+            _effects[name] = ndIsClosed ? kKeep : kDrop;
+        }
+    }
+
+    if (!mocIsClosed) {
+        for (auto&& name : modifiedOrCreatedFieldSet.getList()) {
+            if (!_effects.count(name)) {
+                _fields.emplace_back(name);
+                _effects[name] = kDrop;
+            }
+        }
+    }
+
+    if (!displayOrder.empty()) {
+        auto fieldSet = StringDataSet(_fields.begin(), _fields.end());
+        displayOrder =
+            filterVector(std::move(displayOrder), [&](auto&& f) { return fieldSet.count(f) > 0; });
+        _fields = appendVectorUnique(std::move(displayOrder), std::move(_fields));
+    }
+}
+
+ProjectionEffects::ProjectionEffects(const FieldSet& nonDroppedFieldSet,
+                                     const std::vector<std::string>& modifiedOrCreatedFields,
+                                     const std::vector<std::string>& createdFields,
+                                     std::vector<std::string> displayOrder) {
+    bool ndIsClosed = nonDroppedFieldSet.getScope() == FieldListScope::kClosed;
+
+    _defaultEffect = ndIsClosed ? kDrop : kKeep;
+
+    for (auto&& name : createdFields) {
+        _fields.emplace_back(name);
+        _effects[name] = kCreate;
+    }
+
+    for (auto&& name : modifiedOrCreatedFields) {
+        if (!_effects.count(name)) {
+            _fields.emplace_back(name);
+            _effects[name] = kModify;
+        }
+    }
+
+    for (auto&& name : nonDroppedFieldSet.getList()) {
+        if (!_effects.count(name)) {
+            _fields.emplace_back(name);
+            _effects[name] = ndIsClosed ? kKeep : kDrop;
+        }
+    }
+
+    if (!displayOrder.empty()) {
+        auto fieldSet = StringDataSet(_fields.begin(), _fields.end());
+        displayOrder =
+            filterVector(std::move(displayOrder), [&](auto&& f) { return fieldSet.count(f) > 0; });
+        _fields = appendVectorUnique(std::move(displayOrder), std::move(_fields));
+    }
+}
+
+ProjectionEffects& ProjectionEffects::merge(const ProjectionEffects& other) {
+    // Loop over '_fields'.
+    for (const std::string& field : _fields) {
+        auto it = other._effects.find(field);
+
+        Effect& effect = _effects[field];
+        Effect otherEffect = it != other._effects.end() ? it->second : other._defaultEffect;
+        bool isCreate = effect == kCreate || otherEffect == kCreate;
+
+        effect = isCreate ? kCreate : (effect != otherEffect ? kModify : effect);
+    }
+
+    // Loop over 'other._fields' and only visit fields that are not present in '_fields'.
+    for (size_t i = 0; i < other._fields.size(); ++i) {
+        const std::string& field = other._fields[i];
+
+        if (!_effects.count(field)) {
+            Effect effect = _defaultEffect;
+            Effect otherEffect = other._effects.find(field)->second;
+            bool isCreate = otherEffect == kCreate;
+
+            _fields.emplace_back(field);
+            _effects[field] = isCreate ? kCreate : (effect != otherEffect ? kModify : effect);
+        }
+    }
+
+    // Update '_defaultEffect' as appropriate.
+    if (_defaultEffect != other._defaultEffect) {
+        _defaultEffect = kModify;
+    }
+
+    removeRedundantEffects();
+
+    return *this;
+}
+
+ProjectionEffects& ProjectionEffects::compose(const ProjectionEffects& child) {
+    // Loop over '_fields'.
+    for (const std::string& field : _fields) {
+        auto it = child._effects.find(field);
+
+        Effect& effect = _effects[field];
+        Effect childEffect = it != child._effects.end() ? it->second : child._defaultEffect;
+
+        if (effect == kKeep || (effect == kModify && childEffect != kKeep)) {
+            effect = childEffect;
+        }
+    }
+
+    // Loop over 'child._fields' and only visit fields that are not present in '_fields'.
+    for (size_t i = 0; i < child._fields.size(); ++i) {
+        const std::string& field = child._fields[i];
+
+        if (!_effects.count(field)) {
+            Effect effect = _defaultEffect;
+            Effect childEffect = child._effects.find(field)->second;
+
+            Effect newEffect = effect;
+            if (effect == kKeep || (effect == kModify && childEffect != kKeep)) {
+                newEffect = childEffect;
+            }
+
+            _fields.emplace_back(field);
+            _effects[field] = newEffect;
+        }
+    }
+
+    if (_defaultEffect == kKeep || child._defaultEffect == kDrop) {
+        _defaultEffect = child._defaultEffect;
+    }
+
+    removeRedundantEffects();
+
+    return *this;
+}
+
+std::pair<std::vector<std::string>, bool> ProjectionEffects::difference(
+    const ProjectionEffects& other) const {
+    std::vector<std::string> diffFields;
+    bool defaultEffectsDiffer = _defaultEffect != other._defaultEffect;
+
+    // Loop over '_fields'.
+    for (const std::string& field : _fields) {
+        auto it = other._effects.find(field);
+
+        Effect effect = _effects.find(field)->second;
+        Effect otherEffect = it != other._effects.end() ? it->second : other._defaultEffect;
+        if (effect != otherEffect) {
+            diffFields.emplace_back(field);
+        }
+    }
+
+    // Loop over 'other._fields' and only visit fields that are not present in '_fields'.
+    for (size_t i = 0; i < other._fields.size(); ++i) {
+        const std::string& field = other._fields[i];
+
+        if (!_effects.count(field)) {
+            Effect effect = _defaultEffect;
+            Effect otherEffect = other._effects.find(field)->second;
+            if (effect != otherEffect) {
+                diffFields.emplace_back(field);
+            }
+        }
+    }
+
+    return {std::move(diffFields), defaultEffectsDiffer};
+}
+
+void ProjectionEffects::removeRedundantEffects() {
+    size_t outIdx = 0;
+    for (size_t idx = 0; idx < _fields.size(); ++idx) {
+        auto& field = _fields[idx];
+
+        if (_effects[field] != _defaultEffect) {
+            if (outIdx != idx) {
+                _fields[outIdx] = std::move(field);
+            }
+            ++outIdx;
+        } else {
+            _effects.erase(field);
+        }
+    }
+
+    if (outIdx != _fields.size()) {
+        _fields.resize(outIdx);
+    }
+}
+
+FieldSet ProjectionEffects::getNonDroppedFieldSet() const {
+    bool defEffectIsDrop = _defaultEffect == kDrop;
+    std::vector<std::string> fields;
+
+    for (auto&& field : _fields) {
+        bool isNonDrop = !isDrop(field);
+        if (isNonDrop == defEffectIsDrop) {
+            fields.emplace_back(field);
+        }
+    }
+
+    auto scope = defEffectIsDrop ? FieldListScope::kClosed : FieldListScope::kOpen;
+    return FieldSet(std::move(fields), scope);
+}
+
+FieldSet ProjectionEffects::getModifiedOrCreatedFieldSet() const {
+    bool defEffectIsKeepOrDrop = _defaultEffect != kModify;
+    std::vector<std::string> fields;
+
+    for (auto&& field : _fields) {
+        bool isModifyOrCreate = isModify(field) || isCreate(field);
+        if (isModifyOrCreate == defEffectIsKeepOrDrop) {
+            fields.emplace_back(field);
+        }
+    }
+
+    auto scope = defEffectIsKeepOrDrop ? FieldListScope::kClosed : FieldListScope::kOpen;
+    return FieldSet(std::move(fields), scope);
+}
+
+FieldSet ProjectionEffects::getCreatedFieldSet() const {
+    std::vector<std::string> fields;
+
+    for (auto&& field : _fields) {
+        if (isCreate(field)) {
+            fields.emplace_back(field);
+        }
+    }
+
+    return FieldSet::makeClosedSet(std::move(fields));
+}
+
+std::string ProjectionEffects::toString() const {
+    std::stringstream ss;
+
+    auto effectToString = [&](Effect e) -> StringData {
+        switch (e) {
+            case kKeep:
+                return "Keep"_sd;
+            case kDrop:
+                return "Drop"_sd;
+            case kModify:
+                return "Modify"_sd;
+            case kCreate:
+                return "Create"_sd;
+            default:
+                return ""_sd;
+        }
+    };
+
+    ss << "{";
+
+    bool first = true;
+    for (auto&& field : _fields) {
+        if (!first) {
+            ss << ", ";
+        }
+        first = false;
+
+        auto effect = _effects.find(field)->second;
+        ss << field << " : " << effectToString(effect);
+    }
+
+    ss << (!first ? ", * : " : "* : ") << effectToString(_defaultEffect) << "}";
+
+    return ss.str();
+}
+
+FieldSet makeNonDroppedFieldSet(bool isInclusion,
+                                const std::vector<std::string>& paths,
+                                const std::vector<ProjectNode>& nodes) {
+    // For inclusion projections, we make a list of the top-level fields referenced by the
+    // projection and make a closed FieldSet.
+    if (isInclusion) {
+        return FieldSet::makeClosedSet(getTopLevelFields(paths));
+    }
+
+    // For exclusion projections, we build a list of the top-level fields that are dropped by this
+    // projection, and then we use that list to make an open FieldSet that represents the set of
+    // fields _not_ dropped by this projection.
+    std::vector<std::string> fields;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const auto& node = nodes[i];
+        const auto& path = paths[i];
+        if (node.isBool() && path.find('.') == std::string::npos) {
+            fields.emplace_back(path);
+        }
+    }
+    return FieldSet::makeOpenSet(std::move(fields));
+}
+
+FieldSet makeModifiedOrCreatedFieldSet(bool isInclusion,
+                                       const std::vector<std::string>& paths,
+                                       const std::vector<ProjectNode>& nodes) {
+    std::vector<std::string> fields;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const auto& node = nodes[i];
+        const auto& path = paths[i];
+        bool isTopLevelField = path.find('.') == std::string::npos;
+
+        if (node.isBool() && isTopLevelField) {
+            continue;
+        }
+
+        if (node.isBool() || node.isExpr() || node.isSbExpr() || node.isSlice()) {
+            fields.emplace_back(getTopLevelField(path));
+        }
+    }
+
+    return FieldSet::makeClosedSet(std::move(fields));
+}
+
+FieldSet makeCreatedFieldSet(bool isInclusion,
+                             const std::vector<std::string>& paths,
+                             const std::vector<ProjectNode>& nodes) {
+    std::vector<std::string> fields;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const auto& node = nodes[i];
+        const auto& path = paths[i];
+        if (node.isExpr() || node.isSbExpr()) {
+            fields.emplace_back(getTopLevelField(path));
+        }
+    }
+
+    return FieldSet::makeClosedSet(std::move(fields));
 }
 
 }  // namespace mongo::stage_builder

@@ -34,7 +34,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -129,10 +128,10 @@ public:
         auto rt = RoutingTableHistory::makeNew(kSourceNss,
                                                _sourceUUID,
                                                BSON(kSourceShardKey << 1),
-                                               false, /*unsplittable*/
+                                               false, /* unsplittable */
                                                nullptr /* defaultCollator */,
                                                false /* unique */,
-                                               std::move(epoch),
+                                               epoch,
                                                Timestamp(1, 1),
                                                boost::none /* timeseriesFields */,
                                                boost::none /* reshardingFields */,

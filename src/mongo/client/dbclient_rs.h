@@ -98,7 +98,7 @@ public:
      */
     Status connect();
 
-    Status authenticateInternalUser(auth::StepDownBehavior stepDownBehavior) override;
+    void authenticateInternalUser(auth::StepDownBehavior stepDownBehavior) override;
 
     /**
      * Logs out the connection for the given database.
@@ -107,7 +107,7 @@ public:
      * @param info the result object for the logout command (provided for backwards
      *     compatibility with mongo shell)
      */
-    void logout(const std::string& dbname, BSONObj& info) override;
+    void logout(const DatabaseName& dbname, BSONObj& info) override;
 
     // ----------- simple functions --------------
 
@@ -156,7 +156,7 @@ public:
     // ---- callback pieces -------
 
     void say(Message& toSend, bool isRetry = false, std::string* actualServer = nullptr) override;
-    Status recv(Message& toRecv, int lastRequestId) override;
+    Message recv(int lastRequestId) override;
 
     /* this is the callback from our underlying connections to notify us that we got a "not primary"
      * error.
@@ -261,10 +261,10 @@ private:
 
     DBClientConnection* checkPrimary();
 
-    void _call(Message& toSend, Message& response, std::string* actualServer) override;
+    Message _call(Message& toSend, std::string* actualServer) override;
 
     template <typename Authenticate>
-    Status _runAuthLoop(Authenticate authCb);
+    void _runAuthLoop(Authenticate authCb);
 
     /**
      * Helper method for selecting a node based on the read preference. Will advance
@@ -339,7 +339,7 @@ private:
     // this could be a security issue, as the password is stored in memory
     // not sure if/how we should handle
     bool _internalAuthRequested = false;
-    std::map<std::string, BSONObj> _auths;  // dbName -> auth parameters
+    absl::flat_hash_map<DatabaseName, BSONObj> _auths;  // dbName -> auth parameters
 
     MongoURI _uri;
 

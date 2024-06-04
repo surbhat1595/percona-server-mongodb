@@ -34,7 +34,6 @@
 #include <utility>
 #include <vector>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -146,8 +145,6 @@ Status dropUnfinishedIndexes(OperationContext* opCtx, Collection* collection) {
     for (const auto& indexName : indexNames) {
         if (!collection->isIndexReady(indexName)) {
             LOGV2(3871400,
-                  "Dropping unfinished index '{name}' after collection was modified by "
-                  "repair",
                   "Dropping unfinished index after collection was modified by repair",
                   "index"_attr = indexName);
 
@@ -209,11 +206,8 @@ Status repairDatabase(OperationContext* opCtx, StorageEngine* engine, const Data
 
     auto status = repairCollections(opCtx, engine, dbName);
     if (!status.isOK()) {
-        LOGV2_FATAL_CONTINUE(21030,
-                             "Failed to repair database {dbName}: {status_reason}",
-                             "Failed to repair database",
-                             logAttrs(dbName),
-                             "error"_attr = status);
+        LOGV2_FATAL_CONTINUE(
+            21030, "Failed to repair database", logAttrs(dbName), "error"_attr = status);
     }
 
     try {
@@ -278,6 +272,10 @@ Status repairCollection(OperationContext* opCtx,
 
     ValidateResults validateResults;
     BSONObjBuilder output;
+    // Serialize valdiate result for logging in which tenant prefix is expected.
+    const SerializationContext serializaionCtx(SerializationContext::Source::Command,
+                                               SerializationContext::CallerType::Reply,
+                                               SerializationContext::Prefix::IncludePrefix);
 
     // Exclude full record store validation because we have already validated the underlying
     // record store in the call to repairRecordStore above.
@@ -289,7 +287,8 @@ Status repairCollection(OperationContext* opCtx,
                                        /*additionalOptions=*/{},
                                        &validateResults,
                                        &output,
-                                       /*logDiagnostics=*/false);
+                                       /*logDiagnostics=*/false,
+                                       serializaionCtx);
     if (!status.isOK()) {
         return status;
     }

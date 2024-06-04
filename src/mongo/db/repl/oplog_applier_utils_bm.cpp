@@ -71,6 +71,7 @@ OplogEntry makeInsertOplogEntry(int t, const std::string& id, const NamespaceStr
                               nss,                         // namespace
                               boost::none,                 // uuid
                               boost::none,                 // fromMigrate
+                              boost::none,                 // checkExistenceForDiffInsert
                               OplogEntry::kOplogVersion,   // version
                               oField,                      // o
                               boost::none,                 // o2
@@ -88,7 +89,7 @@ OplogEntry makeInsertOplogEntry(int t, const std::string& id, const NamespaceStr
 
 void BM_OplogEntryHash(benchmark::State& state) {
     auto serviceContext = setupServiceContext();
-    ThreadClient threadClient(serviceContext);
+    ThreadClient threadClient(serviceContext->getService());
     auto opCtx = threadClient->makeOperationContext();
 
     const auto kNumOps = 1000;

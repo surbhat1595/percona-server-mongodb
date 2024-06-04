@@ -12,8 +12,6 @@ buildvariants:
     additional_package_targets: >-
       archive-mongocryptd
       archive-mongocryptd-debug
-      archive-mh
-      archive-mh-debug
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -58,7 +56,7 @@ buildvariants:
   - name: libunwind_tests
   - name: .ocsp
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   - name: .replica_sets .multi_oplog
   - name: sasl
   - name: search

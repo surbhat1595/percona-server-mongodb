@@ -31,7 +31,6 @@
 #include "mongo/db/s/refine_collection_shard_key_coordinator.h"
 
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <string>
 #include <tuple>
@@ -84,12 +83,13 @@ void notifyChangeStreamsOnRefineCollectionShardKeyComplete(OperationContext* opC
                                                            const KeyPattern& oldShardKey,
                                                            const UUID& collUUID) {
 
+    const auto collNssStr =
+        NamespaceStringUtil::serialize(collNss, SerializationContext::stateDefault());
     const std::string oMessage = str::stream()
-        << "Refine shard key for collection " << NamespaceStringUtil::serialize(collNss) << " with "
-        << shardKey.toString();
+        << "Refine shard key for collection " << collNssStr << " with " << shardKey.toString();
 
     BSONObjBuilder cmdBuilder;
-    cmdBuilder.append("refineCollectionShardKey", NamespaceStringUtil::serialize(collNss));
+    cmdBuilder.append("refineCollectionShardKey", collNssStr);
     cmdBuilder.append("shardKey", shardKey.toBSON());
     cmdBuilder.append("oldShardKey", oldShardKey.toBSON());
 
@@ -115,22 +115,8 @@ void logRefineCollectionShardKey(OperationContext* opCtx,
                                  const NamespaceString& nss,
                                  const std::string& eventStr,
                                  const BSONObj& obj) {
-    const auto serializedNss = NamespaceStringUtil::serialize(nss);
     ShardingLogging::get(opCtx)->logChange(
-        opCtx, str::stream() << "refineCollectionShardKey." << eventStr, serializedNss, obj);
-}
-
-void finalizeRefineCollectionShardKey(OperationContext* opCtx,
-                                      const NamespaceString& nss,
-                                      const KeyPattern& newShardKey,
-                                      const KeyPattern& oldShardKey,
-                                      const UUID& uuid,
-                                      const boost::optional<OperationSessionInfo>& osi) {
-    notifyChangeStreamsOnRefineCollectionShardKeyComplete(
-        opCtx, nss, newShardKey, oldShardKey, uuid);
-    if (osi) {
-        sharding_ddl_util::resumeMigrations(opCtx, nss, boost::none, osi);
-    }
+        opCtx, str::stream() << "refineCollectionShardKey." << eventStr, nss, obj);
 }
 
 std::vector<ShardId> getShardsWithDataForCollection(OperationContext* opCtx,
@@ -152,7 +138,9 @@ RefineCollectionShardKeyCoordinator::RefineCollectionShardKeyCoordinator(
       _request(_doc.getRefineCollectionShardKeyRequest()),
       _critSecReason(BSON("command"
                           << "refineCollectionShardKey"
-                          << "ns" << NamespaceStringUtil::serialize(nss()))) {}
+                          << "ns"
+                          << NamespaceStringUtil::serialize(
+                                 nss(), SerializationContext::stateDefault()))) {}
 
 void RefineCollectionShardKeyCoordinator::checkIfOptionsConflict(const BSONObj& doc) const {
     // If we have two refine collections on the same namespace, then the arguments must be the same.
@@ -202,6 +190,12 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                         AutoGetCollection::Options{}
                             .viewMode(auto_get_collection::ViewMode::kViewsPermitted)
                             .expectedUUID(_request.getCollectionUUID())};
+
+                    uassert(ErrorCodes::NamespaceNotFound,
+                            str::stream() << "RefineCollectionShardKey: collection "
+                                          << nss().toStringForErrorMsg() << " does not exists",
+                            coll);
+
                     _doc.setUuid(coll->uuid());
 
                     const auto scopedCsr =
@@ -209,8 +203,9 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                                                                                           nss());
                     auto metadata = scopedCsr->getCurrentMetadataIfKnown();
                     uassert(ErrorCodes::NamespaceNotSharded,
-                            str::stream() << "refineCollectionShardKey namespace "
-                                          << nss().toStringForErrorMsg() << " is not sharded",
+                            str::stream()
+                                << "Can't execute refineCollectionShardKey on unsharded collection "
+                                << nss().toStringForErrorMsg(),
                             metadata && metadata->isSharded());
                     _doc.setOldKey(
                         metadata->getChunkManager()->getShardKeyPattern().getKeyPattern());
@@ -248,6 +243,9 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                         opCtx, nss(), getNewSession(opCtx), **executor);
                 }
 
+                // Stop migrations before checking indexes considering any concurrent index
+                // creation/drop with migrations could leave the cluster with inconsistent indexes,
+                // PM-2077 should address that.
                 sharding_ddl_util::stopMigrations(
                     opCtx, nss(), _request.getCollectionUUID(), getNewSession(opCtx));
 
@@ -300,7 +298,7 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                 async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
                 async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
                 auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-                    blockCRUDOperationsRequest, **executor, token, args);
+                    **executor, token, blockCRUDOperationsRequest, args);
                 sharding_ddl_util::sendAuthenticatedCommandToShards(
                     opCtx, opts, getShardsWithDataForCollection(opCtx, nss()));
 
@@ -362,7 +360,7 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                 VectorClockMutable::get(opCtx)->waitForDurableConfigTime().get(opCtx);
             }))
         .then(_buildPhaseHandler(
-            Phase::kCommitOnShardsAndUnblock,
+            Phase::kReleaseCritSec,
             [this, token, anchor = shared_from_this(), executor] {
                 auto opCtxHolder = cc().makeOperationContext();
                 auto* opCtx = opCtxHolder.get();
@@ -373,42 +371,41 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                         opCtx, nss(), getNewSession(opCtx), **executor);
                 }
 
-                ShardsvrParticipantBlock participantBlockRequest(nss());
-                participantBlockRequest.setBlockType(CriticalSectionBlockTypeEnum::kUnblock);
-                participantBlockRequest.setReason(_critSecReason);
-                participantBlockRequest.setClearFilteringMetadata(true);
+                ShardsvrParticipantBlock unblockCRUDOperationsRequest(nss());
+                unblockCRUDOperationsRequest.setBlockType(CriticalSectionBlockTypeEnum::kUnblock);
+                unblockCRUDOperationsRequest.setReason(_critSecReason);
+                unblockCRUDOperationsRequest.setClearFilteringMetadata(true);
 
                 async_rpc::GenericArgs args;
                 async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
                 async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
                 auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-                    participantBlockRequest, **executor, token, args);
+                    **executor, token, unblockCRUDOperationsRequest, args);
                 sharding_ddl_util::sendAuthenticatedCommandToShards(
                     opCtx, opts, getShardsWithDataForCollection(opCtx, nss()));
+            }))
+        .then(_buildPhaseHandler(
+            Phase::kResumeMigrations,
+            [this, token, anchor = shared_from_this(), executor] {
+                auto opCtxHolder = cc().makeOperationContext();
+                auto* opCtx = opCtxHolder.get();
+                getForwardableOpMetadata().setOn(opCtx);
 
-                finalizeRefineCollectionShardKey(opCtx,
-                                                 nss(),
-                                                 _doc.getNewShardKey(),
-                                                 _doc.getOldKey().get(),
-                                                 *_doc.getUuid(),
-                                                 getNewSession(opCtx));
+                notifyChangeStreamsOnRefineCollectionShardKeyComplete(
+                    opCtx, nss(), _doc.getNewShardKey(), _doc.getOldKey().get(), *_doc.getUuid());
+                sharding_ddl_util::resumeMigrations(
+                    opCtx, nss(), boost::none, getNewSession(opCtx));
+
                 logRefineCollectionShardKey(opCtx, nss(), "end", BSONObj());
             }))
-        .then([this, anchor = shared_from_this()] {
+        .then([this, anchor = shared_from_this(), executor] {
             auto opCtxHolder = cc().makeOperationContext();
             auto* opCtx = opCtxHolder.get();
             getForwardableOpMetadata().setOn(opCtx);
 
-            // Fire and forget best-effort refresh so cache is warmed up for queries.
-            auto shardRegistry = Grid::get(opCtx)->shardRegistry();
-            for (const auto& shardId : getShardsWithDataForCollection(opCtx, nss())) {
-                auto shard = uassertStatusOK(shardRegistry->getShard(opCtx, shardId));
-                shard->runFireAndForgetCommand(opCtx,
-                                               ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                               DatabaseName::kAdmin,
-                                               BSON("_flushRoutingTableCacheUpdates"
-                                                    << NamespaceStringUtil::serialize(nss())));
-            }
+            // Refresh all shards so cache is warmed up for queries.
+            sharding_util::tellShardsToRefreshCollection(
+                opCtx, getShardsWithDataForCollection(opCtx, nss()), nss(), **executor);
         })
         .onCompletion([this, anchor = shared_from_this()](const Status& status) {
             auto opCtxHolder = cc().makeOperationContext();
@@ -419,17 +416,15 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                 status == ErrorCodes::RequestAlreadyFulfilled ? Status::OK() : status;
 
             if (status == ErrorCodes::RequestAlreadyFulfilled) {
-                finalizeRefineCollectionShardKey(opCtx,
-                                                 nss(),
-                                                 _doc.getNewShardKey(),
-                                                 _doc.getOldKey().get(),
-                                                 *_doc.getUuid(),
-                                                 boost::none);
+                notifyChangeStreamsOnRefineCollectionShardKeyComplete(
+                    opCtx, nss(), _doc.getNewShardKey(), _doc.getOldKey().get(), *_doc.getUuid());
             }
 
-            // We only need to resume migrations after the verification phase.
-            if (_doc.getPhase() >= Phase::kRemoteIndexValidation &&
-                !_isRetriableErrorForDDLCoordinator(finalStatus)) {
+            // If a non retriable error during index validation occurs we will end the coordinator,
+            // so we need to resume migrations just in case we managed to stop them in the first
+            // phase.
+            if (!finalStatus.isOK() && _doc.getPhase() >= Phase::kRemoteIndexValidation &&
+                !_mustAlwaysMakeProgress() && !_isRetriableErrorForDDLCoordinator(finalStatus)) {
                 sharding_ddl_util::resumeMigrations(
                     opCtx, nss(), boost::none, getNewSession(opCtx));
             }
@@ -493,6 +488,11 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinatorPre71Compatible::_runImp
                         ->catalogCache()
                         ->getShardedCollectionRoutingInfoWithPlacementRefresh(opCtx, nss()));
 
+                uassert(ErrorCodes::NamespaceNotSharded,
+                        str::stream() << "refineCollectionShardKey namespace "
+                                      << nss().toStringForErrorMsg() << " is not sharded",
+                        cm.isSharded());
+
                 _oldShardKey = cm.getShardKeyPattern().getKeyPattern();
                 _collectionUUID = cm.getUUID();
 
@@ -513,7 +513,7 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinatorPre71Compatible::_runImp
                         configsvrRefineCollShardKey.toBSON({}), opCtx->getWriteConcern()),
                     Shard::RetryPolicy::kIdempotent));
 
-                uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(std::move(cmdResponse)));
+                uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(cmdResponse));
             }))
         .onCompletion([this, anchor = shared_from_this()](const Status& status) {
             auto opCtxHolder = cc().makeOperationContext();

@@ -9,13 +9,13 @@ import {removeShard} from "jstests/sharding/libs/remove_shard_util.js";
 // therefore preventing orphans from being cleaned up.
 TestData.skipCheckOrphans = true;
 
-let st = new ShardingTest({shards: 3});
+let st = new ShardingTest({shards: 3, other: {enableBalancer: true}});
 let dbName = "test";
 let collName = "user";
 let ns = dbName + "." + collName;
 
-assert.commandWorked(st.s.adminCommand({enableSharding: dbName}));
-st.ensurePrimaryShard(dbName, st.shard0.shardName);
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
 assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {x: 1}}));
 
 assert.commandWorked(st.s.adminCommand({addShardToZone: st.shard0.shardName, zone: "zoneA"}));

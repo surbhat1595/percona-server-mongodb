@@ -27,6 +27,8 @@ st.configRS.awaitReplication();
 // Create a sharded time-series collection that has fixed buckets.
 const dbName = "test";
 let testDB = st.s.getDB(dbName);
+assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
+
 let coll = testDB["timeseries"];
 const timeField = "t";
 coll.drop();
@@ -46,7 +48,9 @@ function runPipeline(predValue) {
 
     const explain = coll.explain().aggregate(pipeline);
     const unpackStage = getAggPlanStages(explain, "$_internalUnpackBucket");
-    assert.eq(1, unpackStage.length, `Expected $_internalUnpackBucket in ${tojson(explain)}`);
+    // If data is on both of the shards, we will see 2 "$_internalUnpackBucket" stages in the
+    // explain plan.
+    assert.gte(unpackStage.length, 1, `Expected $_internalUnpackBucket in ${tojson(explain)}`);
     return unpackStage[0]["$_internalUnpackBucket"];
 }
 
@@ -55,8 +59,6 @@ assert.commandWorked(testDB.adminCommand({
     key: shardKey,
     timeseries: {timeField, bucketRoundingSeconds: 3600, bucketMaxSpanSeconds: 3600}
 }));
-
-st.ensurePrimaryShard(dbName, st.shard0.shardName);
 
 // Set up the shards such that the primary shard has [MinKey, 2022-09-30), and the other shard has
 // [2022-09-30, MaxKey].

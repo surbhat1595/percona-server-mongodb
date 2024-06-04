@@ -331,6 +331,8 @@ public:
 
     const CollectionOptions& getCollectionOptions() const final;
 
+    StatusWith<BSONObj> addCollationDefaultsToIndexSpecsForCreate(
+        OperationContext* opCtx, const BSONObj& indexSpecs) const final;
     StatusWith<std::vector<BSONObj>> addCollationDefaultsToIndexSpecsForCreate(
         OperationContext* opCtx, const std::vector<BSONObj>& indexSpecs) const final;
 
@@ -400,6 +402,8 @@ public:
 
     bool isMetadataEqual(const BSONObj& otherMetadata) const final;
 
+    void sanitizeCollectionOptions(OperationContext* opCtx) final;
+
     bool needsCappedLock() const final;
 
     bool isCappedAndNeedsDelete(OperationContext* opCtx) const final;
@@ -426,7 +430,8 @@ private:
      * Holder of shared state between CollectionImpl clones
      */
     struct SharedState {
-        SharedState(CollectionImpl* collection,
+        SharedState(OperationContext* opCtx,
+                    CollectionImpl* collection,
                     std::unique_ptr<RecordStore> recordStore,
                     const CollectionOptions& options);
         ~SharedState();

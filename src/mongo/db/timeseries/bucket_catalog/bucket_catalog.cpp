@@ -31,7 +31,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/container/small_vector.hpp>
 #include <boost/container/vector.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <iterator>
 #include <string>
 #include <utility>
@@ -52,8 +51,11 @@
 #include "mongo/db/timeseries/bucket_catalog/flat_bson.h"
 #include "mongo/db/timeseries/bucket_catalog/rollover.h"
 #include "mongo/db/timeseries/bucket_compression.h"
+#include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/platform/compiler.h"
 #include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/debug_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
@@ -67,6 +69,7 @@ const auto getBucketCatalog = ServiceContext::declareDecoration<BucketCatalog>()
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesDirectModificationBeforeWriteConflict);
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesDirectModificationAfterStart);
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesDirectModificationBeforeFinish);
+MONGO_FAIL_POINT_DEFINE(runPostCommitDebugChecks);
 
 /**
  * Prepares the batch for commit. Sets min/max appropriately, records the number of
@@ -129,6 +132,9 @@ void finishWriteBatch(WriteBatch& batch, const CommitInfo& info) {
 }
 }  // namespace
 
+SuccessfulInsertion::SuccessfulInsertion(std::shared_ptr<WriteBatch>&& b, ClosedBuckets&& c)
+    : batch{std::move(b)}, closedBuckets{std::move(c)} {}
+
 BucketCatalog& BucketCatalog::get(ServiceContext* svcCtx) {
     return getBucketCatalog(svcCtx);
 }
@@ -153,7 +159,7 @@ BSONObj getMetadata(BucketCatalog& catalog, const BucketHandle& handle) {
 StatusWith<InsertResult> tryInsert(OperationContext* opCtx,
                                    BucketCatalog& catalog,
                                    const NamespaceString& ns,
-                                   const StringData::ComparatorInterface* comparator,
+                                   const StringDataComparator* comparator,
                                    const TimeseriesOptions& options,
                                    const BSONObj& doc,
                                    CombineWithInsertsFromOtherClients combine) {
@@ -164,11 +170,11 @@ StatusWith<InsertResult> tryInsert(OperationContext* opCtx,
 StatusWith<InsertResult> insert(OperationContext* opCtx,
                                 BucketCatalog& catalog,
                                 const NamespaceString& ns,
-                                const StringData::ComparatorInterface* comparator,
+                                const StringDataComparator* comparator,
                                 const TimeseriesOptions& options,
                                 const BSONObj& doc,
                                 CombineWithInsertsFromOtherClients combine,
-                                BucketFindResult bucketFindResult) {
+                                ReopeningContext* reopeningContext) {
     return internal::insert(opCtx,
                             catalog,
                             ns,
@@ -177,7 +183,15 @@ StatusWith<InsertResult> insert(OperationContext* opCtx,
                             doc,
                             combine,
                             internal::AllowBucketCreation::kYes,
-                            bucketFindResult);
+                            reopeningContext);
+}
+
+void waitToInsert(InsertWaiter* waiter) {
+    if (auto* batch = stdx::get_if<std::shared_ptr<WriteBatch>>(waiter)) {
+        getWriteBatchResult(**batch).getStatus().ignore();
+    } else if (auto* request = stdx::get_if<std::shared_ptr<ReopeningRequest>>(waiter)) {
+        waitForReopeningRequest(**request);
+    }
 }
 
 Status prepareCommit(BucketCatalog& catalog, std::shared_ptr<WriteBatch> batch) {
@@ -226,7 +240,8 @@ Status prepareCommit(BucketCatalog& catalog, std::shared_ptr<WriteBatch> batch) 
     return Status::OK();
 }
 
-boost::optional<ClosedBucket> finish(BucketCatalog& catalog,
+boost::optional<ClosedBucket> finish(OperationContext* opCtx,
+                                     BucketCatalog& catalog,
                                      std::shared_ptr<WriteBatch> batch,
                                      const CommitInfo& info) {
     invariant(!isWriteBatchFinished(*batch));
@@ -237,6 +252,17 @@ boost::optional<ClosedBucket> finish(BucketCatalog& catalog,
 
     auto& stripe = catalog.stripes[batch->bucketHandle.stripe];
     stdx::lock_guard stripeLock{stripe.mutex};
+
+    if (MONGO_unlikely(runPostCommitDebugChecks.shouldFail() && opCtx)) {
+        Bucket* bucket = internal::useBucket(catalog.bucketStateRegistry,
+                                             stripe,
+                                             stripeLock,
+                                             batch->bucketHandle.bucketId,
+                                             internal::IgnoreBucketState::kYes);
+        if (bucket) {
+            internal::runPostCommitDebugChecks(opCtx, *bucket, *batch);
+        }
+    }
 
     Bucket* bucket =
         internal::useBucketAndChangePreparedState(catalog.bucketStateRegistry,
@@ -275,6 +301,10 @@ boost::optional<ClosedBucket> finish(BucketCatalog& catalog,
         stats.incNumBucketUpdates();
     }
 
+    if (batch->openedDueToMetadata) {
+        stats.incNumBucketsOpenedDueToMetadata();
+    }
+
     stats.incNumMeasurementsCommitted(batch->measurements.size());
     if (bucket) {
         bucket->numCommittedMeasurements += batch->measurements.size();
@@ -300,12 +330,13 @@ boost::optional<ClosedBucket> finish(BucketCatalog& catalog,
         switch (bucket->rolloverAction) {
             case RolloverAction::kHardClose:
             case RolloverAction::kSoftClose: {
-                internal::closeOpenBucket(catalog, stripe, stripeLock, *bucket, closedBucket);
+                internal::closeOpenBucket(
+                    opCtx, catalog, stripe, stripeLock, *bucket, closedBucket);
                 break;
             }
             case RolloverAction::kArchive: {
                 ClosedBuckets closedBuckets;
-                internal::archiveBucket(catalog, stripe, stripeLock, *bucket, closedBuckets);
+                internal::archiveBucket(opCtx, catalog, stripe, stripeLock, *bucket, closedBuckets);
                 if (!closedBuckets.empty()) {
                     closedBucket = std::move(closedBuckets[0]);
                 }
@@ -357,34 +388,7 @@ void directWriteFinish(BucketStateRegistry& registry, const NamespaceString& ns,
 }
 
 void clear(BucketCatalog& catalog, ShouldClearFn&& shouldClear) {
-    if (feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
-        clearSetOfBuckets(catalog.bucketStateRegistry, std::move(shouldClear));
-        return;
-    }
-    for (auto& stripe : catalog.stripes) {
-        stdx::lock_guard stripeLock{stripe.mutex};
-        for (auto it = stripe.openBucketsById.begin(); it != stripe.openBucketsById.end();) {
-            auto nextIt = std::next(it);
-
-            const auto& bucket = it->second;
-            if (shouldClear(bucket->bucketId.ns)) {
-                {
-                    stdx::lock_guard catalogLock{catalog.mutex};
-                    catalog.executionStats.erase(bucket->bucketId.ns);
-                }
-                internal::abort(catalog,
-                                stripe,
-                                stripeLock,
-                                *bucket,
-                                nullptr,
-                                internal::getTimeseriesBucketClearedError(bucket->bucketId.ns,
-                                                                          bucket->bucketId.oid));
-            }
-
-            it = nextIt;
-        }
-    }
+    clearSetOfBuckets(catalog.bucketStateRegistry, std::move(shouldClear));
 }
 
 void clear(BucketCatalog& catalog, const NamespaceString& ns) {
@@ -407,6 +411,13 @@ void appendExecutionStats(const BucketCatalog& catalog,
     invariant(!ns.isTimeseriesBucketsCollection());
     const std::shared_ptr<ExecutionStats> stats = internal::getExecutionStats(catalog, ns);
     appendExecutionStatsToBuilder(*stats, builder);
+}
+
+void reportMeasurementsGroupCommitted(BucketCatalog& catalog,
+                                      const NamespaceString& ns,
+                                      int64_t count) {
+    auto stats = internal::getOrInitializeExecutionStats(catalog, ns);
+    stats.incNumMeasurementsGroupCommitted(count);
 }
 
 }  // namespace mongo::timeseries::bucket_catalog

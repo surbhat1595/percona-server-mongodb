@@ -31,7 +31,6 @@
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 // IWYU pragma: no_include "ext/alloc_traits.h"
@@ -354,6 +353,7 @@ class PlanCacheBase
           std::shared_ptr<const PlanCacheEntryBase<CachedPlanType, DebugInfoType>>,
           KeyBudgetEstimator,
           Partitioner,
+          NoopInsertionEvictionListener,
           KeyHasher> {
 private:
     PlanCacheBase(const PlanCacheBase&) = delete;
@@ -365,6 +365,7 @@ public:
                          std::shared_ptr<const PlanCacheEntryBase<CachedPlanType, DebugInfoType>>,
                          KeyBudgetEstimator,
                          Partitioner,
+                         NoopInsertionEvictionListener,
                          KeyHasher>;
     using Entry = PlanCacheEntryBase<CachedPlanType, DebugInfoType>;
 
@@ -643,7 +644,7 @@ public:
      */
     std::vector<BSONObj> getMatchingStats(
         const std::function<bool(const KeyType&)>& cacheKeyFilterFunc,
-        const std::function<BSONObj(const Entry&)>& serializationFunc,
+        const std::function<BSONObj(const KeyType&, const Entry&)>& serializationFunc,
         const std::function<bool(const BSONObj&)>& filterFunc) const {
         tassert(6033900,
                 "serialization function and filter function are required when retrieving plan "
@@ -656,7 +657,7 @@ public:
             if (cacheKeyFilterFunc && !cacheKeyFilterFunc(key)) {
                 return;
             }
-            auto serializedEntry = serializationFunc(*entry);
+            auto serializedEntry = serializationFunc(key, *entry);
             if (filterFunc(serializedEntry)) {
                 results.push_back(serializedEntry);
             }

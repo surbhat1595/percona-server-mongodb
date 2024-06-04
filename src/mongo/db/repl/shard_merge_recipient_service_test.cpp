@@ -148,6 +148,7 @@ OplogEntry makeOplogEntry(OpTime opTime,
                               nss,                        // namespace
                               uuid,                       // uuid
                               boost::none,                // fromMigrate
+                              boost::none,                // checkExistenceForDiffInsert
                               OplogEntry::kOplogVersion,  // version
                               o,                          // o
                               o2,                         // o2
@@ -300,7 +301,7 @@ public:
 
         ThreadPoolMock::Options dbThreadPoolOptions;
         dbThreadPoolOptions.onCreateThread = []() {
-            Client::initThread("FetchMockTaskExecutor");
+            Client::initThread("FetchMockTaskExecutor", getGlobalServiceContext()->getService());
         };
         _threadPoolExecutor = makeSharedThreadPoolTestExecutor(std::move(net), dbThreadPoolOptions);
         _threadPoolExecutor->startup();

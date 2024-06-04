@@ -31,7 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
 #include <cstring>
@@ -83,7 +82,7 @@
 #include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
 #include "mongo/db/pipeline/resume_token.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/optime.h"
@@ -1625,6 +1624,7 @@ TEST_F(ChangeStreamStageTest, CommitCommandReturnsOperationsFromPreparedTransact
                                 nss.getCommandNS(),               // namespace
                                 boost::none,                      // uuid
                                 boost::none,                      // fromMigrate
+                                boost::none,                      // checkExistenceForDiffInsert
                                 repl::OplogEntry::kOplogVersion,  // version
                                 BSON("commitTransaction" << 1),   // o
                                 boost::none,                      // o2
@@ -2058,6 +2058,7 @@ TEST_F(ChangeStreamStageTest, PreparedTransactionWithMultipleOplogEntries) {
         nss.getCommandNS(),               // namespace
         boost::none,                      // uuid
         boost::none,                      // fromMigrate
+        boost::none,                      // checkExistenceForDiffInsert
         repl::OplogEntry::kOplogVersion,  // version
         BSON("commitTransaction" << 1),   // o
         boost::none,                      // o2
@@ -2203,6 +2204,7 @@ TEST_F(ChangeStreamStageTest, PreparedTransactionEndingWithEmptyApplyOps) {
         nss.getCommandNS(),               // namespace
         boost::none,                      // uuid
         boost::none,                      // fromMigrate
+        boost::none,                      // checkExistenceForDiffInsert
         repl::OplogEntry::kOplogVersion,  // version
         BSON("commitTransaction" << 1),   // o
         boost::none,                      // o2
@@ -3369,7 +3371,7 @@ TEST_F(ChangeStreamStageDBTest, RenameFromUserToSystemCollectionShouldIncludeNot
 
 TEST_F(ChangeStreamStageDBTest, MatchFiltersNoOp) {
     OplogEntry noOp = makeOplogEntry(OpTypeEnum::kNoop,
-                                     NamespaceString(),
+                                     NamespaceString::kEmpty,
                                      BSON(repl::ReplicationCoordinator::newPrimaryMsgField
                                           << repl::ReplicationCoordinator::newPrimaryMsg));
     checkTransformation(noOp, boost::none);
@@ -4398,24 +4400,28 @@ TEST_F(MultiTokenFormatVersionTest, CanResumeFromV1HighWaterMark) {
                              spec);
 
     // The high water mark token should be order ahead of every other entry with the same
-    // clusterTime. So we should see both entries that match the resumeToken's clusterTime, and both
-    // should have inherited the token version 1 from the high water mark.
+    // clusterTime. So we should see both entries that match the resumeToken's clusterTime.
+    // Even though the high watermark token has version 1, the resulting events should have
+    // the default resume token version.
     auto lastStage = stages.back();
     auto next = lastStage->getNext();
     ASSERT(next.isAdvanced());
     const auto sameTsResumeToken1 =
         ResumeToken::parse(next.releaseDocument()["_id"].getDocument()).getData();
     ASSERT_EQ(sameTsResumeToken1.clusterTime, resumeTs);
-    ASSERT_EQ(sameTsResumeToken1.version, 1);
-    ASSERT_VALUE_EQ(sameTsResumeToken1.eventIdentifier, Value(documentKey));
+    ASSERT_EQ(sameTsResumeToken1.version, 2);
+    ASSERT_VALUE_EQ(sameTsResumeToken1.eventIdentifier,
+                    Value(Document{{"operationType", "update"_sd}, {"documentKey", documentKey}}));
 
     next = lastStage->getNext();
     ASSERT(next.isAdvanced());
     const auto sameTsResumeToken2 =
         ResumeToken::parse(next.releaseDocument()["_id"].getDocument()).getData();
     ASSERT_EQ(sameTsResumeToken2.clusterTime, resumeTs);
-    ASSERT_EQ(sameTsResumeToken2.version, 1);
-    ASSERT_VALUE_EQ(sameTsResumeToken2.eventIdentifier, Value(higherDocumentKey));
+    ASSERT_EQ(sameTsResumeToken2.version, 2);
+    ASSERT_VALUE_EQ(
+        sameTsResumeToken2.eventIdentifier,
+        Value(Document{{"operationType", "update"_sd}, {"documentKey", higherDocumentKey}}));
 
     // The resumeToken after the current clusterTime should start using the default version, and
     // corresponding 'eventIdentifier' format.

@@ -126,6 +126,11 @@ public:
                                   << " if in read-only mode",
                     !opCtx->readOnly());
 
+            uassert(ErrorCodes::IllegalOperation,
+                    str::stream() << "Can only call " << Derived::Request::kCommandName
+                                  << " on collections",
+                    !ns().coll().empty());
+
             boost::optional<SharedSemiFuture<void>> criticalSectionSignal;
 
             {
@@ -148,11 +153,7 @@ public:
                 criticalSectionSignal->get(opCtx);
 
             if (Base::request().getSyncFromConfig()) {
-                LOGV2_DEBUG(21982,
-                            1,
-                            "Forcing remote routing table refresh for {namespace}",
-                            "Forcing remote routing table refresh",
-                            logAttrs(ns()));
+                LOGV2_DEBUG(21982, 1, "Forcing remote routing table refresh", logAttrs(ns()));
                 onCollectionPlacementVersionMismatch(opCtx, ns(), boost::none);
             }
 
@@ -172,7 +173,7 @@ public:
         return false;
     }
 };
-MONGO_REGISTER_COMMAND(FlushRoutingTableCacheUpdatesCmd);
+MONGO_REGISTER_COMMAND(FlushRoutingTableCacheUpdatesCmd).forShard();
 
 class FlushRoutingTableCacheUpdatesCmdWithWriteConcern
     : public FlushRoutingTableCacheUpdatesCmdBase<
@@ -184,7 +185,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(FlushRoutingTableCacheUpdatesCmdWithWriteConcern);
+MONGO_REGISTER_COMMAND(FlushRoutingTableCacheUpdatesCmdWithWriteConcern).forShard();
 
 }  // namespace
 }  // namespace mongo

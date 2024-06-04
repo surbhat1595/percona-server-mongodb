@@ -40,6 +40,7 @@
 #include <grpcpp/support/sync_stream.h>
 
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/wire_version.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/op_msg.h"
@@ -160,7 +161,7 @@ private:
     std::shared_ptr<ClockSourceMock> _clkSource;
 };
 
-class CommandServiceTestFixtures {
+class CommandServiceTestFixtures : public ServiceContextTest {
 public:
     static constexpr auto kBindAddress = "localhost";
     static constexpr auto kBindPort = 1234;
@@ -191,7 +192,9 @@ public:
                   ::grpc::internal::RpcMethod::BIDI_STREAMING,
                   channel) {}
 
-        ::grpc::Status connect() {
+        ::grpc::Status connect(
+            Milliseconds connectTimeout = CommandServiceTestFixtures::kDefaultConnectTimeout) {
+            _channel->WaitForConnected((Date_t::now() + connectTimeout).toSystemTimePoint());
             ::grpc::ClientContext ctx;
             CommandServiceTestFixtures::addAllClientMetadata(ctx);
             auto stream = unauthenticatedCommandStream(&ctx);
@@ -208,6 +211,14 @@ public:
             return std::shared_ptr<ClientStream>{
                 ::grpc::internal::ClientReaderWriterFactory<WriteMessageType, ReadMessageType>::
                     Create(_channel.get(), _unauthenticatedCommandStreamMethod, context)};
+        }
+
+        void assertConnected() {
+            ASSERT_EQ(connect().error_code(), ::grpc::StatusCode::OK);
+        }
+
+        void assertNotConnected() {
+            ASSERT_EQ(connect(Milliseconds(50)).error_code(), ::grpc::StatusCode::UNAVAILABLE);
         }
 
     private:
@@ -235,6 +246,19 @@ public:
         GRPCClient::Options options;
         options.tlsCAFile = kCAFile;
         options.tlsCertificateKeyFile = kClientCertificateKeyFile;
+        return options;
+    }
+
+    static GRPCTransportLayer::Options makeTLOptions() {
+        GRPCTransportLayer::Options options{};
+        options.bindIpList = {};
+        options.bindPort = kBindPort;
+        options.maxServerThreads = kMaxThreads;
+        options.useUnixDomainSockets = false;
+        options.unixDomainSocketPermissions = DEFAULT_UNIX_PERMS;
+        options.enableEgress = true;
+        options.clientMetadata = makeClientMetadataDocument();
+
         return options;
     }
 
@@ -272,6 +296,10 @@ public:
      * The addresses of the server is passed to the RPC handler in addition to the IngressSession.
      * The IngressSession passed to the provided RPC handler is automatically ended after the
      * handler is returned.
+     *
+     * The RPC handler will be run in a thread spawned by a ThreadAssertionMonitor to allow the
+     * server handler to perform test assertions. As a result, exceptions thrown by the RPC handler
+     * will terminate the test, rather than being handled by CommandService.
      */
     static void runWithServers(
         std::vector<Server::Options> serverOptions,
@@ -282,9 +310,10 @@ public:
             std::vector<std::unique_ptr<Server>> servers;
 
             for (auto& options : serverOptions) {
-                auto handler = [rpcHandler, &options](auto session) {
+                auto handler = [rpcHandler, &options, &monitor](auto session) {
                     ON_BLOCK_EXIT([&] { session->end(); });
-                    rpcHandler(options, session);
+                    monitor.spawn([&]() { ASSERT_DOES_NOT_THROW(rpcHandler(options, session)); })
+                        .join();
                 };
                 auto server = makeServer(handler, options);
                 server->start();
@@ -358,6 +387,13 @@ public:
         return makeStub("localhost:{}"_format(kBindPort), options);
     }
 
+    static Stub makeStubWithCerts(std::string caFile, std::string clientCertFile) {
+        auto stubOptions = CommandServiceTestFixtures::Stub::Options{};
+        stubOptions.tlsCAFile = caFile;
+        stubOptions.tlsCertificateKeyFile = clientCertFile;
+        return makeStub(stubOptions);
+    }
+
     static CommandService::RPCHandler makeEchoHandler() {
         return [](std::shared_ptr<IngressSession> session) {
             auto msg = uassertStatusOK(session->sourceMessage());
@@ -392,9 +428,10 @@ public:
      * a superset of the required metadata for any individual RPC.
      */
     static void addRequiredClientMetadata(::grpc::ClientContext& ctx) {
-        ctx.AddMetadata(
-            util::constants::kWireVersionKey.toString(),
-            std::to_string(WireSpec::instance().get()->incomingExternalClient.maxWireVersion));
+        ctx.AddMetadata(util::constants::kWireVersionKey.toString(),
+                        std::to_string(WireSpec::getWireSpec(getGlobalServiceContext())
+                                           .get()
+                                           ->incomingExternalClient.maxWireVersion));
         ctx.AddMetadata(util::constants::kAuthenticationTokenKey.toString(), "my-token");
     }
 
@@ -414,7 +451,8 @@ public:
 inline std::shared_ptr<EgressSession> makeEgressSession(
     GRPCTransportLayer& tl,
     const HostAndPort& addr = CommandServiceTestFixtures::defaultServerAddress()) {
-    auto swSession = tl.connect(addr, ConnectSSLMode::kGlobalSSLMode, Milliseconds(5000));
+    auto swSession = tl.connect(
+        addr, ConnectSSLMode::kGlobalSSLMode, CommandServiceTestFixtures::kDefaultConnectTimeout);
     return std::dynamic_pointer_cast<EgressSession>(uassertStatusOK(swSession));
 }
 

@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/bson/bsontypes.h"
@@ -103,7 +102,7 @@ PartitionIterator::PartitionIterator(ExpressionContext* expCtx,
       _sortExpr(exprFromSort(_expCtx, sortPattern)),
       _state(IteratorState::kNotInitialized),
       _cache(std::make_unique<SpillableCache>(_expCtx, tracker)),
-      _memoryToken(0, tracker) {}
+      _memoryToken(0, &(*tracker)["PartitionIterator"]) {}
 
 optional<Document> PartitionIterator::operator[](int index) {
     auto docDesired = _indexOfCurrentInPartition + index;
@@ -516,10 +515,6 @@ void PartitionIterator::getNextDocument() {
 
     tassert(7169100, "getNextResult must have advanced", getNextRes.isAdvanced());
     auto doc = getNextRes.releaseDocument();
-
-    // Greedily populate the internal document cache to enable easier memory tracking versus
-    // detecting the changing document size during execution of each function.
-    doc.fillCache();
 
     if (_partitionExpr) {
         if (!_partitionComparator) {

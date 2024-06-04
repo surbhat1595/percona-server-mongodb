@@ -37,7 +37,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
@@ -434,12 +433,6 @@ protected:
         signalOplogWaiters();
     }
 
-    void _recordDurable(const OpTimeAndWallTime& newOpTimeAndWallTime) {
-        // We have to use setMyLastDurableOpTimeAndWallTimeForward since this thread races with
-        // ReplicationExternalStateImpl::onTransitionToPrimary.
-        _replCoord->setMyLastDurableOpTimeAndWallTimeForward(newOpTimeAndWallTime);
-    }
-
 private:
     // Used to update the replication system's progress.
     ReplicationCoordinator* _replCoord;
@@ -492,7 +485,8 @@ void ApplyBatchFinalizerForJournal::record(const OpTimeAndWallTime& newOpTimeAnd
 }
 
 void ApplyBatchFinalizerForJournal::_run() {
-    Client::initThread("ApplyBatchFinalizerForJournal");
+    Client::initThread("ApplyBatchFinalizerForJournal",
+                       getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
     {
         stdx::lock_guard<Client> lk(cc());
@@ -500,8 +494,6 @@ void ApplyBatchFinalizerForJournal::_run() {
     }
 
     while (true) {
-        OpTimeAndWallTime latestOpTimeAndWallTime = {OpTime(), Date_t()};
-
         {
             stdx::unique_lock<Latch> lock(_mutex);
             while (_latestOpTimeAndWallTime.opTime.isNull() && !_shutdownSignaled) {
@@ -512,13 +504,11 @@ void ApplyBatchFinalizerForJournal::_run() {
                 return;
             }
 
-            latestOpTimeAndWallTime = _latestOpTimeAndWallTime;
             _latestOpTimeAndWallTime = {OpTime(), Date_t()};
         }
 
         auto opCtx = cc().makeOperationContext();
         JournalFlusher::get(opCtx.get())->waitForJournalFlush();
-        _recordDurable(latestOpTimeAndWallTime);
     }
 }
 
@@ -738,11 +728,7 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
                                                       std::vector<OplogEntry> ops) {
     invariant(!ops.empty());
 
-    LOGV2_DEBUG(21230,
-                2,
-                "replication batch size is {size}",
-                "Replication batch size",
-                "size"_attr = ops.size());
+    LOGV2_DEBUG(21230, 2, "Replication batch size", "size"_attr = ops.size());
 
     invariant(_replCoord);
     if (_replCoord->getApplierState() == ReplicationCoordinator::ApplierState::Stopped) {
@@ -839,11 +825,6 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
                 if (!status.isOK()) {
                     LOGV2_FATAL_CONTINUE(
                         21235,
-                        "Failed to apply batch of operations. Number of operations in "
-                        "batch: {numOperationsInBatch}. First operation: {firstOperation}. "
-                        "Last operation: "
-                        "{lastOperation}. Oplog application failed in writer thread "
-                        "{failedWriterThread}: {error}",
                         "Failed to apply batch of operations",
                         "numOperationsInBatch"_attr = ops.size(),
                         "firstOperation"_attr = redact(ops.front().toBSONForLogging()),

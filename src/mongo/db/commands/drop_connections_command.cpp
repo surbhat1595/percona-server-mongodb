@@ -41,7 +41,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
-#include "mongo/executor/egress_tag_closer_manager.h"
+#include "mongo/executor/egress_connection_closer_manager.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/util/assert_util.h"
 
@@ -72,16 +72,16 @@ public:
 
             const auto& hostAndPorts = request().getHostAndPort();
 
-            auto& egressTagCloserManager =
-                executor::EgressTagCloserManager::get(opCtx->getServiceContext());
+            auto& egressConnectionCloserManager =
+                executor::EgressConnectionCloserManager::get(opCtx->getServiceContext());
 
             for (const auto& hostAndPort : hostAndPorts) {
-                egressTagCloserManager.dropConnections(hostAndPort);
+                egressConnectionCloserManager.dropConnections(hostAndPort);
             }
         }
 
         NamespaceString ns() const override {
-            return NamespaceString();
+            return NamespaceString::kEmpty;
         }
 
         bool supportsWriteConcern() const override {
@@ -98,7 +98,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(DropConnectionsCmd);
+MONGO_REGISTER_COMMAND(DropConnectionsCmd).forRouter().forShard();
 
 }  // namespace
 }  // namespace mongo

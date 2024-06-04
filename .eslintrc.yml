@@ -101,6 +101,7 @@ globals:
   isObject: true
   isString: true
   _createSecurityToken: true
+  _createTenantToken: true
   _isAddressSanitizerActive: true
   _isLeakSanitizerActive: true
   _isThreadSanitizerActive: true
@@ -120,7 +121,6 @@ globals:
   numberDecimalsEqual: true
   debug: true
   bsonsize: true
-  globalAssertLevel: true
   _DelegatingDriverSession: true
   _DummyDriverSession: true
   _ServerSession: true
@@ -161,6 +161,7 @@ globals:
   runProgram: true
   runMongoProgram: true
   runNonMongoProgram: true
+  runNonMongoProgramQuietly: true
   _runMongoProgram: true
   _startMongoProgram: true
   startMongoProgram: true

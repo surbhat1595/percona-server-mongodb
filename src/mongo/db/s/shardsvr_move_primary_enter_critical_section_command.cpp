@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 
 #include "mongo/base/error_codes.h"
@@ -94,8 +93,9 @@ public:
                 // Using the original operation context, the two write operations to enter the
                 // critical section (acquire and promote) would use the same txnNumber, which would
                 // cause the failure of the second operation.
-                auto newClient = getGlobalServiceContext()->makeClient(
-                    "ShardsvrMovePrimaryEnterCriticalSection");
+                auto newClient = getGlobalServiceContext()
+                                     ->getService(ClusterRole::ShardServer)
+                                     ->makeClient("ShardsvrMovePrimaryEnterCriticalSection");
                 AlternativeClientRegion acr(newClient);
                 auto newOpCtx = CancelableOperationContext(
                     cc().makeOperationContext(),
@@ -201,7 +201,7 @@ private:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(ShardsvrMovePrimaryEnterCriticalSectionCommand);
+MONGO_REGISTER_COMMAND(ShardsvrMovePrimaryEnterCriticalSectionCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

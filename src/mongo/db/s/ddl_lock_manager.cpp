@@ -36,7 +36,6 @@
 
 #include <absl/container/node_hash_map.h>
 #include <absl/meta/type_traits.h>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 
@@ -198,11 +197,11 @@ DDLLockManager::ScopedDatabaseDDLLock::ScopedDatabaseDDLLock(OperationContext* o
                                                              const DatabaseName& db,
                                                              StringData reason,
                                                              LockMode mode)
-    : DDLLockManager::ScopedBaseDDLLock(
-          opCtx, opCtx->lockState(), db, reason, mode, true /*waitForRecovery*/) {
-
+    : _dbLock{opCtx, opCtx->lockState(), db, reason, mode, true /*waitForRecovery*/} {
     // Check under the DDL dbLock if this is the primary shard for the database
-    DatabaseShardingState::assertIsPrimaryShardForDb(opCtx, db);
+    Lock::DBLock dbLock(opCtx, db, MODE_IS);
+    const auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, db);
+    scopedDss->assertIsPrimaryShardForDb(opCtx);
 }
 
 DDLLockManager::ScopedCollectionDDLLock::ScopedCollectionDDLLock(OperationContext* opCtx,
@@ -218,10 +217,21 @@ DDLLockManager::ScopedCollectionDDLLock::ScopedCollectionDDLLock(OperationContex
                     true /*waitForRecovery*/);
 
     // Check under the DDL db lock if this is the primary shard for the database
-    DatabaseShardingState::assertIsPrimaryShardForDb(opCtx, ns.dbName());
+    {
+        Lock::DBLock dbLock(opCtx, ns.dbName(), MODE_IS);
+        const auto scopedDss =
+            DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, ns.dbName());
+        scopedDss->assertIsPrimaryShardForDb(opCtx);
+    }
 
-    // Finally, acquire the collection DDL lock
-    _collLock.emplace(opCtx, opCtx->lockState(), ns, reason, mode, true /*waitForRecovery*/);
+    // Acquire the collection DDL lock.
+    // If the ns represents a timeseries buckets collection, translate to its corresponding view ns.
+    _collLock.emplace(opCtx,
+                      opCtx->lockState(),
+                      ns.isTimeseriesBucketsCollection() ? ns.getTimeseriesViewNamespace() : ns,
+                      reason,
+                      mode,
+                      true /*waitForRecovery*/);
 }
 
 DDLLockManager::ScopedBaseDDLLock::ScopedBaseDDLLock(OperationContext* opCtx,
@@ -257,13 +267,15 @@ DDLLockManager::ScopedBaseDDLLock::ScopedBaseDDLLock(OperationContext* opCtx,
                                                      StringData reason,
                                                      LockMode mode,
                                                      bool waitForRecovery)
-    : ScopedBaseDDLLock(opCtx,
-                        locker,
-                        NamespaceStringUtil::serialize(ns),
-                        ResourceId{RESOURCE_DDL_COLLECTION, NamespaceStringUtil::serialize(ns)},
-                        reason,
-                        mode,
-                        waitForRecovery) {}
+    : ScopedBaseDDLLock(
+          opCtx,
+          locker,
+          NamespaceStringUtil::serialize(ns, SerializationContext::stateDefault()),
+          ResourceId{RESOURCE_DDL_COLLECTION,
+                     NamespaceStringUtil::serialize(ns, SerializationContext::stateDefault())},
+          reason,
+          mode,
+          waitForRecovery) {}
 
 DDLLockManager::ScopedBaseDDLLock::ScopedBaseDDLLock(OperationContext* opCtx,
                                                      Locker* locker,
@@ -273,8 +285,8 @@ DDLLockManager::ScopedBaseDDLLock::ScopedBaseDDLLock(OperationContext* opCtx,
                                                      bool waitForRecovery)
     : ScopedBaseDDLLock(opCtx,
                         locker,
-                        DatabaseNameUtil::serialize(db),
-                        ResourceId{RESOURCE_DDL_DATABASE, DatabaseNameUtil::serialize(db)},
+                        DatabaseNameUtil::serialize(db, SerializationContext::stateDefault()),
+                        ResourceId{RESOURCE_DDL_DATABASE, db},
                         reason,
                         mode,
                         waitForRecovery) {}
@@ -287,9 +299,9 @@ DDLLockManager::ScopedBaseDDLLock::~ScopedBaseDDLLock() {
 
 DDLLockManager::ScopedBaseDDLLock::ScopedBaseDDLLock(ScopedBaseDDLLock&& other)
     : _resourceName(std::move(other._resourceName)),
-      _resourceId(std::move(other._resourceId)),
+      _resourceId(other._resourceId),
       _reason(std::move(other._reason)),
-      _mode(std::move(other._mode)),
+      _mode(other._mode),
       _result(std::move(other._result)),
       _locker(other._locker),
       _lockManager(other._lockManager) {

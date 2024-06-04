@@ -29,7 +29,6 @@
 
 #include "mongo/db/geo/shapes.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdlib>
 #include <r1interval.h>
 #include <s1angle.h>
@@ -476,6 +475,7 @@ std::unique_ptr<LineWithCRS> LineWithCRS::clone() const {
     cloned->crs = crs;
 
     std::vector<S2Point> vertices;
+    vertices.reserve(line.num_vertices());
     for (int i = 0; i < line.num_vertices(); ++i) {
         vertices.emplace_back(line.vertex(i));
     }

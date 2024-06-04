@@ -30,7 +30,6 @@
 
 // IWYU pragma: no_include "cxxabi.h"
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <string>
 #include <type_traits>
@@ -149,8 +148,11 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
 
             auto requestOpMsg =
                 OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin, commandObj).serialize();
-            const auto replyOpMsg = OpMsg::parseOwned(
-                service->getServiceEntryPoint()->handleRequest(opCtx, requestOpMsg).get().response);
+            const auto replyOpMsg = OpMsg::parseOwned(service->getService(ClusterRole::ShardServer)
+                                                          ->getServiceEntryPoint()
+                                                          ->handleRequest(opCtx, requestOpMsg)
+                                                          .get()
+                                                          .response);
 
             // Document sequences are not yet being used for responses.
             invariant(replyOpMsg.sequences.empty());
@@ -180,7 +182,7 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
                 request,
                 [this,
                  commandObj = std::move(commandObj),
-                 shardId = std::move(shardId),
+                 shardId = shardId,
                  hostTargeted = std::move(hostAndShard.hostTargeted),
                  shard = std::move(hostAndShard.shard),
                  promise = std::make_shared<Promise<ResponseStatus>>(std::move(pf.promise))](
@@ -197,7 +199,7 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
                             getWriteConcernStatusFromCommandResult(args.response.data);
                         shard->updateReplSetMonitor(hostTargeted, writeConcernStatus);
 
-                        promise->emplaceValue(std::move(args.response));
+                        promise->emplaceValue(args.response);
                     } else {
                         promise->setError([&] {
                             if (status == ErrorCodes::CallbackCanceled) {
@@ -273,18 +275,18 @@ Future<AsyncWorkScheduler::HostAndShard> AsyncWorkScheduler::_targetHostAsync(
     return scheduleWork([this, shardId, readPref, operationContextFn](OperationContext* opCtx) {
         operationContextFn(opCtx);
         const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
-        const auto shard = uassertStatusOK(shardRegistry->getShard(opCtx, shardId));
+        auto shard = uassertStatusOK(shardRegistry->getShard(opCtx, shardId));
 
         if (MONGO_unlikely(hangWhileTargetingRemoteHost.shouldFail())) {
             LOGV2(22450, "Hit hangWhileTargetingRemoteHost failpoint", "shardId"_attr = shardId);
             hangWhileTargetingRemoteHost.pauseWhileSet(opCtx);
         }
 
-        return shard->getTargeter()
-            ->findHost(readPref, CancellationToken::uncancelable())
+        auto targeter = shard->getTargeter();
+        return targeter->findHost(readPref, CancellationToken::uncancelable())
             .thenRunOn(_executor)
             .unsafeToInlineFuture()
-            .then([shard = std::move(shard)](HostAndPort host) -> HostAndShard {
+            .then([shard = std::move(shard)](HostAndPort host) mutable -> HostAndShard {
                 return {std::move(host), std::move(shard)};
             });
     });
@@ -313,6 +315,7 @@ ShardId getLocalShardId(ServiceContext* service) {
 
 Future<void> whenAll(std::vector<Future<void>>& futures) {
     std::vector<Future<int>> dummyFutures;
+    dummyFutures.reserve(futures.size());
     for (auto&& f : futures) {
         dummyFutures.push_back(std::move(f).then([]() { return 0; }));
     }

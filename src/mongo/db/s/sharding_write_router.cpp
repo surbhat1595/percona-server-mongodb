@@ -30,7 +30,6 @@
 #include "mongo/db/s/sharding_write_router.h"
 
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
@@ -50,7 +49,7 @@ ShardingWriteRouter::ShardingWriteRouter(OperationContext* opCtx, const Namespac
         _scopedCss.emplace(CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss));
         _collDesc = (*_scopedCss)->getCollectionDescription(opCtx);
 
-        if (!_collDesc->isSharded()) {
+        if (!_collDesc->hasRoutingTable()) {
             invariant(!_collDesc->getReshardingKeyIfShouldForwardOps());
             return;
         }
@@ -76,8 +75,8 @@ ShardingWriteRouter::ShardingWriteRouter(OperationContext* opCtx, const Namespac
                     .cm;
 
             tassert(6862800,
-                    "Routing information for the temporary resharing collection is stale",
-                    _reshardingChunkMgr->isSharded());
+                    "Routing information for the temporary resharding collection is stale",
+                    _reshardingChunkMgr->hasRoutingTable());
         }
     }
 }

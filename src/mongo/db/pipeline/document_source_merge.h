@@ -72,7 +72,7 @@
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/write_concern_options.h"
@@ -112,10 +112,6 @@ public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec);
 
-        bool allowedToPassthroughFromMongos() const {
-            return false;
-        }
-
         ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
                                                      bool isImplicitDefault) const final {
             ReadConcernSupportResult result = {
@@ -134,6 +130,14 @@ public:
         PrivilegeVector requiredPrivileges(bool isMongos,
                                            bool bypassDocumentValidation) const final;
 
+        /**
+         * We must know the aggregation's collation when parsing a $merge in order to correctly
+         * verify that the target namespace guarantees the uniqueness of the 'mergeOnFields'.
+         */
+        bool requiresCollationForParsingUnshardedAggregate() const final {
+            return true;
+        }
+
     private:
         MergeWhenMatchedModeEnum _whenMatched;
         MergeWhenNotMatchedModeEnum _whenNotMatched;
@@ -146,7 +150,7 @@ public:
     }
 
     const NamespaceString& getOutputNs() const override {
-        return _mergeProcessor->getOutputNs();
+        return _outputNs;
     }
 
     MergeProcessor* getMergeProcessor() {
@@ -230,6 +234,9 @@ private:
 
     void waitWhileFailPointEnabled() override;
 
+    boost::optional<ShardId> _getMergeShardId() const;
+
+    const NamespaceString _outputNs;
     boost::optional<MergeProcessor> _mergeProcessor;
 };
 

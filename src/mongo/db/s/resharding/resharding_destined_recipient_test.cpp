@@ -178,9 +178,15 @@ public:
             OperationContext* opCtx, repl::ReadConcernLevel readConcern) override {
             return repl::OpTimeWith<std::vector<ShardType>>(_shards);
         }
+        std::vector<CollectionType> getShardedCollections(OperationContext* opCtx,
+                                                          const DatabaseName& dbName,
+                                                          repl::ReadConcernLevel readConcernLevel,
+                                                          const BSONObj& sort) override {
+            return {};
+        }
 
         std::vector<CollectionType> getCollections(OperationContext* opCtx,
-                                                   StringData dbName,
+                                                   const DatabaseName& dbName,
                                                    repl::ReadConcernLevel readConcernLevel,
                                                    const BSONObj& sort) override {
             return _colls;
@@ -278,7 +284,7 @@ protected:
         coll.setAllowMigrations(false);
 
         getCatalogCacheLoaderMock()->setDatabaseRefreshReturnValue(
-            DatabaseType(kNss.db_forTest().toString(), kShardList[0].getName(), env.dbVersion));
+            DatabaseType(kNss.dbName(), kShardList[0].getName(), env.dbVersion));
         getCatalogCacheLoaderMock()->setCollectionRefreshValues(
             kNss,
             coll,

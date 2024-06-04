@@ -121,10 +121,10 @@ public:
         auto rt = RoutingTableHistory::makeNew(_sourceNss,
                                                _sourceUUID,
                                                BSON(_currentShardKey << 1),
-                                               false, /*unsplittable*/
+                                               false, /* unsplittable */
                                                std::move(defaultCollator),
                                                false /* unique */,
-                                               std::move(epoch),
+                                               epoch,
                                                Timestamp(1, 1),
                                                boost::none /* timeseriesFields */,
                                                boost::none /* reshardingFields */,
@@ -193,7 +193,7 @@ TEST_F(ReshardingDataReplicationTest,
 
     for (int t = 0; t < kThreads; ++t) {
         stdx::thread thread([&]() {
-            ThreadClient threadClient(getGlobalServiceContext());
+            ThreadClient threadClient(getGlobalServiceContext()->getService());
             Timer timer;
             while (timer.elapsed() < Seconds(2)) {
                 CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);

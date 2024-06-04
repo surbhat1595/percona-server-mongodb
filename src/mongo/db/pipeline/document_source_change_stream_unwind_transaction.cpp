@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -506,13 +505,14 @@ void DocumentSourceChangeStreamUnwindTransaction::TransactionOpIterator::_addAff
         ? boost::make_optional<TenantId>(TenantId(doc["tid"].getOid()))
         : boost::none;
     if (doc["op"].getStringData() != "c") {
-        _affectedNamespaces.insert(
-            NamespaceStringUtil::deserialize(tid, doc["ns"].getStringData()));
+        _affectedNamespaces.insert(NamespaceStringUtil::deserialize(
+            tid, doc["ns"].getStringData(), SerializationContext::stateDefault()));
         return;
     }
 
     static const std::vector<std::string> kCollectionField = {"create", "createIndexes"};
-    const auto dbCmdNs = NamespaceStringUtil::deserialize(tid, doc["ns"].getString());
+    const auto dbCmdNs = NamespaceStringUtil::deserialize(
+        tid, doc["ns"].getString(), SerializationContext::stateDefault());
     const Document& object = doc["o"].getDocument();
     for (const auto& fieldName : kCollectionField) {
         const auto field = object[fieldName];

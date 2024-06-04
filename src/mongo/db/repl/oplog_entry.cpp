@@ -33,7 +33,6 @@
 #include <array>
 #include <boost/cstdint.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <string_view>
 
@@ -73,6 +72,7 @@ BSONObj makeOplogEntryDoc(OpTime opTime,
                           const NamespaceString& nss,
                           const boost::optional<UUID>& uuid,
                           const boost::optional<bool>& fromMigrate,
+                          const boost::optional<bool>& checkExistenceForDiffInsert,
                           int64_t version,
                           const BSONObj& oField,
                           const boost::optional<BSONObj>& o2Field,
@@ -99,13 +99,18 @@ BSONObj makeOplogEntryDoc(OpTime opTime,
         gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)) {
         nss.tenantId()->serializeToBSON(OplogEntryBase::kTidFieldName, &builder);
     }
-    builder.append(OplogEntryBase::kNssFieldName, NamespaceStringUtil::serialize(nss));
+    builder.append(OplogEntryBase::kNssFieldName,
+                   NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
     builder.append(OplogEntryBase::kWallClockTimeFieldName, wallClockTime);
     if (uuid) {
         uuid->appendToBuilder(&builder, OplogEntryBase::kUuidFieldName);
     }
     if (fromMigrate) {
         builder.append(OplogEntryBase::kFromMigrateFieldName, fromMigrate.value());
+    }
+    if (checkExistenceForDiffInsert) {
+        builder.append(OplogEntryBase::kCheckExistenceForDiffInsertFieldName,
+                       checkExistenceForDiffInsert.value());
     }
     builder.append(OplogEntryBase::kObjectFieldName, oField);
     if (o2Field) {
@@ -425,6 +430,7 @@ DurableOplogEntry::DurableOplogEntry(OpTime opTime,
                                      const NamespaceString& nss,
                                      const boost::optional<UUID>& uuid,
                                      const boost::optional<bool>& fromMigrate,
+                                     const boost::optional<bool>& checkExistenceForDiffInsert,
                                      int version,
                                      const BSONObj& oField,
                                      const boost::optional<BSONObj>& o2Field,
@@ -443,6 +449,7 @@ DurableOplogEntry::DurableOplogEntry(OpTime opTime,
                                           nss,
                                           uuid,
                                           fromMigrate,
+                                          checkExistenceForDiffInsert,
                                           version,
                                           oField,
                                           o2Field,
@@ -560,7 +567,9 @@ bool DurableOplogEntry::isSingleOplogEntryTransactionWithCommand() const {
                 ? boost::none
                 : boost::make_optional<TenantId>(TenantId::parseFromBSON(tid));
 
-            if (NamespaceStringUtil::deserialize(tenantId, ns.String()).isCommand()) {
+            if (NamespaceStringUtil::deserialize(
+                    tenantId, ns.String(), SerializationContext::stateDefault())
+                    .isCommand()) {
                 return true;
             }
         }
@@ -754,6 +763,10 @@ std::int64_t OplogEntry::getVersion() const {
 
 boost::optional<bool> OplogEntry::getFromMigrate() const& {
     return _entry.getFromMigrate();
+}
+
+bool OplogEntry::getCheckExistenceForDiffInsert() const& {
+    return _entry.getCheckExistenceForDiffInsert().get_value_or(false);
 }
 
 const boost::optional<mongo::UUID>& OplogEntry::getFromTenantMigration() const& {

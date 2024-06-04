@@ -43,7 +43,6 @@
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -248,7 +247,8 @@ Future<void> asyncSaslConversation(auth::RunCommandHook runCommand,
         commandBuilder.append(conversationId);
 
     // Asynchronously continue the conversation
-    const auto dbName = DatabaseNameUtil::deserialize(boost::none, targetDatabase);
+    const auto dbName = DatabaseNameUtil::deserialize(
+        boost::none, targetDatabase, SerializationContext::stateDefault());
     return runCommand(OpMsgRequest::fromDBAndBody(dbName, commandBuilder.obj()))
         .then([runCommand, session, targetDatabase, saslLogLevel](
                   BSONObj serverResponse) -> Future<void> {
@@ -269,9 +269,9 @@ Future<void> asyncSaslConversation(auth::RunCommandHook runCommand,
             static const BSONObj saslFollowupCommandPrefix = BSON(saslContinueCommandName << 1);
             return asyncSaslConversation(runCommand,
                                          session,
-                                         std::move(saslFollowupCommandPrefix),
-                                         std::move(serverResponse),
-                                         std::move(targetDatabase),
+                                         saslFollowupCommandPrefix,
+                                         serverResponse,
+                                         targetDatabase,
                                          saslLogLevel);
         });
 }
@@ -316,12 +316,8 @@ Future<void> saslClientAuthenticateImpl(auth::RunCommandHook runCommand,
                                   << "options" << BSON(saslCommandOptionSkipEmptyExchange << true));
 
     BSONObj inputObj = BSON(saslCommandPayloadFieldName << "");
-    return asyncSaslConversation(runCommand,
-                                 session,
-                                 std::move(saslFirstCommandPrefix),
-                                 std::move(inputObj),
-                                 targetDatabase,
-                                 saslLogLevel);
+    return asyncSaslConversation(
+        runCommand, session, saslFirstCommandPrefix, inputObj, targetDatabase, saslLogLevel);
 }
 
 MONGO_INITIALIZER(SaslClientAuthenticateFunction)(InitializerContext* context) {

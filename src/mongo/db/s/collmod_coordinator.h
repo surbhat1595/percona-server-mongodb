@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <vector>
 
@@ -44,6 +43,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/s/collmod_coordinator_document_gen.h"
+#include "mongo/db/s/sharded_collmod_gen.h"
 #include "mongo/db/s/sharding_ddl_coordinator.h"
 #include "mongo/db/s/sharding_ddl_coordinator_service.h"
 #include "mongo/db/shard_id.h"
@@ -82,7 +82,7 @@ public:
 
 private:
     struct CollectionInfo {
-        bool isSharded;
+        bool isTracked;
         boost::optional<TimeseriesOptions> timeSeriesOptions;
         // The targeting namespace can be different from the original namespace in some cases, like
         // time-series collections.
@@ -92,8 +92,14 @@ private:
     struct ShardingInfo {
         // The primary shard for the collection, only set if the collection is sharded.
         ShardId primaryShard;
-        // The shards owning chunks for the collection, only set if the collection is sharded.
-        std::vector<ShardId> shardsOwningChunks;
+        // Flag that tells if the primary db shard has chunks for the collection.
+        bool isPrimaryOwningChunks;
+        // The participant shards owning chunks for the collection, only set if the collection is
+        // sharded.
+        std::vector<ShardId> participantsOwningChunks;
+        // The participant shards not owning chunks for the collection, only set if the collection
+        // is sharded.
+        std::vector<ShardId> participantsNotOwningChunks;
     };
 
     StringData serializePhase(const Phase& phase) const override {
@@ -109,6 +115,18 @@ private:
     void _saveCollectionInfoOnCoordinatorIfNecessary(OperationContext* opCtx);
 
     void _saveShardingInfoOnCoordinatorIfNecessary(OperationContext* opCtx);
+
+    std::vector<AsyncRequestsSender::Response> _sendCollModToPrimaryShard(
+        OperationContext* opCtx,
+        ShardsvrCollModParticipant& request,
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancellationToken& token);
+
+    std::vector<AsyncRequestsSender::Response> _sendCollModToParticipantShards(
+        OperationContext* opCtx,
+        ShardsvrCollModParticipant& request,
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancellationToken& token);
 
     const mongo::CollModRequest _request;
 

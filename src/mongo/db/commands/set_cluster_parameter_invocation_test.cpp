@@ -109,17 +109,28 @@ private:
 
 class DBClientMock : public DBClientService {
 public:
-    DBClientMock(std::function<StatusWith<bool>(BSONObj, BSONObj, const boost::optional<TenantId>&)>
-                     updateParameterOnDiskMock) {
+    DBClientMock(
+        std::function<StatusWith<BatchedCommandResponse>(
+            BSONObj, BSONObj, const boost::optional<TenantId>&)> updateParameterOnDiskMock) {
         this->updateParameterOnDiskMockImpl = updateParameterOnDiskMock;
     }
 
-    StatusWith<bool> updateParameterOnDisk(OperationContext* opCtx,
-                                           BSONObj cmd,
-                                           BSONObj info,
-                                           const WriteConcernOptions&,
-                                           const boost::optional<TenantId>& tenantId) override {
-        return updateParameterOnDiskMockImpl(cmd, info, tenantId);
+    StatusWith<BatchedCommandResponse> updateParameterOnDisk(
+        OperationContext* opCtx,
+        BSONObj query,
+        BSONObj update,
+        bool upsert,
+        const WriteConcernOptions&,
+        const boost::optional<TenantId>& tenantId) override {
+        return updateParameterOnDiskMockImpl(query, update, tenantId);
+    }
+
+    StatusWith<BatchedCommandResponse> insertParameterOnDisk(
+        OperationContext* opCtx,
+        BSONObj update,
+        const WriteConcernOptions&,
+        const boost::optional<TenantId>& tenantId) override {
+        return BatchedCommandResponse();
     }
 
     Timestamp getUpdateClusterTime(OperationContext*) override {
@@ -128,7 +139,8 @@ public:
     }
 
 private:
-    std::function<StatusWith<bool>(BSONObj, BSONObj, const boost::optional<TenantId>&)>
+    std::function<StatusWith<BatchedCommandResponse>(
+        BSONObj, BSONObj, const boost::optional<TenantId>&)>
         updateParameterOnDiskMockImpl;
 };
 
@@ -149,8 +161,9 @@ MockServerParameter alwaysInvalidatingServerParameter(StringData name) {
 }
 
 DBClientMock alwaysSucceedingDbClient() {
-    DBClientMock dbServiceMock(
-        [&](BSONObj, BSONObj, const boost::optional<TenantId>&) { return true; });
+    DBClientMock dbServiceMock([&](BSONObj, BSONObj, const boost::optional<TenantId>&) {
+        return BatchedCommandResponse();
+    });
 
     return dbServiceMock;
 }
@@ -178,7 +191,7 @@ TEST(SetClusterParameterCommand, SucceedsWithObjectParameter) {
     DBClientMock dbServiceMock = alwaysSucceedingDbClient();
 
     auto serviceCtx = ServiceContext::make();
-    auto client = serviceCtx->makeClient("SomeTest");
+    auto client = serviceCtx->getService()->makeClient("SomeTest");
 
     auto mpsPtr = std::make_unique<MockParameterService>([&](StringData s) { return &sp; });
 
@@ -199,7 +212,7 @@ TEST(SetClusterParameterCommand, SucceedsWithObjectParameter) {
                                                                         << "majority")));
     SetClusterParameter testCmd(obj);
 
-    fixture.invoke(&spyCtx, testCmd, boost::none, kMajorityWriteConcern);
+    fixture.invoke(&spyCtx, testCmd, boost::none, boost::none, kMajorityWriteConcern);
 }
 
 TEST(SetClusterParameterCommand, ThrowsWithNonObjectParameter) {
@@ -208,7 +221,7 @@ TEST(SetClusterParameterCommand, ThrowsWithNonObjectParameter) {
     DBClientMock dbServiceMock = alwaysSucceedingDbClient();
 
     auto serviceCtx = ServiceContext::make();
-    auto client = serviceCtx->makeClient("SomeTest");
+    auto client = serviceCtx->getService()->makeClient("SomeTest");
 
     auto mpsPtr = std::make_unique<MockParameterService>([&](StringData s) { return &sp; });
 
@@ -224,9 +237,10 @@ TEST(SetClusterParameterCommand, ThrowsWithNonObjectParameter) {
     OperationContext spyCtx(clientPtr, 1234);
     SetClusterParameter testCmd(obj);
 
-    ASSERT_THROWS_CODE(fixture.invoke(&spyCtx, testCmd, boost::none, kMajorityWriteConcern),
-                       DBException,
-                       ErrorCodes::BadValue);
+    ASSERT_THROWS_CODE(
+        fixture.invoke(&spyCtx, testCmd, boost::none, boost::none, kMajorityWriteConcern),
+        DBException,
+        ErrorCodes::BadValue);
 }
 
 TEST(SetClusterParameterCommand, ThrowsWhenServerParameterValidationFails) {
@@ -236,7 +250,7 @@ TEST(SetClusterParameterCommand, ThrowsWhenServerParameterValidationFails) {
     DBClientMock dbServiceMock = alwaysSucceedingDbClient();
 
     auto serviceCtx = ServiceContext::make();
-    auto client = serviceCtx->makeClient("SomeTest");
+    auto client = serviceCtx->getService()->makeClient("SomeTest");
 
     auto mpsPtr = std::make_unique<MockParameterService>([&](StringData s) { return &sp; });
 
@@ -255,7 +269,7 @@ TEST(SetClusterParameterCommand, ThrowsWhenServerParameterValidationFails) {
     SetClusterParameter testCmd(obj);
 
     ASSERT_THROWS_CODE_AND_WHAT(
-        fixture.invoke(&spyCtx, testCmd, boost::none, kMajorityWriteConcern),
+        fixture.invoke(&spyCtx, testCmd, boost::none, boost::none, kMajorityWriteConcern),
         DBException,
         ErrorCodes::BadValue,
         "Parameter Validation Failed"_sd);
@@ -267,7 +281,7 @@ TEST(SetClusterParameterCommand, ThrowsWhenDBUpdateFails) {
     DBClientMock dbServiceMock = alwaysFailingDbClient();
 
     auto serviceCtx = ServiceContext::make();
-    auto client = serviceCtx->makeClient("SomeTest");
+    auto client = serviceCtx->getService()->makeClient("SomeTest");
 
     auto mpsPtr = std::make_unique<MockParameterService>([&](StringData s) { return &sp; });
 
@@ -286,9 +300,10 @@ TEST(SetClusterParameterCommand, ThrowsWhenDBUpdateFails) {
 
     SetClusterParameter testCmd(obj);
 
-    ASSERT_THROWS_WHAT(fixture.invoke(&spyCtx, testCmd, boost::none, kMajorityWriteConcern),
-                       DBException,
-                       "DB Client Update Failed"_sd);
+    ASSERT_THROWS_WHAT(
+        fixture.invoke(&spyCtx, testCmd, boost::none, boost::none, kMajorityWriteConcern),
+        DBException,
+        "DB Client Update Failed"_sd);
 }
 
 TEST(SetClusterParameterCommand, ThrowsWhenParameterNotPresent) {
@@ -296,7 +311,7 @@ TEST(SetClusterParameterCommand, ThrowsWhenParameterNotPresent) {
     DBClientMock dbServiceMock = alwaysSucceedingDbClient();
 
     auto serviceCtx = ServiceContext::make();
-    auto client = serviceCtx->makeClient("SomeTest");
+    auto client = serviceCtx->getService()->makeClient("SomeTest");
 
     auto mpsPtr = std::make_unique<MockParameterService>([&](StringData s) {
         return ServerParameterSet::getClusterParameterSet()->get("doesNotExistParam"_sd);
@@ -317,9 +332,10 @@ TEST(SetClusterParameterCommand, ThrowsWhenParameterNotPresent) {
 
     SetClusterParameter testCmd(obj);
 
-    ASSERT_THROWS_CODE(fixture.invoke(&spyCtx, testCmd, boost::none, kMajorityWriteConcern),
-                       DBException,
-                       ErrorCodes::NoSuchKey);
+    ASSERT_THROWS_CODE(
+        fixture.invoke(&spyCtx, testCmd, boost::none, boost::none, kMajorityWriteConcern),
+        DBException,
+        ErrorCodes::NoSuchKey);
 }
 
 TEST(SetClusterParameterCommand, TenantIdPassesThrough) {
@@ -328,7 +344,7 @@ TEST(SetClusterParameterCommand, TenantIdPassesThrough) {
     MockServerParameter sp = alwaysValidatingServerParameter("TenantIdPassesThroughParameter"_sd);
 
     auto serviceCtx = ServiceContext::make();
-    auto client = serviceCtx->makeClient("SomeTest");
+    auto client = serviceCtx->getService()->makeClient("SomeTest");
 
     auto mpsPtr = std::make_unique<MockParameterService>([&](StringData s) { return &sp; });
 
@@ -350,7 +366,7 @@ TEST(SetClusterParameterCommand, TenantIdPassesThrough) {
     SetClusterParameter testCmdNoTenant(obj);
 
     ASSERT_THROWS_CODE_AND_WHAT(
-        fixture.invoke(&spyCtx, testCmdNoTenant, boost::none, kMajorityWriteConcern),
+        fixture.invoke(&spyCtx, testCmdNoTenant, boost::none, boost::none, kMajorityWriteConcern),
         DBException,
         ErrorCodes::UnknownError,
         "");
@@ -359,7 +375,7 @@ TEST(SetClusterParameterCommand, TenantIdPassesThrough) {
     testCmdWithTenant.setDbName(NamespaceString::makeClusterParametersNSS(tenantId).dbName());
 
     ASSERT_THROWS_CODE_AND_WHAT(
-        fixture.invoke(&spyCtx, testCmdWithTenant, boost::none, kMajorityWriteConcern),
+        fixture.invoke(&spyCtx, testCmdWithTenant, boost::none, boost::none, kMajorityWriteConcern),
         DBException,
         ErrorCodes::UnknownError,
         tenantId.toString());

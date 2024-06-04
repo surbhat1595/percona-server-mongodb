@@ -42,7 +42,6 @@
 // IWYU pragma: no_include "boost/align/detail/aligned_alloc_posix.hpp"
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 
 #ifndef _WIN32
@@ -146,7 +145,8 @@ void WatchdogPeriodicThread::setPeriod(Milliseconds period) {
 }
 
 void WatchdogPeriodicThread::doLoop() {
-    Client::initThread(_threadName);
+    Client::initThread(_threadName,
+                       getGlobalServiceContext()->getService(ClusterRole::ShardServer));
     Client* client = &cc();
 
     // TODO(SERVER-74659): Please revisit if this thread could be made killable.

@@ -30,7 +30,6 @@
 
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <string>
 #include <utility>
@@ -132,7 +131,7 @@ void _appendRecordStats(OperationContext* opCtx,
         auto& bucketCatalog = timeseries::bucket_catalog::BucketCatalog::get(opCtx);
         timeseries::bucket_catalog::appendExecutionStats(
             bucketCatalog, collNss.getTimeseriesViewNamespace(), bob);
-        TimeseriesStats::get(collection.get()).append(&bob);
+        TimeseriesStats::get(collection.get()).append(opCtx, &bob);
     } else {
         result->appendNumber("count", numRecords);
         if (numRecords) {

@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -295,9 +294,10 @@ public:
         }
     }
 
-    ScopedCheckedOutSession(ScopedCheckedOutSession&& other)
+    ScopedCheckedOutSession(ScopedCheckedOutSession&& other) noexcept
         : _catalog(other._catalog),
-          _clientTxnNumberStartedAndProvenance(other._clientTxnNumberStartedAndProvenance),
+          _clientTxnNumberStartedAndProvenance(
+              std::move(other._clientTxnNumberStartedAndProvenance)),
           _sri(other._sri),
           _session(other._session),
           _killToken(std::move(other._killToken)) {

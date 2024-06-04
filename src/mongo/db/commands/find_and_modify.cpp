@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -84,6 +83,7 @@
 #include "mongo/db/query/find_command_gen.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/query_settings_gen.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_sharding_state.h"
@@ -93,6 +93,7 @@
 #include "mongo/db/shard_role.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
+#include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
 #include "mongo/db/timeseries/timeseries_write_util.h"
 #include "mongo/db/transaction/retryable_writes_stats.h"
@@ -174,6 +175,7 @@ void makeDeleteRequest(OperationContext* opCtx,
     requestOut->setIsExplain(explain);
 
     requestOut->setYieldPolicy(PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
+    requestOut->setIsTimeseriesNamespace(request.getIsTimeseriesNamespace());
 }
 
 write_ops::FindAndModifyCommandReply buildResponse(
@@ -304,7 +306,7 @@ private:
     // Update related command execution metrics.
     static UpdateMetrics _updateMetrics;
 };
-MONGO_REGISTER_COMMAND(CmdFindAndModify);
+MONGO_REGISTER_COMMAND(CmdFindAndModify).forShard();
 
 UpdateMetrics CmdFindAndModify::_updateMetrics{"findAndModify"};
 
@@ -348,7 +350,10 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
 
     auto requestAndMsg = [&]() {
         if (request().getEncryptionInformation()) {
-            CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+            {
+                stdx::lock_guard<Client> lk(*opCtx->getClient());
+                CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+            }
 
             if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                 return processFLEFindAndModifyExplainMongod(opCtx, request());
@@ -359,7 +364,7 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
     }();
     auto request = requestAndMsg.first;
 
-    auto [isTimeseries, nss] = timeseries::isTimeseries(opCtx, request);
+    auto [isTimeseriesViewRequest, nss] = timeseries::isTimeseriesViewRequest(opCtx, request);
 
     uassertStatusOK(userAllowedWriteNS(opCtx, nss));
     auto const curOp = CurOp::get(opCtx);
@@ -383,8 +388,17 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
                 str::stream() << "database " << dbName.toStringForErrorMsg() << " does not exist",
                 DatabaseHolder::get(opCtx)->getDb(opCtx, nss.dbName()));
 
+        if (isTimeseriesViewRequest) {
+            timeseries::timeseriesRequestChecks<DeleteRequest>(
+                collection.getCollectionPtr(),
+                &deleteRequest,
+                timeseries::deleteRequestCheckFunction);
+            timeseries::timeseriesHintTranslation<DeleteRequest>(collection.getCollectionPtr(),
+                                                                 &deleteRequest);
+        }
+
         ParsedDelete parsedDelete(
-            opCtx, &deleteRequest, collection.getCollectionPtr(), isTimeseries);
+            opCtx, &deleteRequest, collection.getCollectionPtr(), isTimeseriesViewRequest);
         uassertStatusOK(parsedDelete.parseRequest());
 
         CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
@@ -417,15 +431,20 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
         uassert(ErrorCodes::NamespaceNotFound,
                 str::stream() << "database " << dbName.toStringForErrorMsg() << " does not exist",
                 DatabaseHolder::get(opCtx)->getDb(opCtx, nss.dbName()));
-        if (isTimeseries) {
-            timeseries::assertTimeseriesBucketsCollection(collection.getCollectionPtr().get());
+        if (isTimeseriesViewRequest) {
+            timeseries::timeseriesRequestChecks<UpdateRequest>(
+                collection.getCollectionPtr(),
+                &updateRequest,
+                timeseries::updateRequestCheckFunction);
+            timeseries::timeseriesHintTranslation<UpdateRequest>(collection.getCollectionPtr(),
+                                                                 &updateRequest);
         }
 
         ParsedUpdate parsedUpdate(opCtx,
                                   &updateRequest,
                                   collection.getCollectionPtr(),
                                   false /*forgoOpCounterIncrements*/,
-                                  isTimeseries);
+                                  isTimeseriesViewRequest);
         uassertStatusOK(parsedUpdate.parseRequest());
 
         CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
@@ -452,8 +471,13 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
 
     validate(req);
 
+    auto& curOp = *CurOp::get(opCtx);
+
     if (req.getEncryptionInformation().has_value()) {
-        CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+        {
+            stdx::lock_guard<Client> lk(*opCtx->getClient());
+            curOp.setShouldOmitDiagnosticInformation_inlock(lk, true);
+        }
         if (!req.getEncryptionInformation()->getCrudProcessed().get_value_or(false)) {
             return processFLEFindAndModify(opCtx, req);
         }
@@ -461,8 +485,6 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
 
     const NamespaceString& nsString = req.getNamespace();
     uassertStatusOK(userAllowedWriteNS(opCtx, nsString));
-    auto const curOp = CurOp::get(opCtx);
-    OpDebug* const opDebug = &curOp->debug();
 
     // Collect metrics.
     CmdFindAndModify::collectMetrics(req);
@@ -504,6 +526,20 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
         }
     }
 
+    // Initialize curOp information.
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        if (req.getIsTimeseriesNamespace()) {
+            auto viewNss = nsString.getTimeseriesViewNamespace();
+            curOp.setNS_inlock(viewNss);
+            curOp.setOpDescription_inlock(timeseries::timeseriesViewCommand(
+                unparsedRequest().body, "findAndModify", viewNss.coll()));
+        } else {
+            curOp.setNS_inlock(nsString);
+        }
+        curOp.ensureStarted();
+    }
+
     auto sampleId = analyze_shard_key::getOrGenerateSampleId(
         opCtx, ns(), analyze_shard_key::SampledCommandNameEnum::kFindAndModify, req);
     if (sampleId) {
@@ -530,14 +566,8 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                 deleteRequest.setStmtId(stmtId);
             }
             boost::optional<BSONObj> docFound;
-            write_ops_exec::performDelete(opCtx,
-                                          nsString,
-                                          deleteRequest,
-                                          curOp,
-                                          opDebug,
-                                          inTransaction,
-                                          boost::none,
-                                          docFound);
+            write_ops_exec::performDelete(
+                opCtx, nsString, &deleteRequest, &curOp, inTransaction, boost::none, docFound);
             recordStatsForTopCommand(opCtx);
             return buildResponse(boost::none, true /* isRemove */, docFound);
         } else {
@@ -570,14 +600,13 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                     auto updateResult =
                         write_ops_exec::performUpdate(opCtx,
                                                       nsString,
-                                                      curOp,
-                                                      opDebug,
+                                                      &curOp,
                                                       inTransaction,
                                                       req.getRemove().value_or(false),
                                                       req.getUpsert().value_or(false),
                                                       boost::none,
                                                       docFound,
-                                                      updateRequest);
+                                                      &updateRequest);
                     recordStatsForTopCommand(opCtx);
                     return buildResponse(updateResult, req.getRemove().value_or(false), docFound);
 
@@ -645,6 +674,9 @@ void CmdFindAndModify::Invocation::appendMirrorableRequest(BSONObjBuilder* bob) 
     const auto& rawCmd = unparsedRequest().body;
     if (const auto& shardVersion = rawCmd.getField("shardVersion"); !shardVersion.eoo()) {
         bob->append(shardVersion);
+    }
+    if (const auto& databaseVersion = rawCmd.getField("databaseVersion"); !databaseVersion.eoo()) {
+        bob->append(databaseVersion);
     }
 
     // Prevent the find from returning multiple documents since we can

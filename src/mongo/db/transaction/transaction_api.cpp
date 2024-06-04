@@ -43,7 +43,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
@@ -458,7 +457,7 @@ void primeInternalClient(Client* client) {
 
 Future<DbResponse> DefaultSEPTransactionClientBehaviors::handleRequest(
     OperationContext* opCtx, const Message& request) const {
-    auto serviceEntryPoint = opCtx->getServiceContext()->getServiceEntryPoint();
+    auto serviceEntryPoint = opCtx->getService()->getServiceEntryPoint();
     return serviceEntryPoint->handleRequest(opCtx, request);
 }
 
@@ -469,7 +468,7 @@ ExecutorFuture<BSONObj> SEPTransactionClient::_runCommand(const DatabaseName& db
     BSONObjBuilder cmdBuilder(_behaviors->maybeModifyCommand(std::move(cmdObj)));
     _hooks->runRequestHook(&cmdBuilder);
 
-    auto client = _serviceContext->makeClient("SEP-internal-txn-client");
+    auto client = _serviceContext->getService()->makeClient("SEP-internal-txn-client");
     AlternativeClientRegion clientRegion(client);
 
     // Note that _token is only cancelled once the caller of the transaction no longer cares about
@@ -589,10 +588,22 @@ ExecutorFuture<BulkWriteCommandReply> SEPTransactionClient::_runCRUDOp(
     return runCommand(DatabaseName::kAdmin, cmdBob.obj())
         .thenRunOn(_executor)
         .then([](BSONObj reply) {
-            uassertStatusOK(getStatusFromWriteCommandReply(reply));
+            uassertStatusOK(getStatusFromCommandResult(reply));
 
-            IDLParserContext ctx("BulkWriteCommandReplyParse");
+            IDLParserContext ctx("BulkWriteCommandReply");
             auto response = BulkWriteCommandReply::parse(ctx, reply);
+
+            // TODO (SERVER-80794): Support iterating through the cursor for internal transactions.
+            uassert(7934200,
+                    "bulkWrite requires multiple batches to fetch all responses but it is "
+                    "currently not supported in internal transactions",
+                    response.getCursor().getId() == 0);
+            for (auto&& replyItem : response.getCursor().getFirstBatch()) {
+                uassertStatusOK(replyItem.getStatus());
+            }
+
+            uassertStatusOK(getWriteConcernStatusFromCommandResult(reply));
+
             return response;
         });
 }
@@ -915,7 +926,7 @@ void Transaction::prepareRequest(BSONObjBuilder* cmdBuilder) {
         // commands have the same ids inferred.
         dassert(
             !isRetryableWriteCommand(
-                cmdBuilder->asTempObj().firstElement().fieldNameStringData()) ||
+                _service, cmdBuilder->asTempObj().firstElement().fieldNameStringData()) ||
                 (cmdBuilder->hasField(write_ops::WriteCommandRequestBase::kStmtIdsFieldName) ||
                  cmdBuilder->hasField(write_ops::WriteCommandRequestBase::kStmtIdFieldName)) ||
                 (cmdBuilder->hasField(BulkWriteCommandRequest::kStmtIdFieldName) ||
@@ -941,8 +952,8 @@ void Transaction::prepareRequest(BSONObjBuilder* cmdBuilder) {
         uassert(5956600,
                 "Command object passed to the transaction api should not contain maxTimeMS field",
                 !cmdBuilder->hasField(kMaxTimeMSField));
-        auto timeLeftover =
-            std::max(Milliseconds(0), *_opDeadline - _service->getFastClockSource()->now());
+        auto now = _service->getServiceContext()->getFastClockSource()->now();
+        auto timeLeftover = std::max(Milliseconds(0), *_opDeadline - now);
         cmdBuilder->append(kMaxTimeMSField, durationCount<Milliseconds>(timeLeftover));
     }
 
@@ -1142,8 +1153,8 @@ LogicalTime Transaction::getOperationTime() const {
 
 Transaction::~Transaction() {
     if (_acquiredSessionFromPool) {
-        InternalSessionPool::get(_service)->release(
-            {*_sessionInfo.getSessionId(), *_sessionInfo.getTxnNumber()});
+        InternalSessionPool::get(_service->getServiceContext())
+            ->release({*_sessionInfo.getSessionId(), *_sessionInfo.getTxnNumber()});
         _acquiredSessionFromPool = false;
     }
 }

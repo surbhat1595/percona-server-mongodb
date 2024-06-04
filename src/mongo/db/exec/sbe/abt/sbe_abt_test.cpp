@@ -53,6 +53,8 @@
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/abt/document_source_visitor.h"
+#include "mongo/db/pipeline/abt/utils.h"
+#include "mongo/db/query/ce/sampling_estimator.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/query/cost_model/cost_model_gen.h"
@@ -91,8 +93,10 @@ TEST_F(ABTSBE, Lower1) {
     auto tree = Constant::int64(100);
     auto env = VariableEnvironment::build(tree);
     SlotVarMap map;
-
-    auto expr = SBEExpressionLowering{env, map, *runtimeEnv()}.optimize(tree);
+    sbe::InputParamToSlotMap inputParamToSlotMap;
+    auto expr =
+        SBEExpressionLowering{env, map, *runtimeEnv(), slotIdGenerator(), inputParamToSlotMap}
+            .optimize(tree);
 
     ASSERT(expr);
 
@@ -108,11 +112,12 @@ TEST_F(ABTSBE, Lower2) {
         make<Let>("x",
                   Constant::int64(100),
                   make<BinaryOp>(Operations::Add, make<Variable>("x"), Constant::int64(100)));
-
     auto env = VariableEnvironment::build(tree);
     SlotVarMap map;
-
-    auto expr = SBEExpressionLowering{env, map, *runtimeEnv()}.optimize(tree);
+    sbe::InputParamToSlotMap inputParamToSlotMap;
+    auto expr =
+        SBEExpressionLowering{env, map, *runtimeEnv(), slotIdGenerator(), inputParamToSlotMap}
+            .optimize(tree);
 
     ASSERT(expr);
 
@@ -127,8 +132,10 @@ TEST_F(ABTSBE, Lower3) {
     auto tree = make<FunctionCall>("isNumber", makeSeq(Constant::int64(10)));
     auto env = VariableEnvironment::build(tree);
     SlotVarMap map;
-
-    auto expr = SBEExpressionLowering{env, map, *runtimeEnv()}.optimize(tree);
+    sbe::InputParamToSlotMap inputParamToSlotMap;
+    auto expr =
+        SBEExpressionLowering{env, map, *runtimeEnv(), slotIdGenerator(), inputParamToSlotMap}
+            .optimize(tree);
 
     ASSERT(expr);
 
@@ -158,8 +165,10 @@ TEST_F(ABTSBE, Lower4) {
                 Constant::nothing()));
     auto env = VariableEnvironment::build(tree);
     SlotVarMap map;
-
-    auto expr = SBEExpressionLowering{env, map, *runtimeEnv()}.optimize(tree);
+    sbe::InputParamToSlotMap inputParamToSlotMap;
+    auto expr =
+        SBEExpressionLowering{env, map, *runtimeEnv(), slotIdGenerator(), inputParamToSlotMap}
+            .optimize(tree);
 
     ASSERT(expr);
 
@@ -173,11 +182,12 @@ TEST_F(ABTSBE, Lower4) {
 TEST_F(ABTSBE, Lower5) {
     auto tree = make<FunctionCall>(
         "setField", makeSeq(Constant::nothing(), Constant::str("fieldA"), Constant::int64(10)));
-
     auto env = VariableEnvironment::build(tree);
     SlotVarMap map;
-
-    auto expr = SBEExpressionLowering{env, map, *runtimeEnv()}.optimize(tree);
+    sbe::InputParamToSlotMap inputParamToSlotMap;
+    auto expr =
+        SBEExpressionLowering{env, map, *runtimeEnv(), slotIdGenerator(), inputParamToSlotMap}
+            .optimize(tree);
 
     ASSERT(expr);
 
@@ -221,13 +231,17 @@ TEST_F(ABTSBE, Lower6) {
         changed = false;
         if (PathLowering{prefixId, env}.optimize(tree)) {
             changed = true;
+            env.rebuild(tree);
         }
         if (ConstEval{env}.optimize(tree)) {
             changed = true;
         }
     } while (changed);
 
-    auto expr = SBEExpressionLowering{env, map, *runtimeEnv()}.optimize(tree);
+    sbe::InputParamToSlotMap inputParamToSlotMap;
+    auto expr =
+        SBEExpressionLowering{env, map, *runtimeEnv(), slotIdGenerator(), inputParamToSlotMap}
+            .optimize(tree);
 
     ASSERT(expr);
 
@@ -277,7 +291,10 @@ TEST_F(ABTSBE, Lower7) {
         }
     } while (changed);
 
-    auto expr = SBEExpressionLowering{env, map, *runtimeEnv()}.optimize(tree);
+    sbe::InputParamToSlotMap inputParamToSlotMap;
+    auto expr =
+        SBEExpressionLowering{env, map, *runtimeEnv(), slotIdGenerator(), inputParamToSlotMap}
+            .optimize(tree);
 
     ASSERT(expr);
     auto compiledExpr = compileExpression(*expr);
@@ -295,8 +312,10 @@ TEST_F(ABTSBE, LowerFunctionCallFail) {
                                    Constant::str(errorMessage)));
     auto env = VariableEnvironment::build(tree);
     SlotVarMap map;
-
-    auto expr = SBEExpressionLowering{env, map, *runtimeEnv()}.optimize(tree);
+    sbe::InputParamToSlotMap inputParamToSlotMap;
+    auto expr =
+        SBEExpressionLowering{env, map, *runtimeEnv(), slotIdGenerator(), inputParamToSlotMap}
+            .optimize(tree);
     ASSERT(expr);
 
     auto compiledExpr = compileExpression(*expr);
@@ -325,8 +344,10 @@ TEST_F(ABTSBE, LowerFunctionCallConvert) {
         makeSeq(make<Variable>("inputVar"),
                 Constant::int32(static_cast<int32_t>(sbe::value::TypeTags::NumberInt64))));
     auto env = VariableEnvironment::build(tree);
-
-    auto expr = SBEExpressionLowering{env, map, *runtimeEnv()}.optimize(tree);
+    sbe::InputParamToSlotMap inputParamToSlotMap;
+    auto expr =
+        SBEExpressionLowering{env, map, *runtimeEnv(), slotIdGenerator(), inputParamToSlotMap}
+            .optimize(tree);
     ASSERT(expr);
 
     auto compiledExpr = compileExpression(*expr);
@@ -363,9 +384,12 @@ TEST_F(ABTSBE, LowerFunctionCallTypeMatch) {
                                 getBSONTypeMask(sbe::value::TypeTags::NumberInt64) |
                                 getBSONTypeMask(sbe::value::TypeTags::NumberDouble) |
                                 getBSONTypeMask(sbe::value::TypeTags::NumberDecimal))));
-    auto env = VariableEnvironment::build(tree);
 
-    auto expr = SBEExpressionLowering{env, map, *runtimeEnv()}.optimize(tree);
+    auto env = VariableEnvironment::build(tree);
+    sbe::InputParamToSlotMap inputParamToSlotMap;
+    auto expr =
+        SBEExpressionLowering{env, map, *runtimeEnv(), slotIdGenerator(), inputParamToSlotMap}
+            .optimize(tree);
     ASSERT(expr);
 
     auto compiledExpr = compileExpression(*expr);
@@ -394,6 +418,8 @@ TEST_F(ABTSBE, LowerComparisonCollation) {
     map["lhs"] = lhsSlotId;
     map["rhs"] = rhsSlotId;
 
+    sbe::InputParamToSlotMap inputParamToSlotMap;
+
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kToLowerString);
     registerSlot("collator"_sd,
                  sbe::value::TypeTags::collator,
@@ -401,9 +427,11 @@ TEST_F(ABTSBE, LowerComparisonCollation) {
                  false);
 
     auto tree = make<BinaryOp>(Operations::Cmp3w, make<Variable>("lhs"), make<Variable>("rhs"));
-
     auto env = VariableEnvironment::build(tree);
-    auto expr = SBEExpressionLowering{env, map, *runtimeEnv()}.optimize(tree);
+    auto expr =
+        SBEExpressionLowering{env, map, *runtimeEnv(), slotIdGenerator(), inputParamToSlotMap}
+            .optimize(tree);
+
     ASSERT(expr);
     auto compiledExpr = compileExpression(*expr);
 
@@ -463,7 +491,7 @@ TEST_F(NodeSBE, Lower1) {
                                                           true /*hasRID*/),
                                       prefixId);
 
-    auto phaseManager = makePhaseManager(OptPhaseManager::getAllRewritesSet(),
+    auto phaseManager = makePhaseManager(OptPhaseManager::getAllProdRewrites(),
                                          prefixId,
                                          {{{"test", createScanDef({}, {})}}},
                                          boost::none /*costModel*/,
@@ -475,9 +503,15 @@ TEST_F(NodeSBE, Lower1) {
     auto runtimeEnv = std::make_unique<sbe::RuntimeEnvironment>();
     boost::optional<sbe::value::SlotId> ridSlot;
     sbe::value::SlotIdGenerator ids;
+    sbe::InputParamToSlotMap inputParamToSlotMap;
 
-    SBENodeLowering g{
-        env, *runtimeEnv, ids, phaseManager.getMetadata(), planAndProps._map, ScanOrder::Forward};
+    SBENodeLowering g{env,
+                      *runtimeEnv,
+                      ids,
+                      inputParamToSlotMap,
+                      phaseManager.getMetadata(),
+                      planAndProps._map,
+                      ScanOrder::Forward};
     auto sbePlan = g.optimize(planAndProps._node, map, ridSlot);
     ASSERT_EQ(1, map.size());
     ASSERT_FALSE(ridSlot);
@@ -623,7 +657,7 @@ TEST_F(NodeSBE, RequireRID) {
                                                    true /*hasRID*/),
                                prefixId);
 
-    auto phaseManager = makePhaseManagerRequireRID(OptPhaseManager::getAllRewritesSet(),
+    auto phaseManager = makePhaseManagerRequireRID(OptPhaseManager::getAllProdRewrites(),
                                                    prefixId,
                                                    {{{"test", createScanDef({}, {})}}},
                                                    DebugInfo::kDefaultForTests);
@@ -635,9 +669,15 @@ TEST_F(NodeSBE, RequireRID) {
     auto runtimeEnv = std::make_unique<sbe::RuntimeEnvironment>();
     boost::optional<sbe::value::SlotId> ridSlot;
     sbe::value::SlotIdGenerator ids;
+    sbe::InputParamToSlotMap inputParamToSlotMap;
 
-    SBENodeLowering g{
-        env, *runtimeEnv, ids, phaseManager.getMetadata(), planAndProps._map, ScanOrder::Forward};
+    SBENodeLowering g{env,
+                      *runtimeEnv,
+                      ids,
+                      inputParamToSlotMap,
+                      phaseManager.getMetadata(),
+                      planAndProps._map,
+                      ScanOrder::Forward};
     auto sbePlan = g.optimize(planAndProps._node, map, ridSlot);
     ASSERT_EQ(1, map.size());
     ASSERT_TRUE(ridSlot);
@@ -674,6 +714,92 @@ TEST_F(NodeSBE, RequireRID) {
     sbePlan->close();
 
     ASSERT_EQ(1, resultSize);
+}
+
+TEST_F(NodeSBE, SamplingTest) {
+    auto prefixId = PrefixId::createForTests();
+    const std::string scanDefName = "test";
+    Metadata metadata{{{scanDefName,
+                        createScanDef({},
+                                      {{"index1",
+                                        makeIndexDefinition(
+                                            "a", CollationOp::Ascending, true /*isMultiKey*/)}})}}};
+
+    auto opCtx = makeOperationContext();
+    auto pipeline = parsePipeline(
+        "[{$match: {a: 2}}]", NamespaceString::createNamespaceString_forTest("test"), opCtx.get());
+
+    const ProjectionName scanProjName = prefixId.getNextId("scan");
+
+    ABT tree = translatePipelineToABT(metadata,
+                                      *pipeline.get(),
+                                      scanProjName,
+                                      make<ScanNode>(scanProjName, scanDefName),
+                                      prefixId);
+
+    // We are not lowering the paths.
+    OptPhaseManager phaseManagerForSampling{{OptPhase::MemoSubstitutionPhase,
+                                             OptPhase::MemoExplorationPhase,
+                                             OptPhase::MemoImplementationPhase},
+                                            prefixId,
+                                            false /*requireRID*/,
+                                            metadata,
+                                            makeHeuristicCE(),
+                                            makeHeuristicCE(),
+                                            makeCostEstimator(getTestCostModel()),
+                                            defaultConvertPathToInterval,
+                                            defaultConvertPathToInterval,
+                                            DebugInfo::kDefaultForProd,
+                                            {._numSamplingChunks = 5}};
+
+    // Used to record the sampling plans.
+    ABTVector nodes;
+
+    // Not optimizing fully.
+    OptPhaseManager phaseManager{
+        {OptPhase::MemoSubstitutionPhase,
+         OptPhase::MemoExplorationPhase,
+         OptPhase::MemoImplementationPhase},
+        prefixId,
+        false /*requireRID*/,
+        metadata,
+        std::make_unique<ce::SamplingEstimator>(std::move(phaseManagerForSampling),
+                                                1000 /*collectionSize*/,
+                                                makeHeuristicCE(),
+                                                std::make_unique<ABTRecorder>(nodes)),
+        makeHeuristicCE(),
+        makeCostEstimator(getTestCostModel()),
+        defaultConvertPathToInterval,
+        ConstEval::constFold,
+        DebugInfo::kDefaultForTests,
+        {} /*queryHints*/};
+
+    PlanAndProps planAndProps = phaseManager.optimizeAndReturnProps(std::move(tree));
+
+    ASSERT_EQ(1, nodes.size());
+
+    // We have a single plan to sample the predicate
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT
+        "Root [{sum}]\n"
+        "GroupBy []\n"
+        "|   aggregations: \n"
+        "|       [sum]\n"
+        "|           FunctionCall [$sum]\n"
+        "|           Const [1]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [scan_0]\n"
+        "|   PathGet [a]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathCompare [Eq]\n"
+        "|   Const [2]\n"
+        "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
+        "|   |   Const [true]\n"
+        "|   LimitSkip [limit: 200, skip: 0]\n"
+        "|   Seek [ridProjection: rid_0, {'<root>': scan_0}, test]\n"
+        "LimitSkip [limit: 5, skip: 0]\n"
+        "PhysicalScan [{'<rid>': rid_0}, test]\n",
+        nodes.front());
 }
 
 /**
@@ -768,7 +894,9 @@ TEST_F(NodeSBE, SpoolFibonacci) {
     auto runtimeEnv = std::make_unique<sbe::RuntimeEnvironment>();
     boost::optional<sbe::value::SlotId> ridSlot;
     sbe::value::SlotIdGenerator ids;
-    SBENodeLowering g{env, *runtimeEnv, ids, metadata, props, ScanOrder::Forward};
+    sbe::InputParamToSlotMap inputParamToSlotMap;
+    SBENodeLowering g{
+        env, *runtimeEnv, ids, inputParamToSlotMap, metadata, props, ScanOrder::Forward};
     auto sbePlan = g.optimize(tree, map, ridSlot);
     ASSERT_EQ(1, map.size());
 

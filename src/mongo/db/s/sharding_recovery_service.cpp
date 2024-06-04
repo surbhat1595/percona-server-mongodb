@@ -37,7 +37,6 @@
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -206,9 +205,18 @@ void ShardingRecoveryService::acquireRecoverableCriticalSectionBlockWrites(
         Lock::GlobalLock lk(opCtx, MODE_IX);
         boost::optional<AutoGetDb> dbLock;
         boost::optional<AutoGetCollection> collLock;
-        if (nsIsDbOnly(NamespaceStringUtil::serialize(nss))) {
+        if (nss.isDbOnly()) {
+            tassert(8096300,
+                    "Cannot acquire critical section on the config database",
+                    !nss.isConfigDB());
             dbLock.emplace(opCtx, nss.dbName(), MODE_S);
         } else {
+            if (nss.isConfigDB()) {
+                // Take the 'config' database lock in mode IX to prevent lock upgrade when we later
+                // write to kCollectionCriticalSectionsNamespace.
+                dbLock.emplace(opCtx, nss.dbName(), MODE_IX);
+            }
+
             collLock.emplace(opCtx,
                              nss,
                              MODE_S,
@@ -218,8 +226,9 @@ void ShardingRecoveryService::acquireRecoverableCriticalSectionBlockWrites(
 
         DBDirectClient dbClient(opCtx);
         FindCommandRequest findRequest{NamespaceString::kCollectionCriticalSectionsNamespace};
-        findRequest.setFilter(BSON(CollectionCriticalSectionDocument::kNssFieldName
-                                   << NamespaceStringUtil::serialize(nss)));
+        findRequest.setFilter(
+            BSON(CollectionCriticalSectionDocument::kNssFieldName
+                 << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())));
         auto cursor = dbClient.find(std::move(findRequest));
 
         // if there is a doc with the same nss -> in order to not fail it must have the same
@@ -315,7 +324,7 @@ void ShardingRecoveryService::promoteRecoverableCriticalSectionToBlockAlsoReads(
     {
         boost::optional<AutoGetDb> dbLock;
         boost::optional<AutoGetCollection> collLock;
-        if (nsIsDbOnly(NamespaceStringUtil::serialize(nss))) {
+        if (nss.isDbOnly()) {
             dbLock.emplace(opCtx, nss.dbName(), MODE_X);
         } else {
             collLock.emplace(opCtx,
@@ -327,8 +336,9 @@ void ShardingRecoveryService::promoteRecoverableCriticalSectionToBlockAlsoReads(
 
         DBDirectClient dbClient(opCtx);
         FindCommandRequest findRequest{NamespaceString::kCollectionCriticalSectionsNamespace};
-        findRequest.setFilter(BSON(CollectionCriticalSectionDocument::kNssFieldName
-                                   << NamespaceStringUtil::serialize(nss)));
+        findRequest.setFilter(
+            BSON(CollectionCriticalSectionDocument::kNssFieldName
+                 << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())));
         auto cursor = dbClient.find(std::move(findRequest));
 
         tassert(7032361,
@@ -376,7 +386,7 @@ void ShardingRecoveryService::promoteRecoverableCriticalSectionToBlockAlsoReads(
         auto commandResponse = dbClient.runCommand([&] {
             const auto query =
                 BSON(CollectionCriticalSectionDocument::kNssFieldName
-                     << NamespaceStringUtil::serialize(nss)
+                     << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())
                      << CollectionCriticalSectionDocument::kReasonFieldName << reason);
             const auto update = BSON(
                 "$set" << BSON(CollectionCriticalSectionDocument::kBlockReadsFieldName << true));
@@ -441,7 +451,7 @@ void ShardingRecoveryService::releaseRecoverableCriticalSection(
     {
         boost::optional<AutoGetDb> dbLock;
         boost::optional<AutoGetCollection> collLock;
-        if (nsIsDbOnly(NamespaceStringUtil::serialize(nss))) {
+        if (nss.isDbOnly()) {
             dbLock.emplace(opCtx, nss.dbName(), MODE_X);
         } else {
             collLock.emplace(opCtx,
@@ -453,8 +463,9 @@ void ShardingRecoveryService::releaseRecoverableCriticalSection(
 
         DBDirectClient dbClient(opCtx);
 
-        const auto queryNss = BSON(CollectionCriticalSectionDocument::kNssFieldName
-                                   << NamespaceStringUtil::serialize(nss));
+        const auto queryNss =
+            BSON(CollectionCriticalSectionDocument::kNssFieldName
+                 << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
         FindCommandRequest findRequest{NamespaceString::kCollectionCriticalSectionsNamespace};
         findRequest.setFilter(queryNss);
         auto cursor = dbClient.find(std::move(findRequest));
@@ -571,7 +582,7 @@ void ShardingRecoveryService::recoverRecoverableCriticalSections(OperationContex
     store.forEach(opCtx, BSONObj{}, [&opCtx](const CollectionCriticalSectionDocument& doc) {
         const auto& nss = doc.getNss();
         {
-            if (nsIsDbOnly(NamespaceStringUtil::serialize(nss))) {
+            if (nss.isDbOnly()) {
                 AutoGetDb dbLock(opCtx, nss.dbName(), MODE_X);
                 auto scopedDss =
                     DatabaseShardingState::assertDbLockedAndAcquireExclusive(opCtx, nss.dbName());
@@ -651,8 +662,10 @@ void ShardingRecoveryService::recoverIndexesCatalog(OperationContext* opCtx) {
 
     while (cursor->more()) {
         auto doc = cursor->nextSafe();
-        const auto nss = NamespaceStringUtil::deserialize(
-            boost::none, doc[CollectionType::kNssFieldName].String());
+        const auto nss =
+            NamespaceStringUtil::deserialize(boost::none,
+                                             doc[CollectionType::kNssFieldName].String(),
+                                             SerializationContext::stateDefault());
         auto indexVersion = doc[CollectionType::kIndexVersionFieldName].timestamp();
         for (const auto& idx : doc[kShardingIndexCatalogEntriesFieldName].Array()) {
             auto indexEntry = IndexCatalogType::parse(

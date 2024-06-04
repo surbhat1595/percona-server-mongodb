@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <string>
@@ -144,7 +143,7 @@ void renameOrDropTarget(OperationContext* opCtx,
                     "Source namespace not found while trying to rename collection on participant",
                     logAttrs(fromNss));
         dropCollectionLocally(opCtx, toNss, options.markFromMigrate);
-        deleteRangeDeletionTasksForRename(opCtx, fromNss, toNss);
+        rangedeletionutil::deleteRangeDeletionTasksForRename(opCtx, fromNss, toNss);
     }
 }
 
@@ -201,8 +200,9 @@ boost::optional<BSONObj> RenameParticipantInstance::reportForCurrentOp(
     bob.append("type", "op");
     bob.append("desc", "RenameParticipantInstance");
     bob.append("op", "command");
-    bob.append("ns", NamespaceStringUtil::serialize(fromNss()));
-    bob.append("to", NamespaceStringUtil::serialize(toNss()));
+    bob.append("ns",
+               NamespaceStringUtil::serialize(fromNss(), SerializationContext::stateDefault()));
+    bob.append("to", NamespaceStringUtil::serialize(toNss(), SerializationContext::stateDefault()));
     bob.append("command", cmdBob.obj());
     bob.append("currentPhase", _doc.getPhase());
     bob.append("active", true);
@@ -234,12 +234,13 @@ void RenameParticipantInstance::_enterPhase(Phase newPhase) {
             const auto replCoord = repl::ReplicationCoordinator::get(opCtx.get());
             const auto lastLocalOpTime = replCoord->getMyLastAppliedOpTime();
             WaitForMajorityService::get(opCtx->getServiceContext())
-                .waitUntilMajority(lastLocalOpTime, opCtx.get()->getCancellationToken())
+                .waitUntilMajorityForWrite(lastLocalOpTime, opCtx.get()->getCancellationToken())
                 .get(opCtx.get());
         }
     } else {
         store.update(opCtx.get(),
-                     BSON(StateDoc::kFromNssFieldName << NamespaceStringUtil::serialize(fromNss())),
+                     BSON(StateDoc::kFromNssFieldName << NamespaceStringUtil::serialize(
+                              fromNss(), SerializationContext::stateDefault())),
                      newDoc.toBSON(),
                      WriteConcerns::kMajorityWriteConcernNoTimeout);
     }
@@ -256,7 +257,8 @@ void RenameParticipantInstance::_removeStateDocument(OperationContext* opCtx) {
 
     PersistentTaskStore<StateDoc> store(NamespaceString::kShardingRenameParticipantsNamespace);
     store.remove(opCtx,
-                 BSON(StateDoc::kFromNssFieldName << NamespaceStringUtil::serialize(fromNss())),
+                 BSON(StateDoc::kFromNssFieldName << NamespaceStringUtil::serialize(
+                          fromNss(), SerializationContext::stateDefault())),
                  WriteConcerns::kMajorityWriteConcernNoTimeout);
 
     _doc = {};
@@ -364,7 +366,7 @@ SemiFuture<void> RenameParticipantInstance::_runImpl(
                     scopedCsr->clearFilteringMetadata(opCtx);
                 }
 
-                snapshotRangeDeletionsForRename(opCtx, fromNss(), toNss());
+                rangedeletionutil::snapshotRangeDeletionsForRename(opCtx, fromNss(), toNss());
             }))
         .then(_buildPhaseHandler(
             Phase::kRenameLocalAndRestoreRangeDeletions,
@@ -377,15 +379,15 @@ SemiFuture<void> RenameParticipantInstance::_runImpl(
                 const auto primaryShardId =
                     Grid::get(opCtx)
                         ->catalogClient()
-                        ->getDatabase(opCtx,
-                                      DatabaseNameUtil::serialize(fromNss().dbName()),
-                                      repl::ReadConcernLevel::kMajorityReadConcern)
+                        ->getDatabase(
+                            opCtx, fromNss().dbName(), repl::ReadConcernLevel::kMajorityReadConcern)
                         .getPrimary();
                 const auto thisShardId = ShardingState::get(opCtx)->shardId();
 
                 RenameCollectionOptions options;
                 options.dropTarget = _doc.getDropTarget();
                 options.stayTemp = _doc.getStayTemp();
+                options.newTargetCollectionUuid = _doc.getNewTargetCollectionUuid();
                 // Use the "markFromMigrate" option so that change streams capturing events about
                 // fromNss/toNss won't receive duplicate drop notifications.
                 options.markFromMigrate = (thisShardId != primaryShardId);
@@ -393,14 +395,14 @@ SemiFuture<void> RenameParticipantInstance::_runImpl(
                 renameOrDropTarget(
                     opCtx, fromNss(), toNss(), options, _doc.getSourceUUID(), _doc.getTargetUUID());
 
-                restoreRangeDeletionTasksForRename(opCtx, toNss());
+                rangedeletionutil::restoreRangeDeletionTasksForRename(opCtx, toNss());
             }))
         .then(_buildPhaseHandler(
             Phase::kDeleteFromRangeDeletions,
             [this, anchor = shared_from_this()] {
                 auto opCtxHolder = cc().makeOperationContext();
                 auto* opCtx = opCtxHolder.get();
-                deleteRangeDeletionTasksForRename(opCtx, fromNss(), toNss());
+                rangedeletionutil::deleteRangeDeletionTasksForRename(opCtx, fromNss(), toNss());
 
                 {
                     stdx::lock_guard<Latch> lg(_mutex);
@@ -444,8 +446,12 @@ SemiFuture<void> RenameParticipantInstance::_runImpl(
                 // released.
                 const auto reason = BSON("command"
                                          << "rename"
-                                         << "from" << NamespaceStringUtil::serialize(fromNss())
-                                         << "to" << NamespaceStringUtil::serialize(toNss()));
+                                         << "from"
+                                         << NamespaceStringUtil::serialize(
+                                                fromNss(), SerializationContext::stateDefault())
+                                         << "to"
+                                         << NamespaceStringUtil::serialize(
+                                                toNss(), SerializationContext::stateDefault()));
                 auto service = ShardingRecoveryService::get(opCtx);
                 service->releaseRecoverableCriticalSection(
                     opCtx, fromNss(), reason, ShardingCatalogClient::kLocalWriteConcern);

@@ -107,7 +107,8 @@ bool ReplicationCoordinatorMock::inQuiesceMode() const {
     return false;
 }
 
-void ReplicationCoordinatorMock::shutdown(OperationContext*) {
+void ReplicationCoordinatorMock::shutdown(OperationContext*,
+                                          BSONObjBuilder* shutdownTimeElapsedBuilder) {
     // TODO
 }
 
@@ -836,7 +837,7 @@ SplitPrepareSessionManager* ReplicationCoordinatorMock::getSplitPrepareSessionMa
 }
 
 boost::optional<UUID> ReplicationCoordinatorMock::getInitialSyncId(OperationContext* opCtx) {
-    return boost::none;
+    return uassertStatusOK(UUID::parse("00000000-0000-0000-0000-000000000000"));
 }
 
 }  // namespace repl

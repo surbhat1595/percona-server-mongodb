@@ -127,8 +127,7 @@ public:
 
             switch (metadata_consistency_util::getCommandLevel(nss)) {
                 case MetadataConsistencyCommandLevelEnum::kDatabaseLevel: {
-                    const auto collections =
-                        catalogClient->getCollections(opCtx, nss.db_forSharding());
+                    const auto collections = catalogClient->getCollections(opCtx, nss.dbName());
 
                     for (const auto& coll : collections) {
                         _runChecksForCollection(opCtx, coll, inconsistenciesMerged);
@@ -188,6 +187,14 @@ public:
                                          std::make_move_iterator(chunksInconsistencies.begin()),
                                          std::make_move_iterator(chunksInconsistencies.end()));
 
+            auto collectionsInconsistencies =
+                metadata_consistency_util::checkCollectionShardingMetadataConsistency(opCtx, coll);
+
+            inconsistenciesMerged.insert(
+                inconsistenciesMerged.end(),
+                std::make_move_iterator(collectionsInconsistencies.begin()),
+                std::make_move_iterator(collectionsInconsistencies.end()));
+
             auto zonesInconsistencies = metadata_consistency_util::checkZonesInconsistencies(
                 opCtx, coll, _getCollectionZones(opCtx, coll.getNss()));
 
@@ -243,7 +250,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(ConfigsvrCheckMetadataConsistencyCommand);
+MONGO_REGISTER_COMMAND(ConfigsvrCheckMetadataConsistencyCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

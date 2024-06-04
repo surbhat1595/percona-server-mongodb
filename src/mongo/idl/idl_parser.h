@@ -33,7 +33,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <string>
 #include <type_traits>
@@ -152,6 +151,39 @@ T preparsedValue(A&&... args) {
     using preparsed_value_adl_barrier::idlPreparsedValue;
     return idlPreparsedValue(stdx::type_identity<T>{}, std::forward<A>(args)...);
 }
+
+enum DebugEnabled : bool {};
+
+constexpr inline DebugEnabled kIsDebug{kDebugBuild};
+
+/**
+ * HasMembers tracks the presence of required fields in debug mode, and is a noop class in
+ * production builds.
+ */
+template <size_t N, DebugEnabled = kIsDebug>
+class HasMembers;
+
+template <size_t N>
+class HasMembers<N, DebugEnabled{false}> {
+public:
+    void required() const {}
+    void markPresent(size_t pos) {}
+};
+
+template <size_t N>
+class HasMembers<N, DebugEnabled{true}> {
+public:
+    void required() const {
+        invariant(_hasField.all());
+    }
+
+    void markPresent(size_t pos) {
+        _hasField.set(pos, true);
+    }
+
+private:
+    std::bitset<N> _hasField;
+};
 
 /** Support routines for IDL-generated comparison operators */
 namespace relop {
@@ -350,15 +382,10 @@ public:
     MONGO_COMPILER_NORETURN void throwUnknownField(StringData fieldName) const;
 
     /**
-     * Throw an error message about an array field name not being a valid unsigned integer.
-     */
-    MONGO_COMPILER_NORETURN void throwBadArrayFieldNumberValue(StringData value) const;
-
-    /**
      * Throw an error message about the array field name not being the next number in the sequence.
      */
-    MONGO_COMPILER_NORETURN void throwBadArrayFieldNumberSequence(
-        std::uint32_t actualValue, std::uint32_t expectedValue) const;
+    MONGO_COMPILER_NORETURN void throwBadArrayFieldNumberSequence(StringData actualValue,
+                                                                  StringData expectedValue) const;
 
     /**
      * Throw an error message about an unrecognized enum value.
@@ -483,7 +510,7 @@ void throwComparisonError(
  */
 template <typename T>
 void throwComparisonError(StringData fieldName, StringData op, T actualValue, T expectedValue) {
-    uasserted(51024,
+    uasserted(ErrorCodes::BadValue,
               str::stream() << "BSON field '" << fieldName << "' value must be " << op << " "
                             << expectedValue << ", actual value '" << actualValue << "'");
 }
@@ -522,5 +549,11 @@ BSONObj parseOwnedBSON(BSONElement element);
  * break because of it.
  */
 bool parseBoolean(BSONElement element);
+
+/**
+ * Generated enums specialize this with their element count.
+ */
+template <typename E>
+constexpr inline size_t idlEnumCount = 0;
 
 }  // namespace mongo

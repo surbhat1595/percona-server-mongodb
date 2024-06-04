@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <limits>
 #include <new>
@@ -1531,7 +1530,7 @@ SafeNum Element::getValueSafeNum() const {
 }
 
 int Element::compareWithElement(const ConstElement& other,
-                                const StringData::ComparatorInterface* comparator,
+                                const StringDataComparator* comparator,
                                 bool considerFieldName) const {
     invariant(ok());
     invariant(other.ok());
@@ -1614,7 +1613,7 @@ int Element::compareWithElement(const ConstElement& other,
 }
 
 int Element::compareWithBSONElement(const BSONElement& other,
-                                    const StringData::ComparatorInterface* comparator,
+                                    const StringDataComparator* comparator,
                                     bool considerFieldName) const {
     invariant(ok());
 
@@ -1655,7 +1654,7 @@ int Element::compareWithBSONElement(const BSONElement& other,
 }
 
 int Element::compareWithBSONObj(const BSONObj& other,
-                                const StringData::ComparatorInterface* comparator,
+                                const StringDataComparator* comparator,
                                 bool considerFieldName) const {
     invariant(ok());
 

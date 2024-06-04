@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -171,6 +170,10 @@ public:
     uint64_t estimatedKeySizeBytes() const {
         return sizeof(*this) + _info.keySizeInBytes() +
             container_size_helper::estimateObjectSizeInBytes(_secondaryCollectionStates);
+    }
+
+    const query_settings::QuerySettings& querySettings() const {
+        return _info.querySettings();
     }
 
 private:

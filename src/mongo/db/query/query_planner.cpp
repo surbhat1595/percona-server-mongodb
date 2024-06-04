@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstring>
 #include <s2cellid.h>
@@ -70,9 +69,11 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_internal_projection.h"
+#include "mongo/db/pipeline/document_source_internal_replace_root.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/document_source_set_window_fields.h"
+#include "mongo/db/pipeline/document_source_skip.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/inner_pipeline_stage_interface.h"
@@ -142,15 +143,13 @@ void logNumberOfSolutions(size_t numSolutions) {
 
 namespace {
 /**
- * On success, applies the index tags from 'branchCacheData' (which represent the winning
- * plan for 'orChild') to 'compositeCacheData'.
+ * Attempts to apply the index tags from 'branchCacheData' to 'orChild'. If the index assignments
+ * cannot be applied, return the error from the process. Otherwise the tags are applied and success
+ * is returned.
  */
-Status tagOrChildAccordingToCache(PlanCacheIndexTree* compositeCacheData,
-                                  SolutionCacheData* branchCacheData,
+Status tagOrChildAccordingToCache(const SolutionCacheData* branchCacheData,
                                   MatchExpression* orChild,
                                   const std::map<IndexEntry::Identifier, size_t>& indexMap) {
-    invariant(compositeCacheData);
-
     // We want a well-formed *indexed* solution.
     if (nullptr == branchCacheData) {
         // For example, we don't cache things for 2d indices.
@@ -174,9 +173,6 @@ Status tagOrChildAccordingToCache(PlanCacheIndexTree* compositeCacheData,
         ss << "Failed to extract indices from subchild " << orChild->debugString();
         return tagStatus.withContext(ss);
     }
-
-    // Add the child's cache data to the cache data we're creating for the main query.
-    compositeCacheData->children.push_back(branchCacheData->tree->clone());
 
     return Status::OK();
 }
@@ -237,7 +233,7 @@ bool hintMatchesColumnStoreIndex(const BSONObj& hintObj, const ColumnIndexEntry&
 std::pair<DepsTracker /* filter */, DepsTracker /* other */> computeDeps(
     const QueryPlannerParams& params, const CanonicalQuery& query) {
     DepsTracker filterDeps;
-    match_expression::addDependencies(query.root(), &filterDeps);
+    match_expression::addDependencies(query.getPrimaryMatchExpression(), &filterDeps);
     DepsTracker outputDeps;
     if ((!query.getProj() || query.getProj()->requiresDocument()) && !query.isCountLike()) {
         outputDeps.needWholeDocument = true;
@@ -477,7 +473,7 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildColumnScan(
     std::unique_ptr<MatchExpression> residualPredicate;
     StringMap<std::unique_ptr<MatchExpression>> filterSplitByColumn;
     std::tie(filterSplitByColumn, residualPredicate) =
-        expression::splitMatchExpressionForColumns(query.root());
+        expression::splitMatchExpressionForColumns(query.getPrimaryMatchExpression());
     auto heuristicsStatus = querySatisfiesCsiPlanningHeuristics(
         allFieldsReferenced.size(), filterSplitByColumn.size(), params);
 
@@ -535,18 +531,13 @@ bool canUseClusteredCollScan(QuerySolutionNode* node,
  * Creates a query solution node for $search plans that are being pushed down into SBE.
  */
 StatusWith<std::unique_ptr<QuerySolution>> tryToBuildSearchQuerySolution(
-    const CanonicalQuery& query) {
-    if (query.pipeline().empty()) {
+    const QueryPlannerParams& params, const CanonicalQuery& query) {
+    if (query.cqPipeline().empty()) {
         return {ErrorCodes::InvalidOptions,
                 "not building $search node because the query pipeline is empty"};
     }
 
-    const auto stage = query.pipeline().front()->documentSource();
-    auto isSearch = getSearchHelpers(query.getOpCtx()->getServiceContext())->isSearchStage(stage);
-    auto isSearchMeta =
-        getSearchHelpers(query.getOpCtx()->getServiceContext())->isSearchMetaStage(stage);
-
-    if (isSearch || isSearchMeta) {
+    if (query.isSearchQuery()) {
         tassert(7816300,
                 "Pushing down $search into SBE but forceClassicEngine is true.",
                 !query.getForceClassicEngine());
@@ -557,12 +548,17 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildSearchQuerySolution(
                 "Pushing down $search into SBE but featureFlagSearchInSbe is disabled.",
                 feature_flags::gFeatureFlagSearchInSbe.isEnabledAndIgnoreFCVUnsafe());
 
-        auto searchNode =
-            getSearchHelpers(query.getOpCtx()->getServiceContext())->getSearchNode(stage);
+        auto searchNode = getSearchHelpers(query.getOpCtx()->getServiceContext())
+                              ->getSearchNode(query.cqPipeline().front()->documentSource());
 
-        auto querySoln = std::make_unique<QuerySolution>();
-        querySoln->setRoot(std::move(searchNode));
-        return std::move(querySoln);
+        if (searchNode->searchQuery.getBoolField(kReturnStoredSourceArg) ||
+            searchNode->isSearchMeta) {
+            auto querySoln = std::make_unique<QuerySolution>();
+            querySoln->setRoot(std::move(searchNode));
+            return std::move(querySoln);
+        }
+        // Apply shard filter if needed.
+        return QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(searchNode));
     }
 
     return {ErrorCodes::InvalidOptions, "no search stage found at front of pipeline"};
@@ -790,8 +786,8 @@ int determineCollscanDirection(const CanonicalQuery& query, const QueryPlannerPa
 
 std::pair<std::unique_ptr<QuerySolution>, const CollectionScanNode*> buildCollscanSolnWithNode(
     const CanonicalQuery& query, bool tailable, const QueryPlannerParams& params, int direction) {
-    std::unique_ptr<QuerySolutionNode> solnRoot(
-        QueryPlannerAccess::makeCollectionScan(query, tailable, params, direction, query.root()));
+    std::unique_ptr<QuerySolutionNode> solnRoot(QueryPlannerAccess::makeCollectionScan(
+        query, tailable, params, direction, query.getPrimaryMatchExpression()));
     const auto* collscanNode = checked_cast<const CollectionScanNode*>(solnRoot.get());
     return std::make_pair(
         QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(solnRoot)), collscanNode);
@@ -1000,7 +996,7 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
     // cases, and we proceed by using the PlanCacheIndexTree to tag the query tree.
 
     // Create a copy of the expression tree.  We use cachedSoln to annotate this with indices.
-    unique_ptr<MatchExpression> clone = query.root()->clone();
+    unique_ptr<MatchExpression> clone = query.getPrimaryMatchExpression()->clone();
 
     LOGV2_DEBUG(20963,
                 5,
@@ -1009,7 +1005,7 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
                 "cacheData"_attr = redact(winnerCacheData.toString()));
 
     RelevantFieldIndexMap fields;
-    QueryPlannerIXSelect::getFields(query.root(), &fields);
+    QueryPlannerIXSelect::getFields(query.getPrimaryMatchExpression(), &fields);
     // We will not cache queries with 'hint'.
     std::vector<IndexEntry> expandedIndexes =
         QueryPlannerIXSelect::expandIndexes(fields, params.indices, false /* indexHinted */);
@@ -1184,7 +1180,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     // were used to override the allowed indices for planning, we should not use the hinted index
     // requested in the query.
     boost::optional<BSONObj> hintedIndexBson = boost::none;
-    if (!params.indexFiltersApplied) {
+    if (!params.indexFiltersApplied && !params.querySettingsApplied) {
         if (auto hintObj = query.getFindCommandRequest().getHint(); !hintObj.isEmpty()) {
             hintedIndexBson = hintObj;
         }
@@ -1240,7 +1236,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 
     // Figure out what fields we care about.
     RelevantFieldIndexMap fields;
-    QueryPlannerIXSelect::getFields(query.root(), &fields);
+    QueryPlannerIXSelect::getFields(query.getPrimaryMatchExpression(), &fields);
     for (auto&& field : fields) {
         LOGV2_DEBUG(20970, 5, "Predicate over field", "field"_attr = field.first);
     }
@@ -1324,8 +1320,10 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     }
 
     // Figure out how useful each index is to each predicate.
-    QueryPlannerIXSelect::rateIndices(query.root(), "", relevantIndices, query.getCollator());
-    QueryPlannerIXSelect::stripInvalidAssignments(query.root(), relevantIndices);
+    QueryPlannerIXSelect::rateIndices(
+        query.getPrimaryMatchExpression(), "", relevantIndices, query.getCollator());
+    QueryPlannerIXSelect::stripInvalidAssignments(query.getPrimaryMatchExpression(),
+                                                  relevantIndices);
 
     // Unless we have GEO_NEAR, TEXT, or a projection, we may be able to apply an optimization
     // in which we strip unnecessary index assignments.
@@ -1336,23 +1334,29 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     // TEXT and GEO_NEAR are special because they require the use of a text/geo index in order
     // to be evaluated correctly. Stripping these "mandatory assignments" is therefore invalid.
     if (query.getFindCommandRequest().getProjection().isEmpty() &&
-        !QueryPlannerCommon::hasNode(query.root(), MatchExpression::GEO_NEAR) &&
-        !QueryPlannerCommon::hasNode(query.root(), MatchExpression::TEXT)) {
-        QueryPlannerIXSelect::stripUnneededAssignments(query.root(), relevantIndices);
+        !QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(),
+                                     MatchExpression::GEO_NEAR) &&
+        !QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(), MatchExpression::TEXT)) {
+        QueryPlannerIXSelect::stripUnneededAssignments(query.getPrimaryMatchExpression(),
+                                                       relevantIndices);
     }
 
-    // query.root() is now annotated with RelevantTag(s).
-    LOGV2_DEBUG(20972, 5, "Rated tree", "tree"_attr = redact(query.root()->debugString()));
+    // query.getPrimaryMatchExpression() is now annotated with RelevantTag(s).
+    LOGV2_DEBUG(20972,
+                5,
+                "Rated tree",
+                "tree"_attr = redact(query.getPrimaryMatchExpression()->debugString()));
 
     // If there is a GEO_NEAR it must have an index it can use directly.
     const MatchExpression* gnNode = nullptr;
-    if (QueryPlannerCommon::hasNode(query.root(), MatchExpression::GEO_NEAR, &gnNode)) {
+    if (QueryPlannerCommon::hasNode(
+            query.getPrimaryMatchExpression(), MatchExpression::GEO_NEAR, &gnNode)) {
         // No index for GEO_NEAR?  No query.
         RelevantTag* tag = static_cast<RelevantTag*>(gnNode->getTag());
         if (!tag || (0 == tag->first.size() && 0 == tag->notFirst.size())) {
             LOGV2_DEBUG(20973, 5, "Unable to find index for $geoNear query");
             // Don't leave tags on query tree.
-            query.root()->resetTag();
+            query.getPrimaryMatchExpression()->resetTag();
             return Status(ErrorCodes::NoQueryExecutionPlans,
                           "unable to find index for $geoNear query");
         }
@@ -1360,12 +1364,13 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         LOGV2_DEBUG(20974,
                     5,
                     "Rated tree after geonear processing",
-                    "tree"_attr = redact(query.root()->debugString()));
+                    "tree"_attr = redact(query.getPrimaryMatchExpression()->debugString()));
     }
 
     // Likewise, if there is a TEXT it must have an index it can use directly.
     const MatchExpression* textNode = nullptr;
-    if (QueryPlannerCommon::hasNode(query.root(), MatchExpression::TEXT, &textNode)) {
+    if (QueryPlannerCommon::hasNode(
+            query.getPrimaryMatchExpression(), MatchExpression::TEXT, &textNode)) {
         RelevantTag* tag = static_cast<RelevantTag*>(textNode->getTag());
 
         // Exactly one text index required for TEXT.  We need to check this explicitly because
@@ -1379,7 +1384,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         }
         if (textIndexCount != 1) {
             // Don't leave tags on query tree.
-            query.root()->resetTag();
+            query.getPrimaryMatchExpression()->resetTag();
             return Status(ErrorCodes::NoQueryExecutionPlans,
                           "need exactly one text index for $text query");
         }
@@ -1387,7 +1392,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         // Error if the text node is tagged with zero indices.
         if (0 == tag->first.size() && 0 == tag->notFirst.size()) {
             // Don't leave tags on query tree.
-            query.root()->resetTag();
+            query.getPrimaryMatchExpression()->resetTag();
             return Status(ErrorCodes::NoQueryExecutionPlans,
                           "failed to use text index to satisfy $text query (if text index is "
                           "compound, are equality predicates given for all prefix fields?)");
@@ -1400,17 +1405,17 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         LOGV2_DEBUG(20975,
                     5,
                     "Rated tree after text processing",
-                    "tree"_attr = redact(query.root()->debugString()));
+                    "tree"_attr = redact(query.getPrimaryMatchExpression()->debugString()));
     }
 
     std::vector<std::unique_ptr<QuerySolution>> out;
 
     // If we have any relevant indices, we try to create indexed plans.
-    if (0 < relevantIndices.size()) {
+    if (!relevantIndices.empty()) {
         // The enumerator spits out trees tagged with IndexTag(s).
         PlanEnumeratorParams enumParams;
         enumParams.intersect = params.options & QueryPlannerParams::INDEX_INTERSECTION;
-        enumParams.root = query.root();
+        enumParams.root = query.getPrimaryMatchExpression();
         enumParams.indices = &relevantIndices;
         enumParams.enumerateOrChildrenLockstep =
             params.options & QueryPlannerParams::ENUMERATE_OR_CHILDREN_LOCKSTEP;
@@ -1429,9 +1434,9 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
             // Store the plan cache index tree before calling prepareForAccessingPlanning(), so
             // that the PlanCacheIndexTree has the same sort as the MatchExpression used to
             // generate the plan cache key.
-            std::unique_ptr<MatchExpression> clone(nextTaggedTree->clone());
             std::unique_ptr<PlanCacheIndexTree> cacheData;
-            auto statusWithCacheData = cacheDataFromTaggedTree(clone.get(), relevantIndices);
+            auto statusWithCacheData =
+                cacheDataFromTaggedTree(nextTaggedTree.get(), relevantIndices);
             if (!statusWithCacheData.isOK()) {
                 LOGV2_DEBUG(20977,
                             5,
@@ -1471,15 +1476,15 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     }
 
     // Don't leave tags on query tree.
-    query.root()->resetTag();
+    query.getPrimaryMatchExpression()->resetTag();
 
     LOGV2_DEBUG(20979, 5, "Planner: outputted indexed solutions", "numSolutions"_attr = out.size());
 
     // Produce legible error message for failed OR planning with a TEXT child.
     // TODO: support collection scan for non-TEXT children of OR.
     if (out.size() == 0 && textNode != nullptr &&
-        MatchExpression::OR == query.root()->matchType()) {
-        MatchExpression* root = query.root();
+        MatchExpression::OR == query.getPrimaryMatchExpression()->matchType()) {
+        MatchExpression* root = query.getPrimaryMatchExpression();
         for (size_t i = 0; i < root->numChildren(); ++i) {
             if (textNode == root->getChild(i)) {
                 return Status(ErrorCodes::NoQueryExecutionPlans,
@@ -1517,8 +1522,9 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     // index is not over any predicates in the query.
     //
     if (query.getSortPattern() &&
-        !QueryPlannerCommon::hasNode(query.root(), MatchExpression::GEO_NEAR) &&
-        !QueryPlannerCommon::hasNode(query.root(), MatchExpression::TEXT)) {
+        !QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(),
+                                     MatchExpression::GEO_NEAR) &&
+        !QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(), MatchExpression::TEXT)) {
         // See if we have a sort provided from an index already.
         // This is implied by the presence of a non-blocking solution.
         bool usingIndexToSort = false;
@@ -1563,7 +1569,8 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 
                 // Partial indexes can only be used to provide a sort only if the query
                 // predicate is compatible.
-                if (index.filterExpr && !expression::isSubsetOf(query.root(), index.filterExpr)) {
+                if (index.filterExpr &&
+                    !expression::isSubsetOf(query.getPrimaryMatchExpression(), index.filterExpr)) {
                     continue;
                 }
 
@@ -1654,7 +1661,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 
     // Create a $search QuerySolution if we are performing a $search.
     if (out.empty()) {
-        auto statusWithSoln = tryToBuildSearchQuerySolution(query);
+        auto statusWithSoln = tryToBuildSearchQuerySolution(params, query);
         if (statusWithSoln.isOK()) {
             out.emplace_back(std::move(statusWithSoln.getValue()));
         } else {
@@ -1679,9 +1686,10 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 
     // geoNear and text queries *require* an index.
     // Also, if a hint is specified it indicates that we MUST use it.
-    bool possibleToCollscan =
-        !QueryPlannerCommon::hasNode(query.root(), MatchExpression::GEO_NEAR) &&
-        !QueryPlannerCommon::hasNode(query.root(), MatchExpression::TEXT) && !hintedIndexBson;
+    bool possibleToCollscan = !QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(),
+                                                           MatchExpression::GEO_NEAR) &&
+        !QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(), MatchExpression::TEXT) &&
+        !hintedIndexBson;
     if (collScanRequired && !possibleToCollscan) {
         return Status(ErrorCodes::NoQueryExecutionPlans, "No query solutions");
     }
@@ -1723,20 +1731,20 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 }  // QueryPlanner::plan
 
 /**
- * If 'query.pipeline()' is non-empty, it contains a prefix of the aggregation pipeline that can be
- * pushed down to SBE. For now, we plan this separately here and later attach the agg portion of the
- * plan to the solution(s).
+ * If 'query.cqPipeline()' is non-empty, it contains a prefix of the aggregation pipeline that can
+ * be pushed down to SBE. For now, we plan this separately here and attach the agg portion of the
+ * plan to the solution(s) via the extendWith() call near the end.
  */
 std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
-    const CanonicalQuery& query,
+    CanonicalQuery& query,
     std::unique_ptr<QuerySolution>&& solution,
     const std::map<NamespaceString, SecondaryCollectionInfo>& secondaryCollInfos) {
-    if (query.pipeline().empty()) {
+    if (query.cqPipeline().empty()) {
         return nullptr;
     }
 
     std::unique_ptr<QuerySolutionNode> solnForAgg = std::make_unique<SentinelNode>();
-    for (auto& innerStage : query.pipeline()) {
+    for (auto& innerStage : query.cqPipeline()) {
         auto groupStage = dynamic_cast<DocumentSourceGroup*>(innerStage->documentSource());
         if (groupStage) {
             solnForAgg =
@@ -1782,8 +1790,43 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
             continue;
         }
 
+        auto unwindStage = dynamic_cast<DocumentSourceUnwind*>(innerStage->documentSource());
+        if (unwindStage) {
+            solnForAgg = std::make_unique<UnwindNode>(std::move(solnForAgg) /* child */,
+                                                      unwindStage->getUnwindPath() /* fieldPath */,
+                                                      unwindStage->preserveNullAndEmptyArrays(),
+                                                      unwindStage->indexPath());
+            continue;
+        }
+
+        auto replaceRootStage =
+            dynamic_cast<DocumentSourceInternalReplaceRoot*>(innerStage->documentSource());
+        if (replaceRootStage) {
+            solnForAgg = std::make_unique<ReplaceRootNode>(std::move(solnForAgg),
+                                                           replaceRootStage->newRootExpression());
+            continue;
+        }
+
         auto matchStage = dynamic_cast<DocumentSourceMatch*>(innerStage->documentSource());
         if (matchStage) {
+            // Parameterize the pushed-down match expression if there is not already a reason not
+            // to.
+            MatchExpression* matchExpr = matchStage->getMatchExpression();
+            if (query.shouldParameterizeSbe(matchExpr)) {
+                bool parameterized;
+                std::vector<const MatchExpression*> newParams =
+                    MatchExpression::parameterize(matchExpr,
+                                                  query.getMaxMatchExpressionParams(),
+                                                  query.numParams(),
+                                                  &parameterized);
+                if (parameterized) {
+                    query.addMatchParams(newParams);
+                } else {
+                    // Avoid plan cache flooding by not fully parameterized plans.
+                    query.setUncacheableSbe();
+                }
+            }
+
             solnForAgg = std::make_unique<MatchNode>(std::move(solnForAgg),
                                                      matchStage->getMatchExpression()->clone());
             continue;
@@ -1801,6 +1844,18 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
             continue;
         }
 
+        auto limitStage = dynamic_cast<DocumentSourceLimit*>(innerStage->documentSource());
+        if (limitStage) {
+            solnForAgg = std::make_unique<LimitNode>(std::move(solnForAgg), limitStage->getLimit());
+            continue;
+        }
+
+        auto skipStage = dynamic_cast<DocumentSourceSkip*>(innerStage->documentSource());
+        if (skipStage) {
+            solnForAgg = std::make_unique<SkipNode>(std::move(solnForAgg), skipStage->getSkip());
+            continue;
+        }
+
         auto isSearch = getSearchHelpers(query.getOpCtx()->getServiceContext())
                             ->isSearchStage(innerStage->documentSource());
         auto isSearchMeta = getSearchHelpers(query.getOpCtx()->getServiceContext())
@@ -1809,7 +1864,7 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
             // In the $search case, we create the $search query solution node in QueryPlanner::Plan
             // instead of here. The empty branch here assures that we don't hit the tassert below
             // and continue in creating the query plan.
-            // TODO: SERVER-78565 add tests to test pushing down $search + $group and $search +
+            // TODO: SERVER-79255 add tests to test pushing down $search + $group and $search +
             // $lookup pipelines to make sure pushdown works correctly.
             continue;
         }
@@ -1848,13 +1903,11 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
     }
 
     solution->extendWith(std::move(solnForAgg));
-
     solution = QueryPlannerAnalysis::removeInclusionProjectionBelowGroup(std::move(solution));
-
     QueryPlannerAnalysis::removeUselessColumnScanRowStoreExpression(*solution->root());
 
     return std::move(solution);
-}
+}  // QueryPlanner::extendWithAggPipeline
 
 StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::choosePlanForSubqueries(
     const CanonicalQuery& query,
@@ -1862,9 +1915,6 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::choosePlanForSubqueries
     QueryPlanner::SubqueriesPlanningResult planningResult,
     std::function<StatusWith<std::unique_ptr<QuerySolution>>(
         CanonicalQuery* cq, std::vector<unique_ptr<QuerySolution>>)> multiplanCallback) {
-    // This is the skeleton of index selections that is inserted into the cache.
-    std::unique_ptr<PlanCacheIndexTree> cacheData(new PlanCacheIndexTree());
-
     for (size_t i = 0; i < planningResult.orExpression->numChildren(); ++i) {
         auto orChild = planningResult.orExpression->getChild(i);
         auto branchResult = planningResult.branches[i].get();
@@ -1872,14 +1922,14 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::choosePlanForSubqueries
         if (branchResult->cachedData.get()) {
             // We can get the index tags we need out of the cache.
             Status tagStatus = tagOrChildAccordingToCache(
-                cacheData.get(), branchResult->cachedData.get(), orChild, planningResult.indexMap);
+                branchResult->cachedData.get(), orChild, planningResult.indexMap);
             if (!tagStatus.isOK()) {
                 return tagStatus;
             }
         } else if (1 == branchResult->solutions.size()) {
             QuerySolution* soln = branchResult->solutions.front().get();
-            Status tagStatus = tagOrChildAccordingToCache(
-                cacheData.get(), soln->cacheData.get(), orChild, planningResult.indexMap);
+            Status tagStatus =
+                tagOrChildAccordingToCache(soln->cacheData.get(), orChild, planningResult.indexMap);
 
             // Check if 'soln' is a CLUSTERED_IXSCAN. This branch won't be tagged, and 'tagStatus'
             // will return 'NoQueryExecutionPlans'. However, this plan can be executed by the OR
@@ -1939,7 +1989,6 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::choosePlanForSubqueries
                     ss << "Failed to extract indices from subchild " << orChild->debugString();
                     return tagStatus.withContext(ss);
                 }
-                cacheData->children.push_back(bestSoln->cacheData->tree->clone());
             }
         }
     }
@@ -1984,10 +2033,11 @@ StatusWith<QueryPlanner::SubqueriesPlanningResult> QueryPlanner::planSubqueries(
     const CollectionPtr& collection,
     const CanonicalQuery& query,
     const QueryPlannerParams& params) {
-    invariant(query.root()->matchType() == MatchExpression::OR);
-    invariant(query.root()->numChildren(), "Cannot plan subqueries for an $or with no children");
+    invariant(query.getPrimaryMatchExpression()->matchType() == MatchExpression::OR);
+    invariant(query.getPrimaryMatchExpression()->numChildren(),
+              "Cannot plan subqueries for an $or with no children");
 
-    SubqueriesPlanningResult planningResult{query.root()->clone()};
+    SubqueriesPlanningResult planningResult{query.getPrimaryMatchExpression()->clone()};
     for (size_t i = 0; i < params.indices.size(); ++i) {
         const IndexEntry& ie = params.indices[i];
         const auto insertionRes = planningResult.indexMap.insert(std::make_pair(ie.identifier, i));
@@ -2004,7 +2054,8 @@ StatusWith<QueryPlanner::SubqueriesPlanningResult> QueryPlanner::planSubqueries(
         auto orChild = planningResult.orExpression->getChild(i);
 
         // Turn the i-th child into its own query.
-        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx, query, orChild);
+
+        auto statusWithCQ = CanonicalQuery::make(opCtx, query, orChild);
         if (!statusWithCQ.isOK()) {
             str::stream ss;
             ss << "Can't canonicalize subchild " << orChild->debugString() << " "

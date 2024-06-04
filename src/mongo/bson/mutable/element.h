@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -40,6 +39,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
+#include "mongo/bson/mutable/api.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/jsobj.h"
@@ -124,7 +124,7 @@ class Document;
  *    be removed.
  */
 
-class MONGO_API(mutable_bson) Element {
+class MONGO_MUTABLE_BSON_API Element {
 public:
     typedef uint32_t RepIdx;
 
@@ -367,7 +367,7 @@ public:
      *   Returns 1 if this > other according to BSONElement::woCompare
      */
     int compareWithElement(const ConstElement& other,
-                           const StringData::ComparatorInterface* comparator,
+                           const StringDataComparator* comparator,
                            bool considerFieldName = true) const;
 
     /** Compare this Element with BSONElement 'other'. You should not call this on the root
@@ -379,7 +379,7 @@ public:
      *   Returns 1 if this > other according to BSONElement::woCompare
      */
     int compareWithBSONElement(const BSONElement& other,
-                               const StringData::ComparatorInterface* comparator,
+                               const StringDataComparator* comparator,
                                bool considerFieldName = true) const;
 
     /** Compare this Element, which must be an Object or an Array, with 'other'.
@@ -389,7 +389,7 @@ public:
      *   Returns 1 if this object > other according to BSONElement::woCompare
      */
     int compareWithBSONObj(const BSONObj& other,
-                           const StringData::ComparatorInterface* comparator,
+                           const StringDataComparator* comparator,
                            bool considerFieldName = true) const;
 
 

@@ -25,13 +25,13 @@ const config = mongos.getDB("config");
 const mongosDB = mongos.getDB("view_rewrite");
 const coll = mongosDB.getCollection("coll");
 
-assert.commandWorked(config.adminCommand({enableSharding: mongosDB.getName()}));
-st.ensurePrimaryShard(mongosDB.getName(), st.shard0.shardName);
+assert.commandWorked(
+    config.adminCommand({enableSharding: mongosDB.getName(), primaryShard: st.shard0.shardName}));
 
 assert.commandWorked(config.adminCommand({shardCollection: coll.getFullName(), key: {a: 1}}));
 assert.commandWorked(mongos.adminCommand({split: coll.getFullName(), middle: {a: 5}}));
 assert.commandWorked(
-    mongosDB.adminCommand({moveChunk: coll.getFullName(), find: {a: 5}, to: "view_rewrite-rs1"}));
+    mongosDB.adminCommand({moveChunk: coll.getFullName(), find: {a: 5}, to: st.shard1.shardName}));
 
 for (let i = 0; i < 10; ++i) {
     assert.commandWorked(coll.insert({a: i}));

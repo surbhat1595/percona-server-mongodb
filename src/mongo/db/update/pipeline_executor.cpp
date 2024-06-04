@@ -29,7 +29,6 @@
 
 #include <absl/container/node_hash_set.h>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <list>
 #include <typeinfo>
 
@@ -104,6 +103,10 @@ PipelineExecutor::PipelineExecutor(const boost::intrusive_ptr<ExpressionContext>
         invariant(stageConstraints.requiredPosition ==
                   StageConstraints::PositionRequirement::kNone);
         invariant(!stageConstraints.isIndependentOfAnyCollection);
+
+        if (stageConstraints.checkExistenceForDiffInsertOperations) {
+            _checkExistenceForDiffInsertOperations = true;
+        }
     }
 
     _pipeline->addInitialSource(DocumentSourceQueue::create(expCtx));

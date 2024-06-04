@@ -39,7 +39,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -77,7 +76,7 @@
 #include "mongo/transport/service_executor.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/session_workflow.h"
-#include "mongo/transport/transport_layer.h"
+#include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
@@ -289,7 +288,7 @@ private:
 // TODO(SERVER-63883): Remove when re-introducing real metrics.
 class NoopSessionWorkflowMetrics {
 public:
-    explicit NoopSessionWorkflowMetrics(ServiceEntryPoint*) {}
+    explicit NoopSessionWorkflowMetrics() {}
     void start() {}
     void yieldedBeforeReceive() {}
     void received() {}
@@ -390,12 +389,8 @@ public:
     Impl(SessionWorkflow* workflow, ServiceContext::UniqueClient client)
         : _workflow{workflow},
           _serviceContext{client->getServiceContext()},
-          _sep{_serviceContext->getServiceEntryPoint()},
+          _sep{client->getService()->getServiceEntryPoint()},
           _clientStrand{ClientStrand::make(std::move(client))} {}
-
-    ~Impl() {
-        _sep->onEndSession(session());
-    }
 
     Client* client() const {
         return _clientStrand->getClientPointer();
@@ -413,12 +408,13 @@ public:
     void terminate();
 
     /*
-     * Terminates the associated transport Session if its tags don't match the supplied tags.  If
-     * the session is in a pending state, before any tags have been set, it will not be terminated.
+     * Terminates the associated transport Session if the connection tags in the client don't match
+     * the supplied tags.  If the connection tags indicate a pending state, before any tags have
+     * been set, it will not be terminated.
      *
      * This will not block on the session terminating cleaning itself up, it returns immediately.
      */
-    void terminateIfTagsDontMatch(Session::TagMask tags);
+    void terminateIfTagsDontMatch(Client::TagMask tags);
 
     const std::shared_ptr<Session>& session() const {
         return client()->session();
@@ -428,8 +424,8 @@ public:
         return seCtx()->getServiceExecutor();
     }
 
-    bool useDedicatedThread() {
-        return seCtx()->useDedicatedThread();
+    bool usesDedicatedThread() {
+        return seCtx()->usesDedicatedThread();
     }
 
     std::shared_ptr<ServiceExecutor::TaskRunner> taskRunner() {
@@ -459,7 +455,7 @@ private:
     };
 
     struct IterationFrame {
-        explicit IterationFrame(const Impl& impl) : metrics{impl._sep} {
+        explicit IterationFrame(const Impl& impl) : metrics{} {
             metrics.start();
         }
         ~IterationFrame() {
@@ -494,7 +490,7 @@ private:
         invariant(!_work);
         if (_nextWork)
             return Future{std::move(_nextWork)};  // Already have one ready.
-        if (useDedicatedThread()) {
+        if (usesDedicatedThread()) {
             // Yield here to avoid pinning the CPU. Give other threads some CPU
             // time to avoid a spiky latency distribution (BF-27452). Even if
             // this client can run continuously and receive another command
@@ -659,13 +655,11 @@ std::unique_ptr<SessionWorkflow::Impl::WorkItem> SessionWorkflow::Impl::_receive
         const auto& status = ex.toStatus();
         if (ErrorCodes::isInterruption(status.code()) ||
             ErrorCodes::isNetworkError(status.code())) {
-            LOGV2_DEBUG(
-                22986,
-                2,
-                "Session from {remote} encountered a network error during SourceMessage: {error}",
-                "Session from remote encountered a network error during SourceMessage",
-                "remote"_attr = remote,
-                "error"_attr = status);
+            LOGV2_DEBUG(22986,
+                        2,
+                        "Session from remote encountered a network error during SourceMessage",
+                        "remote"_attr = remote,
+                        "error"_attr = status);
         } else if (status == TransportLayer::TicketSessionClosedStatus) {
             // Our session may have been closed internally.
             LOGV2_DEBUG(22987,
@@ -732,14 +726,15 @@ Future<DbResponse> SessionWorkflow::Impl::_dispatchWork() {
 
 void SessionWorkflow::Impl::_acceptResponse(DbResponse response) {
     auto&& work = *_work;
-    // opCtx must be killed and delisted here so that the operation cannot show up in
-    // currentOp results after the response reaches the client. Destruction of the already
-    // killed opCtx is postponed for later (i.e., after completion of the future-chain) to
+    // opCtx must be delisted here so that the operation cannot show up in currentOp results after
+    // the response reaches the client. We are assuming that the operation has already been killed
+    // once we are accepting the response here, so delisting is sufficient. Destruction of the
+    // already killed opCtx is postponed for later (i.e., after completion of the future-chain) to
     // mitigate its performance impact on the critical path of execution.
     // Note that destroying futures after execution, rather that postponing the destruction
     // until completion of the future-chain, would expose the cost of destroying opCtx to
     // the critical path and result in serious performance implications.
-    _serviceContext->killAndDelistOperation(work.opCtx(), ErrorCodes::OperationIsKilledAndDelisted);
+    _serviceContext->delistOperation(work.opCtx());
     // Format our response, if we have one
     Message& toSink = response.response;
     if (toSink.empty())
@@ -807,7 +802,7 @@ void SessionWorkflow::Impl::_scheduleIteration() try {
             _cleanupSession(status);
             return;
         }
-        if (useDedicatedThread()) {
+        if (usesDedicatedThread()) {
             try {
                 _doOneIteration().get();
                 _scheduleIteration();
@@ -840,15 +835,15 @@ void SessionWorkflow::Impl::terminate() {
     session()->end();
 }
 
-void SessionWorkflow::Impl::terminateIfTagsDontMatch(Session::TagMask tags) {
+void SessionWorkflow::Impl::terminateIfTagsDontMatch(Client::TagMask tags) {
     if (_isTerminated.load())
         return;
 
-    auto sessionTags = session()->getTags();
+    auto clientTags = client()->getTags();
 
     // If terminateIfTagsDontMatch gets called when we still are 'pending' where no tags have been
     // set, then skip the termination check.
-    if ((sessionTags & tags) || (sessionTags & Session::kPending)) {
+    if ((clientTags & tags) || (clientTags & Client::kPending)) {
         LOGV2(
             22991, "Skip closing connection for connection", "connectionId"_attr = session()->id());
         return;
@@ -875,7 +870,7 @@ void SessionWorkflow::Impl::_cleanupSession(const Status& status) {
     }
     _cleanupExhaustResources();
     _taskRunner = {};
-    _sep->onClientDisconnect(client());
+    client()->session()->getTransportLayer()->getSessionManager()->endSessionByClient(client());
 }
 
 SessionWorkflow::SessionWorkflow(PassKeyTag, ServiceContext::UniqueClient client)
@@ -895,7 +890,7 @@ void SessionWorkflow::terminate() {
     _impl->terminate();
 }
 
-void SessionWorkflow::terminateIfTagsDontMatch(Session::TagMask tags) {
+void SessionWorkflow::terminateIfTagsDontMatch(Client::TagMask tags) {
     _impl->terminateIfTagsDontMatch(tags);
 }
 

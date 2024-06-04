@@ -34,7 +34,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -265,7 +264,8 @@ void ParsedUpdateBase::parseUpdate() {
 }
 
 PlanYieldPolicy::YieldPolicy ParsedUpdateBase::yieldPolicy() const {
-    return _request->isGod() ? PlanYieldPolicy::YieldPolicy::NO_YIELD : _request->getYieldPolicy();
+    return _request->isGod() ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
+                             : _request->getYieldPolicy();
 }
 
 bool ParsedUpdateBase::hasParsedQuery() const {

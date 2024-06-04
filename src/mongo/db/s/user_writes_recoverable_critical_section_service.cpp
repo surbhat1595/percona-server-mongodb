@@ -29,7 +29,6 @@
 
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <utility>
 
 #include "mongo/base/error_codes.h"
@@ -95,8 +94,9 @@ const auto serviceDecorator =
 BSONObj findRecoverableCriticalSectionDoc(OperationContext* opCtx, const NamespaceString& nss) {
     DBDirectClient dbClient(opCtx);
 
-    const auto queryNss = BSON(UserWriteBlockingCriticalSectionDocument::kNssFieldName
-                               << NamespaceStringUtil::serialize(nss));
+    const auto queryNss =
+        BSON(UserWriteBlockingCriticalSectionDocument::kNssFieldName
+             << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
     FindCommandRequest findRequest{NamespaceString::kUserWritesCriticalSectionsNamespace};
     findRequest.setFilter(queryNss);
     return dbClient.findOne(std::move(findRequest));
@@ -110,7 +110,7 @@ void setBlockUserWritesDocumentField(OperationContext* opCtx,
     store.update(
         opCtx,
         BSON(UserWriteBlockingCriticalSectionDocument::kNssFieldName
-             << NamespaceStringUtil::serialize(nss)),
+             << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())),
         BSON("$set" << BSON(UserWriteBlockingCriticalSectionDocument::kBlockUserWritesFieldName
                             << blockUserWrites)),
         ShardingCatalogClient::kLocalWriteConcern);
@@ -158,6 +158,9 @@ void acquireRecoverableCriticalSection(OperationContext* opCtx,
                         3,
                         "The user writes recoverable critical section was already acquired",
                         logAttrs(nss));
+
+            repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
+
             return;
         }
 
@@ -182,7 +185,7 @@ void acquireRecoverableCriticalSection(OperationContext* opCtx,
 }  // namespace
 
 const NamespaceString UserWritesRecoverableCriticalSectionService::kGlobalUserWritesNamespace =
-    NamespaceString();
+    NamespaceString::kEmpty;
 
 UserWritesRecoverableCriticalSectionService* UserWritesRecoverableCriticalSectionService::get(
     ServiceContext* serviceContext) {
@@ -268,6 +271,9 @@ void UserWritesRecoverableCriticalSectionService::
                         "block user "
                         "writes, do nothing",
                         logAttrs(nss));
+
+            repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
+
             return;
         }
 
@@ -308,6 +314,9 @@ void UserWritesRecoverableCriticalSectionService::
                 3,
                 "The user writes recoverable critical section was not currently taken, do nothing",
                 logAttrs(nss));
+
+            repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
+
             return;
         }
 
@@ -321,6 +330,9 @@ void UserWritesRecoverableCriticalSectionService::
                         "The user writes recoverable critical section was already not blocking "
                         "user writes, do nothing",
                         logAttrs(nss));
+
+            repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
+
             return;
         }
 
@@ -355,6 +367,9 @@ void UserWritesRecoverableCriticalSectionService::releaseRecoverableCriticalSect
                 3,
                 "The user writes recoverable critical section was already released, do nothing",
                 logAttrs(nss));
+
+            repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
+
             return;
         }
 
@@ -370,8 +385,9 @@ void UserWritesRecoverableCriticalSectionService::releaseRecoverableCriticalSect
 
             deleteOp.setDeletes({[&] {
                 write_ops::DeleteOpEntry entry;
-                entry.setQ(BSON(UserWriteBlockingCriticalSectionDocument::kNssFieldName
-                                << NamespaceStringUtil::serialize(nss)));
+                entry.setQ(BSON(
+                    UserWriteBlockingCriticalSectionDocument::kNssFieldName
+                    << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())));
                 // At most one doc can possibly match the above query.
                 entry.setMulti(false);
                 return entry;

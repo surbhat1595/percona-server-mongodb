@@ -38,12 +38,13 @@ assert.commandWorked(mongos.adminCommand({enableSharding: kDbName}));
 
 jsTest.log("Fail if collection is unsharded.");
 assert.commandFailedWithCode(mongos.adminCommand({reshardCollection: ns, key: {newKey: 1}}),
-                             ErrorCodes.NamespaceNotSharded);
+                             [ErrorCodes.NamespaceNotSharded, ErrorCodes.NamespaceNotFound]);
 
 assert.commandWorked(mongos.adminCommand({shardCollection: ns, key: {oldKey: 1}}));
 
 jsTest.log("Fail if missing required key.");
-assert.commandFailedWithCode(mongos.adminCommand({reshardCollection: ns}), 40414);
+assert.commandFailedWithCode(mongos.adminCommand({reshardCollection: ns}),
+                             ErrorCodes.IDLFailedToParse);
 
 jsTest.log("Fail if unique is specified and is true.");
 assert.commandFailedWithCode(
@@ -76,7 +77,7 @@ assert.commandFailedWithCode(mongos.adminCommand({
     zones: [{zone: nonExistingZoneName, min: {newKey: 5}, max: {newKey: 10}}],
     numInitialChunks: 2,
 }),
-                             4952607);
+                             ErrorCodes.CannotCreateChunkDistribution);
 
 jsTestLog("Fail if splitting collection into multiple chunks while it is still empty.");
 assert.commandFailedWithCode(

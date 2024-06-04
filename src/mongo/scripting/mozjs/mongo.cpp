@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <initializer_list>
 #include <js/Object.h>
 #include <js/PropertyDescriptor.h>
@@ -82,12 +81,15 @@
 #include "mongo/scripting/mozjs/valuereader.h"
 #include "mongo/scripting/mozjs/valuewriter.h"
 #include "mongo/scripting/mozjs/wrapconstrainedmethod.h"  // IWYU pragma: keep
+#include "mongo/transport/transport_layer.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/exit_code.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 namespace mongo {
 namespace mozjs {
@@ -371,15 +373,14 @@ void doRunCommand(JSContext* cx, JS::CallArgs args, MakeRequest makeRequest) {
     auto arg = ValueWriter(cx, args.get(1)).toBSON();
 
     auto request = makeRequest(database, arg);
-    if (auto tokenArg = args.get(3); tokenArg.isObject()) {
+    if (auto tokenArg = args.get(3); tokenArg.isString()) {
         using VTS = auth::ValidatedTenancyScope;
-        if (auto token = ValueWriter(cx, tokenArg).toBSON(); token.nFields() > 0) {
-            request.validatedTenancyScope = VTS(token, VTS::InitTag::kInitForShell);
+        if (auto token = ValueWriter(cx, tokenArg).toString(); !token.empty()) {
+            request.validatedTenancyScope = VTS(token, VTS::InitForShellTag{});
         }
     } else {
         uassert(ErrorCodes::BadValue,
-                str::stream() << "The token parameter to " << Params::kCommandName
-                              << " must be an object",
+                "The token parameter to {} must be a string"_format(Params::kCommandName),
                 tokenArg.isUndefined());
     }
 
@@ -591,13 +592,16 @@ void MongoBase::Functions::logout::call(JSContext* cx, JS::CallArgs args) {
     if (args.length() != 1)
         uasserted(ErrorCodes::BadValue, "logout needs 1 arg");
 
+    JSStringWrapper jsstr;
+    const DatabaseName dbName =
+        DatabaseNameUtil::deserialize(boost::none,
+                                      ValueWriter(cx, args.get(0)).toStringData(&jsstr),
+                                      SerializationContext::stateDefault());
+
     BSONObj ret;
-
-    std::string db = ValueWriter(cx, args.get(0)).toString();
-
     auto conn = getConnection(args);
     if (conn) {
-        conn->logout(db, ret);
+        conn->logout(dbName, ret);
     }
 
     // Make a copy because I want to insulate us from whether conn->logout
@@ -726,11 +730,25 @@ void MongoExternalInfo::construct(JSContext* cx, JS::CallArgs args) {
             }
         }
     }
+#ifdef MONGO_CONFIG_GRPC
+    if (cs.isGRPC()) {
+        uassert(ErrorCodes::InvalidOptions,
+                "Cannot enable gRPC mode when connecting to a replica set",
+                cs.type() != ConnectionString::ConnectionType::kReplicaSet);
+
+        uassert(ErrorCodes::InvalidOptions,
+                "Authentication is not currently supported when gRPC mode is enabled",
+                cs.getUser().empty());
+    }
+#endif
 
     boost::optional<std::string> appname = cs.getAppName();
     std::string errmsg;
     std::shared_ptr<DBClientBase> conn(
-        cs.connect(appname.value_or("MongoDB Shell"), errmsg, boost::none, &apiParameters));
+        cs.connect(appname.value_or(MongoURI::kDefaultTestRunnerAppName),
+                   errmsg,
+                   boost::none,
+                   &apiParameters));
 
     if (!conn.get()) {
         uasserted(ErrorCodes::InternalError, errmsg);

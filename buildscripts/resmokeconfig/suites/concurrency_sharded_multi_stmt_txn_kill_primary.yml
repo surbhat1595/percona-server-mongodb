@@ -160,12 +160,16 @@ selector:
   - jstests/concurrency/fsm_workloads/collmod_separate_collections.js
   - jstests/concurrency/fsm_workloads/invalidated_cursors.js
   - jstests/concurrency/fsm_workloads/kill_multicollection_aggregation.js
-  - jstests/concurrency/fsm_workloads/random_moveChunk_timeseries_updates.js
+  - jstests/concurrency/fsm_workloads/random_moveChunk_timeseries_meta_updates.js
+  - jstests/concurrency/fsm_workloads/random_moveChunk_timeseries_arbitrary_updates.js
   - jstests/concurrency/fsm_workloads/view_catalog.js
   - jstests/concurrency/fsm_workloads/view_catalog_cycle_with_drop.js
   - jstests/concurrency/fsm_workloads/view_catalog_direct_system_writes.js
   - jstests/concurrency/fsm_workloads/random_moveChunk_timeseries_deletes.js
   - jstests/concurrency/fsm_workloads/timeseries_deletes_and_inserts.js
+  - jstests/concurrency/fsm_workloads/timeseries_findAndModify_remove_and_inserts.js
+  - jstests/concurrency/fsm_workloads/timeseries_updates_and_inserts.js
+  - jstests/concurrency/fsm_workloads/timeseries_upserts.js
 
   ##
   # Denylists specific to this suite

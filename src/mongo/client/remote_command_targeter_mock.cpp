@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <mutex>
 #include <utility>
 
@@ -97,7 +96,7 @@ void RemoteCommandTargeterMock::markHostShuttingDown(const HostAndPort& host,
     _hostsMarkedDown.insert(host);
 }
 
-void RemoteCommandTargeterMock::setConnectionStringReturnValue(const ConnectionString returnValue) {
+void RemoteCommandTargeterMock::setConnectionStringReturnValue(ConnectionString returnValue) {
     _connectionStringReturnValue = std::move(returnValue);
 }
 

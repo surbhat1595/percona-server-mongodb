@@ -113,7 +113,7 @@ Status notifyShardsOfSecondShardIfNeeded(OperationContext* opCtx) {
         configsvrSetClusterParameter.toBSON({}),
         Shard::RetryPolicy::kIdempotent);
 
-    return Shard::CommandResponse::getEffectiveStatus(std::move(cmdResponse));
+    return Shard::CommandResponse::getEffectiveStatus(cmdResponse);
 }
 
 }  // namespace
@@ -199,7 +199,6 @@ public:
 
         if (!status.isOK()) {
             LOGV2(21920,
-                  "addShard request '{request}' failed: {error}",
                   "addShard request failed",
                   "request"_attr = parsedRequest,
                   "error"_attr = status);
@@ -211,6 +210,6 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(ConfigSvrAddShardCommand);
+MONGO_REGISTER_COMMAND(ConfigSvrAddShardCommand).forShard();
 
 }  // namespace mongo

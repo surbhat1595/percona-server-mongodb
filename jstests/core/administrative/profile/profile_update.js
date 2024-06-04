@@ -18,9 +18,13 @@ import {getLatestProfilerEntry, getNLatestProfilerEntries} from "jstests/libs/pr
 // Setup test db and collection.
 var testDB = db.getSiblingDB("profile_update");
 assert.commandWorked(testDB.dropDatabase());
-var coll = testDB.getCollection("test");
+const collName = jsTestName();
+var coll = testDB.getCollection(collName);
 
-testDB.setProfilingLevel(2);
+// Don't profile the setFCV command, which could be run during this test in the
+// fcv_upgrade_downgrade_replica_sets_jscore_passthrough suite.
+assert.commandWorked(testDB.setProfilingLevel(
+    1, {filter: {'command.setFeatureCompatibilityVersion': {'$exists': false}}}));
 
 //
 // Confirm metrics for single document update.

@@ -44,7 +44,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/string_data.h"
@@ -66,7 +65,7 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
@@ -336,17 +335,16 @@ public:
     static constexpr StringData kRangeFieldName = "range"_sd;
 
     DocumentSourceInternalDensify(const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
-                                  const FieldPath& field,
-                                  const std::list<FieldPath>& partitions,
-                                  const RangeStatement& range)
+                                  FieldPath field,
+                                  std::list<FieldPath> partitions,
+                                  RangeStatement range)
         : DocumentSource(kStageName, pExpCtx),
-          _memTracker(
-              MemoryUsageTracker(false, internalDocumentSourceDensifyMaxMemoryBytes.load())),
+          _memTracker(internalDocumentSourceDensifyMaxMemoryBytes.load()),
           _field(std::move(field)),
-          _partitions(partitions),
+          _partitions(std::move(partitions)),
           _range(std::move(range)),
           _partitionTable(pExpCtx->getValueComparator()
-                              .makeUnorderedValueMap<MemoryTokenWith<DensifyValue>>()) {
+                              .makeUnorderedValueMap<SimpleMemoryTokenWith<DensifyValue>>()) {
         _maxDocs = internalQueryMaxAllowedDensifyDocs.load();
     };
 
@@ -546,9 +544,9 @@ private:
         if (_partitionExpr) {
             auto partitionKey = getDensifyPartition(doc);
             auto partitionVal = getDensifyValue(doc);
-            MemoryToken memoryToken{partitionKey.getApproximateSize() +
-                                        partitionVal.getApproximateSize(),
-                                    &_memTracker};
+            SimpleMemoryToken memoryToken{partitionKey.getApproximateSize() +
+                                              partitionVal.getApproximateSize(),
+                                          &_memTracker};
             _partitionTable[partitionKey] = {std::move(memoryToken), std::move(partitionVal)};
             uassert(6007200,
                     str::stream() << "$densify exceeded memory limit of "
@@ -611,13 +609,13 @@ private:
     // Keep track of documents generated, error if it goes above the limit.
     size_t _docsGenerated = 0;
     size_t _maxDocs = 0;
-    MemoryUsageTracker _memTracker;
+    SimpleMemoryUsageTracker _memTracker;
 
     DensifyState _densifyState = DensifyState::kUninitializedOrBelowRange;
     FieldPath _field;
     std::list<FieldPath> _partitions;
     RangeStatement _range;
     // Store of the value we've seen for each partition.
-    ValueUnorderedMap<MemoryTokenWith<DensifyValue>> _partitionTable;
+    ValueUnorderedMap<SimpleMemoryTokenWith<DensifyValue>> _partitionTable;
 };
 }  // namespace mongo

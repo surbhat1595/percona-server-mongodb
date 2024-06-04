@@ -30,7 +30,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <s2cellid.h>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
@@ -1233,7 +1232,8 @@ std::vector<std::unique_ptr<QuerySolutionNode>> QueryPlannerAccess::collapseEqui
             collapsedFilter->add(std::move(collapseIntoFetch->filter));
 
             // Normalize the filter and add it to 'into'.
-            collapseIntoFetch->filter = MatchExpression::optimize(std::move(collapsedFilter));
+            collapseIntoFetch->filter = MatchExpression::optimize(std::move(collapsedFilter),
+                                                                  /* enableSimplification */ true);
         } else {
             // Scans are not equivalent and can't be collapsed.
             collapsedScans.push_back(std::move(scans[i]));
@@ -1989,7 +1989,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::scanWholeIndex(
 
     deprioritizeUnboundedIndexScan(isn.get(), query.getFindCommandRequest());
 
-    unique_ptr<MatchExpression> filter = query.root()->clone();
+    unique_ptr<MatchExpression> filter = query.getPrimaryMatchExpression()->clone();
 
     // If it's find({}) remove the no-op root.
     if (MatchExpression::AND == filter->matchType() && (0 == filter->numChildren())) {
@@ -2119,7 +2119,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeIndexScan(
     isn->bounds.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
     isn->queryCollator = query.getCollator();
 
-    unique_ptr<MatchExpression> filter = query.root()->clone();
+    unique_ptr<MatchExpression> filter = query.getPrimaryMatchExpression()->clone();
 
     // If it's find({}) remove the no-op root.
     if (MatchExpression::AND == filter->matchType() && (0 == filter->numChildren())) {

@@ -39,7 +39,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cmath>
 #include <cstdint>
@@ -242,6 +241,7 @@ intrusive_ptr<Expression> Expression::parseExpression(ExpressionContext* const e
     // Look up the parser associated with the expression name.
     const char* opName = obj.firstElementFieldName();
     auto it = parserMap.find(opName);
+
     uassert(ErrorCodes::InvalidPipelineOperator,
             str::stream() << "Unrecognized expression '" << opName << "'",
             it != parserMap.end());
@@ -2760,7 +2760,7 @@ intrusive_ptr<Expression> ExpressionFilter::parse(ExpressionContext* const expCt
 
     VariablesParseState vpsSub(vpsIn);  // vpsSub gets our variable, vpsIn doesn't.
     // Parse "as". If "as" is not specified, then use "this" by default.
-    auto const varName = asElem.eoo() ? "this" : asElem.str();
+    auto varName = asElem.eoo() ? "this" : asElem.str();
 
     variableValidation::validateNameForUserWrite(varName);
     Variables::Id varId = vpsSub.defineVariable(varName);
@@ -2866,7 +2866,7 @@ Value ExpressionFilter::evaluate(const Document& root, Variables* variables) con
         variables->setValue(_varId, elem);
 
         if (_children[_kCond]->evaluate(root, variables).coerceToBool()) {
-            output.push_back(std::move(elem));
+            output.push_back(elem);
             if (remainingLimitCounter && --*remainingLimitCounter == 0) {
                 return Value(std::move(output));
             }
@@ -3173,6 +3173,7 @@ const std::string recordIdName = "recordId";
 const std::string indexKeyName = "indexKey";
 const std::string sortKeyName = "sortKey";
 const std::string searchScoreDetailsName = "searchScoreDetails";
+const std::string searchSequenceTokenName = "searchSequenceToken";
 const std::string timeseriesBucketMinTimeName = "timeseriesBucketMinTime";
 const std::string timeseriesBucketMaxTimeName = "timeseriesBucketMaxTime";
 const std::string vectorSearchScoreName = "vectorSearchScore";
@@ -3188,6 +3189,7 @@ const StringMap<DocumentMetadataFields::MetaType> kMetaNameToMetaType = {
     {searchHighlightsName, MetaType::kSearchHighlights},
     {searchScoreName, MetaType::kSearchScore},
     {searchScoreDetailsName, MetaType::kSearchScoreDetails},
+    {searchSequenceTokenName, MetaType::kSearchSequenceToken},
     {sortKeyName, MetaType::kSortKey},
     {textScoreName, MetaType::kTextScore},
     {timeseriesBucketMinTimeName, MetaType::kTimeseriesBucketMinTime},
@@ -3204,6 +3206,7 @@ const stdx::unordered_map<DocumentMetadataFields::MetaType, StringData> kMetaTyp
     {MetaType::kSearchHighlights, searchHighlightsName},
     {MetaType::kSearchScore, searchScoreName},
     {MetaType::kSearchScoreDetails, searchScoreDetailsName},
+    {MetaType::kSearchSequenceToken, searchSequenceTokenName},
     {MetaType::kSortKey, sortKeyName},
     {MetaType::kTextScore, textScoreName},
     {MetaType::kTimeseriesBucketMinTime, timeseriesBucketMinTimeName},
@@ -3225,7 +3228,8 @@ intrusive_ptr<Expression> ExpressionMeta::parse(ExpressionContext* const expCtx,
 
         auto typeName = iter->first;
         auto usesUnstableField = (typeName == "searchScore") || (typeName == "indexKey") ||
-            (typeName == "textScore") || (typeName == "searchHighlights");
+            (typeName == "textScore") || (typeName == "searchHighlights") ||
+            (typeName == "searchSequenceToken");
 
         if (apiStrict && usesUnstableField) {
             uasserted(ErrorCodes::APIStrictError,
@@ -3288,6 +3292,9 @@ Value ExpressionMeta::evaluate(const Document& root, Variables* variables) const
         case MetaType::kSearchScoreDetails:
             return metadata.hasSearchScoreDetails() ? Value(metadata.getSearchScoreDetails())
                                                     : Value();
+        case MetaType::kSearchSequenceToken:
+            return metadata.hasSearchSequenceToken() ? Value(metadata.getSearchSequenceToken())
+                                                     : Value();
         case MetaType::kTimeseriesBucketMinTime:
             return metadata.hasTimeseriesBucketMinTime()
                 ? Value(metadata.getTimeseriesBucketMinTime())
@@ -3634,7 +3641,7 @@ ExpressionIndexOfArray::Arguments ExpressionIndexOfArray::evaluateAndValidateArg
 class ExpressionIndexOfArray::Optimized : public ExpressionIndexOfArray {
 public:
     Optimized(ExpressionContext* const expCtx,
-              const ValueUnorderedMap<vector<int>>& indexMap,
+              ValueUnorderedMap<vector<int>> indexMap,
               const ExpressionVector& operands)
         : ExpressionIndexOfArray(expCtx), _indexMap(std::move(indexMap)) {
         _children = operands;
@@ -3695,7 +3702,7 @@ intrusive_ptr<Expression> ExpressionIndexOfArray::optimize() {
             }
             indexMap[arr[i]].push_back(i);
         }
-        return new Optimized(getExpressionContext(), indexMap, _children);
+        return new Optimized(getExpressionContext(), std::move(indexMap), _children);
     }
     return this;
 }
@@ -4401,10 +4408,8 @@ intrusive_ptr<Expression> ExpressionPow::create(ExpressionContext* const expCtx,
                                                 Value base,
                                                 Value exp) {
     intrusive_ptr<ExpressionPow> expr(new ExpressionPow(expCtx));
-    expr->_children.push_back(
-        ExpressionConstant::create(expr->getExpressionContext(), std::move(base)));
-    expr->_children.push_back(
-        ExpressionConstant::create(expr->getExpressionContext(), std::move(exp)));
+    expr->_children.push_back(ExpressionConstant::create(expr->getExpressionContext(), base));
+    expr->_children.push_back(ExpressionConstant::create(expr->getExpressionContext(), exp));
     return expr;
 }
 
@@ -6770,7 +6775,7 @@ private:
         } else if (doubleValue == 0.0 && std::signbit(doubleValue)) {
             return Value("-0"_sd);
         } else {
-            return Value(static_cast<std::string>(str::stream() << doubleValue));
+            return Value(static_cast<std::string>(str::stream() << fmt::format("{}", doubleValue)));
         }
     }
 
@@ -7909,39 +7914,23 @@ intrusive_ptr<Expression> ExpressionGetField::parse(ExpressionContext* const exp
             str::stream() << kExpressionName << " requires 'input' to be specified",
             inputExpr);
 
-    // The 'field' argument to '$getField' must evaluate to a constant string, for example,
-    // {$const: "$a.b"}. In case the has forgotten to wrap the value into a '$const' or
-    // '$literal' expression, we will raise an error with a more meaningful description.
-    if (auto fieldPathExpr = dynamic_cast<ExpressionFieldPath*>(fieldExpr.get()); fieldPathExpr) {
-        auto fp = fieldPathExpr->getFieldPath().fullPathWithPrefix();
-        uasserted(5654600,
-                  str::stream() << "'" << fp
-                                << "' is a field path reference which is not allowed "
-                                   "in this context. Did you mean {$literal: '"
-                                << fp << "'}?");
+    if (auto constFieldExpr = dynamic_cast<ExpressionConstant*>(fieldExpr.get()); constFieldExpr) {
+        uassert(5654602,
+                str::stream() << kExpressionName
+                              << " requires 'field' to evaluate to type String, "
+                                 "but got "
+                              << typeName(constFieldExpr->getValue().getType()),
+                constFieldExpr->getValue().getType() == BSONType::String);
     }
-
-    auto constFieldExpr = dynamic_cast<ExpressionConstant*>(fieldExpr.get());
-    uassert(5654601,
-            str::stream() << kExpressionName
-                          << " requires 'field' to evaluate to a constant, "
-                             "but got a non-constant argument",
-            constFieldExpr);
-    uassert(5654602,
-            str::stream() << kExpressionName
-                          << " requires 'field' to evaluate to type String, "
-                             "but got "
-                          << typeName(constFieldExpr->getValue().getType()),
-            constFieldExpr->getValue().getType() == BSONType::String);
 
     return make_intrusive<ExpressionGetField>(expCtx, fieldExpr, inputExpr);
 }
 
 Value ExpressionGetField::evaluate(const Document& root, Variables* variables) const {
     auto fieldValue = _children[_kField]->evaluate(root, variables);
-    // The parser guarantees that the '_children[_kField]' expression evaluates to a constant
-    // string.
-    tassert(3041704,
+    // If '_children[_kField]' is a constant expression, the parser guarantees that it evaluates to
+    // a string. If it's a dynamic expression, its type can't be deduced during parsing.
+    uassert(3041704,
             str::stream() << kExpressionName
                           << " requires 'field' to evaluate to type String, "
                              "but got "
@@ -7967,22 +7956,31 @@ intrusive_ptr<Expression> ExpressionGetField::optimize() {
 }
 
 Value ExpressionGetField::serialize(const SerializationOptions& options) const {
-    // The parser guarantees that the '_children[_kField]' expression evaluates to a constant
-    // string.
-    auto strPath =
-        static_cast<ExpressionConstant*>(_children[_kField].get())->getValue().getString();
+    Value fieldValue;
 
-    Value maybeRedactedPath{options.serializeFieldPathFromString(strPath)};
-    // This is a pretty unique option to serialize. It is both a constant and a field path, which
-    // means that it:
-    //  - should be redacted (if that option is set).
-    //  - should *not* be wrapped in $const iff we are serializing for a debug string
-    if (options.literalPolicy != LiteralSerializationPolicy::kToDebugTypeString) {
-        maybeRedactedPath = Value(Document{{"$const"_sd, maybeRedactedPath}});
+    if (auto fieldExprConst = dynamic_cast<ExpressionConstant*>(_children[_kField].get());
+        fieldExprConst) {
+        auto strPath = fieldExprConst->getValue().getString();
+
+        Value maybeRedactedPath{options.serializeFieldPathFromString(strPath)};
+        // This is a pretty unique option to serialize. It is both a constant and a field path,
+        // which means that it:
+        //  - should be redacted (if that option is set).
+        //  - should *not* be wrapped in $const iff we are serializing for a debug string
+        // However, if we are serializing for a debug string and the string looks like a field
+        // reference, it should be wrapped in $const to make it unambiguous with actual field
+        // references.
+        if (options.literalPolicy != LiteralSerializationPolicy::kToDebugTypeString ||
+            strPath[0] == '$') {
+            maybeRedactedPath = Value(Document{{"$const"_sd, maybeRedactedPath}});
+        }
+        fieldValue = maybeRedactedPath;
+    } else {
+        fieldValue = _children[_kField]->serialize(options);
     }
 
     return Value(Document{{"$getField"_sd,
-                           Document{{"field"_sd, std::move(maybeRedactedPath)},
+                           Document{{"field"_sd, std::move(fieldValue)},
                                     {"input"_sd, _children[_kInput]->serialize(options)}}}});
 }
 
@@ -8182,4 +8180,14 @@ REGISTER_STABLE_EXPRESSION(bitXor, ExpressionBitXor::parse);
 
 MONGO_INITIALIZER_GROUP(BeginExpressionRegistration, ("default"), ("EndExpressionRegistration"))
 MONGO_INITIALIZER_GROUP(EndExpressionRegistration, ("BeginExpressionRegistration"), ())
+
+/* --------------------------------- Parenthesis --------------------------------------------- */
+
+REGISTER_STABLE_EXPRESSION(expr, parseParenthesisExprObj);
+static intrusive_ptr<Expression> parseParenthesisExprObj(ExpressionContext* const expCtx,
+                                                         BSONElement bsonExpr,
+                                                         const VariablesParseState& vpsIn) {
+    return Expression::parseOperand(expCtx, bsonExpr, vpsIn);
+}
+
 }  // namespace mongo

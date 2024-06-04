@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <functional>
@@ -75,7 +74,7 @@
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/sort_pattern.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/assert_util.h"
@@ -426,8 +425,14 @@ public:
                         boost::intrusive_ptr<::mongo::Expression> input,
                         WindowBounds bounds)
         : Expression(expCtx, std::move(accumulatorName), std::move(input), std::move(bounds)) {
-        StringDataSet compatibleAccumulators{
-            "$sum", "$covarianceSamp", "$covariancePop", "$push", "$stdDevSamp", "$stdDevPop"};
+        StringDataSet compatibleAccumulators{"$sum",
+                                             "$covarianceSamp",
+                                             "$covariancePop",
+                                             "$push",
+                                             "$stdDevSamp",
+                                             "$stdDevPop",
+                                             "$avg",
+                                             "$addToSet"};
         if (compatibleAccumulators.count(_accumulatorName)) {
             expCtx->sbeWindowCompatibility =
                 std::min(expCtx->sbeWindowCompatibility, SbeCompatibility::flagGuarded);
@@ -460,10 +465,10 @@ public:
         auto arg = obj.firstElement();
         auto argName = arg.fieldNameStringData();
         if (isFunction(argName)) {
+            accumulatorName = argName;
             uassert(5371603,
                     str::stream() << accumulatorName << " must be specified with '{}' as the value",
                     arg.type() == BSONType::Object && arg.embeddedObject().nFields() == 0);
-            accumulatorName = argName;
         } else {
             tasserted(ErrorCodes::FailedToParse,
                       str::stream() << "Window function found an unknown argument: " << argName);
@@ -567,7 +572,9 @@ public:
         if (_N) {
             subObj[kNArg] = opts.serializeLiteral(_N.get());
         } else {
-            subObj[kAlphaArg] = opts.serializeLiteral(_alpha.get());
+            // Alpha must be between zero and one (exclusive), so choose a legal representative
+            // value if applicable.
+            subObj[kAlphaArg] = opts.serializeLiteral(_alpha.get(), Value(0.1));
         }
         subObj[kInputArg] = _input->serialize(opts);
         MutableDocument outerObj;
@@ -832,12 +839,14 @@ public:
 
 class ExpressionLinearFill : public Expression {
 public:
+    static constexpr StringData kName = "$linearFill"_sd;
     ExpressionLinearFill(ExpressionContext* expCtx,
                          std::string accumulatorName,
                          boost::intrusive_ptr<::mongo::Expression> input,
                          WindowBounds bounds)
         : Expression(expCtx, std::move(accumulatorName), std::move(input), std::move(bounds)) {
-        expCtx->sbeWindowCompatibility = SbeCompatibility::notCompatible;
+        expCtx->sbeWindowCompatibility =
+            std::min(expCtx->sbeWindowCompatibility, SbeCompatibility::flagGuarded);
     }
     static boost::intrusive_ptr<Expression> parse(BSONObj obj,
                                                   const boost::optional<SortPattern>& sortBy,
@@ -923,7 +932,8 @@ public:
                     boost::intrusive_ptr<::mongo::Expression> input,
                     WindowBounds bounds)
         : Expression(expCtx, "$first", std::move(input), std::move(bounds)) {
-        expCtx->sbeWindowCompatibility = SbeCompatibility::notCompatible;
+        expCtx->sbeWindowCompatibility =
+            std::min(expCtx->sbeWindowCompatibility, SbeCompatibility::flagGuarded);
     }
 
     static boost::intrusive_ptr<Expression> parse(BSONObj obj,
@@ -947,7 +957,8 @@ public:
                    boost::intrusive_ptr<::mongo::Expression> input,
                    WindowBounds bounds)
         : Expression(expCtx, "$last", std::move(input), std::move(bounds)) {
-        expCtx->sbeWindowCompatibility = SbeCompatibility::notCompatible;
+        expCtx->sbeWindowCompatibility =
+            std::min(expCtx->sbeWindowCompatibility, SbeCompatibility::flagGuarded);
     }
 
     static boost::intrusive_ptr<Expression> parse(BSONObj obj,
@@ -987,7 +998,13 @@ public:
         : Expression(expCtx, std::move(name), std::move(input), std::move(bounds)),
           nExpr(std::move(nExpr)),
           sortPattern(std::move(sortPattern)) {
-        expCtx->sbeWindowCompatibility = SbeCompatibility::notCompatible;
+        StringDataSet compatibleAccumulators{"$firstN", "$lastN"};
+        if (compatibleAccumulators.count(_accumulatorName)) {
+            expCtx->sbeWindowCompatibility =
+                std::min(expCtx->sbeWindowCompatibility, SbeCompatibility::flagGuarded);
+        } else {
+            expCtx->sbeWindowCompatibility = SbeCompatibility::notCompatible;
+        }
     }
 
     Value serialize(const SerializationOptions& opts) const final;

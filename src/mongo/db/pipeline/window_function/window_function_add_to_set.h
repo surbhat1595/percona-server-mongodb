@@ -34,7 +34,6 @@
 #include <utility>
 #include <vector>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
@@ -60,7 +59,7 @@ public:
     }
 
     void add(Value value) override {
-        _values.emplace(MemoryToken{value.getApproximateSize(), &_memUsageTracker},
+        _values.emplace(SimpleMemoryToken{value.getApproximateSize(), &_memUsageTracker},
                         std::move(value));
     }
 
@@ -91,7 +90,7 @@ public:
     }
 
 private:
-    std::multiset<MemoryTokenWith<Value>, MemoryTokenValueComparator> _values;
+    std::multiset<SimpleMemoryTokenWith<Value>, MemoryTokenValueComparator> _values;
 };
 
 }  // namespace mongo

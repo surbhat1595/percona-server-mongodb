@@ -7,6 +7,7 @@
 //   uses_transactions,
 // ]
 
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
 
 function expectChunks(st, ns, chunks) {
@@ -119,6 +120,9 @@ const dbName = "test";
 
 const st = new ShardingTest({shards: 3, mongos: 1, config: 1});
 
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+
 var fixtures = [
     {collName: "not_hashed", shardKey: "_id", docs: [{_id: -3}, {_id: 11}, {_id: 3}]},
     {
@@ -140,9 +144,6 @@ fixtures.forEach(function(fixture) {
         fixture.docs[0], {writeConcern: {w: "majority"}}));
     assert.commandWorked(st.s.getDB(dbName)[rangedCollName].insert(
         fixture.docs[1], {writeConcern: {w: "majority"}}));
-
-    assert.commandWorked(st.s.adminCommand({enableSharding: dbName}));
-    st.ensurePrimaryShard(dbName, st.shard0.shardName);
 
     assert.commandWorked(st.s.getDB(dbName)[rangedCollName].createIndex({[fixture.shardKey]: 1}));
     assert.commandWorked(
@@ -231,6 +232,17 @@ const hashedCollName = "hashed";
 const hashedNs = dbName + '.' + hashedCollName;
 
 assert.commandWorked(st.s.adminCommand({shardCollection: hashedNs, key: {_id: 'hashed'}}));
+
+// TODO SERVER-81884: update once 8.0 becomes last LTS.
+if (FeatureFlagUtil.isPresentAndEnabled(st.s.getDB(dbName),
+                                        "OneChunkPerShardEmptyCollectionWithHashedShardKey")) {
+    // Make sure there two chunks on each shard
+    assert.commandWorked(
+        st.s.adminCommand({split: hashedNs, middle: {_id: NumberLong("-6148914691236517204")}}));
+    assert.commandWorked(st.s.adminCommand({split: hashedNs, middle: {_id: NumberLong("0")}}));
+    assert.commandWorked(
+        st.s.adminCommand({split: hashedNs, middle: {_id: NumberLong("6148914691236517204")}}));
+}
 
 // Setup a predictable chunk distribution:
 assert.commandWorked(st.s.adminCommand({

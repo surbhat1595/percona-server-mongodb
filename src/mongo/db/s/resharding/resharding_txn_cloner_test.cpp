@@ -145,10 +145,8 @@ class ReshardingTxnClonerTest : public ShardServerTestFixtureWithCatalogCacheLoa
         ShardServerTestFixtureWithCatalogCacheLoaderMock::setUp();
 
         // The config database's primary shard is always config, and it is always sharded.
-        getCatalogCacheLoaderMock()->setDatabaseRefreshReturnValue(
-            DatabaseType{DatabaseName::kConfig.toString(),
-                         ShardId::kConfigServerId,
-                         DatabaseVersion::makeFixed()});
+        getCatalogCacheLoaderMock()->setDatabaseRefreshReturnValue(DatabaseType{
+            DatabaseName::kConfig, ShardId::kConfigServerId, DatabaseVersion::makeFixed()});
 
         // The config.transactions collection is always unsharded.
         getCatalogCacheLoaderMock()->setCollectionRefreshReturnValue(
@@ -296,6 +294,21 @@ protected:
         });
     }
 
+    void onKillCursorsRequest(CursorId cursorId) {
+        // Handle the 'killCursors' command.
+        onCommand([&](const executor::RemoteCommandRequest& request) {
+            ASSERT(request.cmdObj["killCursors"]);
+            auto cursors = request.cmdObj["cursors"];
+            ASSERT_EQ(cursors.type(), BSONType::Array);
+            auto cursorsArray = cursors.Array();
+            ASSERT_FALSE(cursorsArray.empty());
+            ASSERT_EQ(cursorsArray[0].Long(), cursorId);
+            // The AsyncResultsMerger doesn't actually inspect the response of the killCursors, so
+            // we don't have to put anything except {ok: true}.
+            return BSON("ok" << true);
+        });
+    }
+
     void seedTransactionOnRecipient(LogicalSessionId sessionId,
                                     TxnNumber txnNum,
                                     bool multiDocTxn) {
@@ -392,7 +405,7 @@ protected:
         threadPoolOptions.threadNamePrefix = "TestReshardCloneConfigTransactions-";
         threadPoolOptions.poolName = "TestReshardCloneConfigTransactionsThreadPool";
         threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-            Client::initThread(threadName.c_str());
+            Client::initThread(threadName.c_str(), getGlobalServiceContext()->getService());
             auto* client = Client::getCurrent();
             AuthorizationSession::get(*client)->grantInternalAuthorization(client);
         };
@@ -626,7 +639,7 @@ TEST_F(ReshardingTxnClonerTest, MergeUnParsableTxn) {
                         {});
 
     auto status = future.getNoThrow();
-    ASSERT_EQ(status, static_cast<ErrorCodes::Error>(40414));
+    ASSERT_EQ(status, ErrorCodes::IDLFailedToParse);
 }
 
 TEST_F(ReshardingTxnClonerTest, MergeNewTxnOverMultiDocTxn) {
@@ -867,6 +880,8 @@ TEST_F(ReshardingTxnClonerTest, ClonerStoresProgressMultipleBatches) {
     auto status = future.getNoThrow();
     ASSERT_EQ(status, ErrorCodes::CallbackCanceled);
 
+    onKillCursorsRequest(CursorId{123});
+
     // After the first batch, the progress document should contain the lsid of the last document in
     // that batch.
     ASSERT_FALSE(getTxnCloningProgress(kTwoSourceIdList[0]));
@@ -919,6 +934,8 @@ TEST_F(ReshardingTxnClonerTest, ClonerStoresProgressResume) {
 
     auto status = future.getNoThrow();
     ASSERT_EQ(status, ErrorCodes::CallbackCanceled);
+
+    onKillCursorsRequest(CursorId{123});
 
     // The stored progress should be unchanged.
     ASSERT_FALSE(getTxnCloningProgress(kTwoSourceIdList[0]));
@@ -1074,7 +1091,7 @@ TEST_F(ReshardingTxnClonerTest,
 
     // Make two in progress transactions so the one started by resharding must block.
     {
-        auto newClientOwned = getServiceContext()->makeClient("newClient");
+        auto newClientOwned = getServiceContext()->getService()->makeClient("newClient");
         AlternativeClientRegion acr(newClientOwned);
         auto newOpCtx = cc().makeOperationContext();
         makeInProgressTxn(newOpCtx.get(),
@@ -1176,7 +1193,7 @@ TEST_F(ReshardingTxnClonerTest, CancelableWhileWaitingOnInProgressInternalTxnFor
 
     // Make two in progress transactions so the one started by resharding must block.
     {
-        auto newClientOwned = getServiceContext()->makeClient("newClient");
+        auto newClientOwned = getServiceContext()->getService()->makeClient("newClient");
         AlternativeClientRegion acr(newClientOwned);
         auto newOpCtx = cc().makeOperationContext();
         makeInProgressTxn(newOpCtx.get(),

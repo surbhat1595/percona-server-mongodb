@@ -30,7 +30,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <list>
 #include <mutex>
@@ -111,16 +110,11 @@ BaseCloner::AfterStageBehavior DatabaseCloner::listCollectionsStage() {
         if (collectionNamespace.isSystem() && !collectionNamespace.isReplicated()) {
             LOGV2_DEBUG(21146,
                         1,
-                        "Skipping 'system' collection: {namespace}",
                         "Database cloner skipping 'system' collection",
                         logAttrs(collectionNamespace));
             continue;
         }
-        LOGV2_DEBUG(21147,
-                    2,
-                    "Allowing cloning of collectionInfo: {info}",
-                    "Allowing cloning of collectionInfo",
-                    "info"_attr = info);
+        LOGV2_DEBUG(21147, 2, "Allowing cloning of collectionInfo", "info"_attr = info);
 
         bool isDuplicate = seen.insert(result.getName().toString()).second;
         uassert(51005,
@@ -145,8 +139,8 @@ BaseCloner::AfterStageBehavior DatabaseCloner::listCollectionsStage() {
 }
 
 bool DatabaseCloner::isMyFailPoint(const BSONObj& data) const {
-    return data["database"].str() == DatabaseNameUtil::serializeForCatalog(_dbName) &&
-        BaseCloner::isMyFailPoint(data);
+    const auto fpDbName = DatabaseNameUtil::parseFailPointData(data, "database"_sd);
+    return fpDbName == _dbName && BaseCloner::isMyFailPoint(data);
 }
 
 void DatabaseCloner::postStage() {
@@ -174,14 +168,9 @@ void DatabaseCloner::postStage() {
         }
         auto collStatus = _currentCollectionCloner->run();
         if (collStatus.isOK()) {
-            LOGV2_DEBUG(21148,
-                        1,
-                        "collection clone finished: {namespace}",
-                        "Collection clone finished",
-                        logAttrs(sourceNss));
+            LOGV2_DEBUG(21148, 1, "Collection clone finished", logAttrs(sourceNss));
         } else {
             LOGV2_ERROR(21149,
-                        "collection clone for '{namespace}' failed due to {error}",
                         "Collection clone failed",
                         logAttrs(sourceNss),
                         "error"_attr = collStatus.toString());
@@ -215,17 +204,6 @@ DatabaseCloner::Stats DatabaseCloner::getStats() const {
     return stats;
 }
 
-std::string DatabaseCloner::Stats::toString() const {
-    return toBSON().toString();
-}
-
-BSONObj DatabaseCloner::Stats::toBSON() const {
-    BSONObjBuilder bob;
-    bob.append("dbname", DatabaseNameUtil::serialize(dbname));
-    append(&bob);
-    return bob.obj();
-}
-
 void DatabaseCloner::Stats::append(BSONObjBuilder* builder) const {
     builder->appendNumber("collections", static_cast<long long>(collections));
     builder->appendNumber("clonedCollections", static_cast<long long>(clonedCollections));
@@ -240,8 +218,8 @@ void DatabaseCloner::Stats::append(BSONObjBuilder* builder) const {
     }
 
     for (auto&& collection : collectionStats) {
-        BSONObjBuilder collectionBuilder(
-            builder->subobjStart(NamespaceStringUtil::serialize(collection.nss)));
+        BSONObjBuilder collectionBuilder(builder->subobjStart(
+            NamespaceStringUtil::serialize(collection.nss, SerializationContext::stateDefault())));
         collection.append(&collectionBuilder);
         collectionBuilder.doneFast();
     }

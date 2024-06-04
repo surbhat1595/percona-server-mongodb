@@ -1,6 +1,7 @@
 #
 %define         mongo_home /var/lib/mongo
 %define         psmdb_telemetry /usr/local/percona/telemetry/psmdb
+%define         psmdbs_telemetry /usr/local/percona/telemetry/psmdbs
 %if 0%{?rhel} >= 8
 %undefine _debugsource_packages
 %endif
@@ -396,11 +397,7 @@ fi
 %endif
     fi
 fi
-mkdir -p %{psmdb_telemetry}
-chown mongod:percona-telemetry /usr/local/percona/telemetry/psmdb
-chmod 775 /usr/local/percona/telemetry/psmdb
-chmod g+s /usr/local/percona/telemetry/psmdb
-chmod u+s /usr/local/percona/telemetry/psmdb
+install -d -m 2775 -o mongod -g percona-telemetry /usr/local/percona/telemetry/psmdb
 cp %SOURCE999 /tmp/ 2>/dev/null || :
 bash /tmp/call-home.sh -f "PRODUCT_FAMILY_PSMDB" -v "@@VERSION@@-@@RELEASE@@" -d "PACKAGE" &>/dev/null || :
 chgrp percona-telemetry /usr/local/percona/telemetry_uuid
@@ -408,11 +405,7 @@ chmod 664 /usr/local/percona/telemetry_uuid
 rm -f /tmp/call-home.sh
 
 %post mongos
-mkdir -p %{psmdb_telemetry}
-chown mongod:percona-telemetry /usr/local/percona/telemetry/psmdb
-chmod 775 /usr/local/percona/telemetry/psmdb
-chmod g+s /usr/local/percona/telemetry/psmdb
-chmod u+s /usr/local/percona/telemetry/psmdb
+install -d -m 2775 -o mongod -g percona-telemetry /usr/local/percona/telemetry/psmdbs
 
 %preun server
 %if 0%{?rhel} >= 7
@@ -432,8 +425,8 @@ if [ -d %{psmdb_telemetry} ]; then
 fi
 
 %postun mongos
-if [ -d %{psmdb_telemetry} ]; then
-  rm -rf %{psmdb_telemetry}
+if [ -d %{psmdbs_telemetry} ]; then
+  rm -rf %{psmdbs_telemetry}
 fi
 
 #

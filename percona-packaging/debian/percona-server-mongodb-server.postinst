@@ -115,11 +115,7 @@ else
 fi
 
 if [ -d /usr/local/percona/telemetry ]; then
-    mkdir -p /usr/local/percona/telemetry/psmdb
-    chown mongod:percona-telemetry /usr/local/percona/telemetry/psmdb
-    chmod 775 /usr/local/percona/telemetry/psmdb
-    chmod g+s /usr/local/percona/telemetry/psmdb
-    chmod u+s /usr/local/percona/telemetry/psmdb
+    install -d -m 2775 -o mongod -g percona-telemetry /usr/local/percona/telemetry/psmdb
 fi
 
 exit 0

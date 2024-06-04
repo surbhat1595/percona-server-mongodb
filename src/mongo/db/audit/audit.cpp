@@ -767,7 +767,7 @@ public:
         }
 
         BSONObjBuilder params;
-        params.append("ns", NamespaceStringUtil::serialize(nsname));
+        params.append("ns", nssToString(nsname));
         params.append("indexName", indexname);
         params.append("indexSpec", *indexSpec);
         params.append("indexBuildState", indexBuildState);
@@ -779,7 +779,7 @@ public:
             return;
         }
 
-        const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname));
+        const BSONObj params = BSON("ns" << nssToString(nsname));
         _auditEvent(client, "createCollection", params);
     }
 
@@ -792,8 +792,8 @@ public:
             return;
         }
 
-        const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname) << "viewOn"
-                                         << viewOn << "pipeline" << pipeline);
+        const BSONObj params =
+            BSON("ns" << nssToString(nsname) << "viewOn" << viewOn << "pipeline" << pipeline);
         _auditEvent(client, "createView", params, code);
     }
 
@@ -802,7 +802,7 @@ public:
             return;
         }
 
-        const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname));
+        const BSONObj params = BSON("ns" << nssToString(nsname));
         _auditEvent(client, "importCollection", params);
     }
 
@@ -821,8 +821,7 @@ public:
             return;
         }
 
-        const BSONObj params =
-            BSON("ns" << NamespaceStringUtil::serialize(nsname) << "indexName" << indexname);
+        const BSONObj params = BSON("ns" << nssToString(nsname) << "indexName" << indexname);
         _auditEvent(client, "dropIndex", params);
     }
 
@@ -831,7 +830,7 @@ public:
             return;
         }
 
-        const BSONObj params = BSON("ns" << NamespaceStringUtil::serialize(nsname));
+        const BSONObj params = BSON("ns" << nssToString(nsname));
         _auditEvent(client, "dropCollection", params);
     }
 
@@ -845,7 +844,7 @@ public:
         }
 
         BSONObjBuilder params;
-        params.append("ns", NamespaceStringUtil::serialize(nsname));
+        params.append("ns", nssToString(nsname));
         params.append("viewOn", viewOn);
         params.append("pipeline", pipeline);
         _auditEvent(client, "dropView", params.done(), code);

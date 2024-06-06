@@ -38,6 +38,7 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include <cstdio>
 #include <iostream>
 #include <string>
+#include <variant>
 
 #include <syslog.h>
 
@@ -68,7 +69,6 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/logv2/log_util.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/rpc/metadata/impersonated_user_metadata.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/errno_util.h"
@@ -1140,26 +1140,26 @@ public:
     }
 
     void logGetClusterParameter(Client* client,
-                                const stdx::variant<std::string, std::vector<std::string>>&
+                                const std::variant<std::string, std::vector<std::string>>&
                                     requestedParameters) const override {
         if (!_auditLog) {
             return;
         }
 
         BSONObjBuilder params;
-        stdx::visit(OverloadedVisitor{[&](const std::string& strParameterName) {
-                                          params << "requestedClusterServerParameters"
-                                                 << strParameterName;
-                                      },
-                                      [&](const std::vector<std::string>& listParameterNames) {
-                                          BSONArrayBuilder abuilder(params.subarrayStart(
-                                              "requestedClusterServerParameters"));
-                                          for (auto p : listParameterNames) {
-                                              abuilder.append(p);
-                                          }
-                                          abuilder.doneFast();
-                                      }},
-                    requestedParameters);
+        std::visit(OverloadedVisitor{[&](const std::string& strParameterName) {
+                                         params << "requestedClusterServerParameters"
+                                                << strParameterName;
+                                     },
+                                     [&](const std::vector<std::string>& listParameterNames) {
+                                         BSONArrayBuilder abuilder(params.subarrayStart(
+                                             "requestedClusterServerParameters"));
+                                         for (auto p : listParameterNames) {
+                                             abuilder.append(p);
+                                         }
+                                         abuilder.doneFast();
+                                     }},
+                   requestedParameters);
         _auditEvent(client, "getClusterParameter", params.done());
     }
 
@@ -1213,11 +1213,9 @@ ServiceContext::ConstructorActionRegisterer registerCreateAuditPercona{
 
 ImpersonatedClientAttrs::ImpersonatedClientAttrs(Client* client) {
     if (auto optAttrs = rpc::getImpersonatedUserMetadata(client->getOperationContext()); optAttrs) {
-        if (auto optUsers = optAttrs->getUsers(); optUsers) {
-            if (auto users = optUsers.get(); !users.empty()) {
-                userName = users.front();
-                roleNames = optAttrs->getRoles();
-            }
+        if (auto optUser = optAttrs->getUser(); optUser) {
+            userName = *optUser;
+            roleNames = optAttrs->getRoles();
         }
     }
 }

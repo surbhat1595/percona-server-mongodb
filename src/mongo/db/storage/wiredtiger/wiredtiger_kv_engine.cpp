@@ -478,7 +478,6 @@ StatusWith<std::deque<BackupBlock>> getBackupBlocksFromBackupCursor(
                                                    /*nss=*/boost::none,
                                                    /*uuid=*/boost::none,
                                                    filePath.string(),
-                                                   checkpointTimestamp,
                                                    offset,
                                                    size,
                                                    fileSize));
@@ -492,7 +491,6 @@ StatusWith<std::deque<BackupBlock>> getBackupBlocksFromBackupCursor(
                                                    /*nss=*/boost::none,
                                                    /*uuid=*/boost::none,
                                                    filePath.string(),
-                                                   checkpointTimestamp,
                                                    0 /* offset */,
                                                    0 /* length */,
                                                    fileSize));
@@ -515,7 +513,6 @@ StatusWith<std::deque<BackupBlock>> getBackupBlocksFromBackupCursor(
                                                /*nss=*/boost::none,
                                                /*uuid=*/boost::none,
                                                filePath.string(),
-                                               checkpointTimestamp,
                                                0 /* offset */,
                                                length,
                                                fileSize));

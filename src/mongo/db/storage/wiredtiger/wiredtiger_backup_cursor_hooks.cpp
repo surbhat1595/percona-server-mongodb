@@ -128,7 +128,7 @@ BackupCursorState WiredTigerBackupCursorHooks::openBackupCursor(
     };
 
     auto filesToBackup =
-        uassertStatusOK(engine->beginNonBlockingBackup(opCtx, checkpointTimestamp, options));
+        uassertStatusOK(engine->beginNonBlockingBackup(opCtx, options));
     _state = kBackupCursorOpened;
     _openCursor = UUID::gen();
     LOGV2(29093, "Opened backup cursor", "backupId"_attr = _openCursor.get());

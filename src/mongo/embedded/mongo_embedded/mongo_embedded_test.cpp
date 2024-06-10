@@ -582,8 +582,10 @@ TEST_F(MongodbCAPITest, InsertAndUpdate) {
 TEST_F(MongodbCAPITest, RunListCommands) {
     auto client = createClient();
 
-    std::vector<std::string> allowlist = {"_hashBSONElement",
+    std::vector<std::string> allowlist = {"_dropConnectionsToMongot",
+                                          "_hashBSONElement",
                                           "_killOperations",
+                                          "_mongotConnPoolStats",
                                           "auditGetOptions",
                                           "logApplicationMessage",
                                           "aggregate",
@@ -596,6 +598,7 @@ TEST_F(MongodbCAPITest, RunListCommands) {
                                           "count",
                                           "create",
                                           "createIndexes",
+                                          "createSearchIndexes",
                                           "currentOp",
                                           "dataSize",
                                           "dbStats",
@@ -604,6 +607,7 @@ TEST_F(MongodbCAPITest, RunListCommands) {
                                           "drop",
                                           "dropDatabase",
                                           "dropIndexes",
+                                          "dropSearchIndex",
                                           "echo",
                                           "endSessions",
                                           "explain",
@@ -625,6 +629,7 @@ TEST_F(MongodbCAPITest, RunListCommands) {
                                           "listDatabases",
                                           "listDatabasesForAllTenants",
                                           "listIndexes",
+                                          "listSearchIndexes",
                                           "lockInfo",
                                           "logMessage",
                                           "ping",
@@ -641,6 +646,7 @@ TEST_F(MongodbCAPITest, RunListCommands) {
                                           "sleep",
                                           "startSession",
                                           "update",
+                                          "updateSearchIndex",
                                           "validate",
                                           "validateDBMetadata",
                                           "waitForFailPoint",

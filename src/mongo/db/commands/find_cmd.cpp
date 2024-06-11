@@ -68,7 +68,6 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/run_aggregate.h"
 #include "mongo/db/commands/server_status_metric.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/cursor_id.h"
 #include "mongo/db/cursor_manager.h"
@@ -99,11 +98,11 @@
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/query_request_helper.h"
-#include "mongo/db/query/query_settings_manager.h"
+#include "mongo/db/query/query_settings/query_settings_utils.h"
 #include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/db/query/query_stats/find_key_generator.h"
-#include "mongo/db/query/query_stats/key_generator.h"
+#include "mongo/db/query/query_stats/find_key.h"
+#include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/query_utils.h"
 #include "mongo/db/read_concern_support_result.h"
@@ -119,6 +118,7 @@
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/storage_stats.h"
 #include "mongo/db/transaction/transaction_participant.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -131,6 +131,7 @@
 #include "mongo/rpc/reply_builder_interface.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
 #include "mongo/s/query_analysis_sampler_util.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
@@ -193,39 +194,35 @@ void beginQueryOp(OperationContext* opCtx, const NamespaceString& nss, const BSO
 }
 
 /**
- * Performs the lookup for the QuerySettings given the 'parsedRequest'.
+ * Check if the operation comes from the internal client. Returns 'true' if the client is
+ * internal ('mongos'), and false otherwise.
  */
+bool isInternalClient(const OperationContext* opCtx) {
+    return opCtx->getClient()->session() && opCtx->getClient()->isInternalClient();
+}
+
+// TODO: SERVER-73632 Remove feature flag for PM-635.
+// Remove query settings lookup as it is only done on mongos.
 query_settings::QuerySettings lookupQuerySettingsForFind(
     boost::intrusive_ptr<ExpressionContext> expCtx,
-    const ParsedFindCommand& parsedRequest,
-    const CollectionPtr& collection,
+    const ParsedFindCommand& parsedFind,
     const NamespaceString& nss) {
-    // No QuerySettings lookup for IDHACK queries.
-    if (!feature_flags::gFeatureFlagQuerySettings.isEnabled(
-            serverGlobalParams.featureCompatibility) ||
-        (collection &&
-         isIdHackEligibleQuery(
-             collection, *parsedRequest.findCommandRequest, parsedRequest.collator.get()))) {
+    // No query settings lookup for IDHACK queries.
+    if (isIdHackEligibleQueryWithoutCollator(*parsedFind.findCommandRequest)) {
         return query_settings::QuerySettings();
     }
 
-    auto opCtx = expCtx->opCtx;
-    auto& manager = query_settings::QuerySettingsManager::get(opCtx);
-    auto queryShapeHashFn = [&]() {
-        auto& opDebug = CurOp::get(opCtx)->debug();
-        if (opDebug.queryStatsKey) {
-            return opDebug.queryStatsKey->getQueryShapeHash(
-                opCtx, parsedRequest.findCommandRequest->getSerializationContext());
-        }
+    // If part of the sharded cluster, use the query settings passed as part of the command
+    // arguments.
+    if (isInternalClient(expCtx->opCtx)) {
+        return parsedFind.findCommandRequest->getQuerySettings().get_value_or({});
+    }
 
-        return std::make_unique<query_shape::FindCmdShape>(parsedRequest, expCtx)
-            ->sha256Hash(opCtx, parsedRequest.findCommandRequest->getSerializationContext());
-    };
-
-    // Return the found query settings or an empty one.
-    return manager.getQuerySettingsForQueryShapeHash(opCtx, queryShapeHashFn, nss)
-        .get_value_or({})
-        .first;
+    const auto& serializationContext = parsedFind.findCommandRequest->getSerializationContext();
+    return query_settings::lookupQuerySettings(expCtx, nss, serializationContext, [&]() {
+        query_shape::FindCmdShape findCmdShape(parsedFind, expCtx);
+        return findCmdShape.sha256Hash(expCtx->opCtx, serializationContext);
+    });
 }
 
 /**
@@ -258,18 +255,13 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
     // It is important to do this before canonicalizing and optimizing the query, each of which
     // would alter the query shape.
     if (!(collection && collection.get()->getCollectionOptions().encryptedFieldConfig)) {
-        query_stats::registerRequest(
-            opCtx,
-            nss,
-            [&]() {
-                return std::make_unique<query_stats::FindKey>(
-                    expCtx, *parsedRequest, collOrViewAcquisition.getCollectionType());
-            },
-            /*requiresFullQueryStatsFeatureFlag*/ false);
+        query_stats::registerRequest(opCtx, nss, [&]() {
+            return std::make_unique<query_stats::FindKey>(
+                expCtx, *parsedRequest, collOrViewAcquisition.getCollectionType());
+        });
     }
 
-    auto querySettings = lookupQuerySettingsForFind(expCtx, *parsedRequest, collection, nss);
-    expCtx->setQuerySettings(std::move(querySettings));
+    expCtx->setQuerySettings(lookupQuerySettingsForFind(expCtx, *parsedRequest, nss));
     return std::make_unique<CanonicalQuery>(CanonicalQueryParams{
         .expCtx = std::move(expCtx),
         .parsedFind = std::move(parsedRequest),
@@ -431,7 +423,8 @@ public:
             // cursors to be closed under the global MODE_X lock, after having sent interrupt
             // signals to read operations. This operation must never hold open storage cursors while
             // ignoring interrupt.
-            InterruptibleLockGuard interruptibleLockAcquisition(opCtx->lockState());
+            InterruptibleLockGuard interruptibleLockAcquisition(
+                shard_role_details::getLocker(opCtx));
 
             // Parse the command BSON to a FindCommandRequest.
             auto findCommand = _parseCmdObjectToFindCommandRequest(opCtx, nss, _request);
@@ -453,13 +446,9 @@ public:
                  .extensionsCallback = ExtensionsCallbackReal(opCtx, &nss),
                  .allowedFeatures = MatchExpressionParser::kAllowAllSpecialFeatures}));
 
-            auto querySettings =
-                lookupQuerySettingsForFind(expCtx, *parsedRequest, collectionPtr, nss);
-            expCtx->setQuerySettings(std::move(querySettings));
-            auto cq = std::make_unique<CanonicalQuery>(
-                CanonicalQueryParams{.expCtx = std::move(expCtx),
-                                     .parsedFind = std::move(parsedRequest),
-                                     .explain = true});
+            expCtx->setQuerySettings(lookupQuerySettingsForFind(expCtx, *parsedRequest, nss));
+            auto cq = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+                .expCtx = std::move(expCtx), .parsedFind = std::move(parsedRequest)});
 
             // After parsing to detect if $$USER_ROLES is referenced in the query, set the value of
             // $$USER_ROLES for the find command.
@@ -497,14 +486,10 @@ public:
 
             // Get the execution plan for the query.
             const auto& collection = collectionOrView->getCollection();
-            bool permitYield = true;
-            auto exec =
-                uassertStatusOK(getExecutorFind(opCtx,
-                                                collection,
-                                                std::move(cq),
-                                                nullptr /* extractAndAttachPipelineStages */,
-                                                permitYield,
-                                                QueryPlannerParams::DEFAULT));
+            auto exec = uassertStatusOK(getExecutorFind(opCtx,
+                                                        MultipleCollectionAccessor{collection},
+                                                        std::move(cq),
+                                                        PlanYieldPolicy::YieldPolicy::YIELD_AUTO));
 
             auto bodyBuilder = result->getBodyBuilder();
             // Got the execution tree. Explain it.
@@ -566,6 +551,8 @@ public:
                 uassertStatusOK(replCoord->updateTerm(opCtx, *term));
             }
 
+            const bool includeMetrics = findCommand->getIncludeQueryStatsMetrics();
+
             // The presence of a term in the request indicates that this is an internal replication
             // oplog read request.
             if (term && isOplogNss) {
@@ -573,7 +560,8 @@ public:
                 // Stalling on ticket acquisition can cause complicated deadlocks. Primaries may
                 // depend on data reaching secondaries in order to proceed; and secondaries may get
                 // stalled replicating because of an inability to acquire a read ticket.
-                opCtx->lockState()->setAdmissionPriority(AdmissionContext::Priority::kImmediate);
+                shard_role_details::getLocker(opCtx)->setAdmissionPriority(
+                    AdmissionContext::Priority::kImmediate);
             }
 
             // If this read represents a reverse oplog scan, we want to bypass oplog visibility
@@ -601,7 +589,7 @@ public:
                 }
 
                 if (reverseScan && isInternal) {
-                    pinReadSourceBlock.emplace(opCtx->recoveryUnit());
+                    pinReadSourceBlock.emplace(shard_role_details::getRecoveryUnit(opCtx));
                 }
             }
 
@@ -625,7 +613,7 @@ public:
             };
             auto const nssOrUUID = findCommand->getNamespaceOrUUID();
             if (nssOrUUID.isNamespaceString()) {
-                CommandHelpers::ensureNsNotCommand(nssOrUUID.nss());
+                CommandHelpers::ensureValidCollectionName(nssOrUUID.nss());
                 initializeTracker(nssOrUUID.nss());
             }
             const auto acquisitionRequest = [&] {
@@ -667,7 +655,8 @@ public:
             // cursors to be closed under the global MODE_X lock, after having sent interrupt
             // signals to read operations. This operation must never hold open storage cursors while
             // ignoring interrupt.
-            InterruptibleLockGuard interruptibleLockAcquisition(opCtx->lockState());
+            InterruptibleLockGuard interruptibleLockAcquisition(
+                shard_role_details::getLocker(opCtx));
 
             const auto& collectionPtr = collectionOrView->getCollectionPtr();
 
@@ -752,20 +741,16 @@ public:
             if (cq->getFindCommandRequest().getReadOnce()) {
                 // The readOnce option causes any storage-layer cursors created during plan
                 // execution to assume read data will not be needed again and need not be cached.
-                opCtx->recoveryUnit()->setReadOnce(true);
+                shard_role_details::getRecoveryUnit(opCtx)->setReadOnce(true);
             }
 
             cq->setUseCqfIfEligible(true);
 
             // Get the execution plan for the query.
-            bool permitYield = true;
-            auto exec =
-                uassertStatusOK(getExecutorFind(opCtx,
-                                                collection,
-                                                std::move(cq),
-                                                nullptr /* extractAndAttachPipelineStages */,
-                                                permitYield,
-                                                QueryPlannerParams::DEFAULT));
+            auto exec = uassertStatusOK(getExecutorFind(opCtx,
+                                                        MultipleCollectionAccessor{collection},
+                                                        std::move(cq),
+                                                        PlanYieldPolicy::YieldPolicy::YIELD_AUTO));
 
             // If the executor supports it, find operations will maintain the storage engine state
             // across commands.
@@ -784,9 +769,13 @@ public:
                 const long long numResults = 0;
                 const CursorId cursorId = 0;
                 endQueryOp(opCtx, collectionPtr, *exec, numResults, boost::none, cmdObj);
-                auto bodyBuilder = result->getBodyBuilder();
-                appendCursorResponseObject(
-                    cursorId, nss, BSONArray(), boost::none, &bodyBuilder, respSc);
+                CursorResponseBuilder::Options options;
+                options.isInitialResponse = true;
+                CursorResponseBuilder builder(result, options);
+                boost::optional<CursorMetrics> metrics = includeMetrics
+                    ? boost::make_optional(CurOp::get(opCtx)->debug().getCursorMetrics())
+                    : boost::none;
+                builder.done(cursorId, nss, metrics, respSc);
                 return;
             }
 
@@ -896,7 +885,8 @@ public:
                     // The stats collected here will not get overwritten, as the service entry
                     // point layer will only set these stats when they're not empty.
                     CurOp::get(opCtx)->debug().storageStats =
-                        opCtx->recoveryUnit()->computeOperationStatisticsSinceLastCall();
+                        shard_role_details::getRecoveryUnit(opCtx)
+                            ->computeOperationStatisticsSinceLastCall();
                 }
 
                 stashTransactionResourcesFromOperationContext(opCtx, pinnedCursor.getCursor());
@@ -915,14 +905,19 @@ public:
             }
 
             // Generate the response object to send to the client.
-            firstBatch.done(cursorId, nss, respSc);
+            boost::optional<CursorMetrics> metrics = includeMetrics
+                ? boost::make_optional(CurOp::get(opCtx)->debug().getCursorMetrics())
+                : boost::none;
+            firstBatch.done(cursorId, nss, metrics, respSc);
 
             // Increment this metric once we have generated a response and we know it will return
             // documents.
             auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
             metricsCollector.incrementDocUnitsReturned(toStringForLogging(nss), docUnitsReturned);
-            query_request_helper::validateCursorResponse(
-                result->getBodyBuilder().asTempObj(), nss.tenantId(), respSc);
+            query_request_helper::validateCursorResponse(result->getBodyBuilder().asTempObj(),
+                                                         auth::ValidatedTenancyScope::get(opCtx),
+                                                         nss.tenantId(),
+                                                         respSc);
         }
 
         void appendMirrorableRequest(BSONObjBuilder* bob) const override {
@@ -965,9 +960,16 @@ public:
 
             auto findCommand = query_request_helper::makeFromFindCommand(
                 request.body,
-                std::move(nss),
+                auth::ValidatedTenancyScope::get(opCtx),
+                nss.tenantId(),
                 reqSc,
                 APIParameters::get(opCtx).getAPIStrict().value_or(false));
+
+            // TODO: SERVER-73632 Remove Feature Flag for PM-635.
+            // Forbid users from passing 'querySettings' explicitly.
+            uassert(7746901,
+                    "BSON field 'querySettings' is an unknown field",
+                    isInternalClient(opCtx) || !findCommand->getQuerySettings().has_value());
 
             // Rewrite any FLE find payloads that exist in the query if this is a FLE 2 query.
             if (shouldDoFLERewrite(findCommand)) {

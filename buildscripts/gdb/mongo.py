@@ -541,7 +541,7 @@ class DumpMongoDSessionCatalog(gdb.Command):
             val = get_boost_optional(txn_part_observable_state['txnResourceStash'])
             if val:
                 locker_addr = get_unique_ptr(val["_locker"])
-                locker_obj = locker_addr.dereference().cast(lookup_type("mongo::LockerImpl"))
+                locker_obj = locker_addr.dereference().cast(lookup_type("mongo::Locker"))
                 print('txnResourceStash._locker', "@", locker_addr)
                 print("txnResourceStash._locker._id", "=", locker_obj["_id"])
             else:
@@ -624,9 +624,7 @@ class MongoDBDumpLocks(gdb.Command):
         try:
             # Call into mongod, and dump the state of lock manager
             # Note that output will go to mongod's standard output, not the debugger output window
-            gdb.execute(
-                "call mongo::LockManager::get((mongo::ServiceContext*) mongo::getGlobalServiceContext())->dump()",
-                from_tty=False, to_string=False)
+            gdb.execute("call mongo::dumpLockManager()", from_tty=False, to_string=False)
         except gdb.error as gdberr:
             print("Ignoring error '%s' in dump_mongod_locks" % str(gdberr))
 

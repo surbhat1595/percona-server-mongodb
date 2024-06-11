@@ -64,6 +64,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -97,7 +98,9 @@ public:
         repl::ReplicationCoordinator::set(
             svcCtx, std::make_unique<repl::ReplicationCoordinatorMock>(svcCtx, replSettings));
         _svcCtx->setStorageEngine(makeEngine());
-        getWiredTigerKVEngine()->notifyStartupComplete();
+        auto client = _svcCtx->getService()->makeClient("opCtx");
+        auto opCtx = client->makeOperationContext();
+        getWiredTigerKVEngine()->notifyStartupComplete(opCtx.get());
     }
 
     ~WiredTigerKVHarnessHelper() {
@@ -108,7 +111,9 @@ public:
         getEngine()->cleanShutdown();
         _svcCtx->clearStorageEngine();
         _svcCtx->setStorageEngine(makeEngine());
-        getEngine()->notifyStartupComplete();
+        auto client = _svcCtx->getService()->makeClient("opCtx");
+        auto opCtx = client->makeOperationContext();
+        getEngine()->notifyStartupComplete(opCtx.get());
         return getEngine();
     }
 
@@ -125,10 +130,7 @@ private:
         // Use a small journal for testing to account for the unlikely event that the underlying
         // filesystem does not support fast allocation of a file of zeros.
         std::string extraStrings = "log=(file_max=1m,prealloc=false)";
-        auto client = _svcCtx->getService()->makeClient("opCtx");
-        auto opCtx = client->makeOperationContext();
-        auto kv = std::make_unique<WiredTigerKVEngine>(opCtx.get(),
-                                                       kWiredTigerEngineName,
+        auto kv = std::make_unique<WiredTigerKVEngine>(kWiredTigerEngineName,
                                                        _dbpath.path(),
                                                        _cs.get(),
                                                        extraStrings,
@@ -136,6 +138,9 @@ private:
                                                        0,
                                                        false,
                                                        _forRepair);
+
+        auto client = _svcCtx->getService()->makeClient("opCtx");
+        auto opCtx = client->makeOperationContext();
         StorageEngineOptions options;
         return std::make_unique<StorageEngineImpl>(opCtx.get(), std::move(kv), options);
     }
@@ -153,7 +158,8 @@ public:
 protected:
     ServiceContext::UniqueOperationContext _makeOperationContext() {
         auto opCtx = makeOperationContext();
-        opCtx->setRecoveryUnit(
+        shard_role_details::setRecoveryUnit(
+            opCtx.get(),
             std::unique_ptr<RecoveryUnit>(_helper.getEngine()->newRecoveryUnit()),
             WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
         return opCtx;
@@ -208,7 +214,7 @@ TEST_F(WiredTigerKVEngineRepairTest, OrphanedDataFilesCanBeRecovered) {
 #else
 
     // Dropping a collection might fail if we haven't checkpointed the data.
-    _helper.getWiredTigerKVEngine()->checkpoint(opCtxPtr.get());
+    _helper.getWiredTigerKVEngine()->checkpoint();
 
     // Move the data file out of the way so the ident can be dropped. This not permitted on Windows
     // because the file cannot be moved while it is open. The implementation for orphan recovery is
@@ -217,7 +223,8 @@ TEST_F(WiredTigerKVEngineRepairTest, OrphanedDataFilesCanBeRecovered) {
     boost::filesystem::rename(*dataFilePath, tmpFile, err);
     ASSERT(!err) << err.message();
 
-    ASSERT_OK(_helper.getWiredTigerKVEngine()->dropIdent(opCtxPtr.get()->recoveryUnit(), ident));
+    ASSERT_OK(_helper.getWiredTigerKVEngine()->dropIdent(
+        shard_role_details::getRecoveryUnit(opCtxPtr.get()), ident));
 
     // The data file is moved back in place so that it becomes an "orphan" of the storage
     // engine and the restoration process can be tested.
@@ -263,9 +270,10 @@ TEST_F(WiredTigerKVEngineRepairTest, UnrecoverableOrphanedDataFilesAreRebuilt) {
     ASSERT(boost::filesystem::exists(*dataFilePath));
 
     // Dropping a collection might fail if we haven't checkpointed the data
-    _helper.getWiredTigerKVEngine()->checkpoint(opCtxPtr.get());
+    _helper.getWiredTigerKVEngine()->checkpoint();
 
-    ASSERT_OK(_helper.getWiredTigerKVEngine()->dropIdent(opCtxPtr.get()->recoveryUnit(), ident));
+    ASSERT_OK(_helper.getWiredTigerKVEngine()->dropIdent(
+        shard_role_details::getRecoveryUnit(opCtxPtr.get()), ident));
 
 #ifdef _WIN32
     auto status = _helper.getWiredTigerKVEngine()->recoverOrphanedIdent(
@@ -432,7 +440,8 @@ TEST_F(WiredTigerKVEngineTest, IdentDrop) {
     ASSERT(boost::filesystem::exists(*dataFilePath));
     ASSERT(boost::filesystem::exists(renamedFilePath));
 
-    ASSERT_OK(_helper.getWiredTigerKVEngine()->dropIdent(opCtxPtr.get()->recoveryUnit(), ident));
+    ASSERT_OK(_helper.getWiredTigerKVEngine()->dropIdent(
+        shard_role_details::getRecoveryUnit(opCtxPtr.get()), ident));
 
     // WiredTiger drops files asynchronously.
     for (size_t check = 0; check < 30; check++) {
@@ -558,28 +567,27 @@ TEST_F(WiredTigerKVEngineTest, WiredTigerDowngrade) {
     WiredTigerFileVersion version = {WiredTigerFileVersion::StartupVersion::IS_42};
 
     // (Generic FCV reference): When FCV is kLatest, no downgrade is necessary.
-    serverGlobalParams.mutableFeatureCompatibility.setVersion(multiversion::GenericFCV::kLatest);
+    serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLatest);
     ASSERT_FALSE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false));
     ASSERT_EQ(WiredTigerFileVersion::kLatestWTRelease, version.getDowngradeString());
 
     // (Generic FCV reference): When FCV is kLastContinuous or kLastLTS, a downgrade may be needed.
-    serverGlobalParams.mutableFeatureCompatibility.setVersion(
-        multiversion::GenericFCV::kLastContinuous);
+    serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLastContinuous);
     ASSERT_TRUE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false));
     ASSERT_EQ(WiredTigerFileVersion::kLastContinuousWTRelease, version.getDowngradeString());
 
-    serverGlobalParams.mutableFeatureCompatibility.setVersion(multiversion::GenericFCV::kLastLTS);
+    serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLastLTS);
     ASSERT_TRUE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false));
     ASSERT_EQ(WiredTigerFileVersion::kLastLTSWTRelease, version.getDowngradeString());
 
     // (Generic FCV reference): While we're in a semi-downgraded state, we shouldn't try downgrading
     // the WiredTiger compatibility version.
-    serverGlobalParams.mutableFeatureCompatibility.setVersion(
+    serverGlobalParams.mutableFCV.setVersion(
         multiversion::GenericFCV::kDowngradingFromLatestToLastContinuous);
     ASSERT_FALSE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false));
     ASSERT_EQ(WiredTigerFileVersion::kLatestWTRelease, version.getDowngradeString());
 
-    serverGlobalParams.mutableFeatureCompatibility.setVersion(
+    serverGlobalParams.mutableFCV.setVersion(
         multiversion::GenericFCV::kDowngradingFromLatestToLastLTS);
     ASSERT_FALSE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false));
     ASSERT_EQ(WiredTigerFileVersion::kLatestWTRelease, version.getDowngradeString());
@@ -600,7 +608,7 @@ TEST_F(WiredTigerKVEngineTest, TestReconfigureLog) {
         // Perform a checkpoint. The goal here is create some activity in WiredTiger in order
         // to generate verbose messages (we don't really care about the checkpoint itself).
         startCapturingLogMessages();
-        _helper.getWiredTigerKVEngine()->checkpoint(opCtxRaii.get());
+        _helper.getWiredTigerKVEngine()->checkpoint();
         stopCapturingLogMessages();
         // In this initial case, we don't expect to capture any debug checkpoint messages. The
         // base severity for the checkpoint component should be at Log().
@@ -625,7 +633,7 @@ TEST_F(WiredTigerKVEngineTest, TestReconfigureLog) {
 
         // Perform another checkpoint.
         startCapturingLogMessages();
-        _helper.getWiredTigerKVEngine()->checkpoint(opCtxRaii.get());
+        _helper.getWiredTigerKVEngine()->checkpoint();
         stopCapturingLogMessages();
 
         // This time we expect to detect WiredTiger checkpoint Debug() messages.

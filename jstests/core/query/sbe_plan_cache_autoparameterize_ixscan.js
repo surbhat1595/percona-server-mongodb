@@ -3,7 +3,7 @@
  * that they can be correctly recovered from the cache with new parameter values.
  *
  * @tags: [
- *   not_allowed_with_security_token,
+ *   not_allowed_with_signed_security_token,
  *   assumes_read_concern_unchanged,
  *   assumes_read_preference_unchanged,
  *   assumes_unsharded_collection,
@@ -12,17 +12,12 @@
  *   requires_fcv_63,
  *   # Plan cache state is node-local and will not get migrated alongside tenant data.
  *   tenant_migration_incompatible,
+ *   # This test is specifically verifying the behavior of the SBE plan cache, which is only enabled
+ *   # when SBE is enabled.
+ *   featureFlagSbeFull,
  * ]
  */
 import {getPlanCacheKeyFromExplain, getQueryHashFromExplain} from "jstests/libs/analyze_plan.js";
-import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
-
-// This test is specifically verifying the behavior of the SBE plan cache, which is only enabled
-// when SBE is enabled.
-if (!checkSBEEnabled(db)) {
-    jsTestLog("Skipping test because SBE is not enabled");
-    quit();
-}
 
 const coll = db[jsTestName()];
 coll.drop();
@@ -84,3 +79,38 @@ assert.eq(newCacheEntry.queryHash, queryHash, newCacheEntry);
 
 // The query should also return the same results as before.
 assert.eq(results, cacheResults);
+
+// Test that Infinity value in a filter should not be parameterized.
+// These two queries have the same query shape but should not have a same plan cache key because
+// the filter with a infinity value should not be eligible for auto-parameterization.
+const filterWithInf = {
+    "a": {$not: {$gt: NumberDecimal("Infinity")}}
+};
+const filterWithVeryLargeValue = {
+    "a": {$not: {$gt: NumberDecimal("9.999999999999999999999999999999999E+6144")}}
+};
+
+assert.neq(
+    getPlanCacheKeyFromExplain(coll.explain().aggregate([{$match: filterWithInf}]), db),
+    getPlanCacheKeyFromExplain(coll.explain().aggregate([{$match: filterWithVeryLargeValue}]), db));
+
+// Auto-parameterization should still apply if no infinity value is involved.
+assert.eq(
+    getPlanCacheKeyFromExplain(coll.explain().aggregate([{$match: {"a": {$not: {$gt: 1}}}}]), db),
+    getPlanCacheKeyFromExplain(coll.explain().aggregate([{$match: filterWithVeryLargeValue}]), db));
+
+const singleElemIn = {
+    "a": {$in: [1]}
+};
+const multipleElemsIn = {
+    "a": {$in: [1, 2]}
+};
+const multipleElemsIn2 = {
+    "a": {$in: [3, 4]}
+};
+assert.neq(getPlanCacheKeyFromExplain(coll.explain().aggregate([{$match: singleElemIn}]), db),
+           getPlanCacheKeyFromExplain(coll.explain().aggregate([{$match: multipleElemsIn}]), db));
+
+// Auto-parameterization should still apply if there's no single-element $in query.
+assert.eq(getPlanCacheKeyFromExplain(coll.explain().aggregate([{$match: multipleElemsIn}]), db),
+          getPlanCacheKeyFromExplain(coll.explain().aggregate([{$match: multipleElemsIn2}]), db));

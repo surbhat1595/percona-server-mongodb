@@ -164,19 +164,23 @@ public:
     bool isCommitQuorumSatisfied(const CommitQuorumOptions& commitQuorum,
                                  const std::vector<mongo::HostAndPort>& members) const override;
 
-    void setMyLastAppliedOpTimeAndWallTime(
+    void setMyLastWrittenOpTimeAndWallTimeForward(
         const repl::OpTimeAndWallTime& opTimeAndWallTime) override;
-    void setMyLastDurableOpTimeAndWallTime(
+    void setMyLastAppliedOpTimeAndWallTimeForward(
         const repl::OpTimeAndWallTime& opTimeAndWallTime) override;
-    void setMyLastAppliedOpTimeAndWallTimeForward(const repl::OpTimeAndWallTime& opTimeAndWallTime,
-                                                  bool advanceGlobalTime) override;
     void setMyLastDurableOpTimeAndWallTimeForward(
         const repl::OpTimeAndWallTime& opTimeAndWallTime) override;
-
+    void setMyLastAppliedAndLastWrittenOpTimeAndWallTimeForward(
+        const repl::OpTimeAndWallTime& opTimeAndWallTime) override;
+    void setMyLastDurableAndLastWrittenOpTimeAndWallTimeForward(
+        const repl::OpTimeAndWallTime& opTimeAndWallTime) override;
 
     void resetMyLastOpTimes() override;
 
     void setMyHeartbeatMessage(const std::string&) override;
+
+    repl::OpTime getMyLastWrittenOpTime() const override;
+    repl::OpTimeAndWallTime getMyLastWrittenOpTimeAndWallTime() const override;
 
     repl::OpTime getMyLastAppliedOpTime() const override;
     repl::OpTimeAndWallTime getMyLastAppliedOpTimeAndWallTime(
@@ -241,7 +245,8 @@ public:
 
     BSONObj getConfigBSON() const override;
 
-    const repl::MemberConfig* findConfigMemberByHostAndPort(const HostAndPort& hap) const override;
+    boost::optional<repl::MemberConfig> findConfigMemberByHostAndPort_deprecated(
+        const HostAndPort& hap) const override;
 
     bool isConfigLocalHostAllowed() const override;
 
@@ -341,8 +346,6 @@ public:
     Status abortCatchupIfNeeded(PrimaryCatchUpConclusionReason reason) override;
 
     void incrementNumCatchUpOpsIfCatchingUp(long numOps) override;
-
-    void signalDropPendingCollectionsRemovedFromStorage() final;
 
     boost::optional<Timestamp> getRecoveryTimestamp() override;
 

@@ -53,7 +53,6 @@
 #include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/drop_gen.h"
@@ -138,7 +137,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getDeleteExpiredPreImagesEx
 
 bool useUnreplicatedTruncates() {
     bool res = feature_flags::gFeatureFlagUseUnreplicatedTruncatesForDeletions.isEnabled(
-        serverGlobalParams.featureCompatibility);
+        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
     return res;
 }
 }  // namespace
@@ -213,7 +212,7 @@ void ChangeStreamPreImagesCollectionManager::insertPreImage(OperationContext* op
                                                             const ChangeStreamPreImage& preImage) {
     tassert(6646200,
             "Expected to be executed in a write unit of work",
-            opCtx->lockState()->inAWriteUnitOfWork());
+            shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
     tassert(5869404,
             str::stream() << "Invalid pre-images document applyOpsIndex: "
                           << preImage.getId().getApplyOpsIndex(),
@@ -225,7 +224,8 @@ void ChangeStreamPreImagesCollectionManager::insertPreImage(OperationContext* op
     // This lock acquisition can block on a stronger lock held by another operation modifying
     // the pre-images collection. There are no known cases where an operation holding an
     // exclusive lock on the pre-images collection also waits for oplog visibility.
-    AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
+    AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(
+        shard_role_details::getLocker(opCtx));
     const auto changeStreamPreImagesCollection = acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(preImagesCollectionNamespace,
@@ -256,9 +256,10 @@ void ChangeStreamPreImagesCollectionManager::insertPreImage(OperationContext* op
             insertionStatus != ErrorCodes::DuplicateKey);
     uassertStatusOK(insertionStatus);
 
-    opCtx->recoveryUnit()->onCommit([this](OperationContext* opCtx, boost::optional<Timestamp>) {
-        _docsInserted.fetchAndAddRelaxed(1);
-    });
+    shard_role_details::getRecoveryUnit(opCtx)->onCommit(
+        [this](OperationContext* opCtx, boost::optional<Timestamp>) {
+            _docsInserted.fetchAndAddRelaxed(1);
+        });
 
     if (useUnreplicatedTruncates()) {
         // This is a no-op until the 'tenantId' is registered with the 'truncateManager' in the
@@ -375,7 +376,7 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithCollSc
     // Change stream collections can multiply the amount of user data inserted and deleted on each
     // node. It is imperative that removal is prioritized so it can keep up with inserts and prevent
     // users from running out of disk space.
-    ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+    ScopedAdmissionPriorityForLock skipAdmissionControl(shard_role_details::getLocker(opCtx),
                                                         AdmissionContext::Priority::kImmediate);
 
     // Acquire intent-exclusive lock on the change collection.
@@ -430,7 +431,7 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithCollSc
     // Change stream collections can multiply the amount of user data inserted and deleted on each
     // node. It is imperative that removal is prioritized so it can keep up with inserts and prevent
     // users from running out of disk space.
-    ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+    ScopedAdmissionPriorityForLock skipAdmissionControl(shard_role_details::getLocker(opCtx),
                                                         AdmissionContext::Priority::kImmediate);
 
     // Acquire intent-exclusive lock on the change collection.
@@ -467,7 +468,7 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithTrunca
     // Change stream collections can multiply the amount of user data inserted and deleted
     // on each node. It is imperative that removal is prioritized so it can keep up with
     // inserts and prevent users from running out of disk space.
-    ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+    ScopedAdmissionPriorityForLock skipAdmissionControl(shard_role_details::getLocker(opCtx),
                                                         AdmissionContext::Priority::kImmediate);
 
     // Truncate markers should track the highest seen RecordId and wall time across pre-images to

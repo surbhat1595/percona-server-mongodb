@@ -665,7 +665,7 @@ server_parameters:
         set_at: [ startup, runtime ]
         cpp_vartype: AtomicWord<int>
         cpp_varname: fassertOnLockTimeoutForStepUpDown
-        # We set the default to 30 seconds explicitly to match sharding's kDefaultConfigCommandTimeout.
+        # We set the default to 30 seconds explicitly to match sharding's defaultConfigCommandTimeout.
         default: 30
         validator:
             gte: 0
@@ -774,6 +774,16 @@ server_parameters:
         validator:
             gt: 0 
 
+    dbCheckMaxInternalRetries:
+        description: >-
+            The maximum number of internal retries that dbCheck will run on a batch.
+        set_at: [ startup, runtime ]
+        cpp_vartype: AtomicWord<int>
+        cpp_varname: dbCheckMaxInternalRetries
+        default: 5
+        validator:
+            gte: 0
+
     writeConflictRetryLimit:
         description: >-
             The number of retries that be made by writeConflictRetry(). It is used in secondary
@@ -796,5 +806,11 @@ feature_flags:
     featureFlagSecondaryIndexChecksInDbCheck:
         description: When enabled, dbCheck runs document and secondary index consistency checks in addition to replica set data consistency checks.
         cpp_varname: feature_flags::gSecondaryIndexChecksInDbCheck
+        default: false
+        shouldBeFCVGated: true
+
+    featureFlagReduceMajorityWriteLatency:
+        description: When enabled, Secondaries acknowledge writes as durable after an oplog entry is written durably to disk, without waiting for it to be applied.
+        cpp_varname: feature_flags::gReduceMajorityWriteLatency
         default: false
         shouldBeFCVGated: true

@@ -44,6 +44,8 @@ void QueryKnobConfiguration::_tryToSetAllValues() {
     _sbeDisableGroupPushdownValue = internalQuerySlotBasedExecutionDisableGroupPushdown.load();
     _sbeDisableLookupPushdownValue = internalQuerySlotBasedExecutionDisableLookupPushdown.load();
     _sbeDisableTimeSeriesValue = internalQuerySlotBasedExecutionDisableTimeSeriesPushdown.load();
+    _planEvaluationMaxResults = static_cast<size_t>(internalQueryPlanEvaluationMaxResults.load());
+    _maxScansToExplodeValue = static_cast<size_t>(internalQueryMaxScansToExplode.load());
     _isSet = true;
 }
 
@@ -65,6 +67,31 @@ bool QueryKnobConfiguration::getSbeDisableLookupPushdownForOp() {
 bool QueryKnobConfiguration::getSbeDisableTimeSeriesForOp() {
     _tryToSetAllValues();
     return _sbeDisableTimeSeriesValue;
+}
+
+size_t QueryKnobConfiguration::getPlanEvaluationMaxResultsForOp() {
+    _tryToSetAllValues();
+    return _planEvaluationMaxResults;
+}
+
+size_t QueryKnobConfiguration::getMaxScansToExplodeForOp() {
+    _tryToSetAllValues();
+    return _maxScansToExplodeValue;
+}
+
+bool QueryKnobConfiguration::canPushDownFullyCompatibleStages() {
+    _tryToSetAllValues();
+    switch (_queryFrameworkControlValue) {
+        case QueryFrameworkControlEnum::kForceClassicEngine:
+        case QueryFrameworkControlEnum::kTrySbeRestricted:
+        case QueryFrameworkControlEnum::kTryBonsai:
+        case QueryFrameworkControlEnum::kTryBonsaiExperimental:
+        case QueryFrameworkControlEnum::kForceBonsai:
+            return false;
+        case QueryFrameworkControlEnum::kTrySbeEngine:
+            return true;
+    }
+    MONGO_UNREACHABLE;
 }
 
 }  // namespace mongo

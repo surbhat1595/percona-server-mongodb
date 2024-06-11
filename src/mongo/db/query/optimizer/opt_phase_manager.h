@@ -37,9 +37,11 @@
 #include <utility>
 #include <vector>
 
+#include "mongo/db/query/opt_counter_info.h"
 #include "mongo/db/query/optimizer/algebra/operator.h"
 #include "mongo/db/query/optimizer/cascades/interfaces.h"
 #include "mongo/db/query/optimizer/cascades/logical_rewriter.h"
+#include "mongo/db/query/optimizer/cascades/logical_rewrites.h"
 #include "mongo/db/query/optimizer/cascades/memo.h"
 #include "mongo/db/query/optimizer/cascades/physical_rewriter.h"
 #include "mongo/db/query/optimizer/containers.h"
@@ -105,7 +107,21 @@ class OptPhaseManager {
 public:
     using PhaseSet = opt::unordered_set<OptPhase>;
 
-    OptPhaseManager(PhaseSet phaseSet,
+    /**
+     * Helper struct to configure which phases & rewrites the optimizer should run.
+     */
+    struct PhasesAndRewrites {
+        PhaseSet phaseSet;
+        LogicalRewriteSet explorationSet;
+        LogicalRewriteSet substitutionSet;
+
+        // Factories for common configurations.
+        static PhasesAndRewrites getDefaultForProd();
+        static PhasesAndRewrites getDefaultForSampling();
+        static PhasesAndRewrites getDefaultForUnindexed();
+    };
+
+    OptPhaseManager(PhasesAndRewrites phasesAndRewrites,
                     PrefixId& prefixId,
                     bool requireRID,
                     Metadata metadata,
@@ -115,7 +131,9 @@ public:
                     PathToIntervalFn pathToInterval,
                     ConstFoldFn constFold,
                     DebugInfo debugInfo,
-                    QueryHints queryHints = {});
+                    QueryHints queryHints,
+                    QueryParameterMap queryParameters,
+                    OptimizerCounterInfo& optCounterInfo);
 
     // We only allow moving.
     OptPhaseManager(const OptPhaseManager& /*other*/) = delete;
@@ -159,9 +177,13 @@ public:
 
     const RIDProjectionsMap& getRIDProjections() const;
 
-private:
+    const QueryParameterMap& getQueryParameters() const;
+
+    QueryParameterMap& getQueryParameters();
+
     bool hasPhase(OptPhase phase) const;
 
+private:
     template <OptPhase phase, class C>
     void runStructuralPhase(C instance, VariableEnvironment& env, ABT& input);
 
@@ -174,7 +196,7 @@ private:
 
     void runMemoLogicalRewrite(OptPhase phase,
                                VariableEnvironment& env,
-                               const LogicalRewriter::RewriteSet& rewriteSet,
+                               const LogicalRewriteSet& rewriteSet,
                                GroupIdType& rootGroupId,
                                bool runStandalone,
                                std::unique_ptr<LogicalRewriter>& logicalRewriter,
@@ -192,14 +214,10 @@ private:
                                                            VariableEnvironment& env,
                                                            ABT& input);
 
-
     /**
-     * Set of rewrites intended for use in production; excludes rewrites that only make the plan
-     * easier to read or easier to compare.
+     * Stores the set of phases and logical rewrites that the optimizer will run.
      */
-    static PhaseSet _allProdRewrites;
-
-    const PhaseSet _phaseSet;
+    const PhasesAndRewrites _phasesAndRewrites;
 
     const DebugInfo _debugInfo;
 
@@ -270,6 +288,14 @@ private:
 
     // We don't own this.
     PrefixId& _prefixId;
+
+    // Map from parameter ID to constant for the query we are optimizing. This is used by the CE
+    // module to estimate selectivities of query parameters.
+    QueryParameterMap _queryParameters;
+
+    // This tracks notable events during optimization. It is used for explain purposes. We don't own
+    // this.
+    OptimizerCounterInfo& _optCounterInfo;
 };
 
 }  // namespace mongo::optimizer

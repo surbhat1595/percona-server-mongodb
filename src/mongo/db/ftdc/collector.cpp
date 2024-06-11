@@ -33,12 +33,12 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/ftdc/collector.h"
 #include "mongo/db/ftdc/constants.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/util/assert_util_core.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/concurrency/admission_context.h"
@@ -71,7 +71,8 @@ std::tuple<BSONObj, Date_t> FTDCCollectorCollection::collect(Client* client) {
     // batches that are taking a long time.
     auto opCtx = client->makeOperationContext();
     opCtx->setEnforceConstraints(false);
-    opCtx->lockState()->setAdmissionPriority(AdmissionContext::Priority::kImmediate);
+    shard_role_details::getLocker(opCtx.get())
+        ->setAdmissionPriority(AdmissionContext::Priority::kImmediate);
 
     for (auto& collector : _collectors) {
         // Skip collection if this collector has no data to return
@@ -99,7 +100,7 @@ std::tuple<BSONObj, Date_t> FTDCCollectorCollection::collect(Client* client) {
         subObjBuilder.appendDate(kFTDCCollectEndField, end);
 
         // Ensure the collector did not set a read timestamp.
-        invariant(opCtx->recoveryUnit()->getTimestampReadSource() ==
+        invariant(shard_role_details::getRecoveryUnit(opCtx.get())->getTimestampReadSource() ==
                   RecoveryUnit::ReadSource::kNoTimestamp);
     }
 

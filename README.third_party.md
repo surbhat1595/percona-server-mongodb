@@ -21,7 +21,7 @@ a notice will be included in
 
 | Name                       | License           | Vendored Version  | Emits persisted data | Distributed in Release Binaries |
 | ---------------------------| ----------------- | ------------------| :------------------: | :-----------------------------: |
-| [abseil-cpp]               | Apache-2.0        | 20211102.0       |                      |                ✗                |
+| [abseil-cpp]               | Apache-2.0        | 20230802.1        |                      |                ✗                |
 | [Aladdin MD5]              | Zlib              | Unknown           |          ✗           |                ✗                |
 | [ASIO]                     | BSL-1.0           | 22afb86087        |                      |                ✗                |
 | [benchmark]                | Apache-2.0        | 1.5.2             |                      |                                 |
@@ -30,7 +30,7 @@ a notice will be included in
 | [double-conversion]        | ???               | ???               |                      |               ???               |
 | [fmt]                      | BSD-2-Clause      | 7.1.3             |                      |                ✗                |
 | [GPerfTools]               | BSD-3-Clause      | 2.9.1             |                      |                ✗                |
-| [gRPC]                     | Apache-2.0        | 1.46.6            |                      |                ✗                |
+| [gRPC]                     | Apache-2.0        | 1.59.2            |                      |                ✗                |
 | [ICU4]                     | ICU               | 57.1              |          ✗           |                ✗                |
 | [immer]                    | BSL-1.0           | d98a68c           |                      |                ✗                |
 | [Intel Decimal FP Library] | BSD-3-Clause      | 2.0 Update 1      |                      |                ✗                |
@@ -41,11 +41,11 @@ a notice will be included in
 | [linenoise]                | BSD-3-Clause      | Unknown + changes |                      |                ✗                |
 | [mongo-c-driver]           | Apache-2.0        | 1.23.0            |          ✗           |                ✗                |
 | [MozJS]                    | MPL-2.0           | ESR 91.3.0        |                      |                ✗                |
-| [MurmurHash3]              | Public Domain     | Unknown + changes |          ✗           |                ✗                |
+| [MurmurHash3]              | Public Domain     | a6bd3ce + changes |          ✗           |                ✗                |
 | [ocspbuilder]              | MIT               | 0.10.2            |                      |                                 |
 | [ocspresponder]            | Apache-2.0        | 0.5.0             |                      |                                 |
 | [pcre2]                    | BSD-3-Clause      | 10.40             |                      |                ✗                |
-| [protobuf]                 | BSD-3-Clause      | 3.19.5            |                      |                ✗                |
+| [protobuf]                 | BSD-3-Clause      | 4.25.0            |                      |                ✗                |
 | [re2]                      | BSD-3-Clause      | 2021-09-01        |                      |                ✗                |
 | [S2]                       | Apache-2.0        | Unknown           |          ✗           |                ✗                |
 | [SafeInt]                  | MIT               | 3.0.26            |                      |                                 |
@@ -69,6 +69,7 @@ a notice will be included in
 [double-conversion]: https://github.com/google/double-conversion (transitive dependency of MozJS)
 [fmt]: http://fmtlib.net/
 [GPerfTools]: https://github.com/gperftools/gperftools
+[gRPC]: https://github.com/grpc/grpc
 [ICU4]: http://site.icu-project.org/download/
 [immer]: https://github.com/arximboldi/immer
 [Intel Decimal FP Library]: https://software.intel.com/en-us/articles/intel-decimal-floating-point-math-library
@@ -79,10 +80,11 @@ a notice will be included in
 [linenoise]: https://github.com/antirez/linenoise
 [mongo-c-driver]: https://github.com/mongodb/mongo-c-driver
 [MozJS]: https://www.mozilla.org/en-US/security/known-vulnerabilities/firefox-esr
-[MurmurHash3]: https://github.com/aappleby/smhasher/blob/master/src/MurmurHash3.cpp
+[MurmurHash3]: https://github.com/aappleby/smhasher/blob/a6bd3ce/
 [ocspbuilder]: https://github.com/wbond/ocspbuilder
 [ocspresponder]: https://github.com/threema-ch/ocspresponder
 [pcre2]: http://www.pcre.org/
+[protobuf]: https://github.com/protocolbuffers/protobuf
 [S2]: https://github.com/google/s2geometry
 [SafeInt]: https://github.com/dcleblanc/SafeInt
 [schemastore.org]: https://www.schemastore.org/json/

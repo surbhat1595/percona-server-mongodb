@@ -42,10 +42,13 @@
 #include "mongo/transport/session.h"
 #include "mongo/transport/transport_layer_mock.h"
 #include "mongo/unittest/temp_dir.h"
+#include "mongo/util/net/ssl_options.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo::transport::test {
+
+constexpr auto kLetKernelChoosePort = 0;
 
 template <typename T>
 class BlockingQueue {
@@ -98,8 +101,8 @@ struct SessionThread {
         _tasks.push(std::move(task));
     }
 
-    transport::Session& session() const {
-        return *_session;
+    std::shared_ptr<transport::Session> session() const {
+        return _session;
     }
 
 private:
@@ -198,8 +201,6 @@ public:
 
     void endSessionByClient(Client* client) override {}
 
-    void appendStats(BSONObjBuilder*) const override {}
-
     void endAllSessions(Client::TagMask tags) override {
         _join();
     }
@@ -281,7 +282,31 @@ inline std::unique_ptr<TempCertificatesDir> copyCertsToTempDir(std::string caFil
     boost::filesystem::copy_file(pemFile, tempDir->getPEMKeyFile().toString());
 
     return tempDir;
-}
+};
+
+/**
+ * RAII type that caches the sslGlobalParams sslCAFile, sslPEMKeyFile, and sslMode on construction,
+ * and restores them to the cached values on destruction.
+ */
+class SSLGlobalParamsGuard {
+public:
+    SSLGlobalParamsGuard() {
+        _sslCAFile = sslGlobalParams.sslCAFile;
+        _sslPEMKeyFile = sslGlobalParams.sslPEMKeyFile;
+        _sslMode = sslGlobalParams.sslMode.load();
+    }
+
+    ~SSLGlobalParamsGuard() {
+        sslGlobalParams.sslCAFile = _sslCAFile;
+        sslGlobalParams.sslPEMKeyFile = _sslPEMKeyFile;
+        sslGlobalParams.sslMode.store(_sslMode);
+    }
+
+private:
+    std::string _sslCAFile;
+    std::string _sslPEMKeyFile;
+    int _sslMode;
+};
 
 }  // namespace mongo::transport::test
 

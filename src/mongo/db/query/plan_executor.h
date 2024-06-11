@@ -56,7 +56,6 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/s/scoped_collection_metadata.h"
 #include "mongo/db/shard_role.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util_core.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/future.h"
@@ -71,28 +70,28 @@ public:
     VariantCollectionPtrOrAcquisition(CollectionAcquisition collection)
         : _collectionPtrOrAcquisition(collection) {}
 
-    const stdx::variant<const CollectionPtr*, CollectionAcquisition>& get() {
+    const std::variant<const CollectionPtr*, CollectionAcquisition>& get() {
         return _collectionPtrOrAcquisition;
     };
 
     const CollectionPtr& getCollectionPtr() const;
 
     bool isCollectionPtr() const {
-        return stdx::holds_alternative<const CollectionPtr*>(_collectionPtrOrAcquisition);
+        return holds_alternative<const CollectionPtr*>(_collectionPtrOrAcquisition);
     }
 
     bool isAcquisition() const {
-        return stdx::holds_alternative<CollectionAcquisition>(_collectionPtrOrAcquisition);
+        return holds_alternative<CollectionAcquisition>(_collectionPtrOrAcquisition);
     }
 
     const CollectionAcquisition& getAcquisition() const {
-        return stdx::get<CollectionAcquisition>(_collectionPtrOrAcquisition);
+        return std::get<CollectionAcquisition>(_collectionPtrOrAcquisition);
     }
 
     boost::optional<ScopedCollectionFilter> getShardingFilter(OperationContext* opCtx) const;
 
 private:
-    stdx::variant<const CollectionPtr*, CollectionAcquisition> _collectionPtrOrAcquisition;
+    std::variant<const CollectionPtr*, CollectionAcquisition> _collectionPtrOrAcquisition;
 };
 
 /**
@@ -222,6 +221,13 @@ public:
      * Get the query that this executor is executing, without transferring ownership.
      */
     virtual CanonicalQuery* getCanonicalQuery() const = 0;
+
+    /**
+     * Get the pipeline that this executor is executing, without transferring ownership.
+     */
+    virtual Pipeline* getPipeline() const {
+        return nullptr;
+    }
 
     /**
      * Return the namespace that the query is running over.

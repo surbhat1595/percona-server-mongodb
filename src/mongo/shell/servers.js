@@ -172,16 +172,24 @@ function runHangAnalyzer(pids) {
     // We are using a raw "python" rather than selecting the approperate python here
     // This is because as part of SERVER-79663 we noticed that servers.js is included in the legacy
     // shell
-    const args =
-        ['python', scriptPath, 'hang-analyzer', '-k', '-o', 'file', '-o', 'stdout', '-d', pids];
+    // See hang-analyzer argument options here:
+    // https://github.com/10gen/mongo/blob/8636ede10bd70b32ff4b6cd115132ab0f22b89c7/buildscripts/resmokelib/hang_analyzer/hang_analyzer.py#L245
+    const args = [
+        'python',
+        scriptPath,
+        'hang-analyzer',
+        '-c',
+        '-k',
+        '-o',
+        'file',
+        '-o',
+        'stdout',
+        '-d',
+        pids
+    ];
 
     if (jsTest.options().evergreenTaskId) {
         args.push('-t', jsTest.options().evergreenTaskId);
-    }
-
-    // Enable core dumps if not an ASAN build.
-    if (!_isAddressSanitizerActive()) {
-        args.push('-c');
     }
 
     return runProgram(...args);
@@ -616,11 +624,20 @@ MongoRunner.mongoOptions = function(opts) {
 
     opts.port = opts.port || allocatePort();
 
-    // If gRPC is enabled and we have a TLS configuration, allocate an explicit port for gRPC.
-    const keyDefined =
-        (opts.tlsCertificateKeyFile !== undefined) || (opts.sslPEMKeyFile !== undefined);
+    if (jsTestOptions().tlsMode && !opts.tlsMode) {
+        opts.tlsMode = jsTestOptions().tlsMode;
+        if (opts.tlsMode != "disabled") {
+            opts.tlsAllowInvalidHostnames = "";
+        }
+    }
+    if (jsTestOptions().tlsCAFile && !opts.tlsCAFile) {
+        opts.tlsCAFile = jsTestOptions().tlsCAFile;
+    }
+
     const setParameters = jsTestOptions().setParameters || {};
-    if (setParameters.featureFlagGRPC && keyDefined) {
+    const tlsEnabled = (opts.tlsMode && opts.tlsMode != "disabled") ||
+        (opts.sslMode && opts.sslMode != "disabled");
+    if (setParameters.featureFlagGRPC && tlsEnabled) {
         opts.grpcPort = opts.grpcPort || allocatePort();
     }
 
@@ -634,6 +651,14 @@ MongoRunner.mongoOptions = function(opts) {
         // We don't want to persist 'waitForConnect' across node restarts.
         delete MongoRunner.savedOptions[opts.runId].waitForConnect;
     }
+
+    if (opts.removeOptions) {
+        for (const opt of opts.removeOptions) {
+            delete MongoRunner.savedOptions[opts.runId][opt];
+            delete opts[opt];
+        }
+    }
+    delete opts.removeOptions;
 
     if (jsTestOptions().networkMessageCompressors) {
         opts.networkMessageCompressors = jsTestOptions().networkMessageCompressors;
@@ -736,6 +761,10 @@ MongoRunner.mongodOptions = function(opts = {}) {
         }
     }
 
+    if (jsTestOptions().mongodTlsCertificateKeyFile && !opts.tlsCertificateKeyFile) {
+        opts.tlsCertificateKeyFile = jsTestOptions().mongodTlsCertificateKeyFile;
+    }
+
     _removeSetParameterIfBeforeVersion(opts, "writePeriodicNoops", "3.3.12");
     _removeSetParameterIfBeforeVersion(opts, "numInitialSyncAttempts", "3.3.12");
     _removeSetParameterIfBeforeVersion(opts, "numInitialSyncConnectAttempts", "3.3.12");
@@ -751,6 +780,7 @@ MongoRunner.mongodOptions = function(opts = {}) {
         opts, "internalQueryDisableExclusionProjectionFastPath", "6.2.0");
     _removeSetParameterIfBeforeVersion(
         opts, "disableTransitionFromLatestToLastContinuous", "7.0.0");
+    _removeSetParameterIfBeforeVersion(opts, "defaultConfigCommandTimeoutMS", "7.3.0");
 
     if (!opts.logFile && opts.useLogFiles) {
         opts.logFile = opts.dbpath + "/mongod.log";
@@ -848,6 +878,10 @@ MongoRunner.mongosOptions = function(opts) {
         opts.keyFile = testOptions.keyFile;
     }
 
+    if (testOptions.mongosTlsCertificateKeyFile && !opts.tlsCertificateKeyFile) {
+        opts.tlsCertificateKeyFile = testOptions.mongosTlsCertificateKeyFile;
+    }
+
     if (opts.hasOwnProperty("auditDestination")) {
         // opts.auditDestination, if set, must be a string
         if (typeof opts.auditDestination !== "string") {
@@ -873,6 +907,7 @@ MongoRunner.mongosOptions = function(opts) {
         opts, "mongosShutdownTimeoutMillisForSignaledShutdown", "4.5.0", true);
     _removeSetParameterIfBeforeVersion(
         opts, "failpoint.skipClusterParameterRefresh", "7.1.0", true);
+    _removeSetParameterIfBeforeVersion(opts, "defaultConfigCommandTimeoutMS", "7.3.0", true);
 
     return opts;
 };
@@ -954,6 +989,8 @@ MongoRunner.runningChildPids = function() {
  *     startClean {boolean}: same as cleanData.
  *     noCleanData {boolean}: Do not clean files (cleanData takes priority).
  *     binVersion {string}: version for binary (also see MongoRunner.binVersionSubs).
+ *     removeOptions {array(string)}: list of option names to remove from the command line before
+ *                                    running the new process. They are also not remembered.
  *
  *     @see MongoRunner.mongodOptions for other options
  *   }
@@ -1686,49 +1723,69 @@ startMongoProgram = function() {
     return m;
 };
 
-runMongoProgram = function() {
-    var args = Array.from(arguments);
-    args = appendSetParameterArgs(args);
+function _getMongoProgramArguments(args) {
+    args = Array.from(args);
+    appendSetParameterArgs(args);
     var progName = args[0];
 
     const separator = _isWindows() ? '\\' : '/';
     progName = progName.split(separator).pop();
     const [baseProgramName, programVersion] = progName.split("-");
+    let newArgs = [];
 
     // Non-shell binaries (which are in fact instantiated via `runMongoProgram`) may not support
     // these command line flags.
     if (jsTestOptions().auth && baseProgramName != 'mongod') {
-        args = args.slice(1);
-        args.unshift(progName,
-                     '-u',
+        newArgs.push('-u',
                      jsTestOptions().authUser,
                      '-p',
                      jsTestOptions().authPassword,
                      '--authenticationDatabase=admin');
     }
+    if (baseProgramName == 'mongo') {
+        if (jsTestOptions().shellTlsEnabled) {
+            newArgs.push('--tls');
+            newArgs.push('--tlsAllowInvalidHostnames');
+        }
+        if (jsTestOptions().shellTlsCertificateKeyFile &&
+            !args.includes('--tlsCertificateKeyFile')) {
+            newArgs.push('--tlsCertificateKeyFile', jsTestOptions().shellTlsCertificateKeyFile);
+        }
+    } else {
+        if (jsTestOptions().tlsMode && !args.includes('--tlsMode')) {
+            newArgs.push('--tlsMode', jsTestOptions().tlsMode);
+            newArgs.push('--tlsAllowInvalidHostnames');
+        }
 
-    return _runMongoProgram.apply(null, args);
+        if (!args.includes('--tlsCertificateKeyFile')) {
+            if (baseProgramName == 'mongod' && jsTestOptions().mongodTlsCertificateKeyFile) {
+                newArgs.push('--tlsCertificateKeyFile',
+                             jsTestOptions().mongodTlsCertificateKeyFile);
+            } else if (baseProgramName == 'mongos' && jsTestOptions().mongosTlsCertificateKeyFile) {
+                newArgs.push('--tlsCertificateKeyFile',
+                             jsTestOptions().mongosTlsCertificateKeyFile);
+            }
+        }
+    }
+
+    if (jsTestOptions().tlsCAFile && !args.includes('--tlsCAFile')) {
+        newArgs.push('--tlsCAFile', jsTestOptions().tlsCAFile);
+    }
+
+    args = args.slice(1);
+    args.unshift(progName, ...newArgs);
+    return args;
+}
+
+runMongoProgram = function() {
+    return _runMongoProgram.apply(null, _getMongoProgramArguments(arguments));
 };
 
 // Start a mongo program instance.  This function's first argument is the
 // program name, and subsequent arguments to this function are passed as
 // command line arguments to the program.  Returns pid of the spawned program.
 startMongoProgramNoConnect = function() {
-    var args = Array.from(arguments);
-    args = appendSetParameterArgs(args);
-    var progName = args[0];
-
-    if (jsTestOptions().auth) {
-        args = args.slice(1);
-        args.unshift(progName,
-                     '-u',
-                     jsTestOptions().authUser,
-                     '-p',
-                     jsTestOptions().authPassword,
-                     '--authenticationDatabase=admin');
-    }
-
-    return _startMongoProgram.apply(null, args);
+    return _startMongoProgram.apply(null, _getMongoProgramArguments(arguments));
 };
 
 myPort = function() {

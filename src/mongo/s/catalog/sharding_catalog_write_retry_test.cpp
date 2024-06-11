@@ -67,7 +67,7 @@
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
 #include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/sharding_router_test_fixture.h"
+#include "mongo/s/sharding_mongos_test_fixture.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/bson_test_util.h"
@@ -100,7 +100,7 @@ const HostAndPort kTestHosts[] = {
 
 Status getMockDuplicateKeyError() {
     return {DuplicateKeyErrorInfo(
-                BSON("mock" << 1), BSON("" << 1), BSONObj{}, stdx::monostate{}, boost::none),
+                BSON("mock" << 1), BSON("" << 1), BSONObj{}, std::monostate{}, boost::none),
             "Mock duplicate key error"};
 }
 

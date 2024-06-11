@@ -54,6 +54,7 @@
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/storage/record_data.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
@@ -62,7 +63,10 @@
 
 namespace mongo {
 namespace sbe {
-ScanStage::ScanStage(UUID collectionUuid,
+/**
+ * Regular constructor. Initializes static '_state' managed by a shared_ptr.
+ */
+ScanStage::ScanStage(UUID collUuid,
                      boost::optional<value::SlotId> recordSlot,
                      boost::optional<value::SlotId> recordIdSlot,
                      boost::optional<value::SlotId> snapshotIdSlot,
@@ -79,124 +83,134 @@ ScanStage::ScanStage(UUID collectionUuid,
                      PlanYieldPolicy* yieldPolicy,
                      PlanNodeId nodeId,
                      ScanCallbacks scanCallbacks,
+                     // Optional arguments:
                      bool lowPriority,
                      bool useRandomCursor,
                      bool participateInTrialRunTracking,
-                     bool excludeScanEndRecordId)
+                     bool includeScanStartRecordId,
+                     bool includeScanEndRecordId)
     : PlanStage(seekRecordIdSlot ? "seek"_sd : "scan"_sd,
                 yieldPolicy,
                 nodeId,
                 participateInTrialRunTracking),
-      _recordSlot(recordSlot),
-      _recordIdSlot(recordIdSlot),
-      _snapshotIdSlot(snapshotIdSlot),
-      _indexIdentSlot(indexIdentSlot),
-      _indexKeySlot(indexKeySlot),
-      _indexKeyPatternSlot(indexKeyPatternSlot),
-      _oplogTsSlot(oplogTsSlot),
-      _scanFieldNames(std::move(scanFieldNames)),
-      _scanFieldSlots(std::move(scanFieldSlots)),
-      _seekRecordIdSlot(seekRecordIdSlot),
-      _minRecordIdSlot(minRecordIdSlot),
-      _maxRecordIdSlot(maxRecordIdSlot),
-      _forward(forward),
-      _useRandomCursor(useRandomCursor),
-      _collUuid(collectionUuid),
-      _scanCallbacks(std::move(scanCallbacks)),
-      _excludeScanEndRecordId(excludeScanEndRecordId),
+      _state(std::make_shared<ScanStageState>(collUuid,
+                                              recordSlot,
+                                              recordIdSlot,
+                                              snapshotIdSlot,
+                                              indexIdentSlot,
+                                              indexKeySlot,
+                                              indexKeyPatternSlot,
+                                              oplogTsSlot,
+                                              scanFieldNames,
+                                              scanFieldSlots,
+                                              seekRecordIdSlot,
+                                              minRecordIdSlot,
+                                              maxRecordIdSlot,
+                                              forward,
+                                              scanCallbacks,
+                                              useRandomCursor)),
+      _includeScanStartRecordId(includeScanStartRecordId),
+      _includeScanEndRecordId(includeScanEndRecordId),
       _lowPriority(lowPriority) {
-    invariant(_scanFieldNames.size() == _scanFieldSlots.size());
-    invariant(!_seekRecordIdSlot || _forward);
+    invariant(!seekRecordIdSlot || forward);
     // We cannot use a random cursor if we are seeking or requesting a reverse scan.
-    invariant(!_useRandomCursor || (!_seekRecordIdSlot && _forward));
-}
+    invariant(!useRandomCursor || (!seekRecordIdSlot && forward));
+}  // ScanStage regular constructor
+
+/**
+ * Constructor for clone(). Copies '_state' shared_ptr.
+ */
+ScanStage::ScanStage(const std::shared_ptr<ScanStageState>& state,
+                     PlanYieldPolicy* yieldPolicy,
+                     PlanNodeId nodeId,
+                     bool lowPriority,
+                     bool participateInTrialRunTracking,
+                     bool includeScanStartRecordId,
+                     bool includeScanEndRecordId)
+    : PlanStage(state->seekRecordIdSlot ? "seek"_sd : "scan"_sd,
+                yieldPolicy,
+                nodeId,
+                participateInTrialRunTracking),
+      _state(state),
+      _includeScanStartRecordId(includeScanStartRecordId),
+      _includeScanEndRecordId(includeScanEndRecordId),
+      _lowPriority(lowPriority) {}  // ScanStage constructor for clone()
 
 std::unique_ptr<PlanStage> ScanStage::clone() const {
-    return std::make_unique<ScanStage>(_collUuid,
-                                       _recordSlot,
-                                       _recordIdSlot,
-                                       _snapshotIdSlot,
-                                       _indexIdentSlot,
-                                       _indexKeySlot,
-                                       _indexKeyPatternSlot,
-                                       _oplogTsSlot,
-                                       _scanFieldNames.getUnderlyingVector(),
-                                       _scanFieldSlots,
-                                       _seekRecordIdSlot,
-                                       _minRecordIdSlot,
-                                       _maxRecordIdSlot,
-                                       _forward,
+    return std::make_unique<ScanStage>(_state,
                                        _yieldPolicy,
                                        _commonStats.nodeId,
-                                       _scanCallbacks,
                                        _lowPriority,
-                                       _useRandomCursor,
                                        _participateInTrialRunTracking,
-                                       _excludeScanEndRecordId);
+                                       _includeScanStartRecordId,
+                                       _includeScanEndRecordId);
 }
 
 void ScanStage::prepare(CompileCtx& ctx) {
-    _scanFieldAccessors.resize(_scanFieldNames.size());
-    for (size_t idx = 0; idx < _scanFieldNames.size(); ++idx) {
+    const size_t numScanFields = _state->getNumScanFields();
+    _scanFieldAccessors.resize(numScanFields);
+    for (size_t idx = 0; idx < numScanFields; ++idx) {
         auto accessorPtr = &_scanFieldAccessors[idx];
 
         auto [itRename, insertedRename] =
-            _scanFieldAccessorsMap.emplace(_scanFieldSlots[idx], accessorPtr);
-        uassert(
-            4822815, str::stream() << "duplicate field: " << _scanFieldSlots[idx], insertedRename);
+            _scanFieldAccessorsMap.emplace(_state->scanFieldSlots[idx], accessorPtr);
+        uassert(4822815,
+                str::stream() << "duplicate field: " << _state->scanFieldSlots[idx],
+                insertedRename);
 
-        if (_oplogTsSlot && _scanFieldNames[idx] == repl::OpTime::kTimestampFieldName) {
+        if (_state->oplogTsSlot &&
+            _state->scanFieldNames[idx] == repl::OpTime::kTimestampFieldName) {
             // Oplog scans only: cache a pointer to the "ts" field accessor for fast access.
             _tsFieldAccessor = accessorPtr;
         }
     }
 
-    if (_seekRecordIdSlot) {
-        _seekRecordIdAccessor = ctx.getAccessor(*_seekRecordIdSlot);
+    if (_state->seekRecordIdSlot) {
+        _seekRecordIdAccessor = ctx.getAccessor(*(_state->seekRecordIdSlot));
     }
 
-    if (_minRecordIdSlot) {
-        _minRecordIdAccessor = ctx.getAccessor(*_minRecordIdSlot);
+    if (_state->minRecordIdSlot) {
+        _minRecordIdAccessor = ctx.getAccessor(*(_state->minRecordIdSlot));
     }
 
-    if (_maxRecordIdSlot) {
-        _maxRecordIdAccessor = ctx.getAccessor(*_maxRecordIdSlot);
+    if (_state->maxRecordIdSlot) {
+        _maxRecordIdAccessor = ctx.getAccessor(*(_state->maxRecordIdSlot));
     }
 
-    if (_snapshotIdSlot) {
-        _snapshotIdAccessor = ctx.getAccessor(*_snapshotIdSlot);
+    if (_state->snapshotIdSlot) {
+        _snapshotIdAccessor = ctx.getAccessor(*(_state->snapshotIdSlot));
     }
 
-    if (_indexIdentSlot) {
-        _indexIdentAccessor = ctx.getAccessor(*_indexIdentSlot);
+    if (_state->indexIdentSlot) {
+        _indexIdentAccessor = ctx.getAccessor(*(_state->indexIdentSlot));
     }
 
-    if (_indexKeySlot) {
-        _indexKeyAccessor = ctx.getAccessor(*_indexKeySlot);
+    if (_state->indexKeySlot) {
+        _indexKeyAccessor = ctx.getAccessor(*(_state->indexKeySlot));
     }
 
-    if (_indexKeyPatternSlot) {
-        _indexKeyPatternAccessor = ctx.getAccessor(*_indexKeyPatternSlot);
+    if (_state->indexKeyPatternSlot) {
+        _indexKeyPatternAccessor = ctx.getAccessor(*(_state->indexKeyPatternSlot));
     }
 
-    if (_oplogTsSlot) {
-        _oplogTsAccessor = ctx.getRuntimeEnvAccessor(*_oplogTsSlot);
+    if (_state->oplogTsSlot) {
+        _oplogTsAccessor = ctx.getRuntimeEnvAccessor(*(_state->oplogTsSlot));
     }
 
     tassert(5709600, "'_coll' should not be initialized prior to 'acquireCollection()'", !_coll);
-    _coll.acquireCollection(_opCtx, _collUuid);
+    _coll.acquireCollection(_opCtx, _state->collUuid);
 }
 
 value::SlotAccessor* ScanStage::getAccessor(CompileCtx& ctx, value::SlotId slot) {
-    if (_recordSlot && *_recordSlot == slot) {
+    if (_state->recordSlot && *(_state->recordSlot) == slot) {
         return &_recordAccessor;
     }
 
-    if (_recordIdSlot && *_recordIdSlot == slot) {
+    if (_state->recordIdSlot && *(_state->recordIdSlot) == slot) {
         return &_recordIdAccessor;
     }
 
-    if (_oplogTsSlot && *_oplogTsSlot == slot) {
+    if (_state->oplogTsSlot && *(_state->oplogTsSlot) == slot) {
         return _oplogTsAccessor;
     }
 
@@ -210,7 +224,8 @@ value::SlotAccessor* ScanStage::getAccessor(CompileCtx& ctx, value::SlotId slot)
 void ScanStage::doSaveState(bool relinquishCursor) {
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
     if (slotsAccessible()) {
-        if (_recordSlot && _recordAccessor.getViewOfValue().first != value::TypeTags::Nothing) {
+        if (_state->recordSlot &&
+            _recordAccessor.getViewOfValue().first != value::TypeTags::Nothing) {
             auto [tag, val] = _recordAccessor.getViewOfValue();
             tassert(5975900, "expected scan to produce bson", tag == value::TypeTags::bsonObject);
 
@@ -223,10 +238,10 @@ void ScanStage::doSaveState(bool relinquishCursor) {
 #endif
 
     if (relinquishCursor) {
-        if (_recordSlot) {
+        if (_state->recordSlot) {
             prepareForYielding(_recordAccessor, slotsAccessible());
         }
-        if (_recordIdSlot) {
+        if (_state->recordIdSlot) {
             // TODO: SERVER-72054
             // RecordId are currently (incorrectly) accessed after EOF, therefore we must treat them
             // as always accessible rather than invalidate them when slots are disabled. We should
@@ -239,7 +254,7 @@ void ScanStage::doSaveState(bool relinquishCursor) {
     }
 
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
-    if (!_recordSlot || !slotsAccessible()) {
+    if (!_state->recordSlot || !slotsAccessible()) {
         _lastReturned.clear();
     }
 #endif
@@ -265,7 +280,7 @@ void ScanStage::doRestoreState(bool relinquishCursor) {
         return;
     }
 
-    _coll.restoreCollection(_opCtx, _collUuid);
+    _coll.restoreCollection(_opCtx, _state->collUuid);
 
     if (auto cursor = getActiveCursor(); cursor != nullptr) {
         if (relinquishCursor) {
@@ -291,7 +306,7 @@ void ScanStage::doRestoreState(bool relinquishCursor) {
     }
 
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
-    if (_recordSlot && !_lastReturned.empty()) {
+    if (_state->recordSlot && !_lastReturned.empty()) {
         auto [tag, val] = _recordAccessor.getViewOfValue();
         tassert(5975901, "expected scan to produce bson", tag == value::TypeTags::bsonObject);
 
@@ -317,8 +332,9 @@ void ScanStage::doDetachFromOperationContext() {
 
 void ScanStage::doAttachToOperationContext(OperationContext* opCtx) {
     if (_lowPriority && _open && gDeprioritizeUnboundedUserCollectionScans.load() &&
-        opCtx->getClient()->isFromUserConnection() && opCtx->lockState()->shouldWaitForTicket()) {
-        _priority.emplace(opCtx->lockState(), AdmissionContext::Priority::kLow);
+        opCtx->getClient()->isFromUserConnection() &&
+        shard_role_details::getLocker(opCtx)->shouldWaitForTicket()) {
+        _priority.emplace(shard_role_details::getLocker(opCtx), AdmissionContext::Priority::kLow);
     }
     if (auto cursor = getActiveCursor()) {
         cursor->reattachToOperationContext(opCtx);
@@ -336,7 +352,7 @@ PlanStage::TrialRunTrackerAttachResultMask ScanStage::doAttachToTrialRunTracker(
 }
 
 RecordCursor* ScanStage::getActiveCursor() const {
-    return _useRandomCursor ? _randomCursor.get() : _cursor.get();
+    return _state->useRandomCursor ? _randomCursor.get() : _cursor.get();
 }
 
 void ScanStage::setSeekRecordId() {
@@ -370,12 +386,12 @@ void ScanStage::setMaxRecordId() {
 }
 
 void ScanStage::scanResetState(bool reOpen) {
-    if (!_useRandomCursor) {
+    if (!_state->useRandomCursor) {
         // Reuse existing cursor if possible in the reOpen case (i.e. when we will do a seek).
         if (!reOpen ||
             (!_seekRecordIdAccessor &&
-             (_forward ? !_minRecordIdAccessor : !_maxRecordIdAccessor))) {
-            _cursor = _coll.getPtr()->getCursor(_opCtx, _forward);
+             (_state->forward ? !_minRecordIdAccessor : !_maxRecordIdAccessor))) {
+            _cursor = _coll.getPtr()->getCursor(_opCtx, _state->forward);
         }
         if (_seekRecordIdAccessor) {
             setSeekRecordId();
@@ -392,7 +408,7 @@ void ScanStage::scanResetState(bool reOpen) {
     }
 
     _firstGetNext = true;
-    _hasScanEndRecordId = _forward ? _maxRecordIdAccessor : _minRecordIdAccessor;
+    _hasScanEndRecordId = _state->forward ? _maxRecordIdAccessor : _minRecordIdAccessor;
     _havePassedScanEndRecordId = false;
 }
 
@@ -417,23 +433,16 @@ void ScanStage::open(bool reOpen) {
 
     // We need to re-acquire '_coll' in this case and make some validity checks (the collection has
     // not been dropped, renamed, etc).
-    _coll.restoreCollection(_opCtx, _collUuid);
+    _coll.restoreCollection(_opCtx, _state->collUuid);
 
     tassert(5959701, "restoreCollection() unexpectedly returned null in ScanStage", _coll);
 
-    if (_scanCallbacks.scanOpenCallback) {
-        _scanCallbacks.scanOpenCallback(_opCtx, _coll.getPtr());
+    if (_state->scanCallbacks.scanOpenCallback) {
+        _state->scanCallbacks.scanOpenCallback(_opCtx, _coll.getPtr());
     }
 
     scanResetState(reOpen);
     _open = true;
-}
-
-value::OwnedValueAccessor* ScanStage::getFieldAccessor(StringData name) {
-    if (size_t pos = _scanFieldNames.findPos(name); pos != StringListSet::npos) {
-        return &_scanFieldAccessors[pos];
-    }
-    return nullptr;
 }
 
 PlanState ScanStage::getNext() {
@@ -445,8 +454,9 @@ PlanState ScanStage::getNext() {
     }
 
     if (_lowPriority && !_priority && gDeprioritizeUnboundedUserCollectionScans.load() &&
-        _opCtx->getClient()->isFromUserConnection() && _opCtx->lockState()->shouldWaitForTicket()) {
-        _priority.emplace(_opCtx->lockState(), AdmissionContext::Priority::kLow);
+        _opCtx->getClient()->isFromUserConnection() &&
+        shard_role_details::getLocker(_opCtx)->shouldWaitForTicket()) {
+        _priority.emplace(shard_role_details::getLocker(_opCtx), AdmissionContext::Priority::kLow);
     }
 
     // We are about to call next() on a storage cursor so do not bother saving our internal state in
@@ -489,11 +499,19 @@ PlanState ScanStage::getNext() {
     //       record here if the seekNear() positioned on a recordId before the target range.
     bool doSeekExact = false;
     boost::optional<Record> nextRecord;
-    if (!_useRandomCursor) {
+    if (!_state->useRandomCursor) {
         if (!_firstGetNext) {
             nextRecord = _cursor->next();
         } else {
             _firstGetNext = false;
+            auto seekAndSkipUntil =
+                [](auto& cursor, const auto& startRecordId, const auto& condition) {
+                    auto record = cursor->seekNear(startRecordId);
+                    while (record && !condition(record->id <=> startRecordId)) {
+                        record = cursor->next();
+                    }
+                    return record;
+                };
             if (_seekRecordIdAccessor) {  // fetch or scan resume
                 if (_seekRecordId.isNull()) {
                     // Attempting to resume from a null record ID gives a null '_seekRecordId'.
@@ -506,18 +524,16 @@ PlanState ScanStage::getNext() {
                 }
                 doSeekExact = true;
                 nextRecord = _cursor->seekExact(_seekRecordId);
-            } else if (_minRecordIdAccessor && _forward) {
-                nextRecord = _cursor->seekNear(_minRecordId);
-                // Skip first record if seekNear() landed on the record just before the start bound.
-                if (nextRecord && nextRecord->id < _minRecordId) {
-                    nextRecord = _cursor->next();
-                }
-            } else if (_maxRecordIdAccessor && !_forward) {
-                nextRecord = _cursor->seekNear(_maxRecordId);
-                // Skip first record if seekNear() landed on the record just before the start bound.
-                if (nextRecord && nextRecord->id > _maxRecordId) {
-                    nextRecord = _cursor->next();
-                }
+            } else if (_minRecordIdAccessor && _state->forward) {
+                // seekNear() may land on the record just before the start bound.
+                // Additionally, the range may be exclusive of the start record.
+                // Keep advancing until the first record equal to _minRecordId
+                // or, if exclusive, the first record "after" it.
+                nextRecord = seekAndSkipUntil(
+                    _cursor, _minRecordId, _includeScanStartRecordId ? std::is_gteq : std::is_gt);
+            } else if (_maxRecordIdAccessor && !_state->forward) {
+                nextRecord = seekAndSkipUntil(
+                    _cursor, _maxRecordId, _includeScanStartRecordId ? std::is_lteq : std::is_lt);
             } else {
                 nextRecord = _cursor->next();
             }
@@ -531,47 +547,53 @@ PlanState ScanStage::getNext() {
     if (!nextRecord) {
         // Only check the index key for corruption if this getNext() call did seekExact(), as that
         // expects the '_seekRecordId' to be found, but it was not.
-        if (doSeekExact && _scanCallbacks.indexKeyCorruptionCheckCallback) {
+        if (doSeekExact && _state->scanCallbacks.indexKeyCorruptionCheckCallback) {
             tassert(5777400, "Collection name should be initialized", _coll.getCollName());
-            _scanCallbacks.indexKeyCorruptionCheckCallback(_opCtx,
-                                                           _snapshotIdAccessor,
-                                                           _indexKeyAccessor,
-                                                           _indexKeyPatternAccessor,
-                                                           _seekRecordId,
-                                                           *_coll.getCollName());
+            _state->scanCallbacks.indexKeyCorruptionCheckCallback(_opCtx,
+                                                                  _snapshotIdAccessor,
+                                                                  _indexKeyAccessor,
+                                                                  _indexKeyPatternAccessor,
+                                                                  _seekRecordId,
+                                                                  *_coll.getCollName());
+        }
+
+        // Indicate that the last recordId seen is null once EOF is hit.
+        if (_state->recordIdSlot) {
+            auto [tag, val] = sbe::value::makeCopyRecordId(RecordId());
+            _recordIdAccessor.reset(true, tag, val);
         }
         _priority.reset();
         return trackPlanState(PlanState::IS_EOF);
     }
 
     // Return EOF if the index key is found to be inconsistent.
-    if (_scanCallbacks.indexKeyConsistencyCheckCallback &&
-        !_scanCallbacks.indexKeyConsistencyCheckCallback(_opCtx,
-                                                         _indexCatalogEntryMap,
-                                                         _snapshotIdAccessor,
-                                                         _indexIdentAccessor,
-                                                         _indexKeyAccessor,
-                                                         _coll.getPtr(),
-                                                         *nextRecord)) {
+    if (_state->scanCallbacks.indexKeyConsistencyCheckCallback &&
+        !_state->scanCallbacks.indexKeyConsistencyCheckCallback(_opCtx,
+                                                                _indexCatalogEntryMap,
+                                                                _snapshotIdAccessor,
+                                                                _indexIdentAccessor,
+                                                                _indexKeyAccessor,
+                                                                _coll.getPtr(),
+                                                                *nextRecord)) {
         _priority.reset();
         return trackPlanState(PlanState::IS_EOF);
     }
 
-    if (_recordSlot) {
+    if (_state->recordSlot) {
         _recordAccessor.reset(false,
                               value::TypeTags::bsonObject,
                               value::bitcastFrom<const char*>(nextRecord->data.data()));
     }
 
-    if (_recordIdSlot) {
+    if (_state->recordIdSlot) {
         _recordId = std::move(nextRecord->id);
         if (_hasScanEndRecordId) {
-            if (_excludeScanEndRecordId) {
+            if (_includeScanEndRecordId) {
                 _havePassedScanEndRecordId =
-                    _forward ? (_recordId >= _maxRecordId) : (_recordId <= _minRecordId);
+                    _state->forward ? (_recordId > _maxRecordId) : (_recordId < _minRecordId);
             } else {
                 _havePassedScanEndRecordId =
-                    _forward ? (_recordId > _maxRecordId) : (_recordId < _minRecordId);
+                    _state->forward ? (_recordId >= _maxRecordId) : (_recordId <= _minRecordId);
             }
         }
         if (_havePassedScanEndRecordId) {
@@ -590,7 +612,7 @@ PlanState ScanStage::getNext() {
         if (_scanFieldAccessors.size() == 1) {
             // If we're only looking for 1 field, then it's more efficient to forgo the hashtable
             // and just use equality comparison.
-            auto name = StringData{_scanFieldNames[0]};
+            auto name = StringData{_state->scanFieldNames[0]};
             auto [tag, val] = [start, last, end, name] {
                 for (auto bsonElement = start; bsonElement != last;) {
                     auto field = bson::fieldNameAndLength(bsonElement);
@@ -671,36 +693,38 @@ std::unique_ptr<PlanStageStats> ScanStage::getStats(bool includeDebugInfo) const
     if (includeDebugInfo) {
         BSONObjBuilder bob;
         bob.appendNumber("numReads", static_cast<long long>(_specificStats.numReads));
-        if (_recordSlot) {
-            bob.appendNumber("recordSlot", static_cast<long long>(*_recordSlot));
+        if (_state->recordSlot) {
+            bob.appendNumber("recordSlot", static_cast<long long>(*(_state->recordSlot)));
         }
-        if (_recordIdSlot) {
-            bob.appendNumber("recordIdSlot", static_cast<long long>(*_recordIdSlot));
+        if (_state->recordIdSlot) {
+            bob.appendNumber("recordIdSlot", static_cast<long long>(*(_state->recordIdSlot)));
         }
-        if (_seekRecordIdSlot) {
-            bob.appendNumber("seekRecordIdSlot", static_cast<long long>(*_seekRecordIdSlot));
+        if (_state->seekRecordIdSlot) {
+            bob.appendNumber("seekRecordIdSlot",
+                             static_cast<long long>(*(_state->seekRecordIdSlot)));
         }
-        if (_minRecordIdSlot) {
-            bob.appendNumber("minRecordIdSlot", static_cast<long long>(*_minRecordIdSlot));
+        if (_state->minRecordIdSlot) {
+            bob.appendNumber("minRecordIdSlot", static_cast<long long>(*(_state->minRecordIdSlot)));
         }
-        if (_maxRecordIdSlot) {
-            bob.appendNumber("maxRecordIdSlot", static_cast<long long>(*_maxRecordIdSlot));
+        if (_state->maxRecordIdSlot) {
+            bob.appendNumber("maxRecordIdSlot", static_cast<long long>(*(_state->maxRecordIdSlot)));
         }
-        if (_snapshotIdSlot) {
-            bob.appendNumber("snapshotIdSlot", static_cast<long long>(*_snapshotIdSlot));
+        if (_state->snapshotIdSlot) {
+            bob.appendNumber("snapshotIdSlot", static_cast<long long>(*(_state->snapshotIdSlot)));
         }
-        if (_indexIdentSlot) {
-            bob.appendNumber("indexIdentSlot", static_cast<long long>(*_indexIdentSlot));
+        if (_state->indexIdentSlot) {
+            bob.appendNumber("indexIdentSlot", static_cast<long long>(*(_state->indexIdentSlot)));
         }
-        if (_indexKeySlot) {
-            bob.appendNumber("indexKeySlot", static_cast<long long>(*_indexKeySlot));
+        if (_state->indexKeySlot) {
+            bob.appendNumber("indexKeySlot", static_cast<long long>(*(_state->indexKeySlot)));
         }
-        if (_indexKeyPatternSlot) {
-            bob.appendNumber("indexKeyPatternSlot", static_cast<long long>(*_indexKeyPatternSlot));
+        if (_state->indexKeyPatternSlot) {
+            bob.appendNumber("indexKeyPatternSlot",
+                             static_cast<long long>(*(_state->indexKeyPatternSlot)));
         }
 
-        bob.append("scanFieldNames", _scanFieldNames.getUnderlyingVector());
-        bob.append("scanFieldSlots", _scanFieldSlots.begin(), _scanFieldSlots.end());
+        bob.append("scanFieldNames", _state->scanFieldNames.getUnderlyingVector());
+        bob.append("scanFieldSlots", _state->scanFieldSlots.begin(), _state->scanFieldSlots.end());
         ret->debugInfo = bob.obj();
     }
     return ret;
@@ -713,59 +737,59 @@ const SpecificStats* ScanStage::getSpecificStats() const {
 std::vector<DebugPrinter::Block> ScanStage::debugPrint() const {
     std::vector<DebugPrinter::Block> ret = PlanStage::debugPrint();
 
-    if (_seekRecordIdSlot) {
-        DebugPrinter::addIdentifier(ret, _seekRecordIdSlot.value());
+    if (_state->seekRecordIdSlot) {
+        DebugPrinter::addIdentifier(ret, _state->seekRecordIdSlot.value());
     }
 
-    if (_recordSlot) {
-        DebugPrinter::addIdentifier(ret, _recordSlot.value());
+    if (_state->recordSlot) {
+        DebugPrinter::addIdentifier(ret, _state->recordSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
-    if (_recordIdSlot) {
-        DebugPrinter::addIdentifier(ret, _recordIdSlot.value());
+    if (_state->recordIdSlot) {
+        DebugPrinter::addIdentifier(ret, _state->recordIdSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
-    if (_snapshotIdSlot) {
-        DebugPrinter::addIdentifier(ret, _snapshotIdSlot.value());
+    if (_state->snapshotIdSlot) {
+        DebugPrinter::addIdentifier(ret, _state->snapshotIdSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
-    if (_indexIdentSlot) {
-        DebugPrinter::addIdentifier(ret, _indexIdentSlot.value());
+    if (_state->indexIdentSlot) {
+        DebugPrinter::addIdentifier(ret, _state->indexIdentSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
-    if (_indexKeySlot) {
-        DebugPrinter::addIdentifier(ret, _indexKeySlot.value());
+    if (_state->indexKeySlot) {
+        DebugPrinter::addIdentifier(ret, _state->indexKeySlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
-    if (_indexKeyPatternSlot) {
-        DebugPrinter::addIdentifier(ret, _indexKeyPatternSlot.value());
+    if (_state->indexKeyPatternSlot) {
+        DebugPrinter::addIdentifier(ret, _state->indexKeyPatternSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
-    if (_minRecordIdSlot) {
-        DebugPrinter::addIdentifier(ret, _minRecordIdSlot.value());
+    if (_state->minRecordIdSlot) {
+        DebugPrinter::addIdentifier(ret, _state->minRecordIdSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
-    if (_maxRecordIdSlot) {
-        DebugPrinter::addIdentifier(ret, _maxRecordIdSlot.value());
+    if (_state->maxRecordIdSlot) {
+        DebugPrinter::addIdentifier(ret, _state->maxRecordIdSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
-    if (_useRandomCursor) {
+    if (_state->useRandomCursor) {
         DebugPrinter::addKeyword(ret, "random");
     }
 
@@ -774,22 +798,22 @@ std::vector<DebugPrinter::Block> ScanStage::debugPrint() const {
     }
 
     ret.emplace_back(DebugPrinter::Block("[`"));
-    for (size_t idx = 0; idx < _scanFieldNames.size(); ++idx) {
+    for (size_t idx = 0; idx < _state->scanFieldNames.size(); ++idx) {
         if (idx) {
             ret.emplace_back(DebugPrinter::Block("`,"));
         }
 
-        DebugPrinter::addIdentifier(ret, _scanFieldSlots[idx]);
+        DebugPrinter::addIdentifier(ret, _state->scanFieldSlots[idx]);
         ret.emplace_back("=");
-        DebugPrinter::addIdentifier(ret, _scanFieldNames[idx]);
+        DebugPrinter::addIdentifier(ret, _state->scanFieldNames[idx]);
     }
     ret.emplace_back(DebugPrinter::Block("`]"));
 
     ret.emplace_back("@\"`");
-    DebugPrinter::addIdentifier(ret, _collUuid.toString());
+    DebugPrinter::addIdentifier(ret, _state->collUuid.toString());
     ret.emplace_back("`\"");
 
-    ret.emplace_back(_forward ? "true" : "false");
+    ret.emplace_back(_state->forward ? "true" : "false");
 
     ret.emplace_back(_oplogTsAccessor ? "true" : "false");
 
@@ -798,14 +822,14 @@ std::vector<DebugPrinter::Block> ScanStage::debugPrint() const {
 
 size_t ScanStage::estimateCompileTimeSize() const {
     size_t size = sizeof(*this);
-    size += size_estimator::estimate(_scanFieldNames.getUnderlyingVector());
-    size += size_estimator::estimate(_scanFieldNames.getUnderlyingMap());
-    size += size_estimator::estimate(_scanFieldSlots);
+    size += size_estimator::estimate(_state->scanFieldNames.getUnderlyingVector());
+    size += size_estimator::estimate(_state->scanFieldNames.getUnderlyingMap());
+    size += size_estimator::estimate(_state->scanFieldSlots);
     size += size_estimator::estimate(_specificStats);
     return size;
 }
 
-ParallelScanStage::ParallelScanStage(UUID collectionUuid,
+ParallelScanStage::ParallelScanStage(UUID collUuid,
                                      boost::optional<value::SlotId> recordSlot,
                                      boost::optional<value::SlotId> recordIdSlot,
                                      boost::optional<value::SlotId> snapshotIdSlot,
@@ -819,23 +843,22 @@ ParallelScanStage::ParallelScanStage(UUID collectionUuid,
                                      ScanCallbacks callbacks,
                                      bool participateInTrialRunTracking)
     : PlanStage("pscan"_sd, yieldPolicy, nodeId, participateInTrialRunTracking),
+      _state(std::make_shared<ParallelState>()),
+      _collUuid(collUuid),
       _recordSlot(recordSlot),
       _recordIdSlot(recordIdSlot),
       _snapshotIdSlot(snapshotIdSlot),
       _indexIdentSlot(indexIdentSlot),
       _indexKeySlot(indexKeySlot),
       _indexKeyPatternSlot(indexKeyPatternSlot),
-      _scanFieldNames(std::move(scanFieldNames)),
-      _scanFieldSlots(std::move(scanFieldSlots)),
-      _collUuid(collectionUuid),
-      _scanCallbacks(std::move(callbacks)) {
+      _scanFieldNames(scanFieldNames),
+      _scanFieldSlots(scanFieldSlots),
+      _scanCallbacks(callbacks) {
     invariant(_scanFieldNames.size() == _scanFieldSlots.size());
-
-    _state = std::make_shared<ParallelState>();
 }
 
 ParallelScanStage::ParallelScanStage(const std::shared_ptr<ParallelState>& state,
-                                     const UUID& collectionUuid,
+                                     UUID collUuid,
                                      boost::optional<value::SlotId> recordSlot,
                                      boost::optional<value::SlotId> recordIdSlot,
                                      boost::optional<value::SlotId> snapshotIdSlot,
@@ -849,17 +872,17 @@ ParallelScanStage::ParallelScanStage(const std::shared_ptr<ParallelState>& state
                                      ScanCallbacks callbacks,
                                      bool participateInTrialRunTracking)
     : PlanStage("pscan"_sd, yieldPolicy, nodeId, participateInTrialRunTracking),
+      _state(state),
+      _collUuid(collUuid),
       _recordSlot(recordSlot),
       _recordIdSlot(recordIdSlot),
       _snapshotIdSlot(snapshotIdSlot),
       _indexIdentSlot(indexIdentSlot),
       _indexKeySlot(indexKeySlot),
       _indexKeyPatternSlot(indexKeyPatternSlot),
-      _scanFieldNames(std::move(scanFieldNames)),
-      _scanFieldSlots(std::move(scanFieldSlots)),
-      _collUuid(collectionUuid),
-      _scanCallbacks(std::move(callbacks)),
-      _state(state) {
+      _scanFieldNames(scanFieldNames),
+      _scanFieldSlots(scanFieldSlots),
+      _scanCallbacks(callbacks) {
     invariant(_scanFieldNames.size() == _scanFieldSlots.size());
 }
 

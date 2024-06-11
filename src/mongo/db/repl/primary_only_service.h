@@ -139,6 +139,13 @@ public:
          *
          * 2. On stepdown/shutdown of a PrimaryOnlyService, the input cancellation token will be
          * marked canceled.
+         *
+         * 3. Currently, 'run()' is scheduled on the Instance ScopedTaskExecutor, which means it's
+         * possible the task never gets executed if the scheduling executor is shutdown
+         * (eg. as part of stepdown) before the task gets run. This also implies that creating
+         * an instance does not guarantee that run() will be called before destruction, and so
+         * PrimaryOnlyService implementations should not rely on run() to guarantee behavior around
+         * safe destruction of an Instance.
          */
         virtual SemiFuture<void> run(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                      const CancellationToken& token) noexcept = 0;
@@ -220,7 +227,8 @@ public:
 
     /**
      * Returns the collection where state documents corresponding to instances of this service are
-     * persisted.
+     * persisted. MUST be in the config database, due to the PrimaryOnlyServiceOpObserver's
+     * NamespaceFilter.
      */
     virtual NamespaceString getStateDocumentsNS() const = 0;
 
@@ -459,11 +467,9 @@ private:
     };
 
     /**
-     * Called at the end of the service stepdown procedure.
-     * In order to not block the stepdown procedure, no blocking work must be done in this
-     * function.
+     * Called as part of the POS onStepDown/onShutdown hooks before interrupting instances.
      */
-    virtual void _afterStepDown() {}
+    virtual void _onServiceTermination() {}
 
     /**
      * Called as part of onStepUp.  Queries the state document collection for this

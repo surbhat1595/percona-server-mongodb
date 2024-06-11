@@ -91,7 +91,7 @@ public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec);
 
-        Status checkShardedForeignCollAllowed(NamespaceString nss,
+        Status checkShardedForeignCollAllowed(const NamespaceString& nss,
                                               bool inMultiDocumentTransaction) const final {
             if (_foreignNss != nss) {
                 return Status::OK();
@@ -112,6 +112,7 @@ public:
 
         ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
                                                      bool isImplicitDefault) const final {
+            using namespace fmt::literals;
             return {
                 {level == repl::ReadConcernLevel::kLinearizableReadConcern,
                  {ErrorCodes::InvalidOptions,

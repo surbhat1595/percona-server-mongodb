@@ -119,8 +119,7 @@ StatusWith<BSONObj> fixDocumentForInsert(OperationContext* opCtx,
             BSONElement e = i.next();
 
             auto fieldName = e.fieldNameStringData();
-
-            if (fieldName[0] == '$' && containsDotsAndDollarsField) {
+            if (fieldName.starts_with('$') && containsDotsAndDollarsField) {
                 *containsDotsAndDollarsField = true;
                 // If the internal validation is disabled and we confirm this doc contains
                 // dots/dollars field name, we can skip other validations below.
@@ -225,7 +224,7 @@ Status userAllowedCreateNS(OperationContext* opCtx, const NamespaceString& ns) {
         return Status::OK();
     }
 
-    if (ns.isSystem() && !ns.isLegalClientSystemNS(serverGlobalParams.featureCompatibility)) {
+    if (ns.isSystem() && !ns.isLegalClientSystemNS()) {
         return Status(ErrorCodes::InvalidNamespace,
                       str::stream() << "Invalid system namespace: " << ns.toStringForErrorMsg());
     }
@@ -248,7 +247,7 @@ Status userAllowedCreateNS(OperationContext* opCtx, const NamespaceString& ns) {
             return Status::OK();
         }
 
-        if (ns.isConfigDB() && ns.isLegalClientSystemNS(serverGlobalParams.featureCompatibility)) {
+        if (ns.isConfigDB() && ns.isLegalClientSystemNS()) {
             return Status::OK();
         }
 

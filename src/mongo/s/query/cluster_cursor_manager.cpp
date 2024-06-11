@@ -44,6 +44,7 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/cursor_stats.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/session/kill_sessions_common.h"
@@ -262,7 +263,7 @@ StatusWith<ClusterCursorManager::PinnedCursor> ClusterCursorManager::checkOutCur
     cursorGuard->reattachToOperationContext(opCtx);
 
     CurOp::get(opCtx)->debug().queryHash = cursorGuard->getQueryHash();
-    CurOp::get(opCtx)->debug().queryStatsKeyHash = cursorGuard->getQueryStatsKeyHash();
+    CurOp::get(opCtx)->debug().queryStatsInfo.keyHash = cursorGuard->getQueryStatsKeyHash();
 
     return PinnedCursor(this, std::move(cursorGuard), entry->getNamespace(), cursorId);
 }
@@ -446,10 +447,13 @@ size_t ClusterCursorManager::cursorsTimedOut() const {
     return _cursorsTimedOut;
 }
 
-ClusterCursorManager::Stats ClusterCursorManager::stats() const {
+void ClusterCursorManager::stats() const {
     stdx::lock_guard<Latch> lk(_mutex);
 
-    Stats stats;
+    auto& stats = CursorStats::getInstance();
+    stats.reset();
+
+    stats.cursorStatsTimedOut.increment(_cursorsTimedOut);
 
     for (auto&& [cursorId, entry] : _cursorEntryMap) {
         if (entry.isKillPending()) {
@@ -459,23 +463,23 @@ ClusterCursorManager::Stats ClusterCursorManager::stats() const {
         }
 
         if (entry.getOperationUsingCursor()) {
-            ++stats.cursorsPinned;
+            stats.cursorStatsOpenPinned.increment();
         }
 
         switch (entry.getCursorType()) {
             case CursorType::SingleTarget:
-                ++stats.cursorsSingleTarget;
+                stats.cursorStatsSingleTarget.increment();
+                stats.cursorStatsOpen.increment();
                 break;
             case CursorType::MultiTarget:
-                ++stats.cursorsMultiTarget;
+                stats.cursorStatsMultiTarget.increment();
+                stats.cursorStatsOpen.increment();
                 break;
             case CursorType::QueuedData:
-                ++stats.cursorsQueuedData;
+                stats.cursorStatsQueuedData.increment();
                 break;
         }
     }
-
-    return stats;
 }
 
 void ClusterCursorManager::appendActiveSessions(LogicalSessionIdSet* lsids) const {
@@ -608,14 +612,14 @@ StatusWith<ClusterClientCursorGuard> ClusterCursorManager::_detachCursor(WithLoc
 void collectQueryStatsMongos(OperationContext* opCtx, std::unique_ptr<query_stats::Key> key) {
     // If we haven't registered a cursor to prepare for getMore requests, we record
     // queryStats directly.
-    auto&& opDebug = CurOp::get(opCtx)->debug();
-    int64_t execTime = opDebug.additiveMetrics.executionTime.value_or(Microseconds{0}).count();
-    query_stats::writeQueryStats(opCtx,
-                                 opDebug.queryStatsKeyHash,
-                                 std::move(key),
-                                 execTime,
-                                 execTime,
-                                 opDebug.additiveMetrics.nreturned.value_or(0));
+    auto& opDebug = CurOp::get(opCtx)->debug();
+
+    auto snapshot = query_stats::captureMetrics(
+        opCtx,
+        query_stats::microsecondsToUint64(opDebug.additiveMetrics.executionTime),
+        opDebug.additiveMetrics);
+
+    query_stats::writeQueryStats(opCtx, opDebug.queryStatsInfo.keyHash, std::move(key), snapshot);
 }
 
 void collectQueryStatsMongos(OperationContext* opCtx, ClusterClientCursorGuard& cursor) {

@@ -59,6 +59,7 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/shard_role.h"
 #include "mongo/db/storage/snapshot.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/db/yieldable.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -79,13 +80,14 @@ MONGO_WARN_UNUSED_RESULT_FUNCTION PlanStage::StageState handlePlanStageYield(
     ExpressionContext* expCtx, StringData opStr, F&& f, H&& yieldHandler) {
     auto opCtx = expCtx->opCtx;
     invariant(opCtx);
-    invariant(opCtx->lockState());
-    invariant(opCtx->recoveryUnit());
+    invariant(shard_role_details::getLocker(opCtx));
+    invariant(shard_role_details::getRecoveryUnit(opCtx));
     invariant(!expCtx->getTemporarilyUnavailableException());
 
     try {
         return f();
     } catch (const ExceptionFor<ErrorCodes::WriteConflict>&) {
+        CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
         yieldHandler();
         return PlanStage::NEED_YIELD;
     } catch (const ExceptionFor<ErrorCodes::TemporarilyUnavailable>& e) {
@@ -134,7 +136,8 @@ public:
                      VariantCollectionPtrOrAcquisition collection,
                      bool returnOwnedBson,
                      NamespaceString nss,
-                     PlanYieldPolicy::YieldPolicy yieldPolicy);
+                     PlanYieldPolicy::YieldPolicy yieldPolicy,
+                     boost::optional<size_t> cachedPlanHash = boost::none);
 
     virtual ~PlanExecutorImpl();
     CanonicalQuery* getCanonicalQuery() const final;

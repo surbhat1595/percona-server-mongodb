@@ -51,6 +51,7 @@ MONGO_FAIL_POINT_DEFINE(asioTransportLayerShortOpportunisticReadWrite);
 MONGO_FAIL_POINT_DEFINE(asioTransportLayerSessionPauseBeforeSetSocketOption);
 MONGO_FAIL_POINT_DEFINE(asioTransportLayerBlockBeforeOpportunisticRead);
 MONGO_FAIL_POINT_DEFINE(asioTransportLayerBlockBeforeAddSession);
+MONGO_FAIL_POINT_DEFINE(clientIsFromLoadBalancer);
 
 namespace {
 
@@ -154,13 +155,18 @@ CommonAsioSession::CommonAsioSession(
 #endif
 }
 
+bool CommonAsioSession::isFromLoadBalancer() const {
+    return MONGO_unlikely(clientIsFromLoadBalancer.shouldFail()) || _isFromLoadBalancer;
+}
+
 void CommonAsioSession::end() {
-    if (getSocket().is_open()) {
-        std::error_code ec;
+    std::error_code ec;
+    {
+        stdx::lock_guard lg(_sslSocketLock);
         getSocket().shutdown(GenericSocket::shutdown_both, ec);
-        if ((ec) && (ec != asio::error::not_connected)) {
-            LOGV2_ERROR(23841, "Error shutting down socket", "error"_attr = ec.message());
-        }
+    }
+    if ((ec) && (ec != asio::error::not_connected)) {
+        LOGV2_ERROR(23841, "Error shutting down socket", "error"_attr = ec.message());
     }
 }
 
@@ -695,7 +701,11 @@ Future<bool> CommonAsioSession::maybeHandshakeSSLForIngress(const MutableBufferS
                 });
         }
 
-        _sslSocket.emplace(std::move(_socket), *_sslContext->ingress, "");
+        {
+            stdx::lock_guard lg(_sslSocketLock);
+            _sslSocket.emplace(std::move(_socket), *_sslContext->ingress, "");
+        }
+
         auto doHandshake = [&] {
             if (_blockingMode == sync) {
                 std::error_code ec;
@@ -716,7 +726,7 @@ Future<bool> CommonAsioSession::maybeHandshakeSSLForIngress(const MutableBufferS
                 LOGV2_DEBUG(4908001, 2, "Client connected without SNI extension");
             }
             const auto handshakeDurationMillis = durationCount<Milliseconds>(startTimer.elapsed());
-            if (gEnableDetailedConnectionHealthMetricLogLines) {
+            if (gEnableDetailedConnectionHealthMetricLogLines.load()) {
                 LOGV2(6723804,
                       "Ingress TLS handshake complete",
                       "durationMillis"_attr = handshakeDurationMillis);
@@ -786,7 +796,7 @@ Future<Message> CommonAsioSession::sendHTTPResponse(const BatonHandle& baton) {
 }
 
 bool CommonAsioSession::shouldOverrideMaxConns(
-    const std::vector<stdx::variant<CIDR, std::string>>& exemptions) const {
+    const std::vector<std::variant<CIDR, std::string>>& exemptions) const {
     return transport::util::shouldOverrideMaxConns(remoteAddr(), localAddr(), exemptions);
 }
 

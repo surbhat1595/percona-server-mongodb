@@ -83,7 +83,7 @@
 #include "mongo/db/query/find_command_gen.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/query/query_settings_gen.h"
+#include "mongo/db/query/query_settings/query_settings_gen.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_sharding_state.h"
@@ -529,7 +529,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
     // Initialize curOp information.
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
-        if (req.getIsTimeseriesNamespace()) {
+        if (req.getIsTimeseriesNamespace() && nsString.isTimeseriesBucketsCollection()) {
             auto viewNss = nsString.getTimeseriesViewNamespace();
             curOp.setNS_inlock(viewNss);
             curOp.setOpDescription_inlock(timeseries::timeseriesViewCommand(
@@ -554,10 +554,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
 
     const bool inTransaction = opCtx->inMultiDocumentTransaction();
 
-    // Although usually the PlanExecutor handles WCE internally, it will throw WCEs when it
-    // is executing a findAndModify. This is done to ensure that we can always match,
-    // modify, and return the document under concurrency, if a matching document exists.
-    return writeConflictRetry(opCtx, "findAndModify", nsString, [&] {
+    auto doWork = [&] {
         if (req.getRemove().value_or(false)) {
             DeleteRequest deleteRequest;
             makeDeleteRequest(opCtx, req, false, &deleteRequest);
@@ -648,7 +645,17 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                 }
             }
         }
-    });
+    };
+
+    // No need to call writeConflictRetry() since it does not retry if in a transaction,
+    // but calling it can cause WCE to be double counted.
+    if (inTransaction) {
+        return doWork();
+    }
+    // Although usually the PlanExecutor handles WCE internally, it will throw WCEs when it
+    // is executing a findAndModify. This is done to ensure that we can always match,
+    // modify, and return the document under concurrency, if a matching document exists.
+    return writeConflictRetry(opCtx, "findAndModify", nsString, doWork);
 }
 
 void CmdFindAndModify::Invocation::appendMirrorableRequest(BSONObjBuilder* bob) const {

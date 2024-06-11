@@ -813,6 +813,10 @@ public:
         unsupportedExpression("$_internalIndexKey");
     }
 
+    void visit(const ExpressionInternalKeyStringValue* expr) override final {
+        unsupportedExpression(expr->getOpName());
+    }
+
 private:
     /**
      * Shared logic for $and, $or. Converts each child into an EExpression that evaluates to Boolean
@@ -929,8 +933,12 @@ private:
 ABT generateAggExpression(const Expression* expr,
                           const ProjectionName& rootProjection,
                           PrefixId& prefixId) {
-    ExpressionAlgebrizerContext ctx(
-        true /*assertExprSort*/, false /*assertPathSort*/, rootProjection, prefixId);
+    QueryParameterMap queryParameters;
+    ExpressionAlgebrizerContext ctx(true /*assertExprSort*/,
+                                    false /*assertPathSort*/,
+                                    rootProjection,
+                                    prefixId,
+                                    queryParameters);
     ABTAggExpressionVisitor visitor(ctx);
 
     AggExpressionWalker walker(&visitor);

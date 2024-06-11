@@ -58,7 +58,6 @@
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/feature_flag.h"
@@ -131,6 +130,7 @@
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/producer_consumer_queue.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
@@ -723,8 +723,8 @@ void MigrationDestinationManager::abortWithoutSessionIdCheck() {
 Status MigrationDestinationManager::startCommit(const MigrationSessionId& sessionId) {
     stdx::unique_lock<Latch> lock(_mutex);
 
-    const auto convergenceTimeout =
-        Shard::kDefaultConfigCommandTimeout + Shard::kDefaultConfigCommandTimeout / 4;
+    const auto convergenceTimeout = Milliseconds(defaultConfigCommandTimeoutMS.load()) +
+        Milliseconds(defaultConfigCommandTimeoutMS.load()) / 4;
 
     // The donor may have started the commit while the recipient is still busy processing
     // the last batch of mods sent in the catch up phase. Allow some time for synching up.
@@ -861,7 +861,7 @@ MigrationDestinationManager::IndexesAndIdIndex MigrationDestinationManager::getC
     // Get the collection indexes and options from the donor shard.
 
     // Do not hold any locks while issuing remote calls.
-    invariant(!opCtx->lockState()->isLocked());
+    invariant(!shard_role_details::getLocker(opCtx)->isLocked());
 
     auto cmd = nssOrUUID.isNamespaceString() ? BSON("listIndexes" << nssOrUUID.nss().coll())
                                              : BSON("listIndexes" << nssOrUUID.uuid());
@@ -1245,12 +1245,19 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
     invariant(!_min.isEmpty());
     invariant(!_max.isEmpty());
 
-    boost::optional<MoveTimingHelper> timing;
     boost::optional<Timer> timeInCriticalSection;
+    boost::optional<MoveTimingHelper> timing;
+    mongo::ScopeGuard timingSetMsgGuard{[this, &timing] {
+        // Set the error message to MoveTimingHelper just before it is destroyed. The destructor
+        // sends that message (among other things) to the ShardingLogging.
+        if (timing) {
+            stdx::lock_guard<Latch> sl(_mutex);
+            timing->setCmdErrMsg(_errmsg);
+        }
+    }};
 
     if (!skipToCritSecTaken) {
-        timing.emplace(
-            outerOpCtx, "to", _nss, _min, _max, 8 /* steps */, &_errmsg, _toShard, _fromShard);
+        timing.emplace(outerOpCtx, "to", _nss, _min, _max, 8 /* steps */, _toShard, _fromShard);
 
         LOGV2(22000,
               "Starting receiving end of chunk migration",
@@ -1369,7 +1376,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
 
             // Get the global indexes and install them.
             if (feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
-                    serverGlobalParams.featureCompatibility)) {
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                 replaceShardingIndexCatalogInShardIfNeeded(
                     altOpCtx.get(), _nss, donorCollectionOptionsAndIndexes.uuid);
             }

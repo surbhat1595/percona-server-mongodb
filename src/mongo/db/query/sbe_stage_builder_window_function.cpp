@@ -102,7 +102,7 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAddCovariance(
     StringDataMap<std::unique_ptr<sbe::EExpression>> args,
     boost::optional<sbe::value::SlotId> collatorSlot) {
     auto accStmt = createFakeAccumulationStatement(state, stmt);
-    return buildAccumulator(accStmt, std::move(args), collatorSlot, *state.frameIdGenerator);
+    return buildAccumulator(accStmt, std::move(args), collatorSlot, state);
 }
 
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowRemoveCovariance(
@@ -134,7 +134,7 @@ std::unique_ptr<sbe::EExpression> buildWindowFinalizeCovarianceSamp(
     sbe::value::SlotVector slots,
     boost::optional<sbe::value::SlotId> collatorSlot) {
     auto accStmt = createFakeAccumulationStatement(state, stmt);
-    return buildFinalize(state, accStmt, slots, collatorSlot, *state.frameIdGenerator);
+    return buildFinalize(state, accStmt, slots, collatorSlot).extractExpr(state).expr;
 }
 
 std::unique_ptr<sbe::EExpression> buildWindowFinalizeCovariancePop(
@@ -143,7 +143,7 @@ std::unique_ptr<sbe::EExpression> buildWindowFinalizeCovariancePop(
     sbe::value::SlotVector slots,
     boost::optional<sbe::value::SlotId> collatorSlot) {
     auto accStmt = createFakeAccumulationStatement(state, stmt);
-    return buildFinalize(state, accStmt, slots, collatorSlot, *state.frameIdGenerator);
+    return buildFinalize(state, accStmt, slots, collatorSlot).extractExpr(state).expr;
 }
 
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAddPush(
@@ -194,7 +194,7 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAddIntegral(
     StringDataMap<std::unique_ptr<sbe::EExpression>> args,
     boost::optional<sbe::value::SlotId> collatorSlot) {
     auto accStmt = createFakeAccumulationStatement(state, stmt);
-    return buildAccumulator(accStmt, std::move(args), collatorSlot, *state.frameIdGenerator);
+    return buildAccumulator(accStmt, std::move(args), collatorSlot, state);
 }
 
 
@@ -227,7 +227,7 @@ std::unique_ptr<sbe::EExpression> buildWindowFinalizeIntegral(
     sbe::value::SlotVector slots,
     boost::optional<sbe::value::SlotId> collatorSlot) {
     auto accStmt = createFakeAccumulationStatement(state, stmt);
-    return buildFinalize(state, accStmt, slots, collatorSlot, *state.frameIdGenerator);
+    return buildFinalize(state, accStmt, slots, collatorSlot).extractExpr(state).expr;
 }
 
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInitializeDerivative(
@@ -236,7 +236,7 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInitializeDerivative(
     std::unique_ptr<sbe::EExpression> unitExpr,
     boost::optional<sbe::value::SlotId> collatorSlot) {
     auto accStmt = createFakeAccumulationStatement(state, stmt);
-    return buildInitialize(accStmt, std::move(unitExpr), *state.frameIdGenerator);
+    return buildInitialize(accStmt, std::move(unitExpr), state);
 }
 
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAddDerivative(
@@ -261,8 +261,7 @@ std::unique_ptr<sbe::EExpression> buildWindowFinalizeDerivative(
     StringDataMap<std::unique_ptr<sbe::EExpression>> args,
     boost::optional<sbe::value::SlotId> collatorSlot) {
     auto accStmt = createFakeAccumulationStatement(state, stmt);
-    return buildFinalize(
-        state, accStmt, slots, std::move(args), collatorSlot, *state.frameIdGenerator);
+    return buildFinalize(state, accStmt, slots, std::move(args), collatorSlot);
 }
 
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAddStdDev(
@@ -394,17 +393,25 @@ std::unique_ptr<sbe::EExpression> buildWindowFinalizeFirstLast(
     tassert(8085500, "Expected a single slot", slots.size() == 1);
     auto it = args.find(AccArgs::kInput);
     tassert(8085501,
-            str::stream() << "Window function " << AccumulatorFirst::kName << " expects '"
+            str::stream() << "Window function " << stmt.expr->getOpName() << " expects '"
                           << AccArgs::kInput << "' argument",
             it != args.end());
+    auto input = std::move(it->second);
+
+    it = args.find(AccArgs::kDefaultVal);
+    tassert(8293502,
+            str::stream() << "Window function " << stmt.expr->getOpName() << " expects '"
+                          << AccArgs::kDefaultVal << "' argument",
+            it != args.end());
+    auto defaultVal = std::move(it->second);
 
     return sbe::makeE<sbe::EIf>(
         makeBinaryOp(
             sbe::EPrimBinary::logicAnd,
             makeFunction("exists", makeVariable(slots[0])),
             makeBinaryOp(sbe::EPrimBinary::greater, makeVariable(slots[0]), makeInt64Constant(0))),
-        makeFillEmptyNull(std::move(it->second)),
-        makeNullConstant());
+        makeFillEmptyNull(std::move(input)),
+        std::move(defaultVal));
 }
 
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInitializeFirstN(
@@ -546,6 +553,243 @@ std::unique_ptr<sbe::EExpression> buildWindowFinalizeAddToSet(
     return makeE<sbe::EFunction>("aggRemovableAddToSetFinalize", std::move(exprs));
 }
 
+std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInitializeMinMax(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    std::unique_ptr<sbe::EExpression> unitExpr,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    std::vector<std::unique_ptr<sbe::EExpression>> exprs;
+
+    auto cap = internalQueryTopNAccumulatorBytes.load();
+
+    if (collatorSlot) {
+        exprs.push_back(makeFunction(
+            "aggRemovableMinMaxNCollInit",
+            makeConstant(sbe::value::TypeTags::NumberInt32, sbe::value::bitcastFrom<int32_t>(1)),
+            makeInt32Constant(cap),
+            sbe::makeE<sbe::EVariable>(*collatorSlot)));
+    } else {
+        exprs.push_back(makeFunction(
+            "aggRemovableMinMaxNInit",
+            makeConstant(sbe::value::TypeTags::NumberInt32, sbe::value::bitcastFrom<int32_t>(1)),
+            makeInt32Constant(cap)));
+    }
+    return exprs;
+}
+
+std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInitializeMinMaxN(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> args,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    auto it = args.find(AccArgs::kMaxSize);
+    uassert(8178112, "Expected max size argument", it != args.end());
+    auto maxSizeArg = std::move(it->second);
+    uassert(8178113,
+            "$minN/$maxN init argument should be a constant",
+            maxSizeArg->as<sbe::EConstant>() != nullptr);
+
+    std::vector<std::unique_ptr<sbe::EExpression>> exprs;
+
+    auto cap = internalQueryTopNAccumulatorBytes.load();
+
+    if (collatorSlot) {
+        exprs.push_back(makeFunction("aggRemovableMinMaxNCollInit",
+                                     std::move(maxSizeArg),
+                                     makeInt32Constant(cap),
+                                     sbe::makeE<sbe::EVariable>(*collatorSlot)));
+    } else {
+        exprs.push_back(
+            makeFunction("aggRemovableMinMaxNInit", std::move(maxSizeArg), makeInt32Constant(cap)));
+    }
+    return exprs;
+}
+
+std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAddMinMaxN(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    std::unique_ptr<sbe::EExpression> arg,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    std::vector<std::unique_ptr<sbe::EExpression>> exprs;
+    exprs.push_back(
+        makeFunction("aggRemovableMinMaxNAdd", makeFunction("setToArray", std::move(arg))));
+    return exprs;
+}
+
+std::vector<std::unique_ptr<sbe::EExpression>> buildWindowRemoveMinMaxN(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    std::unique_ptr<sbe::EExpression> arg,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    std::vector<std::unique_ptr<sbe::EExpression>> exprs;
+    exprs.push_back(
+        makeFunction("aggRemovableMinMaxNRemove", makeFunction("setToArray", std::move(arg))));
+    return exprs;
+}
+
+std::unique_ptr<sbe::EExpression> buildWindowFinalizeMinN(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    sbe::value::SlotVector slots,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    tassert(8178130, "Expected a single slot", slots.size() == 1);
+    return makeFunction("aggRemovableMinNFinalize", makeVariable(slots[0]));
+}
+
+std::unique_ptr<sbe::EExpression> buildWindowFinalizeMaxN(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    sbe::value::SlotVector slots,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    tassert(8178131, "Expected a single slot", slots.size() == 1);
+    return makeFunction("aggRemovableMaxNFinalize", makeVariable(slots[0]));
+}
+
+std::unique_ptr<sbe::EExpression> buildWindowFinalizeMin(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    sbe::value::SlotVector slots,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    tassert(8124914, "Expected a single slot", slots.size() == 1);
+    return makeFillEmptyNull(
+        makeFunction("getElement",
+                     makeFunction("aggRemovableMinNFinalize", makeVariable(slots[0])),
+                     makeInt32Constant(0)));
+}
+
+std::unique_ptr<sbe::EExpression> buildWindowFinalizeMax(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    sbe::value::SlotVector slots,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    tassert(8124915, "Expected a single slot", slots.size() == 1);
+    return makeFillEmptyNull(
+        makeFunction("getElement",
+                     makeFunction("aggRemovableMaxNFinalize", makeVariable(slots[0])),
+                     makeInt32Constant(0)));
+}
+
+std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInitializeTopBottomN(
+    std::string func, StringDataMap<std::unique_ptr<sbe::EExpression>> args) {
+    auto maxAccumulatorBytes = internalQueryTopNAccumulatorBytes.load();
+    auto it = args.find(AccArgs::kMaxSize);
+    uassert(8155719, "Expected max size argument", it != args.end());
+    auto nExpr = std::move(it->second);
+    uassert(8155720,
+            "$topN/$bottomN init argument should be a constant",
+            nExpr->as<sbe::EConstant>() != nullptr);
+    std::vector<std::unique_ptr<sbe::EExpression>> exprs;
+    exprs.push_back(makeFunction(func, std::move(nExpr), makeInt32Constant(maxAccumulatorBytes)));
+    return exprs;
+}
+
+std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInitializeTopN(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> args,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    return buildWindowInitializeTopBottomN("aggRemovableTopNInit", std::move(args));
+}
+
+std::vector<std::unique_ptr<sbe::EExpression>> buildRemovableTopBottomN(
+    std::string func, StringDataMap<std::unique_ptr<sbe::EExpression>> args) {
+
+    auto it = args.find(AccArgs::kTopBottomNKey);
+    tassert(8155712,
+            str::stream() << "Expected a '" << AccArgs::kTopBottomNKey << "' argument",
+            it != args.end());
+    auto key = std::move(it->second);
+
+    it = args.find(AccArgs::kTopBottomNValue);
+    tassert(8155713,
+            str::stream() << "Expected a '" << AccArgs::kTopBottomNValue << "' argument",
+            it != args.end());
+    auto value = std::move(it->second);
+
+    std::vector<std::unique_ptr<sbe::EExpression>> exprs;
+    exprs.push_back(makeFunction(func, std::move(key), std::move(value)));
+    return exprs;
+}
+
+std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAddTopN(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> args,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    return buildRemovableTopBottomN("aggRemovableTopNAdd", std::move(args));
+}
+
+std::vector<std::unique_ptr<sbe::EExpression>> buildWindowRemoveTopN(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> args) {
+    return buildRemovableTopBottomN("aggRemovableTopNRemove", std::move(args));
+}
+
+std::unique_ptr<sbe::EExpression> buildWindowFinalizeTopN(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    sbe::value::SlotVector slots,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    tassert(8155710, "Expected a single slot", slots.size() == 1);
+    return makeFunction("aggRemovableTopNFinalize", makeVariable(slots[0]));
+}
+
+std::unique_ptr<sbe::EExpression> buildWindowFinalizeTop(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    sbe::value::SlotVector slots,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    tassert(8155721, "Expected a single slot", slots.size() == 1);
+    return makeFillEmptyNull(
+        makeFunction("getElement",
+                     makeFunction("aggRemovableTopNFinalize", makeVariable(slots[0])),
+                     makeInt32Constant(0)));
+}
+
+std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInitializeBottomN(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> args,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    return buildWindowInitializeTopBottomN("aggRemovableBottomNInit", std::move(args));
+}
+
+std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAddBottomN(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> args,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    return buildRemovableTopBottomN("aggRemovableBottomNAdd", std::move(args));
+}
+
+std::vector<std::unique_ptr<sbe::EExpression>> buildWindowRemoveBottomN(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> args) {
+    return buildRemovableTopBottomN("aggRemovableBottomNRemove", std::move(args));
+}
+
+std::unique_ptr<sbe::EExpression> buildWindowFinalizeBottomN(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    sbe::value::SlotVector slots,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    tassert(8155714, "Expected a single slot", slots.size() == 1);
+    return makeFunction("aggRemovableBottomNFinalize", makeVariable(slots[0]));
+}
+
+std::unique_ptr<sbe::EExpression> buildWindowFinalizeBottom(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    sbe::value::SlotVector slots,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
+    tassert(8155722, "Expected a single slot", slots.size() == 1);
+    return makeFillEmptyNull(
+        makeFunction("getElement",
+                     makeFunction("aggRemovableBottomNFinalize", makeVariable(slots[0])),
+                     makeInt32Constant(0)));
+}
 
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInit(
     StageBuilderState& state,
@@ -571,6 +815,9 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInit(
         {AccumulatorFirst::kName, &emptyInitializer<1>},
         {AccumulatorLast::kName, &emptyInitializer<1>},
         {AccumulatorAddToSet::kName, &buildWindowInitializeAddToSet},
+        {AccumulatorMin::kName, &buildWindowInitializeMinMax},
+        {AccumulatorMax::kName, &buildWindowInitializeMinMax},
+        {"$shift", &emptyInitializer<1>},
     };
 
     auto opName = stmt.expr->getOpName();
@@ -596,6 +843,12 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInit(
     static const StringDataMap<BuildInitFn> kWindowFunctionBuilders = {
         {"$firstN", &buildWindowInitializeFirstN},
         {"$lastN", &buildWindowInitializeLastN},
+        {AccumulatorMinN::kName, &buildWindowInitializeMinMaxN},
+        {AccumulatorMaxN::kName, &buildWindowInitializeMinMaxN},
+        {"$topN", &buildWindowInitializeTopN},
+        {"$top", &buildWindowInitializeTopN},
+        {"$bottomN", &buildWindowInitializeBottomN},
+        {"$bottom", &buildWindowInitializeBottomN},
     };
 
     auto opName = stmt.expr->getOpName();
@@ -629,6 +882,11 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAdd(
         {"$firstN", &buildWindowAddFirstN},
         {"$lastN", &buildWindowAddLastN},
         {AccumulatorAddToSet::kName, &buildWindowAddAddToSet},
+        {AccumulatorMinN::kName, &buildWindowAddMinMaxN},
+        {AccumulatorMaxN::kName, &buildWindowAddMinMaxN},
+        {AccumulatorMin::kName, &buildWindowAddMinMaxN},
+        {AccumulatorMax::kName, &buildWindowAddMinMaxN},
+        {"$shift", &buildWindowAddFirstLast},
     };
 
     auto opName = stmt.expr->getOpName();
@@ -656,6 +914,10 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAdd(
         {"$covariancePop", &buildWindowAddCovariance},
         {"$integral", &buildWindowAddIntegral},
         {"$derivative", &buildWindowAddDerivative},
+        {"$topN", &buildWindowAddTopN},
+        {"$top", &buildWindowAddTopN},
+        {"$bottomN", &buildWindowAddBottomN},
+        {"$bottom", &buildWindowAddBottomN},
     };
 
     auto opName = stmt.expr->getOpName();
@@ -689,6 +951,11 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowRemove(
         {"$firstN", &buildWindowRemoveFirstN},
         {"$lastN", &buildWindowRemoveLastN},
         {AccumulatorAddToSet::kName, &buildWindowRemoveAddToSet},
+        {AccumulatorMinN::kName, &buildWindowRemoveMinMaxN},
+        {AccumulatorMaxN::kName, &buildWindowRemoveMinMaxN},
+        {AccumulatorMin::kName, &buildWindowRemoveMinMaxN},
+        {AccumulatorMax::kName, &buildWindowRemoveMinMaxN},
+        {"$shift", &buildWindowRemoveFirstLast},
     };
 
     auto opName = stmt.expr->getOpName();
@@ -714,6 +981,10 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowRemove(
         {"$covariancePop", &buildWindowRemoveCovariance},
         {"$integral", &buildWindowRemoveIntegral},
         {"$derivative", &buildWindowRemoveDerivative},
+        {"$topN", &buildWindowRemoveTopN},
+        {"$top", &buildWindowRemoveTopN},
+        {"$bottomN", &buildWindowRemoveBottomN},
+        {"$bottom", &buildWindowRemoveBottomN},
     };
 
     auto opName = stmt.expr->getOpName();
@@ -747,6 +1018,14 @@ std::unique_ptr<sbe::EExpression> buildWindowFinalize(
         {"$firstN", &buildWindowFinalizeFirstN},
         {"$lastN", &buildWindowFinalizeLastN},
         {AccumulatorAddToSet::kName, &buildWindowFinalizeAddToSet},
+        {AccumulatorMinN::kName, &buildWindowFinalizeMinN},
+        {AccumulatorMaxN::kName, &buildWindowFinalizeMaxN},
+        {AccumulatorMin::kName, &buildWindowFinalizeMin},
+        {AccumulatorMax::kName, &buildWindowFinalizeMax},
+        {"$topN", &buildWindowFinalizeTopN},
+        {"$top", &buildWindowFinalizeTop},
+        {"$bottomN", &buildWindowFinalizeBottomN},
+        {"$bottom", &buildWindowFinalizeBottom},
     };
 
     auto opName = stmt.expr->getOpName();
@@ -775,6 +1054,7 @@ std::unique_ptr<sbe::EExpression> buildWindowFinalize(
         {"$derivative", &buildWindowFinalizeDerivative},
         {AccumulatorFirst::kName, &buildWindowFinalizeFirstLast},
         {AccumulatorLast::kName, &buildWindowFinalizeFirstLast},
+        {"$shift", &buildWindowFinalizeFirstLast},
     };
 
     auto opName = stmt.expr->getOpName();

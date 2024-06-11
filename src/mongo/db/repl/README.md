@@ -9,8 +9,7 @@ sets**](https://docs.mongodb.com/manual/replication/).
 Replica sets are a group of nodes with one primary and multiple secondaries. The primary is
 responsible for all writes. Users may specify that reads from secondaries are acceptable via
 [`setSecondaryOk`](https://docs.mongodb.com/manual/reference/method/Mongo.setSecondaryOk/) or through
-[**read preference**](https://docs.mongodb.com/manual/core/read-preference/#secondaryPreferred), but
-they are not by default.
+[**read preference**](#read-preference), but they are not by default.
 
 # Steady State Replication
 
@@ -127,7 +126,7 @@ setting CWWC does not get in the way of being able to do a force reconfig.
 #### Code References
 - [The definition of an Oplog Entry](https://github.com/mongodb/mongo/blob/r6.2.0/src/mongo/db/repl/oplog_entry.idl)
 - [Upper layer uses OpObserver class to write Oplog](https://github.com/mongodb/mongo/blob/r6.2.0/src/mongo/db/op_observer/op_observer.h#L112), for example, [it is helpful to take a look at ObObserverImpl::logOperation()](https://github.com/mongodb/mongo/blob/r6.2.0/src/mongo/db/op_observer/op_observer_impl.cpp#L114)
-- [Oplog::logOpsInner() is a common function to write Oplogs into Oplog Collection](https://github.com/mongodb/mongo/blob/r6.2.0/src/mongo/db/repl/oplog.cpp#L356)
+- [repl::logOplogRecords() is a common function to write Oplogs into Oplog Collection](https://github.com/mongodb/mongo/blob/r7.1.0/src/mongo/db/repl/oplog.cpp#L440)
 - [WriteConcernOptions is filled in extractWriteConcern()](https://github.com/mongodb/mongo/blob/r6.2.0/src/mongo/db/write_concern.cpp#L71)
 - [Upper level uses waitForWriteConcern() to wait for the write concern to be fulfilled](https://github.com/mongodb/mongo/blob/r6.2.0/src/mongo/db/write_concern.cpp#L254)
 
@@ -701,6 +700,55 @@ wait until the committed snapshot is beyond the specified OpTime.
 #### Code References
 - [ReadConcernArg is filled in _extractReadConcern()](https://github.com/mongodb/mongo/blob/r6.2.0/src/mongo/db/service_entry_point_common.cpp#L261)
 
+## Read Preference
+
+The [read preference](https://www.mongodb.com/docs/manual/core/read-preference/) set on a read
+operation determines which nodes in a replica set are eligible to serve that operation. It allows
+the user to control where and how read operations are directed within a replica set. The accepted
+modes for read preference are `primary`, `primaryPreferred`, `secondary`, `secondaryPreferred`,
+and `nearest`. The formal definitions and additional command format information can be found
+[in the driver specification](https://github.com/mongodb/specifications/blob/master/source/server-selection/server-selection.rst#read-preference).
+
+### Server Selection
+
+Server selection is the process of selecting a node for a command. The client first filters servers
+by specified read preference, and then if there is more than one eligible server, filters the
+remaining servers based on latency. The server selection specification is fulfilled by any MongoDB
+replica set client that can select from multiple servers to execute reads, such as a driver or
+`mongos`. The specification determines the algorithms for filtering servers based on
+`readPreference` mode, formulas for calculating roundtrip times, etc.
+
+### Passing `$readPreference` as a parameter
+
+A client will pass any non-primary read preference to the selected server in the form of a
+`$readPreference` parameter attached to each operation. In this context, a server means either
+a replica set node or `mongos`. If the read preference parameter is omitted, the server will assume
+read preference `primary`. In the case of a replica set, `$readPreference` is passed to the
+targeted node [to validate](https://github.com/mongodb/mongo/blob/r7.1.0/src/mongo/db/service_entry_point_common.cpp#L1642-L1658)
+that the replica set state still aligns with the desired read preference.
+
+For sharded clusters, the client skips filtering servers based on read preference and passes the
+`$readPreference` directly to `mongos`. The `mongos` instance then carries out the read preference
+matching on the appropriate shard and forwards the `$readPreference` to the shard server for
+validation. It’s worth noting that if multiple `mongos` nodes exist in the topology, the driver
+will still filter based on latency.
+
+### Replica Set State and Read Preference
+
+Replica set nodes receive the `$readPreference` in a command invocation for validation purposes.
+This is to ensure that the given `$readPreference` matches the current state of the node, as the
+replica set state may have changed in the time between the client’s server selection and the node
+receiving the command. If it doesn't match, the operation will fail with one of the error codes
+mentioned below.
+
+Commands can define whether or not they can run on a secondary by overriding the
+`[secondaryAllowed](https://github.com/10gen/mongo/blob/r7.1.0/src/mongo/db/commands.h#L502-L509)`
+function. If a secondary node receives an operation it cannot service, it will either fail with a
+`NotWritablePrimary` error if the command is designated as primary-only, or a `NotPrimaryNoSecondaryOk`
+error if the command can be serviced by a secondary but the operation’s`$readPreference` specifies
+primary-only. A primary node that receives a `secondary` read preference operation will service it,
+although this case is rare since it requires the node to step up before it receives the operation.
+
 # enableMajorityReadConcern Flag
 
 `readConcern: majority` is enabled by default for WiredTiger in MongoDB. This can be problematic
@@ -1060,7 +1108,7 @@ set.
 As the node applies oplog entries, it will update the transaction table every time it encounters a
 `prepareTransaction` oplog entry to save that the state of the transaction is prepared. Instead of
 actually applying the oplog entry and preparing the transaction, the node will wait until oplog
-application has completed to reconstruct the transaction. If the node encounters a
+application [has completed](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/replication_recovery.cpp#L472) to reconstruct the transaction. If the node encounters a
 `commitTransaction` oplog entry, it will immediately commit the transaction. If the transaction it's
 about to commit was prepared, the node will find the `prepareTransaction` oplog entry(s) using the
 [`TransactionHistoryIterator`](https://github.com/mongodb/mongo/blob/v6.1/src/mongo/db/transaction/transaction_history_iterator.h)
@@ -1071,6 +1119,13 @@ over all entries in the transactions table to see which transactions are still i
 state. At that point, the node will find the `prepareTransaction` oplog entry(s) associated with the
 transaction using the `TransactionHistoryIterator`. It will check out the session associated with
 the transaction, apply all the operations from the oplog entry(s) and prepare the transaction.
+
+#### Code references
+* Function to [abort unprepared transactions during stepup or stepdown](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/replication_coordinator_impl.cpp#L2766).
+* Where we [yield locks for transactions](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1282-L1287).
+* Where we [restore locks for transactions](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1343-L1348).
+* Function to [reconstruct prepared transactions from oplog entries](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/transaction_oplog_application.cpp#L804).
+* Where we [skip over prepareTransaction oplog entries](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/transaction_oplog_application.cpp#L737-L752) during recovery oplog application.
 
 ## Read Concern Behavior Within Transactions
 
@@ -1116,6 +1171,10 @@ timestamp. If `atClusterTime` is not specified, then the read timestamp of the t
 the [`all_durable`](#replication-timestamp-glossary) timestamp when the transaction is started,
 which ensures a snapshot with no oplog holes.
 
+#### Code references
+* [Noop write for read-only transactions](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1940-L1944).
+* Function to [set a read snapshot for transactions](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1170).
+
 ## Transaction Oplog Application
 
 Secondaries begin replicating transaction oplog entries once the primary has either prepared or
@@ -1124,8 +1183,8 @@ writer thread pool to schedule operations to apply. See the
 [oplog entry application](#oplog-entry-application) section for more details on how secondary oplog
 application works.
 
-Before secondaries process and apply transaction oplog entries, they will track operations that
-require changes to `config.transactions`. This results in an update to the transactions table entry
+Before secondaries process and apply transaction oplog entries, they will [track operations](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/oplog_applier_impl.cpp#L968) that
+require changes to `config.transactions`. This results in an [update to the transactions table entry](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/session_update_tracker.cpp#L336)
 (`sessionTxnRecord`) that corresponds to the oplog entry operation. For example,
 `prepareTransaction`, `commitTransaction`, and `abortTransaction` will all update the `txnState`
 accordingly.
@@ -1231,6 +1290,12 @@ commands. However we do not need to apply any operations in the original transac
 an [empty transaction](https://github.com/mongodb/mongo/blob/07e1e93c566243983b45385f5c85bc7df0026f39/src/mongo/db/repl/transaction_oplog_application.cpp#L720-L731))
 since the operations should be applied by its split transactions.
 
+#### Code references
+* [Filling writer vectors for unprepared transactions on terminal applyOps.](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/oplog_applier_impl.cpp#L1018-L1033)
+* [Applying writes in parallel](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/oplog_applier_impl.cpp#L809-L832) via the writer thread pool.
+* Function to [unstash transaction resources](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1462) from the RecoveryUnit to the OperationContext.
+* Function to [stash transaction resources](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1427) from the OperationContext to the RecoveryUnit.
+
 ## Transaction Errors
 
 ### PreparedTransactionInProgress Errors
@@ -1296,11 +1361,16 @@ prepared transaction, and checking/setting if the node can accept writes or serv
 
 ## Global Lock Acquisition Ordering
 
-Both the FCV lock and RSTL are global resources that must be acquired before the global lock is
-acquired. The node must first acquire the FCV lock in [intent
-shared](https://docs.mongodb.com/manual/reference/glossary/#term-intent-lock) or intent exclusive
-mode. Next, it must acquire the RSTL in intent exclusive mode. Only then can it acquire the global
-lock in its desired mode.
+Both the MultiDocumentTransactionsBarrier lock and RSTL are global resources that are acquired
+before the global lock is acquired.
+
+First, the MultiDocumentTransactionsBarrier lock is only acquired when
+the request is part of a multi-document transaction, or when the global lock is requested in
+[shared](https://www.mongodb.com/docs/manual/reference/glossary/#std-term-read-lock) or
+[exclusive](https://www.mongodb.com/docs/manual/reference/glossary/#std-term-write-lock) mode;
+the lock is acquired in the same mode as the global lock request.
+Next, it must acquire the RSTL in [intent exclusive](https://docs.mongodb.com/manual/reference/glossary/#term-intent-lock)
+mode. Only then can it acquire the global lock in its desired mode.
 
 # Elections
 
@@ -1700,24 +1770,28 @@ Before the data clone phase begins, the node will do the following:
    node restarts while this flag is set, it will restart initial sync even though it may already
    have data because it means that initial sync didn't complete. We also check this flag to prevent
    reading from the oplog while initial sync is in progress.
-2. Find a sync source.
-3. Drop all of its data except for the local database and recreate the oplog.
-4. Get the Rollback ID (RBID) from the sync source to ensure at the end that no rollbacks occurred
+2. [Reset the in-memory FCV to `kUnsetDefaultLastLTSBehavior`.](https://github.com/10gen/mongo/blob/b718dc1aa3ffb3e6df4f61a30d54cda578cf2830/src/mongo/db/repl/initial_syncer.cpp#L689). This is to ensure compatibility between the sync source and sync
+target. If the sync source is actually in a different feature compatibility version, we will find
+out when we clone from the sync source.
+3. Find a sync source.
+4. Drop all of its data except for the local database and recreate the oplog.
+5. Get the Rollback ID (RBID) from the sync source to ensure at the end that no rollbacks occurred
    during initial sync.
-5. Query its sync source's oplog for its latest OpTime and save it as the
+6. Query its sync source's oplog for its latest OpTime and save it as the
    `defaultBeginFetchingOpTime`. If there are no open transactions on the sync source, this will be
    used as the `beginFetchingTimestamp` or the timestamp that it begins fetching oplog entries from.
-6. Query its sync source's transactions table for the oldest starting OpTime of all active
+7. Query its sync source's transactions table for the oldest starting OpTime of all active
    transactions. If this timestamp exists (meaning there is an open transaction on the sync source)
    this will be used as the `beginFetchingTimestamp`. If this timestamp doesn't exist, the node will
    use the `defaultBeginFetchingOpTime` instead. This will ensure that even if a transaction was
    started on the sync source after it was queried for the oldest active transaction timestamp, the
    syncing node will have all the oplog entries associated with an active transaction in its oplog.
-7. Query its sync source's oplog for its lastest OpTime. This will be the `beginApplyingTimestamp`,
+8. Query its sync source's oplog for its lastest OpTime. This will be the `beginApplyingTimestamp`,
    or the timestamp that it begins applying oplog entries at once it has completed the data clone
    phase. If there was no active transaction on the sync source, the `beginFetchingTimestamp` will
    be the same as the `beginApplyingTimestamp`.
-8. Create an `OplogFetcher` and start fetching and buffering oplog entries from the sync source
+9. [Set the in-memory FCV to the sync source's FCV.](https://github.com/10gen/mongo/blob/b718dc1aa3ffb3e6df4f61a30d54cda578cf2830/src/mongo/db/repl/initial_syncer.cpp#L1153). This is because during the cloning phase, we do expect to clone the sync source's "admin.system.version" collection eventually (which contains the FCV document), but we can't guarantee that we will clone "admin.system.version" first. Setting the in-memory FCV value to the sync source's FCV first will ensure that we clone collections using the same FCV as the sync source. However, we won't persist the FCV to disk nor will we update our minWireVersion until we clone the actual document.
+10. Create an `OplogFetcher` and start fetching and buffering oplog entries from the sync source
    to be applied later. Operations are buffered to a collection so that they are not limited by the
    amount of memory available.
 
@@ -2109,42 +2183,31 @@ from now on when we invent a new system collection we will place it on "admin".
 # Replication Timestamp Glossary
 
 In this section, when we refer to the word "transaction" without any other qualifier, we are talking
-about a storage transaction. Transactions in the replication layer will be referred to as
-multi-document or prepared transactions.
+about a storage transaction (aka [WriteUnitOfWork](https://github.com/mongodb/mongo/blob/00fbc981646d9e6ebc391f45a31f4070d4466753/src/mongo/db/storage/write_unit_of_work.h#L48)).
+Transactions in the replication layer will be referred to as multi-document or prepared transactions.
 
 **`all_durable`**: All transactions with timestamps earlier than the `all_durable` timestamp are
 committed. This is the point at which the oplog has no gaps, which are created when we reserve
-timestamps before executing the associated write. Since this timestamp is used to maintain the oplog
-visibility point, it is important that all operations up to and including this timestamp are
-committed and durable on disk. This is so that we can replicate the oplog without any gaps.
-
-**`commit oplog entry timestamp`**: The timestamp of the ‘commitTransaction’ oplog entry for a
-prepared transaction, or the timestamp of the ‘applyOps’ oplog entry for a non-prepared transaction.
-In a cross-shard transaction each shard may have a different commit oplog entry timestamp. This is
-guaranteed to be greater than the `prepareTimestamp`.
-
-**`commitTimestamp`**: The timestamp at which we committed a multi-document transaction. This will
-be the `commitTimestamp` field in the `commitTransaction` oplog entry for a prepared transaction, or
-the timestamp of the ‘applyOps’ oplog entry for a non-prepared transaction. In a cross-shard
-transaction this timestamp is the same across all shards. The effects of the transaction are visible
-as of this timestamp. Note that `commitTimestamp` and the `commit oplog entry timestamp` are the
-same for non-prepared transactions because we do not write down the oplog entry until we commit the
-transaction. For a prepared transaction, we have the following guarantee: `prepareTimestamp` <=
-`commitTimestamp` <= `commit oplog entry timestamp`
+timestamps before executing the associated write (ex: [insert path](https://github.com/mongodb/mongo/blob/2ff8fff5b01eeda5722884c5fd104716117c9606/src/mongo/db/ops/write_ops_exec.cpp#L379)).
+Since this timestamp is used to maintain the oplog visibility point, it is important that all
+operations up to and including this timestamp are committed. This is so that we can replicate the
+oplog without any gaps.  
+This is calculated at the storage level and can be retrieved through [getAllDurableTimestamp](https://github.com/mongodb/mongo/blob/2ff8fff5b01eeda5722884c5fd104716117c9606/src/mongo/db/repl/storage_interface.h#L471).  
+Contrary to what the name might imply, this timestamp does not indicate that all transactions
+preceding it are durable on disk; rather, it solely signifies they are committed. Therefore,
+replication consistently [maintains that](https://github.com/mongodb/mongo/blob/00fbc981646d9e6ebc391f45a31f4070d4466753/src/mongo/db/repl/replication_coordinator_impl.cpp#L4843-L4861) `stable_timestamp` <= `all_durable`.
 
 **`currentCommittedSnapshot`**: An optime maintained in `ReplicationCoordinator` that is used to
 serve majority reads and is always guaranteed to be <= `lastCommittedOpTime`. When `eMRC=true`, this
 is currently [set to the stable optime](https://github.com/mongodb/mongo/blob/00fbc981646d9e6ebc391f45a31f4070d4466753/src/mongo/db/repl/replication_coordinator_impl.cpp#L4945).
-Since it is reset every time we recalculate the stable optime, it will also be up to date.
-
+Since it is reset every time we recalculate the stable optime, it will also be up to date.  
 When `eMRC=false`, this [is set](https://github.com/mongodb/mongo/blob/00fbc981646d9e6ebc391f45a31f4070d4466753/src/mongo/db/repl/replication_coordinator_impl.cpp#L4952-L4961)
 to the minimum of the stable optime and the `lastCommittedOpTime`, even though it is not used to
 serve majority reads in that case.
 
 **`initialDataTimestamp`**: A timestamp used to indicate the timestamp at which history “begins”.
 When a node comes out of initial sync, we inform the storage engine that the `initialDataTimestamp`
-is the node's `lastApplied`.
-
+is the node's `lastApplied`.  
 By setting this value to 0, it informs the storage engine to take unstable checkpoints. Stable
 checkpoints can be viewed as timestamped reads that persist the data they read into a checkpoint.
 Unstable checkpoints simply open a transaction and read all data that is currently committed at the
@@ -2182,11 +2245,6 @@ at the end of batch application. Startup recovery will use the `oplogTruncateAft
 the oplog back to an oplog point consistent with the rest of the replica set: other nodes may have
 replicated in-memory data that a crashed node no longer has and is unaware that it lacks.
 
-**`prepareTimestamp`**: The timestamp of the ‘prepare’ oplog entry for a prepared transaction. This
-is the earliest timestamp at which it is legal to commit the transaction. This timestamp is provided
-to the storage engine to block reads that are trying to read prepared data until the storage engines
-knows whether the prepared transaction has committed or aborted.
-
 **`readConcernMajorityOpTime`**: Exposed in replSetGetStatus as “readConcernMajorityOpTime” but is
 populated internally from the `currentCommittedSnapshot` timestamp inside `ReplicationCoordinator`.
 
@@ -2195,14 +2253,36 @@ checkpoint, which can be thought of as a consistent snapshot of the data. Replic
 storage engine of where it is safe to take its next checkpoint. This timestamp is guaranteed to be
 majority committed so that RTT rollback can use it. In the case when
 [`eMRC=false`](#enableMajorityReadConcern-flag), the stable timestamp may not be majority committed,
-which is why we must use the Rollback via Refetch rollback algorithm.
-
+which is why we must use the Rollback via Refetch rollback algorithm.  
 This timestamp is also required to increase monotonically except when `eMRC=false`, where in a
-special case during rollback it is possible for the `stableTimestamp` to move backwards.
-
+special case during rollback it is possible for the `stableTimestamp` to move backwards.  
 The calculation of this value in the replication layer occurs [here](https://github.com/mongodb/mongo/blob/00fbc981646d9e6ebc391f45a31f4070d4466753/src/mongo/db/repl/replication_coordinator_impl.cpp#L4824-L4881).
-The replication layer will [skip setting the stable timestamp](https://github.com/mongodb/mongo/blob/00fbc981646d9e6ebc391f45a31f4070d4466753/src/mongo/db/repl/replication_coordinator_impl.cpp#L4907-L4921) if it is earlier than the
-`initialDataTimestamp`, since data earlier than that timestamp may be inconsistent.
+The replication layer will [skip setting the stable timestamp](https://github.com/mongodb/mongo/blob/00fbc981646d9e6ebc391f45a31f4070d4466753/src/mongo/db/repl/replication_coordinator_impl.cpp#L4907-L4921)
+if it is earlier than the `initialDataTimestamp`, since data earlier than that timestamp may be
+inconsistent.
+
+#### Timestamps related to both prepared and non-prepared transactions:
+- **`prepareTimestamp`**: The timestamp of the ‘prepare’ oplog entry for a prepared transaction. This
+is the earliest timestamp at which it is legal to commit the transaction. This timestamp is provided
+to the storage engine to block reads that are trying to read prepared data until the storage engines
+knows whether the prepared transaction has committed or aborted.
+
+- **`commit oplog entry timestamp`**: The timestamp of the ‘commitTransaction’ oplog entry for a
+prepared transaction, or the timestamp of the ‘applyOps’ oplog entry for a non-prepared transaction.
+In a cross-shard transaction each shard may have a different commit oplog entry timestamp. This is
+guaranteed to be greater than the `prepareTimestamp`. When the `stable_timestamp` advances to this
+point, the transaction can’t be rolled-back; hence, it is referred to as the transaction's
+`durable_timestamp` in [WT](https://source.wiredtiger.com/develop/timestamp_txn_api.html).
+
+- **`commitTimestamp`**: The timestamp at which we committed a multi-document transaction, referred
+to as `commit_timestamp` in [WT](https://source.wiredtiger.com/develop/timestamp_txn_api.html). This will
+be the `commitTimestamp` field in the `commitTransaction` oplog entry for a prepared transaction, or
+the timestamp of the ‘applyOps’ oplog entry for a non-prepared transaction. In a cross-shard
+transaction this timestamp is the same across all shards. The effects of the transaction are visible
+as of this timestamp. Note that `commitTimestamp` and the `commit oplog entry timestamp` are the
+same for non-prepared transactions because we do not write down the oplog entry until we commit the
+transaction. For a prepared transaction, we have the following guarantee: `prepareTimestamp` <=
+`commitTimestamp` <= `commit oplog entry timestamp`
 
 # Non-replication subsystems dependent on replication state transitions.
 

@@ -94,6 +94,7 @@ const allCommands = {
     _recvChunkStatus: {skip: isAnInternalCommand},
     _refreshQueryAnalyzerConfiguration: {skip: isAnInternalCommand},
     _shardsvrAbortReshardCollection: {skip: isAnInternalCommand},
+    _shardsvrChangePrimary: {skip: isAnInternalCommand},
     _shardsvrCleanupStructuredEncryptionData: {skip: isAnInternalCommand},
     _shardsvrCleanupReshardCollection: {skip: isAnInternalCommand},
     _shardsvrCloneCatalogData: {skip: isAnInternalCommand},
@@ -266,7 +267,33 @@ const allCommands = {
         // Skipping command because it requires additional authentication setup.
         skip: "requires additional authentication setup"
     },
-    autoSplitVector: {skip: isAnInternalCommand},
+    autoCompact: {
+        command: {autoCompact: false},
+        isAdminCommand: true,
+        isReplSetOnly: true,
+    },
+    autoSplitVector: {
+        setUp: function(conn) {
+            assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
+            assert.commandWorked(
+                conn.getDB('admin').runCommand({shardCollection: fullNs, key: {a: 1}}));
+            for (let i = 0; i < 10; i++) {
+                assert.commandWorked(conn.getCollection(fullNs).insert({a: i}));
+            }
+        },
+        command: {
+            autoSplitVector: collName,
+            keyPattern: {a: 1},
+            min: {a: MinKey},
+            max: {a: MaxKey},
+            maxChunkSizeBytes: 1024 * 1024
+        },
+        teardown: function(conn) {
+            assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
+        },
+        isShardedOnly: true,
+        isAdminCommand: false,
+    },
     balancerCollectionStatus: {
         command: {balancerCollectionStatus: fullNs},
         isShardedOnly: true,
@@ -323,6 +350,7 @@ const allCommands = {
     captrunc: {
         skip: isAnInternalCommand,
     },
+    changePrimary: {skip: cannotRunWhileDowngrading},
     checkMetadataConsistency: {
         isAdminCommand: true,
         isShardedOnly: true,
@@ -1537,6 +1565,7 @@ const allCommands = {
         // dedicated config server, which is not allowed in a transitionary FCV.
         skip: cannotRunWhileDowngrading
     },
+    transitionToShardedCluster: {skip: isAnInternalCommand},
     unshardCollection: {skip: cannotRunWhileDowngrading},
     update: {
         setUp: function(conn) {

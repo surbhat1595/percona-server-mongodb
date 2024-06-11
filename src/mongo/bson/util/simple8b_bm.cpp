@@ -31,15 +31,41 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <random>
 
 #include <boost/cstdint.hpp>
 
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/simple8b.h"
 #include "mongo/bson/util/simple8b_builder.h"
+#include "mongo/bson/util/simple8b_type_util.h"
 #include "mongo/util/shared_buffer.h"
 
 namespace mongo {
+
+BufBuilder generateIntegers() {
+    std::mt19937_64 seedGen(1337);
+    std::mt19937 gen(seedGen());
+    std::normal_distribution<> d(100, 10);
+    std::uniform_int_distribution skip(1, 100);
+
+    BufBuilder buffer;
+    Simple8bBuilder<uint64_t> s8bBuilder(
+        [&buffer](uint64_t simple8bBlock) { buffer.appendNum(simple8bBlock); });
+
+    // Generate 10k integers
+    for (int i = 0; i < 10000; ++i) {
+        // 5% chance for missing
+        if (skip(gen) <= 5) {
+            s8bBuilder.skip();
+        } else {
+            s8bBuilder.append(std::lround(d(gen)));
+        }
+    }
+
+    s8bBuilder.flush();
+    return buffer;
+}
 
 void BM_increasingValues(benchmark::State& state) {
     size_t totalBytes = 0;
@@ -152,11 +178,106 @@ void BM_decode(benchmark::State& state) {
     state.SetBytesProcessed(totalBytes);
 }
 
+void BM_sum(benchmark::State& state) {
+    BufBuilder buffer = generateIntegers();
+    auto size = buffer.len();
+    auto buf = buffer.release();
+
+    size_t totalBytes = 0;
+
+    for (auto _ : state) {
+        benchmark::ClobberMemory();
+        uint64_t prev = simple8b::kSingleSkip;
+        benchmark::DoNotOptimize(simple8b::sum<int64_t>(buf.get(), size, prev));
+        totalBytes += size;
+    }
+
+    state.SetBytesProcessed(totalBytes);
+}
+
+void BM_sumUnoptimized(benchmark::State& state) {
+    BufBuilder buffer = generateIntegers();
+    auto size = buffer.len();
+    auto buf = buffer.release();
+
+    size_t totalBytes = 0;
+
+    auto sum = [](const char* buffer, int size) {
+        Simple8b<uint64_t> s8b(buffer, size);
+        int64_t s = 0;
+        for (auto&& val : s8b) {
+            if (val) {
+                s += Simple8bTypeUtil::decodeInt64(*val);
+            }
+        }
+        return s;
+    };
+
+    for (auto _ : state) {
+        benchmark::ClobberMemory();
+        benchmark::DoNotOptimize(sum(buf.get(), size));
+        totalBytes += size;
+    }
+
+    state.SetBytesProcessed(totalBytes);
+}
+
+void BM_prefixSum(benchmark::State& state) {
+    BufBuilder buffer = generateIntegers();
+    auto size = buffer.len();
+    auto buf = buffer.release();
+
+    size_t totalBytes = 0;
+
+    for (auto _ : state) {
+        benchmark::ClobberMemory();
+        uint64_t prev = simple8b::kSingleSkip;
+        int64_t prefix = 0;
+        benchmark::DoNotOptimize(simple8b::prefixSum<int64_t>(buf.get(), size, prefix, prev));
+        totalBytes += size;
+    }
+
+    state.SetBytesProcessed(totalBytes);
+}
+
+void BM_prefixSumUnoptimized(benchmark::State& state) {
+    BufBuilder buffer = generateIntegers();
+    auto size = buffer.len();
+    auto buf = buffer.release();
+
+    size_t totalBytes = 0;
+
+    auto prefixSum = [](const char* buffer, int size) {
+        Simple8b<uint64_t> s8b(buffer, size);
+        int64_t sum = 0;
+        int64_t prefixSum = 0;
+        for (auto&& val : s8b) {
+            if (val) {
+                sum += Simple8bTypeUtil::decodeInt64(*val);
+                prefixSum += sum;
+            }
+        }
+        return prefixSum;
+    };
+
+    for (auto _ : state) {
+        benchmark::ClobberMemory();
+        benchmark::DoNotOptimize(prefixSum(buf.get(), size));
+        totalBytes += size;
+    }
+
+    state.SetBytesProcessed(totalBytes);
+}
+
 BENCHMARK(BM_increasingValues)->Arg(100);
 BENCHMARK(BM_rle)->Arg(100);
 BENCHMARK(BM_changingSmallValues)->Arg(100);
 BENCHMARK(BM_changingLargeValues)->Arg(100);
 BENCHMARK(BM_selectorSeven)->Arg(100);
 BENCHMARK(BM_decode);
+BENCHMARK(BM_sum);
+BENCHMARK(BM_sumUnoptimized);
+BENCHMARK(BM_prefixSum);
+BENCHMARK(BM_prefixSumUnoptimized);
 
 }  // namespace mongo

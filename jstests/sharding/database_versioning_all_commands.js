@@ -316,6 +316,7 @@ let testCases = {
     },
     appendOplogNote: {skip: "unversioned and executes on all shards"},
     authenticate: {skip: "does not forward command to primary shard"},
+    autoSplitVector: {skip: "does not forward command to primary shard"},
     balancerCollectionStatus: {skip: "does not forward command to primary shard"},
     balancerStart: {skip: "not on a user database"},
     balancerStatus: {skip: "not on a user database"},
@@ -336,6 +337,7 @@ let testCases = {
         // }
         skip: "requires feature flag"
     },
+    changePrimary: {skip: "reads primary shard from sharding catalog with readConcern: local"},
     checkMetadataConsistency: {
         run: {
             sendsDbVersion: true,

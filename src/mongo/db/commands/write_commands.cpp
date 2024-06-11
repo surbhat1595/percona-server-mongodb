@@ -58,7 +58,6 @@
 #include "mongo/db/commands/update_metrics.h"
 #include "mongo/db/commands/write_commands_common.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/namespace_string.h"
@@ -82,7 +81,7 @@
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/query/query_settings_gen.h"
+#include "mongo/db/query/query_settings/query_settings_gen.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
@@ -172,8 +171,10 @@ void populateReply(OperationContext* opCtx,
         const auto& lastResult = result.results.back();
 
         if (lastResult == ErrorCodes::StaleDbVersion ||
+            lastResult == ErrorCodes::ShardCannotRefreshDueToLocksHeld ||
             ErrorCodes::isStaleShardVersionError(lastResult.getStatus()) ||
-            ErrorCodes::isTenantMigrationError(lastResult.getStatus())) {
+            ErrorCodes::isTenantMigrationError(lastResult.getStatus()) ||
+            lastResult == ErrorCodes::CannotImplicitlyCreateCollection) {
             // For ordered:false commands we need to duplicate these error results for all ops
             // after we stopped. See handleError() in write_ops_exec.cpp for more info.
             //
@@ -319,7 +320,8 @@ public:
             boost::optional<ScopedAdmissionPriorityForLock> priority;
             if (request().getNamespace() == NamespaceString::kConfigSampledQueriesNamespace ||
                 request().getNamespace() == NamespaceString::kConfigSampledQueriesDiffNamespace) {
-                priority.emplace(opCtx->lockState(), AdmissionContext::Priority::kLow);
+                priority.emplace(shard_role_details::getLocker(opCtx),
+                                 AdmissionContext::Priority::kLow);
             }
 
             if (hangInsertBeforeWrite.shouldFail([&](const BSONObj& data) {
@@ -504,8 +506,9 @@ public:
             write_ops_exec::WriteResult reply;
             // For retryable updates on time-series collections, we needs to run them in
             // transactions to ensure the multiple writes are replicated atomically.
-            if (isTimeseriesViewRequest && opCtx->isRetryableWrite() &&
-                !opCtx->inMultiDocumentTransaction()) {
+            bool isTimeseriesRetryableUpdate = isTimeseriesViewRequest &&
+                opCtx->isRetryableWrite() && !opCtx->inMultiDocumentTransaction();
+            if (isTimeseriesRetryableUpdate) {
                 auto executor = serverGlobalParams.clusterRole.has(ClusterRole::None)
                     ? ReplicaSetNodeProcessInterface::getReplicaSetNodeExecutor(
                           opCtx->getServiceContext())
@@ -550,11 +553,15 @@ public:
                           PopulateReplyHooks{singleWriteHandler, postProcessHandler});
 
             // Collect metrics.
-            for (auto&& update : request().getUpdates()) {
-                incrementUpdateMetrics(update.getU(),
-                                       request().getNamespace(),
-                                       CmdUpdate::updateMetrics,
-                                       update.getArrayFilters());
+            // For time-series retryable updates, the metrics are already incremented when running
+            // the internal transaction. Avoids updating them twice.
+            if (!isTimeseriesRetryableUpdate) {
+                for (auto&& update : request().getUpdates()) {
+                    incrementUpdateMetrics(update.getU(),
+                                           request().getNamespace(),
+                                           CmdUpdate::updateMetrics,
+                                           update.getArrayFilters());
+                }
             }
 
             return updateReply;

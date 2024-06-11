@@ -59,6 +59,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -67,7 +68,6 @@
 #include "mongo/logv2/ramlog.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/scripting/engine.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/net/socket_utils.h"
@@ -177,7 +177,7 @@ void HostInfoCmd::Invocation::doCheckAuthorization(OperationContext* opCtx) cons
 template <>
 HostInfoReply HostInfoCmd::Invocation::typedRun(OperationContext* opCtx) {
     // Critical to observability and diagnosability, categorize as immediate priority.
-    ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+    ScopedAdmissionPriorityForLock skipAdmissionControl(shard_role_details::getLocker(opCtx),
                                                         AdmissionContext::Priority::kImmediate);
 
     ProcessInfo p;
@@ -188,7 +188,13 @@ HostInfoReply HostInfoCmd::Invocation::typedRun(OperationContext* opCtx) {
     system.setCpuAddrSize(static_cast<int>(p.getAddrSize()));
     system.setMemSizeMB(static_cast<long>(p.getSystemMemSizeMB()));
     system.setMemLimitMB(static_cast<long>(p.getMemSizeMB()));
-    system.setNumCores(static_cast<int>(p.getNumAvailableCores()));
+    system.setNumLogicalCores(static_cast<int>(p.getNumLogicalCores()));
+    const auto num_cores_avl_to_process = p.getNumCoresAvailableToProcess();
+    // Adding the num cores available to process only if API returns successfully ie. value >=0
+    if (num_cores_avl_to_process >= 0) {
+        system.setNumCoresAvailableToProcess(static_cast<int>(num_cores_avl_to_process));
+    }
+
     system.setNumPhysicalCores(static_cast<int>(p.getNumPhysicalCores()));
     system.setNumCpuSockets(static_cast<int>(p.getNumCpuSockets()));
     system.setCpuArch(p.getArch());
@@ -227,7 +233,7 @@ void GetCmdLineOptsCmd::Invocation::doCheckAuthorization(OperationContext* opCtx
 template <>
 GetCmdLineOptsReply GetCmdLineOptsCmd::Invocation::typedRun(OperationContext* opCtx) {
     // Critical to observability and diagnosability, categorize as immediate priority.
-    ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+    ScopedAdmissionPriorityForLock skipAdmissionControl(shard_role_details::getLocker(opCtx),
                                                         AdmissionContext::Priority::kImmediate);
 
     GetCmdLineOptsReply reply;
@@ -252,8 +258,8 @@ template <>
 OkReply LogRotateCmd::Invocation::typedRun(OperationContext* opCtx) {
     auto arg = request().getCommandParameter();
     boost::optional<StringData> logType = boost::none;
-    if (stdx::holds_alternative<std::string>(arg)) {
-        logType = stdx::get<std::string>(arg);
+    if (holds_alternative<std::string>(arg)) {
+        logType = std::get<std::string>(arg);
     }
 
     logv2::LogRotateErrorAppender minorErrors;
@@ -318,7 +324,7 @@ public:
              const BSONObj& cmdObj,
              BSONObjBuilder& result) final {
         // Critical to observability and diagnosability, categorize as immediate priority.
-        ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+        ScopedAdmissionPriorityForLock skipAdmissionControl(shard_role_details::getLocker(opCtx),
                                                             AdmissionContext::Priority::kImmediate);
 
         if (MONGO_unlikely(hangInGetLog.shouldFail())) {

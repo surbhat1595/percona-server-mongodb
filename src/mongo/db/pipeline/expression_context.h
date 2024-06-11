@@ -63,10 +63,11 @@
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/datetime/date_time_support.h"
+#include "mongo/db/query/distinct_command_gen.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/query_settings_gen.h"
+#include "mongo/db/query/query_settings/query_settings_gen.h"
 #include "mongo/db/query/tailable_mode.h"
 #include "mongo/db/query/tailable_mode_gen.h"
 #include "mongo/db/server_options.h"
@@ -157,6 +158,12 @@ public:
                       boost::optional<ExplainOptions::Verbosity> verbosity = boost::none,
                       bool allowDiskUseByDefault = false);
 
+    ExpressionContext(OperationContext* opCtx,
+                      const DistinctCommandRequest& distinctCmd,
+                      const NamespaceString& nss,
+                      std::unique_ptr<CollatorInterface> collator,
+                      bool mayDbProfile,
+                      boost::optional<ExplainOptions::Verbosity> verbosity);
     /**
      * Constructs an ExpressionContext to be used for Pipeline parsing and evaluation.
      * 'resolvedNamespaces' maps collection names (not full namespaces) to ResolvedNamespaces.
@@ -395,8 +402,8 @@ public:
     }
 
     void addResolvedNamespaces(
-        mongo::stdx::unordered_set<mongo::NamespaceString> resolvedNamespaces) {
-        for (auto&& nss : resolvedNamespaces) {
+        const mongo::stdx::unordered_set<mongo::NamespaceString>& resolvedNamespaces) {
+        for (const auto& nss : resolvedNamespaces) {
             _resolvedNamespaces.try_emplace(nss.coll(), nss, std::vector<BSONObj>{});
         }
     }
@@ -508,6 +515,14 @@ public:
             !Variables::isUserDefinedVariable(var));
         return _varsReferencedInQuery.count(var);
     }
+
+    /**
+     * Throws if the provided feature flag is not enabled in the current FCV or
+     * 'maxFeatureCompatibilityVersion' if set. Will do nothing if the feature flag is enabled
+     * or boost::none.
+     */
+    void throwIfFeatureFlagIsNotEnabledOnFCV(StringData name,
+                                             const boost::optional<FeatureFlag>& flag);
 
     // The explain verbosity requested by the user, or boost::none if no explain was requested.
     boost::optional<ExplainOptions::Verbosity> explain;
@@ -766,7 +781,8 @@ protected:
 private:
     // Instantiates an ExpressionContext which does not increment expression counters and does not
     // enforce FCV restrictions. It is used for implementing the `makeBlankExpressionContext()`
-    // factory method.
+    // factory method. Please also note that the runtime constants are not given real/accurate
+    // values of '$$NOW' and '$$CLUSTER_TIME', in the name of efficiency.
     ExpressionContext(OperationContext* opCtx,
                       const NamespaceString& ns,
                       const boost::optional<BSONObj>& letParameters = boost::none);

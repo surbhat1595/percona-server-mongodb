@@ -137,8 +137,7 @@ class WiredTigerKVEngine final : public KVEngine {
 public:
     static StringData kTableUriPrefix;
 
-    WiredTigerKVEngine(OperationContext* opCtx,
-                       const std::string& canonicalName,
+    WiredTigerKVEngine(const std::string& canonicalName,
                        const std::string& path,
                        ClockSource* cs,
                        const std::string& extraOpenOptions,
@@ -151,7 +150,7 @@ public:
 
     ~WiredTigerKVEngine();
 
-    void notifyStartupComplete() override;
+    void notifyStartupComplete(OperationContext* opCtx) override;
 
     void setRecordStoreExtraOptions(const std::string& options);
     void setSortedDataInterfaceExtraOptions(const std::string& options);
@@ -165,7 +164,7 @@ public:
         return !isEphemeral();
     }
 
-    void checkpoint(OperationContext* opCtx) override;
+    void checkpoint() override;
 
     // Force a WT checkpoint, this will not update internal timestamps.
     void forceCheckpoint(bool useStableTimestamp);
@@ -198,6 +197,10 @@ public:
                                                 const NamespaceString& nss,
                                                 StringData ident,
                                                 const CollectionOptions& options) override;
+
+    std::unique_ptr<RecordStore> getTemporaryRecordStore(OperationContext* opCtx,
+                                                         StringData ident,
+                                                         KeyFormat keyFormat) override;
 
     std::unique_ptr<RecordStore> makeTemporaryRecordStore(OperationContext* opCtx,
                                                           StringData ident,
@@ -258,7 +261,7 @@ public:
                             const IndexDescriptor* desc,
                             bool isForceUpdateMetadata) override;
 
-    Status alterMetadata(OperationContext* opCtx, StringData uri, StringData config);
+    Status alterMetadata(StringData uri, StringData config);
 
     void keydbDropDatabase(const DatabaseName& dbName) override;
 
@@ -271,9 +274,7 @@ public:
     Status disableIncrementalBackup(OperationContext* opCtx) override;
 
     StatusWith<std::unique_ptr<StorageEngine::StreamingCursor>> beginNonBlockingBackup(
-        OperationContext* opCtx,
-        boost::optional<Timestamp> checkpointTimestamp,
-        const StorageEngine::BackupOptions& options) override;
+        OperationContext* opCtx, const StorageEngine::BackupOptions& options) override;
 
     void endNonBlockingBackup(OperationContext* opCtx) override;
 
@@ -444,6 +445,9 @@ public:
                                              Timestamp requestedTimestamp,
                                              bool roundUpIfTooOld) override;
 
+    Status autoCompact(OperationContext* opCtx,
+                       const StorageEngine::AutoCompactOptions& options) override;
+
 private:
     StatusWith<Timestamp> _pinOldestTimestamp(WithLock,
                                               const std::string& requestingServiceName,
@@ -468,7 +472,7 @@ public:
     size_t getCacheSizeMB() const override;
 
     // TODO SERVER-81069: Remove this since it's intrinsically tied to encryption options only.
-    StatusWith<BSONObj> getSanitizedStorageOptionsForSecondaryReplication(
+    BSONObj getSanitizedStorageOptionsForSecondaryReplication(
         const BSONObj& options) const override;
 
     /**
@@ -490,7 +494,7 @@ private:
     // srcPath, destPath, filename, size to copy
     typedef std::tuple<boost::filesystem::path, boost::filesystem::path, boost::uintmax_t, std::time_t> FileTuple;
 
-    void _checkpoint(OperationContext* opCtx, WT_SESSION* session);
+    void _checkpoint(WT_SESSION* session);
 
     void _checkpoint(WT_SESSION* session, bool useTimestamp);
 
@@ -512,7 +516,7 @@ private:
      */
     void _openWiredTiger(const std::string& path, const std::string& wtOpenConfig);
 
-    Status _salvageIfNeeded(OperationContext* opCtx, const char* uri);
+    Status _salvageIfNeeded(const char* uri);
     void _ensureIdentPath(StringData ident);
 
     /**
@@ -522,7 +526,7 @@ private:
      * Returns DataModifiedByRepair if the rebuild was successful, and any other error on failure.
      * This will never return Status::OK().
      */
-    Status _rebuildIdent(OperationContext* opCtx, WT_SESSION* session, const char* uri);
+    Status _rebuildIdent(WT_SESSION* session, const char* uri);
 
     bool _hasUri(WT_SESSION* session, const std::string& uri) const;
 

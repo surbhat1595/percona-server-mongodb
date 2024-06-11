@@ -182,17 +182,23 @@ public:
 
     virtual bool shouldRelaxIndexConstraints(OperationContext* opCtx, const NamespaceString& ns);
 
-    virtual void setMyLastAppliedOpTimeAndWallTime(const OpTimeAndWallTime& opTimeAndWallTime);
-    virtual void setMyLastDurableOpTimeAndWallTime(const OpTimeAndWallTime& opTimeAndWallTime);
-
+    virtual void setMyLastWrittenOpTimeAndWallTimeForward(
+        const OpTimeAndWallTime& opTimeAndWallTime);
     virtual void setMyLastAppliedOpTimeAndWallTimeForward(
-        const OpTimeAndWallTime& opTimeAndWallTime, bool advanceGlobalTimestamp);
+        const OpTimeAndWallTime& opTimeAndWallTime);
     virtual void setMyLastDurableOpTimeAndWallTimeForward(
+        const OpTimeAndWallTime& opTimeAndWallTime);
+    virtual void setMyLastAppliedAndLastWrittenOpTimeAndWallTimeForward(
+        const OpTimeAndWallTime& opTimeAndWallTime);
+    virtual void setMyLastDurableAndLastWrittenOpTimeAndWallTimeForward(
         const OpTimeAndWallTime& opTimeAndWallTime);
 
     virtual void resetMyLastOpTimes();
 
     virtual void setMyHeartbeatMessage(const std::string& msg);
+
+    virtual OpTime getMyLastWrittenOpTime() const;
+    virtual OpTimeAndWallTime getMyLastWrittenOpTimeAndWallTime() const;
 
     virtual OpTimeAndWallTime getMyLastAppliedOpTimeAndWallTime(bool rollbackSafe) const;
     virtual OpTime getMyLastAppliedOpTime() const;
@@ -261,7 +267,7 @@ public:
 
     virtual BSONObj getConfigBSON() const override;
 
-    virtual const MemberConfig* findConfigMemberByHostAndPort(
+    virtual boost::optional<MemberConfig> findConfigMemberByHostAndPort_deprecated(
         const HostAndPort& hap) const override;
 
     virtual Status validateWriteConcern(const WriteConcernOptions& writeConcern) const override;
@@ -415,8 +421,6 @@ public:
 
     virtual void incrementNumCatchUpOpsIfCatchingUp(long numOps) override;
 
-    void signalDropPendingCollectionsRemovedFromStorage() final;
-
     virtual boost::optional<Timestamp> getRecoveryTimestamp() override;
 
     virtual bool setContainsArbiter() const override;
@@ -512,6 +516,8 @@ private:
 
     MemberState _memberState;
     ReplSetConfig _getConfigReturnValue;
+    OpTime _myLastWrittenOpTime;
+    Date_t _myLastWrittenWallTime;
     OpTime _myLastDurableOpTime;
     Date_t _myLastDurableWallTime;
     OpTime _myLastAppliedOpTime;

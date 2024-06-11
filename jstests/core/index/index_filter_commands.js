@@ -22,7 +22,7 @@
  * @tags: [
  *   # The test runs commands that are not allowed with security token: planCacheClearFilters,
  *   # planCacheListFilters, planCacheSetFilter.
- *   not_allowed_with_security_token,
+ *   not_allowed_with_signed_security_token,
  *   # Cannot implicitly shard accessed collections because of collection existing when none
  *   # expected.
  *   assumes_no_implicit_collection_creation_after_drop,
@@ -40,11 +40,14 @@
  */
 
 import {
+    getOptimizer,
     getPlanCacheKeyFromPipeline,
     getPlanCacheKeyFromShape,
     getPlanStage,
+    getQueryPlanner,
     getSingleNodeExplain,
     getWinningPlan,
+    getWinningPlanFromExplain,
     isClusteredIxscan,
     isCollscan,
     isIdhack,
@@ -54,7 +57,7 @@ import {
     ClusteredCollectionUtil
 } from "jstests/libs/clustered_collections/clustered_collection_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
+import {checkSbeRestrictedOrFullyEnabled} from "jstests/libs/sbe_util.js";
 
 // Flag indicating if index filter commands are running through the query settings interface.
 var isIndexFiltersToQuerySettings = TestData.isIndexFiltersToQuerySettings || false;
@@ -218,13 +221,26 @@ var explain = coll.explain("executionStats").find(queryID).finish();
 assert.commandWorked(explain);
 
 explain = getSingleNodeExplain(explain);
-const winningPlan = getWinningPlan(explain.queryPlanner);
+const queryPlanner = getQueryPlanner(explain);
+const winningPlan = getWinningPlan(queryPlanner);
 const collectionIsClustered = ClusteredCollectionUtil.areAllCollectionsClustered(db.getMongo());
 if (collectionIsClustered) {
-    assert(isClusteredIxscan(db, getWinningPlan(explain.queryPlanner)),
+    assert(isClusteredIxscan(db, getWinningPlan(queryPlanner)),
            "Expected clustered ixscan: " + tojson(explain));
 } else {
-    assert(isIdhack(db, winningPlan), winningPlan);
+    switch (getOptimizer(explain)) {
+        case "classic":
+            assert(isIdhack(db, winningPlan), winningPlan);
+            break;
+        case "CQF":
+            // TODO SERVER-70847, how to recognize the case of an IDHACK for Bonsai?
+            // TODO SERVER-77719: Ensure that the decision for using the scan lines up with CQF
+            // optimizer. M2: allow only collscans, M4: check bonsai behavior for index scan.
+            assert(isCollscan(db, getWinningPlanFromExplain(explain)));
+            break;
+        default:
+            break;
+    }
 }
 
 // Clearing filters on a missing collection should be a no-op.
@@ -244,19 +260,19 @@ if (!FixtureHelpers.isMongos(db)) {
         // No filter.
         coll.getPlanCache().clear();
         explain = getSingleNodeExplain(coll.find({z: 1}).explain(verbosity));
-        assert.eq(false, explain.queryPlanner.indexFilterSet, explain);
+        assert.eq(false, getQueryPlanner(explain).indexFilterSet, explain);
         explain =
             getSingleNodeExplain(coll.find(queryA1, projectionA1).sort(sortA1).explain(verbosity));
-        assert.eq(false, explain.queryPlanner.indexFilterSet, explain);
+        assert.eq(false, getQueryPlanner(explain).indexFilterSet, explain);
 
         // With one filter set.
         assert.commandWorked(
             coll.runCommand('planCacheSetFilter', {query: {z: 1}, indexes: [{z: 1}]}));
         explain = getSingleNodeExplain(coll.find({z: 1}).explain(verbosity));
-        assert.eq(true, explain.queryPlanner.indexFilterSet, explain);
+        assert.eq(true, getQueryPlanner(explain).indexFilterSet, explain);
         explain =
             getSingleNodeExplain(coll.find(queryA1, projectionA1).sort(sortA1).explain(verbosity));
-        assert.eq(false, explain.queryPlanner.indexFilterSet, verbosity);
+        assert.eq(false, getQueryPlanner(explain).indexFilterSet, verbosity);
 
         // With two filters set.
         assert.commandWorked(coll.runCommand('planCacheSetFilter', {
@@ -266,10 +282,10 @@ if (!FixtureHelpers.isMongos(db)) {
             indexes: [indexA1B1, indexA1C1]
         }));
         explain = getSingleNodeExplain(coll.find({z: 1}).explain(verbosity));
-        assert.eq(true, explain.queryPlanner.indexFilterSet, explain);
+        assert.eq(true, getQueryPlanner(explain).indexFilterSet, explain);
         explain =
             getSingleNodeExplain(coll.find(queryA1, projectionA1).sort(sortA1).explain(verbosity))
-        assert.eq(true, explain.queryPlanner.indexFilterSet, verbosity);
+        assert.eq(true, getQueryPlanner(explain).indexFilterSet, verbosity);
     });
 } else {
     clearFilters(coll, shape);
@@ -296,11 +312,11 @@ assert.commandWorked(coll.runCommand('planCacheSetFilter',
 // pattern.
 
 explain = getSingleNodeExplain(coll.find(queryAA).explain());
-assert(isIxscan(db, getWinningPlan(explain.queryPlanner)),
+assert(isIxscan(db, getWinningPlan(getQueryPlanner(explain))),
        "Expected index scan: " + tojson(explain));
 
 explain = getSingleNodeExplain(coll.find(queryAA).collation(collationEN).explain());
-assert(isIxscan(db, getWinningPlan(explain.queryPlanner)),
+assert(isIxscan(db, getWinningPlan(getQueryPlanner(explain))),
        "Expected index scan: " + tojson(explain));
 
 // Ensure that index names in planCacheSetFilter only select matching names.
@@ -309,7 +325,7 @@ assert.commandWorked(coll.runCommand('planCacheSetFilter',
                                      {query: queryAA, collation: collationEN, indexes: ["a_1"]}));
 
 explain = getSingleNodeExplain(coll.find(queryAA).collation(collationEN).explain());
-assert(isCollscan(db, getWinningPlan(explain.queryPlanner)),
+assert(isCollscan(db, getWinningPlan(getQueryPlanner(explain))),
        "Expected collscan: " + tojson(explain));
 
 //
@@ -356,7 +372,7 @@ assert.commandFailed(
 filters = getFilters();
 assert.eq(0, filters.length, tojson(filters));
 
-if (checkSBEEnabled(db)) {
+if (checkSbeRestrictedOrFullyEnabled(db)) {
     //
     // Test that planCacheSetFilter doesn't apply to the inner side of a $lookup.
     //

@@ -54,6 +54,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/db/storage/collection_truncate_markers.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/record_data.h"
@@ -136,7 +137,7 @@ public:
         bool overwrite;
         bool isEphemeral;
         bool isLogged;
-        boost::optional<int64_t> oplogMaxSize;
+        int64_t oplogMaxSize = 0;
         WiredTigerSizeStorer* sizeStorer;
         bool tracksSizeAdjustments;
         bool forceUpdateWithFullDocument;
@@ -293,7 +294,7 @@ public:
         return _oplogTruncateMarkers.get();
     };
 
-    typedef stdx::variant<int64_t, WiredTigerItem> CursorKey;
+    typedef std::variant<int64_t, WiredTigerItem> CursorKey;
 
     RecordId getLargestKey(OperationContext* opCtx) const final;
 
@@ -375,7 +376,7 @@ private:
     // TODO (SERVER-57482): Remove special handling of skipping "wiredtiger_calc_modify()".
     // True if force to update with the full document, and false otherwise.
     const bool _forceUpdateWithFullDocument;
-    boost::optional<int64_t> _oplogMaxSize;
+    AtomicWord<int64_t> _oplogMaxSize;
     AtomicWord<Timestamp> _oplogFirstRecordTimestamp{Timestamp()};
 
     // Protects initialization of the _nextIdNum.
@@ -457,6 +458,7 @@ protected:
     const uint64_t _tableId;
     RecordId _lastReturnedId;  // If null, need to seek to first/last record.
     OperationContext* _opCtx;
+    ResourceConsumption::MetricsCollector* _metrics;
     const std::string _uri;
     const std::string _ident;
     boost::optional<WiredTigerCursor> _cursor;

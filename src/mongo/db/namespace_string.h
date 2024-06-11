@@ -56,7 +56,6 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log_attr.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
@@ -397,6 +396,11 @@ public:
         return StringData{_data.data() + offset, _data.size() - offset};
     }
 
+    ConstDataRange asDataRange() const {
+        auto nss = ns();
+        return ConstDataRange(nss.data(), nss.size());
+    }
+
     StringData ns_forTest() const {
         return ns();
     }
@@ -668,7 +672,7 @@ public:
      * Returns true if a client can modify this namespace even though it is under ".system."
      * For example <dbname>.system.users is ok for regular clients to update.
      */
-    bool isLegalClientSystemNS(const ServerGlobalParams::FeatureCompatibility& currentFCV) const;
+    bool isLegalClientSystemNS() const;
 
     /**
      * Returns true if this namespace refers to a drop-pending collection.
@@ -996,20 +1000,20 @@ public:
         : _nssOrUUID(UUIDWithDbName{std::move(dbname), std::move(uuid)}) {}
 
     bool isNamespaceString() const {
-        return stdx::holds_alternative<NamespaceString>(_nssOrUUID);
+        return holds_alternative<NamespaceString>(_nssOrUUID);
     }
 
     const NamespaceString& nss() const {
-        invariant(stdx::holds_alternative<NamespaceString>(_nssOrUUID));
+        invariant(holds_alternative<NamespaceString>(_nssOrUUID));
         return get<NamespaceString>(_nssOrUUID);
     }
 
     bool isUUID() const {
-        return stdx::holds_alternative<UUIDWithDbName>(_nssOrUUID);
+        return holds_alternative<UUIDWithDbName>(_nssOrUUID);
     }
 
     const UUID& uuid() const {
-        invariant(stdx::holds_alternative<UUIDWithDbName>(_nssOrUUID));
+        invariant(holds_alternative<UUIDWithDbName>(_nssOrUUID));
         return get<1>(get<UUIDWithDbName>(_nssOrUUID));
     }
 
@@ -1017,7 +1021,7 @@ public:
      * Returns the database name.
      */
     DatabaseName dbName() const {
-        if (stdx::holds_alternative<NamespaceString>(_nssOrUUID)) {
+        if (holds_alternative<NamespaceString>(_nssOrUUID)) {
             return get<NamespaceString>(_nssOrUUID).dbName();
         }
 
@@ -1045,9 +1049,17 @@ public:
         }
     }
 
+    ConstDataRange asDataRange() const {
+        if (isNamespaceString()) {
+            return nss().asDataRange();
+        }
+        auto nss = uuid().toString();
+        return ConstDataRange(nss.data(), nss.size());
+    }
+
 private:
     using UUIDWithDbName = std::tuple<DatabaseName, UUID>;
-    stdx::variant<NamespaceString, UUIDWithDbName> _nssOrUUID;
+    std::variant<NamespaceString, UUIDWithDbName> _nssOrUUID;
 };
 
 /**

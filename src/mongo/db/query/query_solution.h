@@ -36,6 +36,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <iosfwd>
 #include <iterator>
@@ -55,6 +56,7 @@
 #include "mongo/db/fts/fts_query.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
+#include "mongo/db/matcher/expression_hasher.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
 #include "mongo/db/pipeline/dependencies.h"
@@ -76,6 +78,7 @@
 #include "mongo/db/record_id.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/hash_utils.h"
 #include "mongo/util/id_generator.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
@@ -298,6 +301,15 @@ struct QuerySolutionNode {
     bool isEligibleForPlanCache() const;
 
     /**
+     * True, if later stages won't need more metadata from input. The return value should be aligned
+     * with corresponding DocumentSource's DepsTracker::State, true for EXHAUSTIVE_META or
+     * EXHAUSTIVE_ALL.
+     */
+    virtual bool metadataExhausted() const {
+        return false;
+    }
+
+    /**
      * Returns the id associated with this node. Each node in a 'QuerySolution' tree is assigned a
      * unique identifier, which are assigned as sequential positive integers starting from 1.  An id
      * of 0 means that no id was explicitly assigned during construction of the QuerySolution.
@@ -308,6 +320,23 @@ struct QuerySolutionNode {
         return _nodeId;
     }
 
+    template <typename H>
+    friend H AbslHashValue(H state, const QuerySolutionNode& c) {
+        c.hash(absl::HashState::Create(&state));
+        return state;
+    }
+
+    virtual void hash(absl::HashState state) const {
+        state = absl::HashState::combine(std::move(state), getType());
+        if (filter) {
+            state =
+                absl::HashState::combine(std::move(state), MatchExpressionHasher{}(filter.get()));
+        }
+        for (const auto& child : children) {
+            state = absl::HashState::combine(std::move(state), *child.get());
+        }
+    }
+
     std::vector<std::unique_ptr<QuerySolutionNode>> children;
 
     // If a stage has a non-NULL filter all values outputted from that stage must pass that
@@ -315,6 +344,14 @@ struct QuerySolutionNode {
     std::unique_ptr<MatchExpression> filter;
 
     bool hitScanLimit = false;
+
+    /**
+     * Returns a pair consisting of:
+     *  - First node of the specified type found by pre-order traversal. If node was not found, this
+     *    pair element is nullptr.
+     *  - Total number of nodes with the specified type in tree.
+     */
+    std::pair<const QuerySolutionNode*, size_t> getFirstNodeByType(StageType type) const;
 
 protected:
     /**
@@ -400,7 +437,7 @@ public:
     /**
      * Output a human-readable std::string representing the plan.
      */
-    std::string toString() {
+    std::string toString() const {
         if (!_root) {
             return "empty query solution";
         }
@@ -434,16 +471,15 @@ public:
     void setRoot(std::unique_ptr<QuerySolutionNode> root);
 
     /**
-     * Extracts the root of the QuerySolutionNode rooted at `_root`.
-     */
-    std::unique_ptr<QuerySolutionNode> extractRoot();
-
-    /**
      * Returns a vector containing all of the secondary namespaces referenced by this tree, except
      * for 'mainNss'. This vector is used to track which secondary namespaces we should acquire
      * locks for. Note that the namespaces are returned in sorted order.
      */
     std::vector<NamespaceStringOrUUID> getAllSecondaryNamespaces(const NamespaceString& mainNss);
+
+    size_t hash() const {
+        return absl::Hash<QuerySolutionNode>()(*_root);
+    }
 
     // There are two known scenarios in which a query solution might potentially block:
     //
@@ -467,6 +503,14 @@ public:
 
     // Score calculated by PlanRanker. Only present if there are multiple candidate plans.
     boost::optional<double> score;
+
+    /**
+     * Returns a pair consisting of:
+     *  - First node of the specified type found by pre-order traversal. If node was not found, this
+     *    pair element is nullptr.
+     *  - Total number of nodes with the specified type in tree.
+     */
+    std::pair<const QuerySolutionNode*, size_t> getFirstNodeByType(StageType type) const;
 
 private:
     using QsnIdGenerator = IdGenerator<PlanNodeId>;
@@ -506,7 +550,7 @@ struct CollectionScanNode : public QuerySolutionNodeWithSortSet {
     }
 
     // Tells whether this scan will be performed as a clustered collection scan in SBE.
-    bool doSbeClusteredCollectionScan() const {
+    bool doClusteredCollectionScanSbe() const {
         return (isClustered && !isOplog && (minRecord || maxRecord || resumeAfterRecordId));
     }
 
@@ -519,7 +563,18 @@ struct CollectionScanNode : public QuerySolutionNodeWithSortSet {
         eligibleForPlanCache = false;
     }
 
+    IndexBounds getIndexBounds() const;
+
     std::unique_ptr<QuerySolutionNode> clone() const final;
+
+    void hash(absl::HashState state) const override {
+        // For a collscan plan, the QuerySolutionNode::filter attribute will have the values from
+        // the query rather than be parameterized. So including the filter in the hash would create
+        // inconsistent hashes.
+        state = absl::HashState::combine(std::move(state), getType());
+        state =
+            absl::HashState::combine_contiguous(std::move(state), children.data(), children.size());
+    }
 
     // Name of the namespace.
     NamespaceString nss;
@@ -870,6 +925,16 @@ struct IndexScanNode : public QuerySolutionNodeWithSortSet {
     static std::set<StringData> getFieldsWithStringBounds(const IndexBounds& bounds,
                                                           const BSONObj& indexKeyPattern);
 
+    void hash(absl::HashState h) const override {
+        h = absl::HashState::combine(
+            std::move(h), index.identifier.catalogName, index.identifier.disambiguator);
+        if (iets.empty()) {
+            h = absl::HashState::combine(std::move(h), bounds);
+        }
+        h = absl::HashState::combine_contiguous(std::move(h), iets.data(), iets.size());
+        QuerySolutionNode::hash(std::move(h));
+    }
+
     IndexEntry index;
 
     int direction;
@@ -1197,12 +1262,24 @@ struct SortKeyGeneratorNode : public QuerySolutionNode {
     BSONObj sortSpec;
 };
 
+/**
+ * This enum is used to mark which limit and skip values should be parameterized. Currently we only
+ * support parameterization of limit and skip that are part of find command or became a part of find
+ * command after agg pushdown. Parameterization of limits and skips that remained a part of agg
+ * pipeline is not supported.
+ */
+enum class LimitSkipParameterization : bool { Enabled = true, Disabled = false };
+
 struct SortNode : public QuerySolutionNodeWithSortSet {
-    SortNode() : limit(0) {}
-    SortNode(std::unique_ptr<QuerySolutionNode> child, BSONObj pattern, size_t limit)
+    SortNode(std::unique_ptr<QuerySolutionNode> child,
+             BSONObj pattern,
+             size_t limit,
+             LimitSkipParameterization canBeParameterized)
         : QuerySolutionNodeWithSortSet(std::move(child)),
           pattern(std::move(pattern)),
-          limit(limit) {}
+          limit(limit),
+          canBeParameterized(canBeParameterized) {}
+    SortNode(const SortNode& other);
 
     virtual ~SortNode() {}
 
@@ -1229,6 +1306,9 @@ struct SortNode : public QuerySolutionNodeWithSortSet {
 
     // Sum of both limit and skip count in the parsed query.
     size_t limit;
+    // Enables or disables parameterization of limit value. Must be enabled iff this is a part of
+    // find command (possibly after agg pushdown).
+    LimitSkipParameterization canBeParameterized;
 
     bool addSortKeyMetadata = false;
 
@@ -1282,9 +1362,14 @@ struct SortNodeSimple final : public SortNode {
 };
 
 struct LimitNode : public QuerySolutionNode {
-    LimitNode() {}
-    LimitNode(std::unique_ptr<QuerySolutionNode> child, long long limit)
-        : QuerySolutionNode(std::move(child)), limit(limit) {}
+    LimitNode(std::unique_ptr<QuerySolutionNode> child,
+              long long limit,
+              LimitSkipParameterization canBeParameterized)
+        : QuerySolutionNode(std::move(child)),
+          limit(limit),
+          canBeParameterized(canBeParameterized) {}
+    LimitNode(const LimitNode& other);
+
     virtual ~LimitNode() {}
 
     virtual StageType getType() const {
@@ -1309,12 +1394,18 @@ struct LimitNode : public QuerySolutionNode {
     std::unique_ptr<QuerySolutionNode> clone() const final;
 
     long long limit;
+    // Enables or disables parameterization of limit value. Must be enabled iff this is a part of
+    // find command (possibly after agg pushdown).
+    LimitSkipParameterization canBeParameterized;
 };
 
 struct SkipNode : public QuerySolutionNode {
-    SkipNode() {}
-    SkipNode(std::unique_ptr<QuerySolutionNode> child, long long skip)
-        : QuerySolutionNode(std::move(child)), skip(skip) {}
+    SkipNode(std::unique_ptr<QuerySolutionNode> child,
+             long long skip,
+             LimitSkipParameterization canBeParameterized)
+        : QuerySolutionNode(std::move(child)), skip(skip), canBeParameterized(canBeParameterized) {}
+    SkipNode(const SkipNode& other);
+
     virtual ~SkipNode() {}
 
     virtual StageType getType() const {
@@ -1338,6 +1429,9 @@ struct SkipNode : public QuerySolutionNode {
     std::unique_ptr<QuerySolutionNode> clone() const final;
 
     long long skip;
+    // Enables or disables parameterization of limit value. Must be enabled iff this is a part of
+    // find command (possibly after agg pushdown).
+    LimitSkipParameterization canBeParameterized;
 };
 
 struct GeoNear2DNode : public QuerySolutionNodeWithSortSet {
@@ -1524,7 +1618,10 @@ struct CountScanNode : public QuerySolutionNodeWithSortSet {
 };
 
 struct EofNode : public QuerySolutionNodeWithSortSet {
-    EofNode() {}
+    EofNode() {
+        // We do not generate cache entries for EOF plans.
+        eligibleForPlanCache = false;
+    }
 
     virtual StageType getType() const {
         return STAGE_EOF;
@@ -1647,6 +1744,10 @@ struct GroupNode : public QuerySolutionNode {
     }
 
     std::unique_ptr<QuerySolutionNode> clone() const final;
+
+    bool metadataExhausted() const final {
+        return true;
+    }
 
     boost::intrusive_ptr<Expression> groupByExpression;
     std::vector<AccumulationStatement> accumulators;
@@ -1838,6 +1939,8 @@ struct SearchNode : public QuerySolutionNode {
           remoteCursorId(remoteCursorId),
           remoteCursorVars(remoteCursorVars) {}
 
+    static std::unique_ptr<SearchNode> getSearchNode(DocumentSource* stage);
+
     StageType getType() const override {
         return STAGE_SEARCH;
     }
@@ -1927,8 +2030,11 @@ struct UnpackTsBucketNode : public QuerySolutionNode {
         return children[0]->sortedByDiskLoc();
     }
 
-    // TODO SERVER-79699 & SERVER-79700: Return the sort set which should be translated from the
-    // child's sort set.
+    // The inputs to 'UnpackTsBucketNode' are buckets that might be sorted on bucket-level fields
+    // such as metaField, timeField or any of the control fields. When unpacking, only sort order on
+    // the metaField is preserved (as the field's value is the same for all docs in a bucket).
+    // TODO SERVER-83621: Consider checking the provided sort of the child stage and returning the
+    // meta field here, if appropriate.
     const ProvidedSortSet& providedSorts() const final {
         return kEmptySet;
     }
@@ -1939,6 +2045,10 @@ struct UnpackTsBucketNode : public QuerySolutionNode {
                                                     eventFilter->clone(),
                                                     wholeBucketFilter->clone(),
                                                     includeMeta);
+    }
+
+    bool metadataExhausted() const final {
+        return true;
     }
 
     timeseries::BucketSpec bucketSpec;

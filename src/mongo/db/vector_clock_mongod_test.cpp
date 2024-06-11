@@ -48,7 +48,7 @@
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
-#include "mongo/db/op_observer/oplog_writer_mock.h"
+#include "mongo/db/op_observer/operation_logger_mock.h"
 #include "mongo/db/s/sharding_mongod_test_fixture.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
@@ -67,16 +67,16 @@ namespace {
 
 /**
  * Even though these tests are to exercise logic for plain replica set members, it uses
- * ShardingMongodTestFixture as a convenient way to get the necessary support infrastructure (such
+ * ShardingMongoDTestFixture as a convenient way to get the necessary support infrastructure (such
  * as a TaskExecutor with pool), while still being neither "config server" nor "shard server".
  */
-class VectorClockMongoDTest : public ShardingMongodTestFixture {
+class VectorClockMongoDTest : public ShardingMongoDTestFixture {
 protected:
     VectorClockMongoDTest()
-        : ShardingMongodTestFixture(Options{}.useMockClock(true), false /* setUpMajorityReads */) {}
+        : ShardingMongoDTestFixture(Options{}.useMockClock(true), false /* setUpMajorityReads */) {}
 
     void setUp() override {
-        ShardingMongodTestFixture::setUp();
+        ShardingMongoDTestFixture::setUp();
 
         auto keysCollectionClient = std::make_unique<KeysCollectionClientDirect>(
             !getServiceContext()->getStorageEngine()->supportsReadConcernMajority());
@@ -97,7 +97,7 @@ protected:
     void tearDown() override {
         LogicalTimeValidator::get(getServiceContext())->shutDown();
 
-        ShardingMongodTestFixture::tearDown();
+        ShardingMongoDTestFixture::tearDown();
     }
 
     /**
@@ -111,7 +111,7 @@ protected:
         auto opObserverRegistry =
             checked_cast<OpObserverRegistry*>(getServiceContext()->getOpObserver());
         opObserverRegistry->addObserver(
-            std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterMock>()));
+            std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerMock>()));
     }
 
 private:

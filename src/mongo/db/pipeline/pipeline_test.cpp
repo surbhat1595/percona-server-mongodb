@@ -69,6 +69,7 @@
 #include "mongo/db/pipeline/document_source_test_optimizations.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/process_interface/common_process_interface.h"
 #include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
 #include "mongo/db/pipeline/semantic_analysis.h"
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
@@ -80,6 +81,7 @@
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
+#include "mongo/s/sharding_state.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
@@ -154,7 +156,7 @@ void assertPipelineOptimizesAndSerializesTo(std::string inputPipeJson,
     boost::intrusive_ptr<ExpressionContextForTest> ctx =
         new ExpressionContextForTest(opCtx.get(), request);
     ctx->mongoProcessInterface = std::make_shared<StubExplainInterface>();
-    TempDir tempDir("PipelineTest");
+    unittest::TempDir tempDir("PipelineTest");
     ctx->tempDir = tempDir.path();
 
     // For $graphLookup and $lookup, we have to populate the resolvedNamespaces so that the
@@ -3596,7 +3598,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> getOptimizedPipeline(const BSONObj in
     boost::intrusive_ptr<ExpressionContextForTest> ctx =
         new ExpressionContextForTest(opCtx.get(), request);
     ctx->mongoProcessInterface = std::make_shared<StubExplainInterface>();
-    TempDir tempDir("PipelineTest");
+    unittest::TempDir tempDir("PipelineTest");
     ctx->tempDir = tempDir.path();
 
     auto outputPipe = Pipeline::parse(request.getPipeline(), ctx);
@@ -3699,6 +3701,27 @@ TEST(PipelineOptimizationTest, MergeUnwindPipelineWithSortLimitPipelinePlacesLim
 
 namespace Sharded {
 
+/**
+ * Stub process interface used to allow accessing the CatalogCache for those tests which involve
+ * selecting a specific shard merger.
+ */
+class ShardMergerMongoProcessInterface : public StubMongoProcessInterface {
+public:
+    ShardMergerMongoProcessInterface(CatalogCacheMock* catalogCache)
+        : StubMongoProcessInterface(), _catalogCache(catalogCache) {}
+
+    boost::optional<ShardId> determineSpecificMergeShard(OperationContext* opCtx,
+                                                         const NamespaceString& ns) const override {
+        if (_catalogCache) {
+            return CommonProcessInterface::findOwningShard(opCtx, _catalogCache, ns);
+        }
+        return boost::none;
+    }
+
+private:
+    CatalogCacheMock* _catalogCache;
+};
+
 class PipelineOptimizations : public ShardServerTestFixtureWithCatalogCacheMock {
 public:
     // Allows tests to override the default resolvedNamespaces.
@@ -3723,8 +3746,10 @@ public:
         }
         AggregateCommandRequest request(kTestNss, rawPipeline);
         boost::intrusive_ptr<ExpressionContextForTest> ctx = createExpressionContext(request);
-        TempDir tempDir("PipelineTest");
+        unittest::TempDir tempDir("PipelineTest");
         ctx->tempDir = tempDir.path();
+        ctx->mongoProcessInterface =
+            std::make_shared<Sharded::ShardMergerMongoProcessInterface>(getCatalogCacheMock());
 
         // For $graphLookup and $lookup, we have to populate the resolvedNamespaces so that the
         // operations will be able to have a resolved view definition.
@@ -4171,14 +4196,78 @@ TEST_F(PipelineOptimizationsShardMerger, Project) {
            false /*needsPrimaryShardMerger*/);
 };
 
-TEST_F(PipelineOptimizationsShardMerger, LookUp) {
+TEST_F(PipelineOptimizationsShardMerger, LookUpUnsplittableFromCollection) {
+    const ChunkRange range = ChunkRange{BSON("_id" << MINKEY), BSON("_id" << MAXKEY)};
+    const UUID uuid = UUID::gen();
+    const OID epoch = OID::gen();
+    const Timestamp timestamp{1, 1};
+    auto fromCollNs = getLookupCollNs();
+    auto rt = RoutingTableHistory::makeNew(
+        fromCollNs,
+        uuid,
+        KeyPattern{BSON("right" << 1)},
+        true /* unsplittable */,
+        nullptr /* defaultCollator */,
+        false /* unique */,
+        epoch,
+        Timestamp(1, 1),
+        boost::none /* timeseriesFields */,
+        boost::none /* reshardingFields */,
+        true /* allowMigrations */,
+        {ChunkType{uuid, range, ChunkVersion({epoch, timestamp}, {1, 0}), _myShardName}});
+
+    getCatalogCacheMock()->setCollectionReturnValue(
+        fromCollNs,
+        CollectionRoutingInfo{ChunkManager{_myShardName,
+                                           DatabaseVersion{UUID::gen(), timestamp},
+                                           makeStandaloneRoutingTableHistory(std::move(rt)),
+                                           timestamp},
+                              boost::none});
     doTest(
-        "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: 'right'}}]" /*inputPipeJson*/
+        "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: 'right'}}]" /* inputPipeJson */
         ,
-        "[]" /*shardPipeJson*/,
-        "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: 'right'}}]" /*mergePipeJson*/
+        "[]" /* shardPipeJson */,
+        "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: 'right'}}]" /* mergePipeJson */
         ,
-        true /*needsPrimaryShardMerger*/);
+        false /* needsPrimaryShardMerger */,
+        _myShardName /* needsSpecificShardMerger */);
+};
+
+TEST_F(PipelineOptimizationsShardMerger, LookUpShardedFromCollection) {
+    const ChunkRange range = ChunkRange{BSON("_id" << MINKEY), BSON("_id" << MAXKEY)};
+    const UUID uuid = UUID::gen();
+    const OID epoch = OID::gen();
+    const Timestamp timestamp{1, 1};
+    auto fromCollNs = getLookupCollNs();
+    auto rt = RoutingTableHistory::makeNew(
+        fromCollNs,
+        uuid,
+        KeyPattern{BSON("right" << 1)},
+        false /* unsplittable */,
+        nullptr /* defaultCollator */,
+        false /* unique */,
+        epoch,
+        Timestamp(1, 1),
+        boost::none /* timeseriesFields */,
+        boost::none /* reshardingFields */,
+        true /* allowMigrations */,
+        {ChunkType{uuid, range, ChunkVersion({epoch, timestamp}, {1, 0}), _myShardName}});
+
+    getCatalogCacheMock()->setCollectionReturnValue(
+        fromCollNs,
+        CollectionRoutingInfo{ChunkManager{_myShardName,
+                                           DatabaseVersion{UUID::gen(), timestamp},
+                                           makeStandaloneRoutingTableHistory(std::move(rt)),
+                                           timestamp},
+                              boost::none});
+    doTest(
+        "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: 'right'}}]" /* inputPipeJson */
+        ,
+        "[]" /* shardPipeJson */,
+        "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: 'right'}}]" /* mergePipeJson */
+        ,
+        false /* needsPrimaryShardMerger */,
+        _myShardName /* needsSpecificShardMerger */);
 };
 
 }  // namespace needsPrimaryShardMerger
@@ -4240,8 +4329,8 @@ TEST_F(PipelineMustRunOnMongoSTest, UnsplittableMongoSPipelineAssertsIfDisallowe
     pipeline->optimizePipeline();
 
     // The entire pipeline must run on mongoS, but $sort cannot do so when 'allowDiskUse' is true.
-    ASSERT_THROWS_CODE(
-        pipeline->requiredToRunOnMongos(), AssertionException, ErrorCodes::IllegalOperation);
+    ASSERT_TRUE(pipeline->requiredToRunOnMongos());
+    ASSERT_NOT_OK(pipeline->canRunOnMongos());
 }
 
 DEATH_TEST_F(PipelineMustRunOnMongoSTest,
@@ -4304,9 +4393,8 @@ TEST_F(PipelineMustRunOnMongoSTest, SplitMongoSMergePipelineAssertsIfShardStageP
     auto splitPipeline = sharded_agg_helpers::splitPipeline(std::move(pipeline));
 
     // The merge pipeline must run on mongoS, but $out needs to run on  the primary shard.
-    ASSERT_THROWS_CODE(splitPipeline.mergePipeline->requiredToRunOnMongos(),
-                       AssertionException,
-                       ErrorCodes::IllegalOperation);
+    ASSERT_TRUE(splitPipeline.mergePipeline->requiredToRunOnMongos());
+    ASSERT_NOT_OK(splitPipeline.mergePipeline->canRunOnMongos());
 }
 
 TEST_F(PipelineMustRunOnMongoSTest, SplittablePipelineAssertsIfMongoSStageOnShardSideOfSplit) {
@@ -4325,8 +4413,8 @@ TEST_F(PipelineMustRunOnMongoSTest, SplittablePipelineAssertsIfMongoSStageOnShar
     // mongoS. However, the pipeline *cannot* run on mongoS and *must* split at
     // $_internalSplitPipeline due to the latter's 'anyShard' requirement. The mongoS stage would
     // end up on the shard side of this split, and so it asserts.
-    ASSERT_THROWS_CODE(
-        pipeline->requiredToRunOnMongos(), AssertionException, ErrorCodes::IllegalOperation);
+    ASSERT_TRUE(pipeline->requiredToRunOnMongos());
+    ASSERT_NOT_OK(pipeline->canRunOnMongos());
 }
 
 TEST_F(PipelineMustRunOnMongoSTest, SplittablePipelineRunsUnsplitOnMongoSIfSplitpointIsEligible) {
@@ -5348,7 +5436,12 @@ TEST_F(PipelineRenameTracking, CanHandleBackAndForthRename) {
     }
 }
 
-using InvolvedNamespacesTest = AggregationContextFixture;
+class InvolvedNamespacesTest : public AggregationContextFixture {
+protected:
+    InvolvedNamespacesTest() {
+        ShardingState::create(getServiceContext());
+    }
+};
 
 TEST_F(InvolvedNamespacesTest, NoInvolvedNamespacesForMatchSortProject) {
     boost::intrusive_ptr<ExpressionContext> expCtx(getExpCtx());

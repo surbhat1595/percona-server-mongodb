@@ -42,7 +42,6 @@
 #include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
@@ -53,6 +52,7 @@
 #include "mongo/db/s/sharding_write_router.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/transaction/transaction_participant.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/s/chunk.h"
@@ -90,7 +90,8 @@ void MigrationChunkClonerSourceOpObserver::assertNoMovePrimaryInProgress(
     }
 
     // TODO SERVER-58222: evaluate whether this is safe or whether acquiring the lock can block.
-    AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
+    AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(
+        shard_role_details::getLocker(opCtx));
     Lock::DBLock dblock(opCtx, nss.dbName(), MODE_IS);
 
     const auto scopedDss =
@@ -130,7 +131,7 @@ void MigrationChunkClonerSourceOpObserver::onUnpreparedTransactionCommit(
     const auto& commitOpTime = opAccumulator->opTime.writeOpTime;
     invariant(!commitOpTime.isNull());
 
-    opCtx->recoveryUnit()->registerChange(
+    shard_role_details::getRecoveryUnit(opCtx)->registerChange(
         std::make_unique<LogTransactionOperationsForShardingHandler>(
             *opCtx->getLogicalSessionId(), statements, commitOpTime));
 }
@@ -199,7 +200,7 @@ void MigrationChunkClonerSourceOpObserver::onInserts(
             continue;
         }
 
-        opCtx->recoveryUnit()->registerChange(
+        shard_role_details::getRecoveryUnit(opCtx)->registerChange(
             std::make_unique<LogInsertForShardingHandler>(nss, it->doc, opTime));
     }
 }
@@ -259,8 +260,9 @@ void MigrationChunkClonerSourceOpObserver::onUpdate(OperationContext* opCtx,
         return;
     }
 
-    opCtx->recoveryUnit()->registerChange(std::make_unique<LogUpdateForShardingHandler>(
-        nss, preImageDoc, postImageDoc, opAccumulator->opTime.writeOpTime));
+    shard_role_details::getRecoveryUnit(opCtx)->registerChange(
+        std::make_unique<LogUpdateForShardingHandler>(
+            nss, preImageDoc, postImageDoc, opAccumulator->opTime.writeOpTime));
 }
 
 void MigrationChunkClonerSourceOpObserver::onDelete(OperationContext* opCtx,
@@ -309,8 +311,9 @@ void MigrationChunkClonerSourceOpObserver::onDelete(OperationContext* opCtx,
         return;
     }
 
-    opCtx->recoveryUnit()->registerChange(std::make_unique<LogDeleteForShardingHandler>(
-        nss, *optDocKey, opAccumulator->opTime.writeOpTime));
+    shard_role_details::getRecoveryUnit(opCtx)->registerChange(
+        std::make_unique<LogDeleteForShardingHandler>(
+            nss, *optDocKey, opAccumulator->opTime.writeOpTime));
 }
 
 void MigrationChunkClonerSourceOpObserver::postTransactionPrepare(
@@ -332,7 +335,7 @@ void MigrationChunkClonerSourceOpObserver::postTransactionPrepare(
 
     const auto& statements = transactionOperations.getOperationsForOpObserver();
 
-    opCtx->recoveryUnit()->registerChange(
+    shard_role_details::getRecoveryUnit(opCtx)->registerChange(
         std::make_unique<LogTransactionOperationsForShardingHandler>(
             *opCtx->getLogicalSessionId(), statements, prepareOpTime));
 }
@@ -342,7 +345,7 @@ void MigrationChunkClonerSourceOpObserver::onTransactionPrepareNonPrimary(
     const LogicalSessionId& lsid,
     const std::vector<repl::OplogEntry>& statements,
     const repl::OpTime& prepareOpTime) {
-    opCtx->recoveryUnit()->registerChange(
+    shard_role_details::getRecoveryUnit(opCtx)->registerChange(
         std::make_unique<LogTransactionOperationsForShardingHandler>(
             lsid, statements, prepareOpTime));
 }

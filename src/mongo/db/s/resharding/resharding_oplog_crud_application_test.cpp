@@ -61,7 +61,7 @@
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
-#include "mongo/db/op_observer/oplog_writer_impl.h"
+#include "mongo/db/op_observer/operation_logger_impl.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -89,7 +89,6 @@
 #include "mongo/db/s/resharding/resharding_oplog_application.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier_metrics.h"
 #include "mongo/db/s/resharding/resharding_util.h"
-#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d_test_fixture.h"
@@ -109,6 +108,7 @@
 #include "mongo/s/database_version.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
 #include "mongo/s/sharding_index_catalog_cache.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/bson_test_util.h"
@@ -133,7 +133,13 @@ public:
         serverGlobalParams.clusterRole = ClusterRole::ShardServer;
 
         auto serviceContext = getServiceContext();
-        ShardingState::get(serviceContext)->setInitialized(_myDonorId.toString(), OID::gen());
+
+        const HostAndPort kConfigHostAndPort{"DummyConfig", 12345};
+        ShardingState::get(serviceContext)
+            ->setRecoveryCompleted({OID::gen(),
+                                    ClusterRole::ShardServer,
+                                    ConnectionString(kConfigHostAndPort),
+                                    _myDonorId});
         {
             auto opCtx = makeOperationContext();
             auto replCoord = std::make_unique<repl::ReplicationCoordinatorMock>(serviceContext);
@@ -160,7 +166,7 @@ public:
             invariant(opObserverRegistry);
 
             opObserverRegistry->addObserver(
-                std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+                std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
             opObserverRegistry->addObserver(
                 std::make_unique<MigrationChunkClonerSourceOpObserver>());
         }

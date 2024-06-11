@@ -59,7 +59,6 @@
 #include "mongo/db/commands/fsync.h"
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/initial_syncer.h"
@@ -80,6 +79,7 @@
 #include "mongo/db/storage/storage_util.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -152,6 +152,12 @@ Status finishAndLogApply(OperationContext* opCtx,
             }
 
             attrs.add("duration", Milliseconds(opDuration));
+
+            // Obtain storage specific statistics and log them if they exist.
+            CurOp::get(opCtx)->debug().storageStats =
+                shard_role_details::getRecoveryUnit(opCtx)
+                    ->computeOperationStatisticsSinceLastCall();
+            CurOp::get(opCtx)->debug().reportStorageStats(&attrs);
 
             LOGV2(51801, "Applied op", attrs);
         }
@@ -325,10 +331,8 @@ void _addOplogChainOpsToWriterVectors(OperationContext* opCtx,
     partialTxnList->clear();
 
     if (op->shouldPrepare()) {
-        // Prepared transaction operations should not have commands.
-        invariant(!shouldSerialize);
         OplogApplierUtils::addDerivedPrepares(
-            opCtx, op, &extractedOps, writerVectors, collPropertiesCache);
+            opCtx, op, &extractedOps, writerVectors, collPropertiesCache, shouldSerialize);
         return;
     }
 
@@ -397,17 +401,18 @@ void _setOplogApplicationWorkerOpCtxStates(OperationContext* opCtx) {
     // incomplete key and an adjacent key is prepared.
     // We ignore prepare conflicts on secondaries because they may encounter prepare conflicts that
     // did not occur on the primary.
-    opCtx->recoveryUnit()->setPrepareConflictBehavior(
+    shard_role_details::getRecoveryUnit(opCtx)->setPrepareConflictBehavior(
         PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
 
     // Applying an Oplog batch is crucial to the stability of the Replica Set. We
     // mark it as having Immediate priority so that it skips waiting for ticket
     // acquisition and flow control.
-    opCtx->lockState()->setAdmissionPriority(AdmissionContext::Priority::kImmediate);
+    shard_role_details::getLocker(opCtx)->setAdmissionPriority(
+        AdmissionContext::Priority::kImmediate);
 
     // Ensure future transactions read without a timestamp.
     invariant(RecoveryUnit::ReadSource::kNoTimestamp ==
-              opCtx->recoveryUnit()->getTimestampReadSource());
+              shard_role_details::getRecoveryUnit(opCtx)->getTimestampReadSource());
 }
 }  // namespace
 
@@ -425,6 +430,7 @@ public:
 
 protected:
     void _recordApplied(const OpTimeAndWallTime& newOpTimeAndWallTime) {
+        _replCoord->setMyLastWrittenOpTimeAndWallTimeForward(newOpTimeAndWallTime);
         // We have to use setMyLastAppliedOpTimeAndWallTimeForward since this thread races with
         // ReplicationExternalStateImpl::onTransitionToPrimary.
         _replCoord->setMyLastAppliedOpTimeAndWallTimeForward(newOpTimeAndWallTime);
@@ -554,7 +560,7 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
         // The oplog applier is crucial for stability of the replica set. As a result we mark it as
         // having Immediate priority. This makes the operation skip waiting for ticket acquisition
         // and flow control.
-        ScopedAdmissionPriorityForLock priority(opCtx.lockState(),
+        ScopedAdmissionPriorityForLock priority(shard_role_details::getLocker(&opCtx),
                                                 AdmissionContext::Priority::kImmediate);
 
         // For pausing replication in tests.
@@ -647,11 +653,11 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
 
 // Schedules the writes to the oplog and the change collection for 'ops' into threadPool. The caller
 // must guarantee that 'ops' stays valid until all scheduled work in the thread pool completes.
-void scheduleWritesToOplogAndChangeCollection(OperationContext* opCtx,
-                                              StorageInterface* storageInterface,
-                                              ThreadPool* writerPool,
-                                              const std::vector<OplogEntry>& ops,
-                                              bool skipWritesToOplog) {
+void OplogApplierImpl::scheduleWritesToOplogAndChangeCollection(OperationContext* opCtx,
+                                                                StorageInterface* storageInterface,
+                                                                ThreadPool* writerPool,
+                                                                const std::vector<OplogEntry>& ops,
+                                                                bool skipWritesToOplog) {
     // Skip performing any writes during the startup recovery when running in the non-serverless
     // environment.
     if (skipWritesToOplog && !change_stream_serverless_helpers::isChangeCollectionsModeActive()) {
@@ -670,7 +676,7 @@ void scheduleWritesToOplogAndChangeCollection(OperationContext* opCtx,
             // Oplog writes are crucial to the stability of the replica set. We mark the operations
             // as having Immediate priority so that it skips waiting for ticket acquisition and flow
             // control.
-            ScopedAdmissionPriorityForLock priority(opCtx->lockState(),
+            ScopedAdmissionPriorityForLock priority(shard_role_details::getLocker(opCtx.get()),
                                                     AdmissionContext::Priority::kImmediate);
 
             UnreplicatedWritesBlock uwb(opCtx.get());

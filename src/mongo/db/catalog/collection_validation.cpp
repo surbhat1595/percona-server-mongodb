@@ -67,7 +67,6 @@
 #include "mongo/db/catalog/validate_state.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/multikey_paths.h"
@@ -79,6 +78,7 @@
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -367,7 +367,8 @@ void _reportValidationResults(OperationContext* opCtx,
     results->readTimestamp = validateState->getValidateTimestamp();
 
     if (validateState->isFullIndexValidation()) {
-        invariant(opCtx->lockState()->isCollectionLockedForMode(validateState->nss(), MODE_X));
+        invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(
+            validateState->nss(), MODE_X));
     }
 
     BSONObjBuilder keysPerIndex;
@@ -379,14 +380,6 @@ void _reportValidationResults(OperationContext* opCtx,
         if (!vr.valid) {
             results->valid = false;
             _printIndexSpec(opCtx, validateState, indexName);
-        }
-
-        if (validateState->getSkippedIndexes().contains(indexName)) {
-            // Index internal state was checked and cleared, so it was reported in indexResultsMap,
-            // but we did not verify the index contents against the collection, so we should exclude
-            // it from this report.
-            --nIndexes;
-            continue;
         }
 
         BSONObjBuilder bob(indexDetails.subobjStart(indexName));
@@ -453,35 +446,6 @@ void addErrorIfUnequal(boost::optional<ValidationActionEnum> stored,
                       ValidationAction_serializer(validationActionOrDefault(cached)),
                       name,
                       results);
-}
-
-std::string multikeyPathsToString(MultikeyPaths paths) {
-    str::stream builder;
-    builder << "[";
-    auto pathIt = paths.begin();
-    while (true) {
-        builder << "{";
-
-        auto pathSet = *pathIt;
-        auto setIt = pathSet.begin();
-        while (true) {
-            builder << *setIt++;
-            if (setIt == pathSet.end()) {
-                break;
-            } else {
-                builder << ",";
-            }
-        }
-        builder << "}";
-
-        if (++pathIt == paths.end()) {
-            break;
-        } else {
-            builder << ",";
-        }
-    }
-    builder << "]";
-    return builder;
 }
 
 void _validateCatalogEntry(OperationContext* opCtx,
@@ -580,11 +544,52 @@ Status validate(OperationContext* opCtx,
                 BSONObjBuilder* output,
                 bool logDiagnostics,
                 const SerializationContext& sc) {
-    invariant(!opCtx->lockState()->isLocked() || storageGlobalParams.repair);
+    invariant(!shard_role_details::getLocker(opCtx)->isLocked() || storageGlobalParams.repair);
 
     // This is deliberately outside of the try-catch block, so that any errors thrown in the
     // constructor fail the cmd, as opposed to returning OK with valid:false.
     ValidateState validateState(opCtx, nss, mode, repairMode, additionalOptions, logDiagnostics);
+
+    // Foreground validation needs to ignore prepare conflicts, or else it would deadlock.
+    // Repair mode cannot use ignore-prepare because it needs to be able to do writes, and there is
+    // no danger of deadlock for this mode anyway since it is only used at startup (or in standalone
+    // mode where prepared transactions are prohibited.)
+    auto oldPrepareConflictBehavior =
+        shard_role_details::getRecoveryUnit(opCtx)->getPrepareConflictBehavior();
+    ON_BLOCK_EXIT([&] {
+        shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
+        shard_role_details::getRecoveryUnit(opCtx)->setPrepareConflictBehavior(
+            oldPrepareConflictBehavior);
+    });
+
+    // Relax corruption detection so that we log and continue scanning instead of failing early.
+    auto oldDataCorruptionMode =
+        shard_role_details::getRecoveryUnit(opCtx)->getDataCorruptionDetectionMode();
+    shard_role_details::getRecoveryUnit(opCtx)->setDataCorruptionDetectionMode(
+        DataCorruptionDetectionMode::kLogAndContinue);
+    ON_BLOCK_EXIT([&] {
+        shard_role_details::getRecoveryUnit(opCtx)->setDataCorruptionDetectionMode(
+            oldDataCorruptionMode);
+    });
+
+    if (validateState.fixErrors()) {
+        // Note: cannot set PrepareConflictBehavior here, since the validate command with repair
+        // needs kIngnoreConflictsAllowWrites, but validate repair at startup cannot set that here
+        // due to an already active WriteUnitOfWork.  The prepare conflict behavior for validate
+        // command with repair is set in the command code prior to this point.
+        invariant(!validateState.isBackground());
+    } else if (!validateState.isBackground()) {
+        // Foreground validation may perform writes to fix up inconsistencies that are not
+        // correctness errors.
+        shard_role_details::getRecoveryUnit(opCtx)->setPrepareConflictBehavior(
+            PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
+    } else {
+        // isBackground().
+        invariant(oldPrepareConflictBehavior == PrepareConflictBehavior::kEnforce);
+    }
+
+    Status status = validateState.initializeCollection(opCtx);
+    uassertStatusOK(status);
 
     const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     // Check whether we are allowed to read from this node after acquiring our locks. If we are
@@ -596,42 +601,10 @@ Status validate(OperationContext* opCtx,
 
     validateState.uuid().appendToBuilder(output, "uuid");
 
-    // Foreground validation needs to ignore prepare conflicts, or else it would deadlock.
-    // Repair mode cannot use ignore-prepare because it needs to be able to do writes, and there is
-    // no danger of deadlock for this mode anyway since it is only used at startup (or in standalone
-    // mode where prepared transactions are prohibited.)
-    auto oldPrepareConflictBehavior = opCtx->recoveryUnit()->getPrepareConflictBehavior();
-    ON_BLOCK_EXIT([&] {
-        opCtx->recoveryUnit()->abandonSnapshot();
-        opCtx->recoveryUnit()->setPrepareConflictBehavior(oldPrepareConflictBehavior);
-    });
-
-    // Relax corruption detection so that we log and continue scanning instead of failing early.
-    auto oldDataCorruptionMode = opCtx->recoveryUnit()->getDataCorruptionDetectionMode();
-    opCtx->recoveryUnit()->setDataCorruptionDetectionMode(
-        DataCorruptionDetectionMode::kLogAndContinue);
-    ON_BLOCK_EXIT(
-        [&] { opCtx->recoveryUnit()->setDataCorruptionDetectionMode(oldDataCorruptionMode); });
-
-    if (validateState.fixErrors()) {
-        // Note: cannot set PrepareConflictBehavior here, since the validate command with repair
-        // needs kIngnoreConflictsAllowWrites, but validate repair at startup cannot set that here
-        // due to an already active WriteUnitOfWork.  The prepare conflict behavior for validate
-        // command with repair is set in the command code prior to this point.
-        invariant(!validateState.isBackground());
-    } else if (!validateState.isBackground()) {
-        // Foreground validation may perform writes to fix up inconsistencies that are not
-        // correctness errors.
-        opCtx->recoveryUnit()->setPrepareConflictBehavior(
-            PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
-    } else {
-        // isBackground().
-        invariant(oldPrepareConflictBehavior == PrepareConflictBehavior::kEnforce);
-    }
-
     try {
         invariant(!validateState.isFullIndexValidation() ||
-                  opCtx->lockState()->isCollectionLockedForMode(validateState.nss(), MODE_X));
+                  shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(
+                      validateState.nss(), MODE_X));
 
         // Record store validation code is executed before we open cursors because it may close
         // and/or invalidate all open cursors.
@@ -648,8 +621,6 @@ Status validate(OperationContext* opCtx,
             return Status::OK();
         }
 
-        // Validate in-memory catalog information with persisted info prior to setting the read
-        // source to kCheckpoint otherwise we'd use a checkpointed MDB catalog file.
         _validateCatalogEntry(opCtx, &validateState, results);
 
         if (validateState.isMetadataValidation()) {
@@ -667,8 +638,6 @@ Status validate(OperationContext* opCtx,
             return Status::OK();
         }
 
-        // Open all cursors at once before running non-full validation code so that all steps of
-        // validation during background validation use the same view of the data.
         validateState.initializeCursors(opCtx);
 
         // Validate the record store.
@@ -745,18 +714,6 @@ Status validate(OperationContext* opCtx,
                       "corruption found",
                       logAttrs(validateState.nss()),
                       logAttrs(validateState.uuid()));
-    } catch (ExceptionFor<ErrorCodes::CursorNotFound>&) {
-        invariant(validateState.isBackground());
-        string warning = str::stream()
-            << "Collection validation with {background: true} validates"
-            << " the latest checkpoint (data in a snapshot written to disk in a consistent"
-            << " way across all data files). During this validation, some tables have not yet been"
-            << " checkpointed.";
-        results->warnings.push_back(warning);
-
-        // Nothing to validate, so it must be valid.
-        results->valid = true;
-        return Status::OK();
     } catch (const DBException& e) {
         if (!opCtx->checkForInterruptNoAssert().isOK() || e.code() == ErrorCodes::Interrupted) {
             LOGV2_OPTIONS(5160301,

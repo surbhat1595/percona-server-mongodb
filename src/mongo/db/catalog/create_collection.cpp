@@ -65,7 +65,6 @@
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/feature_flag.h"
@@ -90,12 +89,12 @@
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_options.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/namespace_string_util.h"
@@ -228,6 +227,14 @@ Status _createView(OperationContext* opCtx,
                                         << nss.toStringForErrorMsg());
         }
 
+        // This is a top-level handler for collection creation name conflicts. New commands coming
+        // in, or commands that generated a WriteConflict must return a NamespaceExists error here
+        // on conflict.
+        Status statusNss = catalog::checkIfNamespaceExists(opCtx, nss);
+        if (!statusNss.isOK()) {
+            return statusNss;
+        }
+
         CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
             ->checkShardVersionOrThrow(opCtx);
 
@@ -249,7 +256,7 @@ Status _createView(OperationContext* opCtx,
 
         // If the view creation rolls back, ensure that the Top entry created for the view is
         // deleted.
-        opCtx->recoveryUnit()->onRollback(
+        shard_role_details::getRecoveryUnit(opCtx)->onRollback(
             [nss, serviceContext = opCtx->getServiceContext()](OperationContext*) {
                 Top::get(serviceContext).collectionDropped(nss);
             });
@@ -472,7 +479,7 @@ Status _createTimeseries(OperationContext* opCtx,
 
         // If the buckets collection and time-series view creation roll back, ensure that their
         // Top entries are deleted.
-        opCtx->recoveryUnit()->onRollback(
+        shard_role_details::getRecoveryUnit(opCtx)->onRollback(
             [serviceContext = opCtx->getServiceContext(), bucketsNs](OperationContext*) {
                 Top::get(serviceContext).collectionDropped(bucketsNs);
             });
@@ -580,7 +587,7 @@ Status _createTimeseries(OperationContext* opCtx,
 
         // If the buckets collection and time-series view creation roll back, ensure that their
         // Top entries are deleted.
-        opCtx->recoveryUnit()->onRollback(
+        shard_role_details::getRecoveryUnit(opCtx)->onRollback(
             [serviceContext = opCtx->getServiceContext(), ns](OperationContext*) {
                 Top::get(serviceContext).collectionDropped(ns);
             });
@@ -695,7 +702,7 @@ Status _createCollection(
 
         // If the collection creation rolls back, ensure that the Top entry created for the
         // collection is deleted.
-        opCtx->recoveryUnit()->onRollback(
+        shard_role_details::getRecoveryUnit(opCtx)->onRollback(
             [nss, serviceContext = opCtx->getServiceContext()](OperationContext*) {
                 Top::get(serviceContext).collectionDropped(nss);
             });
@@ -817,8 +824,7 @@ Status createCollection(OperationContext* opCtx, const CreateCommand& cmd) {
     auto options = CollectionOptions::fromCreateCommand(cmd);
     auto idIndex = std::exchange(options.idIndex, {});
     bool hasExplicitlyDisabledClustering = cmd.getClusteredIndex() &&
-        stdx::holds_alternative<bool>(*cmd.getClusteredIndex()) &&
-        !stdx::get<bool>(*cmd.getClusteredIndex());
+        holds_alternative<bool>(*cmd.getClusteredIndex()) && !get<bool>(*cmd.getClusteredIndex());
     if (!hasExplicitlyDisabledClustering) {
         options = clusterByDefaultIfNecessary(cmd.getNamespace(), std::move(options), idIndex);
     }
@@ -832,7 +838,7 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
                                    const bool allowRenameOutOfTheWay,
                                    const boost::optional<BSONObj>& idIndex) {
 
-    invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_IX));
+    invariant(shard_role_details::getLocker(opCtx)->isDbLockedForMode(dbName, MODE_IX));
 
     const NamespaceString newCollName(CommandHelpers::parseNsCollectionRequired(dbName, cmdObj));
     auto newCmd = cmdObj;

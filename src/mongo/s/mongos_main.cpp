@@ -70,7 +70,6 @@
 #include "mongo/db/auth/user_cache_invalidator_job.h"
 #include "mongo/db/change_stream_options_manager.h"
 #include "mongo/db/client.h"
-#include "mongo/db/client_metadata_propagation_egress_hook.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/ftdc/ftdc_mongos.h"
 #include "mongo/db/initialize_server_global_state.h"
@@ -80,7 +79,7 @@
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/process_health/fault_manager.h"
-#include "mongo/db/query/query_settings_manager.h"
+#include "mongo/db/query/query_settings/query_settings_manager.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/serverless/multitenancy_check.h"
@@ -95,7 +94,6 @@
 #include "mongo/db/session/session_killer.h"
 #include "mongo/db/shard_id.h"
 #include "mongo/db/startup_warnings_common.h"
-#include "mongo/db/vector_clock_metadata_hook.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
@@ -134,6 +132,7 @@
 #include "mongo/s/session_catalog_router.h"
 #include "mongo/s/sessions_collection_sharded.h"
 #include "mongo/s/sharding_initialization.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/s/sharding_uptime_reporter.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/s/version_mongos.h"
@@ -186,6 +185,7 @@ MONGO_FAIL_POINT_DEFINE(failReplicaSetChangeConfigServerUpdateHook);
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(pauseWhileKillingOperationsAtShutdown);
+MONGO_FAIL_POINT_DEFINE(pauseAfterImplicitlyAbortAllTransactions)
 
 #if defined(_WIN32)
 const ntservice::NtServiceDefaultStrings defaultServiceStrings = {
@@ -208,7 +208,6 @@ public:
 
     void onConfirmedSet(const State& state) noexcept final {
         const auto& connStr = state.connStr;
-        const auto& setName = connStr.getSetName();
 
         try {
             LOGV2(471693,
@@ -222,23 +221,6 @@ public:
             LOGV2(471694,
                   "Unable to update the shard registry with confirmed replica set",
                   "error"_attr = e);
-        }
-
-        bool updateInProgress = false;
-        {
-            stdx::lock_guard lock(_mutex);
-            if (!_hasUpdateState(lock, setName)) {
-                _updateStates.emplace(std::piecewise_construct,
-                                      std::forward_as_tuple(setName),
-                                      std::forward_as_tuple());
-            }
-            auto& updateState = _updateStates.at(setName);
-            updateState.nextUpdateToSend = connStr;
-            updateInProgress = updateState.updateInProgress;
-        }
-
-        if (!updateInProgress) {
-            _scheduleUpdateConfigServer(setName);
         }
     }
 
@@ -259,112 +241,7 @@ public:
     void onDroppedSet(const Key& key) noexcept final {}
 
 private:
-    // Schedules updates for replica set 'setName' on the config server. Loosly preserves ordering
-    // of update execution. Newer updates will not be overwritten by older updates in config.shards.
-    void _scheduleUpdateConfigServer(const std::string& setName) {
-        ConnectionString updatedConnectionString;
-        {
-            stdx::lock_guard lock(_mutex);
-            if (!_hasUpdateState(lock, setName)) {
-                return;
-            }
-            auto& updateState = _updateStates.at(setName);
-            if (updateState.updateInProgress) {
-                return;
-            }
-            updateState.updateInProgress = true;
-            updatedConnectionString = updateState.nextUpdateToSend.value();
-            updateState.nextUpdateToSend = boost::none;
-        }
-
-        auto executor = Grid::get(_serviceContext)->getExecutorPool()->getFixedExecutor();
-        auto schedStatus =
-            executor
-                ->scheduleWork([self = shared_from_this(),
-                                setName,
-                                update = std::move(updatedConnectionString)](const auto& args) {
-                    self->_updateConfigServer(args.status, setName, update);
-                })
-                .getStatus();
-        if (ErrorCodes::isCancellationError(schedStatus.code())) {
-            LOGV2_DEBUG(22848,
-                        2,
-                        "Unable to schedule updating sharding state with confirmed replica set",
-                        "error"_attr = schedStatus);
-            return;
-        }
-        uassertStatusOK(schedStatus);
-    }
-
-    void _updateConfigServer(const Status& status,
-                             const std::string& setName,
-                             const ConnectionString& update) {
-        if (ErrorCodes::isCancellationError(status.code())) {
-            stdx::lock_guard lock(_mutex);
-            _updateStates.erase(setName);
-            return;
-        }
-
-        if (MONGO_unlikely(failReplicaSetChangeConfigServerUpdateHook.shouldFail())) {
-            _endUpdateConfigServer(setName, update);
-            return;
-        }
-
-        try {
-            LOGV2(22846,
-                  "Updating sharding state with confirmed replica set",
-                  "connectionString"_attr = update);
-            ShardRegistry::updateReplicaSetOnConfigServer(_serviceContext, update);
-        } catch (const ExceptionForCat<ErrorCategory::ShutdownError>& e) {
-            LOGV2(22847,
-                  "Unable to update sharding state with confirmed replica set",
-                  "error"_attr = e);
-        } catch (...) {
-            _endUpdateConfigServer(setName, update);
-            throw;
-        }
-        _endUpdateConfigServer(setName, update);
-    }
-
-    void _endUpdateConfigServer(const std::string& setName, const ConnectionString& update) {
-        bool moreUpdates = false;
-        {
-            stdx::lock_guard lock(_mutex);
-            invariant(_hasUpdateState(lock, setName));
-            auto& updateState = _updateStates.at(setName);
-            updateState.updateInProgress = false;
-            moreUpdates = (updateState.nextUpdateToSend != boost::none);
-            if (!moreUpdates) {
-                _updateStates.erase(setName);
-            }
-        }
-        if (moreUpdates) {
-            auto executor = Grid::get(_serviceContext)->getExecutorPool()->getFixedExecutor();
-            executor->schedule([self = shared_from_this(), setName](const auto& _) {
-                self->_scheduleUpdateConfigServer(setName);
-            });
-        }
-    }
-
-    // Returns true if a ReplSetConfigUpdateState exists for replica set setName.
-    bool _hasUpdateState(WithLock, const std::string& setName) {
-        return (_updateStates.find(setName) != _updateStates.end());
-    }
-
     ServiceContext* _serviceContext;
-
-    mutable Mutex _mutex = MONGO_MAKE_LATCH("ShardingReplicaSetChangeListenerMongod::mutex");
-
-    struct ReplSetConfigUpdateState {
-        ReplSetConfigUpdateState() = default;
-        ReplSetConfigUpdateState(const ReplSetConfigUpdateState&) = delete;
-        ReplSetConfigUpdateState& operator=(const ReplSetConfigUpdateState&) = delete;
-
-        // True when an update to the config.shards is in progress.
-        bool updateInProgress = false;
-        boost::optional<ConnectionString> nextUpdateToSend;
-    };
-    stdx::unordered_map<std::string, ReplSetConfigUpdateState> _updateStates;
 };
 
 Status waitForSigningKeys(OperationContext* opCtx) {
@@ -427,6 +304,8 @@ void implicitlyAbortAllTransactions(OperationContext* opCtx) {
 
     const auto catalog = SessionCatalog::get(opCtx);
 
+    catalog->setDisallowNewTransactions();
+
     SessionKiller::Matcher matcherAllSessions(
         KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)});
 
@@ -473,12 +352,39 @@ void implicitlyAbortAllTransactions(OperationContext* opCtx) {
     }
 }
 
+void logMongosShutdownTimeElapsedStatistics(ServiceContext* serviceContext,
+                                            Date_t beginCleanupTask,
+                                            BSONObjBuilder* shutdownTimeElapsedBuilder,
+                                            BSONObjBuilder* shutdownInfoBuilder) {
+    mongo::Milliseconds elapsedInitAndListen =
+        serviceContext->getFastClockSource()->now() - beginCleanupTask;
+    shutdownTimeElapsedBuilder->append("cleanupTask total elapsed time",
+                                       elapsedInitAndListen.toString());
+    shutdownInfoBuilder->append("Statistics", shutdownTimeElapsedBuilder->obj());
+    LOGV2_INFO(8423406,
+               "mongos shutdown complete",
+               "Summary of time elapsed"_attr = shutdownInfoBuilder->obj());
+}
+
 /**
  * NOTE: This function may be called at any time after registerShutdownTask is called below. It must
  * not depend on the prior execution of mongo initializers or the existence of threads.
  */
 void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
     const auto serviceContext = getGlobalServiceContext();
+
+    BSONObjBuilder shutdownTimeElapsedBuilder;
+    BSONObjBuilder shutdownInfoBuilder;
+
+    Date_t beginCleanupTask = serviceContext->getFastClockSource()->now();
+    ScopeGuard logShutdownStats(
+        [serviceContext, beginCleanupTask, &shutdownTimeElapsedBuilder, &shutdownInfoBuilder] {
+            logMongosShutdownTimeElapsedStatistics(serviceContext,
+                                                   beginCleanupTask,
+                                                   &shutdownTimeElapsedBuilder,
+                                                   &shutdownInfoBuilder);
+        });
+
     {
         // This client initiation pattern is only to be used here, with plans to eliminate this
         // pattern down the line.
@@ -511,38 +417,72 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
         }
 
         if (auto mongosTopCoord = MongosTopologyCoordinator::get(opCtx)) {
+            TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                      "Time spent in quiesce mode",
+                                                      &shutdownTimeElapsedBuilder);
             mongosTopCoord->enterQuiesceModeAndWait(opCtx, quiesceTime);
         }
 
-        // Shutdown the TransportLayer so that new connections aren't accepted
-        if (auto tl = serviceContext->getTransportLayerManager()) {
-            LOGV2_OPTIONS(
-                22843, {LogComponent::kNetwork}, "shutdown: going to close all sockets...");
-
-            tl->shutdown();
+        // Inform the TransportLayers to stop accepting new connections.
+        if (auto tlm = serviceContext->getTransportLayerManager()) {
+            TimeElapsedBuilderScopedTimer scopedTimer(
+                serviceContext->getFastClockSource(),
+                "Inform the transport layer to stop accepting new connections",
+                &shutdownTimeElapsedBuilder);
+            LOGV2_OPTIONS(8314101, {LogComponent::kNetwork}, "Shutdown: Closing listener sockets");
+            tlm->stopAcceptingSessions();
         }
 
         if (audit::shutdownSynchronizeJob) {
+            TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                      "Shut down the audit synchronize job",
+                                                      &shutdownTimeElapsedBuilder);
             audit::shutdownSynchronizeJob();
         }
 
-        ClusterServerParameterRefresher::onShutdown(serviceContext);
+        {
+            TimeElapsedBuilderScopedTimer scopedTimer(
+                serviceContext->getFastClockSource(),
+                "Shut down cluster server parameter refresher",
+                &shutdownTimeElapsedBuilder);
+            ClusterServerParameterRefresher::onShutdown(serviceContext);
+        }
 
         try {
             // Abort transactions while we can still send remote commands.
+            TimeElapsedBuilderScopedTimer scopedTimer(
+                serviceContext->getFastClockSource(),
+                "Abort all active transactions in the catalog that have not yet been committed",
+                &shutdownTimeElapsedBuilder);
             implicitlyAbortAllTransactions(opCtx);
+            pauseAfterImplicitlyAbortAllTransactions.pauseWhileSet();
         } catch (const DBException& excep) {
             LOGV2_WARNING(22854, "Error aborting all active transactions", "error"_attr = excep);
         }
 
         if (auto lsc = LogicalSessionCache::get(serviceContext)) {
+            TimeElapsedBuilderScopedTimer scopedTimer(
+                serviceContext->getFastClockSource(),
+                "Join the logical session cache's refresher and reaper tasks",
+                &shutdownTimeElapsedBuilder);
             lsc->joinOnShutDown();
         }
 
-        LOGV2_OPTIONS(6973901, {LogComponent::kDefault}, "Shutting down the QueryAnalysisSampler");
-        analyze_shard_key::QueryAnalysisSampler::get(serviceContext).onShutdown();
+        {
+            LOGV2_OPTIONS(
+                6973901, {LogComponent::kDefault}, "Shutting down the QueryAnalysisSampler");
+            TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                      "Shut down the Query Analysis Sampler",
+                                                      &shutdownTimeElapsedBuilder);
+            analyze_shard_key::QueryAnalysisSampler::get(serviceContext).onShutdown();
+        }
 
-        ReplicaSetMonitor::shutdown();
+        {
+            TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                      "Shut down replica set monitor",
+                                                      &shutdownTimeElapsedBuilder);
+            ReplicaSetMonitor::shutdown();
+        }
 
         {
             stdx::lock_guard lg(client);
@@ -550,6 +490,9 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
         }
 
         if (serviceContext) {
+            TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                      "Kill all operations",
+                                                      &shutdownTimeElapsedBuilder);
             serviceContext->setKillAllOperations();
 
             if (MONGO_unlikely(pauseWhileKillingOperationsAtShutdown.shouldFail())) {
@@ -568,35 +511,72 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
         // that any pending threads are about to terminate
 
         if (auto validator = LogicalTimeValidator::get(serviceContext)) {
+            TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                      "Shut down logical time validator",
+                                                      &shutdownTimeElapsedBuilder);
             validator->shutDown();
         }
 
         if (auto cursorManager = Grid::get(opCtx)->getCursorManager()) {
+            TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                      "Shut down cursor manager",
+                                                      &shutdownTimeElapsedBuilder);
             cursorManager->shutdown(opCtx);
         }
 
         if (auto pool = Grid::get(opCtx)->getExecutorPool()) {
             LOGV2_OPTIONS(7698300, {LogComponent::kSharding}, "Shutting down the ExecutorPool");
+            TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                      "Shut down the executor pool",
+                                                      &shutdownTimeElapsedBuilder);
             pool->shutdownAndJoin();
         }
 
         if (auto shardRegistry = Grid::get(opCtx)->shardRegistry()) {
+            TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                      "Shut down shard registry",
+                                                      &shutdownTimeElapsedBuilder);
             shardRegistry->shutdown();
         }
 
         if (Grid::get(serviceContext)->isShardingInitialized()) {
             // The CatalogCache must be shuted down before shutting down the CatalogCacheLoader as
             // the CatalogCache may try to schedule work on CatalogCacheLoader and fail.
-            LOGV2_OPTIONS(7698301, {LogComponent::kSharding}, "Shutting down the CatalogCache");
-            Grid::get(serviceContext)->catalogCache()->shutDownAndJoin();
+            {
+                TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                          "Shut down the catalog cache",
+                                                          &shutdownTimeElapsedBuilder);
+                LOGV2_OPTIONS(7698301, {LogComponent::kSharding}, "Shutting down the CatalogCache");
+                Grid::get(serviceContext)->catalogCache()->shutDownAndJoin();
+            }
 
+            {
+                TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                          "Shut down the catalog cache loader",
+                                                          &shutdownTimeElapsedBuilder);
+                LOGV2_OPTIONS(
+                    7698302, {LogComponent::kSharding}, "Shutting down the CatalogCacheLoader");
+                CatalogCacheLoader::get(serviceContext).shutDown();
+            }
+        }
+
+        // Finish shutting down the TransportLayers
+        if (auto tlm = serviceContext->getTransportLayerManager()) {
+            TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                      "Shut down the transport layer",
+                                                      &shutdownTimeElapsedBuilder);
             LOGV2_OPTIONS(
-                7698302, {LogComponent::kSharding}, "Shutting down the CatalogCacheLoader");
-            CatalogCacheLoader::get(serviceContext).shutDown();
+                22843, {LogComponent::kNetwork}, "Shutdown: Closing open transport sessions");
+            tlm->shutdown();
         }
 
         // Shutdown Full-Time Data Capture
-        stopMongoSFTDC(serviceContext);
+        {
+            TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                      "Shut down full-time data capture",
+                                                      &shutdownTimeElapsedBuilder);
+            stopMongoSFTDC(serviceContext);
+        }
     }
 
     audit::logShutdown(Client::getCurrent());
@@ -606,13 +586,20 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
 #endif
 
 #ifdef MONGO_CONFIG_SSL
-    OCSPManager::shutdown(serviceContext);
+    {
+        TimeElapsedBuilderScopedTimer scopedTimer(
+            serviceContext->getFastClockSource(),
+            "Shut down online certificate status protocol manager",
+            &shutdownTimeElapsedBuilder);
+        OCSPManager::shutdown(serviceContext);
+    }
 #endif
 }
 
 Status initializeSharding(
     OperationContext* opCtx,
-    std::shared_ptr<ReplicaSetChangeNotifier::Listener>* replicaSetChangeListener) {
+    std::shared_ptr<ReplicaSetChangeNotifier::Listener>* replicaSetChangeListener,
+    BSONObjBuilder* startupTimeElapsedBuilder) {
     auto targeterFactory = std::make_unique<RemoteCommandTargeterFactoryImpl>();
     auto targeterFactoryPtr = targeterFactory.get();
 
@@ -652,33 +639,32 @@ Status initializeSharding(
             catCache->invalidateEntriesThatReferenceShard(removedShard);
         }};
 
-    if (!mongosGlobalParams.configdbs) {
+    if (!serverGlobalParams.configdbs) {
         return {ErrorCodes::BadValue, "Unrecognized connection string."};
     }
 
     auto shardRegistry = std::make_unique<ShardRegistry>(opCtx->getServiceContext(),
                                                          std::move(shardFactory),
-                                                         mongosGlobalParams.configdbs,
+                                                         serverGlobalParams.configdbs,
                                                          std::move(shardRemovalHooks));
 
-    Status status = initializeGlobalShardingState(
-        opCtx,
-        std::move(catalogCache),
-        std::move(shardRegistry),
-        [opCtx]() {
-            auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
-            hookList->addHook(
-                std::make_unique<rpc::VectorClockMetadataHook>(opCtx->getServiceContext()));
-            hookList->addHook(std::make_unique<rpc::ClientMetadataPropagationEgressHook>());
-            return hookList;
-        },
-        boost::none,
-        [](ShardingCatalogClient* catalogClient) {
-            return std::make_unique<KeysCollectionClientSharded>(catalogClient);
-        });
-
-    if (!status.isOK()) {
-        return status;
+    {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Initialize global sharding state",
+                                                startupTimeElapsedBuilder);
+        Status status = initializeGlobalShardingState(
+            opCtx,
+            std::move(catalogCache),
+            std::move(shardRegistry),
+            [service = opCtx->getServiceContext()] { return makeShardingEgressHooksList(service); },
+            boost::none,
+            [](ShardingCatalogClient* catalogClient) {
+                return std::make_unique<KeysCollectionClientSharded>(catalogClient);
+            });
+        if (!status.isOK()) {
+            return status;
+        }
     }
 
     *replicaSetChangeListener =
@@ -690,6 +676,10 @@ Status initializeSharding(
     auto configShardConnStr =
         Grid::get(opCtx->getServiceContext())->shardRegistry()->getConfigServerConnectionString();
     if (configShardConnStr.type() == ConnectionString::ConnectionType::kReplicaSet) {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Reset the shard registry config connection string",
+                                                startupTimeElapsedBuilder);
         ConnectionString rsMonitorConfigConnStr(
             ReplicaSetMonitor::get(configShardConnStr.getSetName())->getServerAddress(),
             ConnectionString::ConnectionType::kReplicaSet);
@@ -699,27 +689,50 @@ Status initializeSharding(
                                  ShardRegistry::ConnectionStringUpdateType::kConfirmed);
     }
 
-    status = loadGlobalSettingsFromConfigServer(opCtx, Grid::get(opCtx)->catalogClient());
-    if (!status.isOK()) {
-        return status;
+    {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Load global settings from config server",
+                                                startupTimeElapsedBuilder);
+        Status status =
+            loadGlobalSettingsFromConfigServer(opCtx, Grid::get(opCtx)->catalogClient());
+        if (!status.isOK()) {
+            return status;
+        }
     }
 
-    status = waitForSigningKeys(opCtx);
-    if (!status.isOK()) {
-        return status;
+    {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Wait for signing keys",
+                                                startupTimeElapsedBuilder);
+        Status status = waitForSigningKeys(opCtx);
+        if (!status.isOK()) {
+            return status;
+        }
     }
 
     // Loading of routing information may fail. Since this is just an optimization (warmup), any
     // failure must not prevent mongos from starting.
     try {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Pre-cache mongos routing info",
+                                                startupTimeElapsedBuilder);
         preCacheMongosRoutingInfo(opCtx);
     } catch (const DBException& ex) {
         LOGV2_WARNING(6203601, "Failed to warmup routing information", "error"_attr = redact(ex));
     }
 
-    status = preWarmConnectionPool(opCtx);
-    if (!status.isOK()) {
-        return status;
+    {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Warm up connections to shards",
+                                                startupTimeElapsedBuilder);
+        Status status = preWarmConnectionPool(opCtx);
+        if (!status.isOK()) {
+            return status;
+        }
     }
 
     Grid::get(opCtx)->setShardingInitialized();
@@ -739,7 +752,33 @@ ServiceContext::ConstructorActionRegisterer registerWireSpec{
     }};
 }
 
+void logMongosStartupTimeElapsedStatistics(ServiceContext* serviceContext,
+                                           Date_t beginRunMongosServer,
+                                           BSONObjBuilder* startupTimeElapsedBuilder,
+                                           BSONObjBuilder* startupInfoBuilder) {
+    mongo::Milliseconds elapsedTime =
+        serviceContext->getFastClockSource()->now() - beginRunMongosServer;
+    startupTimeElapsedBuilder->append("runMongosServer total elapsed time", elapsedTime.toString());
+    startupInfoBuilder->append("Statistics", startupTimeElapsedBuilder->obj());
+    LOGV2_INFO(8423405,
+               "mongos startup complete",
+               "Summary of time elapsed"_attr = startupInfoBuilder->obj());
+}
+
 ExitCode runMongosServer(ServiceContext* serviceContext) {
+    BSONObjBuilder startupTimeElapsedBuilder;
+    BSONObjBuilder startupInfoBuilder;
+
+    Date_t beginRunMongosServer = serviceContext->getFastClockSource()->now();
+
+    ScopeGuard logStartupStats(
+        [serviceContext, beginRunMongosServer, &startupTimeElapsedBuilder, &startupInfoBuilder] {
+            logMongosStartupTimeElapsedStatistics(serviceContext,
+                                                  beginRunMongosServer,
+                                                  &startupTimeElapsedBuilder,
+                                                  &startupInfoBuilder);
+        });
+
     ThreadClient tc("mongosMain", serviceContext->getService(ClusterRole::RouterServer));
 
     // TODO(SERVER-74658): Please revisit if this thread could be made killable.
@@ -752,12 +791,21 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
 
     // Set up the periodic runner for background job execution
     {
+        TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                  "Set up periodic runner",
+                                                  &startupTimeElapsedBuilder);
         auto runner = makePeriodicRunner(serviceContext);
         serviceContext->setPeriodicRunner(std::move(runner));
     }
 
 #ifdef MONGO_CONFIG_SSL
-    OCSPManager::start(serviceContext);
+    {
+        TimeElapsedBuilderScopedTimer scopedTimer(
+            serviceContext->getFastClockSource(),
+            "Set up online certificate status protocol manager",
+            &startupTimeElapsedBuilder);
+        OCSPManager::start(serviceContext);
+    }
     CertificateExpirationMonitor::get()->start(serviceContext);
 #endif
 
@@ -773,6 +821,9 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
             quickExit(ExitCode::badOptions);
         }
 
+        TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                  "Set up transport layer listener",
+                                                  &startupTimeElapsedBuilder);
         auto tl = transport::TransportLayerManagerImpl::createWithConfig(
             &serverGlobalParams,
             serviceContext,
@@ -786,12 +837,8 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         serviceContext->setTransportLayerManager(std::move(tl));
     }
 
-    auto unshardedHookList = std::make_unique<rpc::EgressMetadataHookList>();
-    unshardedHookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(serviceContext));
-    unshardedHookList->addHook(std::make_unique<rpc::ClientMetadataPropagationEgressHook>());
-
     // Add sharding hooks to both connection pools - ShardingConnectionHook includes auth hooks
-    globalConnPool.addHook(new ShardingConnectionHook(std::move(unshardedHookList)));
+    globalConnPool.addHook(new ShardingConnectionHook(makeShardingEgressHooksList(serviceContext)));
 
     // Mongos connection pools already takes care of authenticating new connections so the
     // replica set connection shouldn't need to.
@@ -803,7 +850,9 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
 
     ReadWriteConcernDefaults::create(serviceContext, readWriteConcernDefaultsCacheLookupMongoS);
     ChangeStreamOptionsManager::create(serviceContext);
-    query_settings::QuerySettingsManager::create(serviceContext);
+    query_settings::QuerySettingsManager::create(serviceContext, [](OperationContext* opCtx) {
+        uassertStatusOK(ClusterServerParameterRefresher::get(opCtx)->refreshParameters(opCtx));
+    });
 
     auto opCtxHolder = tc->makeOperationContext();
     auto const opCtx = opCtxHolder.get();
@@ -812,7 +861,8 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     std::shared_ptr<ReplicaSetChangeNotifier::Listener> replicaSetChangeListener;
 
     try {
-        uassertStatusOK(initializeSharding(opCtx, &replicaSetChangeListener));
+        uassertStatusOK(
+            initializeSharding(opCtx, &replicaSetChangeListener, &startupTimeElapsedBuilder));
     } catch (const DBException& ex) {
         if (ex.code() == ErrorCodes::CallbackCanceled) {
             invariant(globalInShutdownDeprecated());
@@ -824,12 +874,20 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         return ExitCode::shardingError;
     }
 
-    Grid::get(serviceContext)
-        ->getBalancerConfiguration()
-        ->refreshAndCheck(opCtx)
-        .transitional_ignore();
+    {
+        TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                  "Refresh the balancer configuration",
+                                                  &startupTimeElapsedBuilder);
+        Grid::get(serviceContext)
+            ->getBalancerConfiguration()
+            ->refreshAndCheck(opCtx)
+            .transitional_ignore();
+    }
 
     try {
+        TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                  "Update read write concern defaults",
+                                                  &startupTimeElapsedBuilder);
         ReadWriteConcernDefaults::get(serviceContext).refreshIfNecessary(opCtx);
     } catch (const DBException& ex) {
         LOGV2_WARNING(22855,
@@ -840,9 +898,16 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     CommandInvocationHooks::set(serviceContext,
                                 std::make_unique<transport::IngressHandshakeMetricsCommandHooks>());
 
-    startMongoSFTDC(serviceContext);
+    {
+        TimeElapsedBuilderScopedTimer scopedTimer(
+            serviceContext->getFastClockSource(), "Start mongos FTDC", &startupTimeElapsedBuilder);
+        startMongoSFTDC(serviceContext);
+    }
 
     if (mongosGlobalParams.scriptingEnabled) {
+        TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                  "Set up script engine",
+                                                  &startupTimeElapsedBuilder);
         ScriptEngine::setup();
     }
 
@@ -850,10 +915,15 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         globalLDAPManager->start_threads();
     }
 
-    Status status = AuthorizationManager::get(serviceContext)->initialize(opCtx);
-    if (!status.isOK()) {
-        LOGV2_ERROR(22858, "Error initializing authorization data", "error"_attr = status);
-        return ExitCode::shardingError;
+    {
+        TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                  "Build user and roles graph",
+                                                  &startupTimeElapsedBuilder);
+        Status status = AuthorizationManager::get(serviceContext)->initialize(opCtx);
+        if (!status.isOK()) {
+            LOGV2_ERROR(22858, "Error initializing authorization data", "error"_attr = status);
+            return ExitCode::shardingError;
+        }
     }
 
     // Construct the sharding uptime reporter after the startup parameters have been parsed in order
@@ -868,6 +938,9 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     ClusterServerParameterRefresher::start(serviceContext, opCtx);
 
     if (audit::initializeSynchronizeJob) {
+        TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                  "Initialize the audit synchronize job",
+                                                  &startupTimeElapsedBuilder);
         audit::initializeSynchronizeJob(serviceContext);
     }
 
@@ -880,7 +953,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
 
     PeriodicTask::startRunningPeriodicTasks();
 
-    status =
+    Status status =
         process_health::FaultManager::get(serviceContext)->startPeriodicHealthChecks().getNoThrow();
     if (!status.isOK()) {
         LOGV2_ERROR(
@@ -925,6 +998,10 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     }
 #endif
 
+    logStartupStats.dismiss();
+    logMongosStartupTimeElapsedStatistics(
+        serviceContext, beginRunMongosServer, &startupTimeElapsedBuilder, &startupInfoBuilder);
+
     // Block until shutdown.
     MONGO_IDLE_THREAD_BLOCK;
     return waitForShutdown();
@@ -957,7 +1034,7 @@ ExitCode main(ServiceContext* serviceContext) {
     serviceContext->setFastClockSource(FastClockSourceFactory::create(Milliseconds{10}));
 
     // We either have a setting where all processes are in localhost or none are
-    const auto& configServers = mongosGlobalParams.configdbs.getServers();
+    const auto& configServers = serverGlobalParams.configdbs.getServers();
     invariant(!configServers.empty());
     const auto allowLocalHost = configServers.front().isLocalHost();
 
@@ -995,7 +1072,7 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SetFeatureCompatibilityVersionLatest,
                                      ("EndStartupOptionStorage"))
 // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
 (InitializerContext* context) {
-    serverGlobalParams.mutableFeatureCompatibility.setVersion(multiversion::GenericFCV::kLatest);
+    serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLatest);
 }
 
 #ifdef MONGO_CONFIG_SSL
@@ -1067,6 +1144,7 @@ ExitCode mongos_main(int argc, char* argv[]) {
     logCommonStartupWarnings(serverGlobalParams);
 
     setUpMultitenancyCheck(service, gMultitenancySupport);
+    ShardingState::create(service);
 
     try {
         if (!initialize_server_global_state::checkSocketPath())

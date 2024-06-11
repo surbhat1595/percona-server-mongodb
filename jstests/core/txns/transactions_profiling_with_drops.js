@@ -2,7 +2,7 @@
 //
 // @tags: [
 //   # The test runs commands that are not allowed with security token: endSession, profile.
-//   not_allowed_with_security_token,
+//   not_allowed_with_signed_security_token,
 //   uses_transactions,
 //   uses_parallel_shell,
 //   requires_profiling,
@@ -110,4 +110,5 @@ profilerHasSingleMatchingEntryOrThrow(
 jsTest.log("Both writes should succeed");
 assert.docEq({_id: "doc", good: 2}, sessionColl.findOne());
 
+assert.commandWorked(sessionDb.runCommand({profile: 0}));
 session.endSession();

@@ -57,7 +57,7 @@
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/crypto/fle_stats_gen.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/auth/validated_tenancy_scope.h"
+#include "mongo/db/auth/validated_tenancy_scope_factory.h"
 #include "mongo/db/basic_types.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/fle2_get_count_info_command_gen.h"
@@ -93,7 +93,6 @@
 #include "mongo/s/transaction_router_resource_yielder.h"
 #include "mongo/s/write_ops/batch_write_exec.h"
 #include "mongo/s/write_ops/batched_upsert_detail.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
@@ -140,6 +139,13 @@ void appendSingleStatusToWriteErrors(const Status& status,
     replyBase->setWriteErrors(errors);
 }
 
+void appendPossibleWriteConcernErrorToReply(const WriteConcernErrorDetail& wce,
+                                            write_ops::WriteCommandReplyBase* replyBase) {
+    if (wce.isValid(nullptr)) {
+        replyBase->setWriteConcernError(wce.toBSON());
+    }
+}
+
 void replyToResponse(OperationContext* opCtx,
                      write_ops::WriteCommandReplyBase* replyBase,
                      BatchedCommandResponse* response) {
@@ -150,6 +156,13 @@ void replyToResponse(OperationContext* opCtx,
             response->addToErrDetails(error);
         }
     }
+
+    if (auto& wcErrorObj = replyBase->getWriteConcernError()) {
+        auto wcError = std::make_unique<WriteConcernErrorDetail>();
+        wcError->parseBSON(wcErrorObj.value(), nullptr);
+        response->setWriteConcernError(wcError.release());
+    }
+
     if (auto& retriedStmtIds = replyBase->getRetriedStmtIds()) {
         response->setRetriedStmtIds(*retriedStmtIds);
     }
@@ -449,6 +462,7 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
     auto documents = insertRequest.getDocuments();
 
     std::vector<write_ops::WriteError> writeErrors;
+    WriteConcernErrorDetail wcError;
     int32_t stmtId = getStmtIdForWriteAt(insertRequest, 0);
     uint32_t iter = 0;
     uint32_t numDocs = 0;
@@ -485,12 +499,24 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
                 break;
             }
         } else if (!swResult.getValue().getEffectiveStatus().isOK()) {
-            writeErrors.push_back(
-                write_ops::WriteError(iter, swResult.getValue().getEffectiveStatus()));
-            // If the request is ordered (inserts are ordered by default) we will return
-            // early.
-            if (insertRequest.getOrdered()) {
-                break;
+            auto& commitResult = swResult.getValue();
+
+            if (commitResult.wcError.isValid(nullptr)) {
+                commitResult.wcError.cloneTo(&wcError);
+            }
+
+            if (!commitResult.cmdStatus.isOK()) {
+                writeErrors.push_back(
+                    write_ops::WriteError(iter, swResult.getValue().getEffectiveStatus()));
+                // If the request is ordered (inserts are ordered by default) we will return
+                // early.
+                if (insertRequest.getOrdered()) {
+                    break;
+                }
+            } else {
+                // If it gets here, then we merely have a write concern error.
+                // The commit succeeded, only that the WC failed to be satisfied.
+                numDocs++;
             }
         } else {
             if (auto& stmtIds = reply->getRetriedStmtIds()) {
@@ -510,6 +536,7 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
     if (!retriedStmtIds.empty()) {
         writeBase.setRetriedStmtIds(std::move(retriedStmtIds));
     }
+    appendPossibleWriteConcernErrorToReply(wcError, &writeBase);
     returnReply.setWriteCommandReplyBase(writeBase);
 
     return {FLEBatchResult::kProcessed, returnReply};
@@ -536,8 +563,8 @@ write_ops::DeleteCommandReply processDelete(OperationContext* opCtx,
         // `ownedRequest` is OpMsgRequest type which will parse the tenantId from ValidatedTenantId.
         // Before parsing we should ensure that validatedTenancyScope is set in order not to lose
         // the tenantId after the parsing.
-        ownedRequest.validatedTenancyScope =
-            VTS(tenantId.get(), VTS::TrustedForInnerOpMsgRequestTag{});
+        ownedRequest.validatedTenancyScope = auth::ValidatedTenancyScopeFactory::create(
+            tenantId.get(), auth::ValidatedTenancyScopeFactory::TrustedForInnerOpMsgRequestTag{});
     }
 
     auto ownedDeleteRequest =
@@ -591,8 +618,13 @@ write_ops::DeleteCommandReply processDelete(OperationContext* opCtx,
 
         appendSingleStatusToWriteErrors(swResult.getStatus(), &reply->getWriteCommandReplyBase());
     } else if (!swResult.getValue().getEffectiveStatus().isOK()) {
-        appendSingleStatusToWriteErrors(swResult.getValue().getEffectiveStatus(),
-                                        &reply->getWriteCommandReplyBase());
+        auto& commitResult = swResult.getValue();
+        appendPossibleWriteConcernErrorToReply(commitResult.wcError,
+                                               &reply->getWriteCommandReplyBase());
+        if (!commitResult.cmdStatus.isOK()) {
+            appendSingleStatusToWriteErrors(commitResult.cmdStatus,
+                                            &reply->getWriteCommandReplyBase());
+        }
     }
 
     return *reply;
@@ -632,8 +664,8 @@ write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
     auto ownedRequest = updateRequest.serialize({});
     const auto tenantId = updateRequest.getDbName().tenantId();
     if (tenantId && gMultitenancySupport) {
-        ownedRequest.validatedTenancyScope =
-            VTS(tenantId.get(), VTS::TrustedForInnerOpMsgRequestTag{});
+        ownedRequest.validatedTenancyScope = auth::ValidatedTenancyScopeFactory::create(
+            tenantId.get(), auth::ValidatedTenancyScopeFactory::TrustedForInnerOpMsgRequestTag{});
     }
     auto ownedUpdateRequest =
         write_ops::UpdateCommandRequest::parse(IDLParserContext("update"), ownedRequest);
@@ -684,8 +716,13 @@ write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
 
         appendSingleStatusToWriteErrors(swResult.getStatus(), &reply->getWriteCommandReplyBase());
     } else if (!swResult.getValue().getEffectiveStatus().isOK()) {
-        appendSingleStatusToWriteErrors(swResult.getValue().getEffectiveStatus(),
-                                        &reply->getWriteCommandReplyBase());
+        auto& commitResult = swResult.getValue();
+        appendPossibleWriteConcernErrorToReply(commitResult.wcError,
+                                               &reply->getWriteCommandReplyBase());
+        if (!commitResult.cmdStatus.isOK()) {
+            appendSingleStatusToWriteErrors(commitResult.cmdStatus,
+                                            &reply->getWriteCommandReplyBase());
+        }
     }
 
     return *reply;
@@ -811,6 +848,18 @@ std::shared_ptr<write_ops::FindAndModifyCommandRequest> constructDefaultReply() 
     return std::make_shared<write_ops::FindAndModifyCommandRequest>(NamespaceString::kEmpty);
 }
 
+template <typename ReplyType>
+void addWriteConcernErrorInfoToReply(const WriteConcernErrorDetail& wce, ReplyType* reply) {
+    return;
+}
+template <>
+void addWriteConcernErrorInfoToReply(const WriteConcernErrorDetail& wce,
+                                     write_ops::FindAndModifyCommandReply* reply) {
+    if (wce.isValid(nullptr)) {
+        reply->setWriteConcernError(wce.toBSON());
+    }
+}
+
 /**
  * Extracts update payloads from a {findAndModify: nss, ...} request,
  * and proxies to `validateInsertUpdatePayload()`.
@@ -884,8 +933,8 @@ StatusWith<std::pair<ReplyType, OpMsgRequest>> processFindAndModifyRequest(
     auto ownedRequest = findAndModifyRequest.serialize({});
     const auto tenantId = findAndModifyRequest.getDbName().tenantId();
     if (tenantId && gMultitenancySupport) {
-        ownedRequest.validatedTenancyScope =
-            VTS(tenantId.get(), VTS::TrustedForInnerOpMsgRequestTag{});
+        ownedRequest.validatedTenancyScope = auth::ValidatedTenancyScopeFactory::create(
+            tenantId.get(), auth::ValidatedTenancyScopeFactory::TrustedForInnerOpMsgRequestTag{});
     }
     auto ownedFindAndModifyRequest = write_ops::FindAndModifyCommandRequest::parse(
         IDLParserContext("findAndModify"), ownedRequest);
@@ -921,7 +970,11 @@ StatusWith<std::pair<ReplyType, OpMsgRequest>> processFindAndModifyRequest(
     if (!swResult.isOK()) {
         return swResult.getStatus();
     } else if (!swResult.getValue().getEffectiveStatus().isOK()) {
-        return swResult.getValue().getEffectiveStatus();
+        auto& commitResult = swResult.getValue();
+        addWriteConcernErrorInfoToReply(commitResult.wcError, reply.get());
+        if (!commitResult.cmdStatus.isOK()) {
+            return commitResult.cmdStatus;
+        }
     }
 
     return std::pair<ReplyType, OpMsgRequest>{*reply, ownedRequest};
@@ -994,8 +1047,8 @@ bool hasIndexedFieldsInSchema(const std::vector<EncryptedField>& fields) {
     for (const auto& field : fields) {
         if (field.getQueries().has_value()) {
             const auto& queries = field.getQueries().get();
-            if (stdx::holds_alternative<std::vector<mongo::QueryTypeConfig>>(queries)) {
-                const auto& vec = stdx::get<0>(queries);
+            if (holds_alternative<std::vector<mongo::QueryTypeConfig>>(queries)) {
+                const auto& vec = get<0>(queries);
                 if (!vec.empty()) {
                     return true;
                 }
@@ -1098,6 +1151,11 @@ write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
         queryImpl->updateWithPreimage(edcNss, ei, newUpdateRequest);
     if (originalDocument.isEmpty()) {
         // if there is no preimage, then we did not update any documents, we are done
+        return updateReply;
+    }
+
+    // If this is a retried write, we are done
+    if (updateReply.getWriteCommandReplyBase().getRetriedStmtIds().has_value()) {
         return updateReply;
     }
 
@@ -1368,6 +1426,11 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
     auto reply = queryImpl->findAndModify(edcNss, ei, newFindAndModifyRequest);
     if (!reply.getValue().has_value() || reply.getValue().value().isEmpty()) {
         // if there is no preimage, then we did not update or delete any documents, we are done
+        return reply;
+    }
+
+    // If this is a retried write, we are done
+    if (reply.getRetriedStmtId()) {
         return reply;
     }
 
@@ -1757,18 +1820,21 @@ std::pair<write_ops::UpdateCommandReply, BSONObj> FLEQueryInterfaceImpl::updateW
             updateReply.getWriteCommandReplyBase().setRetriedStmtIds(
                 std::vector<std::int32_t>{reply.getRetriedStmtId().value()});
         }
-        updateReply.getWriteCommandReplyBase().setN(reply.getLastErrorObject().getNumDocs());
 
-        if (reply.getLastErrorObject().getUpserted().has_value()) {
+        auto& lastErrorObject = reply.getLastErrorObject();
+
+        updateReply.getWriteCommandReplyBase().setN(lastErrorObject.getNumDocs());
+
+        if (lastErrorObject.getUpserted().has_value()) {
             write_ops::Upserted upserted;
             upserted.setIndex(0);
-            upserted.set_id(reply.getLastErrorObject().getUpserted().value());
+            upserted.set_id(lastErrorObject.getUpserted().value());
             updateReply.setUpserted(std::vector<mongo::write_ops::Upserted>{upserted});
-        }
-
-        if (reply.getLastErrorObject().getNumDocs() > 0) {
-            updateReply.setNModified(1);
-            updateReply.getWriteCommandReplyBase().setN(1);
+        } else {
+            dassert(lastErrorObject.getUpdatedExisting().has_value());
+            if (lastErrorObject.getUpdatedExisting().value()) {
+                updateReply.setNModified(1);
+            }
         }
     }
 
@@ -1882,13 +1948,14 @@ std::vector<std::vector<FLEEdgeCountInfo>> FLETagNoTXNQuery::getTags(
     as->grantInternalAuthorization(opCtx.get());
 
     const auto setDollarTenant = nss.tenantId() && gMultitenancySupport;
-    auto sc = SerializationContext::stateCommandRequest();
+    const auto vts = auth::ValidatedTenancyScope::get(_opCtx);
 
     // We need to instruct the request object (via serialization context passed in when constructing
     // getCountsCmd) that we do not ALSO prefix the $db field when serialize() is later called since
     // we will already be setting the $tenant field below.  Providing both a tenant prefix and a
     // $tenant field is unsupported and can lead to namespace errors.
-    sc.setTenantIdSource(setDollarTenant);
+    auto sc = SerializationContext::stateCommandRequest(
+        setDollarTenant, vts != boost::none && vts->isFromAtlasProxy());
 
     GetQueryableEncryptionCountInfo getCountsCmd(nss, sc);
 

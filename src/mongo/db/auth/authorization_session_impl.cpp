@@ -96,16 +96,6 @@ namespace dps = ::mongo::dotted_path_support;
 using std::vector;
 namespace {
 
-std::unique_ptr<AuthorizationSession> authorizationSessionCreateImpl(
-    AuthorizationManager* authzManager) {
-    return std::make_unique<AuthorizationSessionImpl>(
-        AuthzSessionExternalState::create(authzManager),
-        AuthorizationSessionImpl::InstallMockForTestingOrAuthImpl{});
-}
-
-auto authorizationSessionCreateRegistration =
-    MONGO_WEAK_FUNCTION_REGISTRATION(AuthorizationSession::create, authorizationSessionCreateImpl);
-
 constexpr StringData SYSTEM_BUCKETS_PREFIX = "system.buckets."_sd;
 
 bool checkContracts() {
@@ -682,7 +672,8 @@ void AuthorizationSessionImpl::_refreshUserInfoAsNeeded(OperationContext* opCtx)
                 clearUser();
                 LOGV2(20245,
                       "Removed deleted user from session cache of user information",
-                      "user"_attr = name);
+                      "user"_attr = name,
+                      "error"_attr = status);
                 return;
             }
             case ErrorCodes::UnsupportedFormat: {
@@ -1043,6 +1034,11 @@ void AuthorizationSessionImpl::verifyContract(const AuthorizationContract* contr
     // Implicitly checked often to keep useTenant checks fast
     tempContract.addPrivilege(
         Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::useTenant));
+
+
+    // makeLogicalSessionId checks for impersonate privileges
+    tempContract.addPrivilege(
+        Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::impersonate));
 
     // Needed for internal sessions started by the server.
     tempContract.addPrivilege(Privilege(ResourcePattern::forClusterResource(boost::none),

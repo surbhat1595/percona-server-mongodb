@@ -35,7 +35,6 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/plan_stats.h"
@@ -48,6 +47,7 @@
 #include "mongo/db/query/stage_types.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/record_store.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/s/resharding/resume_token_gen.h"
 
 namespace mongo {

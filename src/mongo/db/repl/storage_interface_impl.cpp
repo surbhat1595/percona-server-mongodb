@@ -57,7 +57,6 @@
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/db_raii.h"
@@ -635,7 +634,7 @@ Status StorageInterfaceImpl::setIndexIsMultikey(OperationContext* opCtx,
         const auto& collection = *collectionResult.getValue();
 
         WriteUnitOfWork wunit(opCtx);
-        auto tsResult = opCtx->recoveryUnit()->setTimestamp(ts);
+        auto tsResult = shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(ts);
         if (!tsResult.isOK()) {
             return tsResult;
         }
@@ -1021,8 +1020,8 @@ Status _updateWithQuery(OperationContext* opCtx,
 
         WriteUnitOfWork wuow(opCtx);
         if (!ts.isNull()) {
-            uassertStatusOK(opCtx->recoveryUnit()->setTimestamp(ts));
-            opCtx->recoveryUnit()->setOrderedCommit(false);
+            uassertStatusOK(shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(ts));
+            shard_role_details::getRecoveryUnit(opCtx)->setOrderedCommit(false);
         }
 
         auto planExecutorResult = mongo::getExecutorUpdate(
@@ -1203,7 +1202,7 @@ Status StorageInterfaceImpl::deleteByFilter(OperationContext* opCtx,
 boost::optional<BSONObj> StorageInterfaceImpl::findOplogEntryLessThanOrEqualToTimestamp(
     OperationContext* opCtx, const CollectionPtr& oplog, const Timestamp& timestamp) {
     invariant(oplog);
-    invariant(opCtx->lockState()->isLocked());
+    invariant(shard_role_details::getLocker(opCtx)->isLocked());
 
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec = InternalPlanner::collectionScan(
         opCtx, &oplog, PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY, InternalPlanner::BACKWARD);
@@ -1272,7 +1271,7 @@ Timestamp StorageInterfaceImpl::getEarliestOplogTimestamp(OperationContext* opCt
     // level (above the storage engine) logic to fetch the earliest oplog entry timestamp.
     if (statusWithTimestamp.getStatus() == ErrorCodes::OplogOperationUnsupported) {
         // Reset the snapshot so that it is ensured to see the latest oplog entries.
-        opCtx->recoveryUnit()->abandonSnapshot();
+        shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
 
         BSONObj oplogEntryBSON;
         tassert(5869100,
@@ -1310,7 +1309,7 @@ Timestamp StorageInterfaceImpl::getLatestOplogTimestamp(OperationContext* opCtx)
     // level (above the storage engine) logic to fetch the latest oplog entry timestamp.
     if (statusWithTimestamp.getStatus() == ErrorCodes::OplogOperationUnsupported) {
         // Reset the snapshot so that it is ensured to see the latest oplog entries.
-        opCtx->recoveryUnit()->abandonSnapshot();
+        shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
 
         // Helpers::getLast will bypass the oplog visibility rules by doing a backwards collection
         // scan.
@@ -1477,7 +1476,7 @@ void StorageInterfaceImpl::waitForAllEarlierOplogWritesToBeVisible(OperationCont
                                                                    bool primaryOnly) {
     // Waiting for oplog writes to be visible in the oplog does not use any storage engine resources
     // and must not wait for ticket acquisition to avoid deadlocks with updating oplog visibility.
-    ScopedAdmissionPriorityForLock setTicketAquisition(opCtx->lockState(),
+    ScopedAdmissionPriorityForLock setTicketAquisition(shard_role_details::getLocker(opCtx),
                                                        AdmissionContext::Priority::kImmediate);
 
     AutoGetOplog oplogRead(opCtx, OplogAccessMode::kRead);
@@ -1495,7 +1494,7 @@ void StorageInterfaceImpl::oplogDiskLocRegister(OperationContext* opCtx,
                                                 bool orderedCommit) {
     // Setting the oplog visibility does not use any storage engine resources and must skip ticket
     // acquisition to avoid deadlocks with updating oplog visibility.
-    ScopedAdmissionPriorityForLock setTicketAquisition(opCtx->lockState(),
+    ScopedAdmissionPriorityForLock setTicketAquisition(shard_role_details::getLocker(opCtx),
                                                        AdmissionContext::Priority::kImmediate);
 
     AutoGetOplog oplogRead(opCtx, OplogAccessMode::kRead);
@@ -1523,7 +1522,8 @@ Timestamp StorageInterfaceImpl::getAllDurableTimestamp(ServiceContext* serviceCt
 }
 
 Timestamp StorageInterfaceImpl::getPointInTimeReadTimestamp(OperationContext* opCtx) const {
-    auto readTimestamp = opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx);
+    auto readTimestamp =
+        shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp(opCtx);
     invariant(readTimestamp);
     return *readTimestamp;
 }

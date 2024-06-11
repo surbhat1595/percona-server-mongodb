@@ -43,7 +43,6 @@
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/namespace_string.h"
@@ -131,7 +130,7 @@ Status ReshardingOplogApplicationRules::applyOperation(
     const repl::OplogEntry& op) const {
     LOGV2_DEBUG(49901, 3, "Applying op for resharding", "op"_attr = redact(op.toBSONForLogging()));
 
-    invariant(!opCtx->lockState()->inAWriteUnitOfWork());
+    invariant(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
     invariant(opCtx->writesAreReplicated());
 
     return writeConflictRetry(opCtx, "applyOplogEntryCRUDOpResharding", op.getNss(), [&] {
@@ -210,7 +209,7 @@ void ReshardingOplogApplicationRules::_applyInsertOrUpdate(
             MONGO_UNREACHABLE;
     }
 
-    if (opCtx->recoveryUnit()->isTimestamped()) {
+    if (shard_role_details::getRecoveryUnit(opCtx)->isTimestamped()) {
         // Resharding oplog application does two kinds of writes:
         //
         // 1) The (obvious) write for applying oplog entries to documents being resharded.
@@ -460,7 +459,7 @@ void ReshardingOplogApplicationRules::_applyDelete(
 
             _applierMetrics->onWriteToStashCollections();
 
-            invariant(opCtx->recoveryUnit()->isTimestamped());
+            invariant(shard_role_details::getRecoveryUnit(opCtx)->isTimestamped());
             wuow.commit();
 
             return;

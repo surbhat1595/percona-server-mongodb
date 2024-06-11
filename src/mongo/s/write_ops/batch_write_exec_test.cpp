@@ -27,6 +27,7 @@
  *    it in the license file.
  */
 
+#include "mongo/rpc/write_concern_error_gen.h"
 #include "mongo/s/catalog_cache_test_fixture.h"
 #include "mongo/s/collection_routing_info_targeter.h"
 #include "mongo/util/fail_point.h"
@@ -75,9 +76,10 @@
 #include "mongo/s/index_version.h"
 #include "mongo/s/mock_ns_targeter.h"
 #include "mongo/s/session_catalog_router.h"
+#include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
 #include "mongo/s/shard_version.h"
 #include "mongo/s/shard_version_factory.h"
-#include "mongo/s/sharding_router_test_fixture.h"
+#include "mongo/s/sharding_mongos_test_fixture.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/s/write_ops/batch_write_exec.h"
@@ -249,6 +251,40 @@ BSONObj expectInsertsReturnTenantMigrationAbortedErrorsBase(
     return tenantMigrationAbortedResponse.obj();
 }
 
+BSONObj expectInsertsReturnCannotRefreshErrorsBase(const NamespaceString& nss,
+                                                   const std::vector<BSONObj>& expected,
+                                                   const executor::RemoteCommandRequest& request) {
+    ASSERT_EQUALS(nss.dbName(), request.dbname);
+
+    const auto opMsgRequest(OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj));
+    const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));
+    ASSERT_EQUALS(nss.toString_forTest(), actualBatchedInsert.getNS().ns_forTest());
+
+    const auto& inserted = actualBatchedInsert.getInsertRequest().getDocuments();
+    ASSERT_EQUALS(expected.size(), inserted.size());
+
+    auto itInserted = inserted.begin();
+    auto itExpected = expected.begin();
+
+    for (; itInserted != inserted.end(); itInserted++, itExpected++) {
+        ASSERT_BSONOBJ_EQ(*itExpected, *itInserted);
+    }
+
+    BatchedCommandResponse cannotRefreshResponse;
+    cannotRefreshResponse.setStatus(Status::OK());
+    cannotRefreshResponse.setN(0);
+
+    // Report a ShardCannotRefreshDueToLocksHeld error for each write in the batch.
+    int i = 0;
+    for (itInserted = inserted.begin(); itInserted != inserted.end(); ++itInserted) {
+        cannotRefreshResponse.addToErrDetails(write_ops::WriteError(
+            i, Status(ShardCannotRefreshDueToLocksHeldInfo(nss), "Catalog cache busy in refresh")));
+        ++i;
+    }
+
+    return cannotRefreshResponse.toBSON();
+}
+
 /**
  * Mimics a single shard backend for a particular collection which can be initialized with a
  * set of write command results to return.
@@ -261,7 +297,6 @@ public:
 
     void setUp() override {
         ShardingTestFixture::setUp();
-        setRemote(HostAndPort("ClientHost", 12345));
 
         // Set up the RemoteCommandTargeter for the config shard
         configTargeter()->setFindHostReturnValue(kTestConfigShardHost);
@@ -360,6 +395,12 @@ public:
         onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
             return expectInsertsReturnTenantMigrationAbortedErrorsBase(
                 nss, expected, request, numberOfFailedOps);
+        });
+    }
+
+    void expectInsertsReturnCannotRefreshErrors(const std::vector<BSONObj>& expected) {
+        onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
+            return expectInsertsReturnCannotRefreshErrorsBase(nss, expected, request);
         });
     }
 
@@ -579,6 +620,7 @@ TEST_F(BatchWriteExecTest, SingleDeleteTargetsShardWithLet) {
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
             bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
             std::set<ChunkRange>* chunkRange = nullptr) const override {
             invariant(chunkRange == nullptr);
             return std::vector{ShardEndpoint(
@@ -868,6 +910,44 @@ TEST_F(BatchWriteExecTest, StaleShardVersionReturnedFromBatchWithSingleMultiWrit
     auto response = future.default_timed_get();
     ASSERT_OK(response.getTopLevelStatus());
     ASSERT_EQ(3, response.getNModified());
+}
+
+TEST_F(BatchWriteExecTest, MultiOpLargeUnorderedWithCannotRefreshError) {
+    const int kNumDocsToInsert = 100'000;
+
+    std::vector<BSONObj> docsToInsert;
+    docsToInsert.reserve(kNumDocsToInsert);
+    for (int i = 0; i < kNumDocsToInsert; i++) {
+        docsToInsert.push_back(BSON("_id" << i));
+    }
+
+    BatchedCommandRequest request([&] {
+        write_ops::InsertCommandRequest insertOp(nss);
+        insertOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setOrdered(false);
+            return writeCommandBase;
+        }());
+        insertOp.setDocuments(docsToInsert);
+        return insertOp;
+    }());
+    request.setWriteConcern(BSONObj());
+
+    auto future = launchAsync([&] {
+        BatchedCommandResponse response;
+        BatchWriteExecStats stats;
+        BatchWriteExec::executeBatch(
+            operationContext(), singleShardNSTargeter, request, &response, &stats);
+
+        ASSERT(response.getOk());
+        ASSERT_EQ(kNumDocsToInsert, response.getN());
+    });
+
+    expectInsertsReturnCannotRefreshErrors({docsToInsert.begin(), docsToInsert.begin() + 60133});
+    expectInsertsReturnSuccess({docsToInsert.begin(), docsToInsert.begin() + 60133});
+    expectInsertsReturnSuccess({docsToInsert.begin() + 60133, docsToInsert.end()});
+
+    future.default_timed_get();
 }
 
 TEST_F(BatchWriteExecTest,
@@ -1610,6 +1690,75 @@ TEST_F(BatchWriteExecTest, TooManyStaleDbOp) {
     future.default_timed_get();
 }
 
+TEST_F(BatchWriteExecTest, MultiCannotRefreshShardOp) {
+    BatchedCommandRequest request([&] {
+        write_ops::InsertCommandRequest insertOp(nss);
+        insertOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setOrdered(false);
+            return writeCommandBase;
+        }());
+        insertOp.setDocuments({BSON("x" << 1)});
+        return insertOp;
+    }());
+    request.setWriteConcern(BSONObj());
+
+    auto future = launchAsync([&] {
+        BatchedCommandResponse response;
+        BatchWriteExecStats stats;
+        BatchWriteExec::executeBatch(
+            operationContext(), singleShardNSTargeter, request, &response, &stats);
+        ASSERT(response.getOk());
+    });
+
+    const std::vector<BSONObj> expected{BSON("x" << 1)};
+
+    // Return multiple ShardCannotRefreshDueToLocksHeld errors, but less than the give-up number
+    for (int i = 0; i < 3; i++) {
+        expectInsertsReturnCannotRefreshErrors(expected);
+    }
+
+    expectInsertsReturnSuccess(expected);
+
+    future.default_timed_get();
+}
+
+TEST_F(BatchWriteExecTest, TooManyCannotRefreshShardOp) {
+    // Retry op in exec too many times b/c of busy catalog cache (the error is not expected to
+    // trigger a refresh on any implementation of NSTargeter). We should report a no progress error
+    // for everything in the batch.
+    BatchedCommandRequest request([&] {
+        write_ops::InsertCommandRequest insertOp(nss);
+        insertOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setOrdered(false);
+            return writeCommandBase;
+        }());
+        insertOp.setDocuments({BSON("x" << 1), BSON("x" << 2)});
+        return insertOp;
+    }());
+    request.setWriteConcern(BSONObj());
+
+    auto future = launchAsync([&] {
+        BatchedCommandResponse response;
+        BatchWriteExecStats stats;
+        BatchWriteExec::executeBatch(
+            operationContext(), singleShardNSTargeter, request, &response, &stats);
+        ASSERT(response.getOk());
+        ASSERT_EQ(0, response.getN());
+        ASSERT(response.isErrDetailsSet());
+        ASSERT_EQUALS(response.getErrDetailsAt(0).getStatus().code(), ErrorCodes::NoProgressMade);
+        ASSERT_EQUALS(response.getErrDetailsAt(1).getStatus().code(), ErrorCodes::NoProgressMade);
+    });
+
+    // Return multiple StaleShardVersion errors
+    for (int i = 0; i < (1 + kMaxRoundsWithoutProgress); i++) {
+        expectInsertsReturnCannotRefreshErrors({BSON("x" << 1), BSON("x" << 2)});
+    }
+
+    future.default_timed_get();
+}
+
 TEST_F(BatchWriteExecTest, RetryableWritesLargeBatch) {
     // A retryable error without a txnNumber is not retried.
 
@@ -2012,11 +2161,10 @@ TEST_F(BatchWriteExecTest, PartialTenantMigrationErrorUnorderedOp) {
     future.default_timed_get();
 }
 
-
 /**
  * Tests the scenario where 1st and 2nd shards return n = 0.
  */
-TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatch) {
+TEST_F(BatchWriteExecTest, UpdateOneAndDeleteOneWithIdWithoutShardKeyNoMatch) {
     RAIIServerParameterControllerForTest _featureFlagController{
         "featureFlagUpdateOneWithIdWithoutShardKey", true};
 
@@ -2029,12 +2177,12 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatch) {
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
+        std::vector<ShardEndpoint> targetWriteOp(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
             bool* useTwoPhaseWriteProtocol = nullptr,
             bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
-            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            std::set<ChunkRange>* chunkRange = nullptr) const {
             invariant(chunkRange == nullptr);
             *isNonTargetedWriteWithoutShardKeyWithExactId = true;
             return std::vector{ShardEndpoint(kShardName1,
@@ -2047,6 +2195,32 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatch) {
                                                  ChunkVersion({epoch, timestamp}, {101, 200}),
                                                  boost::optional<CollectionIndexes>(boost::none)),
                                              boost::none)};
+        }
+
+        std::vector<ShardEndpoint> targetUpdate(
+            OperationContext* opCtx,
+            const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
+            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            return targetWriteOp(opCtx,
+                                 itemRef,
+                                 useTwoPhaseWriteProtocol,
+                                 isNonTargetedWriteWithoutShardKeyWithExactId,
+                                 chunkRange);
+        }
+
+        std::vector<ShardEndpoint> targetDelete(
+            OperationContext* opCtx,
+            const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
+            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            return targetWriteOp(opCtx,
+                                 itemRef,
+                                 useTwoPhaseWriteProtocol,
+                                 isNonTargetedWriteWithoutShardKeyWithExactId,
+                                 chunkRange);
         }
     };
 
@@ -2067,7 +2241,9 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatch) {
                    BSON("x" << 0),
                    BSON("x" << MAXKEY))});
 
-    BatchedCommandRequest request([&] {
+    std::vector<BatchedCommandRequest*> requests;
+
+    BatchedCommandRequest updateRequest([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
         // Op style update.
         write_ops::UpdateOpEntry entry;
@@ -2079,43 +2255,64 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatch) {
         return updateOp;
     }());
 
-    auto future = launchAsync([&] {
-        BatchedCommandResponse response;
-        BatchWriteExecStats stats;
-        BatchWriteExec::executeBatch(
-            operationContext(), multiShardNSTargeter, request, &response, &stats);
+    BatchedCommandRequest deleteRequest([&] {
+        write_ops::DeleteCommandRequest deleteOp(kNss);
+        // Op style delete.
+        write_ops::DeleteOpEntry entry;
+        entry.setQ(BSON("_id" << 1));
+        entry.setMulti(false);
+        deleteOp.setDeletes({entry});
+        return deleteOp;
+    }());
 
-        return response;
-    });
+    requests.emplace_back(&updateRequest);
+    requests.emplace_back(&deleteRequest);
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(kTestShardHost1, request.target);
+    for (auto bcRequest : requests) {
+        auto future = launchAsync([&] {
+            BatchedCommandResponse response;
+            BatchWriteExecStats stats;
+            BatchWriteExec::executeBatch(
+                operationContext(), multiShardNSTargeter, *bcRequest, &response, &stats);
 
-        BatchedCommandResponse response;
-        response.setStatus(Status::OK());
-        response.setN(0);
+            return response;
+        });
 
-        return response.toBSON();
-    });
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost1, request.target);
+            if (bcRequest == *requests.begin())
+                ASSERT_EQUALS("update", request.cmdObj.firstElement().fieldNameStringData());
+            else
+                ASSERT_EQUALS("delete", request.cmdObj.firstElement().fieldNameStringData());
+            BatchedCommandResponse response;
+            response.setStatus(Status::OK());
+            response.setN(0);
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(kTestShardHost2, request.target);
+            return response.toBSON();
+        });
 
-        BatchedCommandResponse response;
-        response.setStatus(Status::OK());
-        response.setN(0);
-        return response.toBSON();
-    });
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost2, request.target);
+            if (bcRequest == (*requests.begin()))
+                ASSERT_EQUALS("update", request.cmdObj.firstElement().fieldNameStringData());
+            else
+                ASSERT_EQUALS("delete", request.cmdObj.firstElement().fieldNameStringData());
+            BatchedCommandResponse response;
+            response.setStatus(Status::OK());
+            response.setN(0);
+            return response.toBSON();
+        });
 
-    auto response = future.default_timed_get();
-    ASSERT_OK(response.getTopLevelStatus());
-    ASSERT_EQ(0, response.getN());
+        auto response = future.default_timed_get();
+        ASSERT_OK(response.getTopLevelStatus());
+        ASSERT_EQ(0, response.getN());
+    }
 }
 
 /**
  * Tests the scenario where 1st shard returns n=1 and 2nd shard write is pending (and cancelled).
  */
-TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatch) {
+TEST_F(BatchWriteExecTest, UpdateOneAndDeleteOneWithIdWithoutShardKeyWithMatch) {
     RAIIServerParameterControllerForTest _featureFlagController{
         "featureFlagUpdateOneWithIdWithoutShardKey", true};
 
@@ -2128,12 +2325,12 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatch) {
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
+        std::vector<ShardEndpoint> targetWriteOp(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
             bool* useTwoPhaseWriteProtocol = nullptr,
             bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
-            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            std::set<ChunkRange>* chunkRange = nullptr) const {
             invariant(chunkRange == nullptr);
             *isNonTargetedWriteWithoutShardKeyWithExactId = true;
             return std::vector{ShardEndpoint(kShardName1,
@@ -2146,6 +2343,31 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatch) {
                                                  ChunkVersion({epoch, timestamp}, {101, 200}),
                                                  boost::optional<CollectionIndexes>(boost::none)),
                                              boost::none)};
+        }
+        std::vector<ShardEndpoint> targetUpdate(
+            OperationContext* opCtx,
+            const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
+            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            return targetWriteOp(opCtx,
+                                 itemRef,
+                                 useTwoPhaseWriteProtocol,
+                                 isNonTargetedWriteWithoutShardKeyWithExactId,
+                                 chunkRange);
+        }
+
+        std::vector<ShardEndpoint> targetDelete(
+            OperationContext* opCtx,
+            const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
+            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            return targetWriteOp(opCtx,
+                                 itemRef,
+                                 useTwoPhaseWriteProtocol,
+                                 isNonTargetedWriteWithoutShardKeyWithExactId,
+                                 chunkRange);
         }
     };
 
@@ -2166,7 +2388,9 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatch) {
                    BSON("x" << 0),
                    BSON("x" << MAXKEY))});
 
-    BatchedCommandRequest request([&] {
+    std::vector<BatchedCommandRequest*> requests;
+
+    BatchedCommandRequest updateRequest([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
         // Op style update.
         write_ops::UpdateOpEntry entry;
@@ -2178,48 +2402,71 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatch) {
         return updateOp;
     }());
 
-    FailPoint* fp =
-        globalFailPointRegistry().find("hangBeforeCompletingWriteWithoutShardKeyWithId");
-    auto timesEntered = fp->setMode(FailPoint::alwaysOn, 0);
-    auto future = launchAsync([&] {
-        BatchedCommandResponse response;
-        BatchWriteExecStats stats;
-        BatchWriteExec::executeBatch(
-            operationContext(), multiShardNSTargeter, request, &response, &stats);
+    BatchedCommandRequest deleteRequest([&] {
+        write_ops::DeleteCommandRequest deleteOp(kNss);
+        // Op style delete.
+        write_ops::DeleteOpEntry entry;
+        entry.setQ(BSON("_id" << 2));
+        entry.setMulti(false);
+        deleteOp.setDeletes({entry});
+        return deleteOp;
+    }());
 
-        return response;
-    });
+    requests.emplace_back(&updateRequest);
+    requests.emplace_back(&deleteRequest);
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(kTestShardHost1, request.target);
+    FailPoint* fp = globalFailPointRegistry().find("hangAfterCompletingWriteWithoutShardKeyWithId");
 
-        BatchedCommandResponse response;
-        response.setStatus(Status::OK());
-        response.setN(1);
+    for (auto bcRequest : requests) {
+        auto timesEntered = fp->setMode(FailPoint::alwaysOn, 0);
+        auto future = launchAsync([&] {
+            BatchedCommandResponse response;
+            BatchWriteExecStats stats;
+            BatchWriteExec::executeBatch(
+                operationContext(), multiShardNSTargeter, *bcRequest, &response, &stats);
 
-        return response.toBSON();
-    });
+            return response;
+        });
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(kTestShardHost2, request.target);
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost1, request.target);
+            if (bcRequest == *requests.begin())
+                ASSERT_EQUALS("update", request.cmdObj.firstElement().fieldNameStringData());
+            else
+                ASSERT_EQUALS("delete", request.cmdObj.firstElement().fieldNameStringData());
 
-        BatchedCommandResponse response;
-        response.setStatus(Status::OK());
-        response.setN(0);
-        return response.toBSON();
-    });
+            BatchedCommandResponse response;
+            response.setStatus(Status::OK());
+            response.setN(1);
 
-    fp->waitForTimesEntered(timesEntered + 1);
-    fp->setMode(FailPoint::off);
-    auto response = future.default_timed_get();
-    ASSERT_OK(response.getTopLevelStatus());
-    ASSERT_EQ(response.getN(), 1);
+            return response.toBSON();
+        });
+
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost2, request.target);
+            if (bcRequest == *requests.begin())
+                ASSERT_EQUALS("update", request.cmdObj.firstElement().fieldNameStringData());
+            else
+                ASSERT_EQUALS("delete", request.cmdObj.firstElement().fieldNameStringData());
+
+            BatchedCommandResponse response;
+            response.setStatus(Status::OK());
+            response.setN(0);
+            return response.toBSON();
+        });
+
+        fp->waitForTimesEntered(timesEntered + 1);
+        fp->setMode(FailPoint::off);
+        auto response = future.default_timed_get();
+        ASSERT_OK(response.getTopLevelStatus());
+        ASSERT_EQ(response.getN(), 1);
+    }
 }
 
 /**
  * Tests the scenario where 1st shard returns non-retryable error and 2nd shard returns n = 0.
  */
-TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatchNonRetryableErrors) {
+TEST_F(BatchWriteExecTest, UpdateOneAndDeleteOneWithIdWithoutShardKeyNoMatchNonRetryableErrors) {
     RAIIServerParameterControllerForTest _featureFlagController{
         "featureFlagUpdateOneWithIdWithoutShardKey", true};
 
@@ -2232,12 +2479,12 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatchNonRetryableErro
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
+        std::vector<ShardEndpoint> targetWriteOp(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
             bool* useTwoPhaseWriteProtocol = nullptr,
             bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
-            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            std::set<ChunkRange>* chunkRange = nullptr) const {
             invariant(chunkRange == nullptr);
             *isNonTargetedWriteWithoutShardKeyWithExactId = true;
             return std::vector{ShardEndpoint(kShardName1,
@@ -2250,6 +2497,31 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatchNonRetryableErro
                                                  ChunkVersion({epoch, timestamp}, {101, 200}),
                                                  boost::optional<CollectionIndexes>(boost::none)),
                                              boost::none)};
+        }
+        std::vector<ShardEndpoint> targetUpdate(
+            OperationContext* opCtx,
+            const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
+            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            return targetWriteOp(opCtx,
+                                 itemRef,
+                                 useTwoPhaseWriteProtocol,
+                                 isNonTargetedWriteWithoutShardKeyWithExactId,
+                                 chunkRange);
+        }
+
+        std::vector<ShardEndpoint> targetDelete(
+            OperationContext* opCtx,
+            const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
+            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            return targetWriteOp(opCtx,
+                                 itemRef,
+                                 useTwoPhaseWriteProtocol,
+                                 isNonTargetedWriteWithoutShardKeyWithExactId,
+                                 chunkRange);
         }
     };
 
@@ -2270,7 +2542,9 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatchNonRetryableErro
                    BSON("x" << 0),
                    BSON("x" << MAXKEY))});
 
-    BatchedCommandRequest request([&] {
+    std::vector<BatchedCommandRequest*> requests;
+
+    BatchedCommandRequest updateRequest([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
         // Op style update.
         write_ops::UpdateOpEntry entry;
@@ -2282,45 +2556,59 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatchNonRetryableErro
         return updateOp;
     }());
 
-    auto future = launchAsync([&] {
-        BatchedCommandResponse response;
-        BatchWriteExecStats stats;
-        BatchWriteExec::executeBatch(
-            operationContext(), multiShardNSTargeter, request, &response, &stats);
+    BatchedCommandRequest deleteRequest([&] {
+        write_ops::DeleteCommandRequest deleteOp(kNss);
+        // Op style delete.
+        write_ops::DeleteOpEntry entry;
+        entry.setQ(BSON("_id" << 1));
+        entry.setMulti(false);
+        deleteOp.setDeletes({entry});
+        return deleteOp;
+    }());
 
-        return response;
-    });
+    requests.emplace_back(&updateRequest);
+    requests.emplace_back(&deleteRequest);
+    for (auto bcRequest : requests) {
+        auto future = launchAsync([&] {
+            BatchedCommandResponse response;
+            BatchWriteExecStats stats;
+            BatchWriteExec::executeBatch(
+                operationContext(), multiShardNSTargeter, *bcRequest, &response, &stats);
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(kTestShardHost1, request.target);
+            return response;
+        });
 
-        BatchedCommandResponse response;
-        response.addToErrDetails(
-            write_ops::WriteError(0, {ErrorCodes::UnknownError, "mock non-retryable error"}));
-        response.setStatus(Status::OK());
-        return response.toBSON();
-    });
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost1, request.target);
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(kTestShardHost2, request.target);
+            BatchedCommandResponse response;
+            response.addToErrDetails(
+                write_ops::WriteError(0, {ErrorCodes::UnknownError, "mock non-retryable error"}));
+            response.setStatus(Status::OK());
+            return response.toBSON();
+        });
 
-        BatchedCommandResponse response;
-        response.setStatus(Status::OK());
-        response.setN(0);
-        return response.toBSON();
-    });
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost2, request.target);
 
-    auto response = future.default_timed_get();
-    ASSERT_OK(response.getTopLevelStatus());
-    ASSERT_EQ(response.getErrDetailsAt(0).getStatus(), ErrorCodes::UnknownError);
-    ASSERT_EQ(0, response.getN());
+            BatchedCommandResponse response;
+            response.setStatus(Status::OK());
+            response.setN(0);
+            return response.toBSON();
+        });
+
+        auto response = future.default_timed_get();
+        ASSERT_OK(response.getTopLevelStatus());
+        ASSERT_EQ(response.getErrDetailsAt(0).getStatus(), ErrorCodes::UnknownError);
+        ASSERT_EQ(0, response.getN());
+    }
 }
 
 /**
  * Tests the scenario where 1st shard returns StaleConfig error and 2nd shard returns n = 0 leading
  * to retry of the broadcast protocol.
  */
-TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatchRetryableError) {
+TEST_F(BatchWriteExecTest, UpdateOneAndDeleteOneWithIdWithoutShardKeyNoMatchRetryableError) {
     RAIIServerParameterControllerForTest _featureFlagController{
         "featureFlagUpdateOneWithIdWithoutShardKey", true};
 
@@ -2333,12 +2621,12 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatchRetryableError) 
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
+        std::vector<ShardEndpoint> targetWriteOp(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
             bool* useTwoPhaseWriteProtocol = nullptr,
             bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
-            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            std::set<ChunkRange>* chunkRange = nullptr) const {
             invariant(chunkRange == nullptr);
             *isNonTargetedWriteWithoutShardKeyWithExactId = true;
             return std::vector{ShardEndpoint(kShardName1,
@@ -2353,21 +2641,31 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatchRetryableError) 
                                              boost::none)};
         }
 
-        void noteStaleShardResponse(OperationContext* opCtx,
-                                    const ShardEndpoint& endpoint,
-                                    const StaleConfigInfo& staleInfo) override {
-            _hasStaleShardResponse = true;
+        std::vector<ShardEndpoint> targetUpdate(
+            OperationContext* opCtx,
+            const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
+            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            return targetWriteOp(opCtx,
+                                 itemRef,
+                                 useTwoPhaseWriteProtocol,
+                                 isNonTargetedWriteWithoutShardKeyWithExactId,
+                                 chunkRange);
         }
 
-        bool hasStaleShardResponse() override {
-            auto val = _hasStaleShardResponse;
-            // Mimics the targeter refresh before retry of batch.
-            _hasStaleShardResponse = false;
-            return val;
+        std::vector<ShardEndpoint> targetDelete(
+            OperationContext* opCtx,
+            const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
+            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            return targetWriteOp(opCtx,
+                                 itemRef,
+                                 useTwoPhaseWriteProtocol,
+                                 isNonTargetedWriteWithoutShardKeyWithExactId,
+                                 chunkRange);
         }
-
-    private:
-        bool _hasStaleShardResponse{false};
     };
 
     MultiShardTargeter multiShardNSTargeter(
@@ -2387,7 +2685,9 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatchRetryableError) 
                    BSON("x" << 0),
                    BSON("x" << MAXKEY))});
 
-    BatchedCommandRequest request([&] {
+    std::vector<BatchedCommandRequest*> requests;
+
+    BatchedCommandRequest updateRequest([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
         // Op style update.
         write_ops::UpdateOpEntry entry;
@@ -2399,74 +2699,88 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNoMatchRetryableError) 
         return updateOp;
     }());
 
-    auto future = launchAsync([&] {
-        BatchedCommandResponse response;
-        BatchWriteExecStats stats;
-        BatchWriteExec::executeBatch(
-            operationContext(), multiShardNSTargeter, request, &response, &stats);
 
-        return response;
-    });
+    BatchedCommandRequest deleteRequest([&] {
+        write_ops::DeleteCommandRequest deleteOp(kNss);
+        // Op style delete.
+        write_ops::DeleteOpEntry entry;
+        entry.setQ(BSON("_id" << 2));
+        entry.setMulti(false);
+        deleteOp.setDeletes({entry});
+        return deleteOp;
+    }());
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(kTestShardHost1, request.target);
+    requests.emplace_back(&updateRequest);
+    requests.emplace_back(&deleteRequest);
+    for (auto bcRequest : requests) {
+        auto future = launchAsync([&] {
+            BatchedCommandResponse response;
+            BatchWriteExecStats stats;
+            BatchWriteExec::executeBatch(
+                operationContext(), multiShardNSTargeter, *bcRequest, &response, &stats);
 
-        BatchedCommandResponse response;
+            return response;
+        });
 
-        auto status =
-            Status(StaleConfigInfo(
-                       kNss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardId(kShardName1)),
-                   "Stale error");
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost1, request.target);
 
-        response.addToErrDetails(write_ops::WriteError(0, status));
-        response.setStatus(Status::OK());
-        return response.toBSON();
-    });
+            BatchedCommandResponse response;
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(kTestShardHost2, request.target);
+            auto status = Status(
+                StaleConfigInfo(
+                    kNss,
+                    ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
+                                              boost::optional<CollectionIndexes>(boost::none)),
+                    ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0}),
+                                              boost::optional<CollectionIndexes>(boost::none)),
+                    ShardId(kShardName1)),
+                "Stale error");
 
-        BatchedCommandResponse response;
-        response.setStatus(Status::OK());
-        response.setN(0);
-        return response.toBSON();
-    });
+            response.addToErrDetails(write_ops::WriteError(0, status));
+            response.setStatus(Status::OK());
+            return response.toBSON();
+        });
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(kTestShardHost1, request.target);
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost2, request.target);
 
-        BatchedCommandResponse response;
-        response.setStatus(Status::OK());
-        response.setN(0);
-        return response.toBSON();
-    });
+            BatchedCommandResponse response;
+            response.setStatus(Status::OK());
+            response.setN(0);
+            return response.toBSON();
+        });
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(kTestShardHost2, request.target);
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost1, request.target);
 
-        BatchedCommandResponse response;
-        response.setStatus(Status::OK());
-        response.setN(0);
-        return response.toBSON();
-    });
+            BatchedCommandResponse response;
+            response.setStatus(Status::OK());
+            response.setN(0);
+            return response.toBSON();
+        });
 
-    auto response = future.default_timed_get();
-    ASSERT_OK(response.getTopLevelStatus());
-    ASSERT_FALSE(response.isErrDetailsSet());
-    ASSERT_EQ(0, response.getN());
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost2, request.target);
+
+            BatchedCommandResponse response;
+            response.setStatus(Status::OK());
+            response.setN(0);
+            return response.toBSON();
+        });
+
+        auto response = future.default_timed_get();
+        ASSERT_OK(response.getTopLevelStatus());
+        ASSERT_FALSE(response.isErrDetailsSet());
+        ASSERT_EQ(0, response.getN());
+    }
 }
-
 
 /**
  * Tests the scenario where 1st shard returns non-retryable error, 2nd shard returns n = 1, 3rd
  * shard's response is pending (and cancelled).
  */
-TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatchNonRetryableError) {
+TEST_F(BatchWriteExecTest, UpdateOneAndDeleteOneWithIdWithoutShardKeyWithMatchNonRetryableError) {
     RAIIServerParameterControllerForTest _featureFlagController{
         "featureFlagUpdateOneWithIdWithoutShardKey", true};
 
@@ -2479,12 +2793,12 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatchNonRetryableEr
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
+        std::vector<ShardEndpoint> targetWriteOp(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
             bool* useTwoPhaseWriteProtocol = nullptr,
             bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
-            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            std::set<ChunkRange>* chunkRange = nullptr) const {
             invariant(chunkRange == nullptr);
             *isNonTargetedWriteWithoutShardKeyWithExactId = true;
             return std::vector{ShardEndpoint(kShardName1,
@@ -2502,6 +2816,31 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatchNonRetryableEr
                                                  ChunkVersion({epoch, timestamp}, {102, 200}),
                                                  boost::optional<CollectionIndexes>(boost::none)),
                                              boost::none)};
+        }
+
+        std::vector<ShardEndpoint> targetDelete(
+            OperationContext* opCtx,
+            const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
+            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            return targetWriteOp(opCtx,
+                                 itemRef,
+                                 useTwoPhaseWriteProtocol,
+                                 isNonTargetedWriteWithoutShardKeyWithExactId,
+                                 chunkRange);
+        }
+        std::vector<ShardEndpoint> targetUpdate(
+            OperationContext* opCtx,
+            const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
+            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            return targetWriteOp(opCtx,
+                                 itemRef,
+                                 useTwoPhaseWriteProtocol,
+                                 isNonTargetedWriteWithoutShardKeyWithExactId,
+                                 chunkRange);
         }
     };
 
@@ -2529,7 +2868,9 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatchNonRetryableEr
                    BSON("x" << 100),
                    BSON("x" << MAXKEY))});
 
-    BatchedCommandRequest request([&] {
+    std::vector<BatchedCommandRequest*> requests;
+
+    BatchedCommandRequest updateRequest([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
         // Op style update.
         write_ops::UpdateOpEntry entry;
@@ -2541,61 +2882,84 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatchNonRetryableEr
         return updateOp;
     }());
 
-    FailPoint* fp =
-        globalFailPointRegistry().find("hangBeforeCompletingWriteWithoutShardKeyWithId");
-    auto timesEntered = fp->setMode(FailPoint::alwaysOn, 0);
+    BatchedCommandRequest deleteRequest([&] {
+        write_ops::DeleteCommandRequest deleteOp(kNss);
+        // Op style delete.
+        write_ops::DeleteOpEntry entry;
+        entry.setQ(BSON("_id" << 2));
+        entry.setMulti(false);
+        deleteOp.setDeletes({entry});
+        return deleteOp;
+    }());
 
-    auto future = launchAsync([&] {
-        BatchedCommandResponse response;
-        BatchWriteExecStats stats;
-        BatchWriteExec::executeBatch(
-            operationContext(), multiShardNSTargeter, request, &response, &stats);
+    requests.emplace_back(&updateRequest);
+    requests.emplace_back(&deleteRequest);
 
-        return response;
-    });
+    FailPoint* fp = globalFailPointRegistry().find("hangAfterCompletingWriteWithoutShardKeyWithId");
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(kTestShardHost1, request.target);
+    for (auto bcRequest : requests) {
+        auto timesEntered = fp->setMode(FailPoint::alwaysOn, 0);
 
-        BatchedCommandResponse response;
-        response.setStatus(Status::OK());
-        response.addToErrDetails(
-            write_ops::WriteError(0, {ErrorCodes::UnknownError, "mock non-retryable error"}));
-        return response.toBSON();
-    });
+        auto future = launchAsync([&] {
+            BatchedCommandResponse response;
+            BatchWriteExecStats stats;
+            BatchWriteExec::executeBatch(
+                operationContext(), multiShardNSTargeter, *bcRequest, &response, &stats);
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(kTestShardHost2, request.target);
+            return response;
+        });
 
-        BatchedCommandResponse response;
-        response.setStatus(Status::OK());
-        response.setN(1);
-        return response.toBSON();
-    });
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost1, request.target);
+            if (bcRequest == *requests.begin())
+                ASSERT_EQUALS("update", request.cmdObj.firstElement().fieldNameStringData());
+            else
+                ASSERT_EQUALS("delete", request.cmdObj.firstElement().fieldNameStringData());
 
-    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
-        ASSERT_EQ(kTestShardHost3, request.target);
+            BatchedCommandResponse response;
+            response.setStatus(Status::OK());
+            response.addToErrDetails(
+                write_ops::WriteError(0, {ErrorCodes::UnknownError, "mock non-retryable error"}));
+            return response.toBSON();
+        });
 
-        BatchedCommandResponse response;
-        response.setStatus(Status::OK());
-        response.setN(0);
-        return response.toBSON();
-    });
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost2, request.target);
+            if (bcRequest == *requests.begin())
+                ASSERT_EQUALS("update", request.cmdObj.firstElement().fieldNameStringData());
+            else
+                ASSERT_EQUALS("delete", request.cmdObj.firstElement().fieldNameStringData());
+
+            BatchedCommandResponse response;
+            response.setStatus(Status::OK());
+            response.setN(1);
+            return response.toBSON();
+        });
+
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost3, request.target);
+
+            BatchedCommandResponse response;
+            response.setStatus(Status::OK());
+            response.setN(0);
+            return response.toBSON();
+        });
 
 
-    fp->waitForTimesEntered(timesEntered + 1);
-    fp->setMode(FailPoint::off);
-    auto response = future.default_timed_get();
-    ASSERT_OK(response.getTopLevelStatus());
-    ASSERT_FALSE(response.isErrDetailsSet());
-    ASSERT_EQ(1, response.getN());
+        fp->waitForTimesEntered(timesEntered + 1);
+        fp->setMode(FailPoint::off);
+        auto response = future.default_timed_get();
+        ASSERT_OK(response.getTopLevelStatus());
+        ASSERT_FALSE(response.isErrDetailsSet());
+        ASSERT_EQ(1, response.getN());
+    }
 }
 
 /**
  * Tests the scenario where 1st shard returns StaleConfig error, 2nd shard returns n = 1, 3rd
  * shard's response is pending (and cancelled).
  */
-TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatchRetryableError) {
+TEST_F(BatchWriteExecTest, UpdateOneAndDeleteOneWithIdWithoutShardKeyWithMatchRetryableError) {
     RAIIServerParameterControllerForTest _featureFlagController{
         "featureFlagUpdateOneWithIdWithoutShardKey", true};
 
@@ -2608,12 +2972,12 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatchRetryableError
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
+        std::vector<ShardEndpoint> targetWriteOp(
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
             bool* useTwoPhaseWriteProtocol = nullptr,
             bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
-            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            std::set<ChunkRange>* chunkRange = nullptr) const {
             invariant(chunkRange == nullptr);
             *isNonTargetedWriteWithoutShardKeyWithExactId = true;
             return std::vector{ShardEndpoint(kShardName1,
@@ -2633,21 +2997,31 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatchRetryableError
                                              boost::none)};
         }
 
-        void noteStaleShardResponse(OperationContext* opCtx,
-                                    const ShardEndpoint& endpoint,
-                                    const StaleConfigInfo& staleInfo) override {
-            _hasStaleShardResponse = true;
+        std::vector<ShardEndpoint> targetUpdate(
+            OperationContext* opCtx,
+            const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
+            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            return targetWriteOp(opCtx,
+                                 itemRef,
+                                 useTwoPhaseWriteProtocol,
+                                 isNonTargetedWriteWithoutShardKeyWithExactId,
+                                 chunkRange);
         }
 
-        bool hasStaleShardResponse() override {
-            bool val = _hasStaleShardResponse;
-            // Mimics the targeter refresh before retry of batch.
-            _hasStaleShardResponse = false;
-            return val;
+        std::vector<ShardEndpoint> targetDelete(
+            OperationContext* opCtx,
+            const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
+            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            return targetWriteOp(opCtx,
+                                 itemRef,
+                                 useTwoPhaseWriteProtocol,
+                                 isNonTargetedWriteWithoutShardKeyWithExactId,
+                                 chunkRange);
         }
-
-    private:
-        bool _hasStaleShardResponse{false};
     };
 
     MultiShardTargeter multiShardNSTargeter(
@@ -2674,7 +3048,155 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatchRetryableError
                    BSON("x" << 100),
                    BSON("x" << MAXKEY))});
 
-    BatchedCommandRequest request([&] {
+    std::vector<BatchedCommandRequest*> requests;
+
+    BatchedCommandRequest updateRequest([&] {
+        write_ops::UpdateCommandRequest updateOp(kNss);
+        // Op style update.
+        write_ops::UpdateOpEntry entry;
+        entry.setQ(BSON("_id" << 1));
+        entry.setU(
+            write_ops::UpdateModification::parseFromClassicUpdate(BSON("$inc" << BSON("a" << 1))));
+        entry.setMulti(false);
+        updateOp.setUpdates({entry});
+        return updateOp;
+    }());
+
+    BatchedCommandRequest deleteRequest([&] {
+        write_ops::DeleteCommandRequest deleteOp(kNss);
+        // Op style delete.
+        write_ops::DeleteOpEntry entry;
+        entry.setQ(BSON("_id" << 2));
+        entry.setMulti(false);
+        deleteOp.setDeletes({entry});
+        return deleteOp;
+    }());
+
+    requests.emplace_back(&updateRequest);
+    requests.emplace_back(&deleteRequest);
+
+    for (auto bcRequest : requests) {
+        auto future = launchAsync([&] {
+            BatchedCommandResponse response;
+            BatchWriteExecStats stats;
+            BatchWriteExec::executeBatch(
+                operationContext(), multiShardNSTargeter, *bcRequest, &response, &stats);
+
+            return response;
+        });
+
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost1, request.target);
+            if (bcRequest == *requests.begin())
+                ASSERT_EQUALS("update", request.cmdObj.firstElement().fieldNameStringData());
+            else
+                ASSERT_EQUALS("delete", request.cmdObj.firstElement().fieldNameStringData());
+
+            BatchedCommandResponse response;
+
+            auto status = Status(
+                StaleConfigInfo(
+                    kNss,
+                    ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
+                                              boost::optional<CollectionIndexes>(boost::none)),
+                    ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0}),
+                                              boost::optional<CollectionIndexes>(boost::none)),
+                    ShardId(kShardName1)),
+                "Stale error");
+
+            response.addToErrDetails(write_ops::WriteError(0, status));
+            response.setStatus(Status::OK());
+            return response.toBSON();
+        });
+
+        onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+            ASSERT_EQ(kTestShardHost2, request.target);
+            if (bcRequest == *requests.begin())
+                ASSERT_EQUALS("update", request.cmdObj.firstElement().fieldNameStringData());
+            else
+                ASSERT_EQUALS("delete", request.cmdObj.firstElement().fieldNameStringData());
+
+            BatchedCommandResponse response;
+            response.setStatus(Status::OK());
+            response.setN(1);
+            return response.toBSON();
+        });
+
+        auto response = future.default_timed_get();
+        ASSERT_OK(response.getTopLevelStatus());
+        ASSERT_FALSE(response.isErrDetailsSet());
+        ASSERT_EQ(1, response.getN());
+    }
+}
+
+/**
+ * Tests the scenario where all shards return non-retryable errors.
+ */
+TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNonRetryableError) {
+    RAIIServerParameterControllerForTest _featureFlagController{
+        "featureFlagUpdateOneWithIdWithoutShardKey", true};
+
+    const static OID epoch = OID::gen();
+    const static Timestamp timestamp{2};
+
+    const NamespaceString kNss =
+        NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
+    class MultiShardTargeter : public MockNSTargeter {
+    public:
+        using MockNSTargeter::MockNSTargeter;
+
+        std::vector<ShardEndpoint> targetWriteOp(
+            OperationContext* opCtx,
+            const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
+            std::set<ChunkRange>* chunkRange = nullptr) const {
+            invariant(chunkRange == nullptr);
+            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
+            return std::vector{ShardEndpoint(kShardName1,
+                                             ShardVersionFactory::make(
+                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
+                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                             boost::none),
+                               ShardEndpoint(kShardName2,
+                                             ShardVersionFactory::make(
+                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
+                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                             boost::none)};
+        }
+
+        std::vector<ShardEndpoint> targetUpdate(
+            OperationContext* opCtx,
+            const BatchItemRef& itemRef,
+            bool* useTwoPhaseWriteProtocol = nullptr,
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
+            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            return targetWriteOp(opCtx,
+                                 itemRef,
+                                 useTwoPhaseWriteProtocol,
+                                 isNonTargetedWriteWithoutShardKeyWithExactId,
+                                 chunkRange);
+        }
+    };
+
+    MultiShardTargeter multiShardNSTargeter(
+        kNss,
+        {MockRange(ShardEndpoint(
+                       kShardName1,
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
+                                                 boost::optional<CollectionIndexes>(boost::none)),
+                       boost::none),
+                   BSON("x" << MINKEY),
+                   BSON("x" << 0)),
+         MockRange(ShardEndpoint(
+                       kShardName2,
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
+                                                 boost::optional<CollectionIndexes>(boost::none)),
+                       boost::none),
+                   BSON("x" << 0),
+                   BSON("x" << 100))});
+
+    BatchedCommandRequest updateRequest([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
         // Op style update.
         write_ops::UpdateOpEntry entry;
@@ -2690,44 +3212,35 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyWithMatchRetryableError
         BatchedCommandResponse response;
         BatchWriteExecStats stats;
         BatchWriteExec::executeBatch(
-            operationContext(), multiShardNSTargeter, request, &response, &stats);
+            operationContext(), multiShardNSTargeter, updateRequest, &response, &stats);
 
         return response;
     });
 
     onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
         ASSERT_EQ(kTestShardHost1, request.target);
-
+        ASSERT_EQUALS("update", request.cmdObj.firstElement().fieldNameStringData());
         BatchedCommandResponse response;
-
-        auto status =
-            Status(StaleConfigInfo(
-                       kNss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardId(kShardName1)),
-                   "Stale error");
-
-        response.addToErrDetails(write_ops::WriteError(0, status));
+        response.addToErrDetails(
+            write_ops::WriteError(0, {ErrorCodes::UnknownError, "mock non-retryable error"}));
         response.setStatus(Status::OK());
         return response.toBSON();
     });
 
     onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
         ASSERT_EQ(kTestShardHost2, request.target);
-
+        ASSERT_EQUALS("update", request.cmdObj.firstElement().fieldNameStringData());
         BatchedCommandResponse response;
+        response.addToErrDetails(
+            write_ops::WriteError(0, {ErrorCodes::UnknownError, "mock non-retryable error"}));
         response.setStatus(Status::OK());
-        response.setN(1);
         return response.toBSON();
     });
 
     auto response = future.default_timed_get();
     ASSERT_OK(response.getTopLevelStatus());
-    ASSERT_FALSE(response.isErrDetailsSet());
-    ASSERT_EQ(1, response.getN());
+    ASSERT_TRUE(response.isErrDetailsSet());
+    ASSERT_EQ(0, response.getN());
 }
 
 /**
@@ -2740,7 +3253,6 @@ public:
 
     void setUp() override {
         ShardingTestFixture::setUp();
-        setRemote(HostAndPort("ClientHost", 12345));
 
         // Set up the RemoteCommandTargeter for the config shard
         configTargeter()->setFindHostReturnValue(kTestConfigShardHost);
@@ -2874,8 +3386,6 @@ public:
 
     void setUp() override {
         BatchWriteExecTest::setUp();
-
-        setRemote(HostAndPort("ClientHost", 12345));
 
         // Set up the RemoteCommandTargeter for the config shard
         configTargeter()->setFindHostReturnValue(kTestConfigShardHost);
@@ -3039,8 +3549,6 @@ public:
 
     void setUp() override {
         BatchWriteExecTest::setUp();
-
-        setRemote(HostAndPort("ClientHost", 12345));
 
         // Set up the RemoteCommandTargeter for the config shard
         configTargeter()->setFindHostReturnValue(kTestConfigShardHost);
@@ -3258,6 +3766,22 @@ public:
         });
     }
 
+    void expectInsertsReturnCannotRefreshErrors(const std::vector<BSONObj>& expected) {
+        onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
+            BSONObjBuilder bob;
+
+            bob.appendElementsUnique(
+                expectInsertsReturnCannotRefreshErrorsBase(nss, expected, request));
+
+            // Because this is the transaction-specific fixture, return transaction metadata in
+            // the response.
+            TxnResponseMetadata txnResponseMetadata(false /* readOnly */);
+            txnResponseMetadata.serialize(&bob);
+
+            return bob.obj();
+        });
+    }
+
     void expectInsertsReturnTransientTxnErrors(const std::vector<BSONObj>& expected) {
         onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
             ASSERT_EQUALS(nss.dbName(), request.dbname);
@@ -3384,6 +3908,66 @@ TEST_F(BatchWriteExecTransactionTest, ErrorInBatchSets_WriteErrorOrdered) {
 
     // Any write error works, using SSV for convenience.
     expectInsertsReturnStaleVersionErrors({BSON("x" << 1), BSON("x" << 2)});
+
+    future.default_timed_get();
+}
+
+TEST_F(BatchWriteExecTransactionTest, ErrorInBatchSets_WriteErrorFromBusyCache) {
+    BatchedCommandRequest request([&] {
+        write_ops::InsertCommandRequest insertOp(nss);
+        insertOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setOrdered(false);
+            return writeCommandBase;
+        }());
+        insertOp.setDocuments({BSON("x" << 1), BSON("x" << 2)});
+        return insertOp;
+    }());
+    request.setWriteConcern(BSONObj());
+
+    auto future = launchAsync([&] {
+        BatchedCommandResponse response;
+        BatchWriteExecStats stats;
+        BatchWriteExec::executeBatch(
+            operationContext(), singleShardNSTargeter, request, &response, &stats);
+
+        ASSERT(response.isErrDetailsSet());
+        ASSERT_GT(response.sizeErrDetails(), 0u);
+        ASSERT_EQ(ErrorCodes::ShardCannotRefreshDueToLocksHeld,
+                  response.getErrDetailsAt(0).getStatus().code());
+    });
+
+    expectInsertsReturnCannotRefreshErrors({BSON("x" << 1), BSON("x" << 2)});
+
+    future.default_timed_get();
+}
+
+TEST_F(BatchWriteExecTransactionTest, ErrorInBatchSets_WriteErrorOrderedFromBusyCache) {
+    BatchedCommandRequest request([&] {
+        write_ops::InsertCommandRequest insertOp(nss);
+        insertOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setOrdered(true);
+            return writeCommandBase;
+        }());
+        insertOp.setDocuments({BSON("x" << 1), BSON("x" << 2)});
+        return insertOp;
+    }());
+    request.setWriteConcern(BSONObj());
+
+    auto future = launchAsync([&] {
+        BatchedCommandResponse response;
+        BatchWriteExecStats stats;
+        BatchWriteExec::executeBatch(
+            operationContext(), singleShardNSTargeter, request, &response, &stats);
+
+        ASSERT(response.isErrDetailsSet());
+        ASSERT_GT(response.sizeErrDetails(), 0u);
+        ASSERT_EQ(ErrorCodes::ShardCannotRefreshDueToLocksHeld,
+                  response.getErrDetailsAt(0).getStatus().code());
+    });
+
+    expectInsertsReturnCannotRefreshErrors({BSON("x" << 1), BSON("x" << 2)});
 
     future.default_timed_get();
 }

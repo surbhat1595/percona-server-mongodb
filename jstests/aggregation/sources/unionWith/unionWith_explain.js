@@ -1,7 +1,10 @@
 /**
  * Test that $unionWith's pipeline argument returns the same explain as an equivalent normal
- * pipeline.
+ * pipeline. The assertions in this test assume that the optimizer for $unionWith queries is
+ * the same as the optimizer for the "normal" pipeline. This assumption is not strictly true when
+ * CQF is enabled.
  * @tags: [
+ *   cqf_incompatible,
  *   do_not_wrap_aggregations_in_facets,
  * ]
  */
@@ -40,6 +43,7 @@ const mongosIgnoredFields = [
     "needTime",
     "queryHash",
     "planCacheKey",
+    "optimizationTimeMillis",
 ].concat(executionStatsIngoredFields, stagesIgnoredFields);
 
 const queryPlannerIgnoredFields = [

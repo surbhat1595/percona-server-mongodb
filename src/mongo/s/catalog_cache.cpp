@@ -48,7 +48,6 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/cluster_role.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/keypattern.h"
@@ -58,6 +57,7 @@
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -327,7 +327,8 @@ StatusWith<CachedDatabaseInfo> CatalogCache::_getDatabase(OperationContext* opCt
             "Do not hold a lock while refreshing the catalog cache. Doing so would potentially "
             "hold the lock during a network call, and can lead to a deadlock as described in "
             "SERVER-37398.",
-            allowLocks || !opCtx->lockState() || !opCtx->lockState()->isLocked());
+            allowLocks || !shard_role_details::getLocker(opCtx) ||
+                !shard_role_details::getLocker(opCtx)->isLocked());
 
     Timer t{};
     ScopeGuard finishTiming([&] {
@@ -374,7 +375,7 @@ StatusWith<ChunkManager> CatalogCache::_getCollectionPlacementInfoAt(
             "Do not hold a lock while refreshing the catalog cache. Doing so would potentially "
             "hold the lock during a network call, and can lead to a deadlock as described in "
             "SERVER-37398.",
-            allowLocks || !opCtx->lockState()->isLocked());
+            allowLocks || !shard_role_details::getLocker(opCtx)->isLocked());
 
     try {
         const auto swDbInfo = _getDatabase(opCtx, nss.dbName(), allowLocks);
@@ -532,7 +533,7 @@ boost::optional<ShardingIndexesCatalogCache> CatalogCache::_getCollectionIndexIn
     }
 
     if (!allowLocks) {
-        invariant(!opCtx->lockState() || !opCtx->lockState()->isLocked(),
+        invariant(!shard_role_details::getLocker(opCtx)->isLocked(),
                   "Do not hold a lock while refreshing the catalog cache. Doing so would "
                   "potentially hold "
                   "the lock during a network call, and can lead to a deadlock as described in "

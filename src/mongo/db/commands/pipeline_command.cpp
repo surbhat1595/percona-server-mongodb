@@ -69,6 +69,7 @@
 #include "mongo/db/service_context.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_builder_interface.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
@@ -125,6 +126,14 @@ public:
                                             aggregationRequest.getNamespace(),
                                             aggregationRequest,
                                             false));
+
+        // TODO: SERVER-73632 Remove feature flag for PM-635.
+        // Forbid users from passing 'querySettings' explicitly.
+        const bool isInternalCLient =
+            opCtx->getClient()->session() && opCtx->getClient()->isInternalClient();
+        uassert(7708001,
+                "BSON field 'querySettings' is an unknown field",
+                isInternalCLient || !aggregationRequest.getQuerySettings().has_value());
 
         return std::make_unique<Invocation>(
             this, opMsgRequest, std::move(aggregationRequest), std::move(privileges));
@@ -209,7 +218,7 @@ public:
             _usedExternalDataSources.emplace_back(_aggregationRequest.getNamespace(),
                                                   externalDataSourcesIter->getDataSources());
 
-            for (auto&& involvedNamespace : _liteParsedPipeline.getInvolvedNamespaces()) {
+            for (const auto& involvedNamespace : _liteParsedPipeline.getInvolvedNamespaces()) {
                 externalDataSourcesIter =
                     findCollNameInExternalDataSourceOption(involvedNamespace.coll());
                 uassert(7039004,
@@ -279,6 +288,7 @@ public:
             if (!_aggregationRequest.getExplain() && !_aggregationRequest.getExchange()) {
                 query_request_helper::validateCursorResponse(
                     reply->getBodyBuilder().asTempObj(),
+                    auth::ValidatedTenancyScope::get(opCtx),
                     _aggregationRequest.getNamespace().tenantId(),
                     _aggregationRequest.getSerializationContext());
             }

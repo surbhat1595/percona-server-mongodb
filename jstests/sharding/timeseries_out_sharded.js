@@ -9,10 +9,10 @@
  *   does_not_support_stepdowns,
  *   # We need a timeseries collection.
  *   requires_timeseries,
- *   requires_fcv_71,
+ *   # TODO (SERVER-70605): Remove this tag once the time-series always compressed buckets feature
+ *   # flag can be removed.
+ *   multiversion_incompatible,
  *   featureFlagAggOutTimeseries,
- *   # TODO (SERVER-80521): Re-enable this test once redness is resolve in multiversion suites.
- *   DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE,
  * ]
  */
 import {TimeseriesAggTests} from "jstests/core/timeseries/libs/timeseries_agg_helpers.js";
@@ -100,13 +100,13 @@ runTest({observer: [{$out: "observer_out"}], timeseries: timeseriesPipeline});
 
 // Test that $out can replace an existing time-series collection without the 'timeseries' option.
 // Change an option in the existing time-series collections.
-assert.commandWorked(testDB.runCommand({collMod: targetCollName, expireAfterSeconds: 360}));
+assert.commandWorked(testDB.runCommand({collMod: targetCollName, expireAfterSeconds: 3600}));
 // Run the $out stage.
 timeseriesPipeline = [{$out: targetCollName}];
 runTest({observer: [{$out: "observer_out"}], timeseries: timeseriesPipeline, drop: false});
 
 // Test that $out can replace an existing time-series collection with the 'timeseries' option.
-let newDate = new Date('1999-09-30T03:24:00');
+let newDate = new Date();
 let observerPipeline = [{$set: {"time": newDate}}, {$out: "observer_out"}];
 timeseriesPipeline = TimeseriesAggTests.generateOutPipeline(
     targetCollName, dbName, {timeField: "time", metaField: "tags"}, {$set: {"time": newDate}});

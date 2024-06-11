@@ -68,7 +68,7 @@
 #include "mongo/db/query/interval_evaluation_tree.h"
 #include "mongo/db/query/optimizer/algebra/polyvalue.h"
 #include "mongo/db/query/projection.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_solution.h"
@@ -799,6 +799,33 @@ void deprioritizeUnboundedCollectionScan(QuerySolutionNode* solnRoot,
 
     collScan->lowPriority = true;
 }
+
+bool isShardedCollScan(QuerySolutionNode* solnRoot) {
+    return solnRoot->getType() == StageType::STAGE_SHARDING_FILTER &&
+        solnRoot->children.size() == 1 &&
+        solnRoot->children[0]->getType() == StageType::STAGE_COLLSCAN;
+}
+
+bool shouldReverseScanForSort(QuerySolutionNode* solnRoot,
+                              const CanonicalQuery& query,
+                              const QueryPlannerParams& params) {
+    // We cannot reverse this scan if its direction is specified by a $natural hint.
+    const FindCommandRequest& findCommand = query.getFindCommandRequest();
+    const bool isCollscan =
+        solnRoot->getType() == StageType::STAGE_COLLSCAN || isShardedCollScan(solnRoot);
+    const bool hasNaturalHint =
+        findCommand.getHint()[query_request_helper::kNaturalSortField].ok() &&
+        !params.querySettingsApplied;
+    const bool hasQuerySettingsEnforcedDirection = params.collscanDirection.has_value();
+    if (isCollscan && (hasNaturalHint || hasQuerySettingsEnforcedDirection)) {
+        return false;
+    }
+
+    // The only collection scan that includes a sort order in 'providedSorts' is a scan on a
+    // clustered collection.
+    const BSONObj reverseSort = QueryPlannerCommon::reverseSortObj(findCommand.getSort());
+    return solnRoot->providedSorts().contains(reverseSort);
+}
 }  // namespace
 
 bool QueryPlannerAnalysis::isEligibleForHashJoin(const SecondaryCollectionInfo& foreignCollInfo) {
@@ -814,11 +841,7 @@ bool QueryPlannerAnalysis::isEligibleForHashJoin(const SecondaryCollectionInfo& 
 // static
 std::unique_ptr<QuerySolution> QueryPlannerAnalysis::removeInclusionProjectionBelowGroup(
     std::unique_ptr<QuerySolution> soln) {
-    auto root = soln->extractRoot();
-
-    removeInclusionProjectionBelowGroupRecursive(root.get());
-
-    soln->setRoot(std::move(root));
+    removeInclusionProjectionBelowGroupRecursive(soln->root());
     return soln;
 }
 
@@ -863,6 +886,36 @@ void QueryPlannerAnalysis::removeUselessColumnScanRowStoreExpression(QuerySoluti
 }
 
 // static
+void QueryPlannerAnalysis::removeImpreciseInternalExprFilters(const QueryPlannerParams& params,
+                                                              QuerySolutionNode& root) {
+    if (params.collectionStats.isTimeseries) {
+        // For timeseries collections, the imprecise filters are able to get rid of an entire
+        // bucket's worth of data, and save us from unpacking potentially thousands of documents.
+        // In this case, we decide not to prune the imprecise filters.
+        return;
+    }
+
+    // In principle we could do this optimization for TEXT queries, but for simplicity we do not
+    // today.
+    const auto stageType = root.getType();
+    if (stageType == StageType::STAGE_TEXT_OR || stageType == STAGE_TEXT_MATCH) {
+        return;
+    }
+
+    // Remove the imprecise predicates on nodes after a fetch. For nodes before a fetch, the
+    // imprecise filters may be able to save us the significant work of doing a fetch. In such
+    // cases, we assume the imprecise filter is always worth applying.
+    if (root.fetched() && root.filter) {
+        root.filter =
+            expression::assumeImpreciseInternalExprNodesReturnTrue(std::move(root.filter));
+    }
+
+    for (auto& child : root.children) {
+        removeImpreciseInternalExprFilters(params, *child);
+    }
+}
+
+// static
 std::pair<EqLookupNode::LookupStrategy, boost::optional<IndexEntry>>
 QueryPlannerAnalysis::determineLookupStrategy(
     const NamespaceString& foreignCollName,
@@ -871,10 +924,9 @@ QueryPlannerAnalysis::determineLookupStrategy(
     bool allowDiskUse,
     const CollatorInterface* collator) {
     auto foreignCollItr = collectionsInfo.find(foreignCollName);
-    tassert(5842600,
-            str::stream() << "Expected collection info, but found none; target collection: "
-                          << foreignCollName.toStringForErrorMsg(),
-            foreignCollItr != collectionsInfo.end());
+    if (foreignCollItr == collectionsInfo.end()) {
+        return {EqLookupNode::LookupStrategy::kNonExistentForeignCollection, boost::none};
+    }
 
     // Check if an eligible index exists for indexed loop join strategy.
     const auto foreignIndex = [&]() -> boost::optional<IndexEntry> {
@@ -1089,7 +1141,8 @@ bool QueryPlannerAnalysis::explodeForSort(const CanonicalQuery& query,
     }
 
     // Too many ixscans spoil the performance.
-    if (totalNumScans > (size_t)internalQueryMaxScansToExplode.load()) {
+    if (totalNumScans >
+        QueryKnobConfiguration::decoration(query.getOpCtx()).getMaxScansToExplodeForOp()) {
         (*solnRoot)->hitScanLimit = true;
         LOGV2_DEBUG(
             20950,
@@ -1152,12 +1205,6 @@ bool sortMatchesTraversalPreference(const TraversalPreference& traversalPreferen
     return true;
 }
 
-bool isShardedCollScan(QuerySolutionNode* solnRoot) {
-    return solnRoot->getType() == StageType::STAGE_SHARDING_FILTER &&
-        solnRoot->children.size() == 1 &&
-        solnRoot->children[0]->getType() == StageType::STAGE_COLLSCAN;
-}
-
 // static
 std::unique_ptr<QuerySolutionNode> QueryPlannerAnalysis::analyzeSort(
     const CanonicalQuery& query,
@@ -1212,13 +1259,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAnalysis::analyzeSort(
 
     // Sort is not provided.  See if we provide the reverse of our sort pattern.
     // If so, we can reverse the scan direction(s).
-    BSONObj reverseSort = QueryPlannerCommon::reverseSortObj(sortObj);
-    // The only collection scan that includes a sort order in 'providedSorts' is a scan on a
-    // clustered collection. However, we cannot reverse this scan if its direction is specified by a
-    // $natural hint.
-    const bool naturalCollScan = solnRoot->getType() == StageType::STAGE_COLLSCAN &&
-        query.getFindCommandRequest().getHint()[query_request_helper::kNaturalSortField];
-    if (providedSorts.contains(reverseSort) && !naturalCollScan) {
+    if (shouldReverseScanForSort(solnRoot.get(), query, params)) {
         QueryPlannerCommon::reverseScans(solnRoot.get());
         LOGV2_DEBUG(20951,
                     5,
@@ -1254,24 +1295,26 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAnalysis::analyzeSort(
     }
 
     std::unique_ptr<SortNode> sortNode;
-    if (canUseSimpleSort(*solnRoot, query, params)) {
-        sortNode = std::make_unique<SortNodeSimple>();
-    } else {
-        sortNode = std::make_unique<SortNodeDefault>();
-    }
-    sortNode->pattern = sortObj;
-    sortNode->children.push_back(std::move(solnRoot));
-    sortNode->addSortKeyMetadata = query.metadataDeps()[DocumentMetadataFields::kSortKey];
     // When setting the limit on the sort, we need to consider both
     // the limit N and skip count M. The sort should return an ordered list
     // N + M items so that the skip stage can discard the first M results.
-    if (findCommand.getLimit()) {
-        // The limit can be combined with the SORT stage.
-        sortNode->limit = static_cast<size_t>(*findCommand.getLimit()) +
-            static_cast<size_t>(findCommand.getSkip().value_or(0));
+    size_t sortLimit = findCommand.getLimit() ? static_cast<size_t>(*findCommand.getLimit()) +
+            static_cast<size_t>(findCommand.getSkip().value_or(0))
+                                              : 0;
+    if (canUseSimpleSort(*solnRoot, query, params)) {
+        sortNode = std::make_unique<SortNodeSimple>(
+            std::move(solnRoot),
+            sortObj,
+            sortLimit,
+            LimitSkipParameterization{query.shouldParameterizeLimitSkip()});
     } else {
-        sortNode->limit = 0;
+        sortNode = std::make_unique<SortNodeDefault>(
+            std::move(solnRoot),
+            sortObj,
+            sortLimit,
+            LimitSkipParameterization{query.shouldParameterizeLimitSkip()});
     }
+    sortNode->addSortKeyMetadata = query.metadataDeps()[DocumentMetadataFields::kSortKey];
     solnRoot = std::move(sortNode);
 
     *blockingSortOut = true;
@@ -1284,6 +1327,7 @@ std::unique_ptr<QuerySolution> QueryPlannerAnalysis::analyzeDataAccess(
     const QueryPlannerParams& params,
     std::unique_ptr<QuerySolutionNode> solnRoot) {
     auto soln = std::make_unique<QuerySolution>();
+
     soln->indexFilterApplied = params.indexFiltersApplied;
 
     solnRoot->computeProperties();
@@ -1353,9 +1397,10 @@ std::unique_ptr<QuerySolution> QueryPlannerAnalysis::analyzeDataAccess(
     soln->hasBlockingStage = hasSortStage || hasAndHashStage;
 
     if (findCommand.getSkip()) {
-        auto skip = std::make_unique<SkipNode>();
-        skip->skip = *findCommand.getSkip();
-        skip->children.push_back(std::move(solnRoot));
+        auto skip = std::make_unique<SkipNode>(
+            std::move(solnRoot),
+            *findCommand.getSkip(),
+            LimitSkipParameterization{query.shouldParameterizeLimitSkip()});
         solnRoot = std::move(skip);
     }
 
@@ -1386,15 +1431,17 @@ std::unique_ptr<QuerySolution> QueryPlannerAnalysis::analyzeDataAccess(
     // sort. Otherwise, we will have to enforce the limit ourselves since it's not handled inside
     // SORT.
     if (!hasSortStage && findCommand.getLimit()) {
-        auto limit = std::make_unique<LimitNode>();
-        limit->limit = *findCommand.getLimit();
-        limit->children.push_back(std::move(solnRoot));
+        auto limit = std::make_unique<LimitNode>(
+            std::move(solnRoot),
+            *findCommand.getLimit(),
+            LimitSkipParameterization{query.shouldParameterizeLimitSkip()});
         solnRoot = std::move(limit);
     }
 
     solnRoot = tryPushdownProjectBeneathSort(std::move(solnRoot));
 
     QueryPlannerAnalysis::removeUselessColumnScanRowStoreExpression(*solnRoot);
+    QueryPlannerAnalysis::removeImpreciseInternalExprFilters(params, *solnRoot);
 
     soln->setRoot(std::move(solnRoot));
     return soln;

@@ -56,6 +56,7 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/shard_id.h"
 #include "mongo/executor/remote_command_response.h"
+#include "mongo/s/client/shard_gen.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/duration.h"
@@ -270,10 +271,6 @@ public:
         const BSONObj& sort,
         boost::optional<long long> limit,
         const boost::optional<BSONObj>& hint = boost::none);
-
-    // This timeout will be used by default in operations against the config server, unless
-    // explicitly overridden
-    static const Milliseconds kDefaultConfigCommandTimeout;
 
     /**
      * Returns false if the error is a retriable error and/or causes a replset monitor update. These

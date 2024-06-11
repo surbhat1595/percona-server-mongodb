@@ -52,8 +52,8 @@
 #include "mongo/db/timeseries/bucket_catalog/rollover.h"
 #include "mongo/db/timeseries/bucket_compression.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/timeseries/timeseries_tracking_context.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/decorable.h"
@@ -69,6 +69,7 @@ const auto getBucketCatalog = ServiceContext::declareDecoration<BucketCatalog>()
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesDirectModificationBeforeWriteConflict);
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesDirectModificationAfterStart);
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesDirectModificationBeforeFinish);
+MONGO_FAIL_POINT_DEFINE(hangTimeseriesInsertBeforeReopeningBucket);
 MONGO_FAIL_POINT_DEFINE(runPostCommitDebugChecks);
 
 /**
@@ -114,11 +115,14 @@ void prepareWriteBatchForCommit(WriteBatch& batch, Bucket& bucket) {
         bucket.memoryUsage += batch.max.objsize();
     }
 
-    if (bucket.decompressed.has_value()) {
-        batch.decompressed = std::move(bucket.decompressed);
-        bucket.decompressed.reset();
-        bucket.memoryUsage -= (batch.decompressed.value().before.objsize() +
-                               batch.decompressed.value().after.objsize());
+    batch.uncompressed = std::move(bucket.uncompressed);
+    bucket.uncompressed = {};
+    bucket.memoryUsage -= batch.uncompressed.objsize();
+
+    if (bucket.compressed) {
+        batch.compressed = std::move(bucket.compressed);
+        bucket.compressed.reset();
+        bucket.memoryUsage -= batch.compressed->objsize();
     }
 }
 
@@ -129,6 +133,29 @@ void prepareWriteBatchForCommit(WriteBatch& batch, Bucket& bucket) {
 void finishWriteBatch(WriteBatch& batch, const CommitInfo& info) {
     invariant(batch.commitRights.load());
     batch.promise.emplaceValue(info);
+}
+
+/**
+ * Updates stats to reflect the status of bucket fetches and queries based off of the
+ * 'ReopeningContext' (which is populated when attempting to reopen a bucket).
+ */
+void updateBucketFetchAndQueryStats(const ReopeningContext& context,
+                                    ExecutionStatsController& stats) {
+    if (context.fetchedBucket) {
+        if (context.bucketToReopen.has_value()) {
+            stats.incNumBucketsFetched();
+        } else {
+            stats.incNumBucketFetchesFailed();
+        }
+    }
+
+    if (context.queriedBucket) {
+        if (context.bucketToReopen.has_value()) {
+            stats.incNumBucketsQueried();
+        } else {
+            stats.incNumBucketQueriesFailed();
+        }
+    }
 }
 }  // namespace
 
@@ -156,6 +183,10 @@ BSONObj getMetadata(BucketCatalog& catalog, const BucketHandle& handle) {
     return bucket->key.metadata.toBSON();
 }
 
+uint64_t getMemoryUsage(const BucketCatalog& catalog) {
+    return catalog.memoryUsage.load() + catalog.trackingContext.allocated();
+}
+
 StatusWith<InsertResult> tryInsert(OperationContext* opCtx,
                                    BucketCatalog& catalog,
                                    const NamespaceString& ns,
@@ -163,8 +194,220 @@ StatusWith<InsertResult> tryInsert(OperationContext* opCtx,
                                    const TimeseriesOptions& options,
                                    const BSONObj& doc,
                                    CombineWithInsertsFromOtherClients combine) {
-    return internal::insert(
-        opCtx, catalog, ns, comparator, options, doc, combine, internal::AllowBucketCreation::kNo);
+    invariant(!ns.isTimeseriesBucketsCollection());
+
+    auto res = internal::extractBucketingParameters(ns, comparator, options, doc);
+    if (!res.isOK()) {
+        return res.getStatus();
+    }
+    auto& key = res.getValue().first;
+    auto time = res.getValue().second;
+
+    ExecutionStatsController stats = internal::getOrInitializeExecutionStats(catalog, ns);
+    // Buckets are spread across independently-lockable stripes to improve parallelism. We map a
+    // bucket to a stripe by hashing the BucketKey.
+    auto stripeNumber = internal::getStripeNumber(key, catalog.numberOfStripes);
+
+    // Save the catalog era value from before we make any further checks. This guarantees that we
+    // don't miss a direct write that happens sometime in between our decision to potentially reopen
+    // a bucket below, and actually reopening it in a subsequent reentrant call. Any direct write
+    // will increment the era, so the reentrant call can check the current value and return a write
+    // conflict if it sees a newer era.
+    const auto catalogEra = getCurrentEra(catalog.bucketStateRegistry);
+
+    ClosedBuckets closedBuckets;
+    internal::CreationInfo info{key, stripeNumber, time, options, stats, &closedBuckets};
+    auto& stripe = catalog.stripes[stripeNumber];
+    stdx::lock_guard stripeLock{stripe.mutex};
+
+    Bucket* bucket = internal::useBucket(
+        opCtx, catalog, stripe, stripeLock, info, internal::AllowBucketCreation::kNo);
+    // If there are no open buckets for our measurement that we can use, we return a
+    // reopeningContext to try reopening a closed bucket from disk.
+    if (!bucket) {
+        return getReopeningContext(opCtx,
+                                   catalog,
+                                   stripe,
+                                   stripeLock,
+                                   info,
+                                   catalogEra,
+                                   internal::AllowQueryBasedReopening::kAllow);
+    }
+
+    auto insertionResult = insertIntoBucket(opCtx,
+                                            catalog,
+                                            stripe,
+                                            stripeLock,
+                                            stripeNumber,
+                                            doc,
+                                            combine,
+                                            internal::AllowBucketCreation::kNo,
+                                            info,
+                                            *bucket);
+    // If our insert was successful, return a SuccessfulInsertion with our
+    // WriteBatch.
+    if (auto* batch = get_if<std::shared_ptr<WriteBatch>>(&insertionResult)) {
+        return SuccessfulInsertion{std::move(*batch), std::move(closedBuckets)};
+    }
+
+    auto* reason = get_if<RolloverReason>(&insertionResult);
+    invariant(reason);
+    if (allCommitted(*bucket)) {
+        internal::markBucketIdle(stripe, stripeLock, *bucket);
+    }
+
+    // If we were time forward or backward, we might be able to "reopen" a bucket we still have
+    // in memory that's set to be closed when pending operations finish.
+    if ((*reason == RolloverReason::kTimeBackward || *reason == RolloverReason::kTimeForward)) {
+        if (Bucket* alternate = useAlternateBucket(catalog, stripe, stripeLock, info)) {
+            insertionResult = insertIntoBucket(opCtx,
+                                               catalog,
+                                               stripe,
+                                               stripeLock,
+                                               stripeNumber,
+                                               doc,
+                                               combine,
+                                               internal::AllowBucketCreation::kNo,
+                                               info,
+                                               *alternate);
+            if (auto* batch = get_if<std::shared_ptr<WriteBatch>>(&insertionResult)) {
+                return SuccessfulInsertion{std::move(*batch), std::move(closedBuckets)};
+            }
+
+            // We weren't able to insert into the other bucket, so fall through to the regular
+            // reopening procedure.
+        }
+    }
+
+    return getReopeningContext(opCtx,
+                               catalog,
+                               stripe,
+                               stripeLock,
+                               info,
+                               catalogEra,
+                               (*reason == RolloverReason::kTimeBackward)
+                                   ? internal::AllowQueryBasedReopening::kAllow
+                                   : internal::AllowQueryBasedReopening::kDisallow);
+}
+
+StatusWith<InsertResult> insertWithReopeningContext(OperationContext* opCtx,
+                                                    BucketCatalog& catalog,
+                                                    const NamespaceString& ns,
+                                                    const StringDataComparator* comparator,
+                                                    const TimeseriesOptions& options,
+                                                    const BSONObj& doc,
+                                                    CombineWithInsertsFromOtherClients combine,
+                                                    ReopeningContext& reopeningContext) {
+    invariant(!ns.isTimeseriesBucketsCollection());
+
+    auto res = internal::extractBucketingParameters(ns, comparator, options, doc);
+    invariant(res.isOK());
+    auto& key = res.getValue().first;
+    auto time = res.getValue().second;
+
+    ExecutionStatsController stats = internal::getOrInitializeExecutionStats(catalog, ns);
+
+    updateBucketFetchAndQueryStats(reopeningContext, stats);
+
+    // Buckets are spread across independently-lockable stripes to improve parallelism. We map a
+    // bucket to a stripe by hashing the BucketKey.
+    auto stripeNumber = internal::getStripeNumber(key, catalog.numberOfStripes);
+    ClosedBuckets closedBuckets;
+    internal::CreationInfo info{key, stripeNumber, time, options, stats, &closedBuckets};
+
+    // We try to create a bucket in-memory from one on disk that we can potentially insert our
+    // measurement into.
+    auto rehydratedBucket = (reopeningContext.bucketToReopen.has_value())
+        ? internal::rehydrateBucket(opCtx,
+                                    catalog.bucketStateRegistry,
+                                    stats,
+                                    ns,
+                                    comparator,
+                                    options,
+                                    reopeningContext.bucketToReopen.value(),
+                                    reopeningContext.catalogEra,
+                                    &key)
+        : StatusWith<std::unique_ptr<Bucket>>{ErrorCodes::BadValue, "No bucket to rehydrate"};
+    if (rehydratedBucket.getStatus().code() == ErrorCodes::WriteConflict) {
+        return rehydratedBucket.getStatus();
+    }
+
+    auto& stripe = catalog.stripes[stripeNumber];
+    stdx::lock_guard stripeLock{stripe.mutex};
+
+    // Can safely clear reentrant coordination state now that we have acquired the lock.
+    reopeningContext.clear(stripeLock);
+
+    if (rehydratedBucket.isOK()) {
+        hangTimeseriesInsertBeforeReopeningBucket.pauseWhileSet();
+
+        StatusWith<std::reference_wrapper<Bucket>> swBucket{ErrorCodes::BadValue, ""};
+        auto existingIt = stripe.openBucketsById.find(rehydratedBucket.getValue()->bucketId);
+        if (existingIt != stripe.openBucketsById.end()) {
+            // First let's check the existing bucket if we have one.
+            Bucket* existingBucket = existingIt->second.get();
+            swBucket = internal::reuseExistingBucket(catalog,
+                                                     stripe,
+                                                     stripeLock,
+                                                     stats,
+                                                     key,
+                                                     *existingBucket,
+                                                     reopeningContext.catalogEra);
+        } else {
+            // No existing bucket to use, go ahead and try to reopen our rehydrated bucket.
+            swBucket = internal::reopenBucket(opCtx,
+                                              catalog,
+                                              stripe,
+                                              stripeLock,
+                                              stats,
+                                              key,
+                                              std::move(rehydratedBucket.getValue()),
+                                              reopeningContext.catalogEra,
+                                              closedBuckets);
+        }
+
+        if (swBucket.isOK()) {
+            Bucket& bucket = swBucket.getValue().get();
+            auto insertionResult = insertIntoBucket(opCtx,
+                                                    catalog,
+                                                    stripe,
+                                                    stripeLock,
+                                                    stripeNumber,
+                                                    doc,
+                                                    combine,
+                                                    internal::AllowBucketCreation::kYes,
+                                                    info,
+                                                    bucket);
+            auto* batch = get_if<std::shared_ptr<WriteBatch>>(&insertionResult);
+            invariant(batch);
+            return SuccessfulInsertion{std::move(*batch), std::move(closedBuckets)};
+        } else {
+            stats.incNumBucketReopeningsFailed();
+            if (swBucket.getStatus().code() == ErrorCodes::WriteConflict) {
+                return swBucket.getStatus();
+            }
+            // If we had a different type of error, then we should fall through and proceed to open
+            // a new bucket.
+        }
+    }
+
+    Bucket* bucket =
+        useBucket(opCtx, catalog, stripe, stripeLock, info, internal::AllowBucketCreation::kYes);
+    invariant(bucket);
+
+    auto insertionResult = insertIntoBucket(opCtx,
+                                            catalog,
+                                            stripe,
+                                            stripeLock,
+                                            stripeNumber,
+                                            doc,
+                                            combine,
+                                            internal::AllowBucketCreation::kYes,
+                                            info,
+                                            *bucket);
+    auto* batch = get_if<std::shared_ptr<WriteBatch>>(&insertionResult);
+    invariant(batch);
+    return SuccessfulInsertion{std::move(*batch), std::move(closedBuckets)};
 }
 
 StatusWith<InsertResult> insert(OperationContext* opCtx,
@@ -173,23 +416,50 @@ StatusWith<InsertResult> insert(OperationContext* opCtx,
                                 const StringDataComparator* comparator,
                                 const TimeseriesOptions& options,
                                 const BSONObj& doc,
-                                CombineWithInsertsFromOtherClients combine,
-                                ReopeningContext* reopeningContext) {
-    return internal::insert(opCtx,
-                            catalog,
-                            ns,
-                            comparator,
-                            options,
-                            doc,
-                            combine,
-                            internal::AllowBucketCreation::kYes,
-                            reopeningContext);
+                                CombineWithInsertsFromOtherClients combine) {
+    invariant(!ns.isTimeseriesBucketsCollection());
+
+    auto res = internal::extractBucketingParameters(ns, comparator, options, doc);
+    if (!res.isOK()) {
+        return res.getStatus();
+    }
+    auto& key = res.getValue().first;
+    auto time = res.getValue().second;
+
+    ExecutionStatsController stats = internal::getOrInitializeExecutionStats(catalog, ns);
+
+    // Buckets are spread across independently-lockable stripes to improve parallelism. We map a
+    // bucket to a stripe by hashing the BucketKey.
+    auto stripeNumber = internal::getStripeNumber(key, catalog.numberOfStripes);
+    ClosedBuckets closedBuckets;
+    internal::CreationInfo info{key, stripeNumber, time, options, stats, &closedBuckets};
+    auto& stripe = catalog.stripes[stripeNumber];
+    stdx::lock_guard stripeLock{stripe.mutex};
+
+    Bucket* bucket =
+        useBucket(opCtx, catalog, stripe, stripeLock, info, internal::AllowBucketCreation::kYes);
+    invariant(bucket);
+
+    auto insertionResult = insertIntoBucket(opCtx,
+                                            catalog,
+                                            stripe,
+                                            stripeLock,
+                                            stripeNumber,
+                                            doc,
+                                            combine,
+                                            internal::AllowBucketCreation::kYes,
+                                            info,
+                                            *bucket);
+
+    auto* batch = get_if<std::shared_ptr<WriteBatch>>(&insertionResult);
+    invariant(batch);
+    return SuccessfulInsertion{std::move(*batch), std::move(closedBuckets)};
 }
 
 void waitToInsert(InsertWaiter* waiter) {
-    if (auto* batch = stdx::get_if<std::shared_ptr<WriteBatch>>(waiter)) {
+    if (auto* batch = get_if<std::shared_ptr<WriteBatch>>(waiter)) {
         getWriteBatchResult(**batch).getStatus().ignore();
-    } else if (auto* request = stdx::get_if<std::shared_ptr<ReopeningRequest>>(waiter)) {
+    } else if (auto* request = get_if<std::shared_ptr<ReopeningRequest>>(waiter)) {
         waitForReopeningRequest(**request);
     }
 }
@@ -275,19 +545,16 @@ boost::optional<ClosedBucket> finish(OperationContext* opCtx,
 
         auto prevMemoryUsage = bucket->memoryUsage;
 
-        // Clear the compression state and memory usage from the previous operation as we're about
-        // to replace it with the compression state from the user operation that committed.
-        if (bucket->decompressed) {
-            bucket->memoryUsage -=
-                (bucket->decompressed->before.objsize() + bucket->decompressed->after.objsize());
-            bucket->decompressed = boost::none;
-        }
+        // The uncompressed and compressed images should have already been moved to the batch by
+        // this point.
+        invariant(!bucket->compressed && bucket->uncompressed.isEmpty());
 
-        // Take ownership of the committed batch's decompressed image.
-        if (batch->decompressed) {
-            bucket->decompressed = std::move(batch->decompressed);
-            bucket->memoryUsage +=
-                bucket->decompressed->before.objsize() + bucket->decompressed->after.objsize();
+        // Take ownership of the committed batch's uncompressed and compressed images.
+        bucket->uncompressed = std::move(batch->uncompressed);
+        bucket->memoryUsage += bucket->uncompressed.objsize();
+        if (batch->compressed) {
+            bucket->compressed = std::move(batch->compressed);
+            bucket->memoryUsage += bucket->compressed->objsize();
         }
 
         catalog.memoryUsage.fetchAndAdd(bucket->memoryUsage - prevMemoryUsage);
@@ -370,7 +637,7 @@ void directWriteStart(BucketStateRegistry& registry, const NamespaceString& ns, 
     auto state = addDirectWrite(registry, BucketId{ns, oid});
     hangTimeseriesDirectModificationAfterStart.pauseWhileSet();
 
-    if (stdx::holds_alternative<DirectWriteCounter>(state)) {
+    if (holds_alternative<DirectWriteCounter>(state)) {
         // The direct write count was successfully incremented.
         return;
     }

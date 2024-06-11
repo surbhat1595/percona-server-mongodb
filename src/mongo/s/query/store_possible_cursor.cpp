@@ -45,7 +45,7 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/cursor_id.h"
 #include "mongo/db/query/cursor_response.h"
-#include "mongo/db/query/query_stats/key_generator.h"
+#include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/shard_id.h"
@@ -115,7 +115,7 @@ StatusWith<BSONObj> storePossibleCursor(OperationContext* opCtx,
 
     if (incomingCursorResponse.getValue().getCursorId() == CursorId(0)) {
         opDebug.cursorExhausted = true;
-        collectQueryStatsMongos(opCtx, std::move(opDebug.queryStatsKey));
+        collectQueryStatsMongos(opCtx, std::move(opDebug.queryStatsInfo.key));
         return cmdResult;
     }
 

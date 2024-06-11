@@ -173,23 +173,26 @@ __compact_page(WT_SESSION_IMPL *session, WT_REF *ref, bool *skipp)
     WT_REF_LOCK(session, ref, &previous_state);
 
     /*
-     * Skip deleted pages but consider them progress (the on-disk block is discarded by the next
-     * checkpoint).
+     * Don't bother rewriting deleted pages but also don't skip. The on-disk block is discarded by
+     * the next checkpoint.
      */
-    if (previous_state == WT_REF_DELETED)
+    if (previous_state == WT_REF_DELETED && ref->page_del == NULL)
         *skipp = false;
 
     /*
-     * If it's on-disk, get a copy of the address and ask the block manager to rewrite the block if
+     * If it's on disk, get a copy of the address and ask the block manager to rewrite the block if
      * it's useful. This is safe because we're holding the WT_REF locked, so nobody can read the
-     * page giving eviction a chance to modify the address.
+     * page giving eviction a chance to modify the address. Note that a deleted ref that is not
+     * globally visible is still on disk.
      *
      * In this path, we are holding the WT_REF lock across two OS buffer cache I/Os (the read of the
      * original block and the write of the new block), plus whatever overhead that entails. It's not
      * ideal, we could release the lock, but then we'd have to deal with the block having been read
      * into memory while we were moving it.
      */
-    if (previous_state == WT_REF_DISK && __wt_ref_addr_copy(session, ref, &copy)) {
+    if ((previous_state == WT_REF_DISK ||
+          (previous_state == WT_REF_DELETED && ref->page_del != NULL)) &&
+      __wt_ref_addr_copy(session, ref, &copy)) {
         bm = S2BT(session)->bm;
         addr_size = copy.size;
         WT_ERR(bm->compact_page_rewrite(bm, session, copy.addr, &addr_size, skipp));
@@ -311,7 +314,7 @@ __wt_compact(WT_SESSION_IMPL *session)
     WT_BM *bm;
     WT_DECL_RET;
     WT_REF *ref;
-    u_int i, msg_count;
+    u_int i;
     bool first, skip;
 
     uint64_t stats_pages_reviewed;           /* Pages reviewed */
@@ -320,7 +323,6 @@ __wt_compact(WT_SESSION_IMPL *session)
     uint64_t stats_pages_skipped;            /* Pages skipped */
 
     bm = S2BT(session)->bm;
-    msg_count = 0;
     ref = NULL;
 
     WT_STAT_DATA_INCR(session, session_compact);
@@ -366,7 +368,7 @@ __wt_compact(WT_SESSION_IMPL *session)
          */
         if (first || ++i > 100) {
             if (!first)
-                bm->compact_progress(bm, session, &msg_count);
+                bm->compact_progress(bm, session);
             WT_ERR(__wt_session_compact_check_interrupted(session));
 
             if (__wt_cache_stuck(session))

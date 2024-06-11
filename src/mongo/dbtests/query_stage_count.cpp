@@ -80,6 +80,7 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
@@ -172,7 +173,8 @@ public:
             &_opCtx,
             _coll,
             oldrecordId,
-            Snapshotted<BSONObj>(_opCtx.recoveryUnit()->getSnapshotId(), oldDoc),
+            Snapshotted<BSONObj>(shard_role_details::getRecoveryUnit(&_opCtx)->getSnapshotId(),
+                                 oldDoc),
             newDoc,
             collection_internal::kUpdateAllIndexes,
             nullptr /* indexesAffected */,
@@ -408,7 +410,7 @@ public:
     }
 };
 
-class All : public OldStyleSuiteSpecification {
+class All : public unittest::OldStyleSuiteSpecification {
 public:
     All() : OldStyleSuiteSpecification("query_stage_count") {}
 
@@ -423,7 +425,7 @@ public:
     }
 };
 
-OldStyleSuiteInitializer<All> queryStageCountAll;
+unittest::OldStyleSuiteInitializer<All> queryStageCountAll;
 
 }  // namespace QueryStageCount
 }  // namespace mongo

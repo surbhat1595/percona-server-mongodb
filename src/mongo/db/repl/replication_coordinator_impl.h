@@ -229,17 +229,23 @@ public:
 
     virtual bool shouldRelaxIndexConstraints(OperationContext* opCtx, const NamespaceString& ns);
 
-    virtual void setMyLastAppliedOpTimeAndWallTime(const OpTimeAndWallTime& opTimeAndWallTime);
-    virtual void setMyLastDurableOpTimeAndWallTime(const OpTimeAndWallTime& opTimeAndWallTime);
-
+    virtual void setMyLastWrittenOpTimeAndWallTimeForward(
+        const OpTimeAndWallTime& opTimeAndWallTime);
     virtual void setMyLastAppliedOpTimeAndWallTimeForward(
-        const OpTimeAndWallTime& opTimeAndWallTime, bool advanceGlobalTimestamp);
+        const OpTimeAndWallTime& opTimeAndWallTime);
     virtual void setMyLastDurableOpTimeAndWallTimeForward(
+        const OpTimeAndWallTime& opTimeAndWallTime);
+    virtual void setMyLastAppliedAndLastWrittenOpTimeAndWallTimeForward(
+        const OpTimeAndWallTime& opTimeAndWallTime);
+    virtual void setMyLastDurableAndLastWrittenOpTimeAndWallTimeForward(
         const OpTimeAndWallTime& opTimeAndWallTime);
 
     virtual void resetMyLastOpTimes();
 
     virtual void setMyHeartbeatMessage(const std::string& msg);
+
+    virtual OpTime getMyLastWrittenOpTime() const override;
+    virtual OpTimeAndWallTime getMyLastWrittenOpTimeAndWallTime() const override;
 
     virtual OpTime getMyLastAppliedOpTime() const override;
     virtual OpTimeAndWallTime getMyLastAppliedOpTimeAndWallTime(
@@ -306,7 +312,7 @@ public:
 
     virtual BSONObj getConfigBSON() const override;
 
-    virtual const MemberConfig* findConfigMemberByHostAndPort(
+    virtual boost::optional<MemberConfig> findConfigMemberByHostAndPort_deprecated(
         const HostAndPort& hap) const override;
 
     virtual bool isConfigLocalHostAllowed() const override;
@@ -431,8 +437,6 @@ public:
     virtual Status abortCatchupIfNeeded(PrimaryCatchUpConclusionReason reason) override;
 
     virtual void incrementNumCatchUpOpsIfCatchingUp(long numOps) override;
-
-    void signalDropPendingCollectionsRemovedFromStorage() final;
 
     virtual boost::optional<Timestamp> getRecoveryTimestamp() override;
 
@@ -740,24 +744,24 @@ private:
         void rstlReacquire();
 
         /*
-         * Returns _userOpsKilled value.
+         * Returns _totalOpsKilled value.
          */
-        size_t getUserOpsKilled() const;
+        size_t getTotalOpsKilled() const;
 
         /*
-         * Increments _userOpsKilled by val.
+         * Increments _totalOpsKilled by val.
          */
-        void incrementUserOpsKilled(size_t val = 1);
+        void incrementTotalOpsKilled(size_t val = 1);
 
         /*
-         * Returns _userOpsRunning value.
+         * Returns _totalOpsRunning value.
          */
-        size_t getUserOpsRunning() const;
+        size_t getTotalOpsRunning() const;
 
         /*
-         * Increments _userOpsRunning by val.
+         * Increments _totalOpsRunning by val.
          */
-        void incrementUserOpsRunning(size_t val = 1);
+        void incrementTotalOpsRunning(size_t val = 1);
 
         /*
          * Returns the step up/step down opCtx.
@@ -811,9 +815,9 @@ private:
         // Thread that will run killOpThreadFn().
         std::unique_ptr<stdx::thread> _killOpThread;
         // Tracks number of operations killed on step up / step down.
-        size_t _userOpsKilled = 0;
+        size_t _totalOpsKilled = 0;
         // Tracks number of operations left running on step up / step down.
-        size_t _userOpsRunning = 0;
+        size_t _totalOpsRunning = 0;
         // Protects killSignaled and stopKillingOps cond. variable.
         Mutex _mutex = MONGO_MAKE_LATCH("AutoGetRstlForStepUpStepDown::_mutex");
         // Signals thread about the change of killSignaled value.
@@ -836,6 +840,9 @@ private:
 
     class WaiterList {
     public:
+        WaiterList() = delete;
+        WaiterList(Atomic64Metric& waiterCountMetric);
+
         // Adds waiter into the list.
         void add_inlock(const OpTime& opTime, SharedWaiterHandle waiter);
         // Adds a waiter into the list and returns the future of the waiter's promise.
@@ -853,8 +860,13 @@ private:
         void setErrorAll_inlock(Status status);
 
     private:
+        void _updateMetric_inlock();
+
         // Waiters sorted by OpTime.
         std::multimap<OpTime, SharedWaiterHandle> _waiters;
+        // We keep a separate count outside _waiters.size() in order to avoid having to
+        // take a lock to read the metric.
+        Atomic64Metric& _waiterCountMetric;
     };
 
     enum class HeartbeatState { kScheduled = 0, kSent = 1 };
@@ -1159,6 +1171,9 @@ private:
 
     int _getMyId_inlock() const;
 
+    OpTime _getMyLastWrittenOpTime_inlock() const;
+    OpTimeAndWallTime _getMyLastWrittenOpTimeAndWallTime_inlock() const;
+
     OpTime _getMyLastAppliedOpTime_inlock() const;
     OpTimeAndWallTime _getMyLastAppliedOpTimeAndWallTime_inlock() const;
 
@@ -1194,14 +1209,23 @@ private:
     void _reportUpstream_inlock(stdx::unique_lock<Latch> lock);
 
     /**
-     * Helpers to set the last applied and durable OpTime.
+     * Helpers to set the last written, applied and durable OpTime.
      */
+    void _setMyLastWrittenOpTimeAndWallTime(WithLock lk,
+                                            const OpTimeAndWallTime& opTime,
+                                            bool isRollbackAllowed);
     void _setMyLastAppliedOpTimeAndWallTime(WithLock lk,
                                             const OpTimeAndWallTime& opTime,
                                             bool isRollbackAllowed);
     void _setMyLastDurableOpTimeAndWallTime(WithLock lk,
                                             const OpTimeAndWallTime& opTimeAndWallTime,
                                             bool isRollbackAllowed);
+    // The return bool value means whether the corresponding timestamp is advanced in these
+    // functions.
+    bool _setMyLastAppliedOpTimeAndWallTimeForward(WithLock lk,
+                                                   const OpTimeAndWallTime& opTimeAndWallTime);
+    bool _setMyLastDurableOpTimeAndWallTimeForward(WithLock lk,
+                                                   const OpTimeAndWallTime& opTimeAndWallTime);
 
     /**
      * Schedules a heartbeat using this node's "replSetName" to be sent to "target" at "when".
@@ -1798,8 +1822,9 @@ private:
     // Set to true when we are in the process of shutting down replication.
     bool _inShutdown;  // (M)
 
-    // The term of the last election that resulted in this node becoming primary.
-    AtomicWord<int64_t> _electionIdTerm;  // (S)
+    // The term of the last election that resulted in this node becoming primary.  "Shadow" because
+    // this follows the authoritative value in the topology coordinatory.
+    AtomicWord<long long> _electionIdTermShadow;  // (S)
 
     // Used to signal threads waiting for changes to _memberState.
     stdx::condition_variable _memberStateChange;  // (M)
@@ -1844,8 +1869,8 @@ private:
     // When engaged, this must be <= _lastCommittedOpTime.
     boost::optional<OpTime> _currentCommittedSnapshot;  // (M)
 
-    // A flag that enables/disables advancement of the stable timestamp for storage.
-    bool _shouldSetStableTimestamp = true;  // (M)
+    // Captured committedSnapshotOptime after reconfig
+    boost::optional<OpTime> _committedSnapshotAfterReconfig;  // (M)
 
     // Used to signal threads that are waiting for a new value of _currentCommittedSnapshot.
     stdx::condition_variable _currentCommittedSnapshotCond;  // (M)

@@ -183,6 +183,15 @@ class Fixture(object, metaclass=registry.make_registry_metaclass(_FIXTURES)):  #
         raise NotImplementedError(
             "get_internal_connection_string must be implemented by Fixture subclasses")
 
+    def get_shell_connection_url(self):
+        """Return the connection string to be used by the mongo shell process executing a jstest.
+
+        Defaults to returning the driver connection url, but can be overriden to provide 
+        shell-specific options (such as using a gRPC port).
+        https://docs.mongodb.com/manual/reference/connection-string/
+        """
+        return self.get_driver_connection_url()
+
     def get_driver_connection_url(self):
         """Return the mongodb connection string as defined below.
 
@@ -203,6 +212,18 @@ class Fixture(object, metaclass=registry.make_registry_metaclass(_FIXTURES)):  #
         if pymongo.version_tuple[0] >= 3:
             kwargs["serverSelectionTimeoutMS"] = timeout_millis
             kwargs["connect"] = True
+
+        if self.config.TLS_MODE == "requireTLS":
+            # When server is in 'tlsMode == requireTLS`,
+            # the client would be unable to connect
+            # without local TLS being explicitly turned on.
+            # Other modes, such as 'allowTLS' permit both tls and non-tls clients.
+            kwargs["tls"] = True
+            kwargs["tlsAllowInvalidHostnames"] = True
+            if self.config.TLS_CA_FILE:
+                kwargs["tlsCAFile"] = self.config.TLS_CA_FILE
+            if self.config.SHELL_TLS_CERTIFICATE_KEY_FILE:
+                kwargs["tlsCertificateKeyFile"] = self.config.SHELL_TLS_CERTIFICATE_KEY_FILE
 
         return pymongo.MongoClient(host=self.get_driver_connection_url(),
                                    read_preference=read_preference, **kwargs)

@@ -44,7 +44,6 @@
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/client/connection_pool.h"
 #include "mongo/client/dbclient_base.h"
 #include "mongo/client/dbclient_connection.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -52,7 +51,6 @@
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/namespace_string.h"
@@ -74,6 +72,7 @@
 #include "mongo/db/shutdown_in_progress_quiesce_info.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -696,7 +695,7 @@ void BackgroundSync::_runRollback(OperationContext* opCtx,
 
     // Ensure future transactions read without a timestamp.
     invariant(RecoveryUnit::ReadSource::kNoTimestamp ==
-              opCtx->recoveryUnit()->getTimestampReadSource());
+              shard_role_details::getRecoveryUnit(opCtx)->getTimestampReadSource());
 
     // Rollback is a synchronous operation that uses the task executor and may not be
     // executed inside the fetcher callback.
@@ -743,14 +742,18 @@ void BackgroundSync::_runRollback(OperationContext* opCtx,
 
     OplogInterfaceLocal localOplog(opCtx);
 
-    ConnectionPool connectionPool;
-    std::unique_ptr<ConnectionPool::ConnectionPtr> connection;
-    auto getConnection = [&connection, &connectionPool, source]() -> DBClientBase* {
-        if (!connection.get()) {
-            connection.reset(new ConnectionPool::ConnectionPtr(
-                &connectionPool, source, Date_t::now(), kRollbackOplogSocketTimeout));
-        };
-        return connection->get();
+    std::unique_ptr<DBClientConnection> connection;
+    auto getConnection = [&connection, source]() -> DBClientBase* {
+        if (!connection) {
+            connection = std::make_unique<DBClientConnection>();
+            connection->setSoTimeout(durationCount<Milliseconds>(kRollbackOplogSocketTimeout) /
+                                     1000.0);
+            connection->connect(source, StringData(), boost::none);
+            if (auth::isInternalAuthSet()) {
+                connection->authenticateInternalUser();
+            }
+        }
+        return connection.get();
     };
 
     // Because oplog visibility is updated asynchronously, wait until all uncommitted oplog entries
@@ -898,7 +901,7 @@ void BackgroundSync::start(OperationContext* opCtx) {
 
     // Ensure future transactions read without a timestamp.
     invariant(RecoveryUnit::ReadSource::kNoTimestamp ==
-              opCtx->recoveryUnit()->getTimestampReadSource());
+              shard_role_details::getRecoveryUnit(opCtx)->getTimestampReadSource());
 
     do {
         lastAppliedOpTime = _readLastAppliedOpTime(opCtx);

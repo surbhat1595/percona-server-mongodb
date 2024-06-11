@@ -64,7 +64,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
-#include "mongo/db/op_observer/oplog_writer_impl.h"
+#include "mongo/db/op_observer/operation_logger_impl.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
@@ -180,7 +180,8 @@ public:
         // to avoid the invariant in ReplClientInfo::setLastOp that the optime only goes forward.
         repl::ReplClientInfo::forClient(_opCtx.getClient()).clearLastOp();
 
-        sc->setOpObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+        sc->setOpObserver(
+            std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
 
         createOplog(&_opCtx);
 
@@ -287,15 +288,6 @@ protected:
             }
         }
 
-        if (!serverGlobalParams.enableMajorityReadConcern) {
-            if (ops.size() > 0) {
-                if (auto tsElem = ops.front()["ts"]) {
-                    _opCtx.getServiceContext()->getStorageEngine()->setOldestTimestamp(
-                        tsElem.timestamp());
-                }
-            }
-        }
-
         OldClientContext ctx(&_opCtx, nss());
         for (std::vector<BSONObj>::iterator i = ops.begin(); i != ops.end(); ++i) {
             repl::UnreplicatedWritesBlock uwb(&_opCtx);
@@ -308,7 +300,7 @@ protected:
                 for (auto& stmt : stmts) {
                     ops.push_back(ApplierOperation(&stmt));
                 }
-                _opCtx.releaseAndReplaceRecoveryUnit();
+                shard_role_details::releaseAndReplaceRecoveryUnit(&_opCtx);
                 uassertStatusOK(
                     OplogApplierUtils::applyOplogBatchCommon(&_opCtx,
                                                              &ops,
@@ -324,7 +316,8 @@ protected:
                                        ->getMyLastAppliedOpTime()
                                        .getTimestamp();
                 auto nextTimestamp = std::max(lastApplied + 1, Timestamp(1, 1));
-                ASSERT_OK(_opCtx.recoveryUnit()->setTimestamp(nextTimestamp));
+                ASSERT_OK(
+                    shard_role_details::getRecoveryUnit(&_opCtx)->setTimestamp(nextTimestamp));
                 const bool dataIsConsistent = true;
                 uassertStatusOK(applyOperation_inlock(&_opCtx,
                                                       coll,
@@ -357,7 +350,7 @@ protected:
             auto nextTimestamp = std::max(lastApplied + 1, Timestamp(1, 1));
 
             repl::UnreplicatedWritesBlock uwb(&_opCtx);
-            ASSERT_OK(_opCtx.recoveryUnit()->setTimestamp(nextTimestamp));
+            ASSERT_OK(shard_role_details::getRecoveryUnit(&_opCtx)->setTimestamp(nextTimestamp));
             ASSERT_OK(coll->truncate(&_opCtx));
             wunit.commit();
         });
@@ -389,7 +382,7 @@ protected:
             collection_internal::insertDocument(
                 &_opCtx, coll, InsertStatement(o), nullOpDebug, true)
                 .transitional_ignore();
-            ASSERT_OK(_opCtx.recoveryUnit()->setTimestamp(nextTimestamp));
+            ASSERT_OK(shard_role_details::getRecoveryUnit(&_opCtx)->setTimestamp(nextTimestamp));
             wunit.commit();
             return;
         }
@@ -403,7 +396,7 @@ protected:
         collection_internal::insertDocument(
             &_opCtx, coll, InsertStatement(b.obj()), nullOpDebug, true)
             .transitional_ignore();
-        ASSERT_OK(_opCtx.recoveryUnit()->setTimestamp(nextTimestamp));
+        ASSERT_OK(shard_role_details::getRecoveryUnit(&_opCtx)->setTimestamp(nextTimestamp));
         wunit.commit();
     }
     static BSONObj wid(const char* json) {
@@ -1412,7 +1405,7 @@ public:
     }
 };
 
-class All : public OldStyleSuiteSpecification {
+class All : public unittest::OldStyleSuiteSpecification {
 public:
     All() : OldStyleSuiteSpecification("repl") {}
 
@@ -1472,7 +1465,7 @@ public:
     }
 };
 
-OldStyleSuiteInitializer<All> myall;
+unittest::OldStyleSuiteInitializer<All> myall;
 
 }  // namespace ReplTests
 }  // namespace repl

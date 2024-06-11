@@ -183,7 +183,7 @@ void buildStateDocumentApplyMetricsForUpdate(BSONObjBuilder& bob,
                                              ReshardingMetrics* metrics,
                                              Date_t timestamp) {
     if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         bob.append(
             getIntervalEndFieldName<DocT>(ReshardingRecipientMetrics::kIndexBuildTimeFieldName),
             timestamp);
@@ -243,7 +243,7 @@ void setMeticsAfterWrite(ReshardingMetrics* metrics,
             return;
         case RecipientStateEnum::kApplying:
             if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
-                    serverGlobalParams.featureCompatibility)) {
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                 metrics->setEndFor(ReshardingMetrics::TimedPhase::kBuildingIndex, timestamp);
             } else {
                 metrics->setEndFor(ReshardingMetrics::TimedPhase::kCloning, timestamp);
@@ -414,7 +414,7 @@ ReshardingRecipientService::RecipientStateMachine::_notifyCoordinatorAndAwaitDec
         ->withAutomaticRetry([this, executor](const auto& factory) {
             auto opCtx = factory.makeOperationContext(&cc());
             if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
-                    serverGlobalParams.featureCompatibility)) {
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                 {
                     AutoGetCollection coll(opCtx.get(), _metadata.getTempReshardingNss(), MODE_IS);
                     if (coll) {
@@ -700,7 +700,7 @@ void ReshardingRecipientService::RecipientStateMachine::
             opCtx.get(), _metadata, *_cloneTimestamp);
 
         if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
-                serverGlobalParams.featureCompatibility)) {
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
             _externalState->withShardVersionRetry(
                 opCtx.get(),
                 _metadata.getSourceNss(),
@@ -716,6 +716,11 @@ void ReshardingRecipientService::RecipientStateMachine::
                     // to make sure we have the indexSpecs even after restart.
                     shardkeyutil::ValidationBehaviorsReshardingBulkIndex behaviors;
                     behaviors.setOpCtxAndCloneTimestamp(opCtx.get(), *_cloneTimestamp);
+
+                    // Do not need to pass in time-series options because we cannot reshard a
+                    // time-series collection.
+                    // TODO SERVER-84741 pass in time-series options and ensure the shard key is
+                    // partially rewritten.
                     shardkeyutil::validateShardKeyIndexExistsOrCreateIfPossible(
                         opCtx.get(),
                         _metadata.getSourceNss(),
@@ -723,7 +728,9 @@ void ReshardingRecipientService::RecipientStateMachine::
                         CollationSpec::kSimpleSpec,
                         false /* unique */,
                         true /* enforceUniquenessCheck */,
-                        behaviors);
+                        behaviors,
+                        boost::none /* tsOpts */,
+                        false /* updatedToHandleTimeseriesIndex */);
                 });
         } else {
             _externalState->withShardVersionRetry(
@@ -736,6 +743,10 @@ void ReshardingRecipientService::RecipientStateMachine::
                         _metadata.getTempReshardingNss(),
                         ShardKeyPattern(_metadata.getReshardingKey()));
 
+                    // Do not need to pass in time-series options because we cannot reshard a
+                    // time-series collection.
+                    // TODO SERVER-84741 pass in time-series options and ensure the shard key is
+                    // partially rewritten.
                     shardkeyutil::validateShardKeyIndexExistsOrCreateIfPossible(
                         opCtx.get(),
                         _metadata.getTempReshardingNss(),
@@ -743,7 +754,9 @@ void ReshardingRecipientService::RecipientStateMachine::
                         CollationSpec::kSimpleSpec,
                         false /* unique */,
                         true /* enforceUniquenessCheck */,
-                        shardkeyutil::ValidationBehaviorsShardCollection(opCtx.get()));
+                        shardkeyutil::ValidationBehaviorsShardCollection(opCtx.get()),
+                        boost::none /* tsOpts */,
+                        false /* updatedToHandleTimeseriesIndex */);
                 });
         }
 
@@ -864,7 +877,7 @@ ReshardingRecipientService::RecipientStateMachine::_cloneThenTransitionToBuildin
         .thenRunOn(**executor)
         .then([this, &factory] {
             if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
-                    serverGlobalParams.featureCompatibility)) {
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                 _transitionToBuildingIndex(factory);
             } else {
                 _transitionToApplying(factory);
@@ -892,6 +905,11 @@ ReshardingRecipientService::RecipientStateMachine::_buildIndexThenTransitionToAp
                    // We call validateShardKeyIndexExistsOrCreateIfPossible again here in case if we
                    // restarted after creatingCollection phase, whatever indexSpec we get in that
                    // phase will go away.
+                   //
+                   // Do not need to pass in time-series options because we cannot reshard a
+                   // time-series collection.
+                   // TODO SERVER-84741 pass in time-series options and ensure the shard key is
+                   // partially rewritten.
                    shardkeyutil::ValidationBehaviorsReshardingBulkIndex behaviors;
                    behaviors.setOpCtxAndCloneTimestamp(opCtx.get(), *_cloneTimestamp);
                    shardkeyutil::validateShardKeyIndexExistsOrCreateIfPossible(
@@ -901,7 +919,9 @@ ReshardingRecipientService::RecipientStateMachine::_buildIndexThenTransitionToAp
                        CollationSpec::kSimpleSpec,
                        false /* unique */,
                        true /* enforceUniquenessCheck */,
-                       behaviors);
+                       behaviors,
+                       boost::none /* tsOpts */,
+                       false /* updatedToHandleTimeseriesIndex */);
 
                    // Get all indexSpecs need to build.
                    auto* indexBuildsCoordinator = IndexBuildsCoordinator::get(opCtx.get());
@@ -1070,9 +1090,10 @@ void ReshardingRecipientService::RecipientStateMachine::_cleanupReshardingCollec
 
     if (aborted) {
         if (feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
-                serverGlobalParams.featureCompatibility)) {
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
             dropCollectionShardingIndexCatalog(opCtx.get(), _metadata.getTempReshardingNss());
         }
+
 
         {
             // We need to do this even though the feature flag is not on because the resharding can
@@ -1099,7 +1120,7 @@ void ReshardingRecipientService::RecipientStateMachine::_cleanupReshardingCollec
     }
 
     if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         resharding::data_copy::deleteRecipientResumeData(opCtx.get(),
                                                          _metadata.getReshardingUUID());
     }
@@ -1383,10 +1404,11 @@ void ReshardingRecipientService::RecipientStateMachine::_removeRecipientDocument
 
         WriteUnitOfWork wuow(opCtx.get());
 
-        opCtx->recoveryUnit()->onCommit([this](OperationContext*, boost::optional<Timestamp>) {
-            stdx::lock_guard<Latch> lk(_mutex);
-            _completionPromise.emplaceValue();
-        });
+        shard_role_details::getRecoveryUnit(opCtx.get())
+            ->onCommit([this](OperationContext*, boost::optional<Timestamp>) {
+                stdx::lock_guard<Latch> lk(_mutex);
+                _completionPromise.emplaceValue();
+            });
 
         deleteObjects(opCtx.get(),
                       coll,

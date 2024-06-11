@@ -1,0 +1,135 @@
+# Amazon build variants for testing development environments that should run on master,
+# rapid release (7.1, 7.2 etc.) and LTS release (7.0, 6.0 etc.) branch projects
+
+variables:
+# THIS HAS COPIES IN:
+# - etc/evergreen_yml_components/variants/amazon/test_dev_master_branch_only.yml
+# - etc/evergreen_yml_components/variants/amazon/test_dev.yml
+# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
+- &linux-arm64-dynamic-compile-params  # Essential set of compile parameters used for Linux dev variants.
+  run_on:
+  - amazon2-arm64-large
+  activate: true  # These compile variants run on every commit to reduce latency of the auto-reverter.
+  modules:
+    - enterprise
+  stepback: false
+
+# THIS HAS COPIES IN:
+# - etc/evergreen_yml_components/variants/amazon/test_dev_master_branch_only.yml
+# - etc/evergreen_yml_components/variants/amazon/test_dev.yml
+# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
+- &linux-arm64-dynamic-compile-expansions
+  scons_cache_scope: shared
+  scons_cache_mode: all
+  has_packages: false
+  compile_flags: >-
+    --ssl
+    MONGO_DISTMOD=amazon2
+    -j$(grep -c ^processor /proc/cpuinfo)
+    --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+    --link-model=dynamic
+    --use-diagnostic-latches=on
+
+# THIS HAS COPIES IN:
+# - etc/evergreen_yml_components/variants/perf.yml
+# - etc/evergreen_yml_components/variants/amazon/test_dev_master_branch_only.yml
+# - etc/evergreen_yml_components/variants/amazon/test_dev.yml
+# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
+- &linux_arm64_generic_expansions
+  multiversion_platform: amazon2
+  multiversion_edition: enterprise
+  multiversion_architecture: aarch64
+  packager_arch: aarch64
+  packager_distro: amazon2
+  repo_edition: enterprise
+  large_distro_name: amazon2-arm64-large
+  num_scons_link_jobs_available: 0.99
+
+
+buildvariants:
+- <<: *linux-arm64-dynamic-compile-params
+  name: &amazon-linux2-arm64-crypt-compile amazon-linux2-arm64-crypt-compile
+  display_name: "! Amazon Linux 2 arm64 Crypt Compile"
+  expansions:
+    <<: *linux-arm64-dynamic-compile-expansions
+    compile_variant: *amazon-linux2-arm64-crypt-compile
+  tasks:
+    - name: .crypt
+    - name: crypt_build_debug_and_test
+
+- <<: *linux-arm64-dynamic-compile-params
+  name: &amazon-linux2-arm64-dynamic-compile amazon-linux2-arm64-dynamic-compile
+  display_name: "! Amazon Linux 2 arm64 Enterprise Shared Library Compile & Static Analysis"
+  expansions:
+    <<: *linux-arm64-dynamic-compile-expansions
+    clang_tidy_toolchain: v4
+    compile_variant: *amazon-linux2-arm64-dynamic-compile
+  tasks:
+    - name: clang_tidy_TG
+      distros:
+        - amazon2-arm64-xlarge
+    - name: compile_ninja_quick_TG
+    - name: compile_test_parallel_unittest_stream_TG
+    - name: compile_test_parallel_core_stream_TG
+    - name: compile_test_parallel_dbtest_stream_TG
+    - name: compile_integration_and_test_parallel_stream_TG
+    - name: generate_buildid_to_debug_symbols_mapping
+    - name: iwyu_self_test_TG
+    - name: .lint
+    - name: resmoke_validation_tests
+    - name: server_discovery_and_monitoring_json_test_TG
+    - name: server_selection_json_test_TG
+    - name: run_pretty_printer_tests
+
+- name: &commit-queue commit-queue
+  display_name: "~ Commit Queue"
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
+  modules:
+    - enterprise
+  run_on:
+    - amazon2-arm64-small
+  stepback: false
+  expansions:
+    <<: *linux_arm64_generic_expansions
+    scons_cache_scope: shared
+    scons_cache_mode: all
+    commit_queue_alternate_cache: amazon-linux2-arm64-dynamic-compile
+    has_packages: false
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=amazon2
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --link-model=dynamic
+      --use-diagnostic-latches=on
+    crypt_task_compile_flags: >-
+      SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic
+      -Wl,--no-gnu-unique"
+      CCFLAGS="-fno-gnu-unique"
+    clang_tidy_toolchain: v4
+    num_scons_unit_cc_jobs_available: 0.75
+    compile_variant: *commit-queue
+  depends_on: []
+  tasks:
+  - name: compile_ninja_quick_TG
+  - name: compile_test_parallel_core_stream_TG
+    distros:
+    - amazon2-arm64-xlarge-commitqueue
+  - name: compile_test_parallel_unittest_stream_TG
+    distros:
+    - amazon2-arm64-xlarge-commitqueue
+  - name: compile_test_parallel_dbtest_stream_TG
+    distros:
+    - amazon2-arm64-xlarge-commitqueue
+  - name: jsCore
+    distros:
+    - amazon2-arm64-large
+  - name: .lint
+  - name: test_api_version_compatibility
+  - name: validate_commit_message
+  - name: lint_large_files_check
+  - name: check_feature_flag_tags
+  - name: resmoke_validation_tests
+  - name: version_gen_validation
+    distros:
+    - ubuntu2004-small

@@ -34,6 +34,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/expression_test_base.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
+#include "mongo/db/exec/sbe/sbe_block_test_helpers.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
@@ -52,15 +53,6 @@ public:
         assertBlockEq(tag, val, tvPairs);
     }
 
-    std::unique_ptr<value::ValueBlock> makeBoolBlock(std::vector<bool> bools) {
-        std::unique_ptr<value::ValueBlock> block = std::make_unique<value::HeterogeneousBlock>();
-        for (auto b : bools) {
-            auto [t, v] = makeBool(b);
-            static_cast<value::HeterogeneousBlock*>(block.get())->push_back(t, v);
-        }
-        return block;
-    }
-
     void assertBlockEq(value::TypeTags blockTag,
                        value::Value blockVal,
                        const std::vector<std::pair<value::TypeTags, value::Value>>& expected) {
@@ -74,8 +66,8 @@ public:
                 extracted.tags[i], extracted.vals[i], expected[i].first, expected[i].second);
             ASSERT_EQ(t, value::TypeTags::NumberInt32) << extracted;
             ASSERT_EQ(value::bitcastTo<int32_t>(v), 0)
-                << "Got " << extracted[i] << " expected " << expected[i] << " full extracted output"
-                << extracted;
+                << "Got " << extracted[i] << " expected " << expected[i]
+                << " full extracted output " << extracted;
         }
     }
 
@@ -83,9 +75,29 @@ public:
                    std::vector<char> filterPosInfo,
                    std::vector<bool> expectedResult);
 
-    void testCmpScalar(const std::vector<std::pair<value::TypeTags, value::Value>>& testValues,
-                       EPrimBinary::Op,
-                       StringData cmpFunctionName);
+    void testCmpScalar(EPrimBinary::Op, StringData cmpFunctionName, value::ValueBlock* valBlock);
+
+    std::pair<std::vector<bool>, std::vector<bool>> naiveLogicalAndOr(
+        std::unique_ptr<value::ValueBlock> leftBlock,
+        std::unique_ptr<value::ValueBlock> rightBlock) {
+        auto left = leftBlock->extract();
+        auto right = rightBlock->extract();
+        ASSERT_EQ(left.count, right.count);
+
+        std::vector<bool> andRes;
+        std::vector<bool> orRes;
+
+        for (size_t i = 0; i < left.count; ++i) {
+            ASSERT_EQ(left.tags[i], value::TypeTags::Boolean);
+            ASSERT_EQ(right.tags[i], value::TypeTags::Boolean);
+            auto leftBool = value::bitcastTo<bool>(left.vals[i]);
+            auto rightBool = value::bitcastTo<bool>(right.vals[i]);
+            andRes.push_back(leftBool && rightBool);
+            orRes.push_back(leftBool || rightBool);
+        }
+
+        return std::pair{andRes, orRes};
+    }
 };
 
 TEST_F(SBEBlockExpressionTest, BlockExistsTest) {
@@ -108,6 +120,80 @@ TEST_F(SBEBlockExpressionTest, BlockExistsTest) {
     value::ValueGuard guard(runTag, runVal);
 
     assertBlockOfBool(runTag, runVal, std::vector{true, true, true, false, true});
+}
+
+TEST_F(SBEBlockExpressionTest, BlockExistsMonoHomogeneousTest) {
+    value::ViewOfValueAccessor blockAccessor;
+    auto blockSlot = bindAccessor(&blockAccessor);
+    auto existsExpr =
+        sbe::makeE<sbe::EFunction>("valueBlockExists", sbe::makeEs(makeE<EVariable>(blockSlot)));
+    auto compiledExpr = compileExpression(*existsExpr);
+
+    {
+        value::Int32Block block;
+        block.push_back(42);
+        block.push_back(43);
+        block.push_back(44);
+        block.pushNothing();
+        block.push_back(46);
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&block));
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        assertBlockOfBool(runTag, runVal, std::vector{true, true, true, false, true});
+    }
+
+    {
+        value::Int32Block denseBlock;
+        denseBlock.push_back(1);
+        denseBlock.push_back(2);
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&denseBlock));
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        assertBlockOfBool(runTag, runVal, std::vector{true, true});
+    }
+
+    {
+        value::Int32Block sparseBlock;
+        sparseBlock.pushNothing();
+        sparseBlock.pushNothing();
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&sparseBlock));
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        assertBlockOfBool(runTag, runVal, std::vector{false, false});
+    }
+
+    {
+        auto [blockTag, blockVal] = value::makeNewString("MonoBlock string"_sd);
+        value::ValueGuard blockInputGuard(blockTag, blockVal);
+        value::MonoBlock monoBlock(2, blockTag, blockVal);
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&monoBlock));
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        assertBlockOfBool(runTag, runVal, std::vector{true, true});
+    }
+
+    {
+        value::MonoBlock monoBlock(2, value::TypeTags::Nothing, value::Value{0u});
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&monoBlock));
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        assertBlockOfBool(runTag, runVal, std::vector{false, false});
+    }
 }
 
 TEST_F(SBEBlockExpressionTest, BlockFillEmptyShallowTest) {
@@ -204,6 +290,89 @@ TEST_F(SBEBlockExpressionTest, BlockFillEmptyNothingTest) {
         std::vector{makeInt32(42), makeInt32(43), makeInt32(44), makeNothing(), makeInt32(46)});
 }
 
+TEST_F(SBEBlockExpressionTest, BlockFillEmptyMonoHomogeneousTest) {
+    value::OwnedValueAccessor fillAccessor;
+    auto fillSlot = bindAccessor(&fillAccessor);
+    value::ViewOfValueAccessor blockAccessor;
+    auto blockSlot = bindAccessor(&blockAccessor);
+    auto fillEmptyExpr = sbe::makeE<sbe::EFunction>(
+        "valueBlockFillEmpty",
+        sbe::makeEs(makeE<EVariable>(blockSlot), makeE<EVariable>(fillSlot)));
+    auto compiledExpr = compileExpression(*fillEmptyExpr);
+
+    value::Int32Block block;
+    block.push_back(42);
+    block.push_back(43);
+    block.push_back(44);
+    block.pushNothing();
+    block.push_back(46);
+
+    {
+        // Matching type
+        auto [fillTag, fillVal] = makeInt32(45);
+        fillAccessor.reset(fillTag, fillVal);
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&block));
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        assertBlockEq(
+            runTag,
+            runVal,
+            std::vector{makeInt32(42), makeInt32(43), makeInt32(44), makeInt32(45), makeInt32(46)});
+    }
+
+    {
+        // Deep replacement value of a different type.
+        auto [fillTag, fillVal] = value::makeNewString("Replacement for missing value"_sd);
+        fillAccessor.reset(true, fillTag, fillVal);
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&block));
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        assertBlockEq(
+            runTag,
+            runVal,
+            std::vector{
+                makeInt32(42), makeInt32(43), makeInt32(44), {fillTag, fillVal}, makeInt32(46)});
+    }
+
+    {
+        auto [blockTag, blockVal] = value::makeNewString("MonoBlock string"_sd);
+        value::ValueGuard blockInputGuard(blockTag, blockVal);
+        value::MonoBlock monoBlock(2, blockTag, blockVal);
+
+        auto [fillTag, fillVal] = makeInt32(0);
+        fillAccessor.reset(true, fillTag, fillVal);
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&monoBlock));
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        auto extracted = monoBlock.extract();
+        assertBlockEq(runTag, runVal, std::vector{extracted[0], extracted[1]});
+    }
+
+    {
+        value::MonoBlock monoBlock(2, value::TypeTags::Nothing, value::Value{0u});
+
+        auto [fillTag, fillVal] = value::makeNewString("MonoBlock string"_sd);
+        fillAccessor.reset(true, fillTag, fillVal);
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&monoBlock));
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        assertBlockEq(
+            runTag, runVal, std::vector{std::pair(fillTag, fillVal), std::pair(fillTag, fillVal)});
+    }
+}
+
 TEST_F(SBEBlockExpressionTest, BlockFillEmptyBlockTest) {
     value::ViewOfValueAccessor fillAccessor;
     auto fillSlot = bindAccessor(&fillAccessor);
@@ -242,6 +411,123 @@ TEST_F(SBEBlockExpressionTest, BlockFillEmptyBlockTest) {
         std::vector{makeInt32(42), makeInt32(43), makeInt32(44), makeInt32(745), makeInt32(46)});
 }
 
+TEST_F(SBEBlockExpressionTest, BlockCountTest) {
+    auto testCount = [&](std::vector<bool> bitsetData, size_t count) {
+        value::ViewOfValueAccessor bitsetAccessor;
+        auto bitsetSlot = bindAccessor(&bitsetAccessor);
+
+        auto bitset = makeHeterogeneousBoolBlock(bitsetData);
+        bitsetAccessor.reset(sbe::value::TypeTags::valueBlock,
+                             value::bitcastFrom<value::ValueBlock*>(bitset.get()));
+
+        auto compiledExpr = sbe::makeE<sbe::EFunction>("valueBlockCount",
+                                                       sbe::makeEs(makeE<EVariable>(bitsetSlot)));
+        auto compiledCountExpr = compileExpression(*compiledExpr);
+
+        auto [runTag, runVal] = runCompiledExpression(compiledCountExpr.get());
+
+        ASSERT_EQ(runTag, value::TypeTags::NumberInt64);
+        auto expectedCount = makeInt64(count);
+        auto [compTag, compVal] =
+            value::compareValue(runTag, runVal, expectedCount.first, expectedCount.second);
+
+        ASSERT_EQ(compTag, value::TypeTags::NumberInt32);
+        ASSERT_EQ(value::bitcastTo<int32_t>(compVal), 0);
+    };
+
+    testCount({false, false, false, false, false, false}, 0);
+    testCount({true, false, true, true, false, true}, 4);
+    testCount({true, true, true, true, true, true}, 6);
+}
+
+TEST_F(SBEBlockExpressionTest, BlockSumTest) {
+    auto testSum = [&](std::vector<std::pair<value::TypeTags, value::Value>> blockData,
+                       std::vector<bool> bitsetData,
+                       std::pair<value::TypeTags, value::Value> expectedResult) {
+        ASSERT_EQ(blockData.size(), bitsetData.size());
+        value::ValueGuard expectedResultGuard(expectedResult);
+
+        value::ViewOfValueAccessor blockAccessor;
+        value::ViewOfValueAccessor bitsetAccessor;
+        auto blockSlot = bindAccessor(&blockAccessor);
+        auto bitsetSlot = bindAccessor(&bitsetAccessor);
+
+        value::HeterogeneousBlock block;
+        for (auto&& p : blockData) {
+            block.push_back(p);
+        }
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&block));
+
+        auto bitset = makeHeterogeneousBoolBlock(bitsetData);
+        bitsetAccessor.reset(sbe::value::TypeTags::valueBlock,
+                             value::bitcastFrom<value::ValueBlock*>(bitset.get()));
+
+        auto compiledExpr = sbe::makeE<sbe::EFunction>(
+            "valueBlockSum",
+            sbe::makeEs(makeE<EVariable>(bitsetSlot), makeE<EVariable>(blockSlot)));
+        auto compiledCountExpr = compileExpression(*compiledExpr);
+
+        auto [runTag, runVal] = runCompiledExpression(compiledCountExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        ASSERT_EQ(runTag, expectedResult.first);
+        if (runTag != value::TypeTags::Nothing) {
+            auto [compTag, compVal] =
+                value::compareValue(runTag, runVal, expectedResult.first, expectedResult.second);
+
+            ASSERT_EQ(compTag, value::TypeTags::NumberInt32);
+            ASSERT_EQ(value::bitcastTo<int32_t>(compVal), 0);
+        }
+    };
+
+    // Bitset is 0.
+    testSum({makeNothing(), makeNothing(), makeNothing(), makeNothing()},
+            {false, false, false, false},
+            {value::TypeTags::Nothing, 0});
+    // All values are nothing
+    testSum({makeNothing(), makeNothing(), makeNothing()},
+            {true, true, false},
+            {value::TypeTags::Nothing, 0});
+    // Only int32.
+    testSum({makeInt32(1), makeNothing(), makeInt32(2), makeInt32(3), makeNothing(), makeInt32(4)},
+            {false, false, true, true, false, true},
+            {value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(9)});
+    // Put the int64 last for type promotion at the end.
+    testSum({makeInt32(1), makeNothing(), makeInt32(2), makeInt32(3), makeNothing(), makeInt64(4)},
+            {false, false, true, true, false, true},
+            {value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(9)});
+    // Put the int64 first for early type promotion.
+    testSum({makeInt64(1), makeNothing(), makeInt32(2), makeInt32(3), makeNothing(), makeInt32(4)},
+            {true, false, true, true, false, true},
+            {value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(10)});
+    // Mix types with double.
+    testSum({makeInt32(1), makeNothing(), makeDouble(2), makeInt32(3), makeNothing(), makeInt64(4)},
+            {false, false, true, true, false, true},
+            {value::TypeTags::NumberDouble, value::bitcastFrom<double>(9)});
+    // Mix types with Decimal128.
+    testSum(
+        {makeInt32(1), makeNothing(), makeDouble(2), makeInt32(3), makeDecimal("50"), makeInt64(4)},
+        {false, false, true, true, true, true},
+        makeDecimal("59"));
+    // Mix types with Nothing.
+    testSum(
+        {makeInt32(1), makeNothing(), makeDouble(2), makeInt32(3), makeDecimal("50"), makeInt64(4)},
+        {false, true, true, true, true, true},
+        makeDecimal("59"));
+    // One Decimal128, to test for memory leaks.
+    testSum({makeDecimal("50")}, {true}, makeDecimal("50"));
+    // A few Decimal128 values.
+    testSum({makeDecimal("50"),
+             makeDecimal("50"),
+             makeDecimal("50"),
+             makeDecimal("50"),
+             makeDecimal("50"),
+             makeDecimal("50")},
+            {false, true, true, true, true, true},
+            makeDecimal("250"));
+}
+
 TEST_F(SBEBlockExpressionTest, BlockMinMaxTest) {
     value::ViewOfValueAccessor blockAccessor;
     value::ViewOfValueAccessor bitsetAccessor;
@@ -258,7 +544,7 @@ TEST_F(SBEBlockExpressionTest, BlockMinMaxTest) {
     blockAccessor.reset(sbe::value::TypeTags::valueBlock,
                         value::bitcastFrom<value::ValueBlock*>(&block));
 
-    auto bitset = makeBoolBlock({true, true, false, false, true, true});
+    auto bitset = makeHeterogeneousBoolBlock({true, true, false, false, true, true});
     bitsetAccessor.reset(sbe::value::TypeTags::valueBlock,
                          value::bitcastFrom<value::ValueBlock*>(bitset.get()));
 
@@ -315,7 +601,7 @@ TEST_F(SBEBlockExpressionTest, BlockMinMaxDeepTest) {
     blockAccessor.reset(sbe::value::TypeTags::valueBlock,
                         value::bitcastFrom<value::ValueBlock*>(&block));
 
-    auto bitset = makeBoolBlock({false, true, true, false, true, true, false, true});
+    auto bitset = makeHeterogeneousBoolBlock({false, true, true, false, true, true, false, true});
     bitsetAccessor.reset(sbe::value::TypeTags::valueBlock,
                          value::bitcastFrom<value::ValueBlock*>(bitset.get()));
 
@@ -417,7 +703,7 @@ TEST_F(SBEBlockExpressionTest, BlockApplyMaskedLambdaTest) {
     blockAccessor.reset(sbe::value::TypeTags::valueBlock,
                         value::bitcastFrom<value::ValueBlock*>(&block));
 
-    auto mask = makeBoolBlock({true, false, true, true, false});
+    auto mask = makeHeterogeneousBoolBlock({true, false, true, true, false});
     maskAccessor.reset(sbe::value::TypeTags::valueBlock,
                        value::bitcastFrom<value::ValueBlock*>(mask.get()));
 
@@ -433,16 +719,32 @@ TEST_F(SBEBlockExpressionTest, BlockApplyMaskedLambdaTest) {
 TEST_F(SBEBlockExpressionTest, BlockLogicAndOrTest) {
     value::ViewOfValueAccessor blockAccessorLeft;
     value::ViewOfValueAccessor blockAccessorRight;
+    value::ViewOfValueAccessor falseMonoBlockAccessor;
+    value::ViewOfValueAccessor trueMonoBlockAccessor;
     auto blockLeftSlot = bindAccessor(&blockAccessorLeft);
     auto blockRightSlot = bindAccessor(&blockAccessorRight);
+    auto falseMonoBlockSlot = bindAccessor(&falseMonoBlockAccessor);
+    auto trueMonoBlockSlot = bindAccessor(&trueMonoBlockAccessor);
 
-    auto leftBlock = makeBoolBlock({true, false, true, false});
+    auto leftBlock = makeHeterogeneousBoolBlock({true, false, true, false});
     blockAccessorLeft.reset(sbe::value::TypeTags::valueBlock,
                             value::bitcastFrom<value::ValueBlock*>(leftBlock.get()));
 
-    auto rightBlock = makeBoolBlock({true, true, false, false});
+    auto rightBlock = makeHeterogeneousBoolBlock({true, true, false, false});
     blockAccessorRight.reset(sbe::value::TypeTags::valueBlock,
                              value::bitcastFrom<value::ValueBlock*>(rightBlock.get()));
+
+    auto [fTag, fVal] = makeBool(false);
+    std::unique_ptr<value::ValueBlock> falseMonoBlock =
+        std::make_unique<value::MonoBlock>(*leftBlock->tryCount(), fTag, fVal);
+    falseMonoBlockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                                 value::bitcastFrom<value::ValueBlock*>(falseMonoBlock.get()));
+
+    auto [tTag, tVal] = makeBool(true);
+    std::unique_ptr<value::ValueBlock> trueMonoBlock =
+        std::make_unique<value::MonoBlock>(*leftBlock->tryCount(), tTag, tVal);
+    trueMonoBlockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                                value::bitcastFrom<value::ValueBlock*>(trueMonoBlock.get()));
 
     {
         auto expr = makeE<sbe::EFunction>(
@@ -467,6 +769,99 @@ TEST_F(SBEBlockExpressionTest, BlockLogicAndOrTest) {
 
         assertBlockOfBool(runTag, runVal, {true, true, true, false});
     }
+
+    {
+        // MonoBlock test
+        std::vector<value::SlotId> blockSlots{blockLeftSlot, falseMonoBlockSlot, trueMonoBlockSlot};
+        std::vector<std::unique_ptr<value::ValueBlock>> kBlocks;
+        kBlocks.push_back(leftBlock->clone());
+        kBlocks.push_back(falseMonoBlock->clone());
+        kBlocks.push_back(trueMonoBlock->clone());
+
+        for (size_t i = 0; i < blockSlots.size(); ++i) {
+            for (size_t j = 0; j < blockSlots.size(); ++j) {
+                auto andExpr = makeE<sbe::EFunction>(
+                    "valueBlockLogicalAnd",
+                    sbe::makeEs(makeE<EVariable>(blockSlots[i]), makeE<EVariable>(blockSlots[j])));
+                auto compiledAndExpr = compileExpression(*andExpr);
+
+                auto [andTag, andVal] = runCompiledExpression(compiledAndExpr.get());
+                value::ValueGuard andGuard(andTag, andVal);
+
+                auto orExpr = makeE<sbe::EFunction>(
+                    "valueBlockLogicalOr",
+                    sbe::makeEs(makeE<EVariable>(blockSlots[i]), makeE<EVariable>(blockSlots[j])));
+                auto compiledOrExpr = compileExpression(*orExpr);
+
+                auto [orTag, orVal] = runCompiledExpression(compiledOrExpr.get());
+                value::ValueGuard orGuard(orTag, orVal);
+
+                auto [andNaive, orNaive] =
+                    naiveLogicalAndOr(kBlocks[i]->clone(), kBlocks[j]->clone());
+
+                assertBlockOfBool(andTag, andVal, andNaive);
+                assertBlockOfBool(orTag, orVal, orNaive);
+            }
+        }
+    }
+
+    {
+        // BoolBlock test
+        value::ViewOfValueAccessor boolBlockAccessorLeft;
+        value::ViewOfValueAccessor boolBlockAccessorRight;
+        auto boolBlockLeftSlot = bindAccessor(&boolBlockAccessorLeft);
+        auto boolBlockRightSlot = bindAccessor(&boolBlockAccessorRight);
+
+        auto leftBoolBlock = makeBoolBlock({true, false, true, false});
+        boolBlockAccessorLeft.reset(sbe::value::TypeTags::valueBlock,
+                                    value::bitcastFrom<value::ValueBlock*>(leftBoolBlock.get()));
+
+        auto rightBoolBlock = makeBoolBlock({true, true, false, false});
+        boolBlockAccessorRight.reset(sbe::value::TypeTags::valueBlock,
+                                     value::bitcastFrom<value::ValueBlock*>(rightBoolBlock.get()));
+
+        auto andExpr = makeE<sbe::EFunction>(
+            "valueBlockLogicalAnd",
+            sbe::makeEs(makeE<EVariable>(boolBlockLeftSlot), makeE<EVariable>(boolBlockRightSlot)));
+        auto compiledAndExpr = compileExpression(*andExpr);
+
+        auto [andTag, andVal] = runCompiledExpression(compiledAndExpr.get());
+        value::ValueGuard andGuard(andTag, andVal);
+
+        auto orExpr = makeE<sbe::EFunction>(
+            "valueBlockLogicalOr",
+            sbe::makeEs(makeE<EVariable>(boolBlockLeftSlot), makeE<EVariable>(boolBlockRightSlot)));
+        auto compiledOrExpr = compileExpression(*orExpr);
+
+        auto [orTag, orVal] = runCompiledExpression(compiledOrExpr.get());
+        value::ValueGuard orGuard(orTag, orVal);
+
+        assertBlockOfBool(andTag, andVal, {true, false, false, false});
+        assertBlockOfBool(orTag, orVal, {true, true, true, false});
+
+        // Test HeterogeneousBlock fallback when applying the op to a bool block on one side and
+        // heterogeneous on the other.
+        auto heterogeneousAndExpr = makeE<sbe::EFunction>(
+            "valueBlockLogicalAnd",
+            sbe::makeEs(makeE<EVariable>(blockLeftSlot), makeE<EVariable>(boolBlockRightSlot)));
+        auto compiledHeterogeneousAndExpr = compileExpression(*andExpr);
+
+        auto [andHeterogeneousTag, andHeterogeneousVal] =
+            runCompiledExpression(compiledHeterogeneousAndExpr.get());
+        value::ValueGuard andHeterogeneousGuard(andHeterogeneousTag, andHeterogeneousVal);
+
+        auto heretergeneousOrExpr = makeE<sbe::EFunction>(
+            "valueBlockLogicalOr",
+            sbe::makeEs(makeE<EVariable>(blockLeftSlot), makeE<EVariable>(boolBlockRightSlot)));
+        auto compiledHeterogeneousOrExpr = compileExpression(*orExpr);
+
+        auto [orHeterogeneousTag, orHeterogeneousVal] =
+            runCompiledExpression(compiledHeterogeneousOrExpr.get());
+        value::ValueGuard orHeterogeneousGuard(orHeterogeneousTag, orHeterogeneousVal);
+
+        assertBlockOfBool(andHeterogeneousTag, andHeterogeneousVal, {true, false, false, false});
+        assertBlockOfBool(orHeterogeneousTag, orHeterogeneousVal, {true, true, true, false});
+    }
 }
 
 void SBEBlockExpressionTest::testFoldF(std::vector<bool> vals,
@@ -482,7 +877,7 @@ void SBEBlockExpressionTest::testFoldF(std::vector<bool> vals,
     materializedCellBlock->_deblocked = nullptr;  // This is never read by the test.
     materializedCellBlock->_filterPosInfo = filterPosInfo;
 
-    auto valBlock = makeBoolBlock(vals);
+    auto valBlock = makeHeterogeneousBoolBlock(vals);
     valBlockAccessor.reset(sbe::value::TypeTags::valueBlock,
                            value::bitcastFrom<value::ValueBlock*>(valBlock.get()));
     cellBlockAccessor.reset(sbe::value::TypeTags::cellBlock,
@@ -549,10 +944,41 @@ TEST_F(SBEBlockExpressionTest, CellFoldFTest) {
     );
 }
 
-void SBEBlockExpressionTest::testCmpScalar(
-    const std::vector<std::pair<value::TypeTags, value::Value>>& testValues,
-    EPrimBinary::Op scalarOp,
-    StringData cmpFunctionName) {
+template <typename BlockType, typename T>
+std::unique_ptr<BlockType> makeTestHomogeneousBlock() {
+    std::unique_ptr<BlockType> testHomogeneousBlock = std::make_unique<BlockType>();
+    testHomogeneousBlock->push_back(value::bitcastFrom<T>(-1));
+    testHomogeneousBlock->push_back(value::bitcastFrom<T>(0));
+    testHomogeneousBlock->push_back(value::bitcastFrom<T>(1));
+    testHomogeneousBlock->push_back(value::bitcastFrom<T>(std::numeric_limits<T>::min()));
+    testHomogeneousBlock->push_back(value::bitcastFrom<T>(std::numeric_limits<T>::max()));
+    testHomogeneousBlock->pushNothing();
+    return testHomogeneousBlock;
+}
+
+std::unique_ptr<value::ValueBlock> makeTestInt32Block() {
+    return makeTestHomogeneousBlock<value::Int32Block, int32_t>();
+}
+
+std::unique_ptr<value::ValueBlock> makeTestInt64Block() {
+    return makeTestHomogeneousBlock<value::Int64Block, int64_t>();
+}
+
+std::unique_ptr<value::ValueBlock> makeTestDateBlock() {
+    return makeTestHomogeneousBlock<value::DateBlock, int64_t>();
+}
+
+std::unique_ptr<value::ValueBlock> makeTestDoubleBlock() {
+    auto testDoubleBlock = makeTestHomogeneousBlock<value::DoubleBlock, double>();
+    testDoubleBlock->push_back(std::numeric_limits<double>::quiet_NaN());
+    testDoubleBlock->push_back(std::numeric_limits<double>::signaling_NaN());
+    return testDoubleBlock;
+}
+
+void SBEBlockExpressionTest::testCmpScalar(EPrimBinary::Op scalarOp,
+                                           StringData cmpFunctionName,
+                                           value::ValueBlock* valBlock) {
+    invariant(valBlock != nullptr);
 
     value::ViewOfValueAccessor valBlockAccessor;
     value::ViewOfValueAccessor scalarAccessorLhs;
@@ -561,14 +987,10 @@ void SBEBlockExpressionTest::testCmpScalar(
     auto scalarSlotLhs = bindAccessor(&scalarAccessorLhs);
     auto scalarSlotRhs = bindAccessor(&scalarAccessorRhs);
 
-    auto valBlock = std::make_unique<value::HeterogeneousBlock>();
-    for (auto [t, v] : testValues) {
-        auto [cpyT, cpyV] = value::copyValue(t, v);
-        valBlock->push_back(cpyT, cpyV);
-    }
+    auto deblocked = valBlock->extract();
 
     valBlockAccessor.reset(sbe::value::TypeTags::valueBlock,
-                           value::bitcastFrom<value::ValueBlock*>(valBlock.get()));
+                           value::bitcastFrom<value::ValueBlock*>(valBlock));
 
     auto expr = makeE<sbe::EFunction>(
         cmpFunctionName,
@@ -579,8 +1001,8 @@ void SBEBlockExpressionTest::testCmpScalar(
         scalarOp, makeE<EVariable>(scalarSlotLhs), makeE<EVariable>(scalarSlotRhs));
     auto compiledScalarExpr = compileExpression(*scalarExpr);
 
-    for (auto [t, v] : testValues) {
-        scalarAccessorRhs.reset(t, v);
+    for (size_t i = 0; i < deblocked.count; ++i) {
+        scalarAccessorRhs.reset(deblocked.tags[i], deblocked.vals[i]);
 
         // Run the block expression and get the result.
         auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
@@ -590,21 +1012,21 @@ void SBEBlockExpressionTest::testCmpScalar(
         auto* resultValBlock = value::getValueBlock(runVal);
         auto resultExtracted = resultValBlock->extract();
 
-        ASSERT_EQ(resultExtracted.count, testValues.size());
+        ASSERT_EQ(resultExtracted.count, deblocked.count);
 
-        for (size_t i = 0; i < resultExtracted.count; ++i) {
+        for (size_t j = 0; j < resultExtracted.count; ++j) {
             // Determine the expected result.
-            scalarAccessorLhs.reset(testValues[i].first, testValues[i].second);
+            scalarAccessorLhs.reset(deblocked.tags[j], deblocked.vals[j]);
             auto [expectedTag, expectedVal] = runCompiledExpression(compiledScalarExpr.get());
             value::ValueGuard guard(expectedTag, expectedVal);
 
 
-            auto [gotTag, gotVal] = resultExtracted[i];
+            auto [gotTag, gotVal] = resultExtracted[j];
 
             auto [cmpTag, cmpVal] = value::compareValue(gotTag, gotVal, expectedTag, expectedVal);
             ASSERT_EQ(cmpTag, value::TypeTags::NumberInt32) << gotTag << " " << expectedTag;
             ASSERT_EQ(value::bitcastTo<int32_t>(cmpVal), 0)
-                << "Comparing " << std::pair(t, v) << " " << testValues[i] << " and got "
+                << "Comparing " << deblocked[i] << " " << deblocked[j] << " and got "
                 << std::pair(gotTag, gotVal) << " expected " << std::pair(expectedTag, expectedVal);
         }
     }
@@ -625,18 +1047,35 @@ TEST_F(SBEBlockExpressionTest, ValueBlockCmpScalarTest) {
         makeDouble(111.0),
     };
 
-    ON_BLOCK_EXIT([&]() {
-        for (auto [t, v] : testValues) {
-            value::releaseValue(t, v);
-        }
-    });
+    std::unique_ptr<value::HeterogeneousBlock> testBlock =
+        std::make_unique<value::HeterogeneousBlock>();
+    for (auto tv : testValues) {
+        testBlock->push_back(tv);
+    }
 
-    testCmpScalar(testValues, EPrimBinary::greater, "valueBlockGtScalar");
-    testCmpScalar(testValues, EPrimBinary::greaterEq, "valueBlockGteScalar");
-    testCmpScalar(testValues, EPrimBinary::less, "valueBlockLtScalar");
-    testCmpScalar(testValues, EPrimBinary::lessEq, "valueBlockLteScalar");
-    testCmpScalar(testValues, EPrimBinary::eq, "valueBlockEqScalar");
-    testCmpScalar(testValues, EPrimBinary::neq, "valueBlockNeqScalar");
+    testCmpScalar(EPrimBinary::greater, "valueBlockGtScalar", testBlock.get());
+    testCmpScalar(EPrimBinary::greaterEq, "valueBlockGteScalar", testBlock.get());
+    testCmpScalar(EPrimBinary::less, "valueBlockLtScalar", testBlock.get());
+    testCmpScalar(EPrimBinary::lessEq, "valueBlockLteScalar", testBlock.get());
+    testCmpScalar(EPrimBinary::eq, "valueBlockEqScalar", testBlock.get());
+    testCmpScalar(EPrimBinary::neq, "valueBlockNeqScalar", testBlock.get());
+}
+
+TEST_F(SBEBlockExpressionTest, ValueBlockCmpScalarHomogeneousTest) {
+    std::vector<std::unique_ptr<value::ValueBlock>> testBlocks;
+    testBlocks.push_back(makeTestInt32Block());
+    testBlocks.push_back(makeTestInt64Block());
+    testBlocks.push_back(makeTestDateBlock());
+    testBlocks.push_back(makeTestDoubleBlock());
+
+    for (auto& block : testBlocks) {
+        testCmpScalar(EPrimBinary::greater, "valueBlockGtScalar", block.get());
+        testCmpScalar(EPrimBinary::greaterEq, "valueBlockGteScalar", block.get());
+        testCmpScalar(EPrimBinary::less, "valueBlockLtScalar", block.get());
+        testCmpScalar(EPrimBinary::lessEq, "valueBlockLteScalar", block.get());
+        testCmpScalar(EPrimBinary::eq, "valueBlockEqScalar", block.get());
+        testCmpScalar(EPrimBinary::neq, "valueBlockNeqScalar", block.get());
+    }
 }
 
 TEST_F(SBEBlockExpressionTest, BlockNewTest) {
@@ -654,7 +1093,7 @@ TEST_F(SBEBlockExpressionTest, BlockSizeTest) {
     value::ViewOfValueAccessor blockAccessor;
     auto blockSlot = bindAccessor(&blockAccessor);
 
-    auto block = makeBoolBlock({true, false, true, false});
+    auto block = makeHeterogeneousBoolBlock({true, false, true, false});
     blockAccessor.reset(sbe::value::TypeTags::valueBlock,
                         value::bitcastFrom<value::ValueBlock*>(block.get()));
 
@@ -672,7 +1111,7 @@ TEST_F(SBEBlockExpressionTest, BitmapNoneTest) {
     value::ViewOfValueAccessor blockAccessor;
     auto blockSlot = bindAccessor(&blockAccessor);
 
-    auto block1 = makeBoolBlock({true, false, true, false});
+    auto block1 = makeHeterogeneousBoolBlock({true, false, true, false});
     blockAccessor.reset(sbe::value::TypeTags::valueBlock,
                         value::bitcastFrom<value::ValueBlock*>(block1.get()));
 
@@ -685,7 +1124,7 @@ TEST_F(SBEBlockExpressionTest, BitmapNoneTest) {
     ASSERT_EQ(runTag1, value::TypeTags::Boolean);
     ASSERT_EQ(value::bitcastTo<bool>(runVal1), false);
 
-    auto block2 = makeBoolBlock({false, false, false, false});
+    auto block2 = makeHeterogeneousBoolBlock({false, false, false, false});
     blockAccessor.reset(sbe::value::TypeTags::valueBlock,
                         value::bitcastFrom<value::ValueBlock*>(block2.get()));
 
@@ -699,7 +1138,7 @@ TEST_F(SBEBlockExpressionTest, BlockLogicNotTest) {
     value::ViewOfValueAccessor blockAccessor;
     auto blockSlot = bindAccessor(&blockAccessor);
 
-    auto block = makeBoolBlock({true, false, true, false});
+    auto block = makeHeterogeneousBoolBlock({true, false, true, false});
     blockAccessor.reset(sbe::value::TypeTags::valueBlock,
                         value::bitcastFrom<value::ValueBlock*>(block.get()));
 
@@ -739,7 +1178,7 @@ TEST_F(SBEBlockExpressionTest, BlockCombineTest) {
     blockAccessorRight.reset(sbe::value::TypeTags::valueBlock,
                              value::bitcastFrom<value::ValueBlock*>(&rightBlock));
 
-    auto block = makeBoolBlock({true, false, true, false, true});
+    auto block = makeHeterogeneousBoolBlock({true, false, true, false, true});
     blockAccessorMask.reset(sbe::value::TypeTags::valueBlock,
                             value::bitcastFrom<value::ValueBlock*>(block.get()));
 

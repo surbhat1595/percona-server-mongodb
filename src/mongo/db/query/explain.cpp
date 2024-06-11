@@ -63,7 +63,6 @@
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/query_settings_decoration.h"
-#include "mongo/db/query/query_settings_manager.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -115,7 +114,9 @@ void generatePlannerInfo(PlanExecutor* exec,
         if (exec->getCanonicalQuery()->isSbeCompatible() &&
             !exec->getCanonicalQuery()->getForceClassicEngine()) {
             const auto planCacheKeyInfo =
-                plan_cache_key_factory::make(*exec->getCanonicalQuery(), collections);
+                plan_cache_key_factory::make(*exec->getCanonicalQuery(),
+                                             collections,
+                                             canonical_query_encoder::Optimizer::kSbeStageBuilders);
             planCacheKeyHash = planCacheKeyInfo.planCacheKeyHash();
             queryHash = planCacheKeyInfo.queryHash();
         } else {
@@ -131,7 +132,24 @@ void generatePlannerInfo(PlanExecutor* exec,
     // query as an optimization (specifically, the update system does not canonicalize for idhack
     // updates). In these cases, 'query' is NULL.
     auto query = exec->getCanonicalQuery();
-    if (nullptr != query) {
+
+    auto framework = exec->getQueryFramework();
+
+    // For CQF explains, we serialize the entire input MQL (via CanonicalQuery or Pipeline) under
+    // "parsedQuery". For classic explains, we serialize just the match expression.
+    if (framework == PlanExecutor::QueryFramework::kCQF) {
+        BSONObjBuilder parsedQueryBob(plannerBob.subobjStart("parsedQuery"));
+
+        // Given the current set of supported language features for CQF, at this point we will
+        // either have a Pipeline or a CanonicalQuery.
+        if (auto pipeline = exec->getPipeline()) {
+            parsedQueryBob.append("pipeline", pipeline->serializeToBson());
+        } else {
+            query->serializeToBson(&parsedQueryBob);
+        }
+
+        parsedQueryBob.doneFast();
+    } else if (nullptr != query) {
         BSONObjBuilder parsedQueryBob(plannerBob.subobjStart("parsedQuery"));
         query->getPrimaryMatchExpression()->serialize(&parsedQueryBob, {});
         parsedQueryBob.doneFast();
@@ -154,15 +172,33 @@ void generatePlannerInfo(PlanExecutor* exec,
         plannerBob.append("planCacheKey", zeroPaddedHex(*planCacheKeyHash));
     }
 
+    if (exec->getOpCtx() != nullptr) {
+        plannerBob.appendNumber(
+            "optimizationTimeMillis",
+            durationCount<Milliseconds>(CurOp::get(exec->getOpCtx())->debug().planningTime));
+    }
+
     if (!extraInfo.isEmpty()) {
         plannerBob.appendElements(extraInfo);
     }
 
     auto&& explainer = exec->getPlanExplainer();
-    auto&& enumeratorInfo = explainer.getEnumeratorInfo();
-    plannerBob.append("maxIndexedOrSolutionsReached", enumeratorInfo.hitIndexedOrLimit);
-    plannerBob.append("maxIndexedAndSolutionsReached", enumeratorInfo.hitIndexedAndLimit);
-    plannerBob.append("maxScansToExplodeReached", enumeratorInfo.hitScanLimit);
+    if (framework == PlanExecutor::QueryFramework::kCQF) {
+        // CQF-only fields.
+        BSONObjBuilder optimizerCountersBob(plannerBob.subobjStart("optimizerCounters"));
+        optimizerCountersBob.append("maxPartialSchemaReqCountReached",
+                                    explainer.getOptExplainInfo().maxPartialSchemaReqCountReached);
+        optimizerCountersBob.doneFast();
+
+        plannerBob.append("queryFramework", "cqf");
+    } else {
+        // Classic-only fields.
+        auto&& enumeratorInfo = explainer.getEnumeratorInfo();
+        plannerBob.append("maxIndexedOrSolutionsReached", enumeratorInfo.hitIndexedOrLimit);
+        plannerBob.append("maxIndexedAndSolutionsReached", enumeratorInfo.hitIndexedAndLimit);
+        plannerBob.append("maxScansToExplodeReached", enumeratorInfo.hitScanLimit);
+    }
+
     auto&& [winningStats, _] =
         explainer.getWinningPlanStats(ExplainOptions::Verbosity::kQueryPlanner);
     plannerBob.append("winningPlan", winningStats);
@@ -533,6 +569,7 @@ void Explain::planCacheEntryToBSON(const PlanCacheEntry& entry, BSONObjBuilder* 
     out->append("indexFilterSet", entry.cachedPlan->indexFilterApplied);
 
     out->append("estimatedSizeBytes", static_cast<long long>(entry.estimatedEntrySizeBytes));
+    out->append("solutionHash", static_cast<long long>(entry.cachedPlan->solutionHash));
 }
 
 void Explain::planCacheEntryToBSON(const sbe::PlanCacheEntry& entry, BSONObjBuilder* out) {
@@ -547,5 +584,6 @@ void Explain::planCacheEntryToBSON(const sbe::PlanCacheEntry& entry, BSONObjBuil
     out->append("indexFilterSet", entry.cachedPlan->indexFilterApplied);
     out->append("isPinned", entry.isPinned());
     out->append("estimatedSizeBytes", static_cast<long long>(entry.estimatedEntrySizeBytes));
+    out->append("solutionHash", static_cast<long long>(entry.cachedPlan->solutionHash));
 }
 }  // namespace mongo

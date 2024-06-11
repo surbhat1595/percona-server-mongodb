@@ -43,7 +43,6 @@
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
@@ -63,6 +62,7 @@
 #include "mongo/db/storage/key_string.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo::sbe {
@@ -176,9 +176,9 @@ protected:
     value::OwnedValueAccessor _indexIdentAccessor;
     value::ViewOfValueAccessor _indexIdentViewAccessor;
 
-    // This field holds the latest snapshot ID that we've received from _opCtx->recoveryUnit().
-    // This field gets initialized by prepare(), and it gets updated each time doRestoreState() is
-    // called.
+    // This field holds the latest snapshot ID that we've received from the recovery unit of the
+    // operation. This field gets initialized by prepare(), and it gets updated each time
+    // doRestoreState() is called.
     uint64_t _latestSnapshotId{0};
 
     // One accessor and slot for each key component that this stage will bind from an index entry's
@@ -196,6 +196,7 @@ protected:
     BufBuilder _valuesBuffer;
 
     bool _open{false};
+    bool _uniqueIndex{false};
     ScanState _scanState = ScanState::kNeedSeek;
     IndexScanStats _specificStats;
 
@@ -268,6 +269,8 @@ private:
 
     value::OwnedValueAccessor _seekKeyLowHolder;
     value::OwnedValueAccessor _seekKeyHighHolder;
+
+    bool _pointBound{false};
 };
 
 /**

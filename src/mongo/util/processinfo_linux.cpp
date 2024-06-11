@@ -88,6 +88,7 @@
 #include "mongo/util/errno_util.h"
 #include "mongo/util/file.h"
 #include "mongo/util/pcre.h"
+#include "mongo/util/procparser.h"
 #include "mongo/util/static_immortal.h"
 #include "mongo/util/str.h"
 
@@ -812,6 +813,11 @@ boost::optional<unsigned long> ProcessInfo::getNumCoresForProcess() {
 #endif
     }
 
+    auto ec = lastSystemError();
+    LOGV2(8366600,
+          "sched_getaffinity failed to collect cpu_set info",
+          "error"_attr = errorMessage(ec));
+
     return boost::none;
 }
 
@@ -823,6 +829,29 @@ int ProcessInfo::getVirtualMemorySize() {
 int ProcessInfo::getResidentSize() {
     LinuxProc p(_pid);
     return (int)((p.getResidentSizeInPages() * getPageSize()) / (1024.0 * 1024));
+}
+
+void collectPressureStallInfo(BSONObjBuilder& builder) {
+
+    auto parsePressureFile = [](StringData key, StringData filename, BSONObjBuilder& bob) {
+        BSONObjBuilder psiParseBuilder;
+        auto status = procparser::parseProcPressureFile(key, filename, &psiParseBuilder);
+        if (status.isOK()) {
+            bob.appendElements(psiParseBuilder.obj());
+        }
+        return status.isOK();
+    };
+
+    BSONObjBuilder psiBuilder;
+    bool parseStatus = false;
+
+    parseStatus |= parsePressureFile("memory", "/proc/pressure/memory"_sd, psiBuilder);
+    parseStatus |= parsePressureFile("cpu", "/proc/pressure/cpu"_sd, psiBuilder);
+    parseStatus |= parsePressureFile("io", "/proc/pressure/io"_sd, psiBuilder);
+
+    if (parseStatus) {
+        builder.append("pressure"_sd, psiBuilder.obj());
+    }
 }
 
 void ProcessInfo::getExtraInfo(BSONObjBuilder& info) {
@@ -863,6 +892,9 @@ void ProcessInfo::getExtraInfo(BSONObjBuilder& info) {
 
     // Append the number of thread in use
     appendNumber("threads", p._nlwp);
+
+    // Append Pressure Stall Information (PSI)
+    collectPressureStallInfo(info);
 }
 
 /**
@@ -891,7 +923,7 @@ unsigned long countNumaNodes() {
                 while (boost::filesystem::exists(
                     std::string(str::stream() << "/sys/devices/system/node/node" << i++)))
                     ;
-                return i;
+                return i - 1;
             }
         }
     } catch (boost::filesystem::filesystem_error& e) {

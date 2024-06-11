@@ -4,8 +4,8 @@
 //   requires_non_retryable_writes,
 // ]
 // Include helpers for analyzing explain output.
-import {getWinningPlan, isIdhack} from "jstests/libs/analyze_plan.js";
-import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
+import {getOptimizer, getWinningPlan, isIdhack} from "jstests/libs/analyze_plan.js";
+import {checkSbeFullyEnabled} from "jstests/libs/sbe_util.js";
 
 const t = db.idhack;
 t.drop();
@@ -35,14 +35,25 @@ const query = {
 };
 let explain = t.find(query).explain("allPlansExecution");
 assert.eq(1, explain.executionStats.nReturned, explain);
-assert.eq(1, explain.executionStats.totalKeysExamined, explain);
-let winningPlan = getWinningPlan(explain.queryPlanner);
-assert(isIdhack(db, winningPlan), winningPlan);
+
+switch (getOptimizer(explain)) {
+    case "classic": {
+        assert.eq(1, explain.executionStats.totalKeysExamined, explain);
+        let winningPlan = getWinningPlan(explain.queryPlanner);
+        assert(isIdhack(db, winningPlan), winningPlan);
+        break;
+    }
+    case "CQF":
+        // TODO SERVER-70847, how to recognize the case of an IDHACK for Bonsai?
+        // TODO SERVER-77719: Ensure that the decision for using the scan lines up with CQF
+        // optimizer. M2: allow only collscans, M4: check bonsai behavior for index scan.
+        break;
+}
 
 // ID hack cannot be used with hint().
 t.createIndex({_id: 1, a: 1});
 explain = t.find(query).hint({_id: 1, a: 1}).explain();
-winningPlan = getWinningPlan(explain.queryPlanner);
+let winningPlan = getWinningPlan(explain.queryPlanner);
 assert(!isIdhack(db, winningPlan), winningPlan);
 
 // ID hack cannot be used with skip().
@@ -58,10 +69,21 @@ winningPlan = getWinningPlan(explain.queryPlanner);
 assert(!isIdhack(db, winningPlan), winningPlan);
 
 // Covered query returning _id field only can be handled by ID hack.
-const parentStage = checkSBEEnabled(db) ? "PROJECTION_COVERED" : "FETCH";
+const parentStage = checkSbeFullyEnabled(db) ? "PROJECTION_COVERED" : "FETCH";
 explain = t.find(query, {_id: 1}).explain();
 winningPlan = getWinningPlan(explain.queryPlanner);
-assert(isIdhack(db, winningPlan), winningPlan);
+
+switch (getOptimizer(explain)) {
+    case "classic": {
+        assert(isIdhack(db, winningPlan), winningPlan);
+        break;
+    }
+    case "CQF":
+        // TODO SERVER-70847, how to recognize the case of an IDHACK for Bonsai?
+        // TODO SERVER-77719: Ensure that the decision for using the scan lines up with CQF
+        // optimizer. M2: allow only collscans, M4: check bonsai behavior for index scan.
+        break;
+}
 
 // Check doc from covered ID hack query.
 assert.eq({_id: {x: 2}}, t.findOne(query, {_id: 1}), explain);

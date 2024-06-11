@@ -43,7 +43,7 @@
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/query/query_stats/key_generator.h"
+#include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
@@ -203,7 +203,7 @@ private:
     // profiler.
     bool _shouldOmitDiagnosticInformation = false;
 
-    // If boost::none, telemetry should not be collected for this cursor.
+    // If boost::none, queryStats should not be collected for this cursor.
     boost::optional<std::size_t> _queryStatsKeyHash;
 
     // The Key used by query stats to generate the query stats store key.

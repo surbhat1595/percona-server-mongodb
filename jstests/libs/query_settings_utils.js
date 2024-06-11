@@ -1,8 +1,7 @@
 /**
  * Utility class for testing query settings.
  */
-import {getQueryPlanner} from "jstests/libs/analyze_plan.js";
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {getQueryPlanners} from "jstests/libs/analyze_plan.js";
 
 export class QuerySettingsUtils {
     /**
@@ -15,17 +14,28 @@ export class QuerySettingsUtils {
     }
 
     /**
-     * Makes an query instance of the find command with an optional filter clause.
+     * Makes an query instance of the find command.
      */
-    makeFindQueryInstance(filter = {}) {
-        return {find: this.collName, $db: this.db.getName(), filter};
+    makeFindQueryInstance(findObj) {
+        return {find: this.collName, $db: this.db.getName(), ...findObj};
+    }
+
+    /**
+     * Makes a query instance of the distinct command.
+     */
+    makeDistinctQueryInstance(distinctObj) {
+        return {distinct: this.collName, $db: this.db.getName(), ...distinctObj};
     }
 
     /**
      * Makes an query instance of the aggregate command with an optional pipeline clause.
      */
-    makeAggregateQueryInstance(pipeline = [], collName = this.collName) {
-        return {aggregate: collName, $db: this.db.getName(), pipeline};
+    makeAggregateQueryInstance(aggregateObj, collectionless = false) {
+        return {
+            aggregate: collectionless ? 1 : this.collName,
+            $db: this.db.getName(),
+            ...aggregateObj
+        };
     }
 
     /**
@@ -49,6 +59,32 @@ export class QuerySettingsUtils {
     }
 
     /**
+     * Return queryShapeHash for a given query from querySettings.
+     */
+    getQueryHashFromQuerySettings(shape) {
+        print("looking for hash for the shape: \n" + tojson(shape))
+        const settings = this.adminDB
+                             .aggregate([
+                                 {$querySettings: {showDebugQueryShape: true}},
+                                 {$project: {"debugQueryShape.cmdNs": 0}},
+                                 {$match: {debugQueryShape: shape}},
+                             ])
+                             .toArray();
+        if (settings.length == 0) {
+            const allSettings = this.adminDB
+                                    .aggregate([
+                                        {$querySettings: {showDebugQueryShape: true}},
+                                        {$project: {"debugQueryShape.cmdNs": 0}},
+                                    ])
+                                    .toArray();
+            print("Couldn't find any. All settings:\n" + tojson(allSettings));
+            return undefined;
+        }
+        assert.eq(settings.length, 1);
+        return settings[0].queryShapeHash;
+    }
+
+    /**
      * Return the query settings section of the server status.
      */
     getQuerySettingsServerStatus() {
@@ -57,23 +93,31 @@ export class QuerySettingsUtils {
 
     /**
      * Helper function to assert equality of QueryShapeConfigurations. In order to ease the
-     * assertion logic, 'queryShapeHash' field is removed from the QueryShapeConfiguration prior to
-     * assertion.
+     * assertion logic, 'queryShapeHash' field is removed from the QueryShapeConfiguration prior
+     * to assertion.
      *
      * Since in sharded clusters the query settings may arrive with a delay to the mongos, the
      * assertion is done via 'assert.soon'.
+     *
+     * The settings list is not expected to be in any particular order.
      */
-    assertQueryShapeConfiguration(expectedQueryShapeConfigurations) {
+    assertQueryShapeConfiguration(expectedQueryShapeConfigurations, shouldRunExplain = true) {
         assert.soon(
             () => {
-                return bsonWoCompare(this.getQuerySettings(), expectedQueryShapeConfigurations) ==
-                    0;
+                let currentQueryShapeConfigurationWo = this.getQuerySettings();
+                currentQueryShapeConfigurationWo.sort(bsonWoCompare);
+                let expectedQueryShapeConfigurationWo = [...expectedQueryShapeConfigurations];
+                expectedQueryShapeConfigurationWo.sort(bsonWoCompare);
+                return bsonWoCompare(currentQueryShapeConfigurationWo,
+                                     expectedQueryShapeConfigurationWo) == 0;
             },
             "current query settings = " + tojson(this.getQuerySettings()) +
                 ", expected query settings = " + tojson(expectedQueryShapeConfigurations));
 
-        for (let {representativeQuery, settings} of expectedQueryShapeConfigurations) {
-            this.assertExplainQuerySettings(representativeQuery, settings);
+        if (shouldRunExplain) {
+            for (let {representativeQuery, settings} of expectedQueryShapeConfigurations) {
+                this.assertExplainQuerySettings(representativeQuery, settings);
+            }
         }
     }
 
@@ -84,33 +128,21 @@ export class QuerySettingsUtils {
         // Pass query without the $db field to explain command, because it injects the $db field
         // inside the query before processing.
         const {$db: _, ...queryWithoutDollarDb} = query;
-        if (query.find) {
-            const explain =
-                assert.commandWorked(this.db.runCommand({explain: queryWithoutDollarDb}));
-            const queryPlanner = getQueryPlanner(explain);
-            assert.docEq(expectedQuerySettings, queryPlanner.querySettings, queryPlanner);
+        const explain = (() => {
+            if (query.find) {
+                return assert.commandWorked(this.db.runCommand({explain: queryWithoutDollarDb}));
+            } else if (query.aggregate) {
+                return assert.commandWorked(
+                    this.db.runCommand({explain: {...queryWithoutDollarDb, cursor: {}}}));
+            } else {
+                return null;
+            }
+        })();
+        if (explain) {
+            getQueryPlanners(explain).forEach(queryPlanner => {
+                assert.docEq(expectedQuerySettings, queryPlanner.querySettings, queryPlanner);
+            });
         }
-    }
-
-    // Adjust the 'clusterServerParameterRefreshIntervalSecs' value for faster fetching of
-    // 'querySettings' cluster parameter on mongos from the configsvr.
-    // TODO: SERVER-81062 Update cluster parameter cache on set-/removeQuerySettings and perform
-    // single retry on failure.
-    setClusterParamRefreshSecs(newValue) {
-        if (FixtureHelpers.isMongos(this.db)) {
-            const response = assert.commandWorked(this.db.adminCommand(
-                {getParameter: 1, clusterServerParameterRefreshIntervalSecs: 1}));
-            const oldValue = response.clusterServerParameterRefreshIntervalSecs;
-            assert.commandWorked(this.db.adminCommand(
-                {setParameter: 1, clusterServerParameterRefreshIntervalSecs: newValue}));
-            return {
-                restore: () => {
-                    assert.commandWorked(this.db.adminCommand(
-                        {setParameter: 1, clusterServerParameterRefreshIntervalSecs: oldValue}));
-                }
-            };
-        }
-        return {restore: () => {}};
     }
 
     /**

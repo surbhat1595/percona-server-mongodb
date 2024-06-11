@@ -66,7 +66,7 @@
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
-#include "mongo/db/op_observer/oplog_writer_impl.h"
+#include "mongo/db/op_observer/operation_logger_impl.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/member_state.h"
@@ -103,6 +103,7 @@
 #include "mongo/logv2/log_component_settings.h"
 #include "mongo/logv2/log_manager.h"
 #include "mongo/logv2/log_severity.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/util/assert_util.h"
@@ -132,8 +133,7 @@ public:
 
         // (Generic FCV reference): Test latest FCV behavior. This FCV reference should exist across
         // LTS binary versions.
-        serverGlobalParams.mutableFeatureCompatibility.setVersion(
-            multiversion::GenericFCV::kLatest);
+        serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLatest);
 
         if (haveClient()) {
             Client::releaseCurrent();
@@ -183,10 +183,18 @@ public:
         // Disable fast shutdown so that WT can free memory.
         globalFailPointRegistry().find("WTDisableFastShutDown")->setMode(FailPoint::alwaysOn);
 
-        auto startupOpCtx = _svcCtx->makeOperationContext(&cc());
-        initializeStorageEngine(startupOpCtx.get(),
-                                StorageEngineInitFlags::kAllowNoLockFile |
-                                    StorageEngineInitFlags::kSkipMetadataFile);
+        {
+            auto initializeStorageEngineOpCtx = _svcCtx->makeOperationContext(&cc());
+            shard_role_details::setRecoveryUnit(
+                initializeStorageEngineOpCtx.get(),
+                std::make_unique<RecoveryUnitNoop>(),
+                WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
+
+            initializeStorageEngine(initializeStorageEngineOpCtx.get(),
+                                    StorageEngineInitFlags::kAllowNoLockFile |
+                                        StorageEngineInitFlags::kSkipMetadataFile);
+        }
+
         DatabaseHolder::set(_svcCtx, std::make_unique<DatabaseHolderImpl>());
         repl::StorageInterface::set(_svcCtx, std::make_unique<repl::StorageInterfaceImpl>());
         auto storageInterface = repl::StorageInterface::get(_svcCtx);
@@ -197,8 +205,9 @@ public:
 
         auto registry = std::make_unique<OpObserverRegistry>();
         registry->addObserver(
-            std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+            std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
         _svcCtx->setOpObserver(std::move(registry));
+        ShardingState::create(_svcCtx);
         CollectionShardingStateFactory::set(
             _svcCtx, std::make_unique<CollectionShardingStateFactoryStandalone>(_svcCtx));
 
@@ -266,10 +275,12 @@ public:
         storageGlobalParams.dbpath = _tempDir->path();
         storageGlobalParams.ephemeral = false;
 
-        auto uniqueOpCtx = _svcCtx->makeOperationContext(&cc());
-        uniqueOpCtx->setRecoveryUnit(std::make_unique<RecoveryUnitNoop>(),
-                                     WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
-        initializeStorageEngine(uniqueOpCtx.get(),
+        auto initializeStorageEngineOpCtx = _svcCtx->makeOperationContext(&cc());
+        shard_role_details::setRecoveryUnit(initializeStorageEngineOpCtx.get(),
+                                            std::make_unique<RecoveryUnitNoop>(),
+                                            WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
+
+        initializeStorageEngine(initializeStorageEngineOpCtx.get(),
                                 StorageEngineInitFlags::kAllowNoLockFile |
                                     StorageEngineInitFlags::kSkipMetadataFile |
                                     StorageEngineInitFlags::kForRestart);
@@ -540,7 +551,7 @@ public:
 
             // Advance timestamps.
             _testSvcCtx->getReplCoordMock()->setMyLastAppliedOpTimeAndWallTimeForward(
-                {lastOpTimeInBatch, lastWallTimeInBatch}, true);
+                {lastOpTimeInBatch, lastWallTimeInBatch});
             _testSvcCtx->getReplCoordMock()->setMyLastDurableOpTimeAndWallTimeForward(
                 {lastOpTimeInBatch, lastWallTimeInBatch});
             repl::StorageInterface::get(opCtx)->setStableTimestamp(

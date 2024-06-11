@@ -37,17 +37,20 @@
 #include <boost/optional/optional.hpp>
 
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/service_context.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/storage/execution_control/concurrency_adjustment_parameters_gen.h"
 #include "mongo/db/storage/storage_engine_feature_flags_gen.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/tick_source.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 namespace mongo {
+
+MONGO_FAIL_POINT_DEFINE(hangTicketRelease);
 
 namespace {
 void updateQueueStatsOnRelease(ServiceContext* serviceContext,
@@ -71,20 +74,36 @@ void updateQueueStatsOnTicketAcquisition(ServiceContext* serviceContext,
 }
 }  // namespace
 
-TicketHolder::TicketHolder(int32_t numTickets, ServiceContext* svcCtx)
-    : _outof(numTickets),
-      _usingDynamicConcurrencyAdjustment(
-          StorageEngineConcurrencyAdjustmentAlgorithm_parse(
-              IDLParserContext{"storageEngineConcurrencyAdjustmentAlgorithm"},
-              gStorageEngineConcurrencyAdjustmentAlgorithm) !=
-          StorageEngineConcurrencyAdjustmentAlgorithmEnum::kFixedConcurrentTransactions),
-      _serviceContext(svcCtx) {}
+TicketHolder::TicketHolder(ServiceContext* svcCtx, int32_t numTickets, bool trackPeakUsed)
+    : _trackPeakUsed(trackPeakUsed), _outof(numTickets), _serviceContext(svcCtx) {}
 
-void TicketHolder::resize(int32_t newSize) noexcept {
+bool TicketHolder::resize(int32_t newSize, Date_t deadline) noexcept {
     stdx::lock_guard<Latch> lk(_resizeMutex);
 
-    _resize(newSize, _outof.load());
-    _outof.store(newSize);
+    auto difference = newSize - _outof.load();
+    AdmissionContext admCtx;
+    if (difference > 0) {
+        // Hand out tickets one-by-one until we've given them all out.
+        for (auto remaining = difference; remaining > 0; remaining--) {
+            // This call bypasses statistics reporting.
+            _releaseToTicketPoolImpl(&admCtx);
+            _outof.fetchAndAdd(1);
+        }
+    } else {
+        // Take tickets one-by-one without releasing.
+        for (auto remaining = -difference; remaining > 0; remaining--) {
+            // This call bypasses statistics reporting.
+            auto ticket =
+                _waitForTicketUntilImpl(nullptr /* not interruptible */, &admCtx, deadline);
+            if (!ticket) {
+                // We timed out getting a ticket, fail the resize.
+                return false;
+            }
+            ticket->discard();
+            _outof.fetchAndSubtract(1);
+        }
+    }
+    return true;
 }
 
 void TicketHolder::appendStats(BSONObjBuilder& b) const {
@@ -96,6 +115,12 @@ void TicketHolder::appendStats(BSONObjBuilder& b) const {
 }
 
 void TicketHolder::_releaseToTicketPool(AdmissionContext* admCtx) noexcept {
+    if (MONGO_unlikely(hangTicketRelease.shouldFail())) {
+        LOGV2(8435300,
+              "Hanging hangTicketRelease in _releaseToTicketPool() due to 'hangTicketRelease' "
+              "failpoint");
+        hangTicketRelease.pauseWhileSet();
+    }
     auto& queueStats = _getQueueStatsToUse(admCtx);
     updateQueueStatsOnRelease(_serviceContext, queueStats, admCtx);
     _releaseToTicketPoolImpl(admCtx);
@@ -163,11 +188,12 @@ boost::optional<Ticket> TicketHolder::waitForTicketUntil(OperationContext* opCtx
 }
 
 int32_t TicketHolder::getAndResetPeakUsed() {
+    invariant(_trackPeakUsed);
     return _peakUsed.swap(used());
 }
 
 void TicketHolder::_updatePeakUsed() {
-    if (!_usingDynamicConcurrencyAdjustment) {
+    if (!_trackPeakUsed) {
         return;
     }
 
@@ -197,35 +223,40 @@ void TicketHolder::_appendCommonQueueImplStats(BSONObjBuilder& b, const QueueSta
     b.append("totalTimeQueuedMicros", stats.totalTimeQueuedMicros.loadRelaxed());
 }
 
-boost::optional<Ticket> MockTicketHolder::tryAcquire(AdmissionContext*) {
-    return {};
+void MockTicketHolder::_releaseToTicketPoolImpl(AdmissionContext* admCtx) noexcept {
+    _available++;
 }
 
-Ticket MockTicketHolder::waitForTicket(OperationContext*, AdmissionContext*) {
-    return {nullptr, nullptr};
+boost::optional<Ticket> MockTicketHolder::tryAcquire(AdmissionContext* admCtx) {
+    if (_available <= 0) {
+        return boost::none;
+    }
+    _available--;
+    if (used() > _peakUsed.load()) {
+        _peakUsed.store(used());
+    }
+    return Ticket{this, admCtx};
+}
+
+Ticket MockTicketHolder::waitForTicket(OperationContext*, AdmissionContext* admCtx) {
+    auto ticket = tryAcquire(admCtx);
+    invariant(ticket);
+    return std::move(ticket.get());
 }
 
 boost::optional<Ticket> MockTicketHolder::waitForTicketUntil(OperationContext*,
-                                                             AdmissionContext*,
+                                                             AdmissionContext* admCtx,
                                                              Date_t) {
-    return {};
+    return tryAcquire(admCtx);
 }
 
 boost::optional<Ticket> MockTicketHolder::_tryAcquireImpl(AdmissionContext* admCtx) {
-    return boost::none;
+    return tryAcquire(admCtx);
 }
 
 boost::optional<Ticket> MockTicketHolder::_waitForTicketUntilImpl(OperationContext* opCtx,
                                                                   AdmissionContext* admCtx,
                                                                   Date_t until) {
-    return boost::none;
+    return tryAcquire(admCtx);
 }
-
-void MockTicketHolder::setUsed(int32_t used) {
-    _used = used;
-    if (_used > _peakUsed) {
-        _peakUsed = _used;
-    }
-}
-
 }  // namespace mongo

@@ -379,18 +379,24 @@ class ShardedClusterBuilder(FixtureBuilder):
         sharded_cluster = _FIXTURES[self.REGISTERED_NAME](logger, job_num, fixturelib, *args,
                                                           **kwargs)
 
-        for rs_shard_index in range(kwargs["num_shards"]):
-            rs_shard = self._new_rs_shard(sharded_cluster, mixed_bin_versions, old_bin_version,
-                                          rs_shard_index, kwargs["num_rs_nodes_per_shard"])
-            sharded_cluster.install_rs_shard(rs_shard)
-
         config_shard = kwargs["config_shard"]
         config_svr = None
+        # We install the configsvr before the shards, so that embedded-router shards can know the
+        # config-server connection string when they are created.
         if config_shard is None:
             config_svr = self._new_configsvr(sharded_cluster, is_multiversion, old_bin_version)
         else:
-            config_svr = sharded_cluster.shards[config_shard]
+            config_svr = self._new_rs_shard(sharded_cluster, mixed_bin_versions, old_bin_version,
+                                            config_shard, kwargs["num_rs_nodes_per_shard"])
         sharded_cluster.install_configsvr(config_svr)
+
+        for rs_shard_index in range(kwargs["num_shards"]):
+            if rs_shard_index != config_shard:
+                rs_shard = self._new_rs_shard(sharded_cluster, mixed_bin_versions, old_bin_version,
+                                              rs_shard_index, kwargs["num_rs_nodes_per_shard"])
+                sharded_cluster.install_rs_shard(rs_shard)
+            else:
+                sharded_cluster.install_rs_shard(config_svr)
 
         num_routers = kwargs["num_mongos"]
         shardsvrs = sharded_cluster.get_shardsvrs()

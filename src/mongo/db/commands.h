@@ -172,8 +172,11 @@ struct CommandHelpers {
 
     static NamespaceStringOrUUID parseNsOrUUID(const DatabaseName& dbName, const BSONObj& cmdObj);
 
-    // Ensure collection identifier is not a Command
-    static void ensureNsNotCommand(const NamespaceString& nss);
+    // Check that the namespace string references a collection that holds documents
+    // rather than an internal configuration collection (the names of which contain
+    // a $). The one exception is kLocalOplogDollarMain, which is considered valid
+    // despite containing $.
+    static void ensureValidCollectionName(const NamespaceString& nss);
 
     /**
      * Return the namespace for the command. If the first field in 'cmdObj' is of type
@@ -1205,6 +1208,7 @@ private:
         return RequestType::parse(
             IDLParserContext(RequestType::kCommandName,
                              APIParameters::get(opCtx).getAPIStrict().value_or(false),
+                             auth::ValidatedTenancyScope::get(opCtx),
                              dbName.tenantId()),
             cmdObj);
     }

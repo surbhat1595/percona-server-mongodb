@@ -37,6 +37,7 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
+#include "mongo/base/secure_allocator.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -50,12 +51,12 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/commands/server_status_metric.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -125,7 +126,8 @@ public:
         const auto runStart = clock->now();
         BSONObjBuilder timeBuilder(256);
 
-        opCtx->lockState()->setAdmissionPriority(AdmissionContext::Priority::kImmediate);
+        shard_role_details::getLocker(opCtx)->setAdmissionPriority(
+            AdmissionContext::Priority::kImmediate);
 
         // --- basic fields that are global
 
@@ -277,6 +279,12 @@ public:
             b.append("note", "not all mem info support on this platform");
             b.appendBool("supported", false);
         }
+
+        using namespace mongo::secure_allocator_details;
+        b.appendNumber("secureAllocByteCount",
+                       static_cast<int>(gSecureAllocCountInfo().getSecureAllocByteCount()));
+        b.appendNumber("secureAllocBytesInPages",
+                       static_cast<int>(gSecureAllocCountInfo().getSecureAllocBytesInPages()));
     }
 };
 

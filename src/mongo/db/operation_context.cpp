@@ -87,11 +87,8 @@ const auto kNoWaiterThread = stdx::thread::id();
 }  // namespace
 
 OperationContext::OperationContext(Client* client, OperationId opId)
-    : OperationContext(client, OperationIdSlot(opId)) {}
-
-OperationContext::OperationContext(Client* client, OperationIdSlot&& opIdSlot)
     : _client(client),
-      _opId(std::move(opIdSlot)),
+      _opId(opId),
       _elapsedTime(client ? client->getServiceContext()->getTickSource()
                           : globalSystemTickSource()) {}
 
@@ -448,7 +445,7 @@ void OperationContext::setOperationKey(OperationKey opKey) {
     invariant(!_opKey);
 
     _opKey.emplace(std::move(opKey));
-    OperationKeyManager::get(_client).add(*_opKey, _opId.getId());
+    OperationKeyManager::get(_client).add(*_opKey, _opId);
 }
 
 void OperationContext::releaseOperationKey() {
@@ -470,7 +467,7 @@ void OperationContext::setTxnRetryCounter(TxnRetryCounter txnRetryCounter) {
     _txnRetryCounter = txnRetryCounter;
 }
 
-std::unique_ptr<RecoveryUnit> OperationContext::releaseRecoveryUnit() {
+std::unique_ptr<RecoveryUnit> OperationContext::releaseRecoveryUnit_DO_NOT_USE() {
     if (_recoveryUnit) {
         _recoveryUnit->setOperationContext(nullptr);
     }
@@ -478,21 +475,21 @@ std::unique_ptr<RecoveryUnit> OperationContext::releaseRecoveryUnit() {
     return std::move(_recoveryUnit);
 }
 
-std::unique_ptr<RecoveryUnit> OperationContext::releaseAndReplaceRecoveryUnit() {
-    auto ru = releaseRecoveryUnit();
-    setRecoveryUnit(
+std::unique_ptr<RecoveryUnit> OperationContext::releaseAndReplaceRecoveryUnit_DO_NOT_USE() {
+    auto ru = releaseRecoveryUnit_DO_NOT_USE();
+    setRecoveryUnit_DO_NOT_USE(
         std::unique_ptr<RecoveryUnit>(getServiceContext()->getStorageEngine()->newRecoveryUnit()),
         WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
     return ru;
 }
 
-void OperationContext::replaceRecoveryUnit() {
-    setRecoveryUnit(
+void OperationContext::replaceRecoveryUnit_DO_NOT_USE() {
+    setRecoveryUnit_DO_NOT_USE(
         std::unique_ptr<RecoveryUnit>(getServiceContext()->getStorageEngine()->newRecoveryUnit()),
         WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
 }
 
-WriteUnitOfWork::RecoveryUnitState OperationContext::setRecoveryUnit(
+WriteUnitOfWork::RecoveryUnitState OperationContext::setRecoveryUnit_DO_NOT_USE(
     std::unique_ptr<RecoveryUnit> unit, WriteUnitOfWork::RecoveryUnitState state) {
     _recoveryUnit = std::move(unit);
     if (_recoveryUnit) {
@@ -504,13 +501,14 @@ WriteUnitOfWork::RecoveryUnitState OperationContext::setRecoveryUnit(
     return oldState;
 }
 
-void OperationContext::setLockState(std::unique_ptr<Locker> locker) {
+void OperationContext::setLockState_DO_NOT_USE(std::unique_ptr<Locker> locker) {
     invariant(!_locker);
     invariant(locker);
     _locker = std::move(locker);
 }
 
-std::unique_ptr<Locker> OperationContext::swapLockState(std::unique_ptr<Locker> locker, WithLock) {
+std::unique_ptr<Locker> OperationContext::swapLockState_DO_NOT_USE(std::unique_ptr<Locker> locker,
+                                                                   WithLock clientLock) {
     invariant(_locker);
     invariant(locker);
     _locker.swap(locker);

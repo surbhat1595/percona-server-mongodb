@@ -34,6 +34,7 @@
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -47,6 +48,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/db/auth/validated_tenancy_scope.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/platform/compiler.h"
@@ -291,30 +293,35 @@ public:
     explicit IDLParserContext(StringData fieldName) : IDLParserContext{fieldName, false} {}
 
     IDLParserContext(StringData fieldName, bool apiStrict)
-        : IDLParserContext{fieldName, apiStrict, boost::none} {}
+        : IDLParserContext{fieldName, apiStrict, boost::none, boost::none} {}
 
     IDLParserContext(StringData fieldName,
                      bool apiStrict,
+                     const boost::optional<auth::ValidatedTenancyScope>& vts,
                      boost::optional<TenantId> tenantId,
                      const SerializationContext& serializationContext = SerializationContext())
         : _serializationContext(serializationContext),
           _currentField(fieldName),
           _apiStrict(apiStrict),
           _tenantId(std::move(tenantId)),
-          _predecessor(nullptr) {}
+          _predecessor(nullptr),
+          _validatedTenancyScope(vts) {}
 
     IDLParserContext(StringData fieldName, const IDLParserContext* predecessor)
-        : IDLParserContext(fieldName, predecessor, boost::none, SerializationContext()) {}
+        : IDLParserContext(
+              fieldName, predecessor, boost::none, boost::none, SerializationContext()) {}
 
     IDLParserContext(StringData fieldName,
                      const IDLParserContext* predecessor,
-                     boost::optional<TenantId> tenantId,
-                     const SerializationContext& serializationContext)
+                     const boost::optional<auth::ValidatedTenancyScope>& vts,
+                     const SerializationContext& serializationContext,
+                     boost::optional<TenantId> tenantId)
         : _serializationContext(serializationContext),
           _currentField(fieldName),
           _apiStrict(predecessor->_apiStrict),
           _tenantId(tenantId),
-          _predecessor(predecessor) {
+          _predecessor(predecessor),
+          _validatedTenancyScope(vts) {
         assertTenantIdMatchesPredecessor(predecessor);
     }
 
@@ -359,7 +366,7 @@ public:
      * processed.
      * Throws an exception if the BSON element's type is wrong.
      */
-    bool checkAndAssertTypes(const BSONElement& element, const std::vector<BSONType>& types) const;
+    bool checkAndAssertTypes(const BSONElement& element, std::span<const BSONType> types) const;
 
     /**
      * Throw an error message about the BSONElement being a duplicate field.
@@ -397,7 +404,7 @@ public:
      * Throw an error about a field having the wrong type.
      */
     MONGO_COMPILER_NORETURN void throwBadType(const BSONElement& element,
-                                              const std::vector<BSONType>& types) const;
+                                              std::span<const BSONType> types) const;
 
     /**
      * Throw an 'APIStrictError' if the user command has 'apiStrict' field as true.
@@ -427,7 +434,7 @@ public:
      * Check that the collection name or UUID in 'element' is valid. Throws an exception if not
      * valid. Returns either the collection name or UUID otherwise.
      */
-    static stdx::variant<UUID, StringData> checkAndAssertCollectionNameOrUUID(
+    static std::variant<UUID, StringData> checkAndAssertCollectionNameOrUUID(
         const BSONElement& element);
 
     /**
@@ -441,6 +448,8 @@ public:
     const boost::optional<TenantId>& getTenantId() const;
 
     const SerializationContext& getSerializationContext() const;
+
+    const boost::optional<auth::ValidatedTenancyScope>& getValidatedTenancyScope() const;
 
 private:
     /**
@@ -493,6 +502,8 @@ private:
     // This provides a singly linked list of parent pointers, and use to produce a full path to a
     // field with an error.
     const IDLParserContext* _predecessor;
+
+    const boost::optional<auth::ValidatedTenancyScope> _validatedTenancyScope;
 };
 
 /**

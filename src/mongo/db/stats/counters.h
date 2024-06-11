@@ -50,7 +50,6 @@
 #include "mongo/rpc/message.h"
 #include "mongo/util/aligned.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/spin_lock.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
@@ -481,6 +480,10 @@ public:
         classicMisses.increment();
     }
 
+    void incrementClassicSkippedCounter() {
+        classicSkipped.increment();
+    }
+
     void incrementSbeHitsCounter() {
         sbeHits.increment();
     }
@@ -489,11 +492,22 @@ public:
         sbeMisses.increment();
     }
 
+    void incrementSbeSkippedCounter() {
+        sbeSkipped.increment();
+    }
+
 private:
+    // Counters that track the number of times a query plan is:
+    // a) found in the cache (hits),
+    // b) not found in cache (misses), or
+    // c) not considered for caching hence we don't even look for it in the cache (skipped).
+    // Split into classic and SBE, depending on which execution engine is used.
     CounterMetric classicHits{"query.planCache.classic.hits"};
     CounterMetric classicMisses{"query.planCache.classic.misses"};
+    CounterMetric classicSkipped{"query.planCache.classic.skipped"};
     CounterMetric sbeHits{"query.planCache.sbe.hits"};
     CounterMetric sbeMisses{"query.planCache.sbe.misses"};
+    CounterMetric sbeSkipped{"query.planCache.sbe.skipped"};
 };
 extern PlanCacheCounters planCacheCounters;
 
@@ -603,5 +617,13 @@ extern CounterMetric updateOneNonTargetedShardedCount;
 extern CounterMetric deleteOneNonTargetedShardedCount;
 // Track the number of non-targeted findAndModify commands on sharded collections
 extern CounterMetric findAndModifyNonTargetedShardedCount;
-
+// Track the number of non-targeted deleteOne commands (without shard key with _id) on sharded
+// collections.
+extern CounterMetric deleteOneWithoutShardKeyWithIdCount;
+// Track the number of retries for non-targeted updateOne commands (without shard key with _id) on
+// sharded collections
+extern CounterMetric updateOneWithoutShardKeyWithIdRetryCount;
+// Track the number of retries for non-targeted deleteOne commands (without shard key with _id) on
+// sharded collections
+extern CounterMetric deleteOneWithoutShardKeyWithIdRetryCount;
 }  // namespace mongo

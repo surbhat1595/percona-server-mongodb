@@ -53,8 +53,7 @@ public:
     AggregationContextFixture(NamespaceString nss) {
         _opCtx = makeOperationContext();
         _expCtx = make_intrusive<ExpressionContextForTest>(_opCtx.get(), nss);
-        unittest::TempDir tempDir("AggregationContextFixture");
-        _expCtx->tempDir = tempDir.path();
+        _expCtx->tempDir = _tempDir.path();
         _expCtx->changeStreamSpec = DocumentSourceChangeStreamSpec();
     }
 
@@ -107,6 +106,8 @@ public:
     }
 
 private:
+    const unittest::TempDir _tempDir{"AggregationContextFixture"};
+
     ServiceContext::UniqueOperationContext _opCtx;
     boost::intrusive_ptr<ExpressionContextForTest> _expCtx;
 };
@@ -117,16 +118,6 @@ struct DocumentSourceDeleter {
         docSource->dispose();
         delete docSource;
     }
-};
-
-class ServerlessAggregationContextFixture : public AggregationContextFixture {
-public:
-    ServerlessAggregationContextFixture()
-        : AggregationContextFixture(NamespaceString::createNamespaceString_forTest(
-              TenantId(OID::gen()), "unittests", "pipeline_test")) {}
-
-    const std::string _targetDb = "test";
-    const std::string _targetColl = "target_collection";
 };
 
 }  // namespace mongo

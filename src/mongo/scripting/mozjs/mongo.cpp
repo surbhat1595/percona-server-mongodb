@@ -62,7 +62,7 @@
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/replica_set_monitor_manager.h"
 #include "mongo/client/sasl_oidc_client_conversation.h"
-#include "mongo/db/auth/validated_tenancy_scope.h"
+#include "mongo/db/auth/validated_tenancy_scope_factory.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/find_command.h"
@@ -118,6 +118,7 @@ const JSFunctionSpec MongoBase::methods[] = {
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(isReplicaSetMember, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(isMongos, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(isTLS, MongoExternalInfo),
+    MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(isGRPC, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(getApiParameters, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(_runCommandImpl, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(_startSession, MongoExternalInfo),
@@ -355,6 +356,7 @@ namespace {
  */
 template <typename Params, typename MakeRequest>
 void doRunCommand(JSContext* cx, JS::CallArgs args, MakeRequest makeRequest) {
+    using namespace fmt::literals;
     uassert(ErrorCodes::BadValue,
             str::stream() << Params::kCommandName << " needs 4 args",
             args.length() >= 4);
@@ -374,9 +376,9 @@ void doRunCommand(JSContext* cx, JS::CallArgs args, MakeRequest makeRequest) {
 
     auto request = makeRequest(database, arg);
     if (auto tokenArg = args.get(3); tokenArg.isString()) {
-        using VTS = auth::ValidatedTenancyScope;
         if (auto token = ValueWriter(cx, tokenArg).toString(); !token.empty()) {
-            request.validatedTenancyScope = VTS(token, VTS::InitForShellTag{});
+            request.validatedTenancyScope = auth::ValidatedTenancyScopeFactory::create(
+                token, auth::ValidatedTenancyScopeFactory::InitForShellTag{});
         }
     } else {
         uassert(ErrorCodes::BadValue,
@@ -753,6 +755,11 @@ void MongoExternalInfo::construct(JSContext* cx, JS::CallArgs args) {
     if (!conn.get()) {
         uasserted(ErrorCodes::InternalError, errmsg);
     }
+    // Make the DBClientBase not throw on a StaleConfig error since the shell cannot handle this
+    // error and for transactions throwing this error from inside DBClientBase makes the error lose
+    // the TransientTransactionError label, which would mislead the external client to not retry the
+    // transaction when it should.
+    conn->setShouldThrowOnStaleConfigError(false);
 
     ScriptEngine::runConnectCallback(*conn, host);
 
@@ -812,6 +819,12 @@ void MongoBase::Functions::isTLS::call(JSContext* cx, JS::CallArgs args) {
     auto conn = getConnection(args);
 
     args.rval().setBoolean(conn->isTLS());
+}
+
+void MongoBase::Functions::isGRPC::call(JSContext* cx, JS::CallArgs args) {
+    auto conn = getConnection(args);
+
+    args.rval().setBoolean(conn->isGRPC());
 }
 
 void MongoBase::Functions::getApiParameters::call(JSContext* cx, JS::CallArgs args) {

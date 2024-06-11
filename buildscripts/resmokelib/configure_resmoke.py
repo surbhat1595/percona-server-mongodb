@@ -147,6 +147,20 @@ def _validate_config(parser):
         if not os.access(resolved_path, os.X_OK):
             parser.error(f"Found '{resolved_path}', but it is not an executable file")
 
+    if not _config.TLS_MODE or _config.TLS_MODE == "disabled":
+        if _config.SHELL_TLS_ENABLED:
+            parser.error("--shellTls requires server TLS to be enabled")
+        if _config.TLS_CA_FILE:
+            parser.error("--tlsCAFile requires server TLS to be enabled")
+        if _config.MONGOD_TLS_CERTIFICATE_KEY_FILE:
+            parser.error("--mongodTlsCertificateKeyFile requires server TLS to be enabled")
+        if _config.MONGOS_TLS_CERTIFICATE_KEY_FILE:
+            parser.error("--mongosTlsCertificateKeyFile requires server TLS to be enabled")
+
+    if not _config.SHELL_TLS_ENABLED:
+        if _config.SHELL_TLS_CERTIFICATE_KEY_FILE:
+            parser.error("--shellTlsCertificateKeyFile requires --shellTls")
+
 
 def _find_resmoke_wrappers():
     # This is technically incorrect. PREFIX_BINDIR defaults to $PREFIX/bin, so
@@ -169,11 +183,15 @@ def _set_up_tracing(
 ) -> bool:
     """Try to set up otel tracing. On success return True. On failure return False.
 
-    This method does 4 things.
-    1. If a user has passed in a grpc OTel endpoint then we set up an OTLPSpanExporter to send OTEL metrics to that endpoint.
-    2. If a user passes in a filename to store OTel metrics in then we are going to export metrics to that file. It is perfectly valid to have an OTel metrics endpoint and a OTel metrics file. We use a custom exporter `FileSpanExporter` to write data to the passed in file.
-    3. If a user passes in a parent trace id and a child trace id we assume both of those. This allows us to tie resmoke metrics to a parent metric.
-    4. If a user passes in extra_baggage, we add these "global" values to our baggage. This allows us to propagate these values to all child spans in resmoke using our custom span processor `BatchedBaggageSpanProcessor`.
+    This method does 3 things:
+    1. If a user passes in a directory pathname to store OTel metrics in,
+    then we export metrics to files in that directory using our custom exporter
+    `FileSpanExporter`.
+    2. If a user passes in a trace ID and a parent span ID, we assume both of those.
+    This allows us to tie resmoke metrics to a parent metric.
+    3. If a user passes in extra_context, we add these "global" values to our baggage.
+    This allows us to propagate these values to all child spans in resmoke
+    using our custom span processor `BatchedBaggageSpanProcessor`.
     """
 
     success = True
@@ -321,6 +339,7 @@ be invoked as either:
     _config.JOBS = config.pop("jobs")
     _config.LINEAR_CHAIN = config.pop("linear_chain") == "on"
     _config.MAJORITY_READ_CONCERN = config.pop("majority_read_concern") == "on"
+    _config.ENABLE_ENTERPRISE_TESTS = config.pop("enable_enterprise_tests")
     _config.MIXED_BIN_VERSIONS = config.pop("mixed_bin_versions")
     if _config.MIXED_BIN_VERSIONS is not None:
         _config.MIXED_BIN_VERSIONS = _config.MIXED_BIN_VERSIONS.split("-")
@@ -398,7 +417,15 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     _config.MRLOG = config.pop("mrlog")
     _config.NO_JOURNAL = config.pop("no_journal")
     _config.NUM_CLIENTS_PER_FIXTURE = config.pop("num_clients_per_fixture")
+    _config.USE_TENANT_CLIENT = config.pop("use_tenant_client")
     _config.NUM_REPLSET_NODES = config.pop("num_replset_nodes")
+    _config.TLS_MODE = config.pop("tls_mode")
+    _config.TLS_CA_FILE = config.pop("tls_ca_file")
+    _config.SHELL_TLS_ENABLED = config.pop("shell_tls_enabled")
+    _config.SHELL_TLS_CERTIFICATE_KEY_FILE = config.pop("shell_tls_certificate_key_file")
+    _config.SHELL_GRPC = config.pop("shell_grpc")
+    _config.MONGOD_TLS_CERTIFICATE_KEY_FILE = config.pop("mongod_tls_certificate_key_file")
+    _config.MONGOS_TLS_CERTIFICATE_KEY_FILE = config.pop("mongos_tls_certificate_key_file")
     _config.NUM_SHARDS = config.pop("num_shards")
     _config.CONFIG_SHARD = utils.pick_catalog_shard_node(
         config.pop("config_shard"), _config.NUM_SHARDS)

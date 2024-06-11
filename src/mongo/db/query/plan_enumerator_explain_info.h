@@ -31,6 +31,7 @@
 
 namespace mongo {
 
+// The information in this struct is used for classic-engine explains.
 struct PlanEnumeratorExplainInfo {
     bool hitIndexedOrLimit = false;
     bool hitIndexedAndLimit = false;

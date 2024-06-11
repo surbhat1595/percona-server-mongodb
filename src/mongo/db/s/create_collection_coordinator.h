@@ -44,6 +44,7 @@
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/s/config/initial_split_policy.h"
 #include "mongo/db/s/create_collection_coordinator_document_gen.h"
+#include "mongo/db/s/participant_block_gen.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/sharding_ddl_coordinator.h"
 #include "mongo/db/s/sharding_ddl_coordinator_service.h"
@@ -88,6 +89,7 @@ public:
     virtual ~CreateCollectionResponseProvider() {}
 };
 
+// TODO (SERVER-79304): Remove once 8.0 becomes last LTS.
 class CreateCollectionCoordinatorLegacy
     : public RecoverableShardingDDLCoordinator<CreateCollectionCoordinatorDocumentLegacy,
                                                CreateCollectionCoordinatorPhaseLegacyEnum>,
@@ -185,6 +187,8 @@ private:
         return CreateCollectionCoordinatorPhase_serializer(phase);
     }
 
+    bool _mustAlwaysMakeProgress() override;
+
     ExecutorFuture<void> _runImpl(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                   const CancellationToken& token) noexcept override;
 
@@ -192,26 +196,58 @@ private:
                                          const CancellationToken& token,
                                          const Status& status) noexcept override;
 
-    /**
-     * Acquires critical sections on all shards.
-     */
-    void _acquireCriticalSectionsOnParticipants(
-        OperationContext* opCtx,
-        std::shared_ptr<executor::ScopedTaskExecutor> executor,
+    // Check the command arguments passed and validate that the collection has not been tracked from
+    // another request.
+    void _checkPreconditions();
+
+    // Enter to the critical section on the coordinator for the namespace and its buckets namespace.
+    // Only blocks writes.
+    void _enterWriteCriticalSectionOnCoordinatorAndDataShard(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
         const CancellationToken& token);
 
-    /**
-     * Releases critical sections on all shards.
-     */
-    void _releaseCriticalSectionsOnParticipants(
-        OperationContext* opCtx,
-        std::shared_ptr<executor::ScopedTaskExecutor> executor,
-        const CancellationToken& token);
+    // Translate the request parameters and persist them in the coordinator document.
+    void _translateRequestParameters();
 
-    /**
-     * Functions to encapsulate each phase
-     */
-    void _checkPreconditions(std::shared_ptr<executor::ScopedTaskExecutor> executor);
+    // Ensure that the collection is created locally and build the shard key index if necessary.
+    void _createCollectionOnCoordinator();
+
+    // Enter to the critical section on the specified shards. Blocks writes and reads.
+    void _enterCriticalSectionOnShards(
+        OperationContext* opCtx,
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancellationToken& token,
+        const NamespaceString& nss,
+        const std::vector<ShardId>& shardIds,
+        CriticalSectionBlockTypeEnum blockType);
+
+    // Enter to the critical section on all the shards. Blocks writes and reads.
+    void _enterCriticalSection(const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+                               const CancellationToken& token);
+
+    // Broadcast create collection to the other shards.
+    void _createCollectionOnParticipants(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
+
+    // Commits the create collection operation to the sharding catalog within a transaction.
+    void _commitOnShardingCatalog(const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
+
+    // Ensure that the change stream event gets emitted and install the new filtering metadata.
+    void _setPostCommitMetadata(const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
+
+    // Exit from the critical section on all the shards, unblocking reads and writes. On the
+    // participant shards, it is set to clear the filtering metadata after exiting the critical
+    // section.
+    void _exitCriticalSection(const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+                              const CancellationToken& token);
+
+    // Exit critical sections on participant shards.
+    void _exitCriticalSectionOnShards(OperationContext* opCtx,
+                                      const NamespaceString& nss,
+                                      bool throwIfReasonDiffers,
+                                      std::shared_ptr<executor::ScopedTaskExecutor> executor,
+                                      const CancellationToken& token,
+                                      const std::vector<ShardId>& shardIds);
 
     mongo::ShardsvrCreateCollectionRequest _request;
 
@@ -220,13 +256,11 @@ private:
     // Set on successful completion of the coordinator
     boost::optional<CreateCollectionResponse> _result;
 
-    // The fields below are only populated if the coordinator enters in the branch where the
-    // collection is not already sharded (i.e., they will not be present on early return)
-
-    boost::optional<UUID> _collectionUUID;
-    std::unique_ptr<InitialSplitPolicy> _splitPolicy;
-    boost::optional<InitialSplitPolicy::ShardCollectionConfig> _initialChunks;
+    // The fields below are populated on the first execution. They will need to be re-calculated on
+    // following executions of the coordinator in case of error.
+    boost::optional<UUID> _uuid;
     boost::optional<bool> _collectionEmpty;
+    boost::optional<InitialSplitPolicy::ShardCollectionConfig> _initialChunks;
 };
 
 }  // namespace mongo

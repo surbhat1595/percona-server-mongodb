@@ -71,9 +71,7 @@ public:
                       "The current storage engine doesn't support backup mode");
     }
     StatusWith<std::unique_ptr<StorageEngine::StreamingCursor>> beginNonBlockingBackup(
-        OperationContext* opCtx,
-        boost::optional<Timestamp> checkpointTimestamp,
-        const StorageEngine::BackupOptions& options) final {
+        OperationContext* opCtx, const StorageEngine::BackupOptions& options) final {
         return Status(ErrorCodes::CommandNotSupported,
                       "The current storage engine doesn't support backup mode");
     }
@@ -96,7 +94,7 @@ public:
         return {};
     }
     std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStoreFromExistingIdent(
-        OperationContext* opCtx, StringData ident) final {
+        OperationContext* opCtx, StringData ident, KeyFormat keyFormat) final {
         return {};
     }
     void cleanShutdown(ServiceContext* svcCtx) final {}
@@ -171,7 +169,7 @@ public:
         return 0;
     }
     void addDropPendingIdent(
-        const stdx::variant<Timestamp, StorageEngine::CheckpointIteration>& dropTime,
+        const std::variant<Timestamp, StorageEngine::CheckpointIteration>& dropTime,
         std::shared_ptr<Ident> ident,
         DropIdentCallback&& onDrop) final {}
     void dropIdentsOlderThan(OperationContext* opCtx, const Timestamp& ts) final {}
@@ -180,7 +178,7 @@ public:
     }
     void startTimestampMonitor() final {}
 
-    void checkpoint(OperationContext* opCtx) final {}
+    void checkpoint() final {}
 
     StorageEngine::CheckpointIteration getCheckpointIteration() const final {
         return StorageEngine::CheckpointIteration{0};
@@ -223,12 +221,15 @@ public:
 
     void setPinnedOplogTimestamp(const Timestamp& pinnedTimestamp) final {}
 
-    StatusWith<BSONObj> getSanitizedStorageOptionsForSecondaryReplication(
-        const BSONObj& options) const final {
+    BSONObj getSanitizedStorageOptionsForSecondaryReplication(const BSONObj& options) const final {
         return options;
     }
 
     void dump() const final {}
+
+    Status autoCompact(OperationContext* opCtx, const AutoCompactOptions& options) final {
+        return Status::OK();
+    }
 };
 
 }  // namespace mongo

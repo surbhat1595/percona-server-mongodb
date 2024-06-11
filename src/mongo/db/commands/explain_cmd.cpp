@@ -155,6 +155,14 @@ public:
         return false;
     }
 
+    ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
+                                                 bool isImplicitDefault) const override {
+        static const Status kDefaultReadConcernNotPermitted{
+            ErrorCodes::InvalidOptions,
+            "Explain does not permit default readConcern to be applied."};
+        return {Status::OK(), {kDefaultReadConcernNotPermitted}};
+    }
+
     /**
      * You are authorized to run an explain if you are authorized to run
      * the command that you are explaining. The auth check is performed recursively
@@ -214,7 +222,7 @@ std::unique_ptr<CommandInvocation> CmdExplain::parse(OperationContext* opCtx,
             explainedCommand);
     auto innerRequest =
         std::make_unique<OpMsgRequest>(OpMsgRequestBuilder::createWithValidatedTenancyScope(
-            dbName, request.validatedTenancyScope, explainedObj, cmdObj.getSerializationContext()));
+            dbName, request.validatedTenancyScope, explainedObj));
     auto innerInvocation = explainedCommand->parseForExplain(opCtx, *innerRequest, verbosity);
     return std::make_unique<Invocation>(
         this, request, std::move(verbosity), std::move(innerRequest), std::move(innerInvocation));

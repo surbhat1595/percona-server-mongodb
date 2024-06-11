@@ -63,8 +63,12 @@ std::string dumpVariables(const Vectorizer::VariableTypes& variableTypes) {
 }  // namespace
 
 Vectorizer::Tree Vectorizer::vectorize(optimizer::ABT& node,
-                                       const VariableTypes& externalBindings) {
+                                       const VariableTypes& externalBindings,
+                                       boost::optional<sbe::value::SlotId> externalBitmapSlot) {
     _variableTypes = externalBindings;
+    if (externalBitmapSlot) {
+        _activeMasks.push_back(getABTVariableName(*externalBitmapSlot));
+    }
     auto result = node.visit(*this);
     foldIfNecessary(result);
     return result;
@@ -127,10 +131,15 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
         // If the variable holds a cell, extract the block variable from that and propagate the name
         // of the cell variable to the caller to be used when folding back the result.
         if (TypeSignature::kCellType.isSubset(varIt->second.first)) {
-            return {makeABTFunction("cellBlockGetFlatValuesBlock"_sd, n),
-                    varIt->second.first.exclude(TypeSignature::kCellType)
-                        .include(TypeSignature::kBlockType),
-                    var.name()};
+            Tree result = Tree{makeABTFunction("cellBlockGetFlatValuesBlock"_sd, n),
+                               varIt->second.first.exclude(TypeSignature::kCellType)
+                                   .include(TypeSignature::kBlockType),
+                               var.name()};
+            if (_purpose == Purpose::Project) {
+                // When we are computing projections, we always work on folded values.
+                foldIfNecessary(result);
+            }
+            return result;
         } else {
             return {n, varIt->second.first, varIt->second.second};
         }
@@ -266,13 +275,14 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
             }
             break;
         }
-        case optimizer::Operations::And: {
+        case optimizer::Operations::And:
+        case optimizer::Operations::Or: {
             Tree lhs = op.getLeftChild().visit(*this);
             if (!lhs.expr.has_value()) {
                 return lhs;
             }
-            // An And operation between two blocks has to work at the level of measures, not on the
-            // expanded arrays.
+            // An And/Or operation between two blocks has to work at the level of measures, not on
+            // the expanded arrays.
             foldIfNecessary(lhs);
 
             if (TypeSignature::kBlockType.isSubset(lhs.typeSignature)) {
@@ -280,7 +290,12 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
                 // This way, the right side can decide whether to skip the processing of the indexes
                 // where the left side produced a false result.
                 auto lhsVar = getABTLocalVariableName(_frameGenerator->generate(), 0);
-                _activeMasks.push_back(lhsVar);
+
+                auto mask = op.op() == optimizer::Operations::And
+                    ? lhsVar
+                    : getABTLocalVariableName(_frameGenerator->generate(), 0);
+
+                _activeMasks.push_back(mask);
                 Tree rhs = op.getRightChild().visit(*this);
                 _activeMasks.pop_back();
                 if (!rhs.expr.has_value()) {
@@ -289,11 +304,24 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
                 foldIfNecessary(rhs);
 
                 if (TypeSignature::kBlockType.isSubset(rhs.typeSignature)) {
-                    return {makeLet(lhsVar,
-                                    std::move(*lhs.expr),
-                                    makeABTFunction("valueBlockLogicalAnd"_sd,
-                                                    makeVariable(lhsVar),
-                                                    std::move(*rhs.expr))),
+                    return {op.op() == optimizer::Operations::And
+                                ? makeLet(lhsVar,
+                                          std::move(*lhs.expr),
+                                          makeABTFunction("valueBlockLogicalAnd"_sd,
+                                                          makeVariable(lhsVar),
+                                                          std::move(*rhs.expr)))
+                                : makeLet(lhsVar,
+                                          std::move(*lhs.expr),
+                                          makeLet(mask,
+                                                  makeABTFunction(
+                                                      "valueBlockLogicalNot",
+                                                      makeABTFunction(
+                                                          "valueBlockFillEmpty"_sd,
+                                                          makeVariable(lhsVar),
+                                                          optimizer::Constant::boolean(false))),
+                                                  makeABTFunction("valueBlockLogicalOr"_sd,
+                                                                  makeVariable(lhsVar),
+                                                                  std::move(*rhs.expr)))),
                             TypeSignature::kBlockType.include(TypeSignature::kBooleanType)
                                 .include(lhs.typeSignature.include(rhs.typeSignature)
                                              .intersect(TypeSignature::kNothingType)),
@@ -350,7 +378,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
                                         const optimizer::FunctionCall& op) {
     size_t arity = op.nodes().size();
 
-    if (op.name() == "blockTraverseFPlaceholder" && arity == 2) {
+    if (arity == 2 && op.name() == "blockTraverseFPlaceholder"s) {
         // This placeholder function is injected when a tree like "traverseF(block_slot, <lambda>,
         // false)" would be used on scalar values. The traverseF would execute the lambda on the
         // current value in the slot if it is not an array; if it contains an array, it would
@@ -402,18 +430,6 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
                     {}};
         }
     }
-    if (op.name() == "exists" && arity == 1) {
-        auto argument = op.nodes()[0].visit(*this);
-        if (!argument.expr.has_value()) {
-            return argument;
-        }
-
-        if (TypeSignature::kBlockType.isSubset(argument.typeSignature)) {
-            return {makeABTFunction("valueBlockExists"_sd, std::move(*argument.expr)),
-                    TypeSignature::kBlockType.include(TypeSignature::kBooleanType),
-                    argument.sourceCell};
-        }
-    }
 
     std::vector<Tree> args;
     args.reserve(arity);
@@ -433,10 +449,72 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
         for (size_t i = 0; i < arity; i++) {
             functionArgs.emplace_back(std::move(*args[i].expr));
         }
-        return {
-            makeABTFunction(op.name(), std::move(functionArgs)), TypeSignature::kAnyScalarType, {}};
+        TypeSignature typeSignature = TypeSignature::kAnyScalarType;
+        // The fail() function aborts the query and never returns a valid value.
+        if (arity == 2 && op.name() == "fail"s) {
+            typeSignature = TypeSignature();
+        }
+        return {makeABTFunction(op.name(), std::move(functionArgs)), typeSignature, {}};
     }
+    if (numOfBlockArgs == 1) {
+        if (arity == 1 && op.name() == "exists"s) {
+            return {makeABTFunction("valueBlockExists"_sd, std::move(*args[0].expr)),
+                    TypeSignature::kBlockType.include(TypeSignature::kBooleanType),
+                    args[0].sourceCell};
+        }
 
+        if (arity == 6 && op.name() == "dateTrunc"s &&
+            TypeSignature::kBlockType.isSubset(args[1].typeSignature)) {
+            optimizer::ABTVector functionArgs;
+            functionArgs.reserve(7);
+            functionArgs.emplace_back(generateMaskArg());
+            functionArgs.emplace_back(std::move(*args[1].expr));
+            functionArgs.emplace_back(std::move(*args[0].expr));
+            for (size_t i = 2; i < arity; i++) {
+                functionArgs.emplace_back(std::move(*args[i].expr));
+            }
+            return {makeABTFunction("valueBlockDateTrunc"_sd, std::move(functionArgs)),
+                    TypeSignature::kBlockType.include(TypeSignature::kDateTimeType)
+                        .include(args[1].typeSignature.intersect(TypeSignature::kNothingType)),
+                    args[1].sourceCell};
+        }
+
+        if ((arity == 5 || arity == 6) && op.name() == "dateDiff"s) {
+            // The dateDiff could have the block argument on either date operand.
+            if (TypeSignature::kBlockType.isSubset(args[1].typeSignature)) {
+                optimizer::ABTVector functionArgs;
+                functionArgs.reserve(arity + 1);
+                functionArgs.emplace_back(generateMaskArg());
+                functionArgs.emplace_back(std::move(*args[1].expr));
+                functionArgs.emplace_back(std::move(*args[0].expr));
+                for (size_t i = 2; i < arity; i++) {
+                    functionArgs.emplace_back(std::move(*args[i].expr));
+                }
+                return {makeABTFunction("valueBlockDateDiff"_sd, std::move(functionArgs)),
+                        TypeSignature::kBlockType
+                            .include(getTypeSignature(sbe::value::TypeTags::NumberInt64))
+                            .include(TypeSignature::kNothingType),
+                        args[1].sourceCell};
+            } else if (TypeSignature::kBlockType.isSubset(args[2].typeSignature)) {
+                optimizer::ABTVector functionArgs;
+                functionArgs.reserve(arity + 1);
+                functionArgs.emplace_back(generateMaskArg());
+                functionArgs.emplace_back(std::move(*args[2].expr));
+                functionArgs.emplace_back(std::move(*args[0].expr));
+                functionArgs.emplace_back(std::move(*args[1].expr));
+                for (size_t i = 3; i < arity; i++) {
+                    functionArgs.emplace_back(std::move(*args[i].expr));
+                }
+                return {
+                    makeUnaryOp(mongo::optimizer::Operations::Neg,
+                                makeABTFunction("valueBlockDateDiff"_sd, std::move(functionArgs))),
+                    TypeSignature::kBlockType
+                        .include(getTypeSignature(sbe::value::TypeTags::NumberInt64))
+                        .include(TypeSignature::kNothingType),
+                    args[2].sourceCell};
+            }
+        }
+    }
     // We don't support this function applied to multiple blocks at the same time.
     logUnsupportedConversion(n);
     return {{}, TypeSignature::kAnyScalarType, {}};
@@ -468,43 +546,43 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
     }
     foldIfNecessary(test);
 
-    if (TypeSignature::kBlockType.isSubset(test.typeSignature)) {
-        auto blockify = [](Tree& tree, optimizer::ProjectionName var) {
-            if (!TypeSignature::kBlockType.isSubset(tree.typeSignature)) {
-                tree.expr =
-                    makeABTFunction("valueBlockNewFill"_sd,
-                                    makeIf(makeABTFunction("valueBlockNone"_sd,
-                                                           makeVariable(var),
-                                                           optimizer::Constant::boolean(true)),
-                                           optimizer::Constant::nothing(),
-                                           std::move(*tree.expr)),
-                                    makeABTFunction("valueBlockSize"_sd, makeVariable(var)));
-                tree.typeSignature = TypeSignature::kBlockType.include(tree.typeSignature);
-                tree.sourceCell = boost::none;
-            }
-        };
+    auto blockify = [](Tree& tree, optimizer::ProjectionName bitmapVar) {
+        if (!TypeSignature::kBlockType.isSubset(tree.typeSignature)) {
+            tree.expr =
+                makeABTFunction("valueBlockNewFill"_sd,
+                                makeIf(makeABTFunction("valueBlockNone"_sd,
+                                                       makeVariable(bitmapVar),
+                                                       optimizer::Constant::boolean(true)),
+                                       optimizer::Constant::nothing(),
+                                       std::move(*tree.expr)),
+                                makeABTFunction("valueBlockSize"_sd, makeVariable(bitmapVar)));
+            tree.typeSignature = TypeSignature::kBlockType.include(tree.typeSignature);
+            tree.sourceCell = boost::none;
+        }
+    };
 
+    if (TypeSignature::kBlockType.isSubset(test.typeSignature)) {
         // Treat the result of the condition as the mask to be applied on the 'then' side, and its
         // flipped representation as the mask for the 'else' branch.
-        auto lhsVar = getABTLocalVariableName(_frameGenerator->generate(), 0);
-        _activeMasks.push_back(lhsVar);
+        auto thenBranchBitmapVar = getABTLocalVariableName(_frameGenerator->generate(), 0);
+        _activeMasks.push_back(thenBranchBitmapVar);
         auto thenBranch = op.getThenChild().visit(*this);
         _activeMasks.pop_back();
         if (!thenBranch.expr.has_value()) {
             return thenBranch;
         }
         // If the branch produces a scalar value, blockify it.
-        blockify(thenBranch, lhsVar);
+        blockify(thenBranch, thenBranchBitmapVar);
 
-        auto rhsVar = getABTLocalVariableName(_frameGenerator->generate(), 0);
-        _activeMasks.push_back(rhsVar);
+        auto elseBranchBitmapVar = getABTLocalVariableName(_frameGenerator->generate(), 0);
+        _activeMasks.push_back(elseBranchBitmapVar);
         auto elseBranch = op.getElseChild().visit(*this);
         _activeMasks.pop_back();
         if (!elseBranch.expr.has_value()) {
             return elseBranch;
         }
         // If the branch produces a scalar value, blockify it.
-        blockify(elseBranch, rhsVar);
+        blockify(elseBranch, elseBranchBitmapVar);
 
         boost::optional<optimizer::ProjectionName> sameCell = thenBranch.sourceCell.has_value() &&
                 elseBranch.sourceCell.has_value() &&
@@ -516,15 +594,15 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
             foldIfNecessary(thenBranch);
             foldIfNecessary(elseBranch);
         }
-        return {makeLet(lhsVar,
+        return {makeLet(thenBranchBitmapVar,
                         std::move(*test.expr),
                         makeABTFunction("valueBlockCombine"_sd,
                                         std::move(*thenBranch.expr),
-                                        makeLet(rhsVar,
+                                        makeLet(elseBranchBitmapVar,
                                                 makeABTFunction("valueBlockLogicalNot"_sd,
-                                                                makeVariable(lhsVar)),
+                                                                makeVariable(thenBranchBitmapVar)),
                                                 std::move(*elseBranch.expr)),
-                                        makeVariable(lhsVar))),
+                                        makeVariable(thenBranchBitmapVar))),
                 thenBranch.typeSignature.include(elseBranch.typeSignature),
                 sameCell};
 
@@ -540,7 +618,69 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
         }
         if (TypeSignature::kBlockType.isSubset(thenBranch.typeSignature) !=
             TypeSignature::kBlockType.isSubset(elseBranch.typeSignature)) {
-            // TODO: blockify the scalar branch.
+            auto& blockBranch = TypeSignature::kBlockType.isSubset(thenBranch.typeSignature)
+                ? thenBranch
+                : elseBranch;
+            auto& scalarBranch = TypeSignature::kBlockType.isSubset(thenBranch.typeSignature)
+                ? elseBranch
+                : thenBranch;
+
+            // When an "if" statement is using a scalar test expression, but can return either a
+            // block or a scalar value, we can't decide at compile time whether the runtime value
+            // will be a block or a scalar value; this makes it impossible for the parent expression
+            // to continue with the vectorization.
+            //
+            // E.g. (if ($$NOW > "2024-01-01") then dateDiff(...) else 0) < 365)
+            //      The vectorizer cannot decide whether the "<" operator should be translated into
+            //      a valueBlockLtScalar, because if the "else" branch is selected, the function
+            //      will be invoked with two scalar arguments, leading to a runtime failure.
+
+            // We can vectorize this operation if the scalarBranch is a call to fail(), because it
+            // would never return a value and the type information is the one coming from the block
+            // branch.
+            if (scalarBranch.typeSignature.isEmpty()) {
+                return {makeIf(std::move(*test.expr),
+                               std::move(*thenBranch.expr),
+                               std::move(*elseBranch.expr)),
+                        blockBranch.typeSignature,
+                        blockBranch.sourceCell};
+            }
+            // The other approach is to convert the scalar value into a block containing N copies of
+            // the scalar value, but we need to know the exact number of items that would be
+            // returned at runtime by the block branch. We can't however execute the block branch to
+            // extract its length via valueBlockSize, because we would be executing a branch that
+            // the test expression was guarding against execution. We can instead use the active
+            // mask, or the source cell.
+            if (!_activeMasks.empty()) {
+                // The scalarBranch variable is a reference, so we are actually modifying either
+                // thenBranch.expr or elseBranch.expr in place.
+                blockify(scalarBranch, _activeMasks.back());
+                return {makeIf(std::move(*test.expr),
+                               std::move(*thenBranch.expr),
+                               std::move(*elseBranch.expr)),
+                        blockBranch.typeSignature.include(scalarBranch.typeSignature),
+                        blockBranch.sourceCell};
+            }
+            if (blockBranch.sourceCell.has_value()) {
+                // The scalarBranch variable is a reference, so we are actually modifying either
+                // thenBranch.expr or elseBranch.expr in place.
+                scalarBranch.expr = makeABTFunction(
+                    "valueBlockNewFill"_sd,
+                    std::move(*scalarBranch.expr),
+                    makeABTFunction("valueBlockSize"_sd,
+                                    makeABTFunction("cellBlockGetFlatValuesBlock"_sd,
+                                                    makeVariable(*blockBranch.sourceCell))));
+                scalarBranch.typeSignature =
+                    TypeSignature::kBlockType.include(scalarBranch.typeSignature);
+                scalarBranch.sourceCell = blockBranch.sourceCell;
+                return {makeIf(std::move(*test.expr),
+                               std::move(*thenBranch.expr),
+                               std::move(*elseBranch.expr)),
+                        blockBranch.typeSignature.include(scalarBranch.typeSignature),
+                        blockBranch.sourceCell};
+            }
+            // Missing those information, we abort vectorization and evaluate the expression in the
+            // scalar pipeline.
             return {{}, TypeSignature::kAnyScalarType, {}};
         }
         boost::optional<optimizer::ProjectionName> sameCell;

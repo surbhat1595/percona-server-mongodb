@@ -115,13 +115,13 @@ public:
  * outstanding 'ReopeningRequest' or a prepared 'WriteBatch' for a bucket in the series (same
  * metaField value), that represents a conflict.
  */
-using InsertWaiter = stdx::variant<std::shared_ptr<WriteBatch>, std::shared_ptr<ReopeningRequest>>;
+using InsertWaiter = std::variant<std::shared_ptr<WriteBatch>, std::shared_ptr<ReopeningRequest>>;
 
 /**
  * Variant representing the possible outcomes of 'tryInsert' or 'insert'. See 'tryInsert' and
  * 'insert' for more details.
  */
-using InsertResult = stdx::variant<SuccessfulInsertion, ReopeningContext, InsertWaiter>;
+using InsertResult = std::variant<SuccessfulInsertion, ReopeningContext, InsertWaiter>;
 
 /**
  * Struct to hold a portion of the buckets managed by the catalog.
@@ -158,7 +158,9 @@ struct Stripe {
 
     // All series currently with outstanding reopening operations. Used to coordinate disk access
     // between reopenings and regular writes to prevent stale reads and corrupted updates.
-    stdx::unordered_map<BucketKey, std::shared_ptr<ReopeningRequest>, BucketHasher>
+    stdx::unordered_map<BucketKey,
+                        boost::container::small_vector<std::shared_ptr<ReopeningRequest>, 4>,
+                        BucketHasher>
         outstandingReopeningRequests;
 };
 
@@ -171,14 +173,20 @@ public:
     static BucketCatalog& get(OperationContext* opCtx);
 
     BucketCatalog()
-        : stripes(numberOfStripes),
+        : bucketStateRegistry(trackingContext),
+          stripes(numberOfStripes),
           memoryUsageThreshold(getTimeseriesIdleBucketExpiryMemoryUsageThresholdBytes) {}
     BucketCatalog(size_t numberOfStripes, std::function<uint64_t()> memoryUsageThreshold)
-        : numberOfStripes(numberOfStripes),
+        : bucketStateRegistry(trackingContext),
+          numberOfStripes(numberOfStripes),
           stripes(numberOfStripes),
           memoryUsageThreshold(memoryUsageThreshold) {}
     BucketCatalog(const BucketCatalog&) = delete;
     BucketCatalog operator=(const BucketCatalog&) = delete;
+
+    // Stores an accurate count of the bytes allocated and deallocated for all the data held by
+    // tracked members of the BucketCatalog.
+    TrackingContext trackingContext;
 
     // Stores state information about all buckets managed by the catalog, across stripes.
     BucketStateRegistry bucketStateRegistry;
@@ -219,6 +227,12 @@ public:
 BSONObj getMetadata(BucketCatalog& catalog, const BucketHandle& bucket);
 
 /**
+ * Returns the memory usage of the bucket catalog across all stripes from the approximated memory
+ * usage, and the tracked memory usage from the TrackingAllocator.
+ */
+uint64_t getMemoryUsage(const BucketCatalog& catalog);
+
+/**
  * Tries to insert 'doc' into a suitable bucket. If an open bucket is full (or has incompatible
  * schema), but is otherwise suitable, we will close it and open a new bucket. If we find no bucket
  * with matching data and a time range that can accommodate 'doc', we will not open a new bucket,
@@ -234,9 +248,9 @@ BSONObj getMetadata(BucketCatalog& catalog, const BucketHandle& bucket);
  *
  * If a 'ReopeningContext' is returned, it contains either a bucket ID, corresponding to an archived
  * bucket which should be fetched, an aggregation pipeline that can be used to search for a
- * previously-closed bucket that can accommodate 'doc', or (in hopefully rare cases) a monostate
- * which requires no intermediate action, The caller should then proceed to call 'insert' to insert
- * 'doc', passing any fetched bucket back as a member of the 'ReopeningContext'.
+ * previously-closed bucket that can accommodate 'doc', or (in hopefully rare cases) a
+ * std::monostate which requires no intermediate action, The caller should then proceed to call
+ * 'insert' to insert 'doc', passing any fetched bucket back as a member of the 'ReopeningContext'.
  */
 StatusWith<InsertResult> tryInsert(OperationContext* opCtx,
                                    BucketCatalog& catalog,
@@ -251,9 +265,25 @@ StatusWith<InsertResult> tryInsert(OperationContext* opCtx,
  * closed in order to make space to insert the document. Any caller who receives the same batch may
  * commit or abort the batch after claiming commit rights. See WriteBatch for more details.
  *
- * If 'reopeningContext' is passed with a bucket, we will reopen that bucket and attempt to add
+ * We will attempt to reopen the bucket passed via 'reopeningContext' and attempt to add
  * 'doc' to that bucket. Otherwise we will attempt to find a suitable open bucket, or open a new
  * bucket if none exists.
+ */
+StatusWith<InsertResult> insertWithReopeningContext(OperationContext* opCtx,
+                                                    BucketCatalog& catalog,
+                                                    const NamespaceString& ns,
+                                                    const StringDataComparator* comparator,
+                                                    const TimeseriesOptions& options,
+                                                    const BSONObj& doc,
+                                                    CombineWithInsertsFromOtherClients combine,
+                                                    ReopeningContext& reopeningContext);
+
+/**
+ * Returns the WriteBatch into which the document was inserted and a list of any buckets that were
+ * closed in order to make space to insert the document. Any caller who receives the same batch may
+ * commit or abort the batch after claiming commit rights. See WriteBatch for more details.
+ *
+ * We will attempt to find a suitable open bucket, or open a new bucket if none exists.
  */
 StatusWith<InsertResult> insert(OperationContext* opCtx,
                                 BucketCatalog& catalog,
@@ -261,8 +291,7 @@ StatusWith<InsertResult> insert(OperationContext* opCtx,
                                 const StringDataComparator* comparator,
                                 const TimeseriesOptions& options,
                                 const BSONObj& doc,
-                                CombineWithInsertsFromOtherClients combine,
-                                ReopeningContext* reopeningContext = nullptr);
+                                CombineWithInsertsFromOtherClients combine);
 
 /**
  * If a 'tryInsert' call returns a 'InsertWaiter' object, the caller should use this function to

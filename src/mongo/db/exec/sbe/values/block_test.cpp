@@ -79,6 +79,49 @@ TEST_F(SbeValueTest, SbeCellBlockTypeIsCopyable) {
     ASSERT_EQ(extracted.count, 1);
 }
 
+namespace {
+// Other types and helpers for testing.
+struct PathTestCase {
+    value::CellBlock::Path path;
+    BSONObj filterValues;
+    std::string filterPosInfo;
+
+    BSONObj projectValues;
+};
+
+// Converts a block to a BSON object of the form {"result": <array of values>}.
+// Nothing values (which are valid in a block) are represented with bson NULL.
+BSONObj blockToBsonArr(value::ValueBlock& block) {
+    auto extracted = block.extract();
+    BSONArrayBuilder arr;
+    for (size_t i = 0; i < extracted.count; ++i) {
+        auto tag = extracted.tags[i];
+        auto val = extracted.vals[i];
+
+        BSONObjBuilder tmp;
+
+        if (tag == TypeTags::Nothing) {
+            // Use null as a fill value.
+            tmp.appendNull("foo");
+        } else {
+            bson::appendValueToBsonObj(tmp, "foo", tag, val);
+        }
+
+        arr.append(tmp.asTempObj().firstElement());
+    }
+    return BSON("result" << arr.arr());
+}
+
+// Converts a vector of char storing char(1)/char(0) into an ascii string of '1' and '0'.
+std::string posInfoToString(const std::vector<char>& posInfo) {
+    std::string out;
+    for (auto c : posInfo) {
+        out.push_back(c ? '1' : '0');
+    }
+    return out;
+}
+}  // namespace
+
 class BsonBlockDecodingTest : public mongo::unittest::Test {
 public:
     void run() {
@@ -153,40 +196,57 @@ public:
         }
     }
 
+    void testPaths(const std::vector<PathTestCase>& testCases, const std::vector<BSONObj>& bsons);
+
 private:
     BSONObj _bucketStorage;
 
     bool useTsImpl = false;
 };
 
-BSONObj blockToBsonArr(value::ValueBlock& block) {
-    auto extracted = block.extract();
-    BSONArrayBuilder arr;
-    for (size_t i = 0; i < extracted.count; ++i) {
-        auto tag = extracted.tags[i];
-        auto val = extracted.vals[i];
-
-        BSONObjBuilder tmp;
-
-        if (tag == TypeTags::Nothing) {
-            // Use null as a fill value.
-            tmp.appendNull("foo");
-        } else {
-            bson::appendValueToBsonObj(tmp, "foo", tag, val);
-        }
-
-        arr.append(tmp.asTempObj().firstElement());
+void BsonBlockDecodingTest::testPaths(const std::vector<PathTestCase>& testCases,
+                                      const std::vector<BSONObj>& bsons) {
+    std::vector<value::CellBlock::PathRequest> pathReqs;
+    for (auto& tc : testCases) {
+        pathReqs.push_back(
+            value::CellBlock::PathRequest(value::CellBlock::PathRequestType::kFilter, tc.path));
+        pathReqs.push_back(
+            value::CellBlock::PathRequest(value::CellBlock::PathRequestType::kProject, tc.path));
     }
-    return BSON("result" << arr.arr());
+
+    auto [tsBlocks, cellBlocks] = extractCellBlocks(pathReqs, bsons);
+    ASSERT_EQ(cellBlocks.size(), pathReqs.size());
+
+    size_t idx = 0;
+    for (auto& tc : testCases) {
+        // const auto filterIdx = idx;
+
+        const auto filterIdx = idx * 2;
+        const auto projectIdx = idx * 2 + 1;
+
+        auto& valsOut = cellBlocks[filterIdx]->getValueBlock();
+        auto numObj = blockToBsonArr(valsOut);
+
+        ASSERT_TRUE(SimpleBSONObjComparator::kInstance.evaluate(numObj == tc.filterValues))
+            << "Incorrect values for filter path " << pathReqs[filterIdx].toString() << " got "
+            << numObj << " expected " << tc.filterValues;
+
+        ASSERT_EQ(posInfoToString(cellBlocks[filterIdx]->filterPositionInfo()), tc.filterPosInfo)
+            << "Incorrect position info for filter path " << pathReqs[filterIdx].toString();
+
+        auto projectValues = blockToBsonArr(cellBlocks[projectIdx]->getValueBlock());
+        ASSERT_TRUE(SimpleBSONObjComparator::kInstance.evaluate(projectValues == tc.projectValues))
+            << "Incorrect values for project path " << pathReqs[projectIdx].toString() << " got "
+            << projectValues << " expected " << tc.projectValues;
+
+        ++idx;
+    }
 }
 
-std::string posInfoToString(const std::vector<char>& posInfo) {
-    std::string out;
-    for (auto c : posInfo) {
-        out.push_back(c ? '1' : '0');
-    }
-    return out;
-}
+
+using Get = value::CellBlock::Get;
+using Traverse = value::CellBlock::Traverse;
+using Id = value::CellBlock::Id;
 
 TEST_F(BsonBlockDecodingTest, BSONDocumentBlockSimple) {
     std::vector<BSONObj> bsons{
@@ -197,28 +257,17 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockSimple) {
         fromjson("{a:6}"),
     };
 
-    value::CellBlock::PathRequest aReq{{value::CellBlock::Get{"a"}, value::CellBlock::Id{}}};
-    value::CellBlock::PathRequest bReq{{value::CellBlock::Get{"b"}, value::CellBlock::Id{}}};
+    std::vector<PathTestCase> tests{
+        PathTestCase{.path = {Get{"a"}, Id{}},
+                     .filterValues = fromjson("{result: [1,2,[3,4], null, 6]}"),
+                     .filterPosInfo = "11111",
+                     .projectValues = fromjson("{result: [1,2,[3,4], null, 6]}")},
 
-    auto [tsBlocks, cellBlocks] = extractCellBlocks({aReq, bReq}, bsons);
-
-    ASSERT_EQ(cellBlocks.size(), 2);
-
-    {
-        auto& valsOut = cellBlocks[0]->getValueBlock();
-        auto numObj = blockToBsonArr(valsOut);
-        ASSERT_BSONOBJ_EQ(numObj, fromjson("{result: [1,2,[3,4], null, 6]}"));
-
-        ASSERT_EQ(posInfoToString(cellBlocks[0]->filterPositionInfo()), "11111");
-    }
-
-    {
-        auto& valsOut = cellBlocks[1]->getValueBlock();
-        auto numObj = blockToBsonArr(valsOut);
-        ASSERT_BSONOBJ_EQ(numObj, fromjson("{result: [1,2,3,null,null]}"));
-
-        ASSERT_EQ(posInfoToString(cellBlocks[0]->filterPositionInfo()), "11111");
-    }
+        PathTestCase{.path = {Get{"b"}, Id{}},
+                     .filterValues = fromjson("{result: [1,2,3,null,null]}"),
+                     .filterPosInfo = "11111",
+                     .projectValues = fromjson("{result: [1,2,3,null,null]}")}};
+    testPaths(tests, bsons);
 }
 
 TEST_F(BsonBlockDecodingTest, BSONDocumentBlockMissings) {
@@ -234,20 +283,14 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockMissings) {
         fromjson("{OtherField: 1}"),
     };
 
-    value::CellBlock::PathRequest aReq{{value::CellBlock::Get{"a"}, value::CellBlock::Id{}}};
-
-    auto [tsBlocks, cellBlocks] = extractCellBlocks({aReq}, bsons);
-
-    ASSERT_EQ(cellBlocks.size(), 1);
-
-    {
-        auto& valsOut = cellBlocks[0]->getValueBlock();
-        auto numObj = blockToBsonArr(valsOut);
-        ASSERT_BSONOBJ_EQ(numObj, fromjson("{result: [null, null, 1,2,[[3],4], null, 6, null]}"));
-
-        ASSERT_EQ(posInfoToString(cellBlocks[0]->filterPositionInfo()), "11111111");
-    }
+    std::vector<PathTestCase> tests{PathTestCase{
+        .path = {Get{"a"}, Id{}},
+        .filterValues = fromjson("{result: [null, null, 1,2,[[3],4], null, 6, null]}"),
+        .filterPosInfo = "11111111",
+        .projectValues = fromjson("{result: [null, null, 1,2,[[3],4], null, 6, null]}")}};
+    testPaths(tests, bsons);
 }
+
 
 TEST_F(BsonBlockDecodingTest, BSONDocumentBlockGetTraverse) {
     std::vector<BSONObj> bsons{
@@ -257,19 +300,12 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockGetTraverse) {
         fromjson("{a:5, b:2}"),
     };
 
-    value::CellBlock::PathRequest req{
-        {value::CellBlock::Get{"a"}, value::CellBlock::Traverse{}, value::CellBlock::Id{}}};
-
-    auto [tsBlocks, cellBlocks] = extractCellBlocks({req}, bsons);
-
-    ASSERT_EQ(cellBlocks.size(), 1);
-
-    {
-        auto& valsOut = cellBlocks[0]->getValueBlock();
-        auto numObj = blockToBsonArr(valsOut);
-        ASSERT_BSONOBJ_EQ(numObj, fromjson("{result: [1,2,3,4,[999], 5]}"));
-        ASSERT_EQ(posInfoToString(cellBlocks[0]->filterPositionInfo()), "111001");
-    }
+    std::vector<PathTestCase> tests{
+        PathTestCase{.path = {Get{"a"}, Traverse{}, Id{}},
+                     .filterValues = fromjson("{result: [1,2,3,4,[999], 5]}"),
+                     .filterPosInfo = "111001",
+                     .projectValues = fromjson("{result: [1,2,[3,4,[999]], 5]}")}};
+    testPaths(tests, bsons);
 }
 
 TEST_F(BsonBlockDecodingTest, BSONDocumentBlockSubfield) {
@@ -281,70 +317,86 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockSubfield) {
         fromjson("{a: [{b: [[999]]}]}"),
     };
 
-    {
-        // Get A Id.
-        value::CellBlock::PathRequest req{{value::CellBlock::Get{"a"}, value::CellBlock::Id{}}};
+    const auto getFieldAResult = fromjson(
+        "{result: [{b:1}, {b: [999,999]}, [{b: [2,3]}, {b: [4,5]}], "
+        "null, [{b: [[999]]}]]}");
 
-        auto [tsBlocks, cellBlocks] = extractCellBlocks({req}, bsons);
-        ASSERT_EQ(cellBlocks.size(), 1);
+    std::vector<PathTestCase> tests{
+        // Get(A)/Id case.
+        PathTestCase{.path = {Get{"a"}, Id{}},
+                     .filterValues = getFieldAResult,
+                     .filterPosInfo = "11111",
+                     .projectValues = getFieldAResult},
+        // Get(A)/Traverse/Id case.
+        PathTestCase{.path = {Get{"a"}, Traverse{}, Id{}},
+                     .filterValues =
+                         fromjson("{result: [{b: 1}, {b: [999, 999]}, {b: [2,3]}, {b: [4,5]}, "
+                                  "null, {b: [[999]]}]}"),
+                     .filterPosInfo = "111011",
+                     .projectValues = getFieldAResult},
+        // Get(A)/Traverse/Get(b)/Id case.
+        PathTestCase{.path = {Get{"a"}, Traverse{}, Get{"b"}, Id{}},
+                     .filterValues =
+                         fromjson("{result: [1, [999,999], [2,3], [4,5], null, [[999]]]}"),
+                     .filterPosInfo = "111011",
+                     .projectValues =
+                         fromjson("{result: [1, [999,999], [[2, 3], [4,5]], null, [[[999]]]]}")},
+        // Get(a)/Get(b)/Id case. This case does not correspond to any MQL equivalent, but we
+        // still want it to work.
+        PathTestCase{.path = {Get{"a"}, Get{"b"}, Id{}},
+                     .filterValues = fromjson("{result: [1, [999,999], null, null, null]}"),
+                     .filterPosInfo = "11111",
+                     .projectValues = fromjson("{result: [1, [999,999], null, null, null]}")},
+        // Get(A)/Traverse/Get(b)/Traverse/Id case.
+        PathTestCase{.path = {Get{"a"}, Traverse{}, Get{"b"}, Traverse{}, Id{}},
+                     .filterValues = fromjson("{result: [1,999,999,2,3,4,5, null, [999]]}"),
+                     .filterPosInfo = "110100011",
+                     .projectValues =
+                         fromjson("{result: [1, [999,999], [[2, 3], [4,5]], null, [[[999]]]]}")}};
+    testPaths(tests, bsons);
+}
 
-        auto& valsOut = cellBlocks[0]->getValueBlock();
-        auto numObj = blockToBsonArr(valsOut);
-        ASSERT_BSONOBJ_EQ(numObj,
-                          fromjson("{result: [{b:1}, {b: [999,999]}, [{b: [2,3]}, {b: [4,5]}], "
-                                   "null, [{b: [[999]]}]]}"));
-        ASSERT_EQ(posInfoToString(cellBlocks[0]->filterPositionInfo()), "11111");
-    }
+TEST_F(BsonBlockDecodingTest, DoublyNestedArrays) {
+    std::vector<BSONObj> bsons{
+        fromjson("{a: [[{b: 1}], {b:2}]}"),
+        fromjson("{a: [{b: [[3,4]]}, {b: [5, 6]}, {b:7}]}"),
+    };
 
-    {
-        // Get A Traverse Id.
-        value::CellBlock::PathRequest req{
-            {value::CellBlock::Get{"a"}, value::CellBlock::Traverse{}, value::CellBlock::Id{}}};
+    const auto getFieldAResult =
+        fromjson("{result: [[[{b: 1}], {b:2}], [{b: [[3,4]]}, {b: [5, 6]}, {b:7}]]}");
 
-        auto [tsBlocks, cellBlocks] = extractCellBlocks({req}, bsons);
-        ASSERT_EQ(cellBlocks.size(), 1);
-
-        auto& valsOut = cellBlocks[0]->getValueBlock();
-        auto numObj = blockToBsonArr(valsOut);
-        ASSERT_BSONOBJ_EQ(numObj,
-                          fromjson("{result: [{b: 1}, {b: [999, 999]}, {b: [2,3]}, {b: [4,5]}, "
-                                   "null, {b: [[999]]}]}"));
-        ASSERT_EQ(posInfoToString(cellBlocks[0]->filterPositionInfo()), "111011");
-    }
-
-    {
-        // Get A Traverse Get B Id.
-        value::CellBlock::PathRequest req{{value::CellBlock::Get{"a"},
-                                           value::CellBlock::Traverse{},
-                                           value::CellBlock::Get{"b"},
-                                           value::CellBlock::Id{}}};
-
-        auto [tsBlocks, cellBlocks] = extractCellBlocks({req}, bsons);
-        ASSERT_EQ(cellBlocks.size(), 1);
-
-        auto& valsOut = cellBlocks[0]->getValueBlock();
-        auto numObj = blockToBsonArr(valsOut);
-        ASSERT_BSONOBJ_EQ(numObj,
-                          fromjson("{result: [1, [999,999], [2,3], [4,5], null, [[999]]]}"));
-        ASSERT_EQ(posInfoToString(cellBlocks[0]->filterPositionInfo()), "111011");
-    }
-
-    {
-        // Get A Traverse Get B Traverse Id.
-        value::CellBlock::PathRequest req{{value::CellBlock::Get{"a"},
-                                           value::CellBlock::Traverse{},
-                                           value::CellBlock::Get{"b"},
-                                           value::CellBlock::Traverse{},
-                                           value::CellBlock::Id{}}};
-
-        auto [tsBlocks, cellBlocks] = extractCellBlocks({req}, bsons);
-        ASSERT_EQ(cellBlocks.size(), 1);
-
-        auto& valsOut = cellBlocks[0]->getValueBlock();
-        auto numObj = blockToBsonArr(valsOut);
-        ASSERT_BSONOBJ_EQ(numObj, fromjson("{result: [1,999,999,2,3,4,5, null, [999]]}"));
-        ASSERT_EQ(posInfoToString(cellBlocks[0]->filterPositionInfo()), "110100011");
-    }
+    std::vector<PathTestCase> tests{
+        // Get(A)/Id case.
+        PathTestCase{.path = {Get{"a"}, Id{}},
+                     .filterValues = getFieldAResult,
+                     .filterPosInfo = "11",
+                     .projectValues = getFieldAResult},
+        // Get(A)/Traverse/Id case.
+        PathTestCase{.path = {Get{"a"}, Traverse{}, Id{}},
+                     .filterValues =
+                         fromjson("{result: [[{b: 1}], {b:2}, {b: [[3,4]]}, {b: [5, 6]}, {b:7}]}"),
+                     .filterPosInfo = "10100",
+                     .projectValues = getFieldAResult},
+        // Get(A)/Traverse/Get(b)/Id case.
+        PathTestCase{.path = {Get{"a"}, Traverse{}, Get{"b"}, Id{}},
+                     // We expect that objects within doubly nested arrays (e.g. {b:1}) are NOT
+                     // traversed. Arrays directly nested within arrays (e.g. [3,4]) are treated
+                     // as "blobs" and are not traversed.
+                     .filterValues = fromjson("{result: [2, [[3,4]], [5, 6], 7]}"),
+                     .filterPosInfo = "1100",
+                     .projectValues = fromjson("{result: [[2], [[[3,4]], [5, 6], 7]]}")},
+        // Get(a)/Get(b)/Id case. This case does not correspond to any MQL equivalent, but we
+        // still want it to work.
+        PathTestCase{.path = {Get{"a"}, Get{"b"}, Id{}},
+                     .filterValues = fromjson("{result: [null, null]}"),
+                     .filterPosInfo = "11",
+                     .projectValues = fromjson("{result: [null, null]}")},
+        // Get(A)/Traverse/Get(b)/Traverse/Id case.
+        PathTestCase{.path = {Get{"a"}, Traverse{}, Get{"b"}, Traverse{}, Id{}},
+                     .filterValues = fromjson("{result: [2, [3,4], 5, 6, 7]}"),
+                     .filterPosInfo = "11000",
+                     .projectValues = fromjson("{result: [[2], [[[3,4]], [5, 6], 7]]}")}};
+    testPaths(tests, bsons);
 }
 
 TEST_F(BsonBlockDecodingTest, BSONDocumentBlockFieldDoesNotExist) {
@@ -363,22 +415,12 @@ TEST_F(BsonBlockDecodingTest, BSONDocumentBlockFieldDoesNotExist) {
         fromjson("{a: [{b: [4, 5]}, {b: []}, {b: [6, 7]}]}")};
 
 
-    {
-        // Get A Traverse Get B Traverse Id.
-        value::CellBlock::PathRequest req{{value::CellBlock::Get{"a"},
-                                           value::CellBlock::Traverse{},
-                                           value::CellBlock::Get{"b"},
-                                           value::CellBlock::Traverse{},
-                                           value::CellBlock::Id{}}};
-
-        auto [tsBlocks, cellBlocks] = extractCellBlocks({req}, bsons);
-        ASSERT_EQ(cellBlocks.size(), 1);
-
-        auto& valsOut = cellBlocks[0]->getValueBlock();
-        auto numObj = blockToBsonArr(valsOut);
-        ASSERT_BSONOBJ_EQ(numObj, fromjson("{result: [1, null, null, 4, 5, 6, 7]}"));
-        ASSERT_EQ(posInfoToString(cellBlocks[0]->filterPositionInfo()), "1111000");
-    }
+    std::vector<PathTestCase> tests{
+        PathTestCase{.path = {Get{"a"}, Traverse{}, Get{"b"}, Traverse{}, Id{}},
+                     .filterValues = fromjson("{result: [1, null, null, 4, 5, 6, 7]}"),
+                     .filterPosInfo = "1111000",
+                     .projectValues = fromjson("{result: [1, [], [], [[4, 5], [], [6, 7]]]}")}};
+    testPaths(tests, bsons);
 }
 
 class ValueBlockTest : public mongo::unittest::Test {
@@ -594,17 +636,8 @@ public:
     boost::optional<size_t> tryCount() const override {
         return _vals.size();
     }
-    std::pair<TypeTags, Value> tryMin() const override {
-        return {TypeTags::Nothing, Value{0u}};
-    }
-    std::pair<TypeTags, Value> tryMax() const override {
-        return {TypeTags::Nothing, Value{0u}};
-    }
-    boost::optional<bool> tryDense() const override {
-        return boost::none;
-    }
     value::DeblockedTagVals deblock(
-        boost::optional<value::DeblockedTagValStorage>& storage) const override {
+        boost::optional<value::DeblockedTagValStorage>& storage) override {
         return {_vals.size(), _tags.data(), _vals.data()};
     }
     std::unique_ptr<value::ValueBlock> clone() const override {
@@ -676,7 +709,7 @@ TEST_F(ValueBlockTest, TestTokenize) {
     ASSERT_EQ(outIdxs, expIdxs);
 }
 
-// Test MonoBlock::Tokenize().
+// Test MonoBlock::tokenize().
 TEST_F(ValueBlockTest, MonoBlockTokenize) {
     {
         auto [strTag, strVal] = value::makeNewString("not a small string"_sd);
@@ -705,6 +738,94 @@ TEST_F(ValueBlockTest, MonoBlockTokenize) {
         std::vector<size_t> expIdxs{0, 0, 0, 0};
         ASSERT_EQ(outIdxs, expIdxs);
     }
+}
+
+// Int32Block::tokenize(), Int64Block::tokenize(), and DateBlock::tokenize() are effectively
+// identical so they are combined into 1 test.
+TEST_F(ValueBlockTest, IntBlockTokenize) {
+    {
+        // Test that first token is Nothing for non-dense blocks.
+        auto block = std::make_unique<value::Int32Block>();
+
+        block->push_back(value::bitcastFrom<int32_t>(2));
+        block->pushNothing();
+        block->push_back(value::bitcastFrom<int32_t>(0));
+        block->push_back(value::bitcastFrom<int32_t>(2));
+        block->pushNothing();
+        block->pushNothing();
+        block->push_back(value::bitcastFrom<int32_t>(1));
+        block->pushNothing();
+        block->pushNothing();
+
+        auto [outTokens, outIdxs] = block->tokenize();
+        ASSERT_EQ(outTokens->tryCount(), boost::optional<size_t>(4));
+
+        auto outTokensBson = blockToBsonArr(*outTokens);
+        ASSERT_BSONOBJ_EQ(outTokensBson, fromjson("{result: [null, 2, 0, 1]}"));
+
+        std::vector<size_t> expIdxs{1, 0, 2, 1, 0, 0, 3, 0, 0};
+        ASSERT_EQ(outIdxs, expIdxs);
+    }
+
+    {
+        // Test on leading Nothing.
+        auto block = std::make_unique<value::Int32Block>();
+
+        block->pushNothing();
+        block->push_back(value::bitcastFrom<int32_t>(0));
+
+        auto [outTokens, outIdxs] = block->tokenize();
+        ASSERT_EQ(outTokens->tryCount(), boost::optional<size_t>(2));
+
+        auto outTokensBson = blockToBsonArr(*outTokens);
+        ASSERT_BSONOBJ_EQ(outTokensBson, fromjson("{result: [null, 0]}"));
+
+        std::vector<size_t> expIdxs{0, 1};
+        ASSERT_EQ(outIdxs, expIdxs);
+    }
+
+    {
+        // Test on dense input.
+        auto block = std::make_unique<value::Int32Block>();
+
+        block->push_back(value::bitcastFrom<int32_t>(2));
+        block->push_back(value::bitcastFrom<int32_t>(0));
+        block->push_back(value::bitcastFrom<int32_t>(2));
+        block->push_back(value::bitcastFrom<int32_t>(1));
+
+        auto [outTokens, outIdxs] = block->tokenize();
+        ASSERT_EQ(outTokens->tryCount(), boost::optional<size_t>(3));
+
+        auto outTokensBson = blockToBsonArr(*outTokens);
+        ASSERT_BSONOBJ_EQ(outTokensBson, fromjson("{result: [2, 0, 1]}"));
+
+        std::vector<size_t> expIdxs{0, 1, 0, 2};
+        ASSERT_EQ(outIdxs, expIdxs);
+    }
+}
+
+// Test that default implementation still works for DoubleBlock's.
+TEST_F(ValueBlockTest, DoubleBlockTokenize) {
+    auto block = std::make_unique<value::DoubleBlock>();
+
+    block->pushNothing();
+    block->push_back(1.1);
+    block->push_back(std::numeric_limits<double>::quiet_NaN());
+    block->pushNothing();
+    block->pushNothing();
+    block->push_back(std::numeric_limits<double>::signaling_NaN());
+    block->push_back(2.2);
+    block->push_back(1.1);
+    block->push_back(std::numeric_limits<double>::quiet_NaN());
+
+    auto [outTokens, outIdxs] = block->tokenize();
+    ASSERT_EQ(outTokens->tryCount(), boost::optional<size_t>(4));
+
+    auto outTokensBson = blockToBsonArr(*outTokens);
+    ASSERT_BSONOBJ_EQ(outTokensBson, fromjson("{result: [null, 1.1, NaN, 2.2]}"));
+
+    std::vector<size_t> expIdxs{0, 1, 2, 0, 0, 2, 3, 1, 2};
+    ASSERT_EQ(outIdxs, expIdxs);
 }
 
 }  // namespace mongo::sbe

@@ -43,7 +43,6 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_consistency_markers_impl.h"
@@ -53,6 +52,7 @@
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -170,8 +170,6 @@ void ReplicationConsistencyMarkersImpl::clearInitialSyncFlag(OperationContext* o
     // initialDataTimestamp). If we crash before the first stable checkpoint is taken, we are
     // guaranteed to come back up with the initial sync flag. In this corner case, this node has to
     // be resynced.
-    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    OpTimeAndWallTime opTimeAndWallTime = replCoord->getMyLastAppliedOpTimeAndWallTime();
     BSONObj update = BSON("$unset" << kInitialSyncFlag);
 
     _updateMinValidDocument(opCtx, update);
@@ -184,8 +182,9 @@ void ReplicationConsistencyMarkersImpl::clearInitialSyncFlag(OperationContext* o
     setOplogTruncateAfterPoint(opCtx, Timestamp());
 
     if (!getGlobalServiceContext()->getStorageEngine()->isEphemeral()) {
+        // This will set lastDurable after journal flush is completed so we after this function, we
+        // will have both valid lastApplied and lastDurable.
         JournalFlusher::get(opCtx)->waitForJournalFlush();
-        replCoord->setMyLastDurableOpTimeAndWallTime(opTimeAndWallTime);
     }
 }
 
@@ -416,18 +415,21 @@ ReplicationConsistencyMarkersImpl::refreshOplogTruncateAfterPointIfPrimary(
 
     // Temporarily allow writes if kIgnoreConflicts is set on the recovery unit so the truncate
     // point can be updated. The kIgnoreConflicts setting only allows reads.
-    auto originalBehavior = opCtx->recoveryUnit()->getPrepareConflictBehavior();
+    auto originalBehavior =
+        shard_role_details::getRecoveryUnit(opCtx)->getPrepareConflictBehavior();
     if (originalBehavior == PrepareConflictBehavior::kIgnoreConflicts) {
-        opCtx->recoveryUnit()->setPrepareConflictBehavior(
+        shard_role_details::getRecoveryUnit(opCtx)->setPrepareConflictBehavior(
             PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
     }
-    ON_BLOCK_EXIT([&] { opCtx->recoveryUnit()->setPrepareConflictBehavior(originalBehavior); });
+    ON_BLOCK_EXIT([&] {
+        shard_role_details::getRecoveryUnit(opCtx)->setPrepareConflictBehavior(originalBehavior);
+    });
 
     // Exempt waiting for storage ticket acquisition in order to avoid starving upstream requests
     // waiting for durability. SERVER-60682 is an example with more pending prepared transactions
     // than storage tickets; the transaction coordinator could not persist the decision and had to
     // unnecessarily wait for prepared transactions to expire to make forward progress.
-    ScopedAdmissionPriorityForLock setTicketAquisition(opCtx->lockState(),
+    ScopedAdmissionPriorityForLock setTicketAquisition(shard_role_details::getLocker(opCtx),
                                                        AdmissionContext::Priority::kImmediate);
 
     // The locks necessary to write to the oplog truncate after point's collection and read from the
@@ -461,7 +463,7 @@ ReplicationConsistencyMarkersImpl::refreshOplogTruncateAfterPointIfPrimary(
     }
 
     // Reset the snapshot so that it is ensured to see the latest oplog entries.
-    opCtx->recoveryUnit()->abandonSnapshot();
+    shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
 
     // Fetch the oplog entry <= timestamp. all_durable may be set to a value between oplog entries.
     // We need an oplog entry in order to return term and wallclock time for an OpTimeAndWallTime
@@ -481,11 +483,10 @@ ReplicationConsistencyMarkersImpl::refreshOplogTruncateAfterPointIfPrimary(
     // entry (it can be momentarily between oplog entry timestamps), _lastNoHolesOplogTimestamp
     // tracks the oplog entry so as to ensure we send out all updates before desisting until new
     // operations occur.
-    OpTime opTime = fassert(4455502, OpTime::parseFromOplogEntry(truncateOplogEntryBSON.value()));
-    _lastNoHolesOplogTimestamp = opTime.getTimestamp();
     _lastNoHolesOplogOpTimeAndWallTime = fassert(
         4455501,
         OpTimeAndWallTime::parseOpTimeAndWallTimeFromOplogEntry(truncateOplogEntryBSON.value()));
+    _lastNoHolesOplogTimestamp = _lastNoHolesOplogOpTimeAndWallTime->opTime.getTimestamp();
 
     // Pass the _lastNoHolesOplogTimestamp timestamp down to the storage layer to prevent oplog
     // history lte to oplogTruncateAfterPoint from being entirely deleted. There should always be a

@@ -18,6 +18,9 @@ executor:
   config:
     shell_options:
       eval: globalThis.testingReplication = true;
+      global_vars:
+        TestData:
+          nonClusteredConfigTransactions: true
   fixture:
     class: ReplicaSetFixture
     mixed_bin_versions: old_new_new
@@ -48,6 +51,7 @@ selector:
   - jstests/core/txns/prepare_conflict.js
   exclude_with_any_tags:
   - assumes_standalone_mongod
+  - requires_profiling
   include_with_any_tags:
   - multiversion_sanity_check
   roots:

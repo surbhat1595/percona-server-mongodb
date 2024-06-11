@@ -43,6 +43,7 @@
 #include "mongo/db/query/optimizer/metadata_factory.h"
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
 #include "mongo/db/query/optimizer/syntax/syntax.h"
+#include "mongo/db/query/optimizer/utils/path_utils.h"
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
 #include "mongo/db/service_context_test_fixture.h"
@@ -57,7 +58,9 @@ ABT translatePipeline(const Metadata& metadata,
                       std::string scanDefName,
                       PrefixId& prefixId,
                       const std::vector<ExpressionContext::ResolvedNamespace>& involvedNss = {},
-                      bool parameterized = false);
+                      bool shouldParameterize = false,
+                      QueryParameterMap* = nullptr,
+                      size_t maxDepth = kMaxPathConjunctionDecomposition);
 
 void formatGoldenTestHeader(StringData variationName,
                             StringData pipelineStr,
@@ -79,6 +82,15 @@ public:
     ABTGoldenTestFixture()
         : _config{kConfigPath.toString()},
           _ctx(std::make_unique<unittest::GoldenTestContext>(&_config)) {}
+
+    void tearDown() override {
+        ServiceContextTest::tearDown();
+        // Deleted early so it won't throw in the destructor.
+        // Throwing from the destructor would violate the base
+        // class destructor's noexcept spec.
+        // It's not allowed by `std::unique_ptr`, either.
+        delete _ctx.release();
+    }
 
 protected:
     /**

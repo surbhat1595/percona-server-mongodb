@@ -52,12 +52,14 @@
 #include "mongo/db/session_manager_mongod.h"
 #include "mongo/db/storage/control/storage_control.h"
 #include "mongo/db/storage/execution_control/concurrency_adjustment_parameters_gen.h"
+#include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/clock_source_mock.h"
@@ -157,17 +159,26 @@ ServiceContextMongoDTest::ServiceContextMongoDTest(Options options)
 
     // Since unit tests start in their own directories, by default skip lock file and metadata file
     // for faster startup.
-    auto opCtx = serviceContext->makeOperationContext(getClient());
-    initializeStorageEngine(opCtx.get(), options._initFlags);
+    {
+        auto initializeStorageEngineOpCtx = serviceContext->makeOperationContext(&cc());
+        shard_role_details::setRecoveryUnit(initializeStorageEngineOpCtx.get(),
+                                            std::make_unique<RecoveryUnitNoop>(),
+                                            WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
+
+        initializeStorageEngine(initializeStorageEngineOpCtx.get(), options._initFlags);
+    }
 
     StorageControl::startStorageControls(serviceContext, true /*forTestOnly*/);
 
     DatabaseHolder::set(serviceContext, std::make_unique<DatabaseHolderImpl>());
     Collection::Factory::set(serviceContext, std::make_unique<CollectionImpl::FactoryImpl>());
     IndexBuildsCoordinator::set(serviceContext, std::make_unique<IndexBuildsCoordinatorMongod>());
+    ShardingState::create_forTest_DO_NOT_USE(serviceContext);
     CollectionShardingStateFactory::set(
         serviceContext, std::make_unique<CollectionShardingStateFactoryShard>(serviceContext));
-    serviceContext->getStorageEngine()->notifyStartupComplete();
+
+    auto opCtx = serviceContext->makeOperationContext(getClient());
+    serviceContext->getStorageEngine()->notifyStartupComplete(opCtx.get());
 
     if (_journalListener) {
         serviceContext->getStorageEngine()->setJournalListener(_journalListener.get());

@@ -84,6 +84,7 @@ DEFAULTS = {
     "mrlog": None,
     "no_journal": False,
     "num_clients_per_fixture": 1,
+    "use_tenant_client": False,
     "origin_suite": None,
     "perf_report_file": None,
     "cedar_report_file": None,
@@ -105,6 +106,7 @@ DEFAULTS = {
     "shuffle": None,
     "stagger_jobs": None,
     "majority_read_concern": "on",
+    "enable_enterprise_tests": "on",
     "shell_seed": None,
     "storage_engine": "wiredTiger",
     "storage_engine_cache_size_gb": None,
@@ -118,6 +120,13 @@ DEFAULTS = {
     "num_replset_nodes": None,
     "num_shards": None,
     "export_mongod_config": "off",
+    "tls_mode": None,
+    "tls_ca_file": None,
+    "shell_grpc": False,
+    "shell_tls_enabled": False,
+    "shell_tls_certificate_key_file": None,
+    "mongos_tls_certificate_key_file": None,
+    "mongod_tls_certificate_key_file": None,
 
     # Internal testing options.
     "internal_params": [],
@@ -328,6 +337,9 @@ DRY_RUN = None
 # If set, specifies which node is the config shard. Can also be set to 'any'.
 CONFIG_SHARD = None
 
+# if set, enables enterprise jstest to automatically be included
+ENABLE_ENTERPRISE_TESTS = None
+
 # URL to connect to the Evergreen service.
 EVERGREEN_URL = None
 
@@ -454,6 +466,9 @@ NO_JOURNAL = None
 # If set, then each fixture runs tests with the specified number of clients.
 NUM_CLIENTS_PER_FIXTURE = None
 
+# If set, each client will be constructed with a generated tenant id.
+USE_TENANT_CLIENT = False
+
 # Indicates the name of the test suite prior to the suite being split up by uite generation
 ORIGIN_SUITE = None
 
@@ -512,6 +527,25 @@ MIXED_BIN_VERSIONS = None
 
 # Specifies the binary version of last-lts or last-continous when multiversion enabled
 MULTIVERSION_BIN_VERSION = None
+
+# Specifies whether to use gRPC when connecting via the shell by default.
+SHELL_GRPC = None
+
+# Specifies what tlsMode the server(s) should be started with.
+TLS_MODE = None
+
+# Specifies the CA file that all servers and shell instances should use.
+TLS_CA_FILE = None
+
+# Shell TLS options.
+SHELL_TLS_ENABLED = None
+SHELL_TLS_CERTIFICATE_KEY_FILE = None
+
+# Specifies the TLS certicicate that all mongods in the cluster should use.
+MONGOD_TLS_CERTIFICATE_KEY_FILE = None
+
+# Specifies the TLS certicicate that all mongoses in the cluster should use.
+MONGOS_TLS_CERTIFICATE_KEY_FILE = None
 
 # Specifies the number of replica set members in a ReplicaSetFixture.
 NUM_REPLSET_NODES = None
@@ -637,7 +671,7 @@ USE_LEGACY_MULTIVERSION = True
 # Expansions file location
 # in CI, the expansions file is located in the ${workdir}, one dir up
 # from src, the checkout directory
-EXPANSIONS_FILE = "../expansions.yml" if 'CI' in os.environ else None
+EXPANSIONS_FILE = "../expansions.yml" if 'CI' in os.environ else "expansions.yml"
 
 # Symbolizer secrets
 SYMBOLIZER_CLIENT_SECRET = None

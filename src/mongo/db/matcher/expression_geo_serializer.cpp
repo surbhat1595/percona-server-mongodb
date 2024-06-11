@@ -53,8 +53,8 @@ void appendLegacyGeoLiteral(BSONObjBuilder* bob,
     }
 
     StringData fieldName = e.fieldNameStringData();
-    if (fieldName == kNearSphereField || fieldName == kNearField) {
-        // Legacy $nearSphere and $near requires at minimum 2 coordinates to be
+    if (fieldName == kNearSphereField || fieldName == kNearField || fieldName == kGeoNearField) {
+        // Legacy $geoNear, $nearSphere, and $near require at minimum 2 coordinates to be
         // re-parseable, so the representative value is [1, 1].
         bob->appendArray(fieldName, BSON_ARRAY(1 << 1));
     } else if (fieldName == kCenterField || fieldName == kCenterSphereField) {
@@ -76,44 +76,80 @@ void appendLegacyGeoLiteral(BSONObjBuilder* bob,
 }
 
 void appendGeoJSONCoordinatesLiteral(BSONObjBuilder* bob,
-                                     const BSONElement& e,
-                                     StringData geoJSONType,
+                                     const BSONElement& coordinatesElem,
+                                     const BSONElement& typeElem,
                                      const SerializationOptions& opts) {
     if (opts.literalPolicy != LiteralSerializationPolicy::kToRepresentativeParseableValue) {
-        opts.appendLiteral(bob, e);
+        opts.appendLiteral(bob, coordinatesElem);
         return;
     }
 
-    StringData fieldName = e.fieldNameStringData();
-    if (geoJSONType == "Polygon"_sd) {
-        // Polygon requires four pairs of coordinates in a closed loop wrapped in an array to be
-        // re-parseable, so the representative value is [[[0,0],[0,1],[1,1],[0,0]]].
-        bob->appendArray(
-            fieldName,
-            BSON_ARRAY(BSON_ARRAY(BSON_ARRAY(0 << 0) << BSON_ARRAY(0 << 1) << BSON_ARRAY(1 << 1)
-                                                     << BSON_ARRAY(0 << 0))));
-    } else if (geoJSONType == "MultiPolygon"_sd) {
-        // MultiPolygon requires four pairs of coordinates in a closed loop wrapped in 2 arrays to
-        // be re-parseable, so the representative value is [[[[0,0],[0,1],[1,1],[0,0]]]].
-        bob->appendArray(fieldName,
-                         BSON_ARRAY(BSON_ARRAY(BSON_ARRAY(
-                             BSON_ARRAY(0 << 0)
-                             << BSON_ARRAY(0 << 1) << BSON_ARRAY(1 << 1) << BSON_ARRAY(0 << 0)))));
-    } else if (geoJSONType == "Point"_sd) {
-        // Point requires a pair of coordinates to be re-parseable, so the representative
-        // value is [1,1].
-        bob->appendArray(fieldName, BSON_ARRAY(1 << 1));
-    } else if (geoJSONType == "MultiPoint"_sd) {
-        // MultiPoint requires a pair of coordinates wrapped in an array to be re-parseable, so the
-        // representative value is [[1,1]].
-        bob->appendArray(fieldName, BSON_ARRAY(BSON_ARRAY(1 << 1)));
-    } else if (geoJSONType == "LineString"_sd) {
-        // LineString requires two pairs of coordinates to be re-parseable, so the representative
-        // value is [[0,0],[1,1]].
-        bob->appendArray(fieldName, BSON_ARRAY(BSON_ARRAY(0 << 0) << BSON_ARRAY(1 << 1)));
-    } else {
-        opts.appendLiteral(bob, e);
+    StringData fieldName = coordinatesElem.fieldNameStringData();
+
+    // When a $geoNear expression is parsed (see GeoNearExpression::parseNewQuery()), a $geometry
+    // object defaults to being parsed as a point, without checking the type of the geometry object.
+    // This means we can query for a $geoNear expression that specifies an invalid type, or no type
+    // at all. In order to accomodate this case, we default to type: 'Point' to ensure our
+    // representative shape is re-parseable.
+    auto geoType = GeoParser::geoJSONTypeStringToEnum(typeElem.valueStringData());
+    if (geoType == GeoParser::GEOJSON_UNKNOWN) {
+        geoType = GeoParser::GEOJSON_POINT;
     }
+    switch (geoType) {
+        case GeoParser::GEOJSON_POLYGON: {
+            // Polygon requires four pairs of coordinates in a closed loop wrapped in an array to be
+            // re-parseable, so the representative value is [[[0,0],[0,1],[1,1],[0,0]]].
+            bob->appendArray(
+                fieldName,
+                BSON_ARRAY(BSON_ARRAY(BSON_ARRAY(0 << 0) << BSON_ARRAY(0 << 1) << BSON_ARRAY(1 << 1)
+                                                         << BSON_ARRAY(0 << 0))));
+            return;
+        }
+        case GeoParser::GEOJSON_MULTI_POLYGON: {
+            // MultiPolygon requires four pairs of coordinates in a closed loop wrapped in 2 arrays
+            // to be re-parseable, so the representative value is [[[[0,0],[0,1],[1,1],[0,0]]]].
+            bob->appendArray(fieldName,
+                             BSON_ARRAY(BSON_ARRAY(BSON_ARRAY(
+                                 BSON_ARRAY(0 << 0) << BSON_ARRAY(0 << 1) << BSON_ARRAY(1 << 1)
+                                                    << BSON_ARRAY(0 << 0)))));
+            return;
+        }
+        case GeoParser::GEOJSON_POINT: {
+            // Point requires a pair of coordinates to be re-parseable, so the representative
+            // value is [1,1].
+            bob->appendArray(fieldName, BSON_ARRAY(1 << 1));
+            return;
+        }
+        case GeoParser::GEOJSON_MULTI_POINT: {
+            // MultiPoint requires a pair of coordinates wrapped in an array to be re-parseable, so
+            // the representative value is [[1,1]].
+            bob->appendArray(fieldName, BSON_ARRAY(BSON_ARRAY(1 << 1)));
+            return;
+        }
+        case GeoParser::GEOJSON_LINESTRING: {
+            // LineString requires two pairs of coordinates to be re-parseable, so the
+            // representative value is [[0,0],[1,1]].
+            bob->appendArray(fieldName, BSON_ARRAY(BSON_ARRAY(0 << 0) << BSON_ARRAY(1 << 1)));
+            return;
+        }
+        case GeoParser::GEOJSON_MULTI_LINESTRING: {
+            // MultiLineString requires two LineStrings wrapped in an array to be re-parseable, so
+            // the representative value is [[[0,0],[1,1]],[[0,0],[1,1]]].
+            bob->appendArray(fieldName,
+                             BSON_ARRAY(BSON_ARRAY(BSON_ARRAY(0 << 0) << BSON_ARRAY(1 << 1))
+                                        << BSON_ARRAY(BSON_ARRAY(0 << 0) << BSON_ARRAY(1 << 1))));
+            return;
+        }
+        case GeoParser::GEOJSON_GEOMETRY_COLLECTION:
+            opts.appendLiteral(bob, coordinatesElem);
+            return;
+        case GeoParser::GEOJSON_UNKNOWN:
+            break;
+    }
+
+    tasserted(8456600,
+              str::stream() << "unexpected geo type found in coordinates serialization: "
+                            << geoType);
 }
 
 void appendCRSObject(BSONObjBuilder* bob,
@@ -165,7 +201,17 @@ void appendGeometrySubObject(BSONObjBuilder* bob,
         bob->append(typeElem);
     }
     if (auto coordinatesElem = geometryObj[kGeometryCoordinatesField]) {
-        appendGeoJSONCoordinatesLiteral(bob, coordinatesElem, typeElem.valueStringData(), opts);
+        appendGeoJSONCoordinatesLiteral(bob, coordinatesElem, typeElem, opts);
+    } else if (auto geometriesElem = geometryObj[GEOJSON_GEOMETRIES]) {
+        // We have a collection of geometries rather than a single one. Recursively serialize them
+        // and add to the output object.
+        BSONArrayBuilder geometriesArrBuilder;
+        for (const auto& geometry : geometriesElem.Array()) {
+            BSONObjBuilder geometryBuilder;
+            appendGeometrySubObject(&geometryBuilder, geometry.Obj(), opts);
+            geometriesArrBuilder.append(geometryBuilder.obj());
+        }
+        bob->append(GEOJSON_GEOMETRIES, geometriesArrBuilder.arr());
     }
 
     // 'crs' can be present if users want to use STRICT_SPHERE coordinate

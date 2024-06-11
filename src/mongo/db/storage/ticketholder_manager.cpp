@@ -34,9 +34,9 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/client.h"
+#include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/storage/execution_control/concurrency_adjustment_parameters_gen.h"
-#include "mongo/db/storage/execution_control/throughput_probing.h"
 #include "mongo/db/storage/storage_engine_feature_flags_gen.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
@@ -56,36 +56,12 @@ const auto ticketHolderManagerDecoration =
 
 namespace mongo {
 
-TicketHolderManager::TicketHolderManager(ServiceContext* svcCtx,
-                                         std::unique_ptr<TicketHolder> readTicketHolder,
+TicketHolderManager::TicketHolderManager(std::unique_ptr<TicketHolder> readTicketHolder,
                                          std::unique_ptr<TicketHolder> writeTicketHolder)
     : _readTicketHolder(std::move(readTicketHolder)),
-      _writeTicketHolder(std::move(writeTicketHolder)),
-      _monitor([this, svcCtx]() -> std::unique_ptr<TicketHolderMonitor> {
-          switch (StorageEngineConcurrencyAdjustmentAlgorithm_parse(
-              IDLParserContext{"storageEngineConcurrencyAdjustmentAlgorithm"},
-              gStorageEngineConcurrencyAdjustmentAlgorithm)) {
-              case StorageEngineConcurrencyAdjustmentAlgorithmEnum::kFixedConcurrentTransactions:
-                  return nullptr;
-              case StorageEngineConcurrencyAdjustmentAlgorithmEnum::kThroughputProbing:
-                  return std::make_unique<execution_control::ThroughputProbing>(
-                      svcCtx,
-                      _readTicketHolder.get(),
-                      _writeTicketHolder.get(),
-                      Milliseconds{gStorageEngineConcurrencyAdjustmentIntervalMillis});
-          }
-          MONGO_UNREACHABLE;
-      }()) {
-    if (_monitor) {
-        _monitor->start();
-    }
-}
+      _writeTicketHolder(std::move(writeTicketHolder)) {}
 
 Status TicketHolderManager::updateConcurrentWriteTransactions(const int32_t& newWriteTransactions) {
-    auto concurrencyAlgorithm = StorageEngineConcurrencyAdjustmentAlgorithm_parse(
-        IDLParserContext{"storageEngineConcurrencyAdjustmentAlgorithm"},
-        gStorageEngineConcurrencyAdjustmentAlgorithm);
-
     if (auto client = Client::getCurrent()) {
         auto ticketHolderManager = TicketHolderManager::get(client->getServiceContext());
         if (!ticketHolderManager) {
@@ -97,9 +73,7 @@ Status TicketHolderManager::updateConcurrentWriteTransactions(const int32_t& new
                           "storage engine");
         }
 
-        if (ticketHolderManager->_monitor &&
-            concurrencyAlgorithm ==
-                StorageEngineConcurrencyAdjustmentAlgorithmEnum::kThroughputProbing) {
+        if (!ticketHolderManager->supportsRuntimeSizeAdjustment()) {
             // In order to manually set the number of read/write tickets, users must set the
             // storageEngineConcurrencyAdjustmentAlgorithm to 'kFixedConcurrentTransactions'.
             return {
@@ -110,7 +84,7 @@ Status TicketHolderManager::updateConcurrentWriteTransactions(const int32_t& new
 
         auto& writer = ticketHolderManager->_writeTicketHolder;
         if (writer) {
-            writer->resize(newWriteTransactions);
+            writer->resize(newWriteTransactions, Date_t::max());
             return Status::OK();
         }
         LOGV2_WARNING(6754202,
@@ -124,10 +98,6 @@ Status TicketHolderManager::updateConcurrentWriteTransactions(const int32_t& new
 };
 
 Status TicketHolderManager::updateConcurrentReadTransactions(const int32_t& newReadTransactions) {
-    auto concurrencyAlgorithm = StorageEngineConcurrencyAdjustmentAlgorithm_parse(
-        IDLParserContext{"storageEngineConcurrencyAdjustmentAlgorithm"},
-        gStorageEngineConcurrencyAdjustmentAlgorithm);
-
     if (auto client = Client::getCurrent()) {
         auto ticketHolderManager = TicketHolderManager::get(client->getServiceContext());
         if (!ticketHolderManager) {
@@ -139,9 +109,7 @@ Status TicketHolderManager::updateConcurrentReadTransactions(const int32_t& newR
                           "storage engine");
         }
 
-        if (ticketHolderManager->_monitor &&
-            concurrencyAlgorithm ==
-                StorageEngineConcurrencyAdjustmentAlgorithmEnum::kThroughputProbing) {
+        if (!ticketHolderManager->supportsRuntimeSizeAdjustment()) {
             // In order to manually set the number of read/write tickets, users must set the
             // storageEngineConcurrencyAdjustmentAlgorithm to 'kFixedConcurrentTransactions'.
             return {ErrorCodes::IllegalOperation,
@@ -151,7 +119,7 @@ Status TicketHolderManager::updateConcurrentReadTransactions(const int32_t& newR
 
         auto& reader = ticketHolderManager->_readTicketHolder;
         if (reader) {
-            reader->resize(newReadTransactions);
+            reader->resize(newReadTransactions, Date_t::max());
             return Status::OK();
         }
 
@@ -161,6 +129,24 @@ Status TicketHolderManager::updateConcurrentReadTransactions(const int32_t& newR
         return Status(ErrorCodes::IllegalOperation,
                       "Attempting to update concurrent read transactions limit before the read "
                       "TicketHolder is initialized");
+    }
+    return Status::OK();
+}
+
+Status TicketHolderManager::validateConcurrentWriteTransactions(const int32_t& newWriteTransactions,
+                                                                const boost::optional<TenantId>) {
+    if (!getTestCommandsEnabled() && newWriteTransactions < 5) {
+        return Status(ErrorCodes::BadValue,
+                      "Concurrent write transactions limit must be greater than or equal to 5.");
+    }
+    return Status::OK();
+}
+
+Status TicketHolderManager::validateConcurrentReadTransactions(const int32_t& newReadTransactions,
+                                                               const boost::optional<TenantId>) {
+    if (!getTestCommandsEnabled() && newReadTransactions < 5) {
+        return Status(ErrorCodes::BadValue,
+                      "Concurrent read transactions limit must be greater than or equal to 5.");
     }
     return Status::OK();
 }
@@ -239,11 +225,6 @@ void TicketHolderManager::appendStats(BSONObjBuilder& b) {
     {
         BSONObjBuilder bbb(b.subobjStart("read"));
         _readTicketHolder->appendStats(bbb);
-        bbb.done();
-    }
-    if (_monitor) {
-        BSONObjBuilder bbb(b.subobjStart("monitor"));
-        _monitor->appendStats(bbb);
         bbb.done();
     }
 }

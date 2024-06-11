@@ -5,14 +5,18 @@
  * contains a nested $lookup stage. This also includes tests when the mongos has stale information
  * about the foreign collection.
  *
- * @tags: [requires_fcv_51]
+ * Shard targeting logic for $lookup changed in 7.3 and may not match the expected behavior in a
+ * multiversion environment.
+ * @tags: [
+ *   requires_fcv_73,
+ * ]
  */
 
 import {resultsEq} from "jstests/aggregation/extras/utils.js";
 import {enableLocalReadLogs, getLocalReadCount} from "jstests/libs/local_reads.js";
 import {
     profilerHasNumMatchingEntriesOrThrow,
-    profilerHasZeroMatchingEntriesOrThrow,
+    profilerHasZeroMatchingEntriesOrThrow
 } from "jstests/libs/profiler.js";
 
 const st = new ShardingTest({shards: 2, mongos: 2});
@@ -150,7 +154,8 @@ function assertLookupExecution(pipeline, opts, expected) {
         // execution is as expected.
         if (expected.nestedExec) {
             // Confirm that a nested $lookup is never on the shards part of the pipeline split and
-            // doesn't get dispatched to a foreign shard.
+            // doesn't get dispatched to a foreign shard (that is, we should designate a merging
+            // shard to execute the nested $lookup).
             profilerHasZeroMatchingEntriesOrThrow({
                 profileDB: shardList[i],
                 filter: {

@@ -76,8 +76,7 @@
 #include "mongo/db/pipeline/document_source_skip.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
-#include "mongo/db/pipeline/inner_pipeline_stage_interface.h"
-#include "mongo/db/pipeline/search_helper.h"
+#include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/classic_plan_cache.h"
 #include "mongo/db/query/collation/collation_index_key.h"
@@ -501,8 +500,18 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildColumnScan(
     return heuristicsStatus;
 }
 
-bool collscanIsBounded(const CollectionScanNode* collscan) {
-    return collscan->minRecord || collscan->maxRecord;
+bool isSolutionBoundedCollscan(const QuerySolution* querySoln) {
+    auto [node, count] = querySoln->getFirstNodeByType(StageType::STAGE_COLLSCAN);
+    if (node) {
+        const unsigned long numCollscanNodes = count;
+        tassert(8186301,
+                str::stream() << "Unexpected number of collscan nodes found. Expected: 1. Found: "
+                              << numCollscanNodes,
+                count == 1);
+        auto collscan = static_cast<const CollectionScanNode*>(node);
+        return collscan->minRecord || collscan->maxRecord;
+    }
+    return false;
 }
 
 bool canUseClusteredCollScan(QuerySolutionNode* node,
@@ -542,14 +551,13 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildSearchQuerySolution(
                 "Pushing down $search into SBE but forceClassicEngine is true.",
                 !query.getForceClassicEngine());
 
-        // (Ignore FCV check): FCV checking is unnecessary because SBE execution is local to a given
-        // node.
         tassert(7816301,
                 "Pushing down $search into SBE but featureFlagSearchInSbe is disabled.",
-                feature_flags::gFeatureFlagSearchInSbe.isEnabledAndIgnoreFCVUnsafe());
+                feature_flags::gFeatureFlagSearchInSbe.isEnabled(
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
 
-        auto searchNode = getSearchHelpers(query.getOpCtx()->getServiceContext())
-                              ->getSearchNode(query.cqPipeline().front()->documentSource());
+        // Build a SearchNode in order to retrieve the search info.
+        auto searchNode = SearchNode::getSearchNode(query.cqPipeline().front().get());
 
         if (searchNode->searchQuery.getBoolField(kReturnStoredSourceArg) ||
             searchNode->isSearchMeta) {
@@ -640,6 +648,9 @@ string optionString(size_t options) {
                 break;
             case QueryPlannerParams::GENERATE_PER_COLUMN_FILTERS:
                 ss << "GENERATE_PER_COLUMN_FILTERS ";
+                break;
+            case QueryPlannerParams::STRICT_NO_TABLE_SCAN:
+                ss << "STRICT_NO_TABLE_SCAN ";
                 break;
             case QueryPlannerParams::DEFAULT:
                 MONGO_UNREACHABLE;
@@ -784,24 +795,33 @@ int determineCollscanDirection(const CanonicalQuery& query, const QueryPlannerPa
     return QueryPlannerCommon::determineClusteredScanDirection(query, params).value_or(1);
 }
 
-std::pair<std::unique_ptr<QuerySolution>, const CollectionScanNode*> buildCollscanSolnWithNode(
-    const CanonicalQuery& query, bool tailable, const QueryPlannerParams& params, int direction) {
-    std::unique_ptr<QuerySolutionNode> solnRoot(QueryPlannerAccess::makeCollectionScan(
-        query, tailable, params, direction, query.getPrimaryMatchExpression()));
-    const auto* collscanNode = checked_cast<const CollectionScanNode*>(solnRoot.get());
-    return std::make_pair(
-        QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(solnRoot)), collscanNode);
-}
+std::unique_ptr<QuerySolution> buildEofOrCollscanSoln(
+    const CanonicalQuery& query,
+    bool tailable,
+    const QueryPlannerParams& params,
+    boost::optional<int> direction = boost::none) {
+    if (query.getPrimaryMatchExpression()->isTriviallyFalse()) {
+        const mongo::NamespaceString nss = query.nss();
+        const bool isOplog = nss.isOplog();
+        const bool isChangeCollection = nss.isChangeCollection();
 
-std::unique_ptr<QuerySolution> buildCollscanSoln(const CanonicalQuery& query,
-                                                 bool tailable,
-                                                 const QueryPlannerParams& params,
-                                                 boost::optional<int> direction = boost::none) {
-    return buildCollscanSolnWithNode(query,
-                                     tailable,
-                                     params,
-                                     direction.value_or(determineCollscanDirection(query, params)))
-        .first;
+        if (!isOplog && !isChangeCollection) {
+            // Return EOF solution for trivially false expressions.
+            // Unless the query is against Oplog (change streams) or change collections (serverless
+            // change streams) because in such cases we still need the scan to happen to advance the
+            // visibility timestamp and resume token.
+            auto soln = std::make_unique<QuerySolution>();
+            soln->setRoot(std::make_unique<EofNode>());
+            return soln;
+        }
+    }
+    std::unique_ptr<QuerySolutionNode> solnRoot(QueryPlannerAccess::makeCollectionScan(
+        query,
+        tailable,
+        params,
+        direction.value_or(determineCollscanDirection(query, params)),
+        query.getPrimaryMatchExpression()));
+    return QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(solnRoot));
 }
 
 std::unique_ptr<QuerySolution> buildWholeIXSoln(
@@ -960,29 +980,24 @@ Status QueryPlanner::tagAccordingToCache(MatchExpression* filter,
 StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
     const CanonicalQuery& query,
     const QueryPlannerParams& params,
-    const CachedSolution& cachedSoln) {
-    invariant(cachedSoln.cachedPlan);
-
+    const SolutionCacheData& solnCacheData) {
     // A query not suitable for caching should not have made its way into the cache.
-    invariant(shouldCacheQuery(query));
+    dassert(shouldCacheQuery(query));
 
-    // Look up winning solution in cached solution's array.
-    const auto& winnerCacheData = *cachedSoln.cachedPlan;
-
-    if (SolutionCacheData::WHOLE_IXSCAN_SOLN == winnerCacheData.solnType) {
+    if (SolutionCacheData::WHOLE_IXSCAN_SOLN == solnCacheData.solnType) {
         // The solution can be constructed by a scan over the entire index.
         auto soln = buildWholeIXSoln(
-            *winnerCacheData.tree->entry, query, params, winnerCacheData.wholeIXSolnDir);
+            *solnCacheData.tree->entry, query, params, solnCacheData.wholeIXSolnDir);
         if (!soln) {
             return Status(ErrorCodes::NoQueryExecutionPlans,
                           "plan cache error: soln that uses index to provide sort");
         } else {
             return {std::move(soln)};
         }
-    } else if (SolutionCacheData::COLLSCAN_SOLN == winnerCacheData.solnType) {
+    } else if (SolutionCacheData::COLLSCAN_SOLN == solnCacheData.solnType) {
         // The cached solution is a collection scan. We don't cache collscans
         // with tailable==true, hence the false below.
-        auto soln = buildCollscanSoln(query, false, params, winnerCacheData.wholeIXSolnDir);
+        auto soln = buildEofOrCollscanSoln(query, false, params, solnCacheData.wholeIXSolnDir);
         if (!soln) {
             return Status(ErrorCodes::NoQueryExecutionPlans,
                           "plan cache error: collection scan soln");
@@ -1002,7 +1017,7 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
                 5,
                 "Tagging the match expression according to cache data",
                 "filter"_attr = redact(clone->debugString()),
-                "cacheData"_attr = redact(winnerCacheData.toString()));
+                "cacheData"_attr = redact(solnCacheData.toString()));
 
     RelevantFieldIndexMap fields;
     QueryPlannerIXSelect::getFields(query.getPrimaryMatchExpression(), &fields);
@@ -1024,7 +1039,7 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
                     "id"_attr = ie.identifier);
     }
 
-    Status s = tagAccordingToCache(clone.get(), winnerCacheData.tree.get(), indexMap);
+    Status s = tagAccordingToCache(clone.get(), solnCacheData.tree.get(), indexMap);
     if (!s.isOK()) {
         return s;
     }
@@ -1070,17 +1085,46 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> singleSolution(
     return {std::move(out)};
 }
 
-bool canTableScan(const QueryPlannerParams& params) {
-    return !(params.options & QueryPlannerParams::NO_TABLE_SCAN);
+// If no table scan option is set the planner may not return any plan containing a collection scan.
+// Yet clusteredIdxScans are still allowed as they are not a full collection scan but a bounded
+// collection scan.
+bool noTableScan(const QueryPlannerParams& params) {
+    return (params.options & QueryPlannerParams::NO_TABLE_SCAN);
+}
+
+// Used internally if the planner should also avoid retruning a plan containing a clusteredIDX scan.
+bool noTableAndClusteredIDXScan(const QueryPlannerParams& params) {
+    return (params.options & QueryPlannerParams::STRICT_NO_TABLE_SCAN);
+}
+
+bool isClusteredScan(QuerySolutionNode* node) {
+    if (node->getType() == STAGE_COLLSCAN) {
+        auto collectionScanSolnNode = dynamic_cast<CollectionScanNode*>(node);
+        return (collectionScanSolnNode->doClusteredCollectionScanClassic() ||
+                collectionScanSolnNode->doClusteredCollectionScanSbe());
+    }
+    return false;
+}
+
+// Check if this is a real coll scan or a hidden ClusteredIDX scan.
+bool isColusteredIDXScanSoln(QuerySolution* collscanSoln) {
+    if (collscanSoln->root()->getType() == STAGE_SHARDING_FILTER) {
+        auto child = collscanSoln->root()->children.begin();
+        return isClusteredScan(child->get());
+    }
+    if (collscanSoln->root()->getType() == STAGE_COLLSCAN) {
+        return isClusteredScan(collscanSoln->root());
+    }
+    return false;
 }
 
 StatusWith<std::vector<std::unique_ptr<QuerySolution>>> attemptCollectionScan(
     const CanonicalQuery& query, bool isTailable, const QueryPlannerParams& params) {
-    if (!canTableScan(params)) {
+    if (noTableScan(params)) {
         return Status(ErrorCodes::NoQueryExecutionPlans,
                       "not allowed to output a collection scan because 'notablescan' is enabled");
     }
-    if (auto soln = buildCollscanSoln(query, isTailable, params)) {
+    if (auto soln = buildEofOrCollscanSoln(query, isTailable, params)) {
         return singleSolution(std::move(soln));
     }
     return Status(ErrorCodes::NoQueryExecutionPlans, "Failed to build collection scan soln");
@@ -1677,9 +1721,9 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 
     // No indexed plans?  We must provide a collscan if possible or else we can't run the query.
     bool collScanRequired = 0 == out.size();
-    if (collScanRequired && !canTableScan(params)) {
+    if (collScanRequired && noTableAndClusteredIDXScan(params)) {
         return Status(ErrorCodes::NoQueryExecutionPlans,
-                      "No indexed plans available, and running with 'notablescan'");
+                      "No indexed plans available, and running with 'notablescan' 1");
     }
 
     bool clusteredCollection = params.clusteredInfo.has_value();
@@ -1694,17 +1738,17 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         return Status(ErrorCodes::NoQueryExecutionPlans, "No query solutions");
     }
 
+    bool isClusteredIDXScan = false;
     if (possibleToCollscan && (collscanRequested || collScanRequired || clusteredCollection)) {
         boost::optional<int> clusteredScanDirection =
             QueryPlannerCommon::determineClusteredScanDirection(query, params);
         int direction = clusteredScanDirection.value_or(1);
-        auto [collscanSoln, collscanNode] =
-            buildCollscanSolnWithNode(query, isTailable, params, direction);
+        auto collscanSoln = buildEofOrCollscanSoln(query, isTailable, params, direction);
         if (!collscanSoln && collScanRequired) {
             return Status(ErrorCodes::NoQueryExecutionPlans,
                           "Failed to build collection scan soln");
         }
-
+        isClusteredIDXScan = isColusteredIDXScanSoln(collscanSoln.get());
         // We consider collection scan in the following cases:
         // 1. collScanRequested - specifically requested by caller.
         // 2. collScanRequired - there are no other possible plans, so we fallback to full scan.
@@ -1712,8 +1756,8 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         // 4. clusteredScanDirection - collection is clustered and sort, provided by clustered
         // index, is used
         if (collscanSoln &&
-            (collscanRequested || collScanRequired || collscanIsBounded(collscanNode) ||
-             clusteredScanDirection)) {
+            (collscanRequested || collScanRequired ||
+             isSolutionBoundedCollscan(collscanSoln.get()) || clusteredScanDirection)) {
             LOGV2_DEBUG(20984,
                         5,
                         "Planner: outputting a collection scan",
@@ -1725,8 +1769,15 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
             out.push_back(std::move(collscanSoln));
         }
     }
-
+    // Make sure to respect the notablescan option. A clustered IDX scan is allowed even under a
+    // NOTABLE option. Only in the case of a strict NOTABLE scan option a clustered IDX scan is not
+    // allowed. This option is used in mongoS for shardPruning.
     invariant(out.size() > 0);
+    if (collScanRequired && noTableScan(params) && !isClusteredIDXScan) {
+        return Status(ErrorCodes::NoQueryExecutionPlans,
+                      "No indexed plans available, and running with 'notablescan' 2");
+    }
+
     return {std::move(out)};
 }  // QueryPlanner::plan
 
@@ -1744,19 +1795,24 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
     }
 
     std::unique_ptr<QuerySolutionNode> solnForAgg = std::make_unique<SentinelNode>();
-    for (auto& innerStage : query.cqPipeline()) {
-        auto groupStage = dynamic_cast<DocumentSourceGroup*>(innerStage->documentSource());
+    const std::vector<boost::intrusive_ptr<DocumentSource>>& innerPipelineStages =
+        query.cqPipeline();
+    for (size_t i = 0; i < innerPipelineStages.size(); ++i) {
+        bool isLastSource =
+            (i + 1 == (innerPipelineStages.size())) && query.containsEntirePipeline();
+        const auto innerStage = innerPipelineStages[i].get();
+
+        auto groupStage = dynamic_cast<DocumentSourceGroup*>(innerStage);
         if (groupStage) {
-            solnForAgg =
-                std::make_unique<GroupNode>(std::move(solnForAgg),
-                                            groupStage->getIdExpression(),
-                                            groupStage->getAccumulationStatements(),
-                                            groupStage->doingMerge(),
-                                            innerStage->isLastSource() /* shouldProduceBson */);
+            solnForAgg = std::make_unique<GroupNode>(std::move(solnForAgg),
+                                                     groupStage->getIdExpression(),
+                                                     groupStage->getAccumulationStatements(),
+                                                     groupStage->doingMerge(),
+                                                     isLastSource /* shouldProduceBson */);
             continue;
         }
 
-        auto lookupStage = dynamic_cast<DocumentSourceLookUp*>(innerStage->documentSource());
+        auto lookupStage = dynamic_cast<DocumentSourceLookUp*>(innerStage);
         if (lookupStage) {
             tassert(6369000,
                     "This $lookup stage should be compatible with SBE",
@@ -1775,22 +1831,21 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
                                                lookupStage->getAsField().fullPath(),
                                                strategy,
                                                std::move(idxEntry),
-                                               innerStage->isLastSource() /* shouldProduceBson */);
+                                               isLastSource /* shouldProduceBson */);
             solnForAgg = std::move(eqLookupNode);
             continue;
         }
 
         // 'projectionStage' pushdown pushes both $project and $addFields to SBE, as the latter is
         // implemented as a variant of the former.
-        auto projectionStage =
-            dynamic_cast<DocumentSourceInternalProjection*>(innerStage->documentSource());
+        auto projectionStage = dynamic_cast<DocumentSourceInternalProjection*>(innerStage);
         if (projectionStage) {
             solnForAgg = std::make_unique<ProjectionNodeDefault>(
                 std::move(solnForAgg), nullptr, projectionStage->projection());
             continue;
         }
 
-        auto unwindStage = dynamic_cast<DocumentSourceUnwind*>(innerStage->documentSource());
+        auto unwindStage = dynamic_cast<DocumentSourceUnwind*>(innerStage);
         if (unwindStage) {
             solnForAgg = std::make_unique<UnwindNode>(std::move(solnForAgg) /* child */,
                                                       unwindStage->getUnwindPath() /* fieldPath */,
@@ -1799,15 +1854,14 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
             continue;
         }
 
-        auto replaceRootStage =
-            dynamic_cast<DocumentSourceInternalReplaceRoot*>(innerStage->documentSource());
+        auto replaceRootStage = dynamic_cast<DocumentSourceInternalReplaceRoot*>(innerStage);
         if (replaceRootStage) {
             solnForAgg = std::make_unique<ReplaceRootNode>(std::move(solnForAgg),
                                                            replaceRootStage->newRootExpression());
             continue;
         }
 
-        auto matchStage = dynamic_cast<DocumentSourceMatch*>(innerStage->documentSource());
+        auto matchStage = dynamic_cast<DocumentSourceMatch*>(innerStage);
         if (matchStage) {
             // Parameterize the pushed-down match expression if there is not already a reason not
             // to.
@@ -1832,45 +1886,44 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
             continue;
         }
 
-        auto sortStage = dynamic_cast<DocumentSourceSort*>(innerStage->documentSource());
+        auto sortStage = dynamic_cast<DocumentSourceSort*>(innerStage);
         if (sortStage) {
             auto pattern =
                 sortStage->getSortKeyPattern()
                     .serialize(SortPattern::SortKeySerialization::kForPipelineSerialization)
                     .toBson();
             auto limit = sortStage->getLimit().get_value_or(0);
-            solnForAgg =
-                std::make_unique<SortNodeDefault>(std::move(solnForAgg), std::move(pattern), limit);
+            solnForAgg = std::make_unique<SortNodeDefault>(std::move(solnForAgg),
+                                                           std::move(pattern),
+                                                           limit,
+                                                           LimitSkipParameterization::Disabled);
             continue;
         }
 
-        auto limitStage = dynamic_cast<DocumentSourceLimit*>(innerStage->documentSource());
+        auto limitStage = dynamic_cast<DocumentSourceLimit*>(innerStage);
         if (limitStage) {
-            solnForAgg = std::make_unique<LimitNode>(std::move(solnForAgg), limitStage->getLimit());
+            solnForAgg = std::make_unique<LimitNode>(
+                std::move(solnForAgg), limitStage->getLimit(), LimitSkipParameterization::Disabled);
             continue;
         }
 
-        auto skipStage = dynamic_cast<DocumentSourceSkip*>(innerStage->documentSource());
+        auto skipStage = dynamic_cast<DocumentSourceSkip*>(innerStage);
         if (skipStage) {
-            solnForAgg = std::make_unique<SkipNode>(std::move(solnForAgg), skipStage->getSkip());
+            solnForAgg = std::make_unique<SkipNode>(
+                std::move(solnForAgg), skipStage->getSkip(), LimitSkipParameterization::Disabled);
             continue;
         }
 
-        auto isSearch = getSearchHelpers(query.getOpCtx()->getServiceContext())
-                            ->isSearchStage(innerStage->documentSource());
-        auto isSearchMeta = getSearchHelpers(query.getOpCtx()->getServiceContext())
-                                ->isSearchMetaStage(innerStage->documentSource());
+        auto isSearch = search_helpers::isSearchStage(innerStage);
+        auto isSearchMeta = search_helpers::isSearchMetaStage(innerStage);
         if (isSearch || isSearchMeta) {
             // In the $search case, we create the $search query solution node in QueryPlanner::Plan
             // instead of here. The empty branch here assures that we don't hit the tassert below
             // and continue in creating the query plan.
-            // TODO: SERVER-79255 add tests to test pushing down $search + $group and $search +
-            // $lookup pipelines to make sure pushdown works correctly.
             continue;
         }
 
-        auto windowStage =
-            dynamic_cast<DocumentSourceInternalSetWindowFields*>(innerStage->documentSource());
+        auto windowStage = dynamic_cast<DocumentSourceInternalSetWindowFields*>(innerStage);
         if (windowStage) {
             auto windowNode = std::make_unique<WindowNode>(std::move(solnForAgg),
                                                            windowStage->getPartitionBy(),
@@ -1880,8 +1933,7 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
             continue;
         }
 
-        auto unpackBucketStage =
-            dynamic_cast<DocumentSourceInternalUnpackBucket*>(innerStage->documentSource());
+        auto unpackBucketStage = dynamic_cast<DocumentSourceInternalUnpackBucket*>(innerStage);
         if (unpackBucketStage) {
             const auto& unpacker = unpackBucketStage->bucketUnpacker();
 
@@ -2051,14 +2103,13 @@ StatusWith<QueryPlanner::SubqueriesPlanningResult> QueryPlanner::planSubqueries(
         planningResult.branches.push_back(
             std::make_unique<SubqueriesPlanningResult::BranchPlanningResult>());
         auto branchResult = planningResult.branches.back().get();
-        auto orChild = planningResult.orExpression->getChild(i);
 
         // Turn the i-th child into its own query.
-
-        auto statusWithCQ = CanonicalQuery::make(opCtx, query, orChild);
+        auto statusWithCQ = CanonicalQuery::makeForSubplanner(opCtx, query, i);
         if (!statusWithCQ.isOK()) {
             str::stream ss;
-            ss << "Can't canonicalize subchild " << orChild->debugString() << " "
+            ss << "Can't canonicalize subchild "
+               << planningResult.orExpression->getChild(i)->debugString() << " "
                << statusWithCQ.getStatus().reason();
             return Status(ErrorCodes::BadValue, ss);
         }

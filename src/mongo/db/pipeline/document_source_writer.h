@@ -39,11 +39,11 @@
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/read_concern.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/rpc/metadata/impersonated_user_metadata.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 
 namespace mongo {
-using namespace fmt::literals;
 
 /**
  * Manipulates the state of the OperationContext so that while this object is in scope, reads and
@@ -62,23 +62,26 @@ public:
     DocumentSourceWriteBlock(OperationContext* opCtx)
         : _opCtx(opCtx), _enforcePrepareConflictsBlock(opCtx) {
         _originalArgs = repl::ReadConcernArgs::get(_opCtx);
-        _originalSource = _opCtx->recoveryUnit()->getTimestampReadSource();
+        _originalSource = shard_role_details::getRecoveryUnit(_opCtx)->getTimestampReadSource();
         if (_originalSource == RecoveryUnit::ReadSource::kProvided) {
             // Storage engine operations require at least Global IS.
             Lock::GlobalLock lk(_opCtx, MODE_IS);
-            _originalTimestamp = *_opCtx->recoveryUnit()->getPointInTimeReadTimestamp(_opCtx);
+            _originalTimestamp =
+                *shard_role_details::getRecoveryUnit(_opCtx)->getPointInTimeReadTimestamp(_opCtx);
         }
 
         repl::ReadConcernArgs::get(_opCtx) = repl::ReadConcernArgs();
-        _opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
+        shard_role_details::getRecoveryUnit(_opCtx)->setTimestampReadSource(
+            RecoveryUnit::ReadSource::kNoTimestamp);
     }
 
     ~DocumentSourceWriteBlock() {
         repl::ReadConcernArgs::get(_opCtx) = _originalArgs;
         if (_originalSource == RecoveryUnit::ReadSource::kProvided) {
-            _opCtx->recoveryUnit()->setTimestampReadSource(_originalSource, _originalTimestamp);
+            shard_role_details::getRecoveryUnit(_opCtx)->setTimestampReadSource(_originalSource,
+                                                                                _originalTimestamp);
         } else {
-            _opCtx->recoveryUnit()->setTimestampReadSource(_originalSource);
+            shard_role_details::getRecoveryUnit(_opCtx)->setTimestampReadSource(_originalSource);
         }
     }
 };
@@ -195,6 +198,7 @@ private:
 
 template <typename B>
 DocumentSource::GetNextResult DocumentSourceWriter<B>::doGetNext() {
+    using namespace fmt::literals;
     if (_done) {
         return GetNextResult::makeEOF();
     }

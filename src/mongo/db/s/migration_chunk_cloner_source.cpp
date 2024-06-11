@@ -57,7 +57,6 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -79,6 +78,7 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/shard_id.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
@@ -257,7 +257,7 @@ void LogTransactionOperationsForShardingHandler::commit(OperationContext* opCtx,
         auto opCtx = cc().getOperationContext();
 
         // TODO (SERVER-71444): Fix to be interruptible or document exception.
-        UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
+        UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(opCtx));  // NOLINT.
         const auto scopedCss =
             CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss);
 
@@ -344,7 +344,7 @@ Status MigrationChunkClonerSource::startClone(OperationContext* opCtx,
                                               const LogicalSessionId& lsid,
                                               TxnNumber txnNumber) {
     invariant(_state == kNew);
-    invariant(!opCtx->lockState()->isLocked());
+    invariant(!shard_role_details::getLocker(opCtx)->isLocked());
 
     if (_sessionCatalogSource) {
         _sessionCatalogSource->init(opCtx, lsid);
@@ -357,13 +357,15 @@ Status MigrationChunkClonerSource::startClone(OperationContext* opCtx,
         // Ignore prepare conflicts when we load ids of currently available documents. This is
         // acceptable because we will track changes made by prepared transactions at transaction
         // commit time.
-        auto originalPrepareConflictBehavior = opCtx->recoveryUnit()->getPrepareConflictBehavior();
+        auto originalPrepareConflictBehavior =
+            shard_role_details::getRecoveryUnit(opCtx)->getPrepareConflictBehavior();
 
         ON_BLOCK_EXIT([&] {
-            opCtx->recoveryUnit()->setPrepareConflictBehavior(originalPrepareConflictBehavior);
+            shard_role_details::getRecoveryUnit(opCtx)->setPrepareConflictBehavior(
+                originalPrepareConflictBehavior);
         });
 
-        opCtx->recoveryUnit()->setPrepareConflictBehavior(
+        shard_role_details::getRecoveryUnit(opCtx)->setPrepareConflictBehavior(
             PrepareConflictBehavior::kIgnoreConflicts);
 
         auto storeCurrentRecordIdStatus = _storeCurrentRecordId(opCtx);
@@ -425,7 +427,7 @@ Status MigrationChunkClonerSource::startClone(OperationContext* opCtx,
 Status MigrationChunkClonerSource::awaitUntilCriticalSectionIsAppropriate(
     OperationContext* opCtx, Milliseconds maxTimeToWait) {
     invariant(_state == kCloning);
-    invariant(!opCtx->lockState()->isLocked());
+    invariant(!shard_role_details::getLocker(opCtx)->isLocked());
     // If this migration is manual migration that specified "force", enter the critical section
     // immediately. This means the entire cloning phase will be done under the critical section.
     if (_jumboChunkCloneState && _args.getForceJumbo() == ForceJumbo::kForceManual) {
@@ -437,7 +439,7 @@ Status MigrationChunkClonerSource::awaitUntilCriticalSectionIsAppropriate(
 
 StatusWith<BSONObj> MigrationChunkClonerSource::commitClone(OperationContext* opCtx) {
     invariant(_state == kCloning);
-    invariant(!opCtx->lockState()->isLocked());
+    invariant(!shard_role_details::getLocker(opCtx)->isLocked());
     if (_jumboChunkCloneState && _forceJumbo) {
         if (_args.getForceJumbo() == ForceJumbo::kForceManual) {
             auto status = _checkRecipientCloningStatus(opCtx, kMaxWaitToCommitCloneForJumboChunk);
@@ -479,7 +481,7 @@ StatusWith<BSONObj> MigrationChunkClonerSource::commitClone(OperationContext* op
 }
 
 void MigrationChunkClonerSource::cancelClone(OperationContext* opCtx) noexcept {
-    invariant(!opCtx->lockState()->isLocked());
+    invariant(!shard_role_details::getLocker(opCtx)->isLocked());
 
     if (_sessionCatalogSource) {
         _sessionCatalogSource->onCloneCleanup();
@@ -509,7 +511,7 @@ void MigrationChunkClonerSource::cancelClone(OperationContext* opCtx) noexcept {
 void MigrationChunkClonerSource::onInsertOp(OperationContext* opCtx,
                                             const BSONObj& insertedDoc,
                                             const repl::OpTime& opTime) {
-    dassert(opCtx->lockState()->isCollectionLockedForMode(nss(), MODE_IX));
+    dassert(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nss(), MODE_IX));
 
     BSONElement idElement = insertedDoc["_id"];
     if (idElement.eoo()) {
@@ -536,7 +538,7 @@ void MigrationChunkClonerSource::onUpdateOp(OperationContext* opCtx,
                                             boost::optional<BSONObj> preImageDoc,
                                             const BSONObj& postImageDoc,
                                             const repl::OpTime& opTime) {
-    dassert(opCtx->lockState()->isCollectionLockedForMode(nss(), MODE_IX));
+    dassert(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nss(), MODE_IX));
 
     BSONElement idElement = postImageDoc["_id"];
     if (idElement.eoo()) {
@@ -569,7 +571,7 @@ void MigrationChunkClonerSource::onUpdateOp(OperationContext* opCtx,
 void MigrationChunkClonerSource::onDeleteOp(OperationContext* opCtx,
                                             const DocumentKey& documentKey,
                                             const repl::OpTime& opTime) {
-    dassert(opCtx->lockState()->isCollectionLockedForMode(nss(), MODE_IX));
+    dassert(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nss(), MODE_IX));
 
     const auto shardKeyAndId = documentKey.getShardKeyAndId();
 
@@ -804,7 +806,7 @@ uint64_t MigrationChunkClonerSource::getCloneBatchBufferAllocationSize() {
 Status MigrationChunkClonerSource::nextCloneBatch(OperationContext* opCtx,
                                                   const CollectionPtr& collection,
                                                   BSONArrayBuilder* arrBuilder) {
-    dassert(opCtx->lockState()->isCollectionLockedForMode(nss(), MODE_IS));
+    dassert(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nss(), MODE_IS));
 
     // If this chunk is too large to store records in _cloneRecordIds and the command args specify
     // to attempt to move it, scan the collection directly.
@@ -892,7 +894,7 @@ void MigrationChunkClonerSource::_processDeferredXferMods(OperationContext* opCt
 }
 
 Status MigrationChunkClonerSource::nextModsBatch(OperationContext* opCtx, BSONObjBuilder* builder) {
-    dassert(opCtx->lockState()->isCollectionLockedForMode(nss(), MODE_IS));
+    dassert(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nss(), MODE_IS));
 
     _processDeferredXferMods(opCtx);
 
@@ -917,7 +919,7 @@ Status MigrationChunkClonerSource::nextModsBatch(OperationContext* opCtx, BSONOb
     // It's important to abandon any open snapshots before processing updates so that we are sure
     // that our snapshot is at least as new as those updates. It's possible for a stale snapshot to
     // still be open from reads performed by _processDeferredXferMods(), above.
-    opCtx->recoveryUnit()->abandonSnapshot();
+    shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
 
     BSONArrayBuilder arrDel(builder->subarrayStart("deleted"));
     auto noopFn = [](BSONObj idDoc, BSONObj* fullDoc) {
@@ -1541,7 +1543,7 @@ LogInsertForShardingHandler::LogInsertForShardingHandler(NamespaceString nss,
 
 void LogInsertForShardingHandler::commit(OperationContext* opCtx, boost::optional<Timestamp>) {
     // TODO (SERVER-71444): Fix to be interruptible or document exception.
-    UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
+    UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(opCtx));  // NOLINT.
     const auto scopedCss =
         CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, _nss);
 
@@ -1561,7 +1563,7 @@ LogUpdateForShardingHandler::LogUpdateForShardingHandler(NamespaceString nss,
 
 void LogUpdateForShardingHandler::commit(OperationContext* opCtx, boost::optional<Timestamp>) {
     // TODO (SERVER-71444): Fix to be interruptible or document exception.
-    UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
+    UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(opCtx));  // NOLINT.
     const auto scopedCss =
         CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, _nss);
 
@@ -1577,7 +1579,7 @@ LogDeleteForShardingHandler::LogDeleteForShardingHandler(NamespaceString nss,
 
 void LogDeleteForShardingHandler::commit(OperationContext* opCtx, boost::optional<Timestamp>) {
     // TODO (SERVER-71444): Fix to be interruptible or document exception.
-    UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
+    UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(opCtx));  // NOLINT.
     const auto scopedCss =
         CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, _nss);
 

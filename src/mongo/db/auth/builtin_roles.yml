@@ -278,6 +278,8 @@ roles:
                   - getDatabaseVersion
                   - getShardVersion
                   - indexStats
+            - matchType: any_system_buckets
+              actions: *clusterMonitorRoleDatabaseActions
             - matchType: database
               db: 'config'
               actions: *clusterMonitorRoleDatabaseActions
@@ -311,6 +313,7 @@ roles:
               actions: &hostManagerRoleClusterActions
                   - applicationMessage # clusterManager gets this also
                   - auditConfigure
+                  - compact
                   - connPoolSync
                   - dropConnections
                   - logRotate

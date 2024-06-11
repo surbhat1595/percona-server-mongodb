@@ -78,7 +78,7 @@ std::unique_ptr<ValueBlock> ValueBlock::map(const ColumnOp& op) {
     return defaultMapImpl(op);
 }
 
-std::unique_ptr<ValueBlock> ValueBlock::defaultMapImpl(const ColumnOp& op) {
+std::unique_ptr<ValueBlock> ValueBlock::mapMonotonicFastPath(const ColumnOp& op) {
     // If the ColumnOp function is monotonic and the block is dense, we can try to map the whole
     // bucket to a MonoBlock instead of mapping each value iteratively.
     if (tryDense().get_value_or(false) && tryCount() &&
@@ -94,8 +94,15 @@ std::unique_ptr<ValueBlock> ValueBlock::defaultMapImpl(const ColumnOp& op) {
                 return std::make_unique<MonoBlock>(*tryCount(), cpyTag, cpyVal);
             }
         }
-        // The min and max didn't exist or didn't map to the same value so we need to process the
-        // whole block.
+    }
+    // The min and max didn't exist or didn't map to the same value so we need to process the whole
+    // block.
+    return nullptr;
+}
+
+std::unique_ptr<ValueBlock> ValueBlock::defaultMapImpl(const ColumnOp& op) {
+    if (auto fastPathResult = this->mapMonotonicFastPath(op); fastPathResult) {
+        return fastPathResult;
     }
 
     auto extracted = extract();
@@ -113,36 +120,6 @@ std::unique_ptr<ValueBlock> ValueBlock::defaultMapImpl(const ColumnOp& op) {
         tags.begin(), tags.end(), [](TypeTags tag) { return tag != TypeTags::Nothing; });
 
     return std::make_unique<HeterogeneousBlock>(std::move(tags), std::move(vals), isDense);
-}
-
-
-TokenizedBlock ValueBlock::tokenize() {
-    auto extracted = extract();
-    std::vector<TypeTags> tokenTags;
-    std::vector<Value> tokenVals;
-    std::vector<size_t> idxs(extracted.count, 0);
-
-    size_t unique_cnt = 0;
-    auto tokenMap = ValueMapType<size_t>{0, value::ValueHash(), value::ValueEq()};
-    for (size_t i = 0; i < extracted.count; ++i) {
-        auto [it, inserted] = tokenMap.insert({extracted.tags[i], extracted.vals[i]}, unique_cnt);
-        if (inserted) {
-            unique_cnt++;
-            auto [cpyTag, cpyVal] = value::copyValue(extracted.tags[i], extracted.vals[i]);
-            tokenTags.push_back(cpyTag), tokenVals.push_back(cpyVal);
-        }
-        idxs[i] = it->second;
-    }
-    return {std::make_unique<HeterogeneousBlock>(std::move(tokenTags), std::move(tokenVals)), idxs};
-}
-
-TokenizedBlock MonoBlock::tokenize() {
-    auto [tag, val] = value::copyValue(_tag, _val);
-    std::vector<TypeTags> tokenTags{tag};
-    std::vector<Value> tokenVals{val};
-
-    return {std::make_unique<HeterogeneousBlock>(std::move(tokenTags), std::move(tokenVals)),
-            std::vector<size_t>(_count, 0)};
 }
 
 std::unique_ptr<ValueBlock> HeterogeneousBlock::map(const ColumnOp& op) {
@@ -166,6 +143,173 @@ std::unique_ptr<ValueBlock> HeterogeneousBlock::map(const ColumnOp& op) {
     return outBlock;
 }
 
+TokenizedBlock ValueBlock::tokenize() {
+    auto extracted = extract();
+    std::vector<TypeTags> tokenTags;
+    std::vector<Value> tokenVals;
+    std::vector<size_t> idxs(extracted.count, 0);
+
+    size_t uniqueCount = 0;
+    auto tokenMap = ValueMapType<size_t>{0, value::ValueHash(), value::ValueEq()};
+    for (size_t i = 0; i < extracted.count; ++i) {
+        auto [it, inserted] = tokenMap.insert({extracted.tags[i], extracted.vals[i]}, uniqueCount);
+        if (inserted) {
+            uniqueCount++;
+            auto [cpyTag, cpyVal] = value::copyValue(extracted.tags[i], extracted.vals[i]);
+            tokenTags.push_back(cpyTag), tokenVals.push_back(cpyVal);
+        }
+        idxs[i] = it->second;
+    }
+    return {std::make_unique<HeterogeneousBlock>(std::move(tokenTags), std::move(tokenVals)), idxs};
+}
+
+TokenizedBlock MonoBlock::tokenize() {
+    auto [tag, val] = value::copyValue(_tag, _val);
+    std::vector<TypeTags> tokenTags{tag};
+    std::vector<Value> tokenVals{val};
+
+    return {std::make_unique<HeterogeneousBlock>(std::move(tokenTags), std::move(tokenVals)),
+            std::vector<size_t>(_count, 0)};
+}
+
+namespace {
+/**
+ * Defines equivalence of two Value's. Should only be used for NumberInt32, NumberInt64, and Date.
+ */
+template <typename T>
+struct IntValueEq {
+    explicit IntValueEq() {}
+
+    bool operator()(const Value& lhs, const Value& rhs) const {
+        T bcLHS = bitcastTo<T>(lhs);
+        T bcRHS = bitcastTo<T>(rhs);
+
+        // flat_hash_map does not use three way comparsion, so this equality comparison is
+        // sufficient.
+        return bcLHS == bcRHS;
+    }
+};
+}  // namespace
+
+// Should not be used for DoubleBlocks since hashValue has special handling of NaN's that differs
+// from naively using absl::Hash<double>.
+template <typename T, value::TypeTags TypeTag>
+TokenizedBlock HomogeneousBlock<T, TypeTag>::tokenize() {
+    std::vector<Value> tokenVals{};
+    std::vector<size_t> idxs(_presentBitset.size(), 0);
+
+    auto tokenMap = absl::flat_hash_map<Value, size_t, absl::Hash<T>, IntValueEq<T>>{};
+
+    bool isDense = *tryDense();
+    size_t uniqueCount = 0;
+    if (!isDense) {
+        tokenVals.push_back(Value{0u});
+        ++uniqueCount;
+    }
+
+    // We make Nothing the first token and initialize 'idxs' to all zeroes. This means that Nothing
+    // is our "default" value, and we only have to set values in idxes for non-Nothings.
+    size_t bitsetIndex = _presentBitset.find_first();
+    for (size_t i = 0; i < _vals.size() && bitsetIndex < _presentBitset.size(); ++i) {
+        auto [it, inserted] = tokenMap.insert({_vals[i], uniqueCount});
+        if (inserted) {
+            ++uniqueCount;
+            tokenVals.push_back(_vals[i]);
+        }
+        idxs[bitsetIndex] = it->second;
+        bitsetIndex = _presentBitset.find_next(bitsetIndex);
+    }
+
+    std::vector<TypeTags> tokenTags(uniqueCount, TypeTag);
+    if (!isDense) {
+        // First token is always Nothing for non-dense blocks.
+        tokenTags[0] = TypeTags::Nothing;
+    }
+    return {std::make_unique<HeterogeneousBlock>(std::move(tokenTags), std::move(tokenVals)), idxs};
+}
+
+template TokenizedBlock Int32Block::tokenize();
+template TokenizedBlock Int64Block::tokenize();
+template TokenizedBlock DateBlock::tokenize();
+
+template <>
+TokenizedBlock DoubleBlock::tokenize() {
+    return ValueBlock::tokenize();
+}
+
+template <>
+TokenizedBlock BoolBlock::tokenize() {
+    return ValueBlock::tokenize();
+}
+
+std::unique_ptr<ValueBlock> ValueBlock::fillEmpty(TypeTags fillTag, Value fillVal) {
+    if (tryDense().get_value_or(false)) {
+        return nullptr;
+    }
+
+    auto deblocked = extract();
+    std::vector<TypeTags> tags(deblocked.count);
+    std::vector<Value> vals(deblocked.count);
+    for (size_t i = 0; i < deblocked.count; ++i) {
+        if (deblocked.tags[i] == value::TypeTags::Nothing) {
+            auto [tag, val] = value::copyValue(fillTag, fillVal);
+            tags[i] = tag;
+            vals[i] = val;
+        } else {
+            auto [tag, val] = value::copyValue(deblocked.tags[i], deblocked.vals[i]);
+            tags[i] = tag;
+            vals[i] = val;
+        }
+    }
+
+    return std::make_unique<HeterogeneousBlock>(
+        std::move(tags), std::move(vals), true /* isDense */);
+}
+
+template <typename T, value::TypeTags TypeTag>
+std::unique_ptr<ValueBlock> HomogeneousBlock<T, TypeTag>::fillEmpty(TypeTags fillTag,
+                                                                    Value fillVal) {
+    if (*tryDense()) {
+        return nullptr;
+    } else if (fillTag == TypeTag) {
+        if (_presentBitset.none()) {
+            return std::make_unique<MonoBlock>(_presentBitset.size(), fillTag, fillVal);
+        }
+        // We also know that fillTag must be shallow since HomogeneousBlocks can only store
+        // shallow types.
+        size_t valsIndex = 0;
+        std::vector<Value> vals(_presentBitset.size());
+        for (size_t i = 0; i < _presentBitset.size(); ++i) {
+            if (_presentBitset[i]) {
+                vals[i] = _vals[valsIndex++];
+            } else {
+                vals[i] = fillVal;
+            }
+        }
+        return std::make_unique<HomogeneousBlock<T, TypeTag>>(std::move(vals));
+    }
+    return ValueBlock::fillEmpty(fillTag, fillVal);
+}
+
+template std::unique_ptr<ValueBlock> Int32Block::fillEmpty(TypeTags fillTag, Value fillVal);
+template std::unique_ptr<ValueBlock> Int64Block::fillEmpty(TypeTags fillTag, Value fillVal);
+template std::unique_ptr<ValueBlock> DateBlock::fillEmpty(TypeTags fillTag, Value fillVal);
+template std::unique_ptr<ValueBlock> DoubleBlock::fillEmpty(TypeTags fillTag, Value fillVal);
+template std::unique_ptr<ValueBlock> BoolBlock::fillEmpty(TypeTags fillTag, Value fillVal);
+
+std::unique_ptr<ValueBlock> ValueBlock::exists() {
+    if (tryDense().get_value_or(false) && tryCount()) {
+        return std::make_unique<MonoBlock>(
+            *tryCount(), TypeTags::Boolean, value::bitcastFrom<bool>(true));
+    }
+    auto extracted = extract();
+    std::vector<Value> vals(extracted.count);
+    for (size_t i = 0; i < extracted.count; ++i) {
+        vals[i] = value::bitcastFrom<bool>(extracted.tags[i] != TypeTags::Nothing);
+    }
+    return std::make_unique<BoolBlock>(std::move(vals));
+}
+
 void HeterogeneousBlock::push_back(TypeTags t, Value v) {
     constexpr auto maxSizeT = std::numeric_limits<size_t>::max();
 
@@ -185,5 +329,4 @@ void HeterogeneousBlock::push_back(TypeTags t, Value v) {
 
     guard.reset();
 }
-
 }  // namespace mongo::sbe::value

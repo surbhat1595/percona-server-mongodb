@@ -104,11 +104,6 @@ Status appendMetadata(RemoteCommandRequestOnAny* request,
         request->metadata = bob.obj();
     }
 
-    if (!request->opCtx)
-        return Status::OK();
-
-    request->validatedTenancyScope = auth::ValidatedTenancyScope::get(request->opCtx);
-
     return Status::OK();
 }
 
@@ -130,8 +125,8 @@ bool catchingInvoke(F&& f, EH&& eh, StringData hint) {
     } catch (...) {
         Status err = exceptionToStatus();
         LOGV2(5802401, "Callback failed", "msg"_attr = hint, "error"_attr = err);
-        if (gSuppressNetworkInterfaceTransportLayerExceptions
-                .isEnabledAndIgnoreFCVUnsafeAtStartup())
+        if (gSuppressNetworkInterfaceTransportLayerExceptions.isEnabled(
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot()))
             std::forward<EH>(eh)(err);  // new server parameter protected behavior
         else
             throw;  // old behavior
@@ -485,7 +480,7 @@ void NetworkInterfaceTL::CommandStateBase::setTimer(std::shared_ptr<RequestState
     const auto timeoutCode = requestOnAny.timeoutCode;
     if (nowVal >= deadline) {
         connTimeoutWaitTime = stopwatch.elapsed();
-        if (gEnableDetailedConnectionHealthMetricLogLines) {
+        if (gEnableDetailedConnectionHealthMetricLogLines.load()) {
             LOGV2(6496501,
                   "Operation timed out while waiting to acquire connection",
                   "requestId"_attr = requestOnAny.id,
@@ -860,7 +855,7 @@ void NetworkInterfaceTL::RequestManager::trySend(
         if (cmdState->finishLine.arriveStrongly()) {
             if (swConn.getStatus() == cmdState->requestOnAny.timeoutCode) {
                 cmdState->connTimeoutWaitTime = cmdState->stopwatch.elapsed();
-                if (gEnableDetailedConnectionHealthMetricLogLines) {
+                if (gEnableDetailedConnectionHealthMetricLogLines.load()) {
                     LOGV2(6496500,
                           "Operation timed out while waiting to acquire connection",
                           "requestId"_attr = cmdState->requestOnAny.id,

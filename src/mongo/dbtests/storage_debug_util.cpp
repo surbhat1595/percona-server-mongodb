@@ -42,7 +42,6 @@
 #include "mongo/db/catalog/validate_results.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
@@ -52,6 +51,7 @@
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/dbtests/storage_debug_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -66,7 +66,7 @@ namespace mongo {
 namespace StorageDebugUtil {
 
 void printCollectionAndIndexTableEntries(OperationContext* opCtx, const NamespaceString& nss) {
-    invariant(!opCtx->lockState()->isLocked());
+    invariant(!shard_role_details::getLocker(opCtx)->isLocked());
     AutoGetCollection coll(opCtx, nss, MODE_IS);
 
     LOGV2(51807, "Dumping collection table and index tables' entries for debugging...");

@@ -75,7 +75,6 @@
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
@@ -94,6 +93,7 @@
 #include "mongo/db/repl/oplog_applier.h"
 #include "mongo/db/repl/oplog_applier_impl.h"
 #include "mongo/db/repl/oplog_applier_impl_test_fixture.h"
+#include "mongo/db/repl/oplog_applier_utils.h"
 #include "mongo/db/repl/oplog_buffer.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
@@ -117,6 +117,7 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/db/update/document_diff_serialization.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/executor/task_executor.h"
@@ -596,7 +597,7 @@ TEST_F(OplogApplierImplTest, CreateCollectionCommand) {
                                             const BSONObj&) {
         applyCmdCalled = true;
         ASSERT_TRUE(opCtx);
-        ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode(nss.dbName(), MODE_IX));
+        ASSERT_TRUE(shard_role_details::getLocker(opCtx)->isDbLockedForMode(nss.dbName(), MODE_IX));
         ASSERT_EQUALS(nss, collNss);
         return Status::OK();
     };
@@ -622,7 +623,7 @@ TEST_F(OplogApplierImplTest, CreateCollectionCommandMultitenant) {
                                             const BSONObj&) {
         applyCmdCalled = true;
         ASSERT_TRUE(opCtx);
-        ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode(nss.dbName(), MODE_IX));
+        ASSERT_TRUE(shard_role_details::getLocker(opCtx)->isDbLockedForMode(nss.dbName(), MODE_IX));
         ASSERT_TRUE(collNss.tenantId());
         ASSERT_EQ(tid, collNss.tenantId().get());
         ASSERT_EQUALS(nss, collNss);
@@ -657,7 +658,7 @@ TEST_F(OplogApplierImplTest, CreateCollectionCommandMultitenantRequireTenantIDFa
                                             const BSONObj&) {
         applyCmdCalled = true;
         ASSERT_TRUE(opCtx);
-        ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode(nss.dbName(), MODE_IX));
+        ASSERT_TRUE(shard_role_details::getLocker(opCtx)->isDbLockedForMode(nss.dbName(), MODE_IX));
         ASSERT_TRUE(collNss.tenantId());
         ASSERT_EQ(tid, collNss.tenantId().get());
         ASSERT_EQUALS(nss, collNss);
@@ -700,7 +701,8 @@ TEST_F(OplogApplierImplTest, CreateCollectionCommandMultitenantAlreadyExists) {
                                             const BSONObj&) {
         applyCmdCalled = true;
         ASSERT_TRUE(opCtx);
-        ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode(nssTenant2.dbName(), MODE_IX));
+        ASSERT_TRUE(
+            shard_role_details::getLocker(opCtx)->isDbLockedForMode(nssTenant2.dbName(), MODE_IX));
         ASSERT_TRUE(collNss.tenantId());
         ASSERT_EQ(tid2, collNss.tenantId().get());
         ASSERT_EQUALS(nssTenant2, collNss);
@@ -5773,6 +5775,18 @@ protected:
         return topLevelTxnOps;
     }
 
+    int getDocumentIdFromOp(const OplogEntry* op) {
+        switch (op->getOpType()) {
+            case OpTypeEnum::kInsert:
+            case OpTypeEnum::kDelete:
+                return op->getObject()["_id"].Int();
+            case OpTypeEnum::kUpdate:
+                return (*op->getObject2())["_id"].Int();
+            default:
+                MONGO_UNREACHABLE
+        }
+    }
+
 protected:
     std::unique_ptr<TrackOpsAppliedApplier> _applier;
     std::unique_ptr<ThreadPool> _writerPool;
@@ -5958,6 +5972,143 @@ TEST_F(PreparedTxnSplitTest, SingleEmptyPrepareTransaction) {
             ASSERT_EQ(boost::none, commitWriter[0].preparedTxnOps);
         }
     }
+}
+
+// For the SinglePreparedTxnMultipleOpsOnOneDoc, we need to make sure we don't fail spuriously
+// due to a hash collision.
+int findDocIdWithSeparateWriterId(
+    OperationContext* opCtx, const NamespaceString& nss, UUID uuid, int docId, int nWriters) {
+
+    invariant(nWriters > 1);
+    const int itersToCheck = std::min(nWriters, 10);
+    CachedCollectionProperties collPropertiesCache;
+    auto oplogEntry1 =
+        makeOplogEntry(OpTypeEnum::kInsert, nss, uuid, BSON("_id" << docId), boost::none);
+    uint32_t id1 =
+        OplogApplierUtils::getOplogEntryHash(opCtx, &oplogEntry1, &collPropertiesCache) % nWriters;
+    for (int newDocId = 1 + docId; newDocId <= docId + itersToCheck; newDocId++) {
+        auto oplogEntry2 =
+            makeOplogEntry(OpTypeEnum::kInsert, nss, uuid, BSON("_id" << newDocId), boost::none);
+        uint32_t id2 =
+            OplogApplierUtils::getOplogEntryHash(opCtx, &oplogEntry2, &collPropertiesCache) %
+            nWriters;
+        if (id1 != id2)
+            return newDocId;
+    }
+    invariant(false,
+              str::stream() << "Unable to find a non-colliding doc ID between " << docId + 1
+                            << " and " << docId + itersToCheck << " inclusive");
+    MONGO_UNREACHABLE;
+}
+
+TEST_F(PreparedTxnSplitTest, SinglePreparedTxnMultipleOpsOnOneDoc) {
+    std::vector<OplogEntry> prepareOps;
+    const int kNumDocuments = 2;
+    const int kNumOpsPerDoc = 3;
+    const int kNumApplierThreads = 100;
+    const int kDocID1 = 1001;
+    const int kDocID2 =
+        findDocIdWithSeparateWriterId(_opCtx.get(), _nss, *_uuid, kDocID1, kNumApplierThreads);
+
+    // Construct one insert, one update and one delete op for each document.
+    std::vector<BSONObj> cruds;
+    cruds.push_back(BSON("op"
+                         << "i"
+                         << "ns" << _nss.ns_forTest() << "ui" << *_uuid << "o"
+                         << BSON("_id" << kDocID1)));
+    cruds.push_back(BSON("op"
+                         << "i"
+                         << "ns" << _nss.ns_forTest() << "ui" << *_uuid << "o"
+                         << BSON("_id" << kDocID2)));
+    cruds.push_back(BSON("op"
+                         << "u"
+                         << "ns" << _nss.ns_forTest() << "ui" << *_uuid << "o" << BSON("a" << 11)
+                         << "o2" << BSON("_id" << kDocID1)));
+    cruds.push_back(BSON("op"
+                         << "u"
+                         << "ns" << _nss.ns_forTest() << "ui" << *_uuid << "o" << BSON("a" << 12)
+                         << "o2" << BSON("_id" << kDocID2)));
+    cruds.push_back(BSON("op"
+                         << "d"
+                         << "ns" << _nss.ns_forTest() << "ui" << *_uuid << "o"
+                         << BSON("_id" << kDocID1)));
+    cruds.push_back(BSON("op"
+                         << "d"
+                         << "ns" << _nss.ns_forTest() << "ui" << *_uuid << "o"
+                         << BSON("_id" << kDocID2)));
+
+    prepareOps.push_back(makePrepareOplogEntry(cruds, {Timestamp(1, 1), 1}, _lsid1, _txnNum1));
+
+    WriterVectors prepareWriterVectors(kNumApplierThreads);
+    std::vector<std::vector<OplogEntry>> derivedPrepareOps;
+    _applier->fillWriterVectors_forTest(
+        _opCtx.get(), &prepareOps, &prepareWriterVectors, &derivedPrepareOps);
+
+    // Verify the config.transactions collection got an entry for the prepared transaction.
+    int txnTableOps = filterConfigTransactionsEntriesFromWriterVectors(prepareWriterVectors);
+    ASSERT_EQ(1, txnTableOps);
+
+    // Verify each top-level transaction has a corresponding prepare entry in the writerVectors.
+    int topLevelTxnOps = filterTopLevelTxnEntriesFromWriterVectors(prepareWriterVectors);
+    ASSERT_EQ(1, topLevelTxnOps);
+
+    // Test that applying a commitTransaction in the next batch will correctly split the entry
+    // and add it into those writer vectors that previously got assigned the prepare entry.
+    std::vector<OplogEntry> commitOps;
+    commitOps.push_back(makeCommitOplogEntry(
+        {Timestamp(3, 1), 1}, Timestamp(2, 1), _lsid1, _txnNum1, prepareOps[0].getOpTime()));
+
+    WriterVectors commitWriterVectors(kNumApplierThreads);
+    std::vector<std::vector<OplogEntry>> derivedCommitOps;
+    _applier->fillWriterVectors_forTest(
+        _opCtx.get(), &commitOps, &commitWriterVectors, &derivedCommitOps);
+
+    // Verify the config.transactions collection got an entry for the commit op.
+    txnTableOps = filterConfigTransactionsEntriesFromWriterVectors(commitWriterVectors);
+    ASSERT_EQ(1, txnTableOps);
+
+    // Verify each top-level transaction has a corresponding commit entry in the writerVectors.
+    topLevelTxnOps = filterTopLevelTxnEntriesFromWriterVectors(commitWriterVectors);
+    ASSERT_EQ(1, topLevelTxnOps);
+
+    // Verify that ops on the same document are grouped into the same split transaction.
+    int splitTxnCount = 0;
+    std::set<int> docIDs;
+    std::set<int> expectDocIDs{kDocID1, kDocID2};
+
+    for (size_t i = 0; i < kNumApplierThreads; ++i) {
+        auto& prepareWriter = prepareWriterVectors[i];
+        auto& commitWriter = commitWriterVectors[i];
+
+        if (prepareWriter.size()) {
+            ++splitTxnCount;
+            ASSERT_EQ(1, prepareWriter.size());
+            ASSERT_EQ(1, commitWriter.size());
+
+            ASSERT_EQ(ApplicationInstruction::applySplitPreparedTxnOp,
+                      prepareWriter[0].instruction);
+            ASSERT_TRUE(prepareWriter[0]->shouldPrepare());
+            ASSERT_NE(boost::none, prepareWriter[0].subSession);
+            ASSERT_NE(boost::none, prepareWriter[0].preparedTxnOps);
+            ASSERT_EQ(kNumOpsPerDoc, prepareWriter[0].preparedTxnOps->size());
+
+            // Check all ops in one split transaction are on the same document.
+            const auto& ops = *prepareWriter[0].preparedTxnOps;
+            const int firstDocID = getDocumentIdFromOp(ops[0]);
+            ASSERT_TRUE(std::all_of(ops.begin(), ops.end(), [=, this](const auto op) {
+                return getDocumentIdFromOp(op) == firstDocID;
+            }));
+            docIDs.insert(firstDocID);
+
+            ASSERT_EQ(ApplicationInstruction::applySplitPreparedTxnOp, commitWriter[0].instruction);
+            ASSERT_TRUE(commitWriter[0]->isPreparedCommit());
+            ASSERT_EQ(prepareWriter[0].subSession->getSessionId(),
+                      commitWriter[0].subSession->getSessionId());
+            ASSERT_EQ(boost::none, commitWriter[0].preparedTxnOps);
+        }
+    }
+    ASSERT_EQ(kNumDocuments, splitTxnCount);
+    ASSERT_EQ(expectDocIDs, docIDs);
 }
 
 class GlobalIndexTest : public OplogApplierImplTest {

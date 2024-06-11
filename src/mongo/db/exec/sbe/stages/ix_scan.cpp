@@ -51,6 +51,7 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/snapshot.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
@@ -97,13 +98,12 @@ void IndexScanStageBase::prepareImpl(CompileCtx& ctx) {
 
     auto indexCatalog = _coll.getPtr()->getIndexCatalog();
     auto indexDesc = indexCatalog->findIndexByName(_opCtx, _indexName);
-    // uassert here, not tassert, because it is not a programming bug if the index got dropped just
-    // before we looked for it.
-    uassert(4938500,
+    tassert(4938500,
             str::stream() << "could not find index named '" << _indexName << "' in collection '"
                           << _coll.getCollName()->toStringForErrorMsg() << "'",
             indexDesc);
 
+    _uniqueIndex = indexDesc->unique();
     _entry = indexCatalog->getEntry(indexDesc);
     tassert(4938503,
             str::stream() << "expected IndexCatalogEntry for index named: " << _indexName,
@@ -121,7 +121,7 @@ void IndexScanStageBase::prepareImpl(CompileCtx& ctx) {
     }
 
     if (_snapshotIdSlot) {
-        _latestSnapshotId = _opCtx->recoveryUnit()->getSnapshotId().toNumber();
+        _latestSnapshotId = shard_role_details::getRecoveryUnit(_opCtx)->getSnapshotId().toNumber();
     }
 }
 
@@ -213,7 +213,7 @@ void IndexScanStageBase::doRestoreState(bool relinquishCursor) {
     // Yield is the only time during plan execution that the snapshotId can change. As such, we
     // update it accordingly as part of yield recovery.
     if (_snapshotIdSlot) {
-        _latestSnapshotId = _opCtx->recoveryUnit()->getSnapshotId().toNumber();
+        _latestSnapshotId = shard_role_details::getRecoveryUnit(_opCtx)->getSnapshotId().toNumber();
     }
 }
 
@@ -226,8 +226,9 @@ void IndexScanStageBase::doDetachFromOperationContext() {
 
 void IndexScanStageBase::doAttachToOperationContext(OperationContext* opCtx) {
     if (_lowPriority && _open && gDeprioritizeUnboundedUserIndexScans.load() &&
-        _opCtx->getClient()->isFromUserConnection() && _opCtx->lockState()->shouldWaitForTicket()) {
-        _priority.emplace(opCtx->lockState(), AdmissionContext::Priority::kLow);
+        _opCtx->getClient()->isFromUserConnection() &&
+        shard_role_details::getLocker(_opCtx)->shouldWaitForTicket()) {
+        _priority.emplace(shard_role_details::getLocker(opCtx), AdmissionContext::Priority::kLow);
     }
     if (_cursor) {
         _cursor->reattachToOperationContext(opCtx);
@@ -290,8 +291,9 @@ PlanState IndexScanStageBase::getNext() {
     auto optTimer(getOptTimer(_opCtx));
 
     if (_lowPriority && !_priority && gDeprioritizeUnboundedUserIndexScans.load() &&
-        _opCtx->getClient()->isFromUserConnection() && _opCtx->lockState()->shouldWaitForTicket()) {
-        _priority.emplace(_opCtx->lockState(), AdmissionContext::Priority::kLow);
+        _opCtx->getClient()->isFromUserConnection() &&
+        shard_role_details::getLocker(_opCtx)->shouldWaitForTicket()) {
+        _priority.emplace(shard_role_details::getLocker(_opCtx), AdmissionContext::Priority::kLow);
     }
 
     // We are about to get next record from a storage cursor so do not bother saving our internal
@@ -562,6 +564,9 @@ void SimpleIndexScanStage::open(bool reOpen) {
                 tagHi == value::TypeTags::ksValue);
 
         _seekKeyHighHolder.reset(ownedHi, tagHi, valHi);
+
+        // It is a point bound if the lowKey and highKey are same except discriminator.
+        _pointBound = getSeekKeyLow().compareWithoutDiscriminator(*getSeekKeyHigh()) == 0;
     } else if (_seekKeyLow) {
         auto [ownedLow, tagLow, valLow] = _bytecode.run(_seekKeyLowCode.get());
         const auto msgTagLow = tagLow;
@@ -666,7 +671,9 @@ bool SimpleIndexScanStage::validateKey(const boost::optional<KeyStringEntry>& ke
     // Note: we may in the future want to bump 'keysExamined' for comparisons to a key that result
     // in the stage returning EOF.
     ++_specificStats.keysExamined;
-    _scanState = ScanState::kScanning;
+
+    // For point bound on unique index, there's only one possible key.
+    _scanState = _pointBound && _uniqueIndex ? ScanState::kFinished : ScanState::kScanning;
     return true;
 }
 

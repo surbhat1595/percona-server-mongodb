@@ -68,7 +68,7 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/document_source_skip.h"
-#include "mongo/db/pipeline/search_helper.h"
+#include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collation/collation_spec.h"
@@ -273,7 +273,8 @@ Status dispatchMergingPipeline(const boost::intrusive_ptr<ExpressionContext>& ex
     // First, check whether we can merge on the mongoS. If the merge pipeline MUST run on mongoS,
     // then ignore the internalQueryProhibitMergingOnMongoS parameter.
     if (mergePipeline->requiredToRunOnMongos() ||
-        (!internalQueryProhibitMergingOnMongoS.load() && mergePipeline->canRunOnMongos())) {
+        (!internalQueryProhibitMergingOnMongoS.load() && mergePipeline->canRunOnMongos().isOK() &&
+         !mergePipeline->needsSpecificShardMerger())) {
         return runPipelineOnMongoS(namespaces,
                                    batchSize,
                                    std::move(shardDispatchResults.splitPipeline->mergePipeline),
@@ -491,12 +492,15 @@ DispatchShardPipelineResults dispatchExchangeConsumerPipeline(
     }
 
     // For all consumers construct a request with appropriate cursor ids and send to shards.
-    std::vector<std::pair<ShardId, BSONObj>> requests;
-    auto numConsumers = shardDispatchResults->exchangeSpec->consumerShards.size();
+    std::vector<AsyncRequestsSender::Request> requests;
     std::vector<SplitPipeline> consumerPipelines;
+    auto numConsumers = shardDispatchResults->exchangeSpec->consumerShards.size();
+    requests.reserve(numConsumers);
+    consumerPipelines.reserve(numConsumers);
     for (size_t idx = 0; idx < numConsumers; ++idx) {
         // Pick this consumer's cursors from producers.
         std::vector<OwnedRemoteCursor> producers;
+        producers.reserve(shardDispatchResults->numProducers);
         for (size_t p = 0; p < shardDispatchResults->numProducers; ++p) {
             producers.emplace_back(
                 std::move(shardDispatchResults->remoteCursors[p * numConsumers + idx]));
@@ -695,7 +699,9 @@ Status runPipelineOnMongoS(const ClusterAggregate::Namespaces& namespaces,
 
     // We should never receive a pipeline which cannot run on mongoS.
     invariant(!expCtx->explain);
-    invariant(pipeline->canRunOnMongos());
+    uassertStatusOKWithContext(pipeline->canRunOnMongos(),
+                               "pipeline is required to run on mongoS, but cannot");
+
 
     // Verify that the first stage can produce input for the remainder of the pipeline.
     uassert(ErrorCodes::IllegalOperation,
@@ -731,7 +737,8 @@ Status dispatchPipelineAndMerge(OperationContext* opCtx,
                                                    pipelineDataSource,
                                                    eligibleForSampling,
                                                    std::move(targeter.pipeline),
-                                                   expCtx->explain);
+                                                   expCtx->explain,
+                                                   targeter.cri);
 
     // Check for valid usage of SEARCH_META. We wait until after we've dispatched pipelines to the
     // shards in the event that we need to resolve any views.
@@ -739,13 +746,13 @@ Status dispatchPipelineAndMerge(OperationContext* opCtx,
     auto svcCtx = opCtx->getServiceContext();
     if (svcCtx) {
         if (shardDispatchResults.pipelineForSingleShard) {
-            getSearchHelpers(svcCtx)->assertSearchMetaAccessValid(
+            search_helpers::assertSearchMetaAccessValid(
                 shardDispatchResults.pipelineForSingleShard->getSources(), expCtx.get());
         } else {
             tassert(7972499,
                     "Must have split pipeline if 'pipelineForSingleShard' not present",
                     shardDispatchResults.splitPipeline);
-            getSearchHelpers(svcCtx)->assertSearchMetaAccessValid(
+            search_helpers::assertSearchMetaAccessValid(
                 shardDispatchResults.splitPipeline->shardsPipeline->getSources(),
                 shardDispatchResults.splitPipeline->mergePipeline->getSources(),
                 expCtx.get());

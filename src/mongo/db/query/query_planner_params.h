@@ -35,6 +35,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/index_entry.h"
+#include "mongo/db/query/index_hint.h"
 #include "mongo/db/query/query_knobs_gen.h"
 
 namespace mongo {
@@ -42,7 +43,7 @@ namespace mongo {
 /**
  * Struct containing basic stats about a collection useful for query planning.
  */
-struct CollectionStats {
+struct PlannerCollectionInfo {
     // The number of records in the collection.
     long long noOfRecords{0};
 
@@ -51,6 +52,9 @@ struct CollectionStats {
 
     // The allocated storage size in bytes.
     long long storageSizeBytes{0};
+
+    // Whether this is a timeseries collection. This is sometimes used in planning decisions.
+    bool isTimeseries = false;
 };
 
 /**
@@ -61,7 +65,7 @@ struct SecondaryCollectionInfo {
     std::vector<IndexEntry> indexes{};
     std::vector<ColumnIndexEntry> columnIndexes{};
     bool exists{true};
-    CollectionStats stats{};
+    PlannerCollectionInfo stats{};
 };
 
 
@@ -84,6 +88,7 @@ struct QueryPlannerParams {
         : options(options),
           indexFiltersApplied(false),
           querySettingsApplied(false),
+          collscanDirection(boost::none),
           maxIndexedSolutions(internalQueryPlannerMaxIndexedSolutions.load()),
           clusteredCollectionCollator(nullptr),
           availableMemoryBytes(0) {}
@@ -123,9 +128,9 @@ struct QueryPlannerParams {
         // Set this so that collection scans on the oplog wait for visibility before reading.
         OPLOG_SCAN_WAIT_FOR_VISIBLE = 1 << 6,
 
-        // Set this so that getExecutorDistinct() will only use a plan that _guarantees_ it will
+        // Set this so that tryGetExecutorDistinct() will only use a plan that _guarantees_ it will
         // return exactly one document per value of the distinct field. See the comments above the
-        // declaration of getExecutorDistinct() for more detail.
+        // declaration of tryGetExecutorDistinct() for more detail.
         STRICT_DISTINCT_ONLY = 1 << 7,
 
         // Set this on an oplog scan to uassert that the oplog has not already rolled over the
@@ -157,6 +162,11 @@ struct QueryPlannerParams {
         // applied per-column. This is off by default, since the execution side doesn't support it
         // yet.
         GENERATE_PER_COLUMN_FILTERS = 1 << 11,
+
+        // This is an extension to the NO_TABLE_SCAN parameter. This more stricter option will also
+        // avoid a CLUSTEREDIDX_SCAN which comes built into a collection scan when the collection is
+        // clustered.
+        STRICT_NO_TABLE_SCAN = 1 << 12,
     };
 
     // See Options enum above.
@@ -169,7 +179,7 @@ struct QueryPlannerParams {
     std::vector<ColumnIndexEntry> columnStoreIndexes;
 
     // Basic collection stats for the main collection.
-    CollectionStats collectionStats;
+    PlannerCollectionInfo collectionStats;
 
     // What's our shard key?  If INCLUDE_SHARD_FILTER is set we will create a shard filtering
     // stage.  If we know the shard key, we can perform covering analysis instead of always
@@ -181,6 +191,13 @@ struct QueryPlannerParams {
 
     // Were query settings applied?
     bool querySettingsApplied;
+
+    // TODO SERVER-85321 Centralize the COLLSCAN direction hinting mechanism.
+    //
+    // Optional hint for specifying the allowed collection scan direction. Unlike cursor '$natural'
+    // hints, this does not force the planner to prefer collection scans over other candidate
+    // solutions. This is currently used for applying query settings '$natural' hints.
+    boost::optional<NaturalOrderHint::Direction> collscanDirection;
 
     // What's the max number of indexed solutions we want to output?  It's expensive to compare
     // plans via the MultiPlanStage, and the set of possible plans is very large for certain

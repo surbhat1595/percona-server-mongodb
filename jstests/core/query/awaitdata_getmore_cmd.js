@@ -2,7 +2,7 @@
 //
 // @tags: [
 //   # The test runs commands that are not allowed with security token: getDefaultRWConcern.
-//   not_allowed_with_security_token,
+//   not_allowed_with_signed_security_token,
 //   # This test attempts to perform a getMore command and find it using the currentOp command. The
 //   # former operation may be routed to a secondary in the replica set, whereas the latter must be
 //   # routed to the primary.
@@ -271,3 +271,18 @@ try {
     db.setLogLevel(originalCmdLogLevel, 'command');
     db.setLogLevel(originalQueryLogLevel, 'query');
 }
+
+jsTestLog("Testing tailable cursors with trivially false conditions...");
+cmdRes = assert.commandWorked(db.runCommand(
+    {find: collName, batchSize: 2, filter: {$alwaysFalse: 1}, awaitData: true, tailable: true}));
+assert.gt(cmdRes.cursor.id, NumberLong(0));
+assert.eq(cmdRes.cursor.ns, coll.getFullName());
+assert.eq(cmdRes.cursor.firstBatch.length, 0);
+
+assert.commandWorked(coll.insert({_id: "new insertion", x: 123}));
+
+cmdRes = assert.commandWorked(
+    db.runCommand({getMore: cmdRes.cursor.id, collection: collName, batchSize: 1}));
+assert.gt(cmdRes.cursor.id, NumberLong(0));
+assert.eq(cmdRes.cursor.ns, coll.getFullName());
+assert.eq(cmdRes.cursor.nextBatch.length, 0);

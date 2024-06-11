@@ -52,7 +52,8 @@
 #include "mongo/db/s/create_collection_coordinator_document_gen.h"
 #include "mongo/db/s/sharding_ddl_coordinator_gen.h"
 #include "mongo/db/s/sharding_ddl_coordinator_service.h"
-#include "mongo/db/s/sharding_state.h"
+#include "mongo/db/s/sharding_ddl_util.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
@@ -60,6 +61,7 @@
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
@@ -81,7 +83,11 @@ CreateCommand makeCreateCommand(OperationContext* opCtx,
     createRequest.setSize(request.getSize());
     createRequest.setAutoIndexId(request.getAutoIndexId());
     createRequest.setClusteredIndex(request.getClusteredIndex());
-    createRequest.setCollation(request.getCollation());
+    if (request.getCollation()) {
+        auto collation =
+            Collation::parse(IDLParserContext("shardsvrCreateCollection"), *request.getCollation());
+        createRequest.setCollation(collation);
+    }
     createRequest.setEncryptedFields(request.getEncryptedFields());
     createRequest.setChangeStreamPreAndPostImages(request.getChangeStreamPreAndPostImages());
     createRequest.setMax(request.getMax());
@@ -143,10 +149,11 @@ public:
         using InvocationBase::InvocationBase;
 
         Response typedRun(OperationContext* opCtx) {
-            uassertStatusOK(ShardingState::get(opCtx)->canAcceptShardedCommands());
+            ShardingState::get(opCtx)->assertCanAcceptShardedCommands();
             opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
             bool inTransaction = opCtx->inMultiDocumentTransaction();
             bool isUnsplittable = request().getUnsplittable();
+            bool hasShardKey = request().getShardKey().has_value();
             bool isFromCreateCommand =
                 isUnsplittable && !request().getIsFromCreateUnsplittableCollectionTestCommand();
             bool isConfigCollection = isUnsplittable && ns().isConfigDB();
@@ -159,7 +166,13 @@ public:
 
             uassert(ErrorCodes::NotImplemented,
                     "Create Collection path has not been implemented",
-                    request().getShardKey());
+                    isUnsplittable || hasShardKey);
+
+            tassert(ErrorCodes::InvalidOptions,
+                    "unsplittable collections must be created with shard key {_id: 1}",
+                    !isUnsplittable || !hasShardKey ||
+                        request().getShardKey()->woCompare(
+                            sharding_ddl_util::unsplittableCollectionShardKey().toBSON()) == 0);
 
             // TODO SERVER-81190 remove isFromCreatecommand from the check
             if (isFromCreateCommand || inTransaction || isConfigCollection) {
@@ -171,19 +184,30 @@ public:
             }
 
             const auto createCollectionCoordinator = [&] {
+                // TODO (SERVER-79304): Remove once 8.0 becomes last LTS.
+                FixedFCVRegion fixedFcvRegion{opCtx};
+                const auto fcvSnapshot = (*fixedFcvRegion).acquireFCVSnapshot();
+
                 auto requestToForward = request().getShardsvrCreateCollectionRequest();
-                // Validates and sets missing time-series options fields automatically.
-                if (requestToForward.getTimeseries()) {
+                // Validates and sets missing time-series options fields automatically. This may
+                // modify the options by setting default values. Due to modifying the durable
+                // format it is feature flagged to 7.1+
+                if (requestToForward.getTimeseries() &&
+                    gFeatureFlagValidateAndDefaultValuesForShardedTimeseries.isEnabled(
+                        fcvSnapshot)) {
                     auto timeseriesOptions = *requestToForward.getTimeseries();
                     uassertStatusOK(
                         timeseries::validateAndSetBucketingParameters(timeseriesOptions));
                     requestToForward.setTimeseries(std::move(timeseriesOptions));
                 }
 
-                FixedFCVRegion fixedFcvRegion{opCtx};
+                if (isUnsplittable && !requestToForward.getShardKey()) {
+                    requestToForward.setShardKey(
+                        sharding_ddl_util::unsplittableCollectionShardKey().toBSON());
+                }
 
                 auto coordinatorDoc = [&] {
-                    if (feature_flags::gAuthoritativeShardCollection.isEnabled(*fixedFcvRegion)) {
+                    if (feature_flags::gAuthoritativeShardCollection.isEnabled(fcvSnapshot)) {
                         const DDLCoordinatorTypeEnum coordType =
                             DDLCoordinatorTypeEnum::kCreateCollection;
                         auto doc = CreateCollectionCoordinatorDocument();
@@ -192,7 +216,7 @@ public:
                         return doc.toBSON();
                     } else {
                         const DDLCoordinatorTypeEnum coordType =
-                            DDLCoordinatorTypeEnum::kCreateCollectionPre71Compatible;
+                            DDLCoordinatorTypeEnum::kCreateCollectionPre80Compatible;
                         auto doc = CreateCollectionCoordinatorDocumentLegacy();
                         doc.setShardingDDLCoordinatorMetadata({{ns(), coordType}});
                         doc.setShardsvrCreateCollectionRequest(requestToForward);

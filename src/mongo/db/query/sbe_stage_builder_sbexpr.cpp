@@ -117,6 +117,24 @@ optimizer::ABT makeVariable(optimizer::ProjectionName var) {
     return optimizer::make<optimizer::Variable>(std::move(var));
 }
 
+VariableTypes buildVariableTypes(const PlanStageSlots& outputs) {
+    VariableTypes varTypes;
+    for (const TypedSlot& slot : outputs.getAllSlotsInOrder()) {
+        varTypes.emplace(getABTVariableName(slot.slotId), slot.typeSignature);
+    }
+    return varTypes;
+}
+
+bool hasBlockOutput(const PlanStageSlots& outputs) {
+    for (const TypedSlot& slot : outputs.getAllSlotsInOrder()) {
+        if (TypeSignature::kBlockType.isSubset(slot.typeSignature) ||
+            TypeSignature::kCellType.isSubset(slot.typeSignature)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 TypeSignature constantFold(optimizer::VariableEnvironment& env,
                            optimizer::ABT& abt,
                            StageBuilderState& state,
@@ -199,7 +217,16 @@ TypedExpression abtToExpr(optimizer::ABT& abt,
     sbe::value::SlotIdGenerator ids;
     auto staticData = std::make_unique<stage_builder::PlanStageStaticData>();
     optimizer::SBEExpressionLowering exprLower{
-        env, std::move(varResolver), runtimeEnv, ids, staticData->inputParamToSlotMap};
+        env,
+        std::move(varResolver),
+        runtimeEnv,
+        ids,
+        staticData->inputParamToSlotMap,
+        nullptr /*metadata*/,
+        nullptr /*nodeProps*/,
+        // SBE stage builders assume that binary comparison operations in ABT are type bracketed and
+        // must specify this to the class responsible for lowering to SBE.
+        optimizer::ComparisonOpSemantics::kTypeBracketing};
     return {exprLower.optimize(abt), signature};
 }
 
@@ -221,26 +248,50 @@ SbVar::SbVar(const optimizer::ProjectionName& name) {
 
 SbExpr::SbExpr(const abt::HolderPtr& a) : _storage(abt::wrap(a->_value)) {}
 
-TypedExpression SbExpr::extractExpr(StageBuilderState& state) {
+TypedExpression SbExpr::extractExpr(StageBuilderState& state, const VariableTypes* slotInfo) {
     if (hasSlot()) {
-        auto slotId = stdx::get<sbe::value::SlotId>(_storage);
-        return {sbe::makeE<sbe::EVariable>(slotId), TypeSignature::kAnyScalarType};
+        auto slotId = get<sbe::value::SlotId>(_storage);
+        TypeSignature varType = TypeSignature::kAnyScalarType;
+        if (slotInfo) {
+            auto it = slotInfo->find(getABTVariableName(slotId));
+            if (it != slotInfo->end()) {
+                varType = it->second;
+            }
+        }
+        return {sbe::makeE<sbe::EVariable>(slotId), varType};
     }
 
-    if (stdx::holds_alternative<LocalVarInfo>(_storage)) {
-        auto [frameId, slotId] = stdx::get<LocalVarInfo>(_storage);
-        return {sbe::makeE<sbe::EVariable>(frameId, slotId), TypeSignature::kAnyScalarType};
+    if (holds_alternative<LocalVarInfo>(_storage)) {
+        auto [frameId, slotId] = get<LocalVarInfo>(_storage);
+        TypeSignature varType = TypeSignature::kAnyScalarType;
+        if (slotInfo) {
+            auto it = slotInfo->find(getABTLocalVariableName(frameId, slotId));
+            if (it != slotInfo->end()) {
+                varType = it->second;
+            }
+        }
+        return {sbe::makeE<sbe::EVariable>(frameId, slotId), varType};
     }
 
-    if (stdx::holds_alternative<abt::HolderPtr>(_storage)) {
-        return abtToExpr(stdx::get<abt::HolderPtr>(_storage)->_value, state);
+    if (holds_alternative<abt::HolderPtr>(_storage)) {
+        return abtToExpr(get<abt::HolderPtr>(_storage)->_value, state, slotInfo);
     }
 
-    if (stdx::holds_alternative<bool>(_storage)) {
+    if (holds_alternative<bool>(_storage)) {
         return {EExpr{}, TypeSignature::kAnyScalarType};
     }
 
-    return {std::move(stdx::get<EExpr>(_storage)), TypeSignature::kAnyScalarType};
+    return {std::move(get<EExpr>(_storage)), TypeSignature::kAnyScalarType};
+}
+
+bool SbExpr::isConstantExpr() const {
+    if (holds_alternative<abt::HolderPtr>(_storage)) {
+        return get<abt::HolderPtr>(_storage)->_value.is<optimizer::Constant>();
+    }
+    if (holds_alternative<std::unique_ptr<sbe::EExpression>>(_storage)) {
+        return get<std::unique_ptr<sbe::EExpression>>(_storage)->as<sbe::EConstant>() != nullptr;
+    }
+    return false;
 }
 
 TypedExpression SbExpr::getExpr(StageBuilderState& state) const {
@@ -249,20 +300,20 @@ TypedExpression SbExpr::getExpr(StageBuilderState& state) const {
 
 abt::HolderPtr SbExpr::extractABT() {
     if (hasSlot()) {
-        auto slotId = stdx::get<sbe::value::SlotId>(_storage);
+        auto slotId = get<sbe::value::SlotId>(_storage);
         return abt::wrap(makeABTVariable(slotId));
     }
 
-    if (stdx::holds_alternative<LocalVarInfo>(_storage)) {
-        auto [frameId, slotId] = stdx::get<LocalVarInfo>(_storage);
+    if (holds_alternative<LocalVarInfo>(_storage)) {
+        auto [frameId, slotId] = get<LocalVarInfo>(_storage);
         return abt::wrap(makeABTLocalVariable(frameId, slotId));
     }
 
     tassert(6950800,
             "Unexpected: extractABT() method invoked on an EExpression object",
-            stdx::holds_alternative<abt::HolderPtr>(_storage));
+            holds_alternative<abt::HolderPtr>(_storage));
 
-    return std::move(stdx::get<abt::HolderPtr>(_storage));
+    return std::move(get<abt::HolderPtr>(_storage));
 }
 
 void SbExpr::set(sbe::FrameId frameId, sbe::value::SlotId slotId) {

@@ -33,9 +33,9 @@
 
 #include <boost/optional/optional.hpp>
 
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 
@@ -58,7 +58,7 @@ void BatchedWriteContext::addBatchedOperation(OperationContext* opCtx,
               repl::ReplOperation::ChangeStreamPreImageRecordingMode::kOff);
     invariant(!opCtx->inMultiDocumentTransaction());
     invariant(!opCtx->getTxnNumber());
-    invariant(opCtx->lockState()->inAWriteUnitOfWork());
+    invariant(shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
 
     invariantStatusOK(_batchedOperations.addOperation(operation));
 }

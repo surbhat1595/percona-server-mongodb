@@ -131,9 +131,11 @@ public:
 
     /**
      * Attempt to reduce the storage space used by this index via compaction. Only called if the
-     * indexed record store supports compaction-in-place.
+     * indexed record store supports compaction-in-place.  If the freeSpaceTargetMB is provided,
+     * compaction will only proceed if the free storage space available is greater than the provided
+     * value.
      */
-    virtual Status compact(OperationContext* opCtx) {
+    virtual Status compact(OperationContext* opCtx, boost::optional<int64_t> freeSpaceTargetMB) {
         return Status::OK();
     }
 
@@ -295,6 +297,13 @@ public:
         virtual boost::optional<IndexKeyEntry> seek(
             const key_string::Value& keyString,
             KeyInclusion keyInclusion = KeyInclusion::kInclude) = 0;
+
+        /**
+         * Seeks to the provided keyString and returns the RecordId of the matching key, or
+         * boost::none if one does not exist.
+         * The provided key must always have a kInclusive discriminator.
+         */
+        virtual boost::optional<RecordId> seekExact(const key_string::Value& keyString) = 0;
 
         //
         // Saving and restoring state

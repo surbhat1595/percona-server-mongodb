@@ -79,7 +79,11 @@ std::string DatabaseNameUtil::serializeForAuthPrevalidated(const DatabaseName& d
 
 std::string DatabaseNameUtil::serializeForStorage(const DatabaseName& dbName,
                                                   const SerializationContext& context) {
-    if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)) {
+    // TODO SERVER-84275: Change to use isEnabled again.
+    // We need to use isEnabledUseLastLTSFCVWhenUninitialized instead of isEnabled because
+    // this could run during startup while the FCV is still uninitialized.
+    if (gFeatureFlagRequireTenantID.isEnabledUseLastLTSFCVWhenUninitialized(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         return dbName.toString();
     }
     return dbName.toStringWithTenantId();
@@ -188,7 +192,11 @@ DatabaseName DatabaseNameUtil::deserializeForAuthPrevalidated(boost::optional<Te
 DatabaseName DatabaseNameUtil::deserializeForStorage(boost::optional<TenantId> tenantId,
                                                      StringData db,
                                                      const SerializationContext& context) {
-    if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)) {
+    // TODO SERVER-84275: Change to use isEnabled again.
+    // We need to use isEnabledUseLastLTSFCVWhenUninitialized instead of isEnabled because
+    // this could run during startup while the FCV is still uninitialized.
+    if (gFeatureFlagRequireTenantID.isEnabledUseLastLTSFCVWhenUninitialized(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         if (db != DatabaseName::kAdmin.db() && db != DatabaseName::kLocal.db() &&
             db != DatabaseName::kConfig.db() && db != DatabaseName::kExternal.db())
             uassert(7005300, "TenantId must be set", tenantId != boost::none);
@@ -224,7 +232,7 @@ DatabaseName DatabaseNameUtil::deserializeForCommands(boost::optional<TenantId> 
             case SerializationContext::Prefix::IncludePrefix: {
                 auto dbName = parseFromStringExpectTenantIdInMultitenancyMode(db);
                 if (!dbName.tenantId() && dbName.isInternalDb()) {
-                    return dbName;
+                    return DatabaseName(std::move(tenantId), dbName.db());
                 }
 
                 uassert(

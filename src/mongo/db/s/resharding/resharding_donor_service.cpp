@@ -74,7 +74,6 @@
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/s/sharding_index_catalog_ddl_util.h"
 #include "mongo/db/s/sharding_recovery_service.h"
-#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/shard_role.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -95,6 +94,7 @@
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/s/shard_version.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
@@ -387,7 +387,7 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_notifyCoordinat
     return resharding::WithAutomaticRetry([this, executor] {
                auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
                if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
-                       serverGlobalParams.featureCompatibility)) {
+                       serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                    _metrics->fillDonorCtxOnCompletion(_donorCtx);
                }
                return _updateCoordinator(opCtx.get(), executor);
@@ -881,7 +881,7 @@ void ReshardingDonorService::DonorStateMachine::_dropOriginalCollectionThenTrans
         WriteBlockBypass::get(opCtx.get()).set(true);
 
         if (feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
-                serverGlobalParams.featureCompatibility)) {
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
             dropCollectionShardingIndexCatalog(opCtx.get(), _metadata.getSourceNss());
         }
         resharding::data_copy::ensureCollectionDropped(
@@ -1098,11 +1098,12 @@ void ReshardingDonorService::DonorStateMachine::_removeDonorDocument(
 
         WriteUnitOfWork wuow(opCtx.get());
 
-        opCtx->recoveryUnit()->onCommit(
-            [this, stepdownToken, aborted](OperationContext*, boost::optional<Timestamp>) {
-                stdx::lock_guard<Latch> lk(_mutex);
-                _completionPromise.emplaceValue();
-            });
+        shard_role_details::getRecoveryUnit(opCtx.get())
+            ->onCommit(
+                [this, stepdownToken, aborted](OperationContext*, boost::optional<Timestamp>) {
+                    stdx::lock_guard<Latch> lk(_mutex);
+                    _completionPromise.emplaceValue();
+                });
 
         deleteObjects(opCtx.get(),
                       coll,

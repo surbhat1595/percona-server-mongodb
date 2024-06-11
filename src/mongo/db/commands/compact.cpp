@@ -43,7 +43,6 @@
 #include "mongo/db/catalog/collection_compact.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/compact_gen.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -85,7 +84,7 @@ public:
 
     std::string help() const override {
         return "compact collection\n"
-               "warning: this operation locks the database and is slow. you can cancel with "
+               "warning: this operation has blocking behaviour and is slow. You can cancel with "
                "killOp()\n"
                "{ compact : <collection_name>, [force:<bool>], [freeSpaceTargetMB:<int64_t>] }\n"
                "  force - allows to run on a replica set primary\n";
@@ -99,12 +98,14 @@ public:
              BSONObjBuilder& result) override {
         NamespaceString nss = CommandHelpers::parseNsCollectionRequired(dbName, cmdObj);
 
-        auto sc = SerializationContext::stateCommandRequest();
-        sc.setTenantIdSource(auth::ValidatedTenancyScope::get(opCtx) != boost::none);
+        const auto vts = auth::ValidatedTenancyScope::get(opCtx);
+        const auto sc = vts != boost::none
+            ? SerializationContext::stateCommandRequest(vts->hasTenantId(), vts->isFromAtlasProxy())
+            : SerializationContext::stateCommandRequest();
 
         repl::ReplicationCoordinator* replCoord = repl::ReplicationCoordinator::get(opCtx);
         auto params = CompactCommand::parse(
-            IDLParserContext("compact", false /*apiStrict*/, dbName.tenantId(), sc), cmdObj);
+            IDLParserContext("compact", false /*apiStrict*/, vts, dbName.tenantId(), sc), cmdObj);
         bool force = params.getForce() && *params.getForce();
 
         uassert(ErrorCodes::IllegalOperation,
@@ -127,5 +128,7 @@ public:
         return true;
     }
 };
+
 MONGO_REGISTER_COMMAND(CompactCmd).forShard();
+
 }  // namespace mongo

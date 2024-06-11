@@ -49,7 +49,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
-#include "mongo/db/query/query_stats/key_generator.h"
+#include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/kill_sessions.h"
 #include "mongo/db/session/logical_session_id.h"
@@ -125,20 +125,6 @@ public:
 
         // Represents an exhausted cursor.
         Exhausted,
-    };
-
-    struct Stats {
-        // Count of open cursors registered with CursorType::MultiTarget.
-        size_t cursorsMultiTarget = 0;
-
-        // Count of open cursors registered with CursorType::SingleTarget.
-        size_t cursorsSingleTarget = 0;
-
-        // Count of open cursors registered with CursorType::QueuedData.
-        size_t cursorsQueuedData = 0;
-
-        // Count of pinned cursors.
-        size_t cursorsPinned = 0;
     };
 
     // Represents a function that may be passed into a ClusterCursorManager method which checks
@@ -522,7 +508,7 @@ public:
      *
      * Does not block.
      */
-    Stats stats() const;
+    void stats() const;
 
     /**
      * Appends sessions that have open cursors in this cursor manager to the given set of lsids.
@@ -624,11 +610,11 @@ private:
  * Record metrics for the current operation on opDebug and aggregates those metrics for queryStats
  * use. If a cursor is provided (via ClusterClientCursorGuard or
  * ClusterCursorManager::PinnedCursor), metrics are aggregated on the cursor; otherwise, metrics are
- * written directly to the telemetry store.
+ * written directly to the queryStats store.
  * NOTE: Metrics are taken from opDebug.additiveMetrics, so CurOp::setEndOfOpMetrics must be called
  * *prior* to calling these.
  *
- * Currently, telemetry is only collected for find and aggregate requests (and their subsequent
+ * Currently, queryStats is only collected for find and aggregate requests (and their subsequent
  * getMore requests), so these should only be called from those request paths.
  */
 void collectQueryStatsMongos(OperationContext* opCtx, std::unique_ptr<query_stats::Key> key);

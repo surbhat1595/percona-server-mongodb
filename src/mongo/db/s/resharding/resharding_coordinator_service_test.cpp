@@ -44,7 +44,6 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/op_observer/op_observer.h"
@@ -66,6 +65,7 @@
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_cache_noop.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/executor/mock_async_rpc.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/idl/server_parameter_test_util.h"
@@ -493,7 +493,7 @@ public:
 
         ASSERT_OK(replCoord->setFollowerMode(repl::MemberState::RS_PRIMARY));
         ASSERT_OK(replCoord->updateTerm(opCtx, _term));
-        replCoord->setMyLastAppliedOpTimeAndWallTime({newOpTime, {}});
+        replCoord->setMyLastAppliedOpTimeAndWallTimeForward({newOpTime, {}});
 
         _registry->onStepUpComplete(opCtx, _term);
     }
@@ -517,7 +517,7 @@ public:
             OperationContext* toKill = client->getOperationContext();
 
             if (toKill && !toKill->isKillPending() && toKill->getOpID() != opCtx->getOpID()) {
-                auto locker = toKill->lockState();
+                auto locker = shard_role_details::getLocker(toKill);
                 if (toKill->shouldAlwaysInterruptAtStepDownOrUp() ||
                     locker->wasGlobalLockTakenInModeConflictingWithWrites()) {
                     serviceCtx->killOperation(lk, toKill);

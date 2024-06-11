@@ -1,7 +1,7 @@
 // @tags: [
 //   # The test runs a lot of commands that are not allowed with security token: addShard,
 //   # addShardToZone, appendOplogNote, applyOps, and so on.
-//   not_allowed_with_security_token,
+//   not_allowed_with_signed_security_token,
 //   assumes_unsharded_collection,
 //   assumes_superuser_permissions,
 //   does_not_support_stepdowns,
@@ -17,7 +17,8 @@
 //   directly_against_shardsvrs_incompatible,
 //   # This test has statements that do not support non-local read concern.
 //   does_not_support_causal_consistency,
-//   uses_compact
+//   uses_compact,
+//   creates_and_authenticates_user,
 // ]
 
 /*
@@ -156,6 +157,7 @@ let viewsCommandTests = {
     _recvChunkStatus: {skip: isAnInternalCommand},
     _refreshQueryAnalyzerConfiguration: {skip: isAnInternalCommand},
     _shardsvrAbortReshardCollection: {skip: isAnInternalCommand},
+    _shardsvrChangePrimary: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistency: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: isAnInternalCommand},
     _shardsvrCleanupStructuredEncryptionData: {skip: isAnInternalCommand},
@@ -240,6 +242,7 @@ let viewsCommandTests = {
         skipSharded: true,
     },
     authenticate: {skip: isUnrelated},
+    autoCompact: {skip: isUnrelated},
     autoSplitVector: {
         command: {
             splitVector: "test.view",
@@ -267,6 +270,7 @@ let viewsCommandTests = {
         command: {captrunc: "view", n: 2, inc: false},
         expectFailure: true,
     },
+    changePrimary: {skip: "Tested in sharding/change_primary.js"},
     checkMetadataConsistency: {
         command: {checkMetadataConsistency: "view"},
         expectFailure: false,
@@ -464,8 +468,11 @@ let viewsCommandTests = {
     getShardMap: {skip: isUnrelated},
     getShardVersion: {
         command: {getShardVersion: "test.view"},
-        expectFailure: true,
-        expectedErrorCode: ErrorCodes.NoShardingEnabled,
+        // This command is only expected to fail with the errors below when it is run against
+        // a standalone replica set mongod.
+        expectFailure: !TestData.testingReplicaSetEndpoint,
+        expectedErrorCode:
+            [ErrorCodes.ShardingStateNotInitialized, ErrorCodes.NoShardingEnabled_OBSOLETE],
         isAdminCommand: true,
         skipSharded: true,  // mongos is tested in views/views_sharded.js
     },
@@ -717,7 +724,8 @@ let viewsCommandTests = {
         },
         skipSharded: true,
         expectFailure: true,
-        expectedErrorCode: ErrorCodes.NoShardingEnabled,
+        expectedErrorCode:
+            [ErrorCodes.ShardingStateNotInitialized, ErrorCodes.NoShardingEnabled_OBSOLETE],
         isAdminCommand: true,
     },
     splitVector: {
@@ -743,6 +751,7 @@ let viewsCommandTests = {
     top: {skip: "tested in views/views_stats.js"},
     transitionFromDedicatedConfigServer: {skip: isUnrelated},
     transitionToDedicatedConfigServer: {skip: isUnrelated},
+    transitionToShardedCluster: {skip: isUnrelated},
     unshardCollection: {
         command: {unshardCollection: "test.view", toShard: "unshard_collection-rs"},
         setup: function(conn) {

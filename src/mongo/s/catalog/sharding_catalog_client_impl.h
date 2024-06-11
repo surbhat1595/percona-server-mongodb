@@ -99,11 +99,11 @@ public:
                                                    const CollectionType& coll,
                                                    bool upsert);
 
-    std::vector<BSONObj> runCatalogAggregation(
-        OperationContext* opCtx,
-        AggregateCommandRequest& aggRequest,
-        const repl::ReadConcernArgs& readConcern,
-        const Milliseconds& maxTimeout = Shard::kDefaultConfigCommandTimeout) override;
+    std::vector<BSONObj> runCatalogAggregation(OperationContext* opCtx,
+                                               AggregateCommandRequest& aggRequest,
+                                               const repl::ReadConcernArgs& readConcern,
+                                               const Milliseconds& maxTimeout = Milliseconds(
+                                                   defaultConfigCommandTimeoutMS.load())) override;
 
     DatabaseType getDatabase(OperationContext* opCtx,
                              const DatabaseName& db,
@@ -186,7 +186,7 @@ public:
         OperationContext* opCtx, const DatabaseName& dbName) override;
 
     StatusWith<repl::OpTimeWith<std::vector<ShardType>>> getAllShards(
-        OperationContext* opCtx, repl::ReadConcernLevel readConcern) override;
+        OperationContext* opCtx, repl::ReadConcernLevel readConcern, bool excludeDraining) override;
 
     Status runUserManagementWriteCommand(OperationContext* opCtx,
                                          StringData commandName,

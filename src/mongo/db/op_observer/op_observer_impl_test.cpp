@@ -61,7 +61,6 @@
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/namespace_string.h"
@@ -71,7 +70,7 @@
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/op_observer/op_observer_util.h"
-#include "mongo/db/op_observer/oplog_writer_impl.h"
+#include "mongo/db/op_observer/operation_logger_impl.h"
 #include "mongo/db/pipeline/change_stream_preimage_gen.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/read_write_concern_defaults.h"
@@ -106,6 +105,7 @@
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
@@ -215,8 +215,8 @@ std::vector<repl::OpTime> reserveOpTimesInSideTransaction(OperationContext* opCt
     auto reservedSlots = LocalOplogInfo::get(opCtx)->getNextOpTimes(opCtx, count);
     wuow.release();
 
-    opCtx->recoveryUnit()->abortUnitOfWork();
-    opCtx->lockState()->endWriteUnitOfWork();
+    shard_role_details::getRecoveryUnit(opCtx)->abortUnitOfWork();
+    shard_role_details::getLocker(opCtx)->endWriteUnitOfWork();
 
     return reservedSlots;
 }
@@ -273,8 +273,9 @@ protected:
                NamespaceString nss,
                boost::optional<UUID> uuid = boost::none) const {
         writeConflictRetry(opCtx, "deleteAll", nss, [&] {
-            opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
-            opCtx->recoveryUnit()->abandonSnapshot();
+            shard_role_details::getRecoveryUnit(opCtx)->setTimestampReadSource(
+                RecoveryUnit::ReadSource::kNoTimestamp);
+            shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
 
             WriteUnitOfWork wunit(opCtx);
             AutoGetCollection collRaii(opCtx, nss, MODE_X);
@@ -305,7 +306,8 @@ protected:
         std::vector<BSONObj> allOplogEntries;
         repl::OplogInterfaceLocal oplogInterface(opCtx);
 
-        AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
+        AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(
+            shard_role_details::getLocker(opCtx));
         auto oplogIter = oplogInterface.makeIterator();
         while (true) {
             StatusWith<std::pair<BSONObj, RecordId>> swEntry = oplogIter->next();
@@ -334,7 +336,7 @@ protected:
         // RSTL lock for prepared transactions.
         if (opCtx->inMultiDocumentTransaction() &&
             TransactionParticipant::get(opCtx).transactionIsPrepared()) {
-            opCtx->lockState()->unlockRSTLforPrepare();
+            shard_role_details::getLocker(opCtx)->unlockRSTLforPrepare();
         }
         return ret;
     }
@@ -452,7 +454,7 @@ private:
 };
 
 TEST_F(OpObserverTest, StartIndexBuildExpectedOplogEntry) {
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
     auto uuid = UUID::gen();
     NamespaceString nss = NamespaceString::createNamespaceString_forTest(boost::none, "test.coll");
@@ -492,7 +494,7 @@ TEST_F(OpObserverTest, StartIndexBuildExpectedOplogEntry) {
 }
 
 TEST_F(OpObserverTest, CommitIndexBuildExpectedOplogEntry) {
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
     auto uuid = UUID::gen();
     NamespaceString nss = NamespaceString::createNamespaceString_forTest(boost::none, "test.coll");
@@ -532,7 +534,7 @@ TEST_F(OpObserverTest, CommitIndexBuildExpectedOplogEntry) {
 }
 
 TEST_F(OpObserverTest, AbortIndexBuildExpectedOplogEntry) {
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
     auto uuid = UUID::gen();
     NamespaceString nss = NamespaceString::createNamespaceString_forTest(boost::none, "test.coll");
@@ -581,7 +583,7 @@ TEST_F(OpObserverTest, AbortIndexBuildExpectedOplogEntry) {
 }
 
 TEST_F(OpObserverTest, CollModWithCollectionOptionsAndTTLInfo) {
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
     auto uuid = UUID::gen();
 
@@ -641,7 +643,7 @@ TEST_F(OpObserverTest, CollModWithCollectionOptionsAndTTLInfo) {
 }
 
 TEST_F(OpObserverTest, CollModWithOnlyCollectionOptions) {
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
     auto uuid = UUID::gen();
 
@@ -701,7 +703,8 @@ TEST_F(OpObserverTest, OnUpdateCheckExistenceForDiffInsert) {
     OplogUpdateEntryArgs update(&updateArgs, *autoColl);
 
     OpObserverRegistry opObserver;
-    opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+    opObserver.addObserver(
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
     opObserver.onUpdate(opCtx.get(), update);
     wuow.commit();
 
@@ -712,7 +715,7 @@ TEST_F(OpObserverTest, OnUpdateCheckExistenceForDiffInsert) {
 }
 
 TEST_F(OpObserverTest, OnDropCollectionReturnsDropOpTime) {
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
     auto uuid = UUID::gen();
 
@@ -749,7 +752,7 @@ TEST_F(OpObserverTest, OnDropCollectionReturnsDropOpTime) {
 TEST_F(OpObserverTest, OnDropCollectionInlcudesTenantId) {
     RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
     auto uuid = UUID::gen();
 
@@ -777,7 +780,7 @@ TEST_F(OpObserverTest, OnDropCollectionInlcudesTenantId) {
 }
 
 TEST_F(OpObserverTest, OnRenameCollectionReturnsRenameOpTime) {
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
 
     auto uuid = UUID::gen();
@@ -822,7 +825,7 @@ TEST_F(OpObserverTest, OnRenameCollectionReturnsRenameOpTime) {
 TEST_F(OpObserverTest, OnRenameCollectionIncludesTenantIdFeatureFlagOff) {
     RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", false);
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
 
     auto uuid = UUID::gen();
@@ -865,7 +868,7 @@ TEST_F(OpObserverTest, OnRenameCollectionIncludesTenantIdFeatureFlagOff) {
 TEST_F(OpObserverTest, OnRenameCollectionIncludesTenantIdFeatureFlagOn) {
     RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
 
     auto uuid = UUID::gen();
@@ -905,7 +908,7 @@ TEST_F(OpObserverTest, OnRenameCollectionIncludesTenantIdFeatureFlagOn) {
 }
 
 TEST_F(OpObserverTest, OnRenameCollectionOmitsDropTargetFieldIfDropTargetUuidIsNull) {
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
 
     auto uuid = UUID::gen();
@@ -935,7 +938,7 @@ TEST_F(OpObserverTest, OnRenameCollectionOmitsDropTargetFieldIfDropTargetUuidIsN
 }
 
 TEST_F(OpObserverTest, MustBePrimaryToWriteOplogEntries) {
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
 
     ASSERT_OK(repl::ReplicationCoordinator::get(opCtx.get())
@@ -950,7 +953,7 @@ TEST_F(OpObserverTest, MustBePrimaryToWriteOplogEntries) {
 }
 
 TEST_F(OpObserverTest, ImportCollectionOplogEntry) {
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
 
     auto importUUID = UUID::gen();
@@ -992,7 +995,7 @@ TEST_F(OpObserverTest, ImportCollectionOplogEntry) {
 TEST_F(OpObserverTest, ImportCollectionOplogEntryIncludesTenantId) {
     RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
 
     auto importUUID = UUID::gen();
@@ -1047,7 +1050,8 @@ TEST_F(OpObserverTest, SingleStatementInsertTestIncludesTenantId) {
     AutoGetCollection autoColl(opCtx.get(), nss, MODE_IX);
 
     OpObserverRegistry opObserver;
-    opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+    opObserver.addObserver(
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
     opObserver.onInserts(opCtx.get(),
                          *autoColl,
                          insert.begin(),
@@ -1087,7 +1091,8 @@ TEST_F(OpObserverTest, SingleStatementUpdateTestIncludesTenantId) {
     OplogUpdateEntryArgs update(&updateArgs, *autoColl);
 
     OpObserverRegistry opObserver;
-    opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+    opObserver.addObserver(
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
     opObserver.onUpdate(opCtx.get(), update);
     wuow.commit();
 
@@ -1109,7 +1114,8 @@ TEST_F(OpObserverTest, SingleStatementDeleteTestIncludesTenantId) {
     AutoGetCollection locks(opCtx.get(), nss, MODE_IX);
 
     OpObserverRegistry opObserver;
-    opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+    opObserver.addObserver(
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
     // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
     // of setting of `documentKey` on the delete for sharding purposes.
     // `OpObserverImpl::onDelete` asserts its existence.
@@ -1196,7 +1202,7 @@ TEST_F(OpObserverSessionCatalogRollbackTest,
     {
         auto opCtx = cc().makeOperationContext();
 
-        OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+        OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
         OpObserver::RollbackObserverInfo rbInfo;
         opObserver.onReplicationRollback(opCtx.get(), rbInfo);
     }
@@ -1211,7 +1217,7 @@ TEST_F(OpObserverSessionCatalogRollbackTest,
 }
 
 TEST_F(OpObserverTest, MultipleAboutToDeleteAndOnDelete) {
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
     AutoGetCollection autoColl(opCtx.get(), nss3, MODE_X);
     WriteUnitOfWork wunit(opCtx.get());
@@ -1226,7 +1232,7 @@ TEST_F(OpObserverTest, MultipleAboutToDeleteAndOnDelete) {
 DEATH_TEST_REGEX_F(OpObserverTest,
                    AboutToDeleteMustPreceedOnDelete,
                    "Invariant failure.*optDocKey") {
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
     AutoGetCollection autoColl(opCtx.get(), nss3, MODE_IX);
     OplogDeleteEntryArgs args;
@@ -1237,7 +1243,7 @@ DEATH_TEST_REGEX_F(OpObserverTest,
 DEATH_TEST_REGEX_F(OpObserverTest,
                    AboutToDeleteRequiresIdField,
                    "Invariant failure.*!id.isEmpty()") {
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
     AutoGetCollection autoColl(opCtx.get(), nss3, MODE_IX);
     OplogDeleteEntryArgs args;
@@ -1247,7 +1253,7 @@ DEATH_TEST_REGEX_F(OpObserverTest,
 DEATH_TEST_REGEX_F(OpObserverTest,
                    NodeCrashesIfShardIdentityDocumentRolledBack,
                    "Fatal assertion.*50712") {
-    OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
 
     OpObserver::RollbackObserverInfo rbInfo;
@@ -1267,7 +1273,7 @@ public:
 
     void setUpObserverContext() {
         _opCtx = cc().makeOperationContext();
-        _opObserver.emplace(std::make_unique<OplogWriterImpl>());
+        _opObserver.emplace(std::make_unique<OperationLoggerImpl>());
         _times.emplace(opCtx());
     }
 
@@ -1318,7 +1324,8 @@ protected:
                                     getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes(),
                                     /*prepare=*/true);
         opObserver().preTransactionPrepare(opCtx(), *txnOps, applyOpsAssignment, currentTime);
-        opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
+        shard_role_details::getRecoveryUnit(opCtx())->setPrepareTimestamp(
+            prepareOpTime.getTimestamp());
 
         // Don't write oplog entry on secondaries.
         if (opCtx()->writesAreReplicated()) {
@@ -1485,7 +1492,8 @@ TEST_F(OpObserverTransactionTest, TransactionalPrepareTest) {
     txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
     prepareTransaction(reservedSlots, prepareOpTime);
 
-    ASSERT_EQ(prepareOpTime.getTimestamp(), opCtx()->recoveryUnit()->getPrepareTimestamp());
+    ASSERT_EQ(prepareOpTime.getTimestamp(),
+              shard_role_details::getRecoveryUnit(opCtx())->getPrepareTimestamp());
 
     txnParticipant.stashTransactionResources(opCtx());
     auto oplogEntryObj = getSingleOplogEntry(opCtx());
@@ -1555,7 +1563,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedCommitTest) {
 
     // Mimic committing the transaction.
     opCtx()->setWriteUnitOfWork(nullptr);
-    opCtx()->lockState()->unsetMaxLockTimeout();
+    shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
 
     {
         Lock::GlobalLock lk(opCtx(), MODE_IX);
@@ -1625,7 +1633,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedAbortTest) {
 
     // Mimic aborting the transaction.
     opCtx()->setWriteUnitOfWork(nullptr);
-    opCtx()->lockState()->unsetMaxLockTimeout();
+    shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
     {
         Lock::GlobalLock lk(opCtx(), MODE_IX);
         opObserver().onTransactionAbort(opCtx(), abortSlot);
@@ -1703,7 +1711,8 @@ TEST_F(OpObserverTransactionTest,
         txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
         prepareTransaction({prepareOpTime}, prepareOpTime);
     }
-    ASSERT_EQ(prepareOpTime.getTimestamp(), opCtx()->recoveryUnit()->getPrepareTimestamp());
+    ASSERT_EQ(prepareOpTime.getTimestamp(),
+              shard_role_details::getRecoveryUnit(opCtx())->getPrepareTimestamp());
 
     txnParticipant.stashTransactionResources(opCtx());
     auto oplogEntryObj = getSingleOplogEntry(opCtx());
@@ -1736,7 +1745,8 @@ TEST_F(OpObserverTransactionTest, PreparingTransactionWritesToTransactionTable) 
         prepareTransaction({slot}, prepareOpTime);
     }
 
-    ASSERT_EQ(prepareOpTime.getTimestamp(), opCtx()->recoveryUnit()->getPrepareTimestamp());
+    ASSERT_EQ(prepareOpTime.getTimestamp(),
+              shard_role_details::getRecoveryUnit(opCtx())->getPrepareTimestamp());
     txnParticipant.stashTransactionResources(opCtx());
     assertTxnRecord(txnNum(), prepareOpTime, DurableTxnStateEnum::kPrepared);
     txnParticipant.unstashTransactionResources(opCtx(), "abortTransaction");
@@ -1771,7 +1781,7 @@ TEST_F(OpObserverTransactionTest, AbortingPreparedTransactionWritesToTransaction
 
     // Mimic aborting the transaction.
     opCtx()->setWriteUnitOfWork(nullptr);
-    opCtx()->lockState()->unsetMaxLockTimeout();
+    shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
     {
         Lock::GlobalLock lk(opCtx(), MODE_IX);
         opObserver().onTransactionAbort(opCtx(), abortSlot);
@@ -1851,7 +1861,7 @@ TEST_F(OpObserverTransactionTest, CommittingPreparedTransactionWritesToTransacti
 
     // Mimic committing the transaction.
     opCtx()->setWriteUnitOfWork(nullptr);
-    opCtx()->lockState()->unsetMaxLockTimeout();
+    shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
 
     {
         Lock::GlobalLock lk(opCtx(), MODE_IX);
@@ -1982,7 +1992,6 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTestIncludesTenantId) {
     OplogEntry oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
     auto o = oplogEntry.getObject();
 
-    // TODO SERVER-69288: disallow more than one tenant on a single transaction
     auto oExpected =
         BSON("applyOps" << BSON_ARRAY(BSON("op"
                                            << "i"
@@ -2121,7 +2130,6 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTestIncludesTenantId) {
     OplogEntry oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
     auto o = oplogEntry.getObject();
 
-    // TODO SERVER-69288: disallow more than one tenant on a single transaction
     auto oExpected =
         BSON("applyOps" << BSON_ARRAY(BSON("op"
                                            << "u"
@@ -2214,7 +2222,6 @@ TEST_F(OpObserverTransactionTest, TransactionalDeleteTestIncludesTenantId) {
     OplogEntry oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
     auto o = oplogEntry.getObject();
 
-    // TODO SERVER-69288: disallow more than one tenant on a single transaction
     auto oExpected =
         BSON("applyOps" << BSON_ARRAY(BSON("op"
                                            << "d"
@@ -2718,7 +2725,8 @@ TEST_F(OnUpdateOutputsTest, TestNonTransactionFundamentalOnUpdateOutputs) {
     // It falls into cases where `ReservedTimes` is expected to be instantiated. Due to strong
     // encapsulation, we use the registry that managers the `ReservedTimes` on our behalf.
     OpObserverRegistry opObserver;
-    opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+    opObserver.addObserver(
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
     opObserver.addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
     opObserver.addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
 
@@ -2766,7 +2774,8 @@ TEST_F(OnUpdateOutputsTest, TestFundamentalTransactionOnUpdateOutputs) {
     // It falls into cases where `ReservedTimes` is expected to be instantiated. Due to strong
     // encapsulation, we use the registry that managers the `ReservedTimes` on our behalf.
     OpObserverRegistry opObserver;
-    opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+    opObserver.addObserver(
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
     opObserver.addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
     opObserver.addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
 
@@ -2821,7 +2830,8 @@ TEST_F(OpObserverTest, TestFundamentalOnInsertsOutputs) {
     // Due to strong encapsulation, we use the registry that managers the `ReservedTimes` on our
     // behalf.
     OpObserverRegistry opObserver;
-    opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+    opObserver.addObserver(
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
 
     const bool isRetryableWrite = true;
     const bool isNotRetryableWrite = false;
@@ -2940,7 +2950,7 @@ public:
 
         auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
         opObserverRegistry->addObserver(
-            std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+            std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
         getServiceContext()->setOpObserver(std::move(opObserverRegistry));
     }
 
@@ -3439,7 +3449,8 @@ TEST_F(OnDeleteOutputsTest, TestNonTransactionFundamentalOnDeleteOutputs) {
     // It falls into cases where `ReservedTimes` is expected to be instantiated. Due to strong
     // encapsulation, we use the registry that managers the `ReservedTimes` on our behalf.
     OpObserverRegistry opObserver;
-    opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+    opObserver.addObserver(
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
     opObserver.addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
     opObserver.addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
 
@@ -3493,7 +3504,8 @@ TEST_F(OnDeleteOutputsTest, TestTransactionFundamentalOnDeleteOutputs) {
     // It falls into cases where `ReservedTimes` is expected to be instantiated. Due to strong
     // encapsulation, we use the registry that managers the `ReservedTimes` on our behalf.
     OpObserverRegistry opObserver;
-    opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+    opObserver.addObserver(
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
     opObserver.addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
     opObserver.addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
 
@@ -3823,7 +3835,8 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertPrepareTest) {
     txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
     prepareTransaction(reservedSlots, prepareOpTime);
 
-    ASSERT_EQ(prepareOpTime.getTimestamp(), opCtx()->recoveryUnit()->getPrepareTimestamp());
+    ASSERT_EQ(prepareOpTime.getTimestamp(),
+              shard_role_details::getRecoveryUnit(opCtx())->getPrepareTimestamp());
     ASSERT_EQ(prepareOpTime, txnParticipant.getLastWriteOpTime());
 
     txnParticipant.stashTransactionResources(opCtx());
@@ -3913,7 +3926,8 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdatePrepareTest) {
     txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
     prepareTransaction(reservedSlots, prepareOpTime);
 
-    ASSERT_EQ(prepareOpTime.getTimestamp(), opCtx()->recoveryUnit()->getPrepareTimestamp());
+    ASSERT_EQ(prepareOpTime.getTimestamp(),
+              shard_role_details::getRecoveryUnit(opCtx())->getPrepareTimestamp());
     ASSERT_EQ(prepareOpTime, txnParticipant.getLastWriteOpTime());
 
     txnParticipant.stashTransactionResources(opCtx());
@@ -3977,7 +3991,8 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalDeletePrepareTest) {
     txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
     prepareTransaction(reservedSlots, prepareOpTime);
 
-    ASSERT_EQ(prepareOpTime.getTimestamp(), opCtx()->recoveryUnit()->getPrepareTimestamp());
+    ASSERT_EQ(prepareOpTime.getTimestamp(),
+              shard_role_details::getRecoveryUnit(opCtx())->getPrepareTimestamp());
     ASSERT_EQ(prepareOpTime, txnParticipant.getLastWriteOpTime());
 
     txnParticipant.stashTransactionResources(opCtx());
@@ -4055,7 +4070,8 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedTest) {
 
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
     const auto prepareTimestamp = prepareOpTime.getTimestamp();
-    ASSERT_EQ(prepareTimestamp, opCtx()->recoveryUnit()->getPrepareTimestamp());
+    ASSERT_EQ(prepareTimestamp,
+              shard_role_details::getRecoveryUnit(opCtx())->getPrepareTimestamp());
 
     // Reserve oplog entry for the commit oplog entry.
     OplogSlot commitSlot = reserveOpTimeInSideTransaction(opCtx());
@@ -4068,7 +4084,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedTest) {
 
     // Mimic committing the transaction.
     opCtx()->setWriteUnitOfWork(nullptr);
-    opCtx()->lockState()->unsetMaxLockTimeout();
+    shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
 
     // commitTimestamp must be greater than the prepareTimestamp.
     auto commitTimestamp = Timestamp(prepareTimestamp.getSecs(), prepareTimestamp.getInc() + 1);
@@ -4140,11 +4156,12 @@ TEST_F(OpObserverMultiEntryTransactionTest, AbortPreparedTest) {
     assertTxnRecord(txnNum(), prepareOpTime, DurableTxnStateEnum::kPrepared);
     assertTxnRecordStartOpTime(startOpTime);
     txnParticipant.unstashTransactionResources(opCtx(), "abortTransaction");
-    ASSERT_EQ(prepareTimestamp, opCtx()->recoveryUnit()->getPrepareTimestamp());
+    ASSERT_EQ(prepareTimestamp,
+              shard_role_details::getRecoveryUnit(opCtx())->getPrepareTimestamp());
 
     // Mimic aborting the transaction by resetting the WUOW.
     opCtx()->setWriteUnitOfWork(nullptr);
-    opCtx()->lockState()->unsetMaxLockTimeout();
+    shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
     {
         Lock::GlobalLock lk(opCtx(), MODE_IX);
         opObserver().onTransactionAbort(opCtx(), abortSlot);
@@ -4350,7 +4367,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedPackingTest) {
 
     // Mimic committing the transaction.
     opCtx()->setWriteUnitOfWork(nullptr);
-    opCtx()->lockState()->unsetMaxLockTimeout();
+    shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
 
     // commitTimestamp must be greater than the prepareTimestamp.
     auto commitTimestamp = Timestamp(prepareTimestamp.getSecs(), prepareTimestamp.getInc() + 1);
@@ -4474,7 +4491,7 @@ TEST_F(OpObserverTest, OnRollbackInvalidatesDefaultRWConcernCache) {
     // Rollback to a timestamp should invalidate the cache and getting the defaults should now
     // return the latest value.
     {
-        OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+        OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
         OpObserver::RollbackObserverInfo rbInfo;
         opObserver.onReplicationRollback(opCtx.get(), rbInfo);
     }
@@ -4505,7 +4522,7 @@ TEST_F(OpObserverServerlessTest, OnInsertChecksIfTenantMigrationIsBlockingWrites
 
     {
         AutoGetCollection autoColl(opCtx.get(), kNssUnderTenantId, MODE_IX);
-        OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
+        OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
         ASSERT_THROWS_CODE(
             opObserver.onInserts(opCtx.get(),
                                  *autoColl,

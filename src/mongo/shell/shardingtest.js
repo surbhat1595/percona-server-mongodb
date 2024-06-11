@@ -114,6 +114,9 @@ var ShardingTest = function ShardingTest(params) {
     // concern (5 minutes)
     const kDefaultWTimeoutMs = 5 * 60 * 1000;
 
+    // Oplog collection name
+    const kOplogName = 'oplog.rs';
+
     // Ensure we don't mutate the passed-in parameters.
     params = Object.extend({}, params, true);
 
@@ -1143,6 +1146,17 @@ var ShardingTest = function ShardingTest(params) {
     };
 
     /**
+     * Query the oplog from a given node.
+     */
+    ShardingTest.prototype.findOplog = function(conn, query, limit) {
+        return conn.getDB('local')
+            .getCollection(kOplogName)
+            .find(query)
+            .sort({$natural: -1})
+            .limit(limit);
+    };
+
+    /**
      * Returns if there is a new feature compatibility version for the "latest" version. This must
      * be manually changed if and when there is a new feature compatibility version.
      */
@@ -1186,6 +1200,16 @@ var ShardingTest = function ShardingTest(params) {
         otherParams.hasOwnProperty('configShard') ? otherParams.configShard : false;
     isConfigShardMode =
         isConfigShardMode || jsTestOptions().configShard || useAutoBootstrapProcedure;
+
+    let isEmbeddedRouterMode =
+        otherParams.hasOwnProperty('embeddedRouter') ? otherParams.embeddedRouter : false;
+    isEmbeddedRouterMode = isEmbeddedRouterMode || jsTestOptions().embeddedRouter;
+    if (isEmbeddedRouterMode) {
+        // TODO (SERVER-84239): Make ShardingTest and ReplSetTest fully support embedded routers.
+        assert(numShards == 1 && isConfigShardMode,
+               "The embedded router mode is currently only supported on a single-shard " +
+                   "cluster in the config shard mode");
+    }
 
     if ("shardAsReplicaSet" in otherParams) {
         throw new Error("Use of deprecated option 'shardAsReplicaSet'");
@@ -1276,6 +1300,12 @@ var ShardingTest = function ShardingTest(params) {
     this._rsObjects = [];
 
     this._useBridge = otherParams.useBridge;
+    if (this._useBridge) {
+        assert(
+            !jsTestOptions().tlsMode,
+            'useBridge cannot be true when using TLS. Add the requires_mongobridge tag to the test to ensure it will be skipped on variants that use TLS.')
+    }
+
     this._unbridgedMongos = [];
     let _allocatePortForMongos;
     let _allocatePortForBridgeForMongos;
@@ -1425,6 +1455,7 @@ var ShardingTest = function ShardingTest(params) {
                 settings: rsSettings,
                 seedRandomNumberGenerator: !randomSeedAlreadySet,
                 isConfigServer: setIsConfigSvr,
+                isRouterServer: isEmbeddedRouterMode,
                 useAutoBootstrapProcedure: useAutoBootstrapProcedure,
             });
 
@@ -1883,6 +1914,21 @@ var ShardingTest = function ShardingTest(params) {
         // servers then the secondary mongoses risk reading from a stale config server and seeing an
         // empty config database.
         this.configRS.awaitLastOpCommitted();
+
+        if (useAutoBootstrapProcedure) {
+            // This is needed because auto-bootstrapping will initially create a config.shards entry
+            // for the config shard where the host field does not contain all the nodes in the
+            // replica set.
+            assert.soonNoExcept(() => {
+                function getConfigShardDoc() {
+                    return csrsPrimary.getDB("config").shards.findOne({_id: "config"})
+                }
+                const configShardDoc = this.keyFile
+                    ? authutil.asCluster(csrsPrimary, this.keyFile, getConfigShardDoc)
+                    : getConfigShardDoc();
+                return configShardDoc.host == this.configRS.getURL();
+            });
+        }
 
         if (jsTestOptions().keyFile) {
             jsTest.authenticateNodes(this._mongos);

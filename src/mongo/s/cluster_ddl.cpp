@@ -55,7 +55,10 @@
 #include "mongo/s/cluster_ddl.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/router_role.h"
 #include "mongo/s/shard_version.h"
+#include "mongo/s/transaction_router.h"
+#include "mongo/s/transaction_router_resource_yielder.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/read_through_cache.h"
 #include "mongo/util/str.h"
@@ -117,6 +120,17 @@ CachedDatabaseInfo createDatabase(OperationContext* opCtx,
         if (suggestedPrimaryId)
             request.setPrimaryShardId(*suggestedPrimaryId);
 
+        if (auto txnRouter = TransactionRouter::get(opCtx)) {
+            txnRouter.annotateCreatedDatabase(dbName);
+        }
+
+        // If this is a database creation triggered by a command running inside a transaction, the
+        // _configsvrCreateDatabase command here will also need to run inside that session. Yield
+        // the session here. Otherwise, if this router is also the configsvr primary, the
+        // _configsvrCreateDatabase command would not be able to check out the session.
+        auto txnRouterResourceYielder = std::make_unique<TransactionRouterResourceYielder>();
+        txnRouterResourceYielder->yield(opCtx);
+
         auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
         auto response = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
             opCtx,
@@ -124,6 +138,8 @@ CachedDatabaseInfo createDatabase(OperationContext* opCtx,
             DatabaseName::kAdmin,
             CommandHelpers::appendMajorityWriteConcern(request.toBSON({})),
             Shard::RetryPolicy::kIdempotent));
+
+        uassertStatusOK(txnRouterResourceYielder->unyieldNoThrow(opCtx));
         uassertStatusOK(response.writeConcernStatus);
         uassertStatusOKWithContext(response.commandStatus,
                                    str::stream() << "Database " << dbName.toStringForErrorMsg()
@@ -202,6 +218,25 @@ void createCollection(OperationContext* opCtx, const ShardsvrCreateCollection& r
     auto catalogCache = Grid::get(opCtx)->catalogCache();
     catalogCache->invalidateShardOrEntireCollectionEntryForShardedCollection(
         nss, createCollResp.getCollectionVersion(), dbInfo->getPrimary());
+}
+
+void createCollectionWithRouterLoop(OperationContext* opCtx, const NamespaceString& nss) {
+    auto dbName = nss.dbName();
+
+    ShardsvrCreateCollection shardsvrCollCommand(nss);
+    ShardsvrCreateCollectionRequest request;
+
+    request.setUnsplittable(true);
+
+    shardsvrCollCommand.setShardsvrCreateCollectionRequest(request);
+    shardsvrCollCommand.setDbName(nss.dbName());
+
+    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), dbName);
+    router.route(opCtx,
+                 "cluster::createCollectionWithRouterLoop",
+                 [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
+                     cluster::createCollection(opCtx, shardsvrCollCommand);
+                 });
 }
 
 }  // namespace cluster

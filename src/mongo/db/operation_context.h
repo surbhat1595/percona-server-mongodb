@@ -73,7 +73,6 @@
 
 namespace mongo {
 
-class CurOp;
 class ServiceContext;
 
 namespace repl {
@@ -116,63 +115,66 @@ public:
      * CTOR if possible to avoid OperationId collisions.
      */
     OperationContext(Client* client, OperationId opId);
-    OperationContext(Client* client, OperationIdSlot&& opIdSlot);
     virtual ~OperationContext();
 
-    /**
-     * Interface for durability.  Caller DOES NOT own pointer.
-     */
-    RecoveryUnit* recoveryUnit() const {
+    // TODO (SERVER-77213): The RecoveryUnit ownership is being moved to the TransactionResources.
+    // Do not add any new usages to these methods as they will go away and will be folded as an
+    // implementation detail of the Shard Role API.
+    //
+    // Interface for durability.  Caller DOES NOT own pointer.
+    RecoveryUnit* recoveryUnit_DO_NOT_USE() const {
         return _recoveryUnit.get();
     }
 
-    /**
-     * Returns the RecoveryUnit (same return value as recoveryUnit()) but the caller takes
-     * ownership of the returned RecoveryUnit, and the OperationContext instance relinquishes
-     * ownership. Sets the RecoveryUnit to NULL.
-     */
-    std::unique_ptr<RecoveryUnit> releaseRecoveryUnit();
+    // TODO (SERVER-77213): The RecoveryUnit ownership is being moved to the TransactionResources.
+    // Do not add any new usages to these methods as they will go away and will be folded as an
+    // implementation detail of the Shard Role API.
+    //
+    // Returns the RecoveryUnit (same return value as recoveryUnit()) but the caller takes
+    // ownership of the returned RecoveryUnit, and the OperationContext instance relinquishes
+    // ownership. Sets the RecoveryUnit to NULL.
+    std::unique_ptr<RecoveryUnit> releaseRecoveryUnit_DO_NOT_USE();
 
-    /*
-     * Sets up a new, inactive RecoveryUnit in the OperationContext. Destroys any previous recovery
-     * unit and executes its rollback handlers.
-     */
-    void replaceRecoveryUnit();
+    // TODO (SERVER-77213): The RecoveryUnit ownership is being moved to the TransactionResources.
+    // Do not add any new usages to these methods as they will go away and will be folded as an
+    // implementation detail of the Shard Role API.
+    //
+    // Sets up a new, inactive RecoveryUnit in the OperationContext. Destroys any previous recovery
+    // unit and executes its rollback handlers.
+    void replaceRecoveryUnit_DO_NOT_USE();
 
-    /*
-     * Similar to replaceRecoveryUnit(), but returns the previous recovery unit like
-     * releaseRecoveryUnit().
-     */
-    std::unique_ptr<RecoveryUnit> releaseAndReplaceRecoveryUnit();
+    // TODO (SERVER-77213): The RecoveryUnit ownership is being moved to the TransactionResources.
+    // Do not add any new usages to these methods as they will go away and will be folded as an
+    // implementation detail of the Shard Role API.
+    //
+    // Similar to replaceRecoveryUnit(), but returns the previous recovery unit like
+    // releaseRecoveryUnit().
+    std::unique_ptr<RecoveryUnit> releaseAndReplaceRecoveryUnit_DO_NOT_USE();
 
 
-    /**
-     * Associates the OperatingContext with a different RecoveryUnit for getMore or
-     * subtransactions, see RecoveryUnitSwap. The new state is passed and the old state is
-     * returned separately even though the state logically belongs to the RecoveryUnit,
-     * as it is managed by the OperationContext.
-     */
-    WriteUnitOfWork::RecoveryUnitState setRecoveryUnit(std::unique_ptr<RecoveryUnit> unit,
-                                                       WriteUnitOfWork::RecoveryUnitState state);
+    // TODO (SERVER-77213): The RecoveryUnit ownership is being moved to the TransactionResources.
+    // Do not add any new usages to these methods as they will go away and will be folded as an
+    // implementation detail of the Shard Role API.
+    //
+    // Associates the OperatingContext with a different RecoveryUnit for getMore or
+    // subtransactions, see RecoveryUnitSwap. The new state is passed and the old state is
+    // returned separately even though the state logically belongs to the RecoveryUnit,
+    // as it is managed by the OperationContext.
+    WriteUnitOfWork::RecoveryUnitState setRecoveryUnit_DO_NOT_USE(
+        std::unique_ptr<RecoveryUnit> unit, WriteUnitOfWork::RecoveryUnitState state);
 
-    /**
-     * Interface for locking.  Caller DOES NOT own pointer.
-     */
-    Locker* lockState() const {
+    // TODO (SERVER-77213): The locker ownership is being moved to the TransactionResources. Do not
+    // add any new usages to these methods as they will go away and will be folded as an
+    // implementation detail of the Shard Role API.
+    //
+    // The way to access the locker associated with a given OperationContext is through the
+    // shard_role_details::getLocker methods.
+    Locker* lockState_DO_NOT_USE() const {
         return _locker.get();
     }
-
-    /**
-     * Sets the locker for use by this OperationContext. Call during OperationContext
-     * initialization, only.
-     */
-    void setLockState(std::unique_ptr<Locker> locker);
-
-    /**
-     * Swaps the locker, releasing the old locker to the caller.  The Client lock is required to
-     * call this function.
-     */
-    std::unique_ptr<Locker> swapLockState(std::unique_ptr<Locker> locker, WithLock);
+    void setLockState_DO_NOT_USE(std::unique_ptr<Locker> locker);
+    std::unique_ptr<Locker> swapLockState_DO_NOT_USE(std::unique_ptr<Locker> locker,
+                                                     WithLock clientLock);
 
     /**
      * Returns Status::OK() unless this operation is in a killed state.
@@ -207,7 +209,7 @@ public:
      * Returns the operation ID associated with this operation.
      */
     OperationId getOpID() const {
-        return _opId.getId();
+        return _opId;
     }
 
     /**
@@ -805,7 +807,7 @@ private:
 
     Client* const _client;
 
-    const OperationIdSlot _opId;
+    const OperationId _opId;
     boost::optional<OperationKey> _opKey;
 
     boost::optional<LogicalSessionId> _lsid;

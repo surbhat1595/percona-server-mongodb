@@ -53,7 +53,8 @@ feature_flags:
   featureFlagCheckForDirectShardOperations:
     description: "Feature flag for checking for direct shard operations."
     cpp_varname: feature_flags::gCheckForDirectShardOperations
-    default: false
+    default: true
+    version: 7.3
     shouldBeFCVGated: true
   # TODO (SERVER-73632): Remove once 8.0 becomes last LTS.
   featureFlagEmbeddedRouter:
@@ -81,6 +82,7 @@ feature_flags:
     default: true
     version: 7.1
     shouldBeFCVGated: true
+  # TODO (SERVER-79304): Remove once 8.0 becomes last LTS.
   featureFlagAuthoritativeShardCollection:
     description: "Feature flag for enabling the authoritative version of the shardCollection DDL operation."
     cpp_varname: feature_flags::gAuthoritativeShardCollection
@@ -105,3 +107,20 @@ feature_flags:
     cpp_varname: feature_flags::gUpdateOneWithIdWithoutShardKey
     default: false
     shouldBeFCVGated: true
+  # TODO (SERVER-83264): Remove once 8.0 becomes last LTS.
+  featureFlagBalancerSettingsSchema:
+    description: "Feature flag for updating the config settings schema to enforce balancer settings"
+    cpp_varname: feature_flags::gBalancerSettingsSchema
+    default: true
+    version: 7.3
+    shouldBeFCVGated: true
+  # TODO (SERVER-83704): Remove once 8.0 becomes last LTS.
+  featureFlagPlacementHistoryPostFCV73 :
+    description: "Feature flag that marks a version change in the logic that generates config.placementHistory;
+                  it causes such a collection to be reinitialized on FCV upgrade and placement history queries
+                  to be redirected to config.shards prior to the reinitialization."
+    cpp_varname: feature_flags::gPlacementHistoryPostFCV3
+    default: true
+    version: 7.3
+    shouldBeFCVGated: true
+

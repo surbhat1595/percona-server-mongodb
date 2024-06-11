@@ -52,6 +52,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/control/storage_control.h"
 #include "mongo/db/storage/execution_control/concurrency_adjustment_parameters_gen.h"
+#include "mongo/db/storage/execution_control/throughput_probing.h"
 #include "mongo/db/storage/master_key_rotation_completed.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/recovery_unit_noop.h"
@@ -65,6 +66,7 @@
 #include "mongo/db/storage/storage_repair_observer.h"
 #include "mongo/db/storage/ticketholder_manager.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -236,22 +238,41 @@ StorageEngine::LastShutdownState initializeStorageEngine(
         }
 
         auto svcCtx = opCtx->getServiceContext();
-        if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations
-                .isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+
+        auto usingThroughputProbing =
+            StorageEngineConcurrencyAdjustmentAlgorithm_parse(
+                IDLParserContext{"storageEngineConcurrencyAdjustmentAlgorithm"},
+                gStorageEngineConcurrencyAdjustmentAlgorithm) ==
+            StorageEngineConcurrencyAdjustmentAlgorithmEnum::kThroughputProbing;
+        auto makeTicketHolderManager =
+            [&](auto readTicketHolder,
+                auto writeTicketHolder) -> std::unique_ptr<TicketHolderManager> {
+            if (usingThroughputProbing) {
+                return std::make_unique<ThroughputProbingTicketHolderManager>(
+                    svcCtx,
+                    std::move(readTicketHolder),
+                    std::move(writeTicketHolder),
+                    Milliseconds{gStorageEngineConcurrencyAdjustmentIntervalMillis});
+            } else {
+                return std::make_unique<FixedTicketHolderManager>(std::move(readTicketHolder),
+                                                                  std::move(writeTicketHolder));
+            }
+        };
+
+        if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations.isEnabled(
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
             std::unique_ptr<TicketHolderManager> ticketHolderManager;
 #ifdef __linux__
             LOGV2_DEBUG(6902900, 1, "Using Priority Queue-based ticketing scheduler");
 
             auto lowPriorityBypassThreshold = gLowPriorityAdmissionBypassThreshold.load();
-            ticketHolderManager = std::make_unique<TicketHolderManager>(
-                svcCtx,
+            ticketHolderManager = makeTicketHolderManager(
                 std::make_unique<PriorityTicketHolder>(
-                    readTransactions, lowPriorityBypassThreshold, svcCtx),
+                    svcCtx, readTransactions, lowPriorityBypassThreshold, usingThroughputProbing),
                 std::make_unique<PriorityTicketHolder>(
-                    writeTransactions, lowPriorityBypassThreshold, svcCtx));
+                    svcCtx, writeTransactions, lowPriorityBypassThreshold, usingThroughputProbing));
 #else
             LOGV2_DEBUG(7207201, 1, "Using semaphore-based ticketing scheduler");
-
             // PriorityTicketHolder is implemented using an equivalent mechanism to
             // std::atomic::wait which isn't available until C++20. We've implemented it in Linux
             // using futex calls. As this hasn't been implemented in non-Linux platforms we fallback
@@ -259,17 +280,19 @@ StorageEngine::LastShutdownState initializeStorageEngine(
             //
             // TODO SERVER-72616: Remove the ifdefs once TicketPool is implemented with atomic
             // wait.
-            ticketHolderManager = std::make_unique<TicketHolderManager>(
-                svcCtx,
-                std::make_unique<SemaphoreTicketHolder>(readTransactions, svcCtx),
-                std::make_unique<SemaphoreTicketHolder>(writeTransactions, svcCtx));
+            ticketHolderManager =
+                makeTicketHolderManager(std::make_unique<SemaphoreTicketHolder>(
+                                            svcCtx, readTransactions, usingThroughputProbing),
+                                        std::make_unique<SemaphoreTicketHolder>(
+                                            svcCtx, writeTransactions, usingThroughputProbing));
 #endif
             TicketHolderManager::use(svcCtx, std::move(ticketHolderManager));
         } else {
-            auto ticketHolderManager = std::make_unique<TicketHolderManager>(
-                svcCtx,
-                std::make_unique<SemaphoreTicketHolder>(readTransactions, svcCtx),
-                std::make_unique<SemaphoreTicketHolder>(writeTransactions, svcCtx));
+            auto ticketHolderManager =
+                makeTicketHolderManager(std::make_unique<SemaphoreTicketHolder>(
+                                            svcCtx, readTransactions, usingThroughputProbing),
+                                        std::make_unique<SemaphoreTicketHolder>(
+                                            svcCtx, writeTransactions, usingThroughputProbing));
             TicketHolderManager::use(svcCtx, std::move(ticketHolderManager));
         }
     }
@@ -380,13 +403,14 @@ StorageEngine::LastShutdownState reinitializeStorageEngine(
     StorageEngineInitFlags initFlags,
     std::function<void()> changeConfigurationCallback) {
     auto service = opCtx->getServiceContext();
-    opCtx->recoveryUnit()->abandonSnapshot();
+    shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
     shutdownGlobalStorageEngineCleanly(
         service,
         {ErrorCodes::InterruptedDueToStorageChange, "The storage engine is being reinitialized."},
         /*forRestart=*/true);
-    opCtx->setRecoveryUnit(std::make_unique<RecoveryUnitNoop>(),
-                           WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
+    shard_role_details::setRecoveryUnit(opCtx,
+                                        std::make_unique<RecoveryUnitNoop>(),
+                                        WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
     changeConfigurationCallback();
     auto lastShutdownState =
         initializeStorageEngine(opCtx, initFlags | StorageEngineInitFlags::kForRestart);

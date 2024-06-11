@@ -195,13 +195,13 @@ TEST(NamespaceStringUtilTest, SerializeMissingExpectPrefix_CommandReply) {
     }
 
     {  // No prefix, has tenantId.
-        // request --> { ns: database.coll, $tenant: tenantId }
+        // request --> { ns: database.coll }
         auto nss = NamespaceString::createNamespaceString_forTest(tenantId, nsString);
         ASSERT_EQ(NamespaceStringUtil::serialize(nss, ctxt_withTenantId), nsString);
     }
 
     {  // Has prefix, has tenantId.  *** we shouldn't see this from Atlas Proxy
-        // request --> { ns: tenantId_database.coll, $tenant: tenantId }
+        // request --> { ns: tenantId_database.coll }
         // in this test, we're getting the toString() for ns, but we also have a tenantId. This
         // means if we called ns.toStringWithTenantId(), we would see two tenantId prefixes
         auto nss = NamespaceString::createNamespaceString_forTest(tenantId, nsPrefixString);
@@ -223,25 +223,25 @@ TEST(NamespaceStringUtilTest, SerializeExpectPrefixFalse_CommandReply) {
     ctxt_withTenantId.setPrefixState(false);
 
     {  // No prefix, no tenantId.
-        // request --> { ns: database.coll, expectPrefix: false }
+        // request --> { ns: database.coll }
         auto nss = NamespaceString::createNamespaceString_forTest(boost::none, nsString);
         ASSERT_EQ(NamespaceStringUtil::serialize(nss, ctxt_noTenantId), nsString);
     }
 
     {  // Has prefix, no tenantId.  *** we shouldn't see this from Atlas Proxy
-        // request --> { ns: tenantId_database.coll, expectPrefix: false }
+        // request --> { ns: tenantId_database.coll }
         auto nss = NamespaceString::createNamespaceString_forTest(boost::none, nsPrefixString);
         ASSERT_EQ(NamespaceStringUtil::serialize(nss, ctxt_noTenantId), nsPrefixString);
     }
 
     {  // No prefix, has tenantId.
-        // request --> { ns: database.coll, $tenant: tenantId, expectPrefix: false }
+        // request --> { ns: database.coll }
         auto nss = NamespaceString::createNamespaceString_forTest(tenantId, nsString);
         ASSERT_EQ(NamespaceStringUtil::serialize(nss, ctxt_withTenantId), nsString);
     }
 
     {  // Has prefix, has tenantId.  *** we shouldn't see this from Atlas Proxy
-        // request --> { ns: tenantId_database.coll, $tenant: tenantId, expectPrefix: false }
+        // request --> { ns: tenantId_database.coll }
         auto nss = NamespaceString::createNamespaceString_forTest(tenantId, nsPrefixString);
         ASSERT_EQ(NamespaceStringUtil::serialize(nss, ctxt_withTenantId), nsPrefixString);
     }
@@ -274,13 +274,13 @@ TEST(NamespaceStringUtilTest, SerializeExpectPrefixTrue_CommandReply) {
     }
 
     {  // No prefix, has tenantId.  *** we shouldn't see this from Atlas Proxy
-        // request --> { ns: database.coll, $tenant: tenantId, expectPrefix: true }
+        // request --> { ns: database.coll, expectPrefix: true }
         auto nss = NamespaceString::createNamespaceString_forTest(tenantId, nsString);
         ASSERT_EQ(NamespaceStringUtil::serialize(nss, ctxt_withTenantId), nsPrefixString);
     }
 
     {  // Has prefix, has tenantId.
-        // request -->  { ns: tenantId_database.coll, $tenant: tenantId, expectPrefix: true }
+        // request -->  { ns: tenantId_database.coll, expectPrefix: true }
         const std::string nsDoublePrefixString = str::stream()
             << tenantId.toString() << "_" << tenantId.toString() << "_" << nsString;
         auto nss = NamespaceString::createNamespaceString_forTest(tenantId, nsPrefixString);
@@ -351,14 +351,14 @@ TEST(NamespaceStringUtilTest, DeserializeMissingExpectPrefix_CommandRequest) {
     }
 
     {  // No prefix, has tenantId.
-        // request --> { ns: database.coll, $tenant: tenantId }
+        // request --> { ns: database.coll }
         auto nss = NamespaceStringUtil::deserialize(tenantId, nsString, ctxt_withTenantId);
         ASSERT_EQ(nss.tenantId(), tenantId);
         ASSERT_EQ(nss.toString_forTest(), nsString);
     }
 
     {  // Has prefix, has tenantId.  *** we shouldn't see this from Atlas Proxy
-        // request --> { ns: tenantId_database.coll, $tenant: tenantId }
+        // request --> { ns: tenantId_database.coll }
         auto nss = NamespaceStringUtil::deserialize(tenantId, nsPrefixString, ctxt_withTenantId);
         ASSERT_EQ(nss.tenantId(), tenantId);
         ASSERT_EQ(nss.toString_forTest(), nsPrefixString);
@@ -379,14 +379,14 @@ TEST(NamespaceStringUtilTest, DeserializeExpectPrefixFalse_CommandRequest) {
     ctxt_withTenantId.setPrefixState(false);
 
     {  // No prefix, no tenantId.  *** we shouldn't see this from Atlas Proxy in MT mode
-        // request --> { ns: database.coll, expectPrefix: false }
+        // request --> { ns: database.coll }
         ASSERT_THROWS_CODE(NamespaceStringUtil::deserialize(boost::none, nsString, ctxt_noTenantId),
                            AssertionException,
                            8423387);
     }
 
     {  // Has prefix, no tenantId.  *** we shouldn't see this from Atlas Proxy
-        // request --> { ns: tenantId_database.coll, expectPrefix: false }
+        // request --> { ns: tenantId_database.coll }
         auto nss = NamespaceStringUtil::deserialize(boost::none, nsPrefixString, ctxt_noTenantId);
         // This is an anomaly, when no tenantId is supplied, we actually ignore expectPrefix, so we
         // can't expect nss.toString == nsPrefixString as we will still attempt to parse the prefix
@@ -396,14 +396,14 @@ TEST(NamespaceStringUtilTest, DeserializeExpectPrefixFalse_CommandRequest) {
     }
 
     {  // No prefix, has tenantId.
-        // request --> { ns: database.coll, $tenant: tenantId, expectPrefix: false }
+        // request --> { ns: database.coll }
         auto nss = NamespaceStringUtil::deserialize(tenantId, nsString, ctxt_withTenantId);
         ASSERT_EQ(nss.tenantId(), tenantId);
         ASSERT_EQ(nss.toString_forTest(), nsString);
     }
 
     {  // Has prefix, has tenantId.  *** we shouldn't see this from Atlas Proxy
-        // request --> { ns: tenantId_database.coll, $tenant: tenantId, expectPrefix: false }
+        // request --> { ns: tenantId_database.coll }
         auto nss = NamespaceStringUtil::deserialize(tenantId, nsPrefixString, ctxt_withTenantId);
         ASSERT_EQ(nss.tenantId(), tenantId);
         ASSERT_EQ(nss.toString_forTest(), nsPrefixString);
@@ -438,14 +438,14 @@ TEST(NamespaceStringUtilTest, DeserializeExpectPrefixTrue_CommandRequest) {
     }
 
     {  // No prefix, has tenantId.  *** we shouldn't see this from Atlas Proxy
-        // request --> { ns: database.coll, $tenant: tenantId, expectPrefix: true }
+        // request --> { ns: database.coll, expectPrefix: true }
         ASSERT_THROWS_CODE(NamespaceStringUtil::deserialize(tenantId, nsString, ctxt_withTenantId),
                            AssertionException,
                            8423385);
     }
 
     {  // Has prefix, has tenantId.
-        // request -->  { ns: tenantId_database.coll, $tenant: tenantId, expectPrefix: true }
+        // request -->  { ns: tenantId_database.coll, expectPrefix: true }
         auto nss = NamespaceStringUtil::deserialize(tenantId, nsPrefixString, ctxt_withTenantId);
         ASSERT_EQ(nss.tenantId(), tenantId);
         ASSERT_EQ(nss.toString_forTest(), nsString);
@@ -466,6 +466,7 @@ TEST(NamespaceStringUtilTest, ParseNSSWithTenantId) {
     ASSERT_EQ(*nss.tenantId(), tenantId);
 }
 
+// TODO: SERVER-82748 Remove $tenant in BSON objects and pass the tenant information another way
 TEST(NamespaceStringUtilTest, ParseFailPointData) {
     const TenantId tid = TenantId(OID::gen());
 
@@ -586,5 +587,27 @@ TEST(NamespaceStringUtilTest, SerializingEmptyNamespaceSting) {
         const std::string expectedSerialization = str::stream() << tid.toString() << "_";
         ASSERT_EQ(NamespaceStringUtil::serialize(emptyTenantIdDbNss, sc), expectedSerialization);
     }
+}
+
+TEST(NamespaceStringUtilTest, CheckEmptyCollectionSerialize) {
+    const auto serializeCtx = SerializationContext::stateDefault();
+    const TenantId tenantId(OID::gen());
+
+    const auto dbName = DatabaseName::createDatabaseName_forTest(tenantId, "dbTest");
+    const auto nssEmptyColl = NamespaceString::createNamespaceString_forTest(dbName, "");
+    const auto nssEmptySerialized = NamespaceStringUtil::serialize(nssEmptyColl, serializeCtx);
+    ASSERT_EQ(nssEmptySerialized, "dbTest");
+}
+
+TEST(NamespaceStringUtilTest, CheckEmptyCollectionSerializeMultitenancy) {
+    const auto authSerializeCtx = SerializationContext::stateAuthPrevalidated();
+    const TenantId tenantId(OID::gen());
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+
+    const auto dbName = DatabaseName::createDatabaseName_forTest(tenantId, "dbTestMulti");
+    const auto nssEmptyColl = NamespaceString::createNamespaceString_forTest(dbName, "");
+    const auto nssAuthEmptySerialized =
+        NamespaceStringUtil::serialize(nssEmptyColl, authSerializeCtx);
+    ASSERT_EQ(nssAuthEmptySerialized, (tenantId.toString() + "_dbTestMulti"));
 }
 }  // namespace mongo

@@ -46,6 +46,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/simple8b_builder.h"
+#include "mongo/bson/util/simple8b_type_util.h"
 #include "mongo/platform/int128.h"
 #include "mongo/stdx/type_traits.h"
 #include "mongo/unittest/assert.h"
@@ -53,6 +54,16 @@
 #include "mongo/util/shared_buffer.h"
 
 using namespace mongo;
+
+// Performs addition as unsigned and cast back to signed to get overflow defined to wrapped around
+// instead of undefined behavior.
+static constexpr int64_t add(int64_t lhs, int64_t rhs) {
+    return static_cast<int64_t>(static_cast<uint64_t>(lhs) + static_cast<uint64_t>(rhs));
+}
+
+static constexpr int128_t add(int128_t lhs, int128_t rhs) {
+    return static_cast<int128_t>(static_cast<uint128_t>(lhs) + static_cast<uint128_t>(rhs));
+}
 
 template <typename T>
 void assertValuesEqual(const Simple8b<T>& actual, const std::vector<boost::optional<T>>& expected) {
@@ -102,8 +113,48 @@ void testSimple8b(const std::vector<boost::optional<T>>& expectedValues,
         ASSERT_EQ(memcmp(buffer.get(), expectedBinary.data(), size), 0);
     }
 
+
     Simple8b<T> s8b(buffer.get(), size);
     assertValuesEqual(s8b, expectedValues);
+
+    make_signed_t<T> sum = 0;
+    for (auto&& val : expectedValues) {
+        if (val) {
+            sum = add(sum, Simple8bTypeUtil::decodeInt(*val));
+        }
+    }
+
+    uint64_t prev = 0xE;  // Tests in this file assume that the previous value was '0'. This is
+                          // different semantics from BSONColumn.
+    auto s = simple8b::sum<make_signed_t<T>>(
+        reinterpret_cast<const char*>(expectedBinary.data()), expectedBinary.size(), prev);
+    ASSERT_EQ(s, sum);
+
+    auto testPrefixSum = [&](auto prefix) {
+        make_signed_t<T> sum = prefix;
+        make_signed_t<T> prefixSum = 0;
+
+        for (auto&& val : expectedValues) {
+            if (val) {
+                sum = add(sum, Simple8bTypeUtil::decodeInt(*val));
+                prefixSum = add(prefixSum, sum);
+            }
+        }
+
+        uint64_t prev = 0xE;  // Tests in this file assume that the previous value was '0'. This is
+                              // different semantics from BSONColumn.
+        auto ps = simple8b::prefixSum<make_signed_t<T>>(
+            reinterpret_cast<const char*>(expectedBinary.data()),
+            expectedBinary.size(),
+            prefix,
+            prev);
+
+        ASSERT_EQ(ps, prefixSum);
+    };
+
+    // Test prefix sum with different initial prefixes
+    testPrefixSum(make_signed_t<T>(0));
+    testPrefixSum(make_signed_t<T>(1));
 }
 
 template <typename T>

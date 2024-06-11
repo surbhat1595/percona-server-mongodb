@@ -46,6 +46,7 @@
 
 namespace mongo::stage_builder {
 
+class PlanStageSlots;
 struct StageBuilderState;
 
 optimizer::ProjectionName getABTVariableName(sbe::value::SlotId slotId);
@@ -71,15 +72,22 @@ struct TypedExpression {
 using VariableTypes = stdx::
     unordered_map<optimizer::ProjectionName, TypeSignature, optimizer::ProjectionName::Hasher>;
 
+// Collect the type information of the slots declared in the provided stage output.
+VariableTypes buildVariableTypes(const PlanStageSlots& outputs);
+
+// Return whether the declared outputs contain a block value.
+bool hasBlockOutput(const PlanStageSlots& outputs);
+
 // Run constant folding on the provided ABT tree and return its type signature. If the type
-// information in the slotInfo is available, it is used to assign a type to the visible slots.
+// information for the visible slots is available in the slotInfo argument, it is used to perform a
+// more precise type checking optimization. On return, the abt argument points to the modified tree.
 TypeSignature constantFold(optimizer::ABT& abt,
                            StageBuilderState& state,
                            const VariableTypes* slotInfo = nullptr);
 
-// Optimize and convert the provided ABT tree into an equivalent EExpression tree, returning its
-// type signature. If the type information in the slotInfo is available, it is used to assign a type
-// to the visible slots.
+// Optimize (by modifying it in place via a call to constantFold) and convert the provided ABT tree
+// into an equivalent typed EExpression tree. The type information for the visible slots provided in
+// the slotInfo argument is forwarded to the constantFold operation.
 TypedExpression abtToExpr(optimizer::ABT& abt,
                           StageBuilderState& state,
                           const VariableTypes* slotInfo = nullptr);
@@ -249,43 +257,21 @@ public:
     }
 
     boost::optional<sbe::value::SlotId> getSlot() const noexcept {
-        return hasSlot() ? boost::make_optional(stdx::get<sbe::value::SlotId>(_storage))
-                         : boost::none;
+        return hasSlot() ? boost::make_optional(get<sbe::value::SlotId>(_storage)) : boost::none;
     }
 
     bool hasSlot() const noexcept {
-        return stdx::holds_alternative<sbe::value::SlotId>(_storage);
+        return holds_alternative<sbe::value::SlotId>(_storage);
     }
 
     bool hasABT() const noexcept {
-        return stdx::holds_alternative<sbe::value::SlotId>(_storage) ||
-            stdx::holds_alternative<LocalVarInfo>(_storage) ||
-            stdx::holds_alternative<abt::HolderPtr>(_storage);
-    }
-
-    SbExpr clone() const {
-        if (hasSlot()) {
-            return stdx::get<sbe::value::SlotId>(_storage);
-        }
-
-        if (stdx::holds_alternative<LocalVarInfo>(_storage)) {
-            return stdx::get<LocalVarInfo>(_storage);
-        }
-
-        if (stdx::holds_alternative<abt::HolderPtr>(_storage)) {
-            return stdx::get<abt::HolderPtr>(_storage);
-        }
-
-        if (stdx::holds_alternative<EExpr>(_storage)) {
-            const auto& expr = stdx::get<EExpr>(_storage);
-            return expr->clone();
-        }
-
-        return {};
+        return holds_alternative<sbe::value::SlotId>(_storage) ||
+            holds_alternative<LocalVarInfo>(_storage) ||
+            holds_alternative<abt::HolderPtr>(_storage);
     }
 
     bool isNull() const noexcept {
-        return stdx::holds_alternative<bool>(_storage);
+        return holds_alternative<bool>(_storage);
     }
 
     explicit operator bool() const noexcept {
@@ -296,14 +282,37 @@ public:
         _storage = false;
     }
 
+    SbExpr clone() const {
+        if (hasSlot()) {
+            return get<sbe::value::SlotId>(_storage);
+        }
+
+        if (holds_alternative<LocalVarInfo>(_storage)) {
+            return get<LocalVarInfo>(_storage);
+        }
+
+        if (holds_alternative<abt::HolderPtr>(_storage)) {
+            return get<abt::HolderPtr>(_storage);
+        }
+
+        if (holds_alternative<EExpr>(_storage)) {
+            const auto& expr = get<EExpr>(_storage);
+            return expr->clone();
+        }
+
+        return {};
+    }
+
+    bool isConstantExpr() const;
+
     TypedExpression getExpr(StageBuilderState& state) const;
 
     /**
      * Extract the expression on top of the stack as an SBE EExpression node. If the expression is
-     * stored as an ABT node, it is lowered into an SBE expression, using the provided map to
-     * convert variable names into slot ids.
+     * stored as an ABT node, it is lowered into an SBE expression, using the provided type
+     * information for the referenced variables.
      */
-    TypedExpression extractExpr(StageBuilderState& state);
+    TypedExpression extractExpr(StageBuilderState& state, const VariableTypes* slotInfo = nullptr);
 
     /**
      * Extract the expression on top of the stack as an ABT node. Throws an exception if the
@@ -317,20 +326,12 @@ private:
     void set(sbe::FrameId frameId, sbe::value::SlotId slotId);
 
     // The bool type as the first option is used to represent the empty storage.
-    stdx::variant<bool, EExpr, sbe::value::SlotId, LocalVarInfo, abt::HolderPtr> _storage;
+    std::variant<bool, EExpr, sbe::value::SlotId, LocalVarInfo, abt::HolderPtr> _storage;
 };
 
 /**
  * "SbStage" is short for "stage builder stage". SbStage is an alias for a unique pointer type.
  */
 using SbStage = std::unique_ptr<sbe::PlanStage>;
-
-/**
- * In the past, "SbExpr" used to be named "EvalExpr". For now we have this type alias so that code
- * that refers to "EvalExpr" still works.
- *
- * TODO SERVER-80366: Remove this type alias when it's no longer needed.
- */
-using EvalExpr = SbExpr;
 
 }  // namespace mongo::stage_builder

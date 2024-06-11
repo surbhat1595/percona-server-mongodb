@@ -15,6 +15,8 @@ export const denylistedNamespaces = [
     /^admin\./,
     /^config\./,
     /\.system\./,
+    // TODO SERVER-84406 create a new list for the case unsplittable collection. The
+    // below nss should now be allowed in case of unsplittable.
     /enxcol_\..*\.esc/,
     /enxcol_\..*\.ecc/,
     /enxcol_\..*\.ecoc/,
@@ -61,8 +63,9 @@ export var ShardingOverrideCommon = (function() {
      * @returns nothing
      */
     function shardCollectionWithSpec({db, collName, shardKey, timeseriesSpec}) {
-        // Don't attempt to shard if this operation is running on mongoD.
-        if (!FixtureHelpers.isMongos(db)) {
+        // Only attempt to shard if this operation is running on a mongos or a mongod with replica
+        // set endpoint enabled.
+        if (!FixtureHelpers.isMongos(db) && !TestData.testingReplicaSetEndpoint) {
             return;
         }
 
@@ -133,8 +136,52 @@ export var ShardingOverrideCommon = (function() {
         }
     }
 
+    function createUnsplittableCollection({db, collName, opts}) {
+        // Expected to be called only on sharded clusters
+        assert(FixtureHelpers.isMongos(db));
+
+        const options = opts || {};
+
+        let createCmd = {createUnsplittableCollection: collName};
+        Object.extend(createCmd, options);
+
+        return db.runCommand(createCmd);
+    }
+
+    /**
+     * @param {*} collection name as string
+     * @returns true if unsupported, false otherwise
+     */
+    function nssCanBeTrackedByShardingCatalog(nss) {
+        for (const ns of denylistedNamespaces) {
+            if (nss.match(ns)) {
+                return true
+            }
+        }
+        return false;
+    }
+
+    // SERVER-83396 Get rid of this function
+    function createUnsplittableCollectionOnRandomShard({db, collName, opts}) {
+        let options = opts || {};
+
+        // Expected to be called only on sharded clusters
+        assert(FixtureHelpers.isMongos(db));
+
+        // Select a random shard
+        let shardName =
+            db.getSiblingDB('config').shards.aggregate([{$sample: {size: 1}}]).toArray()[0]._id;
+        options['dataShard'] = shardName;
+
+        return this.createUnsplittableCollection({db: db, collName: collName, opts: options});
+    }
+
     return {
         shardCollection: shardCollection,
         shardCollectionWithSpec: shardCollectionWithSpec,
+        nssCanBeTrackedByShardingCatalog: nssCanBeTrackedByShardingCatalog,
+        createUnsplittableCollection: createUnsplittableCollection,
+        // SERVER-83396 Get rid of this function
+        createUnsplittableCollectionOnRandomShard: createUnsplittableCollectionOnRandomShard
     };
 })();

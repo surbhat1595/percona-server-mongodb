@@ -38,7 +38,9 @@ WT_STAT_USECS_HIST_INCR_FUNC(opwrite, perf_hist_opwrite_latency)
     do {                                                                                    \
         WT_TXN *__saved_txn;                                                                \
         uint64_t __saved_write_gen = (session)->checkpoint_write_gen;                       \
+        bool no_reconcile_set;                                                              \
                                                                                             \
+        no_reconcile_set = F_ISSET((session), WT_SESSION_NO_RECONCILE);                     \
         if ((cbt)->checkpoint_txn != NULL) {                                                \
             __saved_txn = (session)->txn;                                                   \
             if (F_ISSET(__saved_txn, WT_TXN_IS_CHECKPOINT)) {                               \
@@ -47,6 +49,8 @@ WT_STAT_USECS_HIST_INCR_FUNC(opwrite, perf_hist_opwrite_latency)
                 __saved_txn = NULL;                                                         \
             } else {                                                                        \
                 (session)->txn = (cbt)->checkpoint_txn;                                     \
+                /* Reconciliation is disabled when reading a checkpoint. */                 \
+                F_SET((session), WT_SESSION_NO_RECONCILE);                                  \
                 if ((cbt)->checkpoint_hs_dhandle != NULL) {                                 \
                     WT_ASSERT(session, (session)->hs_checkpoint == NULL);                   \
                     (session)->hs_checkpoint = (cbt)->checkpoint_hs_dhandle->checkpoint;    \
@@ -59,6 +63,8 @@ WT_STAT_USECS_HIST_INCR_FUNC(opwrite, perf_hist_opwrite_latency)
         op;                                                                                 \
         if (__saved_txn != NULL) {                                                          \
             (session)->txn = __saved_txn;                                                   \
+            if (!no_reconcile_set)                                                          \
+                F_CLR((session), WT_SESSION_NO_RECONCILE);                                  \
             (session)->hs_checkpoint = NULL;                                                \
             (session)->checkpoint_write_gen = __saved_write_gen;                            \
         }                                                                                   \
@@ -1024,6 +1030,12 @@ __curfile_create(WT_SESSION_IMPL *session, WT_CURSOR *owner, const char *cfg[], 
      */
     WT_ERR(__wt_config_gets_def(session, cfg, "next_random", 0, &cval));
     if (cval.val != 0) {
+        WT_ERR(__wt_config_gets_def(session, cfg, "next_random_seed", 0, &cval));
+        if (cval.val != 0)
+            __wt_random_init_custom_seed(&cbt->rnd, (uint64_t)cval.val);
+        else
+            __wt_random_init_seed(session, &cbt->rnd);
+
         if (WT_CURSOR_RECNO(cursor))
             WT_ERR_MSG(
               session, ENOTSUP, "next_random configuration not supported for column-store objects");

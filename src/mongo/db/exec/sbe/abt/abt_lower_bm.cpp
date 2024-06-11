@@ -83,7 +83,7 @@ protected:
                     boost::none,
                     CostType::fromDouble(0),
                     CostType::fromDouble(0),
-                    {false}};
+                    CEType{0.0}};
         properties::setPropertyOverwrite(n._physicalProps, properties::ProjectionRequirement({}));
         return n;
     }
@@ -106,9 +106,9 @@ protected:
             sbe::value::SlotIdGenerator ids;
             sbe::InputParamToSlotMap inputParamToSlotMap;
 
-            benchmark::DoNotOptimize(SBENodeLowering{
-                env, runtimeEnv, ids, inputParamToSlotMap, m, _nodeMap, ScanOrder::Forward}
-                                         .optimize(n, map, ridSlot));
+            benchmark::DoNotOptimize(
+                SBENodeLowering{env, runtimeEnv, ids, inputParamToSlotMap, m, _nodeMap}.optimize(
+                    n, map, ridSlot));
             benchmark::ClobberMemory();
         }
     }

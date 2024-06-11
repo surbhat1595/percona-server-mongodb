@@ -29,15 +29,135 @@
 
 #include "mongo/db/replica_set_endpoint_util.h"
 
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/multitenancy_gen.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/replica_set_endpoint_sharding_state.h"
 #include "mongo/db/s/replica_set_endpoint_feature_flag_gen.h"
+#include "mongo/s/grid.h"
+#include "mongo/util/namespace_string_util.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
 namespace replica_set_endpoint {
 
-bool isFeatureFlagEnabled() {
-    return serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-        feature_flags::gFeatureFlagReplicaSetEndpoint.isEnabled(
-            serverGlobalParams.featureCompatibility);
+namespace {
+
+/**
+ * Returns true if this is an operation from an internal client.
+ */
+bool isInternalClient(OperationContext* opCtx) {
+    return !opCtx->getClient()->session() || opCtx->getClient()->isInternalClient() ||
+        opCtx->getClient()->isInDirectClient();
+}
+
+/**
+ * Returns true if this is a request for an unreplicated database or collection.
+ */
+bool isUnreplicatedDatabaseOrCollectionCommandRequest(const OpMsgRequest& opMsgReq) {
+    if (opMsgReq.getDbName().isLocalDB()) {
+        return true;
+    }
+    if (const auto& firstElement = opMsgReq.body.firstElement();
+        firstElement.type() == BSONType::String &&
+        firstElement.String() == NamespaceString::kSystemDotProfileCollectionName) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Returns true if this is a request for an aggregate command with a $currentOp stage.
+ */
+bool isCurrentOpAggregateCommandRequest(const OpMsgRequest& opMsgReq) {
+    if (opMsgReq.getDbName().isAdminDB() && opMsgReq.getCommandName() == "aggregate") {
+        auto aggRequest = AggregateCommandRequest::parse(
+            IDLParserContext("ServiceEntryPointMongod::isCurrentOp"), opMsgReq.body);
+        return !aggRequest.getPipeline().empty() &&
+            aggRequest.getPipeline()[0].firstElementFieldNameStringData() == "$currentOp";
+    }
+    return false;
+}
+
+/**
+ * Returns true if this is a request for a command that needs to run on the mongod it arrives on.
+ */
+bool isTargetedCommandRequest(OperationContext* opCtx, const OpMsgRequest& opMsgReq) {
+    return kTargetedCmdNames.contains(opMsgReq.getCommandName()) ||
+        isCurrentOpAggregateCommandRequest(opMsgReq);
+}
+
+/**
+ * Returns the router service.
+ */
+Service* getRouterService(OperationContext* opCtx) {
+    auto routerService = opCtx->getServiceContext()->getService(ClusterRole::RouterServer);
+    invariant(routerService);
+    return routerService;
+}
+
+/**
+ * Returns true if this is a request for a command that does not exist on a router.
+ */
+bool isRoutableCommandRequest(OperationContext* opCtx, const OpMsgRequest& opMsgReq) {
+    return CommandHelpers::findCommand(getRouterService(opCtx), opMsgReq.getCommandName());
+}
+
+}  // namespace
+
+ScopedSetRouterService::ScopedSetRouterService(OperationContext* opCtx)
+    : _opCtx(opCtx), _originalService(opCtx->getService()) {
+    // Verify that the opCtx is not using the router service already.
+    invariant(!_originalService->role().has(ClusterRole::RouterServer));
+    _opCtx->getClient()->setService(getRouterService(opCtx));
+}
+
+ScopedSetRouterService::~ScopedSetRouterService() {
+    // Verify that the opCtx is still using the router service.
+    invariant(_opCtx->getService()->role().has(ClusterRole::RouterServer));
+    _opCtx->getClient()->setService(_originalService);
+}
+
+bool isReplicaSetEndpointClient(Client* client) {
+    if (client->isRouterClient()) {
+        return false;
+    }
+    return replica_set_endpoint::ReplicaSetEndpointShardingState::get(client->getServiceContext())
+        ->supportsReplicaSetEndpoint();
+}
+
+bool shouldRouteRequest(OperationContext* opCtx, const OpMsgRequest& opMsgReq) {
+    // The request must have come in through a client on the shard port.
+    invariant(!opCtx->getClient()->isRouterClient());
+
+    if (!replica_set_endpoint::ReplicaSetEndpointShardingState::get(opCtx)
+             ->supportsReplicaSetEndpoint()) {
+        return false;
+    }
+
+    if (gMultitenancySupport) {
+        // Currently, serverless does not support sharding.
+        return false;
+    }
+
+    if (!Grid::get(opCtx)->isShardingInitialized()) {
+        return false;
+    }
+
+    if (isInternalClient(opCtx) || isUnreplicatedDatabaseOrCollectionCommandRequest(opMsgReq) ||
+        isTargetedCommandRequest(opCtx, opMsgReq) || !isRoutableCommandRequest(opCtx, opMsgReq)) {
+        return false;
+    }
+
+    // There is nothing that will prevent the cluster from becoming multi-shard (i.e. no longer
+    // supporting as replica set endpoint) after the check here is done. However, the contract is
+    // that users must have transitioned to the sharded connection string (i.e. connect to mongoses
+    // and/or router port of mongods) before adding a second shard. Also, commands that make it to
+    // here should be safe to route even when the cluster has more than one shard.
+    return true;
 }
 
 }  // namespace replica_set_endpoint

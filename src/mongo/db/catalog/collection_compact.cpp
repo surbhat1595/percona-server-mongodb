@@ -48,10 +48,10 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/timeseries/catalog_helper.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/db/views/view.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -71,7 +71,8 @@ using logv2::LogComponent;
 namespace {
 
 CollectionPtr getCollectionForCompact(OperationContext* opCtx, const NamespaceString& resolvedNss) {
-    invariant(opCtx->lockState()->isCollectionLockedForMode(resolvedNss, MODE_IX));
+    invariant(
+        shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(resolvedNss, MODE_IX));
 
     // Hold reference to the catalog for collection lookup without locks to be safe.
     auto collectionCatalog = CollectionCatalog::get(opCtx);
@@ -140,7 +141,7 @@ StatusWith<int64_t> compactCollection(OperationContext* opCtx,
         return status;
 
     // Compact all indexes (not including unfinished indexes)
-    status = indexCatalog->compactIndexes(opCtx);
+    status = indexCatalog->compactIndexes(opCtx, freeSpaceTargetMB);
     if (!status.isOK())
         return status;
 

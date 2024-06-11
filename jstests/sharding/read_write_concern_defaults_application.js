@@ -147,6 +147,7 @@ let testCases = {
     _recvChunkStatus: {skip: "internal command"},
     _refreshQueryAnalyzerConfiguration: {skip: "internal command"},
     _shardsvrAbortReshardCollection: {skip: "internal command"},
+    _shardsvrChangePrimary: {skip: "internal command"},
     _shardsvrCleanupReshardCollection: {skip: "internal command"},
     _shardsvrCloneCatalogData: {skip: "internal command"},
     _shardsvrRegisterIndex: {skip: "internal command"},
@@ -259,7 +260,8 @@ let testCases = {
     applyOps: {skip: "internal command"},
     auditGetOptions: {skip: "does not accept read or write concern"},
     authenticate: {skip: "does not accept read or write concern"},
-    autoSplitVector: {skip: "internal command"},
+    autoCompact: {skip: "does not accept read or write concern"},
+    autoSplitVector: {skip: "does not accept read or write concern"},
     balancerCollectionStatus: {skip: "does not accept read or write concern"},
     balancerStart: {skip: "does not accept read or write concern"},
     balancerStatus: {skip: "does not accept read or write concern"},
@@ -285,6 +287,7 @@ let testCases = {
         skip: "requires feature flag"
     },
     captrunc: {skip: "test command"},
+    changePrimary: {skip: "does not accept read or write concern"},
     checkMetadataConsistency: {skip: "does not accept read or write concern"},
     checkShardingIndex: {skip: "does not accept read or write concern"},
     cleanupOrphaned: {skip: "only on shard server"},
@@ -780,6 +783,7 @@ let testCases = {
     top: {skip: "does not accept read or write concern"},
     transitionFromDedicatedConfigServer: {skip: "does not accept read or write concern"},
     transitionToDedicatedConfigServer: {skip: "does not accept read or write concern"},
+    transitionToShardedCluster: {skip: "accepts only majority"},
     unshardCollection: {skip: "does not accept read or write concern"},
     update: {
         setUp: function(conn) {

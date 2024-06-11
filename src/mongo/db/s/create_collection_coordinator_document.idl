@@ -38,22 +38,27 @@ imports:
     - "mongo/s/request_types/sharded_ddl_commands.idl"
 
 enums:
+    # TODO (SERVER-79304): Remove once 8.0 becomes last LTS.
     CreateCollectionCoordinatorPhaseLegacy:
         description: "Current create collection coordinator's operation state."
         type: string
         values:
             kUnset: "unset"
             kCommit: "commit"
+    
     CreateCollectionCoordinatorPhase:
         description: "Current create collection coordinator's operation state."
         type: string
         values:
             kUnset: "unset"
-            kAcquireCSOnCoordinator: "acquireCSOnCoordinator"
-            kTranslateRequest: "translateRequest"
-            kAcquireCSOnParticipants: "acquireCSOnParticipants"
-            kCommit: "commit"
-            kReleaseAllCS: "releaseAllCS"
+            kEnterWriteCriticalSectionOnCoordinatorAndDataShard: "enterWriteCriticalSectionOnCoordinatorAndDataShard"
+            kTranslateRequestParameters: "translateRequestParameters"
+            kCreateCollectionOnCoordinator: "createCollectionOnCoordinator"
+            kEnterCriticalSection: "enterCriticalSection"
+            kCreateCollectionOnParticipants: "createCollectionOnParticipants"
+            kCommitOnShardingCatalog: "commitOnShardingCatalog"
+            kSetPostCommitMetadata: "setPostCommitMetadata"
+            kExitCriticalSection: "exitCriticalSection"
 
 structs:
     TranslatedRequestParams:
@@ -74,8 +79,9 @@ structs:
                 description: "Collation value from the targeted unsharded collection if this exists; otherwise, simple-collation"
                 optional: false
 
+    # TODO (SERVER-79304): Remove once 8.0 becomes last LTS.
     CreateCollectionCoordinatorDocumentLegacy:
-        description: "Object with neccessary fields to create a collection"
+        description: "Object with necessary fields to create a collection"
         generate_comparison_operators: false
         strict: false
         chained_structs:
@@ -90,6 +96,7 @@ structs:
                 type: TranslatedRequestParams
                 description: "The field is populated only once the kTranslateRequest phase is completed"
                 optional: true
+
     CreateCollectionCoordinatorDocument:
         description: "Object with neccessary fields to create a collection"
         generate_comparison_operators: false
@@ -104,5 +111,16 @@ structs:
                 default: kUnset
             translatedRequestParams:
                 type: TranslatedRequestParams
-                description: "The field is populated only once the kTranslateRequest phase is completed"
+                description: "The field is populated only once the kTranslateRequest phase is completed."
+                optional: true
+            shardIds:
+                type: array<shard_id>
+                description: "The list of shards involved in the create collection operation."
+                optional: true
+            selectedDataShard:
+                type: shard_id
+                description: >-
+                    The chosen data shard for the collection creation if creating a new unsharded collection.
+                    The current data shard for the unsharded collection if sharding an existing
+                    collection.
                 optional: true

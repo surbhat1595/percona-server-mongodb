@@ -75,7 +75,6 @@
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/curop_metrics.h"
@@ -130,6 +129,7 @@
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
+#include "mongo/db/timeseries/bucket_catalog/bucket_catalog_internal.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
 #include "mongo/db/timeseries/bucket_catalog/closed_bucket.h"
 #include "mongo/db/timeseries/bucket_catalog/write_batch.h"
@@ -137,7 +137,6 @@
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_options.h"
-#include "mongo/db/timeseries/timeseries_stats.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
 #include "mongo/db/timeseries/timeseries_write_util.h"
 #include "mongo/db/transaction/retryable_writes_stats.h"
@@ -160,6 +159,7 @@
 #include "mongo/s/analyze_shard_key_common_gen.h"
 #include "mongo/s/analyze_shard_key_role.h"
 #include "mongo/s/query_analysis_sampler_util.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/s/write_ops/batched_command_response.h"
@@ -179,46 +179,6 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
 
 namespace mongo::write_ops_exec {
-class Atomic64Metric;
-}  // namespace mongo::write_ops_exec
-
-namespace mongo {
-template <>
-struct BSONObjAppendFormat<write_ops_exec::Atomic64Metric> : FormatKind<NumberLong> {};
-}  // namespace mongo
-
-namespace mongo::write_ops_exec {
-
-/**
- * Atomic wrapper for long long type for Metrics.
- */
-class Atomic64Metric {
-public:
-    /** Set _value to the max of the current or newMax. */
-    void setIfMax(long long newMax) {
-        /*  Note: compareAndSwap will load into val most recent value. */
-        for (long long val = _value.load(); val < newMax && !_value.compareAndSwap(&val, newMax);) {
-        }
-    }
-
-    /** store val into value. */
-    void set(long long val) {
-        _value.store(val);
-    }
-
-    /** Return the current value. */
-    long long get() const {
-        return _value.load();
-    }
-
-    /** TODO: SERVER-73806 Avoid implicit conversion to long long */
-    operator long long() const {
-        return get();
-    }
-
-private:
-    mongo::AtomicWord<long long> _value;
-};
 
 // Convention in this file: generic helpers go in the anonymous namespace. Helpers that are for a
 // single type of operation are static functions defined above their caller.
@@ -327,8 +287,19 @@ void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
         if (!CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
                 opCtx, ns)) {  // someone else may have beat us to it.
             uassertStatusOK(userAllowedCreateNS(opCtx, ns));
-            OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
-                unsafeCreateCollection(opCtx);
+            // TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
+            // TODO (SERVER-82066): Update handling for direct connections.
+            // TODO (SERVER-81937): Update handling for transactions.
+            boost::optional<OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE>
+                allowCollectionCreation;
+            const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+            if (!fcvSnapshot.isVersionInitialized() ||
+                !feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(
+                    fcvSnapshot) ||
+                !OperationShardingState::get(opCtx).isComingFromRouter(opCtx) ||
+                (opCtx->inMultiDocumentTransaction() || opCtx->isRetryableWrite())) {
+                allowCollectionCreation.emplace(opCtx);
+            }
             WriteUnitOfWork wuow(opCtx);
             CollectionOptions defaultCollectionOptions;
             if (auto fp = globalFailPointRegistry().find("clusterAllCollectionsByDefault");
@@ -497,15 +468,22 @@ bool handleError(OperationContext* opCtx,
         return false;
     }
 
-    if (ex.code() == ErrorCodes::StaleDbVersion || ErrorCodes::isStaleShardVersionError(ex)) {
-        if (!opCtx->getClient()->isInDirectClient()) {
+    if (ex.code() == ErrorCodes::StaleDbVersion || ErrorCodes::isStaleShardVersionError(ex) ||
+        ex.code() == ErrorCodes::ShardCannotRefreshDueToLocksHeld ||
+        ex.code() == ErrorCodes::CannotImplicitlyCreateCollection) {
+        if (!opCtx->getClient()->isInDirectClient() &&
+            ex.code() != ErrorCodes::CannotImplicitlyCreateCollection) {
             auto& oss = OperationShardingState::get(opCtx);
             oss.setShardingOperationFailedStatus(ex.toStatus());
         }
 
-        // Since this is a routing error, it is guaranteed that all subsequent operations will fail
+        // For routing errors, it is guaranteed that all subsequent operations will fail
         // with the same cause, so don't try doing any more operations. The command reply serializer
         // will handle repeating this error for unordered writes.
+        // (On the other hand, ShardCannotRefreshDueToLocksHeld is caused by a temporary inability
+        // to access a stable version of the cache during the execution of the batch; the error is
+        // returned back to the router to leverage its capability of selectively retrying
+        // operations).
         out->results.emplace_back(ex.toStatus());
         return false;
     }
@@ -533,10 +511,6 @@ bool handleError(OperationContext* opCtx,
         // migration blocking, committing, or aborting.
         out->results.emplace_back(ex.toStatus());
         return false;
-    }
-
-    if (ex.code() == ErrorCodes::ShardCannotRefreshDueToLocksHeld) {
-        throw;
     }
 
     out->results.emplace_back(ex.toStatus());
@@ -720,7 +694,8 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
 
 boost::optional<BSONObj> advanceExecutor(OperationContext* opCtx,
                                          PlanExecutor* exec,
-                                         bool isRemove) {
+                                         bool isRemove,
+                                         StringData operationName) {
     BSONObj value;
     PlanExecutor::ExecState state;
     try {
@@ -731,11 +706,12 @@ boost::optional<BSONObj> advanceExecutor(OperationContext* opCtx,
         auto&& explainer = exec->getPlanExplainer();
         auto&& [stats, _] = explainer.getWinningPlanStats(ExplainOptions::Verbosity::kExecStats);
         LOGV2_WARNING(7267501,
-                      "Plan executor error during findAndModify",
+                      "Plan executor error",
+                      "operation"_attr = operationName,
                       "error"_attr = exception.toStatus(),
                       "stats"_attr = redact(stats));
 
-        exception.addContext("Plan executor error during findAndModify");
+        exception.addContext("Plan executor error during " + operationName);
         throw;
     }
 
@@ -808,8 +784,18 @@ UpdateResult performUpdate(OperationContext* opCtx,
     if (!collection.exists() && upsert) {
         CollectionWriter collectionWriter(opCtx, &collection);
         uassertStatusOK(userAllowedCreateNS(opCtx, nsString));
-        OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE unsafeCreateCollection(
-            opCtx);
+        // TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
+        // TODO (SERVER-82066): Update handling for direct connections.
+        // TODO (SERVER-81937): Update handling for transactions.
+        boost::optional<OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE>
+            allowCollectionCreation;
+        const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+        if (!fcvSnapshot.isVersionInitialized() ||
+            !feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(fcvSnapshot) ||
+            !OperationShardingState::get(opCtx).isComingFromRouter(opCtx) ||
+            (opCtx->inMultiDocumentTransaction() || opCtx->isRetryableWrite())) {
+            allowCollectionCreation.emplace(opCtx);
+        }
         WriteUnitOfWork wuow(opCtx);
         ScopedLocalCatalogWriteFence scopedLocalCatalogWriteFence(opCtx, &collection);
         CollectionOptions defaultCollectionOptions;
@@ -849,7 +835,10 @@ UpdateResult performUpdate(OperationContext* opCtx,
         CurOp::get(opCtx)->setPlanSummary_inlock(exec->getPlanExplainer().getPlanSummary());
     }
 
-    docFound = advanceExecutor(opCtx, exec.get(), remove);
+    docFound = advanceExecutor(opCtx,
+                               exec.get(),
+                               remove,
+                               updateRequest->shouldReturnAnyDocs() ? "findAndModify" : "update");
     // Nothing after advancing the plan executor should throw a WriteConflictException,
     // so the following bookkeeping with execution stats won't end up being done
     // multiple times.
@@ -862,7 +851,9 @@ UpdateResult performUpdate(OperationContext* opCtx,
             .notifyOfQuery(opCtx, collection.getCollectionPtr(), summaryStats);
     }
     auto updateResult = exec->getUpdateResult();
+
     write_ops_exec::recordUpdateResultInOpDebug(updateResult, &curOp->debug());
+
     curOp->debug().setPlanSummaryMetrics(summaryStats);
 
     if (updateResult.containsDotsAndDollarsField) {
@@ -958,7 +949,8 @@ long long performDelete(OperationContext* opCtx,
         CurOp::get(opCtx)->setPlanSummary_inlock(exec->getPlanExplainer().getPlanSummary());
     }
 
-    docFound = advanceExecutor(opCtx, exec.get(), true);
+    docFound = advanceExecutor(
+        opCtx, exec.get(), true, deleteRequest->getReturnDeleted() ? "findAndModify" : "delete");
     // Nothing after advancing the plan executor should throw a WriteConflictException,
     // so the following bookkeeping with execution stats won't end up being done
     // multiple times.
@@ -1065,7 +1057,7 @@ WriteResult performInserts(OperationContext* opCtx,
     // Insert performs its own retries, so we should only be within a WriteUnitOfWork when run in a
     // transaction.
     auto txnParticipant = TransactionParticipant::get(opCtx);
-    invariant(!opCtx->lockState()->inAWriteUnitOfWork() ||
+    invariant(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork() ||
               (txnParticipant && opCtx->inMultiDocumentTransaction()));
 
     auto& curOp = *CurOp::get(opCtx);
@@ -1322,8 +1314,7 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
         curOp.debug().execStats = std::move(stats);
     }
 
-    if (source != OperationSource::kTimeseriesInsert &&
-        source != OperationSource::kTimeseriesUpdate) {
+    if (source != OperationSource::kTimeseriesInsert) {
         recordUpdateResultInOpDebug(updateResult, &curOp.debug());
     }
     curOp.debug().setPlanSummaryMetrics(summary);
@@ -1508,7 +1499,7 @@ WriteResult performUpdates(OperationContext* opCtx,
     // Update performs its own retries, so we should not be in a WriteUnitOfWork unless run in a
     // transaction.
     auto txnParticipant = TransactionParticipant::get(opCtx);
-    invariant(!opCtx->lockState()->inAWriteUnitOfWork() ||
+    invariant(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork() ||
               (txnParticipant && opCtx->inMultiDocumentTransaction()));
     uassertStatusOK(userAllowedWriteNS(opCtx, ns));
 
@@ -1772,7 +1763,7 @@ WriteResult performDeletes(OperationContext* opCtx,
     // Delete performs its own retries, so we should not be in a WriteUnitOfWork unless we are in a
     // transaction.
     auto txnParticipant = TransactionParticipant::get(opCtx);
-    invariant(!opCtx->lockState()->inAWriteUnitOfWork() ||
+    invariant(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork() ||
               (txnParticipant && opCtx->inMultiDocumentTransaction()));
     uassertStatusOK(userAllowedWriteNS(opCtx, ns));
 
@@ -1892,7 +1883,7 @@ Status performAtomicTimeseriesWrites(
     OperationContext* opCtx,
     const std::vector<write_ops::InsertCommandRequest>& insertOps,
     const std::vector<write_ops::UpdateCommandRequest>& updateOps) try {
-    invariant(!opCtx->lockState()->inAWriteUnitOfWork());
+    invariant(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
     invariant(!opCtx->inMultiDocumentTransaction());
     invariant(!insertOps.empty() || !updateOps.empty());
 
@@ -1930,7 +1921,7 @@ Status performAtomicTimeseriesWrites(
     // Since we are manually updating the "lastWriteOpTime" before committing, we'll also need to
     // manually reset if the storage transaction is aborted.
     if (slot && participant) {
-        opCtx->recoveryUnit()->onRollback([](OperationContext* opCtx) {
+        shard_role_details::getRecoveryUnit(opCtx)->onRollback([](OperationContext* opCtx) {
             TransactionParticipant::get(opCtx).setLastWriteOpTime(opCtx, repl::OpTime());
         });
     }
@@ -2002,7 +1993,8 @@ Status performAtomicTimeseriesWrites(
         if (slot) {
             args.oplogSlots = {**slot};
             fassert(5481600,
-                    opCtx->recoveryUnit()->setTimestamp(args.oplogSlots[0].getTimestamp()));
+                    shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(
+                        args.oplogSlots[0].getTimestamp()));
         }
 
         collection_internal::updateDocument(opCtx,
@@ -2257,13 +2249,12 @@ TimeseriesSingleWriteResult performTimeseriesUpdate(
  * Attempts to perform bucket compression on time-series bucket. It will surpress any error caused
  * by the write and silently leave the bucket uncompressed when any type of error is encountered.
  */
-void tryPerformTimeseriesBucketCompression(
-    OperationContext* opCtx,
-    const timeseries::bucket_catalog::ClosedBucket& closedBucket,
-    const write_ops::InsertCommandRequest& request) {
+void tryPerformTimeseriesBucketCompression(OperationContext* opCtx,
+                                           timeseries::bucket_catalog::ClosedBucket& closedBucket,
+                                           const write_ops::InsertCommandRequest& request) {
     // When enabled, we skip constructing ClosedBuckets which results in skipping compression.
     invariant(!feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
-        serverGlobalParams.featureCompatibility));
+        serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
 
     // Buckets with just a single measurement is not worth compressing.
     if (closedBucket.numMeasurements.has_value() && closedBucket.numMeasurements.value() <= 1) {
@@ -2272,8 +2263,12 @@ void tryPerformTimeseriesBucketCompression(
 
     bool validateCompression = gValidateTimeseriesCompression.load();
 
-    boost::optional<int> beforeSize;
-    TimeseriesStats::CompressedBucketInfo compressionStats;
+    struct {
+        int uncompressedSize = 0;
+        int compressedSize = 0;
+        int numInterleavedRestarts = 0;
+        bool decompressionFailed = false;
+    } compressionStats;
 
     auto bucketCompressionFunc = [&](const BSONObj& bucketDoc) -> boost::optional<BSONObj> {
         // Skip compression if the bucket is already compressed.
@@ -2281,30 +2276,29 @@ void tryPerformTimeseriesBucketCompression(
             return boost::none;
         }
 
-        beforeSize = bucketDoc.objsize();
         // Reset every time we run to ensure we never use a stale value
         compressionStats = {};
+        compressionStats.uncompressedSize = bucketDoc.objsize();
+
         auto compressed = timeseries::compressBucket(
             bucketDoc, closedBucket.timeField, ns(request), validateCompression);
         if (compressed.compressedBucket) {
-            // If compressed object size is larger than uncompressed, skip compression
-            // update.
-            if (compressed.compressedBucket->objsize() >= *beforeSize) {
+            // If compressed object size is larger than uncompressed, skip compression update.
+            if (compressed.compressedBucket->objsize() >= compressionStats.uncompressedSize) {
                 LOGV2_DEBUG(5857802,
                             1,
                             "Skipping time-series bucket compression, compressed object is "
                             "larger than original",
-                            "originalSize"_attr = bucketDoc.objsize(),
+                            "originalSize"_attr = compressionStats.uncompressedSize,
                             "compressedSize"_attr = compressed.compressedBucket->objsize());
                 return boost::none;
             }
 
-            compressionStats.size = compressed.compressedBucket->objsize();
-            compressionStats.numInterleaveRestarts = compressed.numInterleavedRestarts;
-        } else if (compressed.decompressionFailed) {
-            compressionStats.decompressionFailed = true;
+            compressionStats.compressedSize = compressed.compressedBucket->objsize();
+            compressionStats.numInterleavedRestarts = compressed.numInterleavedRestarts;
         }
 
+        compressionStats.decompressionFailed = compressed.decompressionFailed;
         return compressed.compressedBucket;
     };
 
@@ -2315,18 +2309,17 @@ void tryPerformTimeseriesBucketCompression(
             opCtx, compressionOp, OperationSource::kTimeseriesBucketCompression),
         request);
 
-    // Report stats, if we fail before running the transform function then just skip
-    // reporting.
-    if (beforeSize) {
-        compressionStats.result = result.result.getStatus();
+    closedBucket.stats.incNumBytesUncompressed(compressionStats.uncompressedSize);
+    if (result.result.isOK() && compressionStats.compressedSize > 0) {
+        closedBucket.stats.incNumBytesCompressed(compressionStats.compressedSize);
+        closedBucket.stats.incNumSubObjCompressionRestart(compressionStats.numInterleavedRestarts);
+        closedBucket.stats.incNumCompressedBuckets();
+    } else {
+        closedBucket.stats.incNumBytesCompressed(compressionStats.uncompressedSize);
+        closedBucket.stats.incNumUncompressedBuckets();
 
-        // Report stats for the bucket collection
-        // Hold reference to the catalog for collection lookup without locks to be safe.
-        auto catalog = CollectionCatalog::get(opCtx);
-        auto coll = catalog->lookupCollectionByNamespace(opCtx, compressionOp.getNamespace());
-        if (coll) {
-            const auto& stats = TimeseriesStats::get(coll);
-            stats.onBucketClosed(*beforeSize, compressionStats);
+        if (compressionStats.decompressionFailed) {
+            closedBucket.stats.incNumFailedDecompressBuckets();
         }
     }
 }
@@ -2381,7 +2374,7 @@ bool commitTimeseriesBucket(OperationContext* opCtx,
                   str::stream() << "Expected 1 insertion of document with _id '" << docId
                                 << "', but found " << output.result.getValue().getN() << ".");
     } else {
-        auto op = batch->decompressed.has_value()
+        auto op = batch->compressed
             ? timeseries::makeTimeseriesDecompressAndUpdateOp(
                   opCtx,
                   batch,
@@ -2404,7 +2397,7 @@ bool commitTimeseriesBucket(OperationContext* opCtx,
                       ? Status{ErrorCodes::WriteConflict, "Could not update non-existent bucket"}
                       : output.result.getStatus());
             docsToRetry->push_back(index);
-            opCtx->recoveryUnit()->abandonSnapshot();
+            shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
             return true;
         } else if (auto error = write_ops_exec::generateError(
                        opCtx, output.result.getStatus(), start + index, errors->size())) {
@@ -2635,7 +2628,7 @@ std::tuple<TimeseriesBatches, TimeseriesStmtIds, size_t /* numInserted */> inser
         }
 
         auto& result = swResult.getValue();
-        auto* insertResult = stdx::get_if<timeseries::bucket_catalog::SuccessfulInsertion>(&result);
+        auto* insertResult = get_if<timeseries::bucket_catalog::SuccessfulInsertion>(&result);
         invariant(insertResult);
         batches.emplace_back(std::move(insertResult->batch), index);
         const auto& batch = batches.back().first;
@@ -2645,7 +2638,7 @@ std::tuple<TimeseriesBatches, TimeseriesStmtIds, size_t /* numInserted */> inser
 
         // If this insert closed buckets, rewrite to be a compressed column. If we cannot
         // perform write operations at this point the bucket will be left uncompressed.
-        for (const auto& closedBucket : insertResult->closedBuckets) {
+        for (auto& closedBucket : insertResult->closedBuckets) {
             tryPerformTimeseriesBucketCompression(opCtx, closedBucket, request);
         }
 
@@ -2704,7 +2697,7 @@ void getTimeseriesBatchResults(OperationContext* opCtx,
         if (swCommitInfo.getStatus() == ErrorCodes::WriteConflict ||
             swCommitInfo.getStatus() == ErrorCodes::TemporarilyUnavailable) {
             docsToRetry->push_back(index);
-            opCtx->recoveryUnit()->abandonSnapshot();
+            shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
             continue;
         }
         if (auto error = write_ops_exec::generateError(
@@ -2901,7 +2894,10 @@ write_ops::InsertCommandReply performTimeseriesWrites(
 
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
-        curOp.setNS_inlock(ns(request));
+        auto requestNs = ns(request);
+        curOp.setNS_inlock(requestNs.isTimeseriesBucketsCollection()
+                               ? requestNs.getTimeseriesViewNamespace()
+                               : requestNs);
         curOp.setLogicalOp_inlock(LogicalOp::opInsert);
         curOp.ensureStarted();
         curOp.debug().additiveMetrics.ninserted = 0;

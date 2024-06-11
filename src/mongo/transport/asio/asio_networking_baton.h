@@ -36,6 +36,7 @@
 
 #include <poll.h>
 
+#include "mongo/platform/atomic_word.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/transport/asio/asio_session.h"
@@ -86,6 +87,14 @@ public:
 
     Future<void> waitUntil(Date_t expiration, const CancellationToken&) override;
 
+    /**
+     * Cancellations are not necessarily processed in order. For example, consider:
+     * Baton someBaton;
+     * someBaton.addSession(S1); someBaton.addSession(S2);
+     * someBaton.cancelSession(S1); someBaton.cancelSession(S2);
+     * The continuation for `S1` may run before or after that of `S2`. Continuations for
+     * timers behave similarly with respect to cancellation.
+     */
     bool cancelSession(Session& session) noexcept override;
 
     bool cancelTimer(const ReactorTimer& timer) noexcept override;
@@ -100,15 +109,18 @@ private:
     struct Timer {
         size_t id;  // Stores the unique identifier for the timer, provided by `ReactorTimer`.
         Promise<void> promise;
+        bool canceled = false;
     };
 
     struct TransportSession {
         int fd;
         short events;  // Events to consider while polling for this session (e.g., `POLLIN`).
         Promise<void> promise;
+        bool canceled = false;
     };
 
     bool _cancelTimer(size_t timerId) noexcept;
+    void _addTimer(Date_t expiration, Timer timer);
 
     /*
      * Internally, `AsioNetworkingBaton` thinks in terms of synchronized units of work. This is
@@ -139,9 +151,11 @@ private:
      * - `notify()` is called, either directly or through other methods (e.g., `schedule()`).
      * - One of the timers scheduled on this baton times out.
      * - There is an event for at least one of the registered sessions (e.g., data is available).
-     * Returns the list of promises that must be fulfilled as the result of polling.
+     * Returns two lists of promises that must be fulfilled as the result of polling - the first
+     * must be fulfilled successfully and the second must be fulfilled with a cancellation error.
      */
-    std::list<Promise<void>> _poll(stdx::unique_lock<Mutex>&, ClockSource*);
+    std::pair<std::list<Promise<void>>, std::list<Promise<void>>> _poll(stdx::unique_lock<Mutex>&,
+                                                                        ClockSource*);
 
     Future<void> _addSession(Session& session, short events);
 
@@ -153,16 +167,63 @@ private:
 
     bool _inPoll = false;
 
-    // Stores the sessions we need to poll on.
-    stdx::unordered_map<SessionId, TransportSession> _sessions;
+    /**
+     * We use `_notificationState` to send a notification without going through the eventfd
+     * where possible. If we're in the middle of polling, we must use the eventfd so as
+     * to wake up the polling thread. Otherwise, we just transition to the `kNotificationPending`
+     * state, which is seen in the next call to `_poll()`.
+     *
+     * In `notify()`, a thread sending a notification can cause a transition from any state to
+     * `kNotificationPending`. Graphically:
+     *
+     * kNone ----1----> kNotificationPending <----2---- kInPoll
+     * (1) The polling thread is not blocked in `::poll()` - don't call `notify()`
+     * (2) The polling thread may be blocked in `::poll()` - call `notify()`
+     *
+     * In `_poll()`, the polling thread transitions to `kInPoll` (from any other state) before
+     * calling `::poll()`, and transitions to `kNone` after `::poll()` returns.
+     * There is also a fast path from `kNotificationPending` to `kNone` when a notification is
+     * pending and there are no sessions to poll on.
+     *
+     * +-------+ -----2-----> +---------+            +----------------------+
+     * | kNone |              | kInPoll | <----3---- | kNotificationPending |
+     * +-------+ <----1------ +---------+            +----------------------+
+     *    ^                                               |
+     *    +---------------------4-------------------------+
+     *
+     * (1) Return from `::poll()`
+     * (2) Start polling with no notification pending - use blocking call to `::poll()`
+     * (3) Start polling with a pending notification - use non-blocking call to `::poll()`
+     * (4) Start polling with a pending notification and no active sessions - skip `::poll()`
+     *
+     * Notice that only notifying threads transition to `kNotificationPending` and only the polling
+     * thread transitions out of `kNotificationPending`. This gives the polling thread exclusive
+     * ownership over `_notificationState` in that state (i.e., no one else will write to it).
+     */
+    enum NotificationState { kNone, kNotificationPending, kInPoll };
+    AtomicWord<NotificationState> _notificationState;
 
     /**
-     * We use two structures to maintain timers:
+     * Stores the sessions we need to poll on.
+     * `_pendingSessions` stores sessions that have been added, but due to an ongoing poll, haven't
+     * been added to `_sessions` yet. The baton only starts polling on a session once it gets
+     * added to `_sessions`.
+     */
+    stdx::unordered_map<SessionId, TransportSession> _sessions;
+    stdx::unordered_map<SessionId, TransportSession> _pendingSessions;
+
+    /**
+     * We use three structures to maintain timers:
      * - `_timers` keeps a sorted list of timers according to their expiration date.
      * - `_timersById` allows using the unique timer id to find and cancel a timer in constant time.
+     * - `_pendingTimers` keeps a map from timer id to (timer, expiration) pairs that haven't
+     *   been added to the other two members yet due to an ongoing `_poll`.
+     * Timers that are in `_pendingTimers` won't fire upon expiration until they are added to
+     * `_timers` and `_timersById`.
      */
     std::multimap<Date_t, Timer> _timers;
     stdx::unordered_map<size_t, std::multimap<Date_t, Timer>::iterator> _timersById;
+    stdx::unordered_map<size_t, std::pair<Date_t, Timer>> _pendingTimers;
 
     // Tasks scheduled for deferred execution.
     std::vector<Job> _scheduled;

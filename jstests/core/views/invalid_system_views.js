@@ -4,7 +4,7 @@
  *
  * @tags: [
  *   # The test runs commands that are not allowed with security token: applyOps, compact, reIndex.
- *   not_allowed_with_security_token,
+ *   not_allowed_with_signed_security_token,
  *   assumes_unsharded_collection,
  *   # applyOps is not available on mongos.
  *   assumes_against_mongod_not_mongos,
@@ -22,7 +22,7 @@
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const runningOnMongos = FixtureHelpers.isMongos(db);
-const isStandalone = !runningOnMongos && !db.runCommand({hello: 1}).hasOwnProperty("setName");
+const isStandalone = FixtureHelpers.isStandalone(db);
 
 function runTest(badViewDefinition) {
     let viewsDB = db.getSiblingDB("invalid_system_views");

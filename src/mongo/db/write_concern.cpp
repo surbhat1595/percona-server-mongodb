@@ -65,7 +65,6 @@
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
@@ -111,28 +110,35 @@ StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* opCtx,
     bool clientSuppliedWriteConcern = !writeConcern.usedDefaultConstructedWC;
     bool customDefaultWasApplied = false;
 
+    // WriteConcern defaults can only be applied on regular replica set members.
+    // Operations received by shard and config servers should always have WC explicitly specified.
+    bool canApplyDefaultWC = serverGlobalParams.clusterRole.has(ClusterRole::None) &&
+        repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() &&
+        (!opCtx->inMultiDocumentTransaction() ||
+         isTransactionCommand(opCtx->getService(), cmdObj.firstElementFieldName())) &&
+        !opCtx->getClient()->isInDirectClient() && !isInternalClient;
+
+
     // If no write concern is specified in the command, then use the cluster-wide default WC (if
     // there is one), or else the default implicit WC:
     // (if [(#arbiters > 0) AND (#arbiters >= ½(#voting nodes) - 1)] then {w:1} else {w:majority}).
-    if (!clientSuppliedWriteConcern) {
-        writeConcern = ([&]() {
-            // WriteConcern defaults can only be applied on regular replica set members.  Operations
-            // received by shard and config servers should always have WC explicitly specified.
-            if (serverGlobalParams.clusterRole.has(ClusterRole::None) &&
-                repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() &&
-                (!opCtx->inMultiDocumentTransaction() ||
-                 isTransactionCommand(opCtx->getService(), cmdObj.firstElementFieldName())) &&
-                !opCtx->getClient()->isInDirectClient() && !isInternalClient) {
+    if (canApplyDefaultWC) {
+        auto getDefaultWC = ([&]() {
+            auto rwcDefaults =
+                ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
+            auto wcDefault = rwcDefaults.getDefaultWriteConcern();
+            const auto defaultWriteConcernSource = rwcDefaults.getDefaultWriteConcernSource();
+            customDefaultWasApplied = defaultWriteConcernSource &&
+                defaultWriteConcernSource == DefaultWriteConcernSourceEnum::kGlobal;
+            return wcDefault;
+        });
 
-                const auto rwcDefaults =
-                    ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
-                auto wcDefault = rwcDefaults.getDefaultWriteConcern();
+
+        if (!clientSuppliedWriteConcern) {
+            writeConcern = ([&]() {
+                auto wcDefault = getDefaultWC();
+                // Default WC can be 'boost::none' if the implicit default is used and set to 'w:1'.
                 if (wcDefault) {
-                    const auto defaultWriteConcernSource =
-                        rwcDefaults.getDefaultWriteConcernSource();
-                    customDefaultWasApplied = defaultWriteConcernSource &&
-                        defaultWriteConcernSource == DefaultWriteConcernSourceEnum::kGlobal;
-
                     LOGV2_DEBUG(22548,
                                 2,
                                 "Applying default writeConcern on {cmdObj_firstElementFieldName} "
@@ -142,10 +148,22 @@ StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* opCtx,
                                 "wcDefault"_attr = wcDefault->toBSON());
                     return *wcDefault;
                 }
+                return writeConcern;
+            })();
+            writeConcern.notExplicitWValue = true;
+        }
+        // Client supplied a write concern object without 'w' field.
+        else if (writeConcern.isExplicitWithoutWField()) {
+            auto wcDefault = getDefaultWC();
+            // Default WC can be 'boost::none' if the implicit default is used and set to 'w:1'.
+            if (wcDefault) {
+                clientSuppliedWriteConcern = false;
+                writeConcern.w = wcDefault->w;
+                if (writeConcern.syncMode == WriteConcernOptions::SyncMode::UNSET) {
+                    writeConcern.syncMode = wcDefault->syncMode;
+                }
             }
-            return writeConcern;
-        })();
-        writeConcern.notExplicitWValue = true;
+        }
     }
 
     // It's fine for clients to provide any provenance value to mongod. But if they haven't, then an
@@ -179,8 +197,7 @@ Status validateWriteConcern(OperationContext* opCtx, const WriteConcernOptions& 
     }
 
     if (!repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()) {
-        if (stdx::holds_alternative<int64_t>(writeConcern.w) &&
-            stdx::get<int64_t>(writeConcern.w) > 1) {
+        if (holds_alternative<int64_t>(writeConcern.w) && get<int64_t>(writeConcern.w) > 1) {
             return Status(ErrorCodes::BadValue, "cannot use 'w' > 1 when a host is not replicated");
         }
 
@@ -189,7 +206,7 @@ Status validateWriteConcern(OperationContext* opCtx, const WriteConcernOptions& 
                 ErrorCodes::BadValue,
                 fmt::format("cannot use non-majority 'w' mode \"{}\" when a host is not a "
                             "member of a replica set",
-                            stdx::get<std::string>(writeConcern.w)));
+                            get<std::string>(writeConcern.w)));
         }
     }
 
@@ -279,7 +296,7 @@ Status waitForWriteConcern(OperationContext* opCtx,
         // This fail point pauses with an open snapshot on the oplog. Some tests pause on this fail
         // point prior to running replication rollback. This prevents the operation from being
         // killed and the snapshot being released. Hence, we release the snapshot here.
-        opCtx->replaceRecoveryUnit();
+        shard_role_details::replaceRecoveryUnit(opCtx);
 
         hangBeforeWaitingForWriteConcern.pauseWhileSet();
     }

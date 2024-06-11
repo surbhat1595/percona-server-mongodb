@@ -107,8 +107,8 @@ void statsToBSON(const QuerySolutionNode* node,
 
     StageType nodeType = node->getType();
     if ((nodeType == STAGE_COLLSCAN) &&
-        static_cast<const CollectionScanNode*>(node)->doSbeClusteredCollectionScan()) {
-        bob->append("stage", sbeClusteredCollectionScanToString());
+        static_cast<const CollectionScanNode*>(node)->doClusteredCollectionScanSbe()) {
+        bob->append("stage", clusteredCollectionScanSbeToString());
     } else {
         bob->append("stage", stageTypeToString(node->getType()));
     }
@@ -463,8 +463,11 @@ PlanExplainer::PlanStatsDetails buildPlanStatsDetails(
     const sbe::PlanStageStats& stats,
     const boost::optional<BSONObj>& execPlanDebugInfo,
     const boost::optional<BSONObj>& optimizerExplain,
+    const boost::optional<std::string>& planSummary,
+    const boost::optional<BSONObj>& queryParams,
     const boost::optional<BSONArray>& remotePlanInfo,
-    ExplainOptions::Verbosity verbosity) {
+    ExplainOptions::Verbosity verbosity,
+    bool isCached) {
     BSONObjBuilder bob;
 
     if (verbosity >= ExplainOptions::Verbosity::kExecStats) {
@@ -488,11 +491,19 @@ PlanExplainer::PlanStatsDetails buildPlanStatsDetails(
 
     invariant(execPlanDebugInfo);
     BSONObjBuilder plan;
+    if (planSummary) {
+        plan.append("planSummary", *planSummary);
+    }
+
     if (optimizerExplain) {
-        plan.append("optimizerPlan", *optimizerExplain);
+        // TODO SERVER-84429 Implement "isCached" field for Bonsai.
+        plan.append("queryPlan", *optimizerExplain);
+        plan.append("queryParameters", *queryParams);
     } else {
+        plan.append("isCached", isCached);
         plan.append("queryPlan", bob.obj());
     }
+
     plan.append("slotBasedPlan", *execPlanDebugInfo);
     if (remotePlanInfo && !remotePlanInfo->isEmpty()) {
         plan.append("remotePlans", *remotePlanInfo);
@@ -502,8 +513,12 @@ PlanExplainer::PlanStatsDetails buildPlanStatsDetails(
 }  // namespace
 
 const PlanExplainer::ExplainVersion& PlanExplainerSBE::getVersion() const {
-    static const ExplainVersion kExplainVersion = "2";
-    return kExplainVersion;
+    if (_optimizerData) {
+        static const ExplainVersion kExplainVersionForCQF = "3";
+        return kExplainVersionForCQF;
+    }
+    static const ExplainVersion kExplainVersionForStageBuilders = "2";
+    return kExplainVersionForStageBuilders;
 }
 
 std::string PlanExplainerSBE::getPlanSummary() const {
@@ -566,12 +581,23 @@ PlanExplainer::PlanStatsDetails PlanExplainerSBE::getWinningPlanStats(
     invariant(_root);
     auto stats = _root->getStats(true /* includeDebugInfo  */);
     invariant(stats);
+
+    // Append a planSummary only for CQF plans.
+    auto planSummary = _optimizerData ? boost::make_optional(getPlanSummary()) : boost::none;
+
+    // Append the query parameters map only for CQF plans.
+    auto queryParams =
+        _optimizerData ? boost::make_optional(_optimizerData->getQueryParameters()) : boost::none;
+
     return buildPlanStatsDetails(_solution,
                                  *stats,
                                  buildExecPlanDebugInfo(_root, _rootData),
                                  buildCascadesPlan(),
+                                 planSummary,
+                                 queryParams,
                                  buildRemotePlanInfo(),
-                                 verbosity);
+                                 verbosity,
+                                 _matchesCachedPlan);
 }
 
 PlanExplainer::PlanStatsDetails PlanExplainerSBE::getWinningPlanTrialStats() const {
@@ -585,8 +611,11 @@ PlanExplainer::PlanStatsDetails PlanExplainerSBE::getWinningPlanTrialStats() con
             // `ExplainOptions::Verbosity::kExecAllPlans`, as is the case here.
             boost::none /* execPlanDebugInfo */,
             boost::none /* optimizerExplain */,
+            boost::none, /* planSummary */
+            boost::none, /* queryParams */
             boost::none /* remotePlanInfo */,
-            ExplainOptions::Verbosity::kExecAllPlans);
+            ExplainOptions::Verbosity::kExecAllPlans,
+            _matchesCachedPlan);
     }
     return getWinningPlanStats(ExplainOptions::Verbosity::kExecAllPlans);
 }
@@ -611,8 +640,11 @@ std::vector<PlanExplainer::PlanStatsDetails> PlanExplainerSBE::getRejectedPlansS
                                             *stats,
                                             execPlanDebugInfo,
                                             boost::none /* optimizerExplain */,
+                                            boost::none, /* planSummary */
+                                            boost::none /* queryParams */,
                                             boost::none /* remotePlanInfo */,
-                                            verbosity));
+                                            verbosity,
+                                            candidate.matchesCachedPlan));
     }
     return res;
 }

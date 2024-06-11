@@ -35,6 +35,7 @@
 #include <set>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "mongo/base/string_data.h"
@@ -44,14 +45,13 @@
 #include "mongo/db/collection_type.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/db/views/view.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
@@ -505,11 +505,13 @@ LockMode getLockModeForQuery(OperationContext* opCtx, const NamespaceStringOrUUI
 class EnforcePrepareConflictsBlock {
 public:
     explicit EnforcePrepareConflictsBlock(OperationContext* opCtx)
-        : _opCtx(opCtx), _originalValue(opCtx->recoveryUnit()->getPrepareConflictBehavior()) {
+        : _opCtx(opCtx),
+          _originalValue(shard_role_details::getRecoveryUnit(opCtx)->getPrepareConflictBehavior()) {
         // It is illegal to call setPrepareConflictBehavior() while any storage transaction is
         // active. setPrepareConflictBehavior() invariants that there is no active storage
         // transaction.
-        _opCtx->recoveryUnit()->setPrepareConflictBehavior(PrepareConflictBehavior::kEnforce);
+        shard_role_details::getRecoveryUnit(_opCtx)->setPrepareConflictBehavior(
+            PrepareConflictBehavior::kEnforce);
     }
 
     ~EnforcePrepareConflictsBlock() {
@@ -519,14 +521,14 @@ public:
         // to call abandonSnapshot() to close any open transactions on destruction. Any reads or
         // writes should have already completed as we are exiting the scope. Therefore, this call is
         // safe.
-        if (_opCtx->lockState()->isLocked()) {
-            _opCtx->recoveryUnit()->abandonSnapshot();
+        if (shard_role_details::getLocker(_opCtx)->isLocked()) {
+            shard_role_details::getRecoveryUnit(_opCtx)->abandonSnapshot();
         }
         // It is illegal to call setPrepareConflictBehavior() while any storage transaction is
         // active. There should not be any active transaction if we are not holding locks. If locks
         // are still being held, the above abandonSnapshot() call should have already closed all
         // storage transactions.
-        _opCtx->recoveryUnit()->setPrepareConflictBehavior(_originalValue);
+        shard_role_details::getRecoveryUnit(_opCtx)->setPrepareConflictBehavior(_originalValue);
     }
 
 private:

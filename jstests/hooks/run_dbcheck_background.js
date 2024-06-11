@@ -23,6 +23,9 @@ const conn = db.getMongo();
 const topology = DiscoverTopology.findConnectedNodes(conn);
 
 const exceptionFilteredBackgroundDbCheck = function(hosts) {
+    // Set a higher rate to let 'maxDocsPerBatch' be the only limiting factor.
+    assert.commandWorkedOrFailedWithCode(
+        db.adminCommand({setParameter: 1, maxDbCheckMBperSec: 1024}), ErrorCodes.InvalidOptions);
     const runBackgroundDbCheck = function(hosts) {
         const quietly = (func) => {
             const printOriginal = print;
@@ -71,7 +74,10 @@ const exceptionFilteredBackgroundDbCheck = function(hosts) {
 
         dbNames.forEach((dbName) => {
             jsTestLog("dbCheck is starting on database " + dbName + " for RS: " + rst.getURL());
-            runDbCheckForDatabase(rst, primary.getDB(dbName), true /*awaitCompletion*/);
+            runDbCheckForDatabase(rst,
+                                  primary.getDB(dbName),
+                                  true /*awaitCompletion*/,
+                                  20 * 60 * 1000 /*awaitCompletionTimeoutMs*/);
             jsTestLog("dbCheck is done on database " + dbName + " for RS: " + rst.getURL());
         });
 

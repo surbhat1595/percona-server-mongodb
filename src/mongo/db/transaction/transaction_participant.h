@@ -54,7 +54,6 @@
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_stats.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -75,6 +74,7 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/transaction/transaction_metrics_observer.h"
 #include "mongo/db/transaction/transaction_operations.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/mutable_observer_registry.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/stdx/unordered_map.h"
@@ -372,8 +372,16 @@ public:
             return o().txnState.isInRetryableWriteMode();
         }
 
-        const std::vector<NamespaceString>& affectedNamespaces() const {
+        const absl::flat_hash_set<NamespaceString>& affectedNamespaces() const {
             return o().affectedNamespaces;
+        }
+
+        bool isValid() const {
+            return o().isValid;
+        }
+
+        bool hasIncompleteHistory() const {
+            return o().hasIncompleteHistory;
         }
 
         /**
@@ -600,7 +608,7 @@ public:
          *
          * On secondary, the "prepareTimestamp" will be given in the oplog.
          */
-        std::pair<Timestamp, std::vector<NamespaceString>> prepareTransaction(
+        std::pair<Timestamp, absl::flat_hash_set<NamespaceString>> prepareTransaction(
             OperationContext* opCtx, boost::optional<repl::OpTime> prepareOptime);
 
         /**
@@ -686,6 +694,12 @@ public:
         void onWriteOpCompletedOnPrimary(OperationContext* opCtx,
                                          std::vector<StmtId> stmtIdsWritten,
                                          const SessionTxnRecord& sessionTxnRecord);
+
+        /**
+         * Called after a retryable write was completed so we can mark the given namespace
+         * as affected by the current oplog chain.
+         */
+        void addToAffectedNamespaces(OperationContext* opCtx, const NamespaceString& nss);
 
         /**
          * Called after an entry for the specified session and transaction has been written to the
@@ -810,7 +824,7 @@ public:
             stdx::lock_guard<Client> lk(*opCtx->getClient());
             o(lk).prepareOpTime = prepareOpTime;
             o(lk).txnState.transitionTo(TransactionState::kPrepared);
-            opCtx->lockState()->unlockRSTLforPrepare();
+            shard_role_details::getLocker(opCtx)->unlockRSTLforPrepare();
         }
 
         void transitionToAbortedWithoutPrepareforTest(OperationContext* opCtx) {
@@ -1025,7 +1039,7 @@ public:
         void _invalidate(WithLock);
 
         // Helper that resets the retryable writes state.
-        void _resetRetryableWriteState();
+        void _resetRetryableWriteState(WithLock wl);
 
         // Helper that resets the transactional state. This is used when aborting a transaction,
         // invalidating a transaction, or starting a new transaction. It releases the Client lock
@@ -1198,7 +1212,7 @@ private:
         TransactionMetricsObserver transactionMetricsObserver;
 
         // Contains a list of affected namespaces to be reported to transaction coordinator.
-        std::vector<NamespaceString> affectedNamespaces;
+        absl::flat_hash_set<NamespaceString> affectedNamespaces;
 
         // Maintains a copy of ReadConcernArgs, this allows the worker thread to perform
         // intermediate changes to its own ReadConcernArgs when fetching the transaction state or
@@ -1208,6 +1222,13 @@ private:
         // This value is set at the beginning of a transaction and reflects the user's ReadConcern
         // preferences.
         repl::ReadConcernArgs readConcernArgs;
+
+        // Specifies whether the session information needs to be refreshed from storage
+        bool isValid{false};
+
+        // Set to true if incomplete history is detected. For example, when the oplog to a write was
+        // truncated because it was too old.
+        bool hasIncompleteHistory{false};
     } _o;
 
     /**
@@ -1216,9 +1237,6 @@ private:
      * the Participant.
      */
     struct PrivateState {
-        // Specifies whether the session information needs to be refreshed from storage
-        bool isValid{false};
-
         // Only set if the server is shutting down and it has been ensured that no new requests will
         // be accepted. Ensures that any transaction resources will not be stashed from the
         // operation context onto the transaction participant when the session is checked-in so that
@@ -1236,10 +1254,6 @@ private:
         //
         // Retryable writes state
         //
-
-        // Set to true if incomplete history is detected. For example, when the oplog to a write was
-        // truncated because it was too old.
-        bool hasIncompleteHistory{false};
 
         // For the active txn, tracks which statement ids have been committed and at which oplog
         // opTime. Used for fast retryability check and retrieving the previous write's data without

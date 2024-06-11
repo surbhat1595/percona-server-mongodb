@@ -70,10 +70,8 @@ namespace mongo {
 
 using unittest::assertGet;
 
-const NamespaceString QueryPlannerTest::nss =
-    NamespaceString::createNamespaceString_forTest("test.collection");
-
 void QueryPlannerTest::setUp() {
+    nss = NamespaceString::createNamespaceString_forTest("test.collection");
     opCtx = serviceContext.makeOperationContext();
     expCtx = make_intrusive<ExpressionContext>(
         opCtx.get(), std::unique_ptr<CollatorInterface>(nullptr), nss);
@@ -91,19 +89,21 @@ void QueryPlannerTest::clearState() {
 }
 
 void QueryPlannerTest::addIndex(BSONObj keyPattern, bool multikey) {
-    params.indices.push_back({keyPattern,
-                              IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                              IndexDescriptor::kLatestIndexVersion,
-                              multikey,
-                              {},
-                              {},
-                              false,  // sparse
-                              false,  // unique
-                              IndexEntry::Identifier{"hari_king_of_the_stove"},
-                              nullptr,  // filterExpr
-                              BSONObj(),
-                              nullptr,
-                              nullptr});
+    params.indices.push_back(
+        {keyPattern,
+         IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
+         IndexDescriptor::kLatestIndexVersion,
+         multikey,
+         {},
+         {},
+         false,  // sparse
+         false,  // unique
+         // Add the position to the name so we have a unique set of index names.
+         IndexEntry::Identifier{"hari_king_of_the_stove" + std::to_string(params.indices.size())},
+         nullptr,  // filterExpr
+         BSONObj(),
+         nullptr,
+         nullptr});
 }
 
 void QueryPlannerTest::addIndex(BSONObj keyPattern, bool multikey, bool sparse) {
@@ -295,7 +295,7 @@ void QueryPlannerTest::runQuery(BSONObj query) {
 void QueryPlannerTest::runQueryWithPipeline(
     BSONObj query,
     BSONObj proj,
-    std::vector<std::unique_ptr<InnerPipelineStageInterface>> queryLayerPipeline) {
+    std::vector<boost::intrusive_ptr<DocumentSource>> queryLayerPipeline) {
     runQueryFull(query,
                  BSONObj(),
                  proj,
@@ -351,16 +351,15 @@ void QueryPlannerTest::runQuerySortProjSkipLimitHint(const BSONObj& query,
     runQueryFull(query, sort, proj, skip, limit, hint, BSONObj(), BSONObj());
 }
 
-void QueryPlannerTest::runQueryFull(
-    const BSONObj& query,
-    const BSONObj& sort,
-    const BSONObj& proj,
-    long long skip,
-    long long limit,
-    const BSONObj& hint,
-    const BSONObj& minObj,
-    const BSONObj& maxObj,
-    std::vector<std::unique_ptr<InnerPipelineStageInterface>> pipeline) {
+void QueryPlannerTest::runQueryFull(const BSONObj& query,
+                                    const BSONObj& sort,
+                                    const BSONObj& proj,
+                                    long long skip,
+                                    long long limit,
+                                    const BSONObj& hint,
+                                    const BSONObj& minObj,
+                                    const BSONObj& maxObj,
+                                    std::vector<boost::intrusive_ptr<DocumentSource>> pipeline) {
     clearState();
 
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
@@ -465,7 +464,6 @@ void QueryPlannerTest::runInvalidQueryFull(const BSONObj& query,
     plannerStatus = statusWithMultiPlanSolns.getStatus();
     ASSERT_NOT_OK(plannerStatus);
 }
-
 
 void QueryPlannerTest::runQueryAsCommand(const BSONObj& cmdObj) {
     clearState();

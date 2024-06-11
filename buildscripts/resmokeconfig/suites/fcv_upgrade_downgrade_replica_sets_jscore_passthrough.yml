@@ -23,8 +23,10 @@ selector:
   # Transactions are aborted upon fcv upgrade or downgrade.
   - uses_transactions
   # Exclude tests that require a specific fcv.
+  # Once SERVER-81054 is complete this is no longer needed.
   - requires_fcv_71
   - requires_fcv_72
+  - requires_fcv_73
   # Exclude tests that are not compatible with upgrade/downgrade.
   - cannot_run_during_upgrade_downgrade
 
@@ -108,10 +110,19 @@ executor:
       eval: >-
         globalThis.testingReplication = true;
         await import("jstests/libs/override_methods/retry_aborted_db_and_index_creation.js");
+      global_vars:
+        TestData:
+          nonClusteredConfigTransactions: true
   hooks:
   - class: CheckReplOplogs
   - class: CheckReplDBHash
   - class: ValidateCollections
+    shell_options:
+      global_vars:
+        TestData:
+          # Skip enforcing this check in FCV upgrade/downgrade suites as time-series buckets are not
+          # always compressed in a downgraded FCV.
+          skipEnforceTimeseriesBucketsAreAlwaysCompressedOnValidate: true
   - class: FCVUpgradeDowngradeInBackground
   - class: CleanEveryN
     n: 20

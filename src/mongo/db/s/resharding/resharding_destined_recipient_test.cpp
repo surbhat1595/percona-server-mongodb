@@ -75,7 +75,6 @@
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/s/sharding_mongod_test_fixture.h"
-#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/sharding_write_router.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id.h"
@@ -145,7 +144,6 @@ class DestinedRecipientTest : public ShardServerTestFixtureWithCatalogCacheLoade
 public:
     const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("test.foo");
     const std::string kShardKey = "x";
-    const HostAndPort kConfigHostAndPort{"DummyConfig", 12345};
     const std::vector<ShardType> kShardList = {ShardType(_myShardName.toString(), "Host0:12345"),
                                                ShardType("shard1", "Host1:12345")};
 
@@ -175,7 +173,9 @@ public:
         StaticCatalogClient(std::vector<ShardType> shards) : _shards(std::move(shards)) {}
 
         StatusWith<repl::OpTimeWith<std::vector<ShardType>>> getAllShards(
-            OperationContext* opCtx, repl::ReadConcernLevel readConcern) override {
+            OperationContext* opCtx,
+            repl::ReadConcernLevel readConcern,
+            bool excludeDraining) override {
             return repl::OpTimeWith<std::vector<ShardType>>(_shards);
         }
         std::vector<CollectionType> getShardedCollections(OperationContext* opCtx,

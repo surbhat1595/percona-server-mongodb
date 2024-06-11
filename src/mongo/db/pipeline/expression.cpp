@@ -77,6 +77,7 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_parser_gen.h"
 #include "mongo/db/pipeline/variable_validation.h"
+#include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/query_knobs_gen.h"
@@ -115,13 +116,14 @@ Value ExpressionConstant::serializeConstant(const SerializationOptions& opts, Va
     if (val.missing()) {
         return Value("$$REMOVE"_sd);
     }
-    if (opts.literalPolicy == LiteralSerializationPolicy::kToDebugTypeString) {
+    // Debug and representative serialization policies do not wrap constants with $const in order to
+    // reduce verbosity/size of the resulting query shape. The $const is not needed to disambiguate
+    // in these cases, since we never choose a value which could be mis-construed as an expression,
+    // such as a string starting with a '$' or an object with a $-prefixed field name.
+    if (opts.literalPolicy != LiteralSerializationPolicy::kUnchanged) {
         return opts.serializeLiteral(val);
     }
 
-    // Other serialization policies need to include this $const in order to be unambiguous for
-    // re-parsing this output later. If for example the constant was '$cashMoney' - we don't want to
-    // misinterpret it as a field path when parsing.
     return Value(DOC("$const" << opts.serializeLiteral(val)));
 }
 
@@ -246,19 +248,8 @@ intrusive_ptr<Expression> Expression::parseExpression(ExpressionContext* const e
             str::stream() << "Unrecognized expression '" << opName << "'",
             it != parserMap.end());
 
-    // Make sure we are allowed to use this expression under the current feature compatibility
-    // version.
     auto& entry = it->second;
-    uassert(ErrorCodes::QueryFeatureNotAllowed,
-            // We would like to include the current version and the required minimum version in this
-            // error message, but using FeatureCompatibilityVersion::toString() would introduce a
-            // dependency cycle (see SERVER-31968).
-            str::stream() << opName
-                          << " is not allowed in the current feature compatibility version. See "
-                          << feature_compatibility_version_documentation::kCompatibilityLink
-                          << " for more information.",
-            !expCtx->maxFeatureCompatibilityVersion || !entry.featureFlag ||
-                entry.featureFlag->isEnabledOnVersion(*expCtx->maxFeatureCompatibilityVersion));
+    expCtx->throwIfFeatureFlagIsNotEnabledOnFCV(opName, entry.featureFlag);
 
     if (expCtx->opCtx) {
         assertLanguageFeatureIsAllowed(
@@ -290,7 +281,7 @@ intrusive_ptr<Expression> Expression::parseOperand(ExpressionContext* const expC
                                                    const VariablesParseState& vps) {
     BSONType type = exprElement.type();
 
-    if (type == String && exprElement.valueStringData()[0] == '$') {
+    if (type == String && exprElement.valueStringData().starts_with('$')) {
         /* if we got here, this is a field path expression */
         return ExpressionFieldPath::parse(expCtx, exprElement.str(), vps);
     } else if (type == Object) {
@@ -3243,7 +3234,15 @@ intrusive_ptr<Expression> ExpressionMeta::parse(ExpressionContext* const expCtx,
 
 ExpressionMeta::ExpressionMeta(ExpressionContext* const expCtx, MetaType metaType)
     : Expression(expCtx), _metaType(metaType) {
-    expCtx->sbeCompatibility = SbeCompatibility::notCompatible;
+    switch (_metaType) {
+        case MetaType::kSearchScore:
+        case MetaType::kSearchHighlights:
+        case MetaType::kSearchScoreDetails:
+        case MetaType::kSearchSequenceToken:
+            break;
+        default:
+            expCtx->sbeCompatibility = SbeCompatibility::notCompatible;
+    }
 }
 
 Value ExpressionMeta::serialize(const SerializationOptions& options) const {
@@ -3334,9 +3333,7 @@ StatusWith<Value> ExpressionMod::apply(Value lhs, Value rhs) {
             return Status(ErrorCodes::Error(16610), str::stream() << "can't $mod by zero");
         };
 
-        if (leftType == NumberDouble || (rightType == NumberDouble && !rhs.integral())) {
-            // Need to do fmod. Integer-valued double case is handled below.
-
+        if (leftType == NumberDouble || rightType == NumberDouble) {
             double left = lhs.coerceToDouble();
             return Value(fmod(left, right));
         }
@@ -6963,11 +6960,26 @@ boost::intrusive_ptr<Expression> ExpressionConvert::optimize() {
 }
 
 Value ExpressionConvert::serialize(const SerializationOptions& options) const {
+    // Since the 'to' field is a parameter from a set of valid values and not free user input,
+    // we want to avoid boiling it down to the representative value in the query shape. The first
+    // condition is so that we can keep serializing correctly whenever the 'to' field is an
+    // expression that gets resolved down to a string of a valid type, or its corresponding
+    // numerical value. If it's just the constant, we want to wrap it in a $const except when the
+    // serialization policy is debug.
+    auto constExpr = dynamic_cast<ExpressionConstant*>(_children[_kTo].get());
+    Value toField = Value();
+    if (!constExpr) {
+        toField = _children[_kTo]->serialize(options);
+    } else if (options.literalPolicy == LiteralSerializationPolicy::kToDebugTypeString) {
+        toField = constExpr->getValue();
+    } else {
+        toField = Value(DOC("$const" << constExpr->getValue()));
+    }
     return Value(Document{
         {"$convert",
          Document{
              {"input", _children[_kInput]->serialize(options)},
-             {"to", _children[_kTo]->serialize(options)},
+             {"to", toField},
              {"onError", _children[_kOnError] ? _children[_kOnError]->serialize(options) : Value()},
              {"onNull",
               _children[_kOnNull] ? _children[_kOnNull]->serialize(options) : Value()}}}});
@@ -7096,11 +7108,12 @@ Value ExpressionRegex::nextMatch(RegexExecutionState* regexState) const {
         // No match.
         return Value(BSONNULL);
 
-    StringData beforeMatch(m.input().begin() + m.startPos(), m[0].begin());
+    auto afterStart = m.input().substr(m.startPos());
+    auto beforeMatch = afterStart.substr(0, m[0].data() - afterStart.data());
     regexState->startCodePointPos += str::lengthInUTF8CodePoints(beforeMatch);
 
     // Set the start index for match to the new one.
-    regexState->startBytePos = m[0].begin() - m.input().begin();
+    regexState->startBytePos = m[0].data() - m.input().data();
 
     std::vector<Value> captures;
     captures.reserve(m.captureCount());
@@ -7341,6 +7354,8 @@ Value ExpressionRegexFindAll::evaluate(const Document& root, Variables* variable
             // the character at startByteIndex matches the regex, we cannot return it since we are
             // already returing an empty string starting at this index. So we move on to the next
             // byte index.
+            if (static_cast<size_t>(executionState.startBytePos) >= input.size())
+                continue;  // input already exhausted
             executionState.startBytePos +=
                 str::getCodePointLength(input[executionState.startBytePos]);
             ++executionState.startCodePointPos;
@@ -8180,6 +8195,85 @@ REGISTER_STABLE_EXPRESSION(bitXor, ExpressionBitXor::parse);
 
 MONGO_INITIALIZER_GROUP(BeginExpressionRegistration, ("default"), ("EndExpressionRegistration"))
 MONGO_INITIALIZER_GROUP(EndExpressionRegistration, ("BeginExpressionRegistration"), ())
+
+/* ----------------------- ExpressionInternalKeyStringValue ---------------------------- */
+
+REGISTER_STABLE_EXPRESSION(_internalKeyStringValue, ExpressionInternalKeyStringValue::parse);
+
+boost::intrusive_ptr<Expression> ExpressionInternalKeyStringValue::parse(
+    ExpressionContext* expCtx, BSONElement expr, const VariablesParseState& vps) {
+
+    uassert(
+        8281500,
+        str::stream() << "$_internalKeyStringValue only supports an object as its argument, not "
+                      << typeName(expr.type()),
+        expr.type() == BSONType::Object);
+
+    boost::intrusive_ptr<Expression> inputExpr;
+    boost::intrusive_ptr<Expression> collationExpr;
+
+    for (auto&& element : expr.embeddedObject()) {
+        auto field = element.fieldNameStringData();
+        if ("input"_sd == field) {
+            inputExpr = parseOperand(expCtx, element, vps);
+        } else if ("collation"_sd == field) {
+            collationExpr = parseOperand(expCtx, element, vps);
+        } else {
+            uasserted(8281501,
+                      str::stream() << "Unrecognized argument to $_internalKeyStringValue: "
+                                    << element.fieldName());
+        }
+    }
+    uassert(8281502,
+            str::stream() << "$_internalKeyStringValue requires 'input' to be specified",
+            inputExpr);
+
+    return make_intrusive<ExpressionInternalKeyStringValue>(expCtx, inputExpr, collationExpr);
+}
+
+Value ExpressionInternalKeyStringValue::serialize(const SerializationOptions& options) const {
+    return Value(
+        Document{{getOpName(),
+                  Document{{"input", _children[_kInput]->serialize(options)},
+                           {"collation",
+                            _children[_kCollation] ? _children[_kCollation]->serialize(options)
+                                                   : Value()}}}});
+}
+
+Value ExpressionInternalKeyStringValue::evaluate(const Document& root, Variables* variables) const {
+    const Value input = _children[_kInput]->evaluate(root, variables);
+    auto inputBson = input.wrap("");
+
+    std::unique_ptr<CollatorInterface> collator = nullptr;
+    if (_children[_kCollation]) {
+        const Value collation = _children[_kCollation]->evaluate(root, variables);
+        uassert(8281503,
+                str::stream() << "Collation spec must be an object, not "
+                              << typeName(collation.getType()),
+                collation.isObject());
+        auto collationBson = collation.getDocument().toBson();
+
+        auto collatorFactory =
+            CollatorFactoryInterface::get(getExpressionContext()->opCtx->getServiceContext());
+        collator = uassertStatusOKWithContext(collatorFactory->makeFromBSON(collationBson),
+                                              "Invalid collation spec");
+    }
+
+    key_string::HeapBuilder ksBuilder(key_string::Version::V1);
+    if (collator) {
+        ksBuilder.appendBSONElement(inputBson.firstElement(), [&](StringData str) {
+            return collator->getComparisonString(str);
+        });
+    } else {
+        ksBuilder.appendBSONElement(inputBson.firstElement());
+    }
+    auto ksValue = ksBuilder.release();
+
+    // The result omits the typebits so that the numeric value of different types have the same
+    // binary representation.
+    return Value(
+        BSONBinData{ksValue.getBuffer(), static_cast<int>(ksValue.getSize()), BinDataGeneral});
+}
 
 /* --------------------------------- Parenthesis --------------------------------------------- */
 

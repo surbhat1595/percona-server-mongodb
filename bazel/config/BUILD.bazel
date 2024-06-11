@@ -1,4 +1,36 @@
-load("//bazel/config:configs.bzl", "build_mode", "compiler_type", "use_libunwind", "use_gdbserver", "spider_monkey_dbg")
+load(
+    "//bazel/config:configs.bzl",
+    "build_mode",
+    "compiler_type",
+    "libunwind",
+    "use_gdbserver",
+    "spider_monkey_dbg",
+    "allocator",
+    "use_lldbserver",
+    "use_wait_for_debugger",
+    "use_disable_ref_track",
+    "use_ocsp_stapling",
+    "asan",
+    "fsan",
+    "lsan",
+    "msan",
+    "tsan",
+    "ubsan",
+    "use_wiredtiger",
+    "use_glibcxx_debug",
+    "use_libcxx",
+    "build_grpc",
+    "separate_debug",
+    "http_client",
+    "linkstatic",
+    "use_diagnostic_latches",
+    "shared_archive",
+    "linker",
+    "detect_odr_violations",
+    "build_enterprise",
+)
+
+load("@bazel_skylib//lib:selects.bzl", "selects")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -25,6 +57,13 @@ config_setting(
     },
 )
 
+config_setting(
+    name = "compiler_type_msvc",
+    flag_values = {
+        "//bazel/config:compiler_type": "msvc",
+    },
+)
+
 # --------------------------------------
 # Architecture + OS combinations
 # --------------------------------------
@@ -46,10 +85,10 @@ config_setting(
 )
 
 config_setting(
-    name = "linux_ppc",
+    name = "linux_ppc64le",
     constraint_values = [
         "@platforms//os:linux",
-        "@platforms//cpu:ppc",
+        "@platforms//cpu:ppc64le",
     ],
 )
 
@@ -67,6 +106,27 @@ config_setting(
         "@platforms//os:windows",
         "@platforms//cpu:x86_64",
     ],
+)
+
+config_setting(
+    name = "macos_x86_64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "macos_aarch64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+selects.config_setting_group(
+    name = "not_windows",
+    match_any = ["@platforms//os:macos", "@platforms//os:linux"],
 )
 
 # ==========
@@ -209,19 +269,75 @@ config_setting(
 )
 
 # --------------------------------------
-# Libunwind options
+# linker options
 # --------------------------------------
 
-use_libunwind(
-    name = "use_libunwind",
-    build_setting_default = False,
+linker(
+    name = "linker",
+    build_setting_default = "lld",
 )
 
 config_setting(
-    name = "use_libunwind_enabled",
+    name = "linker_gold",
     flag_values = {
-        "//bazel/config:use_libunwind": "True",
+        "//bazel/config:linker": "gold",
     },
+)
+
+config_setting(
+    name = "linker_lld",
+    flag_values = {
+        "//bazel/config:linker": "lld",
+    },
+)
+
+# --------------------------------------
+# libunwind options
+# --------------------------------------
+
+libunwind(
+    name = "libunwind",
+    build_setting_default = "auto",
+)
+
+# Underscored settings are for flagging configuration errors and for evaluating auto.
+# Use :libunwind_enabled to check the final result of whether or not it's enabled.
+config_setting(
+    name = "_libunwind_on",
+    flag_values = {
+        "//bazel/config:libunwind": "on",
+    },
+)
+
+config_setting(
+    name = "_libunwind_off",
+    flag_values = {
+        "//bazel/config:libunwind": "off",
+    },
+)
+
+config_setting(
+    name = "_libunwind_auto",
+    flag_values = {
+        "//bazel/config:libunwind": "auto",
+    },
+)
+
+selects.config_setting_group(
+    name = "_libunwind_enabled_by_auto",
+    match_all = [":_libunwind_auto", "@platforms//os:linux"],
+)
+
+selects.config_setting_group(
+    name = "_libunwind_enabled_by_on",
+    match_all = [":_libunwind_on", "@platforms//os:linux"],
+)
+
+# Final setting intended for external use.
+#   (libunwind == on && os == linux) || (libunwind == auto && os == linux)
+selects.config_setting_group(
+    name = "libunwind_enabled",
+    match_any = [":_libunwind_enabled_by_on", ":_libunwind_enabled_by_auto"],
 )
 
 # --------------------------------------
@@ -255,5 +371,569 @@ config_setting(
     name = "spider_monkey_dbg_enabled",
     flag_values = {
         "//bazel/config:spider_monkey_dbg": "True",
+    }
+)
+
+# --------------------------------------
+# allocator options
+# --------------------------------------
+
+allocator(
+    name = "allocator",
+    build_setting_default = "auto",
+)
+
+config_setting(
+    name = "auto_allocator_linux",
+    constraint_values = [
+        "@platforms//os:linux",
+    ],
+    flag_values = {
+        "//bazel/config:allocator": "auto",
+    },
+)
+
+config_setting(
+    name = "auto_allocator_windows",
+    constraint_values = [
+        "@platforms//os:windows",
+    ],
+    flag_values = {
+        "//bazel/config:allocator": "auto",
+    },
+)
+
+config_setting(
+    name = "auto_allocator",
+    flag_values = {
+        "//bazel/config:allocator": "auto",
+    },
+)
+
+config_setting(
+    name = "system_allocator",
+    flag_values = {
+        "//bazel/config:allocator": "system",
+    },
+)
+
+config_setting(
+    name = "tcmalloc_allocator",
+    flag_values = {
+        "//bazel/config:allocator": "tcmalloc",
+    },
+)
+
+# --------------------------------------
+# gdbserver options
+# --------------------------------------
+
+use_lldbserver(
+    name = "use_lldbserver",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "use_lldbserver_enabled",
+    flag_values = {
+        "//bazel/config:use_lldbserver": "True",
+    }
+)
+
+# --------------------------------------
+# wait-for-debugger options
+# --------------------------------------
+
+use_wait_for_debugger(
+    name = "use_wait_for_debugger",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "use_wait_for_debugger_enabled",
+    flag_values = {
+        "//bazel/config:use_wait_for_debugger": "True",
+    }
+)
+
+
+# --------------------------------------
+# ocsp-stapling options
+# --------------------------------------
+
+use_ocsp_stapling(
+    name = "use_ocsp_stapling",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "use_ocsp_stapling_enabled",
+    flag_values = {
+        "//bazel/config:use_ocsp_stapling": "True",
+    }
+)
+
+# --------------------------------------
+# disable-ref-track options
+# --------------------------------------
+
+use_disable_ref_track(
+    name = "use_disable_ref_track",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "use_disable_ref_track_enabled",
+    flag_values = {
+        "//bazel/config:use_disable_ref_track": "True",
+    },
+)
+
+# --------------------------------------
+# wiredtiger options
+# --------------------------------------
+
+use_wiredtiger(
+    name = "use_wiredtiger",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "use_wiredtiger_enabled",
+    flag_values = {
+        "//bazel/config:use_wiredtiger": "True",
+    },
+)
+
+# --------------------------------------
+# glibcxx debug options
+# --------------------------------------
+
+use_glibcxx_debug(
+    name = "use_glibcxx_debug",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "use_glibcxx_debug_enabled",
+    flag_values = {
+        "//bazel/config:use_glibcxx_debug": "True",
+    },
+)
+
+config_setting(
+    name = "use_glibcxx_debug_disabled",
+    flag_values = {
+        "//bazel/config:use_glibcxx_debug": "False",
+    },
+)
+
+# --------------------------------------------
+# ------- computed glibcxx debug flags -------
+
+# If we are using a modern libstdc++ and this is a debug build and we control all C++
+# dependencies, then turn on the debugging features in libstdc++.
+selects.config_setting_group(
+    name = "use_glibcxx_debug_required_settings",
+    #TODO SERVER-84714 add check to ensure we are using the toolchain version of C++ libs
+    match_all = [":use_glibcxx_debug_enabled", ":dbg", ":use_libcxx_disabled"],
+)
+
+
+# --------------------------------------
+# libc++ options
+# --------------------------------------
+
+use_libcxx(
+    name = "use_libcxx",
+    build_setting_default = False,
+)
+
+# TODO SERVER-85340 when libc++ is readded remove the macos constraint
+config_setting(
+    name = "use_libcxx_enabled",
+    flag_values = {
+        "//bazel/config:use_libcxx": "True",
+    },
+    constraint_values = [
+        "@platforms//os:macos",
+    ],
+)
+
+config_setting(
+    name = "use_libcxx_disabled",
+    flag_values = {
+        "//bazel/config:use_libcxx": "False",
+    },
+)
+
+# --------------------------------------------
+# ----------- computed libc++ flags ----------
+selects.config_setting_group(
+    name = "use_libcxx_required_settings",
+    match_all = [":use_libcxx_enabled", ":compiler_type_clang"],
+)
+
+# --------------------------------------
+# grpc options
+# --------------------------------------
+
+build_grpc(
+    name = "build_grpc",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "build_grpc_enabled",
+    constraint_values = [
+        "@platforms//os:linux",
+    ],
+    flag_values = {
+        "//bazel/config:build_grpc": "True",
+    },
+)
+
+# --------------------------------------
+# linkstatic options
+# --------------------------------------
+
+linkstatic(
+    name = "linkstatic",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "linkstatic_enabled",
+    flag_values = {
+        "//bazel/config:linkstatic": "True",
+    },
+)
+
+config_setting(
+    name = "linkstatic_disabled",
+    flag_values = {
+        "//bazel/config:linkstatic": "False",
+    },
+)
+
+selects.config_setting_group(
+    name = "linkdynamic_required_settings",
+    match_all = [":linkstatic_disabled", ":not_windows"],
+)
+
+# --------------------------------------
+# sanitizer options
+# --------------------------------------
+
+# ------ address sanitizer --------
+
+asan(
+    name = "asan",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "asan_enabled",
+    flag_values = {
+        "//bazel/config:asan": "True",
+    },
+)
+
+config_setting(
+    name = "asan_disabled",
+    flag_values = {
+        "//bazel/config:asan": "False",
+    },
+)
+
+# ------ fuzzer sanitizer --------
+
+fsan(
+    name = "fsan",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "fsan_enabled",
+    flag_values = {
+        "//bazel/config:fsan": "True",
+    },
+)
+
+config_setting(
+    name = "fsan_disabled",
+    flag_values = {
+        "//bazel/config:fsan": "False",
+    },
+)
+
+# ------ leak sanitizer --------
+
+lsan(
+    name = "lsan",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "lsan_enabled",
+    flag_values = {
+        "//bazel/config:lsan": "True",
+    },
+)
+
+config_setting(
+    name = "lsan_disabled",
+    flag_values = {
+        "//bazel/config:lsan": "False",
+    },
+)
+
+# ------ memory sanitizer --------
+
+msan(
+    name = "msan",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "msan_enabled",
+    flag_values = {
+        "//bazel/config:msan": "True",
+    },
+)
+
+config_setting(
+    name = "msan_disabled",
+    flag_values = {
+        "//bazel/config:msan": "False",
+    },
+)
+
+# ------ thread sanitizer --------
+
+tsan(
+    name = "tsan",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "tsan_enabled",
+    flag_values = {
+        "//bazel/config:tsan": "True",
+    },
+)
+
+config_setting(
+    name = "tsan_disabled",
+    flag_values = {
+        "//bazel/config:tsan": "False",
+    },
+)
+
+# ------ undefined sanitizer --------
+
+ubsan(
+    name = "ubsan",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "ubsan_enabled",
+    flag_values = {
+        "//bazel/config:ubsan": "True",
+    },
+)
+
+config_setting(
+    name = "ubsan_disabled",
+    flag_values = {
+        "//bazel/config:ubsan": "False",
+    },
+)
+
+# --------------------------------------------
+# ----------- computed sanitizer flags -------
+
+selects.config_setting_group(
+    name = "sanitize_build_mode",
+    match_any = [":opt_on", ":opt_debug"],
+)
+
+selects.config_setting_group(
+    name = "all_sanitizer_required_settings",
+    match_all = [":sanitize_build_mode", ":compiler_type_clang"]
+)
+
+selects.config_setting_group(
+    name = "any_enabled_sanitizer",
+    match_any = [":asan_enabled", ":fsan_enabled", ":msan_enabled", ":lsan_enabled", ":tsan_enabled", ":ubsan_enabled"],
+)
+
+selects.config_setting_group(
+    name = "no_enabled_sanitizer",
+    match_all = [":asan_disabled", ":fsan_disabled", ":msan_disabled", ":lsan_disabled", ":tsan_disabled", ":ubsan_disabled"],
+)
+
+selects.config_setting_group(
+    name = "any_sanitizer_required_setting",
+    match_all = [":any_enabled_sanitizer", ":all_sanitizer_required_settings"],
+)
+
+selects.config_setting_group(
+    name = "sanitize_address_required_settings",
+    match_all = [":asan_enabled", ":system_allocator"],
+)
+
+selects.config_setting_group(
+    name = "sanitize_memory_required_settings",
+    match_all = [":msan_enabled", ":system_allocator"],
+)
+
+selects.config_setting_group(
+    name = "sanitize_fuzzer_required_settings",
+    match_all = [":fsan_enabled"],
+)
+
+selects.config_setting_group(
+    name = "sanitize_thread_required_settings",
+    match_all = [":tsan_enabled", ":use_libunwind_disabled", ":linkdynamic_required_settings"],
+)
+
+selects.config_setting_group(
+    name = "sanitize_undefined_without_fuzzer_settings",
+    match_all = [":ubsan_enabled", ":fsan_disabled"],
+)
+
+selects.config_setting_group(
+    name = "sanitize_undefined_dynamic_link_settings",
+    match_all = [":ubsan_enabled", ":linkdynamic_required_settings"],
+)
+
+# --------------------------------------
+# separate_debug options
+# --------------------------------------
+
+separate_debug(
+    name = "separate_debug",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "separate_debug_enabled",
+    flag_values = {
+        "//bazel/config:separate_debug": "True",
+    },
+)
+
+# --------------------------------------
+# http_client options
+# --------------------------------------
+
+http_client(
+    name = "http_client",
+    build_setting_default = True
+)
+
+config_setting(
+    name = "http_client_enabled",
+    flag_values = {
+        "//bazel/config:http_client": "True",
+    }
+)
+
+config_setting(
+    name = "http_client_disabled",
+    flag_values = {
+        "//bazel/config:http_client": "False",
+    },
+)
+
+# --------------------------------------
+# use_diagnostic_latches options
+# --------------------------------------
+
+use_diagnostic_latches(
+    name = "use_diagnostic_latches",
+    build_setting_default = True
+)
+
+config_setting(
+    name = "use_diagnostic_latches_enabled",
+    flag_values = {
+        "//bazel/config:use_diagnostic_latches": "True",
+    }
+)
+
+config_setting(
+    name = "use_diagnostic_latches_disabled",
+    flag_values = {
+        "//bazel/config:use_diagnostic_latches": "False",
+    },
+)
+
+# --------------------------------------
+# shared_archive options
+# --------------------------------------
+
+shared_archive(
+    name = "shared_archive",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "shared_archive_enabled",
+    flag_values = {
+        "//bazel/config:shared_archive": "True",
+    },
+)
+
+# --------------------------------------
+# detect-odr-violations options
+# --------------------------------------
+
+detect_odr_violations(
+    name = "detect_odr_violations",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "detect_odr_violations_enabled",
+    flag_values = {
+        "//bazel/config:detect_odr_violations": "True",
+    },
+)
+
+config_setting(
+    name = "detect_odr_violations_disabled",
+    flag_values = {
+        "//bazel/config:detect_odr_violations": "False",
+    },
+)
+
+selects.config_setting_group(
+    name = "detect_odr_violations_required_settings",
+    match_all = [":opt_off", ":detect_odr_violations_enabled", ":linker_gold"],
+)
+
+# --------------------------------------
+# build_enterprise
+# --------------------------------------
+
+build_enterprise(
+    name = "build_enterprise",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "build_enterprise_enabled",
+    flag_values = {
+        "//bazel/config:build_enterprise": "True",
+    },
+)
+
+config_setting(
+    name = "build_enterprise_disabled",
+    flag_values = {
+        "//bazel/config:build_enterprise": "False",
     },
 )

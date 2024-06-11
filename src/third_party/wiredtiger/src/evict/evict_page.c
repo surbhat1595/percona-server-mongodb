@@ -205,7 +205,6 @@ __wt_evict(WT_SESSION_IMPL *session, WT_REF *ref, uint8_t previous_state, uint32
 
     /* As re-entry into eviction is possible, only clear the statistics on the first entry. */
     if (__wt_session_gen((session), (WT_GEN_EVICT)) == 0) {
-        WT_CLEAR(session->reconcile_timeline);
         WT_CLEAR(session->evict_timeline);
         session->evict_timeline.evict_start = __wt_clock(session);
     } else {
@@ -770,7 +769,7 @@ __evict_review(WT_SESSION_IMPL *session, WT_REF *ref, uint32_t evict_flags, bool
     }
     /*
      * If reconciliation is disabled for this thread (e.g., during an eviction that writes to the
-     * history store), give up.
+     * history store or reading a checkpoint), give up.
      */
     if (F_ISSET(session, WT_SESSION_NO_RECONCILE))
         return (__wt_set_return(session, EBUSY));
@@ -877,14 +876,16 @@ __evict_reconcile(WT_SESSION_IMPL *session, WT_REF *ref, uint32_t evict_flags)
         __wt_txn_bump_snapshot(session);
     else if (use_snapshot_for_app_thread) {
         /*
-         * Application threads entering into eviction saves the existing snapshots and refresh to
-         * acquire a new snapshot to evict the latest data, once the application threads are done
-         * with eviction then the snapshots are switched back to its original snapshots.
+         * If we couldn't make progress with the application thread's existing snapshot, save the
+         * existing snapshot and refresh to acquire a new one. Then try eviction again. Once the
+         * application threads are done with eviction, the application thread's snapshot is switched
+         * back to the original.
          */
-        WT_RET(__wt_txn_snapshot_save_and_refresh(session));
-
-        is_application_thread_snapshot_refreshed = true;
-        WT_STAT_CONN_INCR(session, application_evict_snapshot_refreshed);
+        if (F_ISSET(session->txn, WT_TXN_REFRESH_SNAPSHOT)) {
+            WT_RET(__wt_txn_snapshot_save_and_refresh(session));
+            is_application_thread_snapshot_refreshed = true;
+            WT_STAT_CONN_INCR(session, application_evict_snapshot_refreshed);
+        }
 
         LF_SET(WT_REC_APP_EVICTION_SNAPSHOT);
     } else if (!WT_SESSION_BTREE_SYNC(session))

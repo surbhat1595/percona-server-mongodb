@@ -1,6 +1,6 @@
 /**
  * Tests that additional participants can be added to an existing transaction when the
- * 'featureFlagAdditionalParticipants' is enabled.
+ * 'featureFlagAllowAdditionalParticipants' is enabled.
  */
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
@@ -54,10 +54,10 @@ const testAddingParticipant = function(
     let st = new ShardingTest({shards: 4, causallyConsistent: true});
 
     // SERVER-67748
-    const featureFlagAdditionalParticipants = FeatureFlagUtil.isEnabled(
-        st.configRS.getPrimary().getDB('admin'), "AdditionalParticipants");
-    if (!featureFlagAdditionalParticipants) {
-        jsTestLog("Skipping as featureFlagAdditionalParticipants is  not enabled");
+    const featureFlagAllowAdditionalParticipants = FeatureFlagUtil.isEnabled(
+        st.configRS.getPrimary().getDB('admin'), "AllowAdditionalParticipants");
+    if (!featureFlagAllowAdditionalParticipants) {
+        jsTestLog("Skipping as featureFlagAllowAdditionalParticipants is  not enabled");
         st.stop();
         return;
     }
@@ -82,8 +82,8 @@ const testAddingParticipant = function(
     // shard0: [-inf, 0)
     // shard1: [0, 10)
     // shard2: [10, +inf)
-    assert.commandWorked(st.s.adminCommand({enableSharding: dbName}));
-    assert.commandWorked(st.s.adminCommand({movePrimary: dbName, to: coordinator.shardName}));
+    assert.commandWorked(
+        st.s.adminCommand({enableSharding: dbName, primaryShard: coordinator.shardName}));
     assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {_id: 1}}));
     assert.commandWorked(st.s.adminCommand({split: ns, middle: {_id: 0}}));
     assert.commandWorked(st.s.adminCommand({split: ns, middle: {_id: 10}}));

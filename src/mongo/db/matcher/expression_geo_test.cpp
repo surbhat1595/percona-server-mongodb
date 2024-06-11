@@ -405,4 +405,183 @@ TEST(ExpressionGeoTest, SerializeWithCRSIFSpecifiedWithChangedOptions) {
         })",
         serialized);
 }
+
+template <typename CreateFn>
+void assertRepresentativeShapeIsStable(BSONObj inputExpr,
+                                       BSONObj expectedRepresentativeExpr,
+                                       CreateFn createFn) {
+    auto opts = SerializationOptions{LiteralSerializationPolicy::kToRepresentativeParseableValue};
+    auto ge(createFn(inputExpr));
+
+    auto serializedExpr = ge->getSerializedRightHandSide(opts);
+    ASSERT_BSONOBJ_EQ(serializedExpr, expectedRepresentativeExpr);
+
+    auto roundTripped = createFn(serializedExpr);
+    ASSERT_BSONOBJ_EQ(roundTripped->getSerializedRightHandSide(opts), serializedExpr);
+}
+
+void assertRepresentativeGeoShapeIsStable(BSONObj inputExpr, BSONObj expectedRepresentativeExpr) {
+    assertRepresentativeShapeIsStable(
+        inputExpr, expectedRepresentativeExpr, [](const BSONObj& input) {
+            return makeGeoMatchExpression(input);
+        });
+}
+
+void assertRepresentativeGeoNearShapeIsStable(BSONObj inputExpr,
+                                              BSONObj expectedRepresentativeExpr) {
+    assertRepresentativeShapeIsStable(
+        inputExpr, expectedRepresentativeExpr, [](const BSONObj& input) {
+            return makeGeoNearMatchExpression(input);
+        });
+}
+
+TEST(ExpressionGeoTest, RoundTripSerializeGeoExpressions) {
+    assertRepresentativeGeoShapeIsStable(fromjson("{$within: {$box: [{x: 4, y: 4}, [6, 6]]}}"),
+                                         fromjson("{$within: {$box: [[1, 1],[1, 1]]}}"));
+
+    assertRepresentativeGeoShapeIsStable(
+        fromjson(
+            R"({$geoWithin: {$geometry: {type: "MultiPolygon", coordinates: [[[[20.0, 70.0],[30.0, 70.0],[30.0, 50.0],[20.0, 50.0],[20.0, 70.0]]]]}}})"),
+        fromjson(
+            R"({$geoWithin: {$geometry: {type: "MultiPolygon", coordinates: [[[[0, 0],[0, 1],[1, 1],[0, 0]]]]}}})"));
+
+    assertRepresentativeGeoShapeIsStable(fromjson(R"({
+                "$geoIntersects": {
+                    "$geometry": {
+                        "type": "MultiPolygon",
+                        "coordinates": [[[
+                            [-20.0, -70.0],
+                            [-30.0, -70.0],
+                            [-30.0, -50.0],
+                            [-20.0, -50.0],
+                            [-20.0, -70.0]
+                        ]]]
+                    }
+                }
+            })"),
+                                         fromjson(R"({
+                "$geoIntersects": {
+                    "$geometry": {
+                        "type": "MultiPolygon",
+                        "coordinates": [[[[0, 0],[0, 1],[1, 1],[0, 0]]]]
+                    }
+                }
+            })"));
+
+    assertRepresentativeGeoShapeIsStable(fromjson(R"({$within: {
+                    $geometry: {
+                        type: 'Polygon',
+                        coordinates: [[[0, 0], [3, 6], [6, 1], [0, 0]]]
+                    }
+            }})"),
+                                         fromjson(R"({$within: {
+                    $geometry: {
+                        type: 'Polygon',
+                        coordinates: [[[0, 0],[0, 1],[1, 1],[0, 0]]]
+                    }
+            }})"));
+
+    assertRepresentativeGeoNearShapeIsStable(
+        fromjson("{$near: {$maxDistance: 100, $geometry: {type: 'Point', coordinates: [0, 0]}}}"),
+        fromjson("{$near: {$maxDistance: 1, $geometry: {type: 'Point', coordinates: [1, 1]}}}"));
+
+    assertRepresentativeGeoNearShapeIsStable(
+        fromjson("{$nearSphere: [0,0], $minDistance: 2, $maxDistance: 4 }"),
+        fromjson("{$nearSphere: [1,1], $minDistance: 1, $maxDistance: 1 }"));
+
+    assertRepresentativeGeoNearShapeIsStable(fromjson("{$near: [0, 0, 1]}"),
+                                             fromjson("{$near: [1, 1]}"));
+
+    assertRepresentativeGeoNearShapeIsStable(fromjson("{$geoNear: [0, 0, 100]}"),
+                                             fromjson("{$geoNear: [1, 1]}"));
+
+    assertRepresentativeGeoNearShapeIsStable(fromjson("{$geoNear: [0, 10], $maxDistance: 80 }"),
+                                             fromjson("{$geoNear: [1, 1], $maxDistance: 1}"));
+
+    assertRepresentativeGeoShapeIsStable(fromjson("{$geoIntersects: {$geometry: [0, 0]}}"),
+                                         fromjson("{$geoIntersects: {$geometry: [1, 1]}}"));
+    // Test scenario with new $geometry query not specifying the geometry type.
+    assertRepresentativeGeoNearShapeIsStable(
+        fromjson("{$geoNear: { $geometry: {coordinates: [0, 10]}}}"),
+        fromjson("{$geoNear: { $geometry: {coordinates: [1, 1]}}}"));
+
+    // Test scenario with new $geometry query specifying invalid type.
+    assertRepresentativeGeoNearShapeIsStable(
+        fromjson("{$geoNear: { $geometry: { type: 'b.c', coordinates: [0, 10]}}}"),
+        fromjson("{$geoNear: { $geometry: {type: 'b.c', coordinates: [1, 1]}}}"));
+
+    assertRepresentativeGeoShapeIsStable(fromjson(R"({
+                "$geoIntersects": {
+                    "$geometry": {
+                        "type": "MultiLineString",
+                        "coordinates": [[
+                            [2, 0],
+                            [2, 2]
+                        ], [
+                            [0, 4],
+                            [1, 4]
+                        ]]
+                    }
+                }
+            })"),
+                                         fromjson(R"({
+                "$geoIntersects": {
+                    "$geometry": {
+                        "type": "MultiLineString",
+                        "coordinates": [[[0, 0], [1, 1]],[[0, 0], [1, 1]]]
+                    }
+                }
+            })"));
+
+    assertRepresentativeGeoShapeIsStable(fromjson(R"({
+                "$geoIntersects": {
+                    "$geometry": {
+                        "type": "LineString",
+                        "coordinates": [
+                            [2, 0],
+                            [2, 2]
+                        ]
+                    }
+                }
+            })"),
+                                         fromjson(R"({
+                "$geoIntersects": {
+                    "$geometry": {
+                        "type": "LineString",
+                        "coordinates": [[0, 0], [1, 1]]
+                    }
+                }
+            })"));
+
+    assertRepresentativeGeoShapeIsStable(fromjson(R"({
+                "$geoIntersects": {
+                    "$geometry": {
+                        "type": "GeometryCollection",
+                        "geometries": [{
+                            "type": "LineString",
+                            "coordinates": [
+                                [2, 0],
+                                [2, 2]
+                            ]
+                        }, {
+                            type: 'Point', coordinates: [2, 2]
+                        }]
+                    }
+                }
+            })"),
+                                         fromjson(R"({
+                "$geoIntersects": {
+                    "$geometry": {
+                        "type": "GeometryCollection",
+                        "geometries": [{
+                            "type": "LineString",
+                            "coordinates": [[0, 0], [1, 1]]
+                        }, {
+                            type: 'Point', coordinates: [1, 1]
+                        }]
+                    }
+                }
+            })"));
+}
+
 }  // namespace mongo

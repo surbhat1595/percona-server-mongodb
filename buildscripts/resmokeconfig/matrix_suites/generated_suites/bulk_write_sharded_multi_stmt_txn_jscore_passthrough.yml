@@ -53,7 +53,6 @@ selector:
   - jstests/core/**/compact_keeps_indexes.js
   - jstests/core/**/currentop.js
   - jstests/core/**/dbhash.js
-  - jstests/core/**/dbhash2.js
   - jstests/core/**/fsync.js
   - jstests/core/**/geo_s2cursorlimitskip.js
   - jstests/core/**/geo_update_btree2.js
@@ -67,7 +66,6 @@ selector:
   - jstests/core/**/geo_s2explain.js
   - jstests/core/**/geo_s2sparse.js
   - jstests/core/**/operation_latency_histogram.js
-  - jstests/core/**/killop_drop_collection.js
   - jstests/core/**/explain_upsert.js
   - jstests/core/views/views_drop.js
   - jstests/core/**/api_params_getmore.js
@@ -213,6 +211,8 @@ selector:
   - jstests/core/failcommand_failpoint.js
   - jstests/core/version_api_v1_command_coverage.js
   - jstests/core/write/write_commands_reject_unknown_fields.js
+  - jstests/core/query/explain/explain_uuid.js
+  - jstests/core/query/explain/explain_includes_command.js
   - jstests/core/txns/api_params_transaction.js
   - jstests/core/txns/transactions_profiling.js
   - jstests/core/txns/currentop_blocked_operations.js
@@ -220,6 +220,7 @@ selector:
   - jstests/core/txns/multi_statement_transaction_write_error.js
   - src/mongo/db/modules/enterprise/jstests/fle2/basic_update.js
   - src/mongo/db/modules/enterprise/jstests/fle2/basic_delete.js
+  - src/mongo/db/modules/enterprise/jstests/fle2/query/explain*.js
   exclude_with_any_tags:
   - assumes_read_concern_unchanged
   - assumes_unsharded_collection

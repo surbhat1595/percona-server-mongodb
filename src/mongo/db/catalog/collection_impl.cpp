@@ -62,7 +62,6 @@
 #include "mongo/db/client.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/index/index_access_method.h"
@@ -93,6 +92,7 @@
 #include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/transaction/transaction_participant.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/db/ttl_collection_cache.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -377,8 +377,8 @@ void CollectionImpl::init(OperationContext* opCtx) {
             // commit time, otherwise it is startup and we can register immediately.
             auto svcCtx = opCtx->getClient()->getServiceContext();
             auto uuid = *collectionOptions.uuid;
-            if (opCtx->lockState()->inAWriteUnitOfWork()) {
-                opCtx->recoveryUnit()->onCommit(
+            if (shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork()) {
+                shard_role_details::getRecoveryUnit(opCtx)->onCommit(
                     [svcCtx, uuid](OperationContext*, boost::optional<Timestamp>) {
                         TTLCollectionCache::get(svcCtx).registerTTLInfo(
                             uuid, TTLCollectionCache::Info{TTLCollectionCache::ClusteredId{}});
@@ -525,7 +525,7 @@ bool CollectionImpl::requiresIdIndex() const {
 std::unique_ptr<SeekableRecordCursor> CollectionImpl::getCursor(OperationContext* opCtx,
                                                                 bool forward) const {
     if (usesCappedSnapshots() && forward) {
-        if (opCtx->recoveryUnit()->isActive()) {
+        if (shard_role_details::getRecoveryUnit(opCtx)->isActive()) {
             auto snapshot =
                 CappedSnapshots::get(opCtx).getSnapshot(_shared->_recordStore->getIdent());
             invariant(
@@ -549,7 +549,8 @@ bool CollectionImpl::findDoc(OperationContext* opCtx,
     RecordData rd;
     if (!_shared->_recordStore->findRecord(opCtx, loc, &rd))
         return false;
-    *out = Snapshotted<BSONObj>(opCtx->recoveryUnit()->getSnapshotId(), rd.releaseToBson());
+    *out = Snapshotted<BSONObj>(shard_role_details::getRecoveryUnit(opCtx)->getSnapshotId(),
+                                rd.releaseToBson());
     return true;
 }
 
@@ -890,7 +891,7 @@ void CollectionImpl::updateClusteredIndexTTLSetting(OperationContext* opCtx,
 Status CollectionImpl::updateCappedSize(OperationContext* opCtx,
                                         boost::optional<long long> newCappedSize,
                                         boost::optional<long long> newCappedMax) {
-    invariant(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_X));
+    invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(ns(), MODE_X));
 
     if (!_shared->_isCapped) {
         return Status(ErrorCodes::InvalidNamespace,
@@ -959,8 +960,9 @@ std::vector<RecordId> CollectionImpl::reserveCappedRecordIds(OperationContext* o
     // By registering ourselves as a writer, we inform the capped visibility system that we may be
     // in the process of committing uncommitted records.
     auto cappedObserver = getCappedVisibilityObserver();
-    cappedObserver->registerWriter(
-        opCtx->recoveryUnit(), [this]() { _shared->_recordStore->notifyCappedWaitersIfNeeded(); });
+    cappedObserver->registerWriter(shard_role_details::getRecoveryUnit(opCtx), [this]() {
+        _shared->_recordStore->notifyCappedWaitersIfNeeded();
+    });
 
     std::vector<RecordId> ids;
     ids.reserve(count);
@@ -985,8 +987,8 @@ void CollectionImpl::registerCappedInserts(OperationContext* opCtx,
     // we never get here while holding an uninterruptible, read-ticketed lock. That would indicate
     // that we are operating with the wrong global lock semantics, and either hold too weak a lock
     // (e.g. IS) or that we upgraded in a way we shouldn't (e.g. IS -> IX).
-    invariant(!opCtx->lockState()->hasReadTicket() ||
-              !opCtx->lockState()->uninterruptibleLocksRequested());
+    invariant(!shard_role_details::getLocker(opCtx)->hasReadTicket() ||
+              !shard_role_details::getLocker(opCtx)->uninterruptibleLocksRequested());
 
     auto* uncommitted =
         CappedWriter::get(opCtx).getUncommitedRecordsFor(_shared->_recordStore->getIdent());
@@ -1088,7 +1090,7 @@ uint64_t CollectionImpl::getIndexFreeStorageBytes(OperationContext* const opCtx)
  * 4) re-write indexes
  */
 Status CollectionImpl::truncate(OperationContext* opCtx) {
-    dassert(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_X));
+    dassert(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(ns(), MODE_X));
     invariant(_indexCatalog->numIndexesInProgress() == 0);
 
     // 1) store index specs
@@ -1121,7 +1123,7 @@ Status CollectionImpl::truncate(OperationContext* opCtx) {
 }
 
 void CollectionImpl::setValidator(OperationContext* opCtx, Validator validator) {
-    invariant(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_X));
+    invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(ns(), MODE_X));
 
     auto validatorDoc = validator.validatorDoc.getOwned();
     auto validationLevel = validationLevelOrDefault(_metadata->options.validationLevel);
@@ -1145,7 +1147,7 @@ boost::optional<ValidationActionEnum> CollectionImpl::getValidationAction() cons
 }
 
 Status CollectionImpl::setValidationLevel(OperationContext* opCtx, ValidationLevelEnum newLevel) {
-    invariant(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_X));
+    invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(ns(), MODE_X));
 
     auto status = checkValidationOptionsCanBeUsed(_metadata->options, newLevel, boost::none);
     if (!status.isOK()) {
@@ -1176,7 +1178,7 @@ Status CollectionImpl::setValidationLevel(OperationContext* opCtx, ValidationLev
 
 Status CollectionImpl::setValidationAction(OperationContext* opCtx,
                                            ValidationActionEnum newAction) {
-    invariant(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_X));
+    invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(ns(), MODE_X));
 
     auto status = checkValidationOptionsCanBeUsed(_metadata->options, boost::none, newAction);
     if (!status.isOK()) {
@@ -1209,7 +1211,7 @@ Status CollectionImpl::updateValidator(OperationContext* opCtx,
                                        BSONObj newValidator,
                                        boost::optional<ValidationLevelEnum> newLevel,
                                        boost::optional<ValidationActionEnum> newAction) {
-    invariant(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_X));
+    invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(ns(), MODE_X));
 
     auto status = checkValidationOptionsCanBeUsed(_metadata->options, newLevel, newAction);
     if (!status.isOK()) {
@@ -1700,7 +1702,7 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
     if (!hasSetMultikey)
         return false;
 
-    opCtx->recoveryUnit()->onRollback(
+    shard_role_details::getRecoveryUnit(opCtx)->onRollback(
         [this, uncommittedMultikeys](OperationContext*) { uncommittedMultikeys->erase(this); });
 
     DurableCatalog::get(opCtx)->putMetaData(opCtx, getCatalogId(), *metadata);
@@ -1735,12 +1737,12 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
 
     // Mark this index that there is an ongoing multikey write. This forces readers to read from the
     // durable catalog to determine if the index is multikey or not.
-    opCtx->recoveryUnit()->registerPreCommitHook(
+    shard_role_details::getRecoveryUnit(opCtx)->registerPreCommitHook(
         [concurrentWriteTracker](OperationContext*) { concurrentWriteTracker->preCommit(); });
 
     // Capture a reference to 'concurrentWriteTracker' to extend the lifetime of this object until
     // commiting/rolling back the transaction is fully complete.
-    opCtx->recoveryUnit()->onCommit(
+    shard_role_details::getRecoveryUnit(opCtx)->onCommit(
         [this, uncommittedMultikeys, setMultikey = std::move(setMultikey), concurrentWriteTracker](
             OperationContext*, boost::optional<Timestamp>) {
             // Merge in changes to this index, other indexes may have been updated since we made our
@@ -1795,12 +1797,12 @@ void CollectionImpl::forceSetIndexIsMultikey(OperationContext* opCtx,
     }
     forceSetMultikey(*metadata);
 
-    opCtx->recoveryUnit()->onRollback(
+    shard_role_details::getRecoveryUnit(opCtx)->onRollback(
         [this, uncommittedMultikeys](OperationContext*) { uncommittedMultikeys->erase(this); });
 
     DurableCatalog::get(opCtx)->putMetaData(opCtx, getCatalogId(), *metadata);
 
-    opCtx->recoveryUnit()->onCommit(
+    shard_role_details::getRecoveryUnit(opCtx)->onCommit(
         [this, uncommittedMultikeys, forceSetMultikey = std::move(forceSetMultikey)](
             OperationContext*, boost::optional<Timestamp>) {
             // Merge in changes to this index, other indexes may have been updated since we made our
@@ -1876,8 +1878,8 @@ void CollectionImpl::sanitizeCollectionOptions(OperationContext* opCtx) {
     _writeMetadata(opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) {
         const auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
         const auto& storageEngineOptions = md.options.storageEngine;
-        md.options.storageEngine = uassertStatusOK(
-            storageEngine->getSanitizedStorageOptionsForSecondaryReplication(storageEngineOptions));
+        md.options.storageEngine =
+            storageEngine->getSanitizedStorageOptionsForSecondaryReplication(storageEngineOptions);
     });
 }
 

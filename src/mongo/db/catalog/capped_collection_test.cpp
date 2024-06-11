@@ -39,7 +39,6 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/catalog/capped_visibility.h"
 #include "mongo/db/catalog/catalog_control.h"
 #include "mongo/db/catalog/collection.h"
@@ -49,7 +48,6 @@
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/locker.h"
-#include "mongo/db/concurrency/locker_impl.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -66,8 +64,8 @@
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/unittest/assert.h"
-#include "mongo/unittest/barrier.h"
 #include "mongo/unittest/framework.h"
 
 namespace mongo {
@@ -119,7 +117,6 @@ protected:
     ClientAndCtx makeClientAndCtx(const std::string& clientName) {
         auto client = getServiceContext()->getService()->makeClient(clientName);
         auto opCtx = client->makeOperationContext();
-        client->swapLockState(std::make_unique<LockerImpl>(getServiceContext()));
         return std::make_pair(std::move(client), std::move(opCtx));
     }
 
@@ -142,7 +139,7 @@ Status insertBSON(OperationContext* opCtx, const NamespaceString& nss, RecordId 
     WriteUnitOfWork wuow(opCtx);
 
     auto cappedObserver = coll->getCappedVisibilityObserver();
-    cappedObserver->registerWriter(opCtx->recoveryUnit());
+    cappedObserver->registerWriter(shard_role_details::getRecoveryUnit(opCtx));
 
     coll->registerCappedInsert(opCtx, id);
     auto status =
@@ -157,8 +154,13 @@ Status insertBSON(OperationContext* opCtx, const NamespaceString& nss, RecordId 
 Status _insertBSON(OperationContext* opCtx, const CollectionPtr& coll, RecordId id) {
     BSONObj obj = BSON("a" << 1);
     auto cappedObserver = coll->getCappedVisibilityObserver();
-    cappedObserver->registerWriter(opCtx->recoveryUnit());
+    cappedObserver->registerWriter(shard_role_details::getRecoveryUnit(opCtx));
     coll->registerCappedInsert(opCtx, id);
+    return collection_internal::insertDocument(opCtx, coll, InsertStatement(obj, id), nullptr);
+}
+
+Status _insertOplogBSON(OperationContext* opCtx, const CollectionPtr& coll, RecordId id) {
+    BSONObj obj = BSON("ts" << Timestamp(id.getLong()));
     return collection_internal::insertDocument(opCtx, coll, InsertStatement(obj, id), nullptr);
 }
 
@@ -380,7 +382,7 @@ TEST_F(CappedCollectionTest, OplogOrder) {
         ASSERT_EQ(earlyCursor->seekExact(id1)->id, id1);
         coll.yield();
         earlyCursor->save();
-        earlyCtx->recoveryUnit()->abandonSnapshot();
+        shard_role_details::getRecoveryUnit(earlyCtx.get())->abandonSnapshot();
 
         auto [c1, t1] = makeClientAndCtx("t1");
         AutoGetCollection ac1(t1.get(), nss, MODE_IX);
@@ -471,7 +473,7 @@ TEST_F(CappedCollectionTest, OplogOrder) {
         ASSERT_EQ(earlyCursor->seekExact(id1)->id, id1);
         coll.yield();
         earlyCursor->save();
-        earlyCtx->recoveryUnit()->abandonSnapshot();
+        shard_role_details::getRecoveryUnit(earlyCtx.get())->abandonSnapshot();
 
         auto [c1, t1] = makeClientAndCtx("t1");
         AutoGetCollection ac1(t1.get(), nss, MODE_IX);
@@ -624,5 +626,130 @@ TEST_F(CappedCollectionTest, VisibilityAfterRestart) {
         ASSERT_EQ(pastHoleId, next->id);
     }
 }
+
+TEST_F(CappedCollectionTest, SeekNearOplogWithReadTimestamp) {
+    NamespaceString nss = NamespaceString::kRsOplogNamespace;
+    const auto oneSec = Timestamp(1, 0).asULL();
+    {
+        auto [c1, t1] = makeClientAndCtx("t1");
+        WriteUnitOfWork wuow(t1.get());
+        AutoGetCollection ac(t1.get(), nss, MODE_IX);
+        const CollectionPtr& oplog = ac.getCollection();
+        ASSERT_OK(_insertOplogBSON(t1.get(), oplog, RecordId(oneSec + 2)));
+        ASSERT_OK(_insertOplogBSON(t1.get(), oplog, RecordId(oneSec + 4)));
+        ASSERT_OK(_insertOplogBSON(t1.get(), oplog, RecordId(oneSec + 6)));
+        ASSERT_OK(_insertOplogBSON(t1.get(), oplog, RecordId(oneSec + 8)));
+        wuow.commit();
+    }
+#define checkSeekNear(cursor, recordNum, expectedRecordNum)           \
+    do {                                                              \
+        auto record = cursor->seekNear(RecordId(oneSec + recordNum)); \
+        ASSERT(record);                                               \
+        ASSERT_EQ(expectedRecordNum, record->id.getLong() - oneSec);  \
+    } while (0);
+
+    // Forward, no read timestamp.
+    {
+        auto [c2, t2] = makeClientAndCtx("t2");
+        AutoGetCollectionForReadLockFree acr(t2.get(), nss);
+        shard_role_details::getRecoveryUnit(t2.get())->setOplogVisibilityTs(boost::none);
+        auto cursor = acr.getCollection()->getCursor(t2.get());
+        checkSeekNear(cursor, 1, 2);
+        checkSeekNear(cursor, 2, 2);
+        checkSeekNear(cursor, 3, 2);
+        checkSeekNear(cursor, 4, 4);
+        checkSeekNear(cursor, 5, 4);
+        checkSeekNear(cursor, 6, 6);
+        checkSeekNear(cursor, 7, 6);
+        checkSeekNear(cursor, 8, 8);
+        checkSeekNear(cursor, 9, 8);
+    }
+    // Backward, no read timestamp.
+    {
+        auto [c2, t2] = makeClientAndCtx("t2");
+        AutoGetCollectionForReadLockFree acr(t2.get(), nss);
+        auto cursor = acr.getCollection()->getCursor(t2.get(), false);
+        checkSeekNear(cursor, 1, 2);
+        checkSeekNear(cursor, 2, 2);
+        checkSeekNear(cursor, 3, 4);
+        checkSeekNear(cursor, 4, 4);
+        checkSeekNear(cursor, 5, 6);
+        checkSeekNear(cursor, 6, 6);
+        checkSeekNear(cursor, 7, 8);
+        checkSeekNear(cursor, 8, 8);
+        checkSeekNear(cursor, 9, 8);
+    }
+    // Forward, existing read timestamp.
+    {
+        auto [c2, t2] = makeClientAndCtx("t2");
+        shard_role_details::getRecoveryUnit(t2.get())->setTimestampReadSource(
+            RecoveryUnit::ReadSource::kProvided, Timestamp(1, 6));
+        AutoGetCollectionForReadLockFree acr(t2.get(), nss);
+        shard_role_details::getRecoveryUnit(t2.get())->setOplogVisibilityTs(boost::none);
+        auto cursor = acr.getCollection()->getCursor(t2.get());
+        checkSeekNear(cursor, 1, 2);
+        checkSeekNear(cursor, 2, 2);
+        checkSeekNear(cursor, 3, 2);
+        checkSeekNear(cursor, 4, 4);
+        checkSeekNear(cursor, 5, 4);
+        checkSeekNear(cursor, 6, 6);
+        checkSeekNear(cursor, 7, 6);
+        checkSeekNear(cursor, 8, 6);
+        checkSeekNear(cursor, 9, 6);
+    }
+    // Backward, existing read timestamp.
+    {
+        auto [c2, t2] = makeClientAndCtx("t2");
+        shard_role_details::getRecoveryUnit(t2.get())->setTimestampReadSource(
+            RecoveryUnit::ReadSource::kProvided, Timestamp(1, 6));
+        AutoGetCollectionForReadLockFree acr(t2.get(), nss);
+        auto cursor = acr.getCollection()->getCursor(t2.get(), false);
+        checkSeekNear(cursor, 1, 2);
+        checkSeekNear(cursor, 2, 2);
+        checkSeekNear(cursor, 3, 4);
+        checkSeekNear(cursor, 4, 4);
+        checkSeekNear(cursor, 5, 6);
+        checkSeekNear(cursor, 6, 6);
+        checkSeekNear(cursor, 7, 6);
+        checkSeekNear(cursor, 8, 6);
+        checkSeekNear(cursor, 9, 6);
+    }
+    // Forward, non-existing read timestamp.
+    {
+        auto [c2, t2] = makeClientAndCtx("t2");
+        shard_role_details::getRecoveryUnit(t2.get())->setTimestampReadSource(
+            RecoveryUnit::ReadSource::kProvided, Timestamp(1, 7));
+        AutoGetCollectionForReadLockFree acr(t2.get(), nss);
+        shard_role_details::getRecoveryUnit(t2.get())->setOplogVisibilityTs(boost::none);
+        auto cursor = acr.getCollection()->getCursor(t2.get());
+        checkSeekNear(cursor, 1, 2);
+        checkSeekNear(cursor, 2, 2);
+        checkSeekNear(cursor, 3, 2);
+        checkSeekNear(cursor, 4, 4);
+        checkSeekNear(cursor, 5, 4);
+        checkSeekNear(cursor, 6, 6);
+        checkSeekNear(cursor, 7, 6);
+        checkSeekNear(cursor, 8, 6);
+        checkSeekNear(cursor, 9, 6);
+    }
+    // Backward, non-existing read timestamp.
+    {
+        auto [c2, t2] = makeClientAndCtx("t2");
+        shard_role_details::getRecoveryUnit(t2.get())->setTimestampReadSource(
+            RecoveryUnit::ReadSource::kProvided, Timestamp(1, 7));
+        AutoGetCollectionForReadLockFree acr(t2.get(), nss);
+        auto cursor = acr.getCollection()->getCursor(t2.get(), false);
+        checkSeekNear(cursor, 1, 2);
+        checkSeekNear(cursor, 2, 2);
+        checkSeekNear(cursor, 3, 4);
+        checkSeekNear(cursor, 4, 4);
+        checkSeekNear(cursor, 5, 6);
+        checkSeekNear(cursor, 6, 6);
+        checkSeekNear(cursor, 7, 6);
+        checkSeekNear(cursor, 8, 6);
+        checkSeekNear(cursor, 9, 6);
+    }
+}
+
 }  // namespace
 }  // namespace mongo

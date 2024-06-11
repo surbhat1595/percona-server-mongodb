@@ -29,6 +29,7 @@
 #pragma once
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/catalog/throttle_cursor.h"
 #include "mongo/db/repl/dbcheck.h"
 #include "mongo/db/repl/dbcheck_gen.h"
 #include "mongo/db/repl/dbcheck_idl.h"
@@ -49,14 +50,14 @@ struct DbCheckCollectionInfo {
     BSONObj end;
     int64_t maxCount;
     int64_t maxSize;
-    int64_t maxRate;
     int64_t maxDocsPerBatch;
-    int64_t maxBytesPerBatch;
-    int64_t maxDocsPerSec;
-    int64_t maxBytesPerSec;
     int64_t maxBatchTimeMillis;
     WriteConcernOptions writeConcern;
     boost::optional<SecondaryIndexCheckParameters> secondaryIndexCheckParameters;
+    DataThrottle dataThrottle;
+
+    // Returns the BSON representation of this object.
+    BSONObj toBSON() const;
 };
 
 /**
@@ -77,7 +78,7 @@ struct DbCheckCollectionBatchStats {
  * For organizing the results of batches for extra index keys check.
  */
 struct DbCheckExtraIndexKeysBatchStats {
-    int64_t nDocs;
+    int64_t nKeys;
     int64_t nBytes;
     key_string::Value firstIndexKey;
     key_string::Value lastIndexKey;
@@ -87,6 +88,7 @@ struct DbCheckExtraIndexKeysBatchStats {
     std::string md5;
     repl::OpTime time;
     boost::optional<Timestamp> readTimestamp;
+    Date_t deadline;
 };
 
 /**
@@ -211,7 +213,8 @@ private:
                         const key_string::Value& keyString,
                         const BSONObj& keyStringBson,
                         const SortedDataIndexAccessMethod* iam,
-                        const IndexCatalogEntry* indexCatalogEntry);
+                        const IndexCatalogEntry* indexCatalogEntry,
+                        const BSONObj& indexSpec);
 
     /**
      * Runs the data consistency and missing index key check.

@@ -96,7 +96,8 @@ BSONObj makeOplogEntryDoc(OpTime opTime,
     builder.append(OplogEntryBase::kVersionFieldName, version);
     builder.append(OplogEntryBase::kOpTypeFieldName, OpType_serializer(opType));
     if (nss.tenantId() && gMultitenancySupport &&
-        gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)) {
+        gFeatureFlagRequireTenantID.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         nss.tenantId()->serializeToBSON(OplogEntryBase::kTidFieldName, &builder);
     }
     builder.append(OplogEntryBase::kNssFieldName,
@@ -231,7 +232,8 @@ void ReplOperation::extractPrePostImageForTransaction(boost::optional<ImageBundl
 
 void ReplOperation::setTid(boost::optional<mongo::TenantId> value) & {
     if (gMultitenancySupport &&
-        gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
+        gFeatureFlagRequireTenantID.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()))
         DurableReplOperation::setTid(value);
 }
 
@@ -361,8 +363,12 @@ StatusWith<MutableOplogEntry> MutableOplogEntry::parse(const BSONObj& object) {
 
     try {
         MutableOplogEntry oplogEntry;
-        oplogEntry.parseProtected(IDLParserContext("OplogEntryBase", false /* apiStrict */, tid),
-                                  object);
+        const auto vts = tid
+            ? boost::make_optional(auth::ValidatedTenancyScopeFactory::create(
+                  *tid, auth::ValidatedTenancyScopeFactory::TrustedForInnerOpMsgRequestTag{}))
+            : boost::none;
+        oplogEntry.parseProtected(
+            IDLParserContext("OplogEntryBase", false /* apiStrict */, vts, tid), object);
         return oplogEntry;
     } catch (...) {
         return exceptionToStatus();
@@ -375,8 +381,10 @@ ReplOperation MutableOplogEntry::toReplOperation() const noexcept {
 }
 
 void MutableOplogEntry::setTid(boost::optional<mongo::TenantId> value) & {
-    if (gMultitenancySupport &&
-        gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
+    // Only set Tid if we have a TenantId value and the server parameter and feature flag are on.
+    if (value && gMultitenancySupport &&
+        gFeatureFlagRequireTenantID.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()))
         getDurableReplOperation().setTid(std::move(value));
 }
 
@@ -395,7 +403,7 @@ OpTime MutableOplogEntry::getOpTime() const {
 }
 
 size_t DurableOplogEntry::getDurableReplOperationSize(const DurableReplOperation& op) {
-    const auto stmtIds = variant_util::toVector<StmtId>(op.getStatementIds());
+    const auto& stmtIds = op.getStatementIds();
     return sizeof(op) + (op.getTid() ? op.getTid()->toString().size() : 0) + op.getNss().size() +
         op.getObject().objsize() + (op.getObject2() ? op.getObject2()->objsize() : 0) +
         (sizeof(std::vector<StmtId>) + (sizeof(StmtId) * stmtIds.size()));
@@ -417,7 +425,11 @@ DurableOplogEntry::DurableOplogEntry(BSONObj rawInput) : _raw(std::move(rawInput
     if (_raw.hasElement("tid"))
         tid = TenantId::parseFromBSON(_raw["tid"]);
 
-    parseProtected(IDLParserContext("OplogEntryBase", false /* apiStrict */, tid), _raw);
+    const auto vts = tid
+        ? boost::make_optional(auth::ValidatedTenancyScopeFactory::create(
+              *tid, auth::ValidatedTenancyScopeFactory::TrustedForInnerOpMsgRequestTag{}))
+        : boost::none;
+    parseProtected(IDLParserContext("OplogEntryBase", false /* apiStrict */, vts, tid), _raw);
 
     // Parse command type from 'o' and 'o2' fields.
     if (isCommand()) {
@@ -690,7 +702,7 @@ const boost::optional<mongo::Value>& OplogEntry::get_id() const& {
     return _entry.get_id();
 }
 
-std::vector<StmtId> OplogEntry::getStatementIds() const& {
+const std::vector<StmtId>& OplogEntry::getStatementIds() const& {
     return _entry.getStatementIds();
 }
 

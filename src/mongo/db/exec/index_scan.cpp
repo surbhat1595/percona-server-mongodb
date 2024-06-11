@@ -49,6 +49,7 @@
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/storage/key_string.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
@@ -106,8 +107,8 @@ IndexScan::IndexScan(ExpressionContext* expCtx,
 boost::optional<IndexKeyEntry> IndexScan::initIndexScan() {
     if (_lowPriority && gDeprioritizeUnboundedUserIndexScans.load() &&
         opCtx()->getClient()->isFromUserConnection() &&
-        opCtx()->lockState()->shouldWaitForTicket()) {
-        _priority.emplace(opCtx()->lockState(), AdmissionContext::Priority::kLow);
+        shard_role_details::getLocker(opCtx())->shouldWaitForTicket()) {
+        _priority.emplace(shard_role_details::getLocker(opCtx()), AdmissionContext::Priority::kLow);
     }
 
     // Perform the possibly heavy-duty initialization of the underlying index cursor.
@@ -264,8 +265,11 @@ PlanStage::StageState IndexScan::doWork(WorkingSetID* out) {
     WorkingSetID id = _workingSet->allocate();
     WorkingSetMember* member = _workingSet->get(id);
     member->recordId = std::move(kv->loc);
-    member->keyData.push_back(IndexKeyDatum(
-        _keyPattern, kv->key, workingSetIndexId(), opCtx()->recoveryUnit()->getSnapshotId()));
+    member->keyData.push_back(
+        IndexKeyDatum(_keyPattern,
+                      kv->key,
+                      workingSetIndexId(),
+                      shard_role_details::getRecoveryUnit(opCtx())->getSnapshotId()));
     _workingSet->transitionToRecordIdAndIdx(id);
 
     if (_addKeyMetadata) {
@@ -307,8 +311,8 @@ void IndexScan::doDetachFromOperationContext() {
 void IndexScan::doReattachToOperationContext() {
     if (_lowPriority && gDeprioritizeUnboundedUserIndexScans.load() &&
         opCtx()->getClient()->isFromUserConnection() &&
-        opCtx()->lockState()->shouldWaitForTicket()) {
-        _priority.emplace(opCtx()->lockState(), AdmissionContext::Priority::kLow);
+        shard_role_details::getLocker(opCtx())->shouldWaitForTicket()) {
+        _priority.emplace(shard_role_details::getLocker(opCtx()), AdmissionContext::Priority::kLow);
     }
     if (_indexCursor)
         _indexCursor->reattachToOperationContext(opCtx());

@@ -54,6 +54,7 @@
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/decorable.h"
@@ -61,9 +62,10 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTransaction
 
-
 namespace mongo {
 namespace {
+
+MONGO_FAIL_POINT_DEFINE(hangBeforeTxnCoordinatorOnStepUpWork);
 
 const auto transactionCoordinatorServiceDecoration =
     ServiceContext::declareDecoration<TransactionCoordinatorService>();
@@ -126,6 +128,11 @@ void TransactionCoordinatorService::createCoordinator(
 void TransactionCoordinatorService::reportCoordinators(OperationContext* opCtx,
                                                        bool includeIdle,
                                                        std::vector<BSONObj>* ops) {
+    // TODO: SERVER-82965 Remove early return
+    if (!ShardingState::get(opCtx)->enabled()) {
+        return;
+    }
+
     std::shared_ptr<CatalogAndScheduler> cas;
     try {
         cas = _getCatalogAndScheduler(opCtx);
@@ -203,6 +210,11 @@ boost::optional<SharedSemiFuture<txn::CommitDecision>> TransactionCoordinatorSer
 
 void TransactionCoordinatorService::onStepUp(OperationContext* opCtx,
                                              Milliseconds recoveryDelayForTesting) {
+    // TODO: SERVER-82965 Remove early return
+    if (!ShardingState::get(opCtx)->enabled()) {
+        return;
+    }
+
     joinPreviousRound();
 
     stdx::lock_guard<Latch> lg(_mutex);
@@ -220,6 +232,17 @@ void TransactionCoordinatorService::onStepUp(OperationContext* opCtx,
                 recoveryDelayForTesting,
                 [catalogAndScheduler = _catalogAndScheduler,
                  cancelSource = _cancelSource](OperationContext* opCtx) {
+                    if (MONGO_unlikely(hangBeforeTxnCoordinatorOnStepUpWork.shouldFail())) {
+                        LOGV2(8288301, "Hit hangBeforeTxnCoordinatorOnStepUpWork failpoint");
+                        hangBeforeTxnCoordinatorOnStepUpWork.pauseWhileSet(opCtx);
+                    }
+
+                    // Skip ticket acquisition in order to prevent possible deadlock when
+                    // participants are in the prepared state. See SERVER-82883 and SERVER-60682.
+                    ScopedAdmissionPriorityForLock skipTicketAcquisition(
+                        shard_role_details::getLocker(opCtx),
+                        AdmissionContext::Priority::kImmediate);
+
                     auto& replClientInfo = repl::ReplClientInfo::forClient(opCtx->getClient());
                     replClientInfo.setLastOpToSystemLastOpTime(opCtx);
 
@@ -378,6 +401,11 @@ void TransactionCoordinatorService::cancelIfCommitNotYetStarted(
     OperationContext* opCtx,
     LogicalSessionId lsid,
     TxnNumberAndRetryCounter txnNumberAndRetryCounter) {
+    // TODO: SERVER-82965 Remove early return
+    if (!ShardingState::get(opCtx)->enabled()) {
+        return;
+    }
+
     auto cas = _getCatalogAndScheduler(opCtx);
     auto& catalog = cas->catalog;
 

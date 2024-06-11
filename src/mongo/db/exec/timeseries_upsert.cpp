@@ -169,7 +169,7 @@ void TimeseriesUpsertStage::_performInsert(BSONObj newMeasurement) {
                 // mongos will be able to start an internal transaction to handle the
                 // wouldChangeOwningShard error thrown below.
                 if (!feature_flags::gFeatureFlagUpdateDocumentShardKeyUsingTransactionApi.isEnabled(
-                        serverGlobalParams.featureCompatibility)) {
+                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                     uassert(ErrorCodes::IllegalOperation,
                             "The upsert document could not be inserted onto the shard targeted "
                             "by the query, since its shard key belongs on a different shard. "
@@ -206,6 +206,7 @@ BSONObj TimeseriesUpsertStage::_produceNewDocumentForInsert() {
     _getImmutablePaths();
 
     mutablebson::Document doc;
+    using namespace fmt::literals;
 
     if (_request.shouldUpsertSuppliedDocument()) {
         update::generateNewDocumentFromSuppliedDoc(opCtx(), _immutablePaths, &_request, doc);

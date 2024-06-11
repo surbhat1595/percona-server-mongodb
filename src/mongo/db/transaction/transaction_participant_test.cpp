@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <functional>
 #include <future>
+#include <iterator>
 #include <system_error>
 #include <type_traits>
 
@@ -66,7 +67,7 @@
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
-#include "mongo/db/op_observer/oplog_writer_impl.h"
+#include "mongo/db/op_observer/operation_logger_impl.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/mock_repl_coord_server_fixture.h"
@@ -232,7 +233,7 @@ public:
 void OpObserverMock::postTransactionPrepare(OperationContext* opCtx,
                                             const std::vector<OplogSlot>& reservedSlots,
                                             const TransactionOperations& transactionOperations) {
-    ASSERT_TRUE(opCtx->lockState()->inAWriteUnitOfWork());
+    ASSERT_TRUE(shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
 
     uassert(ErrorCodes::OperationFailed,
             "postTransactionPrepare() failed",
@@ -247,7 +248,7 @@ void OpObserverMock::onUnpreparedTransactionCommit(
     const TransactionOperations& transactionOperations,
     const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
     OpStateAccumulator* opAccumulator) {
-    ASSERT(opCtx->lockState()->inAWriteUnitOfWork());
+    ASSERT(shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
 
     uassert(ErrorCodes::OperationFailed,
             "onUnpreparedTransactionCommit() failed",
@@ -268,9 +269,9 @@ void OpObserverMock::onPreparedTransactionCommit(
     OplogSlot commitOplogEntryOpTime,
     Timestamp commitTimestamp,
     const std::vector<repl::ReplOperation>& statements) noexcept {
-    ASSERT_FALSE(opCtx->lockState()->inAWriteUnitOfWork());
+    ASSERT_FALSE(shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
     // The 'commitTimestamp' must be cleared before we write the oplog entry.
-    ASSERT(opCtx->recoveryUnit()->getCommitTimestamp().isNull());
+    ASSERT(shard_role_details::getRecoveryUnit(opCtx)->getCommitTimestamp().isNull());
 
     OpObserverNoop::onPreparedTransactionCommit(
         opCtx, commitOplogEntryOpTime, commitTimestamp, statements);
@@ -575,8 +576,8 @@ TEST_F(TxnParticipantTest, TransactionThrowsLockTimeoutIfLockIsUnavailable) {
 }
 
 TEST_F(TxnParticipantTest, StashAndUnstashResources) {
-    Locker* originalLocker = opCtx()->lockState();
-    RecoveryUnit* originalRecoveryUnit = opCtx()->recoveryUnit();
+    Locker* originalLocker = shard_role_details::getLocker(opCtx());
+    RecoveryUnit* originalRecoveryUnit = shard_role_details::getRecoveryUnit(opCtx());
     ASSERT(originalLocker);
     ASSERT(originalRecoveryUnit);
 
@@ -593,15 +594,15 @@ TEST_F(TxnParticipantTest, StashAndUnstashResources) {
     // Perform initial unstash which sets up a WriteUnitOfWork.
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "find");
-    ASSERT_EQUALS(originalLocker, opCtx()->lockState());
-    ASSERT_EQUALS(originalRecoveryUnit, opCtx()->recoveryUnit());
+    ASSERT_EQUALS(originalLocker, shard_role_details::getLocker(opCtx()));
+    ASSERT_EQUALS(originalRecoveryUnit, shard_role_details::getRecoveryUnit(opCtx()));
     ASSERT(opCtx()->getWriteUnitOfWork());
-    ASSERT(opCtx()->lockState()->isLocked());
+    ASSERT(shard_role_details::getLocker(opCtx())->isLocked());
 
     // Stash resources. The original Locker and RecoveryUnit now belong to the stash.
     txnParticipant.stashTransactionResources(opCtx());
-    ASSERT_NOT_EQUALS(originalLocker, opCtx()->lockState());
-    ASSERT_NOT_EQUALS(originalRecoveryUnit, opCtx()->recoveryUnit());
+    ASSERT_NOT_EQUALS(originalLocker, shard_role_details::getLocker(opCtx()));
+    ASSERT_NOT_EQUALS(originalRecoveryUnit, shard_role_details::getRecoveryUnit(opCtx()));
     ASSERT(!opCtx()->getWriteUnitOfWork());
 
     // Unset the read concern on the OperationContext. This is needed to unstash.
@@ -610,8 +611,8 @@ TEST_F(TxnParticipantTest, StashAndUnstashResources) {
     // Unstash the stashed resources. This restores the original Locker and RecoveryUnit to the
     // OperationContext.
     txnParticipant.unstashTransactionResources(opCtx(), "find");
-    ASSERT_EQUALS(originalLocker, opCtx()->lockState());
-    ASSERT_EQUALS(originalRecoveryUnit, opCtx()->recoveryUnit());
+    ASSERT_EQUALS(originalLocker, shard_role_details::getLocker(opCtx()));
+    ASSERT_EQUALS(originalRecoveryUnit, shard_role_details::getRecoveryUnit(opCtx()));
     ASSERT(opCtx()->getWriteUnitOfWork());
 
     // Commit the transaction. This allows us to release locks.
@@ -835,11 +836,11 @@ TEST_F(TxnParticipantTest, CommitTransactionSetsCommitTimestampOnPreparedTransac
     txnParticipant.commitPreparedTransaction(opCtx(), commitTS, {});
 
     // The recovery unit is reset on commit.
-    ASSERT(opCtx()->recoveryUnit()->getCommitTimestamp().isNull());
+    ASSERT(shard_role_details::getRecoveryUnit(opCtx())->getCommitTimestamp().isNull());
 
     txnParticipant.stashTransactionResources(opCtx());
     ASSERT_TRUE(txnParticipant.transactionIsCommitted());
-    ASSERT(opCtx()->recoveryUnit()->getCommitTimestamp().isNull());
+    ASSERT(shard_role_details::getRecoveryUnit(opCtx())->getCommitTimestamp().isNull());
 }
 
 TEST_F(TxnParticipantTest, CommitTransactionWithCommitTimestampFailsOnUnpreparedTransaction) {
@@ -863,7 +864,7 @@ TEST_F(TxnParticipantTest, CommitTransactionDoesNotSetCommitTimestampOnUnprepare
     _opObserver->onUnpreparedTransactionCommitFn =
         [&](const std::vector<repl::ReplOperation>& statements) {
             originalFn(statements);
-            ASSERT(opCtx()->recoveryUnit()->getCommitTimestamp().isNull());
+            ASSERT(shard_role_details::getRecoveryUnit(opCtx())->getCommitTimestamp().isNull());
             ASSERT(statements.empty());
         };
 
@@ -874,11 +875,11 @@ TEST_F(TxnParticipantTest, CommitTransactionDoesNotSetCommitTimestampOnUnprepare
     { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
     txnParticipant.commitUnpreparedTransaction(opCtx());
 
-    ASSERT(opCtx()->recoveryUnit()->getCommitTimestamp().isNull());
+    ASSERT(shard_role_details::getRecoveryUnit(opCtx())->getCommitTimestamp().isNull());
 
     txnParticipant.stashTransactionResources(opCtx());
     ASSERT_TRUE(txnParticipant.transactionIsCommitted());
-    ASSERT(opCtx()->recoveryUnit()->getCommitTimestamp().isNull());
+    ASSERT(shard_role_details::getRecoveryUnit(opCtx())->getCommitTimestamp().isNull());
 }
 
 TEST_F(TxnParticipantTest, CommitTransactionWithoutCommitTimestampFailsOnPreparedTransaction) {
@@ -1056,9 +1057,9 @@ TEST_F(TxnParticipantTest, StashedRollbackDoesntHoldClientLock) {
     unittest::Barrier finishRollback(2);
 
     // Rollback changes are executed in reverse order.
-    opCtx()->recoveryUnit()->onRollback(
+    shard_role_details::getRecoveryUnit(opCtx())->onRollback(
         [&](OperationContext*) { finishRollback.countDownAndWait(); });
-    opCtx()->recoveryUnit()->onRollback(
+    shard_role_details::getRecoveryUnit(opCtx())->onRollback(
         [&](OperationContext*) { startedRollback.countDownAndWait(); });
 
     auto future = stdx::async(stdx::launch::async, [&] {
@@ -1096,7 +1097,7 @@ TEST_F(TxnParticipantTest, UnstashFailsShouldLeaveTxnResourceStashUnchanged) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
     txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
-    ASSERT_TRUE(opCtx()->lockState()->isLocked());
+    ASSERT_TRUE(shard_role_details::getLocker(opCtx())->isLocked());
 
     // Simulate the locking of an insert.
     {
@@ -1111,7 +1112,7 @@ TEST_F(TxnParticipantTest, UnstashFailsShouldLeaveTxnResourceStashUnchanged) {
     // Simulate a secondary style lock stashing such that the locks are yielded.
     {
         repl::UnreplicatedWritesBlock uwb(opCtx());
-        opCtx()->lockState()->unsetMaxLockTimeout();
+        shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
         txnParticipant.stashTransactionResources(opCtx());
     }
     ASSERT_FALSE(txnParticipant.getTxnResourceStashLockerForTest()->isLocked());
@@ -1131,7 +1132,7 @@ TEST_F(TxnParticipantTest, UnstashFailsShouldLeaveTxnResourceStashUnchanged) {
 
     // Should be successfully able to perform lock restore.
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
-    ASSERT_TRUE(opCtx()->lockState()->isLocked());
+    ASSERT_TRUE(shard_role_details::getLocker(opCtx())->isLocked());
 
     // Commit the transaction to release the locks.
     txnParticipant.commitPreparedTransaction(opCtx(), prepareTimestamp, boost::none);
@@ -1148,8 +1149,9 @@ TEST_F(TxnParticipantTest, StepDownAfterPrepareDoesNotBlock) {
     // Test that we can acquire the RSTL in mode X, and then immediately release it so the test can
     // complete successfully.
     auto func = [&](OperationContext* opCtx) {
-        opCtx->lockState()->lock(opCtx, resourceIdReplicationStateTransitionLock, MODE_X);
-        opCtx->lockState()->unlock(resourceIdReplicationStateTransitionLock);
+        shard_role_details::getLocker(opCtx)->lock(
+            opCtx, resourceIdReplicationStateTransitionLock, MODE_X);
+        shard_role_details::getLocker(opCtx)->unlock(resourceIdReplicationStateTransitionLock);
     };
     runFunctionFromDifferentOpCtx(func);
 
@@ -1168,8 +1170,9 @@ TEST_F(TxnParticipantTest, StepDownAfterPrepareDoesNotBlockThenCommit) {
     // Test that we can acquire the RSTL in mode X, and then immediately release it so the test can
     // complete successfully.
     auto func = [&](OperationContext* opCtx) {
-        opCtx->lockState()->lock(opCtx, resourceIdReplicationStateTransitionLock, MODE_X);
-        opCtx->lockState()->unlock(resourceIdReplicationStateTransitionLock);
+        shard_role_details::getLocker(opCtx)->lock(
+            opCtx, resourceIdReplicationStateTransitionLock, MODE_X);
+        shard_role_details::getLocker(opCtx)->unlock(resourceIdReplicationStateTransitionLock);
     };
     runFunctionFromDifferentOpCtx(func);
 
@@ -1250,11 +1253,14 @@ TEST_F(TxnParticipantTest, StepDownDuringPreparedAbortReleasesRSTL) {
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
               MODE_NONE);
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock), MODE_IX);
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
+              MODE_IX);
 
     // Simulate the locking of an insert.
     {
@@ -1264,24 +1270,32 @@ TEST_F(TxnParticipantTest, StepDownDuringPreparedAbortReleasesRSTL) {
             opCtx(), NamespaceString::createNamespaceString_forTest("test.foo"), MODE_IX);
     }
 
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock), MODE_IX);
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
+              MODE_IX);
     txnParticipant.stashTransactionResources(opCtx());
 
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
               MODE_NONE);
 
     txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock), MODE_IX);
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
+              MODE_IX);
     txnParticipant.prepareTransaction(opCtx(), {});
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
               MODE_NONE);
     txnParticipant.stashTransactionResources(opCtx());
 
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
               MODE_NONE);
 
     txnParticipant.unstashTransactionResources(opCtx(), "abortTransaction");
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
               MODE_NONE);
     ASSERT_OK(repl::ReplicationCoordinator::get(opCtx())->setFollowerMode(
         repl::MemberState::RS_SECONDARY));
@@ -1289,14 +1303,16 @@ TEST_F(TxnParticipantTest, StepDownDuringPreparedAbortReleasesRSTL) {
                        AssertionException,
                        ErrorCodes::NotWritablePrimary);
 
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
               MODE_NONE);
 
     // Test that we can acquire the RSTL in mode X, and then immediately release it so the test can
     // complete successfully.
     auto func = [&](OperationContext* newOpCtx) {
-        newOpCtx->lockState()->lock(newOpCtx, resourceIdReplicationStateTransitionLock, MODE_X);
-        newOpCtx->lockState()->unlock(resourceIdReplicationStateTransitionLock);
+        shard_role_details::getLocker(newOpCtx)->lock(
+            newOpCtx, resourceIdReplicationStateTransitionLock, MODE_X);
+        shard_role_details::getLocker(newOpCtx)->unlock(resourceIdReplicationStateTransitionLock);
     };
     runFunctionFromDifferentOpCtx(func);
 }
@@ -1305,11 +1321,14 @@ TEST_F(TxnParticipantTest, StepDownDuringPreparedCommitReleasesRSTL) {
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
               MODE_NONE);
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock), MODE_IX);
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
+              MODE_IX);
 
     // Simulate the locking of an insert.
     {
@@ -1319,25 +1338,33 @@ TEST_F(TxnParticipantTest, StepDownDuringPreparedCommitReleasesRSTL) {
             opCtx(), NamespaceString::createNamespaceString_forTest("test.foo"), MODE_IX);
     }
 
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock), MODE_IX);
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
+              MODE_IX);
     txnParticipant.stashTransactionResources(opCtx());
 
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
               MODE_NONE);
 
     txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock), MODE_IX);
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
+              MODE_IX);
     const auto prepareResponse = txnParticipant.prepareTransaction(opCtx(), {});
     const auto& prepareTimestamp = prepareResponse.first;
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
               MODE_NONE);
     txnParticipant.stashTransactionResources(opCtx());
 
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
               MODE_NONE);
 
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
               MODE_NONE);
     ASSERT_OK(repl::ReplicationCoordinator::get(opCtx())->setFollowerMode(
         repl::MemberState::RS_SECONDARY));
@@ -1346,14 +1373,16 @@ TEST_F(TxnParticipantTest, StepDownDuringPreparedCommitReleasesRSTL) {
         AssertionException,
         ErrorCodes::NotWritablePrimary);
 
-    ASSERT_EQ(opCtx()->lockState()->getLockMode(resourceIdReplicationStateTransitionLock),
+    ASSERT_EQ(shard_role_details::getLocker(opCtx())->getLockMode(
+                  resourceIdReplicationStateTransitionLock),
               MODE_NONE);
 
     // Test that we can acquire the RSTL in mode X, and then immediately release it so the test can
     // complete successfully.
     auto func = [&](OperationContext* newOpCtx) {
-        newOpCtx->lockState()->lock(newOpCtx, resourceIdReplicationStateTransitionLock, MODE_X);
-        newOpCtx->lockState()->unlock(resourceIdReplicationStateTransitionLock);
+        shard_role_details::getLocker(newOpCtx)->lock(
+            newOpCtx, resourceIdReplicationStateTransitionLock, MODE_X);
+        shard_role_details::getLocker(newOpCtx)->unlock(resourceIdReplicationStateTransitionLock);
     };
     runFunctionFromDifferentOpCtx(func);
 }
@@ -1498,7 +1527,7 @@ TEST_F(TxnParticipantTest, CannotStartNewTransactionWhilePreparedTransactionInPr
     _opObserver->postTransactionPrepareFn = [&]() {
         originalFn();
 
-        ruPrepareTimestamp = opCtx()->recoveryUnit()->getPrepareTimestamp();
+        ruPrepareTimestamp = shard_role_details::getRecoveryUnit(opCtx())->getPrepareTimestamp();
         ASSERT_FALSE(ruPrepareTimestamp.isNull());
     };
 
@@ -1625,8 +1654,8 @@ TEST_F(TxnParticipantTest, TransactionExceedsSizeParameterStmtIdsField) {
 
 TEST_F(TxnParticipantTest, StashInNestedSessionIsANoop) {
     auto outerScopedSession = checkOutSession();
-    Locker* originalLocker = opCtx()->lockState();
-    RecoveryUnit* originalRecoveryUnit = opCtx()->recoveryUnit();
+    Locker* originalLocker = shard_role_details::getLocker(opCtx());
+    RecoveryUnit* originalRecoveryUnit = shard_role_details::getRecoveryUnit(opCtx());
     ASSERT(originalLocker);
     ASSERT(originalRecoveryUnit);
 
@@ -1642,8 +1671,8 @@ TEST_F(TxnParticipantTest, StashInNestedSessionIsANoop) {
     // Perform initial unstash, which sets up a WriteUnitOfWork.
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "find");
-    ASSERT_EQUALS(originalLocker, opCtx()->lockState());
-    ASSERT_EQUALS(originalRecoveryUnit, opCtx()->recoveryUnit());
+    ASSERT_EQUALS(originalLocker, shard_role_details::getLocker(opCtx()));
+    ASSERT_EQUALS(originalRecoveryUnit, shard_role_details::getRecoveryUnit(opCtx()));
     ASSERT(opCtx()->getWriteUnitOfWork());
 
     {
@@ -1653,8 +1682,8 @@ TEST_F(TxnParticipantTest, StashInNestedSessionIsANoop) {
 
         // The stash was a noop, so the locker, RecoveryUnit, and WriteUnitOfWork on the
         // OperationContext are unaffected.
-        ASSERT_EQUALS(originalLocker, opCtx()->lockState());
-        ASSERT_EQUALS(originalRecoveryUnit, opCtx()->recoveryUnit());
+        ASSERT_EQUALS(originalLocker, shard_role_details::getLocker(opCtx()));
+        ASSERT_EQUALS(originalRecoveryUnit, shard_role_details::getRecoveryUnit(opCtx()));
         ASSERT(opCtx()->getWriteUnitOfWork());
     }
 }
@@ -1732,8 +1761,10 @@ TEST_F(TxnParticipantTest, PrepareReturnsAListOfAffectedNamespaces) {
     auto [timestamp, namespaces] = txnParticipant.prepareTransaction(opCtx(), {});
     ASSERT_EQ(namespaces, txnParticipant.affectedNamespaces());
 
-    std::sort(namespaces.begin(), namespaces.end());
-    ASSERT_EQ(namespaces, kNamespaces);
+    std::vector<NamespaceString> namespacesVec;
+    std::move(namespaces.begin(), namespaces.end(), std::back_inserter(namespacesVec));
+    std::sort(namespacesVec.begin(), namespacesVec.end());
+    ASSERT_EQ(namespacesVec, kNamespaces);
 }
 
 /**
@@ -3110,8 +3141,8 @@ TEST_F(TransactionsMetricsTest, ReportStashedResources) {
 
     const bool autocommit = false;
 
-    ASSERT(opCtx()->lockState());
-    ASSERT(opCtx()->recoveryUnit());
+    ASSERT(shard_role_details::getLocker(opCtx()));
+    ASSERT(shard_role_details::getRecoveryUnit(opCtx()));
 
     auto sessionCheckout = checkOutSession();
 
@@ -3141,7 +3172,7 @@ TEST_F(TransactionsMetricsTest, ReportStashedResources) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "find");
     ASSERT(opCtx()->getWriteUnitOfWork());
-    ASSERT(opCtx()->lockState()->isLocked());
+    ASSERT(shard_role_details::getLocker(opCtx())->isLocked());
 
     // Prepare the transaction and extend the duration in the prepared state.
     const auto [prepareTimestamp, namespaces] = txnParticipant.prepareTransaction(opCtx(), {});
@@ -3209,8 +3240,8 @@ TEST_F(TransactionsMetricsTest, ReportUnstashedResources) {
     auto startTime = Date_t::now();
     ClockSourceMock{}.reset(startTime);
 
-    ASSERT(opCtx()->lockState());
-    ASSERT(opCtx()->recoveryUnit());
+    ASSERT(shard_role_details::getLocker(opCtx()));
+    ASSERT(shard_role_details::getRecoveryUnit(opCtx()));
 
     repl::ReadConcernArgs readConcernArgs;
     ASSERT_OK(
@@ -3227,7 +3258,7 @@ TEST_F(TransactionsMetricsTest, ReportUnstashedResources) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "find");
     ASSERT(opCtx()->getWriteUnitOfWork());
-    ASSERT(opCtx()->lockState()->isLocked());
+    ASSERT(shard_role_details::getLocker(opCtx())->isLocked());
 
     // Prepare transaction and extend duration in the prepared state.
     txnParticipant.prepareTransaction(opCtx(), {});
@@ -3273,8 +3304,8 @@ TEST_F(TransactionsMetricsTest, ReportUnstashedResources) {
 }
 
 TEST_F(TransactionsMetricsTest, ReportUnstashedResourcesForARetryableWrite) {
-    ASSERT(opCtx()->lockState());
-    ASSERT(opCtx()->recoveryUnit());
+    ASSERT(shard_role_details::getLocker(opCtx()));
+    ASSERT(shard_role_details::getRecoveryUnit(opCtx()));
 
     auto clientOwned = getServiceContext()->getService()->makeClient("client");
     AlternativeClientRegion acr(clientOwned);
@@ -3308,8 +3339,8 @@ TEST_F(TransactionsMetricsTest, ReportUnstashedResourcesForARetryableWrite) {
 }
 
 TEST_F(TransactionsMetricsTest, UseAPIParametersOnOpCtxForARetryableWrite) {
-    ASSERT(opCtx()->lockState());
-    ASSERT(opCtx()->recoveryUnit());
+    ASSERT(shard_role_details::getLocker(opCtx()));
+    ASSERT(shard_role_details::getRecoveryUnit(opCtx()));
 
     APIParameters firstAPIParameters = APIParameters();
     firstAPIParameters.setAPIVersion("2");
@@ -3543,7 +3574,7 @@ std::string buildTransactionInfoString(OperationContext* opCtx,
                                        boost::optional<repl::OpTime> prepareOpTime = boost::none) {
     // Calling transactionInfoForLog to get the actual transaction info string.
     const auto lockerInfo =
-        opCtx->lockState()->getLockerInfo(CurOp::get(*opCtx)->getLockStatsBase());
+        shard_role_details::getLocker(opCtx)->getLockerInfo(CurOp::get(*opCtx)->getLockStatsBase());
     // Building expected transaction info string.
     StringBuilder parametersInfo;
     // autocommit must be false for a multi statement transaction, so
@@ -3708,7 +3739,7 @@ BSONObj buildTransactionInfoBSON(OperationContext* opCtx,
                                  boost::optional<repl::OpTime> prepareOpTime = boost::none) {
     // Calling transactionInfoForLog to get the actual transaction info string.
     const auto lockerInfo =
-        opCtx->lockState()->getLockerInfo(CurOp::get(*opCtx)->getLockStatsBase());
+        shard_role_details::getLocker(opCtx)->getLockerInfo(CurOp::get(*opCtx)->getLockStatsBase());
     // Building expected transaction info string.
     StringBuilder parametersInfo;
     // autocommit must be false for a multi statement transaction, so
@@ -3796,7 +3827,7 @@ TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogAfterCommit) {
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
     txnParticipant.commitUnpreparedTransaction(opCtx());
 
-    const auto lockerInfo = opCtx()->lockState()->getLockerInfo(boost::none);
+    const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
     ASSERT(lockerInfo);
     std::string testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
         opCtx(), &lockerInfo->stats, true, apiParameters, readConcernArgs);
@@ -3846,7 +3877,7 @@ TEST_F(TransactionsMetricsTest, TestPreparedTransactionInfoForLogAfterCommit) {
 
     txnParticipant.commitPreparedTransaction(opCtx(), prepareTimestamp, {});
 
-    const auto lockerInfo = opCtx()->lockState()->getLockerInfo(boost::none);
+    const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
     ASSERT(lockerInfo);
     std::string testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
         opCtx(), &lockerInfo->stats, true, apiParameters, readConcernArgs);
@@ -3889,7 +3920,7 @@ TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogAfterAbort) {
     txnParticipant.unstashTransactionResources(opCtx(), "abortTransaction");
     txnParticipant.abortTransaction(opCtx());
 
-    const auto lockerInfo = opCtx()->lockState()->getLockerInfo(boost::none);
+    const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
     ASSERT(lockerInfo);
 
     std::string testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
@@ -3939,7 +3970,7 @@ TEST_F(TransactionsMetricsTest, TestPreparedTransactionInfoForLogAfterAbort) {
 
     txnParticipant.abortTransaction(opCtx());
 
-    const auto lockerInfo = opCtx()->lockState()->getLockerInfo(boost::none);
+    const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
     ASSERT(lockerInfo);
 
     std::string testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
@@ -3977,7 +4008,7 @@ DEATH_TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogWithNoLockerInfoS
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
-    const auto lockerInfo = opCtx()->lockState()->getLockerInfo(boost::none);
+    const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
     ASSERT(lockerInfo);
 
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
@@ -4036,7 +4067,7 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterSlowCommit) {
     txnParticipant.commitUnpreparedTransaction(opCtx());
     stopCapturingLogMessages();
 
-    const auto lockerInfo = opCtx()->lockState()->getLockerInfo(boost::none);
+    const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
     ASSERT(lockerInfo);
 
     BSONObj expected = txnParticipant.getTransactionInfoBSONForLogForTest(
@@ -4090,7 +4121,7 @@ TEST_F(TransactionsMetricsTest, LogPreparedTransactionInfoAfterSlowCommit) {
     txnParticipant.commitPreparedTransaction(opCtx(), prepareTimestamp, {});
     stopCapturingLogMessages();
 
-    const auto lockerInfo = opCtx()->lockState()->getLockerInfo(boost::none);
+    const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
     ASSERT(lockerInfo);
 
     BSONObj expected = txnParticipant.getTransactionInfoBSONForLogForTest(
@@ -4137,7 +4168,7 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterSlowAbort) {
     txnParticipant.abortTransaction(opCtx());
     stopCapturingLogMessages();
 
-    const auto lockerInfo = opCtx()->lockState()->getLockerInfo(boost::none);
+    const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
     ASSERT(lockerInfo);
 
     auto expectedTransactionInfo = buildTransactionInfoBSON(opCtx(),
@@ -4199,7 +4230,7 @@ TEST_F(TransactionsMetricsTest, LogPreparedTransactionInfoAfterSlowAbort) {
     txnParticipant.abortTransaction(opCtx());
     stopCapturingLogMessages();
 
-    const auto lockerInfo = opCtx()->lockState()->getLockerInfo(boost::none);
+    const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
     ASSERT(lockerInfo);
 
     auto expectedTransactionInfo = buildTransactionInfoBSON(opCtx(),
@@ -4264,7 +4295,7 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterExceptionInPrepare) {
     ASSERT(txnParticipant.transactionIsAborted());
     stopCapturingLogMessages();
 
-    const auto lockerInfo = opCtx()->lockState()->getLockerInfo(boost::none);
+    const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
     ASSERT(lockerInfo);
     auto expectedTransactionInfo = buildTransactionInfoBSON(opCtx(),
                                                             txnParticipant,
@@ -6062,19 +6093,22 @@ TEST_F(TxnParticipantTest,
 class OneOffRead {
 public:
     OneOffRead(OperationContext* opCtx, const Timestamp& ts) : _opCtx(opCtx) {
-        if (_opCtx->recoveryUnit()->isActive()) {
-            _opCtx->recoveryUnit()->abandonSnapshot();
+        if (shard_role_details::getRecoveryUnit(_opCtx)->isActive()) {
+            shard_role_details::getRecoveryUnit(_opCtx)->abandonSnapshot();
         }
         if (ts.isNull()) {
-            _opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
+            shard_role_details::getRecoveryUnit(_opCtx)->setTimestampReadSource(
+                RecoveryUnit::ReadSource::kNoTimestamp);
         } else {
-            _opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kProvided, ts);
+            shard_role_details::getRecoveryUnit(_opCtx)->setTimestampReadSource(
+                RecoveryUnit::ReadSource::kProvided, ts);
         }
     }
 
     ~OneOffRead() {
-        _opCtx->recoveryUnit()->abandonSnapshot();
-        _opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
+        shard_role_details::getRecoveryUnit(_opCtx)->abandonSnapshot();
+        shard_role_details::getRecoveryUnit(_opCtx)->setTimestampReadSource(
+            RecoveryUnit::ReadSource::kNoTimestamp);
     }
 
 private:
@@ -6098,7 +6132,7 @@ TEST_F(TxnParticipantTest, AbortSplitPreparedTransaction) {
     DurableHistoryRegistry::set(opCtx->getServiceContext(),
                                 std::make_unique<DurableHistoryRegistry>());
     opCtx->getServiceContext()->setOpObserver(
-        std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
 
     OpDebug* const nullOpDbg = nullptr;
 
@@ -6277,7 +6311,7 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
     DurableHistoryRegistry::set(opCtx->getServiceContext(),
                                 std::make_unique<DurableHistoryRegistry>());
     opCtx->getServiceContext()->setOpObserver(
-        std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
 
     OpDebug* const nullOpDbg = nullptr;
 
@@ -6397,7 +6431,7 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
     // Reading at the prepare timestamp should not see anything.
     {
         OneOffRead oor(opCtx, prepTs);
-        opCtx->recoveryUnit()->setPrepareConflictBehavior(
+        shard_role_details::getRecoveryUnit(opCtx)->setPrepareConflictBehavior(
             PrepareConflictBehavior::kIgnoreConflicts);
         ASSERT_BSONOBJ_EQ(
             BSONObj::kEmptyObject,
@@ -6455,12 +6489,19 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
     userSession.reset();
 
     // Rollback such that the commit oplog entry and the effects of the transaction are rolled
-    // back.
+    // back. Unset some of the multi-doc transaction state because it's illegal to request the
+    // global lock in strong mode when the operation context has been part of a multi-doc
+    // transaction.
+    const auto lsid = *opCtx->getLogicalSessionId();
+    const auto txnNum = *opCtx->getTxnNumber();
+    opCtx->resetMultiDocumentTransactionState();
     opCtx->getServiceContext()->getStorageEngine()->setStableTimestamp(chosenStableTimestamp);
     {
         Lock::GlobalLock globalLock(opCtx, LockMode::MODE_X);
         ASSERT_OK(opCtx->getServiceContext()->getStorageEngine()->recoverToStableTimestamp(opCtx));
     }
+    opCtx->setLogicalSessionId(lsid);
+    opCtx->setTxnNumber(txnNum);
 
     // Again, display read values for diagnostics.
     userColl.emplace(opCtx, kNss, LockMode::MODE_IX);

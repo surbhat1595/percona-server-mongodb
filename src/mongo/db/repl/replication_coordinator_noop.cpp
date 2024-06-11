@@ -203,8 +203,13 @@ void ReplicationCoordinatorNoOp::setMyHeartbeatMessage(const std::string&) {
     MONGO_UNREACHABLE;
 }
 
-void ReplicationCoordinatorNoOp::setMyLastAppliedOpTimeAndWallTimeForward(const OpTimeAndWallTime&,
-                                                                          bool) {
+void ReplicationCoordinatorNoOp::setMyLastWrittenOpTimeAndWallTimeForward(
+    const OpTimeAndWallTime&) {
+    MONGO_UNREACHABLE;
+}
+
+void ReplicationCoordinatorNoOp::setMyLastAppliedOpTimeAndWallTimeForward(
+    const OpTimeAndWallTime&) {
     MONGO_UNREACHABLE;
 }
 
@@ -213,11 +218,13 @@ void ReplicationCoordinatorNoOp::setMyLastDurableOpTimeAndWallTimeForward(
     MONGO_UNREACHABLE;
 }
 
-void ReplicationCoordinatorNoOp::setMyLastAppliedOpTimeAndWallTime(const OpTimeAndWallTime&) {
+void ReplicationCoordinatorNoOp::setMyLastAppliedAndLastWrittenOpTimeAndWallTimeForward(
+    const OpTimeAndWallTime&) {
     MONGO_UNREACHABLE;
 }
 
-void ReplicationCoordinatorNoOp::setMyLastDurableOpTimeAndWallTime(const OpTimeAndWallTime&) {
+void ReplicationCoordinatorNoOp::setMyLastDurableAndLastWrittenOpTimeAndWallTimeForward(
+    const OpTimeAndWallTime&) {
     MONGO_UNREACHABLE;
 }
 
@@ -341,7 +348,7 @@ BSONObj ReplicationCoordinatorNoOp::getConfigBSON() const {
     MONGO_UNREACHABLE;
 }
 
-const MemberConfig* ReplicationCoordinatorNoOp::findConfigMemberByHostAndPort(
+boost::optional<MemberConfig> ReplicationCoordinatorNoOp::findConfigMemberByHostAndPort_deprecated(
     const HostAndPort& hap) const {
     MONGO_UNREACHABLE;
 }
@@ -538,10 +545,6 @@ Status ReplicationCoordinatorNoOp::stepUpIfEligible(bool skipDryRun) {
     MONGO_UNREACHABLE;
 }
 
-void ReplicationCoordinatorNoOp::signalDropPendingCollectionsRemovedFromStorage() {
-    MONGO_UNREACHABLE;
-}
-
 boost::optional<Timestamp> ReplicationCoordinatorNoOp::getRecoveryTimestamp() {
     MONGO_UNREACHABLE;
 }
@@ -634,6 +637,14 @@ bool ReplicationCoordinatorNoOp::isRetryableWrite(OperationContext* opCtx) const
 }
 
 boost::optional<UUID> ReplicationCoordinatorNoOp::getInitialSyncId(OperationContext* opCtx) {
+    MONGO_UNREACHABLE;
+}
+
+OpTime ReplicationCoordinatorNoOp::getMyLastWrittenOpTime() const {
+    MONGO_UNREACHABLE;
+}
+
+OpTimeAndWallTime ReplicationCoordinatorNoOp::getMyLastWrittenOpTimeAndWallTime() const {
     MONGO_UNREACHABLE;
 }
 

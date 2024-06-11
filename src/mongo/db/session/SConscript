@@ -14,8 +14,11 @@ env.Library(
         'logical_session_id_helpers',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/db/internal_transactions_feature_flag',
         '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/util/concurrency/spin_lock',
+        '$BUILD_DIR/mongo/util/fail_point',
     ],
 )
 
@@ -52,13 +55,14 @@ env.Library(
         'sessions_collection.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
         'logical_session_id',
         'logical_session_id_helpers',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/coll_mod_command_idl',
         '$BUILD_DIR/mongo/db/index_commands_idl',
+        '$BUILD_DIR/mongo/db/server_base',
     ],
 )
 
@@ -152,6 +156,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/auth/user',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/rpc/client_metadata',
+        '$BUILD_DIR/mongo/util/concurrency/spin_lock',
         'logical_session_id_helpers',
     ],
 )
@@ -183,7 +188,9 @@ env.Library(
         'session_catalog',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/catalog/collection_options',
+        '$BUILD_DIR/mongo/db/coll_mod_command_idl',
+        '$BUILD_DIR/mongo/db/commands/mongod_fcv',
         '$BUILD_DIR/mongo/db/dbdirectclient',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
         '$BUILD_DIR/mongo/db/index_commands_idl',

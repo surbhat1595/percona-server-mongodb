@@ -40,6 +40,7 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/query/allowed_contexts.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/net/socket_utils.h"
@@ -76,11 +77,16 @@ intrusive_ptr<DocumentSource> DocumentSourceCollStats::createFromBson(
             specElem.type() == BSONType::Object);
 
     // TODO SERVER-77056: add assertion to validate pExpCtx->serializationCtxt != stateDefault()
-
+    const auto tenantId = pExpCtx->ns.tenantId();
+    const auto vts = tenantId
+        ? boost::make_optional(auth::ValidatedTenancyScopeFactory::create(
+              *tenantId, auth::ValidatedTenancyScopeFactory::TrustedForInnerOpMsgRequestTag{}))
+        : boost::none;
     auto spec = DocumentSourceCollStatsSpec::parse(
         IDLParserContext(kStageName,
                          false /* apiStrict */,
-                         pExpCtx->ns.tenantId(),
+                         vts,
+                         tenantId,
                          SerializationContext::stateCommandReply(pExpCtx->serializationCtxt)),
         specElem.embeddedObject());
 
@@ -94,8 +100,8 @@ BSONObj DocumentSourceCollStats::makeStatsForNs(
     const boost::optional<BSONObj>& filterObj) {
     // The $collStats stage is critical to observability and diagnosability, categorize as immediate
     // priority.
-    ScopedAdmissionPriorityForLock skipAdmissionControl(expCtx->opCtx->lockState(),
-                                                        AdmissionContext::Priority::kImmediate);
+    ScopedAdmissionPriorityForLock skipAdmissionControl(
+        shard_role_details::getLocker(expCtx->opCtx), AdmissionContext::Priority::kImmediate);
 
     BSONObjBuilder builder;
 

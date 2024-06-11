@@ -90,6 +90,7 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_options.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/db/ttl_collection_cache.h"
 #include "mongo/db/views/view.h"
 #include "mongo/db/views/view_catalog_helpers.h"
@@ -101,7 +102,6 @@
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/shard_key_pattern.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/namespace_string_util.h"
@@ -180,9 +180,9 @@ Status getOnlySupportedOnTimeseriesError(StringData fieldName) {
             str::stream() << "option only supported on a time-series collection: " << fieldName};
 }
 
-boost::optional<ShardKeyPattern> getShardKeyPattern(OperationContext* opCtx,
-                                                    const NamespaceStringOrUUID& nsOrUUID,
-                                                    const CollMod& cmd) {
+boost::optional<ShardKeyPattern> getShardKeyPatternIfSharded(OperationContext* opCtx,
+                                                             const NamespaceStringOrUUID& nsOrUUID,
+                                                             const CollMod& cmd) {
     if (!Grid::get(opCtx)->isInitialized()) {
         return boost::none;
     }
@@ -191,7 +191,12 @@ boost::optional<ShardKeyPattern> getShardKeyPattern(OperationContext* opCtx,
         const NamespaceString nss =
             CollectionCatalog::get(opCtx)->resolveNamespaceStringOrUUID(opCtx, nsOrUUID);
         if (auto catalogClient = Grid::get(opCtx)->catalogClient()) {
-            return ShardKeyPattern(catalogClient->getCollection(opCtx, nss).getKeyPattern());
+            auto coll = catalogClient->getCollection(opCtx, nss);
+            if (coll.getUnsplittable()) {
+                return boost::none;
+            } else {
+                return ShardKeyPattern(coll.getKeyPattern());
+            }
         }
     } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
         // The collection is unsharded or doesn't exist.
@@ -294,12 +299,6 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(
                         "TTL indexes are not supported for time-series collections. "
                         "Please refer to the documentation and use the top-level "
                         "'expireAfterSeconds' option instead"};
-            }
-            if (coll->isCapped() &&
-                !feature_flags::gFeatureFlagTTLIndexesOnCappedCollections.isEnabled(
-                    serverGlobalParams.featureCompatibility)) {
-                return {ErrorCodes::InvalidOptions,
-                        "TTL indexes are not supported for capped collections."};
             }
             if (auto status = index_key_validate::validateExpireAfterSeconds(
                     *cmdIndex.getExpireAfterSeconds(),
@@ -502,8 +501,8 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(
         // (Generic FCV reference): This FCV check should exist across LTS binary versions.
         multiversion::FeatureCompatibilityVersion fcv;
         if (serverGlobalParams.validateFeaturesAsPrimary.load() &&
-            serverGlobalParams.featureCompatibility.isLessThan(multiversion::GenericFCV::kLatest,
-                                                               &fcv)) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot().isLessThan(
+                multiversion::GenericFCV::kLatest, &fcv)) {
             maxFeatureCompatibilityVersion = fcv;
         }
         auto validatorObj = *validator;
@@ -592,7 +591,7 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(
                                   << "' option is only supported on collections clustered by _id"};
         }
 
-        auto status = stdx::visit(
+        auto status = visit(
             OverloadedVisitor{
                 [&oplogEntryBuilder](const std::string& value) -> Status {
                     if (value != "off") {
@@ -646,43 +645,44 @@ void _setClusteredExpireAfterSeconds(
     OperationContext* opCtx,
     const CollectionOptions& oldCollOptions,
     Collection* coll,
-    const stdx::variant<std::string, std::int64_t>& clusteredIndexExpireAfterSeconds) {
+    const std::variant<std::string, std::int64_t>& clusteredIndexExpireAfterSeconds) {
     invariant(oldCollOptions.clusteredIndex);
 
     boost::optional<int64_t> oldExpireAfterSeconds = oldCollOptions.expireAfterSeconds;
 
-    stdx::visit(
-        OverloadedVisitor{
-            [&](const std::string& newExpireAfterSeconds) {
-                invariant(newExpireAfterSeconds == "off");
-                if (!oldExpireAfterSeconds) {
-                    // expireAfterSeconds is already disabled on the clustered index.
-                    return;
-                }
+    visit(OverloadedVisitor{
+              [&](const std::string& newExpireAfterSeconds) {
+                  invariant(newExpireAfterSeconds == "off");
+                  if (!oldExpireAfterSeconds) {
+                      // expireAfterSeconds is already disabled on the clustered index.
+                      return;
+                  }
 
-                coll->updateClusteredIndexTTLSetting(opCtx, boost::none);
-            },
-            [&](std::int64_t newExpireAfterSeconds) {
-                if (oldExpireAfterSeconds && *oldExpireAfterSeconds == newExpireAfterSeconds) {
-                    // expireAfterSeconds is already the requested value on the clustered index.
-                    return;
-                }
+                  coll->updateClusteredIndexTTLSetting(opCtx, boost::none);
+              },
+              [&](std::int64_t newExpireAfterSeconds) {
+                  if (oldExpireAfterSeconds && *oldExpireAfterSeconds == newExpireAfterSeconds) {
+                      // expireAfterSeconds is already the requested value on the clustered index.
+                      return;
+                  }
 
-                // If this collection was not previously TTL, inform the TTL monitor when we commit.
-                if (!oldExpireAfterSeconds) {
-                    auto ttlCache = &TTLCollectionCache::get(opCtx->getServiceContext());
-                    opCtx->recoveryUnit()->onCommit(
-                        [ttlCache, uuid = coll->uuid()](OperationContext*,
-                                                        boost::optional<Timestamp>) {
-                            ttlCache->registerTTLInfo(
-                                uuid, TTLCollectionCache::Info{TTLCollectionCache::ClusteredId{}});
-                        });
-                }
+                  // If this collection was not previously TTL, inform the TTL monitor when we
+                  // commit.
+                  if (!oldExpireAfterSeconds) {
+                      auto ttlCache = &TTLCollectionCache::get(opCtx->getServiceContext());
+                      shard_role_details::getRecoveryUnit(opCtx)->onCommit(
+                          [ttlCache, uuid = coll->uuid()](OperationContext*,
+                                                          boost::optional<Timestamp>) {
+                              ttlCache->registerTTLInfo(
+                                  uuid,
+                                  TTLCollectionCache::Info{TTLCollectionCache::ClusteredId{}});
+                          });
+                  }
 
-                invariant(newExpireAfterSeconds >= 0);
-                coll->updateClusteredIndexTTLSetting(opCtx, newExpireAfterSeconds);
-            }},
-        clusteredIndexExpireAfterSeconds);
+                  invariant(newExpireAfterSeconds >= 0);
+                  coll->updateClusteredIndexTTLSetting(opCtx, newExpireAfterSeconds);
+              }},
+          clusteredIndexExpireAfterSeconds);
 }
 
 Status _processCollModDryRunMode(OperationContext* opCtx,
@@ -790,7 +790,7 @@ Status _collModInternal(OperationContext* opCtx,
     bool mayNeedKeyPatternForParsing =
         cmd.getIndex() && (cmd.getIndex()->getHidden() || cmd.getIndex()->getPrepareUnique());
     if (!mode && mayNeedKeyPatternForParsing) {
-        shardKeyPattern = getShardKeyPattern(opCtx, nsOrUUID, cmd);
+        shardKeyPattern = getShardKeyPatternIfSharded(opCtx, nsOrUUID, cmd);
     }
 
     if (cmd.getDryRun().value_or(false)) {
@@ -980,7 +980,7 @@ Status _collModInternal(OperationContext* opCtx,
             if (changed) {
                 coll.getWritableCollection(opCtx)->setTimeseriesOptions(opCtx, newOptions);
                 if (feature_flags::gTSBucketingParametersUnchanged.isEnabled(
-                        serverGlobalParams.featureCompatibility)) {
+                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                     coll.getWritableCollection(opCtx)->setTimeseriesBucketingParametersChanged(
                         opCtx, true);
                 };
@@ -992,8 +992,9 @@ Status _collModInternal(OperationContext* opCtx,
         // (Generic FCV reference): This FCV check happens whenever we upgrade to the latest
         // version.
         // TODO SERVER-80490: remove this check when 8.0 becomes the next LTS release.
-        if (auto version = serverGlobalParams.featureCompatibility.getVersion();
-            cmrNew.numModifications == 0 &&
+        const auto version =
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion();
+        if (cmrNew.numModifications == 0 &&
             (version == multiversion::GenericFCV::kUpgradingFromLastContinuousToLatest ||
              version == multiversion::GenericFCV::kUpgradingFromLastLTSToLatest)) {
             auto writableCollection = coll.getWritableCollection(opCtx);
@@ -1007,8 +1008,7 @@ Status _collModInternal(OperationContext* opCtx,
         // (Generic FCV reference): This FCV check should exist across LTS binary versions.
         // TODO SERVER-80003 remove special version handling when LTS becomes 8.0.
         if (cmrNew.numModifications == 0 && coll->timeseriesBucketingParametersHaveChanged() &&
-            serverGlobalParams.featureCompatibility.getVersion() ==
-                multiversion::GenericFCV::kDowngradingFromLatestToLastLTS) {
+            version == multiversion::GenericFCV::kDowngradingFromLatestToLastLTS) {
             coll.getWritableCollection(opCtx)->setTimeseriesBucketingParametersChanged(opCtx,
                                                                                        boost::none);
         }

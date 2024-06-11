@@ -85,13 +85,14 @@
 #include "mongo/db/session/sessions_collection_standalone.h"
 #include "mongo/db/startup_recovery.h"
 #include "mongo/db/storage/control/storage_control.h"
+#include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/embedded/embedded_options_parser_init.h"
 #include "mongo/embedded/index_builds_coordinator_embedded.h"
-#include "mongo/embedded/oplog_writer_embedded.h"
+#include "mongo/embedded/operation_logger_embedded.h"
 #include "mongo/embedded/periodic_runner_embedded.h"
 #include "mongo/embedded/read_write_concern_defaults_cache_lookup_embedded.h"
 #include "mongo/embedded/replication_coordinator_embedded.h"
@@ -101,6 +102,7 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_options.h"
 #include "mongo/platform/process_id.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/scripting/dbdirectclient_factory.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/transport_layer_manager_impl.h"
@@ -175,9 +177,10 @@ GlobalInitializerRegisterer filterAllowedIndexFieldNamesEmbeddedInitializer(
     {},
     {"FilterAllowedIndexFieldNames"});
 
-ServiceContext::ConstructorActionRegisterer collectionShardingStateFactoryRegisterer{
-    "CollectionShardingStateFactory",
+ServiceContext::ConstructorActionRegisterer shardingStateRegisterer{
+    "ShardingState",
     [](ServiceContext* service) {
+        ShardingState::create(service);
         CollectionShardingStateFactory::set(
             service, std::make_unique<CollectionShardingStateFactoryStandalone>(service));
     },
@@ -234,7 +237,6 @@ void shutdown(ServiceContext* srvContext) {
     LOGV2_OPTIONS(22551, {LogComponent::kControl}, "now exiting");
 }
 
-
 ServiceContext* initialize(const char* yaml_config) {
     srand(static_cast<unsigned>(curTimeMicros64()));  // NOLINT
 
@@ -245,6 +247,12 @@ ServiceContext* initialize(const char* yaml_config) {
     uassertStatusOKWithContext(status, "Global initilization failed");
     ScopeGuard giGuard([] { mongo::runGlobalDeinitializers().ignore(); });
     setGlobalServiceContext(ServiceContext::make());
+
+    auto serviceContext = getGlobalServiceContext();
+    serviceContext->getService()->setServiceEntryPoint(
+        std::make_unique<ServiceEntryPointEmbedded>());
+    serviceContext->setTransportLayerManager(std::make_unique<transport::TransportLayerManagerImpl>(
+        std::make_unique<transport::TransportLayerMock>()));
 
     Client::initThread("initandlisten", getGlobalServiceContext()->getService());
 
@@ -257,15 +265,9 @@ ServiceContext* initialize(const char* yaml_config) {
     // Make sure current thread have no client set in thread_local when we leave this function
     ScopeGuard clientGuard([] { Client::releaseCurrent(); });
 
-    auto serviceContext = getGlobalServiceContext();
-    serviceContext->getService()->setServiceEntryPoint(
-        std::make_unique<ServiceEntryPointEmbedded>());
-    serviceContext->setTransportLayerManager(std::make_unique<transport::TransportLayerManagerImpl>(
-        std::make_unique<transport::TransportLayerMock>()));
-
     auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
     opObserverRegistry->addObserver(
-        std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterEmbedded>()));
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerEmbedded>()));
     serviceContext->setOpObserver(std::move(opObserverRegistry));
 
     DBDirectClientFactory::get(serviceContext).registerImplementation([](OperationContext* opCtx) {
@@ -304,12 +306,20 @@ ServiceContext* initialize(const char* yaml_config) {
 
     // Creating the operation context before initializing the storage engine allows the storage
     // engine initialization to make use of the lock manager.
-    auto startupOpCtx = serviceContext->makeOperationContext(&cc());
+    auto lastShutdownState = [&] {
+        auto initializeStorageEngineOpCtx = serviceContext->makeOperationContext(&cc());
+        shard_role_details::setRecoveryUnit(initializeStorageEngineOpCtx.get(),
+                                            std::make_unique<RecoveryUnitNoop>(),
+                                            WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
 
-    auto lastShutdownState =
-        initializeStorageEngine(startupOpCtx.get(), StorageEngineInitFlags::kAllowNoLockFile);
-    invariant(StorageEngine::LastShutdownState::kClean == lastShutdownState);
-    StorageControl::startStorageControls(serviceContext);
+        auto lastShutdownState = initializeStorageEngine(initializeStorageEngineOpCtx.get(),
+                                                         StorageEngineInitFlags::kAllowNoLockFile);
+        invariant(StorageEngine::LastShutdownState::kClean == lastShutdownState);
+        StorageControl::startStorageControls(serviceContext);
+        return lastShutdownState;
+    }();
+
+    auto startupOpCtx = serviceContext->makeOperationContext(&cc());
 
     // Warn if we detect configurations for multiple registered storage engines in the same
     // configuration file/environment.
@@ -370,7 +380,7 @@ ServiceContext* initialize(const char* yaml_config) {
 
     // Notify the storage engine that startup is completed before repair exits below, as repair sets
     // the upgrade flag to true.
-    serviceContext->getStorageEngine()->notifyStartupComplete();
+    serviceContext->getStorageEngine()->notifyStartupComplete(startupOpCtx.get());
 
     if (storageGlobalParams.upgrade) {
         LOGV2(22553, "finished checking dbs");

@@ -28,6 +28,7 @@
  */
 
 
+#include "mongo/bson/util/bsoncolumnbuilder.h"
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
 #include <algorithm>
@@ -390,6 +391,33 @@ TEST_F(KeyStringBuilderTest, DeprecatedBinData) {
     ROUNDTRIP(version, BSON("" << BSONBinData(nullptr, 0, ByteArrayDeprecated)));
 }
 
+TEST_F(KeyStringBuilderTest, ValidColumn) {
+    BSONColumnBuilder cb;
+    cb.append(BSON("a"
+                   << "deadbeef")
+                  .getField("a"));
+    cb.append(BSON("a" << 1).getField("a"));
+    cb.append(BSON("a" << 2).getField("a"));
+    cb.append(BSON("a" << 1).getField("a"));
+    BSONBinData columnData = cb.finalize();
+    BSONObj objData = BSON("" << columnData);
+
+    ROUNDTRIP(version, objData);
+}
+
+TEST_F(KeyStringBuilderTest, InvalidColumn) {
+    const BSONObj objData = BSON("" << BSONBinData("foobar", 6, Column));
+    const key_string::Builder builder(version, objData, ALL_ASCENDING);
+    auto KeyStringBuilderSize = builder.getSize();
+    ASSERT(KeyStringBuilderSize > 0);
+
+    ASSERT_THROWS_CODE(
+        key_string::toBsonSafe(
+            builder.getBuffer(), KeyStringBuilderSize, ALL_ASCENDING, builder.getTypeBits()),
+        AssertionException,
+        50833);
+}
+
 TEST_F(KeyStringBuilderTest, ActualBytesDouble) {
     // just one test like this for utter sanity
 
@@ -732,6 +760,44 @@ TEST_F(KeyStringBuilderTest, KeyStringBuilderDiscriminator) {
     uint8_t end = (uint8_t)(*(data.getBuffer() + (data.getSize() - 1)));
     ASSERT_EQ((uint8_t)'\001', appendedDescriminator);
     ASSERT_EQ((uint8_t)'\004', end);
+}
+
+TEST_F(KeyStringBuilderTest, KeyStringValueCompareWithoutDiscriminator1) {
+    // test that when passed in a Discriminator it gets added.
+    BSONObj doc = BSON("fieldA" << 1 << "fieldB" << 2);
+
+    key_string::HeapBuilder ks1(
+        key_string::Version::V1, ALL_ASCENDING, key_string::Discriminator::kExclusiveBefore);
+    ks1.appendBSONElement(doc["fieldA"]);
+    ks1.appendBSONElement(doc["fieldB"]);
+    key_string::Value data1 = ks1.release();
+
+    key_string::HeapBuilder ks2(
+        key_string::Version::V1, ALL_ASCENDING, key_string::Discriminator::kExclusiveAfter);
+    ks2.appendBSONElement(doc["fieldA"]);
+    ks2.appendBSONElement(doc["fieldB"]);
+    key_string::Value data2 = ks2.release();
+
+    ASSERT_EQ(data1.compareWithoutDiscriminator(data2), 0);
+}
+
+TEST_F(KeyStringBuilderTest, KeyStringValueCompareWithoutDiscriminator2) {
+    // test that when passed in a Discriminator it gets added.
+    BSONObj doc = BSON("fieldA" << 1 << "fieldB" << 2);
+
+    key_string::HeapBuilder ks1(
+        key_string::Version::V1, ALL_ASCENDING, key_string::Discriminator::kExclusiveBefore);
+    ks1.appendBSONElement(doc["fieldA"]);
+    ks1.appendBSONElement(doc["fieldB"]);
+    key_string::Value data1 = ks1.release();
+
+    key_string::HeapBuilder ks2(
+        key_string::Version::V1, ALL_ASCENDING, key_string::Discriminator::kExclusiveAfter);
+    ks2.appendBSONElement(doc["fieldA"]);
+    ks2.appendBSONElement(doc["fieldA"]);
+    key_string::Value data2 = ks2.release();
+
+    ASSERT_EQ(data1.compareWithoutDiscriminator(data2), 1);
 }
 
 TEST_F(KeyStringBuilderTest, DoubleInvalidIntegerPartV0) {

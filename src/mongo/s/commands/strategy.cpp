@@ -100,7 +100,9 @@
 #include "mongo/rpc/rewrite_state_change_errors.h"
 #include "mongo/rpc/topology_version_gen.h"
 #include "mongo/s/analyze_shard_key_role.h"
+#include "mongo/s/cannot_implicitly_create_collection_info.h"
 #include "mongo/s/catalog_cache.h"
+#include "mongo/s/cluster_ddl.h"
 #include "mongo/s/commands/strategy.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/load_balancer_support.h"
@@ -127,6 +129,7 @@
 
 namespace mongo {
 namespace {
+using namespace fmt::literals;
 
 MONGO_FAIL_POINT_DEFINE(hangBeforeCheckingMongosShutdownInterrupt);
 const auto kOperationTime = "operationTime"_sd;
@@ -143,18 +146,9 @@ MONGO_FAIL_POINT_DEFINE(allowSkippingAppendRequiredFieldsToResponse);
 
 Future<void> runCommandInvocation(std::shared_ptr<RequestExecutionContext> rec,
                                   std::shared_ptr<CommandInvocation> invocation) {
-    bool usesDedicatedThread = [&] {
-        auto client = rec->getOpCtx()->getClient();
-        if (auto context = transport::ServiceExecutorContext::get(client); context) {
-            return context->usesDedicatedThread();
-        }
-        tassert(5453902,
-                "Threading model may only be absent for internal and direct clients",
-                !client->hasRemote() || client->isInDirectClient());
-        return true;
-    }();
+    static constexpr bool useDedicatedThread = true;
     return CommandHelpers::runCommandInvocation(
-        std::move(rec), std::move(invocation), usesDedicatedThread);
+        std::move(rec), std::move(invocation), useDedicatedThread);
 }
 
 /**
@@ -285,19 +279,21 @@ void ExecCommandClient::_prologue() {
             "Invalid database name: '{}'"_format(dbname),
             DatabaseName::validDBName(dbname, DatabaseName::DollarInDbNameBehavior::Allow));
 
-    StringMap<int> topLevelFields;
+    StringDataSet topLevelFields(8);
     for (auto&& element : request.body) {
         StringData fieldName = element.fieldNameStringData();
-        if (fieldName == "help" && element.type() == Bool && element.Bool()) {
+        if (fieldName == CommandHelpers::kHelpFieldName && element.type() == Bool &&
+            element.Bool()) {
             auto body = result->getBodyBuilder();
-            body.append("help", "help for: {} {}"_format(c->getName(), c->help()));
+            body.append(CommandHelpers::kHelpFieldName,
+                        "help for: {} {}"_format(c->getName(), c->help()));
             CommandHelpers::appendSimpleCommandStatus(body, true, "");
             iassert(Status(ErrorCodes::SkipCommandExecution, "Already served help command"));
         }
 
         uassert(ErrorCodes::FailedToParse,
                 "Parsed command object contains duplicate top level key: {}"_format(fieldName),
-                topLevelFields[fieldName]++ == 0);
+                topLevelFields.insert(fieldName).second);
     }
 
     try {
@@ -312,11 +308,6 @@ void ExecCommandClient::_prologue() {
     rpc::TrackingMetadata trackingMetadata;
     trackingMetadata.initWithOperName(c->getName());
     rpc::TrackingMetadata::get(opCtx) = trackingMetadata;
-
-    // Extract and process metadata from the command request body.
-    ReadPreferenceSetting::get(opCtx) =
-        uassertStatusOK(ReadPreferenceSetting::fromContainingBSON(request.body));
-    VectorClock::get(opCtx)->gossipIn(opCtx, request.body, !c->requiresAuth());
 }
 
 Future<void> ExecCommandClient::_run() {
@@ -491,6 +482,7 @@ private:
     void _onSnapshotError(Status& status);
     void _onShardCannotRefreshDueToLocksHeldError(Status& status);
     void _onTenantMigrationAborted(Status& status);
+    void _onCannotImplicitlyCreateCollection(Status& status);
 
     ParseAndRunCommand* const _parc;
 
@@ -735,30 +727,53 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
     bool customDefaultWriteConcernWasApplied = false;
     bool isInternalClientValue = isInternalClient(opCtx);
 
-    if (supportsWriteConcern && !clientSuppliedWriteConcern &&
+    bool canApplyDefaultWC = supportsWriteConcern &&
         (!TransactionRouter::get(opCtx) || command->isTransactionCommand()) &&
-        !opCtx->getClient()->isInDirectClient()) {
-        if (isInternalClientValue) {
-            uassert(
-                5569900,
-                "received command without explicit writeConcern on an internalClient connection {}"_format(
-                    redact(request.body.toString())),
-                request.body.hasField(WriteConcernOptions::kWriteConcernField));
-        } else {
-            // This command is not from a DBDirectClient or internal client, and supports WC, but
-            // wasn't given one - so apply the default, if there is one.
-            const auto rwcDefaults =
+        !opCtx->getClient()->isInDirectClient();
+
+    if (canApplyDefaultWC) {
+        auto getDefaultWC = ([&]() {
+            auto rwcDefaults =
                 ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
-            if (const auto wcDefault = rwcDefaults.getDefaultWriteConcern()) {
-                _parc->_wc = *wcDefault;
-                const auto defaultWriteConcernSource = rwcDefaults.getDefaultWriteConcernSource();
-                customDefaultWriteConcernWasApplied = defaultWriteConcernSource &&
-                    defaultWriteConcernSource == DefaultWriteConcernSourceEnum::kGlobal;
-                LOGV2_DEBUG(22766,
-                            2,
-                            "Applying default writeConcern on command",
-                            "command"_attr = request.getCommandName(),
-                            "writeConcern"_attr = *wcDefault);
+            auto wcDefault = rwcDefaults.getDefaultWriteConcern();
+            const auto defaultWriteConcernSource = rwcDefaults.getDefaultWriteConcernSource();
+            customDefaultWriteConcernWasApplied = defaultWriteConcernSource &&
+                defaultWriteConcernSource == DefaultWriteConcernSourceEnum::kGlobal;
+            return wcDefault;
+        });
+
+        if (!clientSuppliedWriteConcern) {
+            if (isInternalClientValue) {
+                uassert(
+                    5569900,
+                    "received command without explicit writeConcern on an internalClient connection {}"_format(
+                        redact(request.body.toString())),
+                    request.body.hasField(WriteConcernOptions::kWriteConcernField));
+            } else {
+                // This command is not from a DBDirectClient or internal client, and supports WC,
+                // but wasn't given one - so apply the default, if there is one.
+                const auto wcDefault = getDefaultWC();
+                // Default WC can be 'boost::none' if the implicit default is used and set to 'w:1'.
+                if (wcDefault) {
+                    _parc->_wc = *wcDefault;
+                    LOGV2_DEBUG(22766,
+                                2,
+                                "Applying default writeConcern on command",
+                                "command"_attr = request.getCommandName(),
+                                "writeConcern"_attr = *wcDefault);
+                }
+            }
+        }
+        // Client supplied a write concern object without 'w' field.
+        else if (_parc->_wc->isExplicitWithoutWField()) {
+            const auto wcDefault = getDefaultWC();
+            // Default WC can be 'boost::none' if the implicit default is used and set to 'w:1'.
+            if (wcDefault) {
+                clientSuppliedWriteConcern = false;
+                _parc->_wc->w = wcDefault->w;
+                if (_parc->_wc->syncMode == WriteConcernOptions::SyncMode::UNSET) {
+                    _parc->_wc->syncMode = wcDefault->syncMode;
+                }
             }
         }
     }
@@ -1131,6 +1146,17 @@ void ParseAndRunCommand::RunAndRetry::_onTenantMigrationAborted(Status& status) 
         iassert(status);
 }
 
+void ParseAndRunCommand::RunAndRetry::_onCannotImplicitlyCreateCollection(Status& status) {
+    invariant(status.code() == ErrorCodes::CannotImplicitlyCreateCollection);
+
+    auto opCtx = _parc->_rec->getOpCtx();
+
+    auto extraInfo = status.extraInfo<CannotImplicitlyCreateCollectionInfo>();
+    invariant(extraInfo);
+
+    cluster::createCollectionWithRouterLoop(opCtx, extraInfo->getNss());
+}
+
 Future<void> ParseAndRunCommand::RunAndRetry::run() {
     return makeReadyFutureWith([&] {
                // Try kMaxNumStaleVersionRetries times. On the last try, exceptions are
@@ -1162,6 +1188,10 @@ Future<void> ParseAndRunCommand::RunAndRetry::run() {
         })
         .onError<ErrorCodes::TenantMigrationAborted>([this](Status status) {
             _onTenantMigrationAborted(status);
+            return run();  // Retry
+        })
+        .onError<ErrorCodes::CannotImplicitlyCreateCollection>([this](Status status) {
+            _onCannotImplicitlyCreateCollection(status);
             return run();  // Retry
         });
 }

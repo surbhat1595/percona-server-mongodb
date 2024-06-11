@@ -3,7 +3,7 @@
  *
  * The test runs commands that are not allowed with security token: bulkWrite.
  * @tags: [
- *   not_allowed_with_security_token,
+ *   not_allowed_with_signed_security_token,
  *   command_not_supported_in_serverless,
  *   # TODO SERVER-52419 Remove this tag.
  *   featureFlagBulkWriteCommand,
@@ -13,7 +13,11 @@
  *   assumes_unsharded_collection,
  * ]
  */
-import {cursorEntryValidator, cursorSizeValidator} from "jstests/libs/bulk_write_utils.js";
+import {
+    cursorEntryValidator,
+    cursorSizeValidator,
+    summaryFieldsValidator
+} from "jstests/libs/bulk_write_utils.js";
 
 const coll = db.getCollection("coll");
 coll.drop();
@@ -37,7 +41,8 @@ let res = db.adminCommand({
 
 assert.commandWorked(res);
 cursorSizeValidator(res, 4);
-assert.eq(res.numErrors, 0, "bulkWrite command response: " + tojson(res));
+summaryFieldsValidator(
+    res, {nErrors: 0, nInserted: 3, nDeleted: 0, nMatched: 1, nModified: 1, nUpserted: 0});
 
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, idx: 0, n: 1});
 cursorEntryValidator(res.cursor.firstBatch[1], {ok: 1, idx: 1, n: 1});
@@ -70,7 +75,9 @@ res = db.adminCommand({
 
 assert.commandWorked(res);
 cursorSizeValidator(res, 4);
-assert.eq(res.numErrors, 0, "bulkWrite command response: " + tojson(res));
+assert.eq(res.nErrors, 0, "bulkWrite command response: " + tojson(res));
+summaryFieldsValidator(
+    res, {nErrors: 0, nInserted: 3, nDeleted: 0, nMatched: 1, nModified: 1, nUpserted: 0});
 
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, idx: 0, n: 1});
 cursorEntryValidator(res.cursor.firstBatch[1], {ok: 1, idx: 1, n: 1});

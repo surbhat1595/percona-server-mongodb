@@ -67,7 +67,7 @@ public:
         : _sessionManager(std::move(sm)) {}
     ~TransportLayerMock();
 
-    std::shared_ptr<Session> createSession();
+    std::shared_ptr<Session> createSession(bool isFromRouterPort = false);
     std::shared_ptr<Session> get(Session::Id id);
     bool owns(Session::Id id);
 
@@ -88,6 +88,9 @@ public:
     Status start() override;
     void shutdown() override;
     bool inShutdown() const;
+    void stopAcceptingSessions() override {
+        MONGO_UNIMPLEMENTED;
+    }
 
     StringData getNameForLogging() const override {
         return "mock"_sd;
@@ -108,8 +111,12 @@ public:
         const TransientSSLParams& transientSSLParams) override;
 #endif
 
-    SessionManager* getSessionManager() const {
+    SessionManager* getSessionManager() const override {
         return _sessionManager.get();
+    }
+
+    std::shared_ptr<SessionManager> getSharedSessionManager() const override {
+        return _sessionManager;
     }
 
 private:
@@ -123,7 +130,7 @@ private:
     stdx::unordered_map<Session::Id, Connection> _sessions;
     bool _shutdown = false;
 
-    std::unique_ptr<SessionManager> _sessionManager;
+    std::shared_ptr<SessionManager> _sessionManager;
 };
 
 }  // namespace transport

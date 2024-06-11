@@ -65,6 +65,7 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/direct_shard_client_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/operation_context.h"
@@ -89,6 +90,7 @@
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/idl/idl_parser.h"
@@ -118,7 +120,7 @@
 namespace mongo {
 
 // Hangs in the beginning of each hello command when set.
-MONGO_FAIL_POINT_DEFINE(waitInHello);
+MONGO_FAIL_POINT_DEFINE(shardWaitInHello);
 // Awaitable hello requests with the proper topologyVersions will sleep for maxAwaitTimeMS on
 // standalones. This failpoint will hang right before doing this sleep when set.
 MONGO_FAIL_POINT_DEFINE(hangWaitingForHelloResponseOnStandalone);
@@ -399,18 +401,19 @@ public:
                              const BSONObj& cmdObj,
                              rpc::ReplyBuilderInterface* replyBuilder) final {
         // Critical to monitoring and observability, categorize the command as immediate priority.
-        ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+        ScopedAdmissionPriorityForLock skipAdmissionControl(shard_role_details::getLocker(opCtx),
                                                             AdmissionContext::Priority::kImmediate);
 
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         const bool apiStrict = APIParameters::get(opCtx).getAPIStrict().value_or(false);
-        auto sc = SerializationContext::stateCommandRequest();
-        sc.setTenantIdSource(auth::ValidatedTenancyScope::get(opCtx) != boost::none);
+        const auto vts = auth::ValidatedTenancyScope::get(opCtx);
+        const auto sc = vts != boost::none
+            ? SerializationContext::stateCommandRequest(vts->hasTenantId(), vts->isFromAtlasProxy())
+            : SerializationContext::stateCommandRequest();
+        auto cmd = HelloCommand::parse(
+            IDLParserContext("hello", apiStrict, vts, dbName.tenantId(), sc), cmdObj);
 
-        auto cmd = HelloCommand::parse(IDLParserContext("hello", apiStrict, dbName.tenantId(), sc),
-                                       cmdObj);
-
-        waitInHello.execute(
+        shardWaitInHello.execute(
             [&](const BSONObj& customArgs) { _handleHelloFailPoint(customArgs, opCtx, cmdObj); });
 
         /* currently request to arbiter is (somewhat arbitrarily) an ismaster request that is not
@@ -422,7 +425,6 @@ public:
 
         Client::TagMask connectionTagsToSet = 0;
         Client::TagMask connectionTagsToUnset = 0;
-        bool isInternalClient = false;
 
         // Tag connections to avoid closing them on stepdown.
         if (!cmd.getHangUpOnStepDown()) {
@@ -438,19 +440,25 @@ public:
         }
 
         auto client = opCtx->getClient();
-        if (ClientMetadata::tryFinalize(client)) {
-            audit::logClientMetadata(client);
+        const auto internalClient = cmd.getInternalClient();
+        const bool isInternalClient = internalClient.has_value();
 
-            // If we are the first hello, then set split horizon parameters.
+        if (ClientMetadata::tryFinalize(client)) {
+            // This is the first hello for this client.
+            audit::logClientMetadata(client);
+            if (!isInternalClient) {
+                DirectShardClientTracker::trackClient(client);
+            }
+
+            // Set split horizon parameters.
             auto sniName = client->getSniNameForSession();
             SplitHorizon::setParameters(client, std::move(sniName));
         }
 
         // Parse the optional 'internalClient' field. This is provided by incoming connections from
         // mongod and mongos.
-        if (auto internalClient = cmd.getInternalClient()) {
+        if (internalClient) {
             connectionTagsToUnset |= Client::kExternalClientKeepOpen;
-            isInternalClient = true;
 
             // All incoming connections from mongod/mongos of earlier versions should be
             // closed if the featureCompatibilityVersion is bumped to 3.6.
@@ -663,7 +671,7 @@ private:
               "cmd"_attr = cmdObj,
               "client"_attr = opCtx->getClient()->clientAddress(true),
               "desc"_attr = opCtx->getClient()->desc());
-        waitInHello.pauseWhileSet(opCtx);
+        shardWaitInHello.pauseWhileSet(opCtx);
     }
 };
 MONGO_REGISTER_COMMAND(CmdHello).forShard();

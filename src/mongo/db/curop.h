@@ -66,9 +66,10 @@
 #include "mongo/db/operation_cpu_timer.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/profile_filter.h"
+#include "mongo/db/query/cursor_response_gen.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_summary_stats.h"
-#include "mongo/db/query/query_stats/key_generator.h"
+#include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/db/storage/storage_stats.h"
@@ -238,6 +239,8 @@ public:
                 const ResourceConsumption::OperationMetrics* operationMetrics,
                 logv2::DynamicAttributes* pAttrs) const;
 
+    void reportStorageStats(logv2::DynamicAttributes* pAttrs) const;
+
     /**
      * Appends information about the current operation to "builder"
      *
@@ -285,6 +288,11 @@ public:
     BSONArray getResolvedViewsInfo() const;
     void appendResolvedViewsInfo(BSONObjBuilder& builder) const;
 
+    /**
+     * Get a snapshot of the cursor metrics suitable for inclusion in a command response.
+     */
+    CursorMetrics getCursorMetrics() const;
+
     // -------------------
 
     // basic options
@@ -312,6 +320,10 @@ public:
     long long sortSpills{0};           // The total number of spills to disk from sort stages
     size_t sortTotalDataSizeBytes{0};  // The amount of data we've sorted in bytes
     long long keysSorted{0};           // The number of keys that we've sorted.
+    long long collectionScans{0};      // The number of collection scans during query execution.
+    long long collectionScansNonTailable{0};  // The number of non-tailable collection scans.
+    std::set<std::string> indexesUsed;        // The indexes used during query execution.
+
 
     // True if the plan came from the multi-planner (not from the plan cache and not a query with a
     // single solution).
@@ -331,11 +343,48 @@ public:
     boost::optional<uint32_t> planCacheKey;
     // The hash of the query's "stable" key. This represents the query's shape.
     boost::optional<uint32_t> queryHash;
-    // The shape of the original query serialized with readConcern, application name, and namespace.
-    // If boost::none, query stats should not be collected for this operation.
-    boost::optional<std::size_t> queryStatsKeyHash;
-    // The Key used by query stats to generate the query stats store key.
-    std::unique_ptr<query_stats::Key> queryStatsKey;
+
+    /* The QueryStatsInfo struct was created to bundle all the queryStats related fields of CurOp &
+     * OpDebug together (SERVER-83280).
+     *
+     * ClusterClientCursorImpl and ClientCursor also contain _queryStatsKey and _queryStatsKeyHash
+     * members but NOT a wasRateLimited member. Variable names & accesses would be more consistent
+     * across the code if ClusterClientCursorImpl and ClientCursor each also had a QueryStatsInfo
+     * struct, but we considered and rejected two different potential implementations of this:
+     *  - Option 1:
+     *    Declare a QueryStatsInfo struct in each .h file. Every struct would have key and keyHash
+     *    fields, and a wasRateLimited field would be added only to CurOp. But, it seemed confusing
+     *    to have slightly different structs with the same name declared three different times.
+     *  - Option 2:
+     *    Create a query_stats_info.h that declares QueryStatsInfo--identical to the version defined
+     *    in this file. CurOp/OpDebug, ClientCursor, and ClusterClientCursorImpl would then all
+     *    have their own QueryStatsInfo instances, potentially as a unique_ptr or boost::optional. A
+     *    benefit to this would be the ability to to just move the entire QueryStatsInfo struct from
+     *    Op to the Cursor, instead of copying it over field by field (the current method). But:
+     *      - The current code moves ownership of the key, but copies the keyHash. So, for workflows
+     *        that require multiple cursors, like sharding, one cursor would own the key, but all
+     *        cursors would have copies of the keyHash. The problem with trying to move around the
+     *        struct in its entirety is that access to the *entire* struct would be lost on the
+     *        move, meaning there's no way to retain the keyHash (that doesn't largely nullify the
+     *        benefits of having the struct).
+     *      - It seemed odd to have ClientCursor and ClusterClientCursorImpl using the struct but
+     *        never needing the wasRateLimited field.
+     */
+
+    // Note that the only case when the three fields of the below struct are null, none, and false
+    // is if the query stats feature flag is turned off.
+    struct QueryStatsInfo {
+        // Uniquely identifies one query stats entry.
+        // nullptr if `wasRateLimited` is true.
+        std::unique_ptr<query_stats::Key> key;
+        // A cached value of `absl::HashOf(key)`.
+        // Always populated if `key` is non-null. boost::none if `wasRateLimited` is true.
+        boost::optional<std::size_t> keyHash;
+        // True if the request was rate limited and stats should not be collected.
+        bool wasRateLimited = false;
+    };
+
+    QueryStatsInfo queryStatsInfo;
 
     // The query framework that this operation used. Will be unknown for non query operations.
     PlanExecutor::QueryFramework queryFramework{PlanExecutor::QueryFramework::kUnknown};
@@ -359,9 +408,14 @@ public:
     // after optimizations.
     Microseconds planningTime{0};
 
-    // Amount of CPU time used by this thread. Will remain zero if this platform does not support
+    // Cost computed by the cost-based optimizer.
+    boost::optional<double> estimatedCost;
+    // Cardinality computed by the cost-based optimizer.
+    boost::optional<double> estimatedCardinality;
+
+    // Amount of CPU time used by this thread. Will remain -1 if this platform does not support
     // this feature.
-    Nanoseconds cpuTime{0};
+    Nanoseconds cpuTime{-1};
 
     int responseLength{-1};
 

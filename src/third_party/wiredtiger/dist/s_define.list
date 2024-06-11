@@ -62,7 +62,6 @@ WT_PACKED_STRUCT_END
 WT_PADDING_CHECK
 WT_PREPARE_INIT
 WT_READ_BARRIER
-WT_READ_BARRIER_WEAK_MEMORDER
 WT_READ_ONCE
 WT_REF_SAVE_STATE_MAX
 WT_REF_SIZE
@@ -108,6 +107,7 @@ __WIREDTIGER_EXT_H_
 __WIREDTIGER_H_
 __WT_INTERNAL_H
 __wt_bswap16
+__wt_checksum_with_seed
 __wt_verbose_error
 __wt_verbose_level
 __wt_verbose_level_multi

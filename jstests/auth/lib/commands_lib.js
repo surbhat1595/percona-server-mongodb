@@ -2315,6 +2315,20 @@ export const authCommandsLib = {
           ],
         },
         {
+            testname: "autoCompact",
+            // Not need to actually enable background compaction, just verify the user can run this command
+            command: {autoCompact: false},
+            skipSharded: true,
+            testcases: [
+                {
+                  runOnDb: adminDbName,
+                  roles: roles_hostManager,
+                  privileges:
+                      [{resource: {cluster: true}, actions: ["compact"]}]
+                }
+            ]
+          },
+        {
           testname: "buildInfo",
           command: {buildInfo: 1},
           testcases: [
@@ -4051,10 +4065,6 @@ export const authCommandsLib = {
               createSearchIndexes: "x",
               indexes: [{'definition': {'mappings': {'dynamic': true}}}],
           },
-          // Only enterprise knows of this command.
-          skipTest: (conn) => {
-              return !getBuildInfo().modules.includes("enterprise");
-          },
           testcases: [{
               runOnDb: firstDbName,
               roles: Object.extend({
@@ -4431,10 +4441,6 @@ export const authCommandsLib = {
           command: {
               dropSearchIndex: "x",
               name: 'indexName',
-          },
-          // Only enterprise knows of this command.
-          skipTest: (conn) => {
-              return !getBuildInfo().modules.includes("enterprise");
           },
           testcases: [
             {
@@ -5573,10 +5579,6 @@ export const authCommandsLib = {
         {
           testname: "listSearchIndexes",
           command: {listSearchIndexes: "x"},
-          // Only enterprise knows of this command.
-          skipTest: (conn) => {
-              return !getBuildInfo().modules.includes("enterprise");
-          },
           testcases: [{
               runOnDb: firstDbName,
               roles: {
@@ -5735,10 +5737,6 @@ export const authCommandsLib = {
               updateSearchIndex: "foo",
               id: 'index-ID-number',
               definition: {"textBlob": "blob"},
-          },
-          // Only enterprise knows of this command.
-          skipTest: (conn) => {
-              return !getBuildInfo().modules.includes("enterprise");
           },
           testcases: [
               {
@@ -7050,11 +7048,7 @@ export const authCommandsLib = {
               }]
           },
           skipSharded: false,
-          // Only enterprise knows of this aggregation stage.
-          skipTest:
-              (conn) =>
-                  !conn.getDB("admin").runCommand({buildInfo: 1}).modules.includes("enterprise"),
-          // Instead of configuring mongot, lets make the search to return EOF early.
+          // Instead of calling to mongot, lets make the search to return EOF early.
           disableSearch: true,
           testcases: [
               {

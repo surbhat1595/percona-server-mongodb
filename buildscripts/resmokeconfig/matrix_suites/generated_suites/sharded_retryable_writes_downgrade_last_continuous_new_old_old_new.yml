@@ -28,6 +28,7 @@ executor:
           logRetryAttempts: true
           networkErrorAndTxnOverrideConfig:
             retryOnNetworkErrors: true
+          nonClusteredConfigTransactions: true
           overrideRetryAttempts: 3
           sessionOptions:
             readConcern:
@@ -112,7 +113,6 @@ selector:
   - jstests/core/**/shell_connection_strings.js
   - jstests/core/**/geo_s2ordering.js
   - jstests/core/**/dbhash.js
-  - jstests/core/**/dbhash2.js
   - jstests/core/**/explain_missing_database.js
   - jstests/core/**/geo_2d_explain.js
   - jstests/core/**/geo_s2explain.js

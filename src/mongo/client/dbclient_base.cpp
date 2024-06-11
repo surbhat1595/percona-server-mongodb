@@ -139,11 +139,7 @@ rpc::UniqueReply DBClientBase::parseCommandReplyMessage(const std::string& host,
         uassertStatusOK(_metadataReader(opCtx, commandReply->getCommandReply(), host));
     }
 
-    // StaleConfig is thrown because clients acting as routers handle the exception at a higher
-    // level. Routing clients only expect StaleConfig from shards, so the exception should not be
-    // thrown when connected to a mongos, which allows StaleConfig to be returned to clients that
-    // connect to a mongos with DBClient, e.g. the shell.
-    if (!isMongos()) {
+    if (_shouldThrowOnStaleConfigError) {
         auto status = getStatusFromCommandResult(commandReply->getCommandReply());
         if (status == ErrorCodes::StaleConfig) {
             uassertStatusOK(status.withContext("stale config in runCommand"));
@@ -255,14 +251,16 @@ std::pair<rpc::UniqueReply, std::shared_ptr<DBClientBase>> DBClientBase::runComm
     return {std::move(out.first), std::move(me)};
 }
 
-std::tuple<bool, DBClientBase*> DBClientBase::runCommandWithTarget(const DatabaseName& dbName,
-                                                                   BSONObj cmd,
-                                                                   BSONObj& info,
-                                                                   int options) {
+std::tuple<bool, DBClientBase*> DBClientBase::runCommandWithTarget(
+    const DatabaseName& dbName,
+    BSONObj cmd,
+    BSONObj& info,
+    int options,
+    boost::optional<auth::ValidatedTenancyScope> vts) {
     // TODO: This will be downconverted immediately if the underlying
     // requestBuilder is a legacyRequest builder. Not sure what the best
     // way to get around that is without breaking the abstraction.
-    auto request = _upconvertRequest(dbName, cmd, options);
+    auto request = _upconvertRequest(dbName, cmd, options, vts);
     auto result = runCommandWithTarget(std::move(request));
 
     info = result.first->getCommandReply().getOwned();
@@ -282,8 +280,12 @@ std::tuple<bool, std::shared_ptr<DBClientBase>> DBClientBase::runCommandWithTarg
     return std::make_tuple(isOk(info), result.second);
 }
 
-bool DBClientBase::runCommand(const DatabaseName& dbName, BSONObj cmd, BSONObj& info, int options) {
-    auto res = runCommandWithTarget(dbName, std::move(cmd), info, options);
+bool DBClientBase::runCommand(const DatabaseName& dbName,
+                              BSONObj cmd,
+                              BSONObj& info,
+                              int options,
+                              boost::optional<auth::ValidatedTenancyScope> vts) {
+    auto res = runCommandWithTarget(dbName, std::move(cmd), info, options, vts);
     return std::get<0>(res);
 }
 
@@ -934,14 +936,15 @@ void DBClientBase::createIndexes(const NamespaceString& nss,
 
 OpMsgRequest DBClientBase::_upconvertRequest(const DatabaseName& dbName,
                                              BSONObj legacyCmdObj,
-                                             int options) {
+                                             int options,
+                                             boost::optional<auth::ValidatedTenancyScope> vts) {
     if (isAlwaysAppendDollarTenant_forTest() && dbName.tenantId()) {
         BSONObjBuilder bob = BSONObjBuilder(std::move(legacyCmdObj));
         dbName.tenantId()->serializeToBSON("$tenant", &bob);
         legacyCmdObj = bob.obj();
     }
 
-    return rpc::upconvertRequest(dbName, std::move(legacyCmdObj), options);
+    return rpc::upconvertRequest(dbName, std::move(legacyCmdObj), options, vts);
 }
 
 BSONElement getErrField(const BSONObj& o) {

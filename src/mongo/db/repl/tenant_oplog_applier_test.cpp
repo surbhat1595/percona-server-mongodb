@@ -45,7 +45,6 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -71,6 +70,7 @@
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/db/update/document_diff_serialization.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/executor/network_interface_mock.h"
@@ -948,8 +948,8 @@ TEST_F(TenantOplogApplierTest, ApplyDelete_Success) {
                                   const OplogDeleteEntryArgs& args) {
         onDeleteCalled = true;
         ASSERT_TRUE(opCtx);
-        ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode(nss.dbName(), MODE_IX));
-        ASSERT_TRUE(opCtx->lockState()->isCollectionLockedForMode(nss, MODE_IX));
+        ASSERT_TRUE(shard_role_details::getLocker(opCtx)->isDbLockedForMode(nss.dbName(), MODE_IX));
+        ASSERT_TRUE(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nss, MODE_IX));
         ASSERT_TRUE(opCtx->writesAreReplicated());
         ASSERT_FALSE(args.fromMigrate);
         ASSERT_EQUALS(nss.dbName().toString_forTest(), _dbName.toStringWithTenantId_forTest());
@@ -1078,7 +1078,7 @@ TEST_F(TenantOplogApplierTest, ApplyCreateCollCommand_Success) {
                                             const BSONObj&) {
         applyCmdCalled = true;
         ASSERT_TRUE(opCtx);
-        ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode(nss.dbName(), MODE_IX));
+        ASSERT_TRUE(shard_role_details::getLocker(opCtx)->isDbLockedForMode(nss.dbName(), MODE_IX));
         ASSERT_TRUE(opCtx->writesAreReplicated());
         ASSERT_EQUALS(nss, collNss);
     };
@@ -1123,7 +1123,7 @@ TEST_F(TenantOplogApplierTest, ApplyCreateIndexesCommand_Success) {
                                        bool fromMigrate) {
         ASSERT_FALSE(applyCmdCalled);
         applyCmdCalled = true;
-        ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode(nss.dbName(), MODE_IX));
+        ASSERT_TRUE(shard_role_details::getLocker(opCtx)->isDbLockedForMode(nss.dbName(), MODE_IX));
         ASSERT_TRUE(opCtx->writesAreReplicated());
         ASSERT_BSONOBJ_EQ(indexDoc,
                           BSON("v" << 2 << "key" << BSON("a" << 1) << "name"

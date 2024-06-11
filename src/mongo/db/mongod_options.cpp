@@ -78,6 +78,7 @@
 #include "mongo/db/server_options_base.h"
 #include "mongo/db/server_options_nongeneral_gen.h"
 #include "mongo/db/server_options_server_helpers.h"
+#include "mongo/db/server_options_upgrade_downgrade_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
@@ -87,6 +88,7 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/net/socket_utils.h"
 #include "mongo/util/options_parser/startup_options.h"
 #include "mongo/util/str.h"
 #include "mongo/util/version.h"
@@ -131,6 +133,7 @@ Status addMongodOptions(moe::OptionSection* options) try {
     uassertStatusOK(addMongodLegacyOptions(options));
     uassertStatusOK(addKeyfileServerOption(options));
     uassertStatusOK(addClusterAuthModeServerOption(options));
+    uassertStatusOK(addServerUpgradeDowngradeOptions(options));
 
     return Status::OK();
 } catch (const AssertionException& ex) {
@@ -173,7 +176,8 @@ StatusWith<repl::ReplSettings> populateReplSettings(const moe::Environment& para
         // "replSetName" is previously removed if "replSet" and "replSetName" are both found to be
         // set by the user. Therefore, we only need to check for it if "replSet" in not found.
         replSettings.setReplSetString(params["replication.replSetName"].as<std::string>().c_str());
-    } else if (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup() &&
+    } else if (gFeatureFlagAllMongodsAreSharded.isEnabledUseLatestFCVWhenUninitialized(
+                   serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
                serverGlobalParams.maintenanceMode != ServerGlobalParams::StandaloneMode) {
         replSettings.setShouldAutoInitiate();
         // Empty `replSet` in replSettings means that the replica set name will be auto-generated
@@ -286,10 +290,14 @@ Status validateMongodOptions(const moe::Environment& params) {
 
     bool setRouterPort = params.count("routerPort") || params.count("net.routerPort");
 
-    // TODO (SERVER-79008): Make `--configdb` mandatory when the embedded router is enabled.
     if (setRouterPort && !setConfigRole && !setShardRole) {
         return Status(ErrorCodes::BadValue,
                       "The embedded router requires the node to act as a shard or config server");
+    }
+
+    bool setConfigDBs = params.count("sharding.configDB");
+    if (setConfigDBs && !setRouterPort) {
+        return Status(ErrorCodes::BadValue, "--configdb is only supported in embedded router mode");
     }
 
     if (params.count("maintenanceMode")) {
@@ -714,7 +722,8 @@ Status storeMongodOptions(const moe::Environment& params) {
     }
 
     if (params.count("maintenanceMode") &&
-        gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+        gFeatureFlagAllMongodsAreSharded.isEnabledUseLatestFCVWhenUninitialized(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         // Setting maintenanceMode will disable sharding by setting 'clusterRole' to
         // 'ClusterRole::None'. If maintenanceMode is set to 'standalone', replication will be
         // disabled as well.
@@ -792,6 +801,7 @@ Status storeMongodOptions(const moe::Environment& params) {
         }
         return Status(ErrorCodes::BadValue, "--cacheSize option not currently supported");
     }
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
     if (params.count("sharding.clusterRole")) {
         auto clusterRoleParam = params["sharding.clusterRole"].as<std::string>();
         // Force to set up the node as a replica set, unless we're a shard and we're using queryable
@@ -824,14 +834,24 @@ Status storeMongodOptions(const moe::Environment& params) {
         }
 
         if (params.count("net.routerPort")) {
-            if (feature_flags::gEmbeddedRouter.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+            if (feature_flags::gEmbeddedRouter.isEnabledUseLatestFCVWhenUninitialized(
+                    fcvSnapshot)) {
                 serverGlobalParams.routerPort = params["net.routerPort"].as<int>();
                 serverGlobalParams.clusterRole += ClusterRole::RouterServer;
             }
         }
-    } else if (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup() &&
+    } else if (gFeatureFlagAllMongodsAreSharded.isEnabledUseLatestFCVWhenUninitialized(
+                   fcvSnapshot) &&
                serverGlobalParams.maintenanceMode == ServerGlobalParams::MaintenanceMode::None) {
+        serverGlobalParams.doAutoBootstrapSharding = true;
         serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
+        if (feature_flags::gEmbeddedRouter.isEnabledUseLatestFCVWhenUninitialized(fcvSnapshot)) {
+            serverGlobalParams.clusterRole += ClusterRole::RouterServer;
+        }
+    }
+
+    if (!feature_flags::gEmbeddedRouter.isEnabledUseLatestFCVWhenUninitialized(fcvSnapshot)) {
+        serverGlobalParams.configdbs = ConnectionString{};
     }
 
     if (!params.count("net.port")) {
@@ -906,6 +926,9 @@ Status storeMongodOptions(const moe::Environment& params) {
                                         << " and set requireApiVersion=true");
         }
     }
+
+    serverGlobalParams.upgradeBackCompat = params.count("upgradeBackCompat");
+    serverGlobalParams.downgradeBackCompat = params.count("downgradeBackCompat");
 
     setGlobalReplSettings(replSettings);
     return Status::OK();

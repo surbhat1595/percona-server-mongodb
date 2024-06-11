@@ -112,7 +112,7 @@ bool isQuerySbeCompatible(const CollectionPtr* collection, const CanonicalQuery*
 
     auto& queryKnob = QueryKnobConfiguration::decoration(cq->getExpCtxRaw()->opCtx);
     if ((!feature_flags::gFeatureFlagTimeSeriesInSbe.isEnabled(
-             serverGlobalParams.featureCompatibility) ||
+             serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) ||
          queryKnob.getSbeDisableTimeSeriesForOp()) &&
         nss.isTimeseriesBucketsCollection()) {
         return false;

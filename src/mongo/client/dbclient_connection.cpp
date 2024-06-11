@@ -99,11 +99,11 @@ using std::string;
 using std::unique_ptr;
 
 DBClientConnection::DBClientConnection(bool autoReconnect,
-                                       double so_timeout,
+                                       double soTimeout,
                                        MongoURI uri,
                                        const HandshakeValidationHook& hook,
                                        const ClientAPIVersionParameters* apiParameters)
-    : DBClientSession(autoReconnect, so_timeout, uri, hook, apiParameters),
+    : DBClientSession(autoReconnect, soTimeout, uri, hook, apiParameters),
       _autoReconnectBackoff(Seconds(1), Seconds(2)) {
     _numConnections.fetchAndAdd(1);
 }
@@ -184,13 +184,13 @@ rpc::UniqueReply DBClientConnection::parseCommandReplyMessage(const std::string&
         return DBClientBase::parseCommandReplyMessage(host, replyMsg);
     } catch (const DBException& ex) {
         if (ErrorCodes::isConnectionFatalMessageParseError(ex.code())) {
-            _markFailed(kEndSession);
+            _markFailed(kKillSession);
         }
         throw;
     }
 }
 
-void DBClientConnection::_ensureSession() {
+void DBClientConnection::_reconnectSession() {
     // Don't hammer reconnects, backoff if needed
     sleepFor(_autoReconnectBackoff.nextSleep());
 
@@ -231,7 +231,7 @@ void DBClientConnection::_ensureSession() {
     }
 }
 
-void DBClientConnection::_shutdownSession() {
+void DBClientConnection::_killSession() {
     if (!_session) {
         return;
     }

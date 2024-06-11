@@ -46,7 +46,6 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/persistent_task_store.h"
@@ -61,6 +60,7 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/internal_session_pool.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/executor/scoped_task_executor.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/idl/idl_parser.h"
@@ -152,6 +152,19 @@ protected:
     virtual ShardingDDLCoordinatorMetadata const& metadata() const = 0;
     virtual void setMetadata(ShardingDDLCoordinatorMetadata&& metadata) = 0;
 
+    /**
+     * Returns a set of basic coordinator attributes to be used for logging.
+     */
+    logv2::DynamicAttributes getBasicCoordinatorAttrs() const;
+
+    /**
+     * Returns the set of attributes to be used for coordinator logging. Implementations must be
+     * sure to return a DynamicAttributes object that starts with the attributes returned by
+     * getBasicCoordinatorAttrs().
+     */
+    virtual logv2::DynamicAttributes getCoordinatorLogAttrs() const {
+        return getBasicCoordinatorAttrs();
+    }
     /*
      * Performs a noop write on all shards and the configsvr using the sessionId and txnNumber
      * specified in 'osi'.
@@ -348,11 +361,13 @@ protected:
         };
     }
 
+    auto _getDoc() const {
+        stdx::lock_guard lk{_docMutex};
+        return _doc;
+    }
+
     virtual void _enterPhase(const Phase& newPhase) {
-        auto newDoc = [&] {
-            stdx::lock_guard lk{_docMutex};
-            return _doc;
-        }();
+        auto newDoc = _getDoc();
 
         newDoc.setPhase(newPhase);
 
@@ -454,10 +469,7 @@ protected:
                    "phase"_attr = serializePhase(_doc.getPhase()),
                    "reason"_attr = redact(status));
 
-        auto newDoc = [&] {
-            stdx::lock_guard lk{_docMutex};
-            return _doc;
-        }();
+        auto newDoc = _getDoc();
 
         auto coordinatorMetadata = newDoc.getShardingDDLCoordinatorMetadata();
         coordinatorMetadata.setAbortReason(status);
@@ -471,10 +483,7 @@ protected:
 private:
     // lazily acquire Logical Session ID and a txn number
     void _updateSession(OperationContext* opCtx) {
-        auto newDoc = [&] {
-            stdx::lock_guard lk{_docMutex};
-            return _doc;
-        }();
+        auto newDoc = _getDoc();
         auto newShardingDDLCoordinatorMetadata = newDoc.getShardingDDLCoordinatorMetadata();
 
         auto optSession = newShardingDDLCoordinatorMetadata.getSession();

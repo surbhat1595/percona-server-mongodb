@@ -108,7 +108,8 @@ struct ChildWriteOp {
     // filled when state == _Error
     boost::optional<write_ops::WriteError> error;
 
-    // filled when state == _Complete and this is an op from a bulkWrite command.
+    // filled when state == _Complete or state == _Deferred and this is an op from a bulkWrite
+    // command.
     boost::optional<BulkWriteReplyItem> bulkWriteReplyItem;
 };
 
@@ -157,6 +158,15 @@ public:
      * Can only be used in state _Error
      */
     const write_ops::WriteError& getOpError() const;
+
+    /**
+     * Check if we have a stashed BulkWriteReplyItem so we can safely call
+     * takeBulkWriteReplyItem. A writeOp for bulkWrite may not have one if
+     * the command was run with errorsOnly=true.
+     *
+     * Can only be used in state _Complete.
+     */
+    bool hasBulkWriteReplyItem() const;
 
     /**
      * Take's the op's underlying BulkWriteReplyItem. This method must only be called one time
@@ -215,7 +225,10 @@ public:
      * Marks the write op complete if n is 1 along with transitioning any pending child write ops to
      * WriteOpState::NoOp. If n is 0 then defers the state update of the child write op until later.
      */
-    void noteWriteWithoutShardKeyWithIdResponse(const TargetedWrite& targetedWrite, int n);
+    void noteWriteWithoutShardKeyWithIdResponse(
+        const TargetedWrite& targetedWrite,
+        int n,
+        boost::optional<const BulkWriteReplyItem&> bulkWriteReplyItem);
 
     /**
      * Sets the reply for this write op directly, and forces the state to _Completed.
@@ -236,7 +249,7 @@ public:
      */
     void setWriteType(WriteType writeType);
 
-    WriteType getWriteType();
+    WriteType getWriteType() const;
 
     /**
      * Combines the pointed-to BulkWriteReplyItems into a single item. Used for merging the results
@@ -244,6 +257,8 @@ public:
      */
     boost::optional<BulkWriteReplyItem> combineBulkWriteReplyItems(
         std::vector<BulkWriteReplyItem const*> replies);
+
+    const std::vector<ChildWriteOp>& getChildWriteOps_forTest() const;
 
 private:
     /**

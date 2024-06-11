@@ -43,6 +43,7 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/basic_types.h"
 #include "mongo/db/commands/bulk_write_crud_op.h"
+#include "mongo/db/commands/write_commands_common.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/delete_request_gen.h"
 #include "mongo/db/ops/update_request.h"
@@ -162,6 +163,13 @@ NamespaceInfoEntry getFLENamespaceInfoEntry(const BSONObj& bulkWrite) {
     return nss[0];
 }
 
+bool isUnacknowledgedBulkWrite(OperationContext* opCtx) {
+    const WriteConcernOptions& writeConcern = opCtx->getWriteConcern();
+    return writeConcern.isUnacknowledged() &&
+        (writeConcern.syncMode == WriteConcernOptions::SyncMode::NONE ||
+         writeConcern.syncMode == WriteConcernOptions::SyncMode::UNSET);
+}
+
 write_ops::InsertCommandRequest makeInsertCommandRequestForFLE(
     const std::vector<mongo::BSONObj>& documents,
     const BulkWriteCommandRequest& req,
@@ -186,7 +194,7 @@ write_ops::UpdateOpEntry makeUpdateOpEntryFromUpdateOp(const BulkWriteUpdateOp* 
     update.setU(op->getUpdateMods());
     update.setHint(op->getHint());
     update.setCollation(op->getCollation());
-    update.setArrayFilters(op->getArrayFilters().value_or(std::vector<BSONObj>()));
+    update.setArrayFilters(op->getArrayFilters());
     update.setUpsert(op->getUpsert());
     update.setUpsertSupplied(op->getUpsertSupplied());
     update.setSampleId(op->getSampleId());
@@ -248,17 +256,15 @@ write_ops::UpdateCommandRequest makeUpdateCommandRequestFromUpdateOp(
     updateCommand.setExpectPrefix(req.getExpectPrefix());
     updateCommand.setLet(req.getLet());
 
-    updateCommand.getWriteCommandRequestBase().setIsTimeseriesNamespace(
-        nsEntry.getIsTimeseriesNamespace());
-    updateCommand.getWriteCommandRequestBase().setCollectionUUID(nsEntry.getCollectionUUID());
+    auto& requestBase = updateCommand.getWriteCommandRequestBase();
+    requestBase.setIsTimeseriesNamespace(nsEntry.getIsTimeseriesNamespace());
+    requestBase.setCollectionUUID(nsEntry.getCollectionUUID());
 
-    updateCommand.getWriteCommandRequestBase().setEncryptionInformation(
-        nsEntry.getEncryptionInformation());
-    updateCommand.getWriteCommandRequestBase().setBypassDocumentValidation(
-        req.getBypassDocumentValidation());
+    requestBase.setEncryptionInformation(nsEntry.getEncryptionInformation());
+    requestBase.setBypassDocumentValidation(req.getBypassDocumentValidation());
 
-    updateCommand.getWriteCommandRequestBase().setStmtIds(std::vector<StmtId>{stmtId});
-    updateCommand.getWriteCommandRequestBase().setOrdered(req.getOrdered());
+    requestBase.setStmtIds(std::vector<StmtId>{stmtId});
+    requestBase.setOrdered(req.getOrdered());
 
     return updateCommand;
 }
@@ -267,7 +273,7 @@ write_ops::DeleteCommandRequest makeDeleteCommandRequestForFLE(
     OperationContext* opCtx,
     const BulkWriteDeleteOp* op,
     const BulkWriteCommandRequest& req,
-    const mongo::NamespaceInfoEntry& nsInfoEntry) {
+    const mongo::NamespaceInfoEntry& nsEntry) {
     write_ops::DeleteOpEntry deleteEntry;
     if (op->getCollation()) {
         deleteEntry.setCollation(op->getCollation());
@@ -277,15 +283,16 @@ write_ops::DeleteCommandRequest makeDeleteCommandRequestForFLE(
     deleteEntry.setQ(op->getFilter());
 
     std::vector<write_ops::DeleteOpEntry> deletes{deleteEntry};
-    write_ops::DeleteCommandRequest deleteRequest(nsInfoEntry.getNs(), deletes);
+    write_ops::DeleteCommandRequest deleteRequest(nsEntry.getNs(), deletes);
     deleteRequest.setDollarTenant(req.getDollarTenant());
     deleteRequest.setExpectPrefix(req.getExpectPrefix());
     deleteRequest.setLet(req.getLet());
     deleteRequest.setLegacyRuntimeConstants(Variables::generateRuntimeConstants(opCtx));
-    deleteRequest.getWriteCommandRequestBase().setEncryptionInformation(
-        nsInfoEntry.getEncryptionInformation());
-    deleteRequest.getWriteCommandRequestBase().setBypassDocumentValidation(
-        req.getBypassDocumentValidation());
+
+    auto& requestBase = deleteRequest.getWriteCommandRequestBase();
+    requestBase.setCollectionUUID(nsEntry.getCollectionUUID());
+    requestBase.setEncryptionInformation(nsEntry.getEncryptionInformation());
+    requestBase.setBypassDocumentValidation(req.getBypassDocumentValidation());
 
     return deleteRequest;
 }
@@ -300,12 +307,12 @@ BulkWriteCommandRequest makeSingleOpBulkWriteCommandRequest(
 
     // Make a copy of the operation and adjust its namespace index to 0.
     auto newOp = bulkWriteReq.getOps()[opIdx];
-    stdx::visit(OverloadedVisitor{
-                    [](mongo::BulkWriteInsertOp& op) { op.setInsert(0); },
-                    [](mongo::BulkWriteUpdateOp& op) { op.setUpdate(0); },
-                    [](mongo::BulkWriteDeleteOp& op) { op.setDeleteCommand(0); },
-                },
-                newOp);
+    visit(OverloadedVisitor{
+              [](mongo::BulkWriteInsertOp& op) { op.setInsert(0); },
+              [](mongo::BulkWriteUpdateOp& op) { op.setUpdate(0); },
+              [](mongo::BulkWriteDeleteOp& op) { op.setDeleteCommand(0); },
+          },
+          newOp);
 
     BulkWriteCommandRequest singleOpRequest;
     singleOpRequest.setOps({newOp});
@@ -314,7 +321,18 @@ BulkWriteCommandRequest makeSingleOpBulkWriteCommandRequest(
     singleOpRequest.setLet(bulkWriteReq.getLet());
     singleOpRequest.setStmtId(bulk_write_common::getStatementId(bulkWriteReq, opIdx));
     singleOpRequest.setDbName(DatabaseName::kAdmin);
+    singleOpRequest.setErrorsOnly(bulkWriteReq.getErrorsOnly());
     return singleOpRequest;
+}
+
+// Update related command execution metrics.
+static UpdateMetrics bulkWriteUpdateMetric{"bulkWrite"};
+
+void incrementBulkWriteUpdateMetrics(
+    const write_ops::UpdateModification& updateMod,
+    const mongo::NamespaceString& ns,
+    const boost::optional<std::vector<mongo::BSONObj>>& arrayFilters) {
+    incrementUpdateMetrics(updateMod, ns, bulkWriteUpdateMetric, arrayFilters);
 }
 
 }  // namespace bulk_write_common

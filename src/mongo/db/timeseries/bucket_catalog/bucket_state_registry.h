@@ -43,6 +43,8 @@
 #include "mongo/bson/oid.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
+#include "mongo/db/timeseries/timeseries_tracked_types.h"
+#include "mongo/db/timeseries/timeseries_tracking_context.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/concurrency/with_lock.h"
@@ -119,16 +121,19 @@ struct BucketStateRegistry {
     Era currentEra = 0;
 
     // Mapping of era to counts of how many buckets are associated with that era.
-    std::map<Era, uint64_t> bucketsPerEra;
+    tracked_map<Era, uint64_t> bucketsPerEra;
 
     // Bucket state for synchronization with direct writes.
-    stdx::unordered_map<BucketId, stdx::variant<BucketState, DirectWriteCounter>, BucketHasher>
+    tracked_unordered_map<BucketId, std::variant<BucketState, DirectWriteCounter>, BucketHasher>
         bucketStates;
 
     // Registry storing 'clearSetOfBuckets' operations. Maps from era to a lambda function which
     // takes in information about a Bucket and returns whether the Bucket belongs to the cleared
     // set.
-    std::map<Era, ShouldClearFn> clearedSets;
+    // TODO SERVER-85565: use tracked type for ShouldClearFn.
+    tracked_map<Era, ShouldClearFn> clearedSets;
+
+    BucketStateRegistry(TrackingContext& trackingContext);
 };
 
 BucketStateRegistry::Era getCurrentEra(const BucketStateRegistry& registry);
@@ -153,34 +158,34 @@ std::uint64_t getClearedSetsCount(const BucketStateRegistry& registry);
  * Retrieves the bucket state if it is tracked in the catalog. Modifies the bucket state if
  * the bucket is found to have been cleared.
  */
-boost::optional<stdx::variant<BucketState, DirectWriteCounter>> getBucketState(
+boost::optional<std::variant<BucketState, DirectWriteCounter>> getBucketState(
     BucketStateRegistry& registry, Bucket* bucket);
 
 /**
  * Retrieves the bucket state if it is tracked in the catalog.
  */
-boost::optional<stdx::variant<BucketState, DirectWriteCounter>> getBucketState(
+boost::optional<std::variant<BucketState, DirectWriteCounter>> getBucketState(
     BucketStateRegistry& registry, const BucketId& bucketId);
 
 /**
  * Returns true if the state is cleared.
  */
-bool isBucketStateCleared(stdx::variant<BucketState, DirectWriteCounter>& state);
+bool isBucketStateCleared(std::variant<BucketState, DirectWriteCounter>& state);
 
 /**
  * Returns true if the state is prepared.
  */
-bool isBucketStatePrepared(stdx::variant<BucketState, DirectWriteCounter>& state);
+bool isBucketStatePrepared(std::variant<BucketState, DirectWriteCounter>& state);
 
 /**
  * Returns true if the state conflicts with reopening (aka a direct write).
  */
-bool conflictsWithReopening(stdx::variant<BucketState, DirectWriteCounter>& state);
+bool conflictsWithReopening(std::variant<BucketState, DirectWriteCounter>& state);
 
 /**
  * Returns true if the state conflicts with reopening or is cleared.
  */
-bool conflictsWithInsertions(stdx::variant<BucketState, DirectWriteCounter>& state);
+bool conflictsWithInsertions(std::variant<BucketState, DirectWriteCounter>& state);
 
 /**
  * Initializes the state of the bucket within the registry to a state of 'kNormal'. If included,
@@ -254,7 +259,7 @@ StateChangeSuccessful unprepareBucketState(BucketStateRegistry& registry,
  * | PreparedAndCleared |       -
  * | DirectWriteCounter | increments value
  */
-stdx::variant<BucketState, DirectWriteCounter> addDirectWrite(
+std::variant<BucketState, DirectWriteCounter> addDirectWrite(
     BucketStateRegistry& registry,
     const BucketId& bucketId,
     ContinueTrackingBucket continueTrackingBucket = ContinueTrackingBucket::kContinue);
@@ -316,6 +321,6 @@ void appendStats(const BucketStateRegistry& registry, BSONObjBuilder& builder);
 /**
  * Helper to stringify BucketState.
  */
-std::string bucketStateToString(const stdx::variant<BucketState, DirectWriteCounter>& state);
+std::string bucketStateToString(const std::variant<BucketState, DirectWriteCounter>& state);
 
 }  // namespace mongo::timeseries::bucket_catalog

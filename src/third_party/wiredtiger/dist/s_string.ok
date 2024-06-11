@@ -72,7 +72,6 @@ Ceil
 CentOS
 Checkpointing
 Checksums
-Chunkcache
 CityHash
 ClmSvxz
 CloseHandle
@@ -114,6 +113,7 @@ ENCRYPTOR
 ENDIAN
 ENOENT
 ENOMEM
+ENOSPC
 ENOTSUP
 ENUM
 EOF
@@ -154,6 +154,7 @@ FreeLibrary
 Fsync
 Fuerst
 GBR
+GC
 GCP
 GCP's
 GF
@@ -202,6 +203,7 @@ Kounavis
 LANGID
 LF
 LLVMFuzzerTestOneInput
+LOGOP
 LOGREC
 LOGSCAN
 LRU
@@ -225,7 +227,6 @@ MADV
 MALLOC
 MEM
 MEMALIGN
-MEMORDER
 MERCHANTABILITY
 MONGODB
 MOVEFILE
@@ -357,8 +358,10 @@ Spinlock
 Spinlocks
 StoreLoad
 StoreStore
+Strobed
 Su
 Subdirectory
+Subprocess
 TAILQ
 TCMalloc
 TESTUTIL
@@ -440,6 +443,7 @@ Wundef
 Wuninitialized
 Wunused
 XP
+XXXXXX
 Xorshift
 YCSB
 ZSTD
@@ -502,6 +506,7 @@ bitstring
 bitwise
 blk
 blkcache
+blkincr
 blkmod
 bm
 bnd
@@ -622,6 +627,7 @@ curstd
 curtable
 curversion
 cust
+customizable
 customp
 cv
 cx
@@ -833,6 +839,7 @@ iiii
 iiu
 ikey
 im
+img
 impl
 incr
 incrementals
@@ -865,7 +872,6 @@ isb
 isdigit
 ish
 ishld
-ishst
 islocked
 ispo
 isprint
@@ -902,7 +908,6 @@ lex
 lexically
 lexicographically
 lf
-lfence
 libdatasource
 libmemkind
 libs
@@ -930,7 +935,6 @@ logsize
 logtest
 lookaside
 lookups
-loongarch
 lossy
 lr
 lru
@@ -970,6 +974,7 @@ metafile
 mfence
 minSnapshotHistoryWindowInSeconds
 minorp
+misalignments
 mkdir
 mmap
 mmrand
@@ -1167,6 +1172,7 @@ rw
 rwlock
 sH
 sHQ
+sXXXXXX
 sanitizer
 sanitizers
 scalable
@@ -1180,9 +1186,9 @@ setname
 setstr
 setv
 setvbuf
-sfence
 shareability
 sig
+sigchld
 signalled
 sii
 sizeof
@@ -1199,7 +1205,6 @@ snapsort
 snprintf
 sortable
 sp
-sparc
 spinlock
 spinlocks
 src
@@ -1223,6 +1228,7 @@ strlen
 strncpy
 strndup
 strnlen
+strobed
 strtoll
 strtouq
 struct

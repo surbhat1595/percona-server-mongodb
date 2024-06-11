@@ -54,7 +54,6 @@
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/database_name.h"
@@ -75,6 +74,7 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
@@ -322,7 +322,7 @@ void setPrepareConflictBehaviorForReadConcernImpl(OperationContext* opCtx,
         prepareConflictBehavior = PrepareConflictBehavior::kEnforce;
     }
 
-    opCtx->recoveryUnit()->setPrepareConflictBehavior(prepareConflictBehavior);
+    shard_role_details::getRecoveryUnit(opCtx)->setPrepareConflictBehavior(prepareConflictBehavior);
 }
 
 Status waitForReadConcernImpl(OperationContext* opCtx,
@@ -333,7 +333,8 @@ Status waitForReadConcernImpl(OperationContext* opCtx,
     // wait for read concern. This is fine, since the outer operation should have handled waiting
     // for read concern. We don't want to ignore prepare conflicts because reads in transactions
     // should block on prepared transactions.
-    if (opCtx->getClient()->isInDirectClient() && opCtx->lockState()->isLocked()) {
+    if (opCtx->getClient()->isInDirectClient() &&
+        shard_role_details::getLocker(opCtx)->isLocked()) {
         return Status::OK();
     }
 
@@ -436,7 +437,7 @@ Status waitForReadConcernImpl(OperationContext* opCtx,
         }
     }
 
-    auto ru = opCtx->recoveryUnit();
+    auto ru = shard_role_details::getRecoveryUnit(opCtx);
     if (atClusterTime) {
         ru->setTimestampReadSource(RecoveryUnit::ReadSource::kProvided,
                                    atClusterTime->asTimestamp());
@@ -512,7 +513,11 @@ Status waitForReadConcernImpl(OperationContext* opCtx,
                 ->isAuthorizedForActionsOnResource(
                     ResourcePattern::forClusterResource(dbName.tenantId()), ActionType::internal));
         auto* const storageEngine = opCtx->getServiceContext()->getStorageEngine();
-        Lock::GlobalLock global(opCtx, MODE_IS);
+        Lock::GlobalLock global(opCtx,
+                                MODE_IS,
+                                Date_t::max(),
+                                Lock::InterruptBehavior::kThrow,
+                                Lock::GlobalLockSkipOptions{.skipRSTLLock = true});
         auto lastStableRecoveryTimestamp = storageEngine->getLastStableRecoveryTimestamp();
         if (!lastStableRecoveryTimestamp ||
             *lastStableRecoveryTimestamp < atClusterTime->asTimestamp()) {
@@ -540,7 +545,8 @@ Status waitForLinearizableReadConcernImpl(OperationContext* opCtx,
                                           const Milliseconds readConcernTimeout) {
     // If we are in a direct client that's holding a global lock, then this means this is a
     // sub-operation of the parent. In this case we delegate the wait to the parent.
-    if (opCtx->getClient()->isInDirectClient() && opCtx->lockState()->isLocked()) {
+    if (opCtx->getClient()->isInDirectClient() &&
+        shard_role_details::getLocker(opCtx)->isLocked()) {
         return Status::OK();
     }
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
@@ -564,9 +570,10 @@ Status waitForLinearizableReadConcernImpl(OperationContext* opCtx,
         // exception to the rule that writes are not allowed while ignoring prepare conflicts. If we
         // are ignoring prepare conflicts (during a read command), force the prepare conflict
         // behavior to permit writes.
-        auto originalBehavior = opCtx->recoveryUnit()->getPrepareConflictBehavior();
+        auto originalBehavior =
+            shard_role_details::getRecoveryUnit(opCtx)->getPrepareConflictBehavior();
         if (originalBehavior == PrepareConflictBehavior::kIgnoreConflicts) {
-            opCtx->recoveryUnit()->setPrepareConflictBehavior(
+            shard_role_details::getRecoveryUnit(opCtx)->setPrepareConflictBehavior(
                 PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
         }
 
@@ -598,7 +605,8 @@ Status waitForSpeculativeMajorityReadConcernImpl(
 
     // If we are in a direct client that's holding a global lock, then this means this is a
     // sub-operation of the parent. In this case we delegate the wait to the parent.
-    if (opCtx->getClient()->isInDirectClient() && opCtx->lockState()->isLocked()) {
+    if (opCtx->getClient()->isInDirectClient() &&
+        shard_role_details::getLocker(opCtx)->isLocked()) {
         return Status::OK();
     }
 
@@ -611,13 +619,13 @@ Status waitForSpeculativeMajorityReadConcernImpl(
         waitTs = *speculativeReadTimestamp;
     } else {
         // Speculative majority reads are required to use the 'kNoOverlap' read source.
-        invariant(opCtx->recoveryUnit()->getTimestampReadSource() ==
+        invariant(shard_role_details::getRecoveryUnit(opCtx)->getTimestampReadSource() ==
                   RecoveryUnit::ReadSource::kNoOverlap);
 
         // Storage engine operations require at least Global IS.
         Lock::GlobalLock lk(opCtx, MODE_IS);
         boost::optional<Timestamp> readTs =
-            opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx);
+            shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp(opCtx);
         invariant(readTs);
         waitTs = *readTs;
     }

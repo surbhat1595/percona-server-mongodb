@@ -1,7 +1,8 @@
 // When running explain commands with "executionStats" verbosity, checks that the explain output
 // includes "executionTimeMicros"/"executionTimeNanos" only if requested.
 // "executionTimeMillisEstimate" will always be present in the explain output.
-import {getAllPlanStages} from "jstests/libs/analyze_plan.js";
+// Check that "queryPlanner" has "optimizationTimeMillis".
+import {getAllPlanStages, getOptimizer} from "jstests/libs/analyze_plan.js";
 
 let conn = MongoRunner.runMongod({});
 assert.neq(conn, null, "mongod failed to start up");
@@ -30,6 +31,10 @@ function verifyStages(execStages, microAndNanosExpected) {
 
 // Test explain on find command.
 let explainResult = coll.find({x: {$gt: 500}}).explain("executionStats");
+// Verify that "queryPlanner" has "optimizationTimeMillis".
+assert(explainResult.hasOwnProperty("queryPlanner"), explainResult);
+assert(explainResult.queryPlanner.hasOwnProperty("optimizationTimeMillis"),
+       explainResult.queryPlanner);
 let executionStages = explainResult.executionStats.executionStages;
 assert(executionStages.hasOwnProperty("executionTimeMillisEstimate"), executionStages);
 verifyStages(executionStages, false);
@@ -49,6 +54,10 @@ for (let executionStage of executionStages) {
     assert(!executionStage.hasOwnProperty("executionTimeMicros"), executionStage);
     assert(!executionStage.hasOwnProperty("executionTimeNanos"), executionStage);
     if (executionStage.hasOwnProperty("$cursor")) {
+        // Verify that "queryPlanner" has "optimizationTimeMillis".
+        assert(executionStage["$cursor"].hasOwnProperty("queryPlanner"), executionStage);
+        assert(executionStage["$cursor"]["queryPlanner"].hasOwnProperty("optimizationTimeMillis"),
+               executionStage);
         const stages = executionStage["$cursor"]["executionStats"]["executionStages"];
         verifyStages(stages, false);
     }
@@ -69,14 +78,16 @@ assert(executionStages.hasOwnProperty("executionTimeMillisEstimate"), executionS
 verifyStages(executionStages, isSBE);
 
 explainResult = coll.explain("executionStats").aggregate(pipeline);
-executionStages = explainResult.stages;
+executionStages = explainResult.hasOwnProperty("stages")
+    ? explainResult.stages
+    : [explainResult.executionStats.executionStages];
 isSBE = explainResult.explainVersion === "2";
 assert.neq(executionStages.length, 0, executionStages);
 for (let executionStage of executionStages) {
     assert(executionStage.hasOwnProperty("executionTimeMillisEstimate"), executionStage);
-    // "executionTimeMicros"/"executionTimeNanos" is only added to SBE stages, not to agg stages.
-    assert(!executionStage.hasOwnProperty("executionTimeMicros"), executionStage);
-    assert(!executionStage.hasOwnProperty("executionTimeNanos"), executionStage);
+    // "executionTimeMicros"/"executionTimeNanos" is added to SBE stages.
+    assert.eq(executionStage.hasOwnProperty("executionTimeMicros"), isSBE, executionStage);
+    assert.eq(executionStage.hasOwnProperty("executionTimeNanos"), isSBE, executionStage);
 
     if (executionStage.hasOwnProperty("$cursor")) {
         const stages = executionStage["$cursor"]["executionStats"]["executionStages"];

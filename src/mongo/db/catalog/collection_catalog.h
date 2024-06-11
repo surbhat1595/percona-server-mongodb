@@ -265,6 +265,11 @@ public:
                                                     const NamespaceStringOrUUID& nssOrUUID,
                                                     boost::optional<Timestamp> readTimestamp) const;
 
+    std::vector<const Collection*> establishConsistentCollections(
+        OperationContext* opCtx,
+        const DatabaseName& dbName,
+        boost::optional<Timestamp> readTimestamp) const;
+
     /**
      * Returns a shared_ptr to a drop pending index if it's found and not expired.
      */
@@ -447,6 +452,13 @@ public:
      * the check to be meaningful it should be performed against CollectionCatalog::latest.
      */
     bool isLatestCollection(OperationContext* opCtx, const Collection* collection) const;
+
+    /**
+     * Verifies that the provided collection name doesn't exist in the catalog and is exclusively
+     * present in the uncommitted updates of the operation. For the check to be meaningful it should
+     * be performed against CollectionCatalog::latest.
+     */
+    void ensureCollectionIsNew(OperationContext* opCtx, const NamespaceString& nss) const;
 
     /**
      * Iterates through the views in the catalog associated with database `dbName`, applying

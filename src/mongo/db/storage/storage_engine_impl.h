@@ -96,7 +96,7 @@ public:
 
     virtual ~StorageEngineImpl();
 
-    virtual void notifyStartupComplete() override;
+    virtual void notifyStartupComplete(OperationContext* opCtx) override;
 
     virtual RecoveryUnit* newRecoveryUnit() override;
 
@@ -118,9 +118,7 @@ public:
     virtual Status disableIncrementalBackup(OperationContext* opCtx) override;
 
     virtual StatusWith<std::unique_ptr<StreamingCursor>> beginNonBlockingBackup(
-        OperationContext* opCtx,
-        boost::optional<Timestamp> checkpointTimestamp,
-        const BackupOptions& options) override;
+        OperationContext* opCtx, const BackupOptions& options) override;
 
     virtual void endNonBlockingBackup(OperationContext* opCtx) override;
 
@@ -142,7 +140,7 @@ public:
         OperationContext* opCtx, KeyFormat keyFormat) override;
 
     virtual std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStoreFromExistingIdent(
-        OperationContext* opCtx, StringData ident) override;
+        OperationContext* opCtx, StringData ident, KeyFormat keyFormat) override;
 
     virtual void cleanShutdown(ServiceContext* svcCtx) override;
 
@@ -342,7 +340,7 @@ public:
     }
 
     void addDropPendingIdent(
-        const stdx::variant<Timestamp, StorageEngine::CheckpointIteration>& dropTime,
+        const std::variant<Timestamp, StorageEngine::CheckpointIteration>& dropTime,
         std::shared_ptr<Ident> ident,
         DropIdentCallback&& onDrop) override;
 
@@ -352,7 +350,7 @@ public:
 
     void startTimestampMonitor() override;
 
-    void checkpoint(OperationContext* opCtx) override;
+    void checkpoint() override;
 
     StorageEngine::CheckpointIteration getCheckpointIteration() const override;
 
@@ -408,10 +406,12 @@ public:
 
     void setPinnedOplogTimestamp(const Timestamp& pinnedTimestamp) override;
 
-    StatusWith<BSONObj> getSanitizedStorageOptionsForSecondaryReplication(
+    BSONObj getSanitizedStorageOptionsForSecondaryReplication(
         const BSONObj& options) const override;
 
     void dump() const override;
+
+    virtual Status autoCompact(OperationContext* opCtx, const AutoCompactOptions& options) override;
 
 private:
     using CollIter = std::list<std::string>::iterator;

@@ -67,10 +67,10 @@
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
@@ -81,7 +81,7 @@
 
 
 namespace mongo {
-
+using namespace fmt::literals;
 using std::shared_ptr;
 using std::string;
 using std::unique_ptr;
@@ -102,7 +102,7 @@ namespace {
 std::unique_ptr<PlanYieldPolicy> makeYieldPolicy(
     PlanExecutorImpl* exec,
     PlanYieldPolicy::YieldPolicy policy,
-    stdx::variant<const Yieldable*, PlanYieldPolicy::YieldThroughAcquisitions> yieldable) {
+    std::variant<const Yieldable*, PlanYieldPolicy::YieldThroughAcquisitions> yieldable) {
     switch (policy) {
         case PlanYieldPolicy::YieldPolicy::YIELD_AUTO:
         case PlanYieldPolicy::YieldPolicy::YIELD_MANUAL:
@@ -134,14 +134,15 @@ PlanExecutorImpl::PlanExecutorImpl(OperationContext* opCtx,
                                    VariantCollectionPtrOrAcquisition collection,
                                    bool returnOwnedBson,
                                    NamespaceString nss,
-                                   PlanYieldPolicy::YieldPolicy yieldPolicy)
+                                   PlanYieldPolicy::YieldPolicy yieldPolicy,
+                                   boost::optional<size_t> cachedPlanHash)
     : _opCtx(opCtx),
       _cq(std::move(cq)),
       _expCtx(_cq ? _cq->getExpCtx() : expCtx),
       _workingSet(std::move(ws)),
       _qs(std::move(qs)),
       _root(std::move(rt)),
-      _planExplainer(plan_explainer_factory::make(_root.get())),
+      _planExplainer(plan_explainer_factory::make(_root.get(), cachedPlanHash)),
       _mustReturnOwnedBson(returnOwnedBson),
       _nss(std::move(nss)) {
     invariant(!_expCtx || _expCtx->opCtx == _opCtx);
@@ -165,19 +166,18 @@ PlanExecutorImpl::PlanExecutorImpl(OperationContext* opCtx,
     }
 
     // There's no point in yielding if the collection doesn't exist.
-    const stdx::variant<const Yieldable*, PlanYieldPolicy::YieldThroughAcquisitions> yieldable =
-        stdx::visit(
-            OverloadedVisitor{[](const CollectionPtr* coll) {
-                                  return stdx::variant<const Yieldable*,
-                                                       PlanYieldPolicy::YieldThroughAcquisitions>(
-                                      *coll ? coll : nullptr);
-                              },
-                              [](const CollectionAcquisition& coll) {
-                                  return stdx::variant<const Yieldable*,
-                                                       PlanYieldPolicy::YieldThroughAcquisitions>(
-                                      PlanYieldPolicy::YieldThroughAcquisitions{});
-                              }},
-            collection.get());
+    const std::variant<const Yieldable*, PlanYieldPolicy::YieldThroughAcquisitions> yieldable =
+        visit(OverloadedVisitor{[](const CollectionPtr* coll) {
+                                    return std::variant<const Yieldable*,
+                                                        PlanYieldPolicy::YieldThroughAcquisitions>(
+                                        *coll ? coll : nullptr);
+                                },
+                                [](const CollectionAcquisition& coll) {
+                                    return std::variant<const Yieldable*,
+                                                        PlanYieldPolicy::YieldThroughAcquisitions>(
+                                        PlanYieldPolicy::YieldThroughAcquisitions{});
+                                }},
+              collection.get());
 
     _yieldPolicy = makeYieldPolicy(this,
                                    collectionExists ? yieldPolicy
@@ -187,11 +187,12 @@ PlanExecutorImpl::PlanExecutorImpl(OperationContext* opCtx,
     uassertStatusOK(_pickBestPlan());
 
     if (_qs) {
+        _planExplainer->setQuerySolution(_qs.get());
         _planExplainer->updateEnumeratorExplainInfo(_qs->_enumeratorExplainInfo);
     } else if (const MultiPlanStage* mps = getMultiPlanStage()) {
         const QuerySolution* soln = mps->bestSolution();
+        _planExplainer->setQuerySolution(soln);
         _planExplainer->updateEnumeratorExplainInfo(soln->_enumeratorExplainInfo);
-
     } else if (auto subplan = getStageByType(_root.get(), STAGE_SUBPLAN)) {
         auto subplanStage = static_cast<SubplanStage*>(subplan);
         _planExplainer->updateEnumeratorExplainInfo(
@@ -473,7 +474,7 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<Document>* ob
             // This result didn't have the data the caller wanted, try again.
         } else if (PlanStage::NEED_YIELD == code) {
             invariant(id == WorkingSet::INVALID_ID);
-            invariant(_opCtx->recoveryUnit());
+            invariant(shard_role_details::getRecoveryUnit(_opCtx));
 
             if (_expCtx->getTemporarilyUnavailableException()) {
                 _expCtx->setTemporarilyUnavailableException(false);
@@ -524,7 +525,11 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<Document>* ob
                 planExecutorHangBeforeShouldWaitForInserts.pauseWhileSet();
             }
 
-            if (!insert_listener::shouldWaitForInserts(_opCtx, _cq.get(), _yieldPolicy.get())) {
+            // The !notifier check is necessary because shouldWaitForInserts can return 'true' when
+            // shouldListenForInserts returned 'false' (above) in the case of a deadline becoming
+            // "unexpired" due to the system clock going backwards.
+            if (!notifier ||
+                !insert_listener::shouldWaitForInserts(_opCtx, _cq.get(), _yieldPolicy.get())) {
                 return PlanExecutor::IS_EOF;
             }
 

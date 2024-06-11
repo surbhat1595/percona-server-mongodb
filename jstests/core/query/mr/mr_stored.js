@@ -3,7 +3,7 @@
 //
 // @tags: [
 //   # The test runs commands that are not allowed with security token: mapReduce.
-//   not_allowed_with_security_token,
+//   not_allowed_with_signed_security_token,
 //   assumes_unsharded_collection,
 //   # mapReduce does not support afterClusterTime.
 //   does_not_support_causal_consistency,
@@ -53,9 +53,10 @@ const finalize = function(key, reducedValue) {
     return reducedValue;
 };
 
-assert.commandWorked(testDB.system.js.insert({_id: "mr_stored_map", value: map}));
-assert.commandWorked(testDB.system.js.insert({_id: "mr_stored_reduce", value: reduce}));
-assert.commandWorked(testDB.system.js.insert({_id: "mr_stored_finalize", value: finalize}));
+const systemJsColl = testDB.getCollection("system.js");
+assert.commandWorked(systemJsColl.insert({_id: "mr_stored_map", value: map}));
+assert.commandWorked(systemJsColl.insert({_id: "mr_stored_reduce", value: reduce}));
+assert.commandWorked(systemJsColl.insert({_id: "mr_stored_finalize", value: finalize}));
 
 const out = testDB.mr_stored_out;
 
@@ -131,6 +132,6 @@ assert.commandWorked(testDB.runCommand({
 assertCorrect(out.convertToSingleObject("value"));
 out.drop();
 
-assert.commandWorked(testDB.system.js.remove({_id: "mr_stored_map"}));
-assert.commandWorked(testDB.system.js.remove({_id: "mr_stored_reduce"}));
-assert.commandWorked(testDB.system.js.remove({_id: "mr_stored_finalize"}));
+assert.commandWorked(systemJsColl.remove({_id: "mr_stored_map"}));
+assert.commandWorked(systemJsColl.remove({_id: "mr_stored_reduce"}));
+assert.commandWorked(systemJsColl.remove({_id: "mr_stored_finalize"}));

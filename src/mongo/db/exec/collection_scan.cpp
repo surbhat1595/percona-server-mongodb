@@ -57,6 +57,7 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -162,8 +163,8 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
 
     if (_params.lowPriority && !_priority && gDeprioritizeUnboundedUserCollectionScans.load() &&
         opCtx()->getClient()->isFromUserConnection() &&
-        opCtx()->lockState()->shouldWaitForTicket()) {
-        _priority.emplace(opCtx()->lockState(), AdmissionContext::Priority::kLow);
+        shard_role_details::getLocker(opCtx())->shouldWaitForTicket()) {
+        _priority.emplace(shard_role_details::getLocker(opCtx()), AdmissionContext::Priority::kLow);
     }
 
     boost::optional<Record> record;
@@ -191,7 +192,7 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
                     // are not yet visible even after the wait.
                     invariant(!_params.tailable && collPtr->ns().isOplog());
 
-                    opCtx()->recoveryUnit()->abandonSnapshot();
+                    shard_role_details::getRecoveryUnit(opCtx())->abandonSnapshot();
                     collPtr->getRecordStore()->waitForAllEarlierOplogWritesToBeVisible(opCtx());
                 }
 
@@ -215,16 +216,16 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
                     }
                 }
 
-                if (_params.resumeAfterRecordId && !_params.resumeAfterRecordId->isNull()) {
+                if (_params.resumeAfterRecordId) {
                     invariant(!_params.tailable);
                     invariant(_lastSeenId.isNull());
                     // Seek to where we are trying to resume the scan from. Signal a KeyNotFound
-                    // error if the record no longer exists.
+                    // error if the record no longer exists or if the recordId is null.
                     //
                     // Note that we want to return the record *after* this one since we have already
                     // returned this one prior to the resume.
                     auto& recordIdToSeek = *_params.resumeAfterRecordId;
-                    if (!_cursor->seekExact(recordIdToSeek)) {
+                    if (recordIdToSeek.isNull() || !_cursor->seekExact(recordIdToSeek)) {
                         uasserted(ErrorCodes::KeyNotFound,
                                   str::stream()
                                       << "Failed to resume collection scan: the recordId from "
@@ -294,7 +295,8 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
     WorkingSetID id = _workingSet->allocate();
     WorkingSetMember* member = _workingSet->get(id);
     member->recordId = std::move(record->id);
-    member->resetDocument(opCtx()->recoveryUnit()->getSnapshotId(), record->data.releaseToBson());
+    member->resetDocument(shard_role_details::getRecoveryUnit(opCtx())->getSnapshotId(),
+                          record->data.releaseToBson());
     _workingSet->transitionToRecordIdAndObj(id);
 
     return returnIfMatches(member, id, out);
@@ -308,7 +310,8 @@ void CollectionScan::setLatestOplogEntryTimestampToReadTimestamp() {
         return;
     }
 
-    const auto readTimestamp = opCtx()->recoveryUnit()->getPointInTimeReadTimestamp(opCtx());
+    const auto readTimestamp =
+        shard_role_details::getRecoveryUnit(opCtx())->getPointInTimeReadTimestamp(opCtx());
 
     // If we don't have a read timestamp, we take no action here.
     if (!readTimestamp) {
@@ -373,7 +376,7 @@ BSONObj CollectionScan::getPostBatchResumeToken() const {
         BSONObjBuilder builder;
         _lastSeenId.serializeToken("$recordId", &builder);
         if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
-                serverGlobalParams.featureCompatibility)) {
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
             auto initialSyncId =
                 repl::ReplicationCoordinator::get(opCtx())->getInitialSyncId(opCtx());
             if (initialSyncId) {
@@ -526,8 +529,8 @@ void CollectionScan::doDetachFromOperationContext() {
 void CollectionScan::doReattachToOperationContext() {
     if (_params.lowPriority && gDeprioritizeUnboundedUserCollectionScans.load() &&
         opCtx()->getClient()->isFromUserConnection() &&
-        opCtx()->lockState()->shouldWaitForTicket()) {
-        _priority.emplace(opCtx()->lockState(), AdmissionContext::Priority::kLow);
+        shard_role_details::getLocker(opCtx())->shouldWaitForTicket()) {
+        _priority.emplace(shard_role_details::getLocker(opCtx()), AdmissionContext::Priority::kLow);
     }
     if (_cursor)
         _cursor->reattachToOperationContext(opCtx());

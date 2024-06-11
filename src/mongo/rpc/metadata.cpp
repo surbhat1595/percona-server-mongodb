@@ -101,7 +101,12 @@ void readRequestMetadata(OperationContext* opCtx, const OpMsg& opMsg, bool cmdRe
              ResourcePattern::forClusterResource(opMsg.getValidatedTenantId()),
              ActionType::internal))) {
         auto opKey = uassertStatusOK(UUID::parse(clientOperationKeyElem));
-        opCtx->setOperationKey(std::move(opKey));
+        {
+            // We must obtain the client lock to set the OperationKey on the operation context as
+            // it may be concurrently read by CurrentOp.
+            stdx::lock_guard lg(*opCtx->getClient());
+            opCtx->setOperationKey(std::move(opKey));
+        }
         failIfOperationKeyMismatch.execute([&](const BSONObj& data) {
             tassert(7446600,
                     "OperationKey in request does not match test provided OperationKey",
@@ -155,7 +160,10 @@ bool isArrayOfObjects(BSONElement array) {
 }  // namespace
 
 
-OpMsgRequest upconvertRequest(const DatabaseName& dbName, BSONObj cmdObj, int queryFlags) {
+OpMsgRequest upconvertRequest(const DatabaseName& dbName,
+                              BSONObj cmdObj,
+                              int queryFlags,
+                              boost::optional<auth::ValidatedTenancyScope> vts) {
     cmdObj = cmdObj.getOwned();  // Usually this is a no-op since it is already owned.
 
     auto readPrefContainer = BSONObj();
@@ -190,13 +198,14 @@ OpMsgRequest upconvertRequest(const DatabaseName& dbName, BSONObj cmdObj, int qu
         ? BSONElement()
         : cmdObj[docSequenceIt->second];
     if (!isArrayOfObjects(docSequenceElem))
-        return OpMsgRequestBuilder::create(dbName, std::move(cmdObj));
+        return OpMsgRequestBuilder::createWithValidatedTenancyScope(dbName, vts, std::move(cmdObj));
 
     auto docSequenceName = docSequenceElem.fieldNameStringData();
 
     // Note: removing field before adding "$db" to avoid the need to copy the potentially large
     // array.
-    auto out = OpMsgRequestBuilder::create(dbName, cmdObj.removeField(docSequenceName));
+    auto out = OpMsgRequestBuilder::createWithValidatedTenancyScope(
+        dbName, vts, cmdObj.removeField(docSequenceName));
     out.sequences.push_back({docSequenceName.toString()});
     for (auto elem : docSequenceElem.Obj()) {
         out.sequences[0].objs.push_back(elem.Obj().shareOwnershipWith(cmdObj));

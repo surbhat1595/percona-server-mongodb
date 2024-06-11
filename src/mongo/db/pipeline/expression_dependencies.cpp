@@ -201,6 +201,7 @@ public:
     void visit(const ExpressionInternalFLEBetween*) {}
     void visit(const ExpressionInternalOwningShard*) {}
     void visit(const ExpressionInternalIndexKey*) {}
+    void visit(const ExpressionInternalKeyStringValue*) {}
 };
 
 class DependencyVisitor : public DefaultDependencyVisitor {
@@ -218,18 +219,7 @@ public:
     }
 
     void visit(const ExpressionMeta* expr) final {
-        using MetaType = DocumentMetadataFields::MetaType;
-
-        auto metaType = expr->getMetaType();
-        if (metaType == MetaType::kSearchScore || metaType == MetaType::kSearchHighlights ||
-            metaType == MetaType::kSearchScoreDetails || metaType == MetaType::kVectorSearchScore) {
-            // We do not add the dependencies for searchScore, searchHighlights,
-            // searchScoreDetails, or vectorSearchScore because those values are not stored in
-            // the collection (or in mongod at all).
-            return;
-        }
-
-        _deps->setNeedsMetadata(metaType, true);
+        _deps->setNeedsMetadata(expr->getMetaType(), true);
     }
 
     void visit(const ExpressionRandom* expr) final {

@@ -95,6 +95,7 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/platform/process_id.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/shell/linenoise.h"
 #include "mongo/shell/mongo_main.h"
@@ -167,8 +168,7 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SetFeatureCompatibilityVersionLatest,
                                      ("EndStartupOptionStorage"))
 // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
 (InitializerContext* context) {
-    mongo::serverGlobalParams.mutableFeatureCompatibility.setVersion(
-        multiversion::GenericFCV::kLatest);
+    mongo::serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLatest);
 }
 
 namespace {
@@ -346,7 +346,7 @@ void shellHistoryAdd(const char* line) {
 }
 
 void killOps() {
-    if (shellGlobalParams.nokillop)
+    if (shellGlobalParams.nokillop.load())
         return;
 
     if (atPrompt.load())
@@ -776,6 +776,8 @@ int mongo_main(int argc, char* argv[]) {
         // before the transport layer is initialized.
         auto runner = makePeriodicRunner(serviceContext);
         serviceContext->setPeriodicRunner(std::move(runner));
+
+        ShardingState::create(serviceContext);
 
 #ifdef MONGO_CONFIG_SSL
         OCSPManager::start(serviceContext);

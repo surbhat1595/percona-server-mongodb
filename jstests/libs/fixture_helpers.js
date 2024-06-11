@@ -53,8 +53,12 @@ export var FixtureHelpers = (function() {
      * sharded.
      */
     function isSharded(coll) {
-        const db = coll.getDB();
-        return db.getSiblingDB("config").collections.find({_id: coll.getFullName()}).count() > 0;
+        const collEntry =
+            coll.getDB().getSiblingDB("config").collections.findOne({_id: coll.getFullName()});
+        if (collEntry === null) {
+            return false;
+        }
+        return collEntry.unsplittable === null || !collEntry.unsplittable;
     }
 
     /**
@@ -187,6 +191,13 @@ export var FixtureHelpers = (function() {
         return primaryInfo.hasOwnProperty('setName');
     }
 
+    /**
+     * Returns true if we have a standalone mongod.
+     */
+    function isStandalone(db) {
+        return !isMongos(db) && !isReplSet(db);
+    }
+
     return {
         isMongos: isMongos,
         isSharded: isSharded,
@@ -202,5 +213,6 @@ export var FixtureHelpers = (function() {
         getSecondaries: getSecondaries,
         getPrimaryForNodeHostingDatabase: getPrimaryForNodeHostingDatabase,
         isReplSet: isReplSet,
+        isStandalone: isStandalone,
     };
 })();

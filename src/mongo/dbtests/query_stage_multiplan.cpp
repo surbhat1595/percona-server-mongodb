@@ -90,7 +90,7 @@
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_planner_test_lib.h"
-#include "mongo/db/query/query_settings_gen.h"
+#include "mongo/db/query/query_settings/query_settings_gen.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/stage_builder_util.h"
 #include "mongo/db/query/stage_types.h"
@@ -128,6 +128,7 @@ static const NamespaceString nss =
 
 std::unique_ptr<QuerySolution> createQuerySolution() {
     auto soln = std::make_unique<QuerySolution>();
+    soln->setRoot(std::make_unique<CollectionScanNode>());
     soln->cacheData = std::make_unique<SolutionCacheData>();
     soln->cacheData->solnType = SolutionCacheData::COLLSCAN_SOLN;
     soln->cacheData->tree = std::make_unique<PlanCacheIndexTree>();
@@ -633,12 +634,10 @@ TEST_F(QueryStageMultiPlanTest, MPSSummaryStats) {
     auto cq = std::make_unique<CanonicalQuery>(
         CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
                              .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
-    auto exec = uassertStatusOK(getExecutor(opCtx(),
-                                            &coll,
-                                            std::move(cq),
-                                            nullptr /* extractAndAttachPipelineStages */,
-                                            PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
-                                            0));
+    auto exec = uassertStatusOK(getExecutorFind(opCtx(),
+                                                MultipleCollectionAccessor{coll},
+                                                std::move(cq),
+                                                PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY));
 
     auto execImpl = dynamic_cast<PlanExecutorImpl*>(exec.get());
     ASSERT(execImpl);

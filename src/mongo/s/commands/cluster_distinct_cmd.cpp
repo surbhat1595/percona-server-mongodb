@@ -57,16 +57,20 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
+#include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
+#include "mongo/db/query/canonical_distinct.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/parsed_distinct.h"
+#include "mongo/db/query/query_settings/query_settings_utils.h"
+#include "mongo/db/query/query_shape/distinct_cmd_shape.h"
+#include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/view_response_formatter.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -99,6 +103,71 @@
 
 namespace mongo {
 namespace {
+
+query_settings::QuerySettings lookupQuerySettingsForDistinct(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const ParsedDistinctCommand& parsedRequest,
+    const NamespaceString& nss) {
+    auto serializationContext = parsedRequest.distinctCommandRequest->getSerializationContext();
+
+    auto queryShapeHashFn = [&]() {
+        query_shape::DistinctCmdShape shape(parsedRequest, expCtx);
+        return shape.sha256Hash(expCtx->opCtx, serializationContext);
+    };
+
+    return query_settings::lookupQuerySettings(expCtx, nss, serializationContext, queryShapeHashFn);
+}
+
+CanonicalDistinct parseDistinctCmd(OperationContext* opCtx,
+                                   const NamespaceString& nss,
+                                   const BSONObj& cmdObj,
+                                   const ExtensionsCallback& extensionsCallback,
+                                   const CollatorInterface* defaultCollator,
+                                   boost::optional<ExplainOptions::Verbosity> verbosity) {
+    const auto vts = auth::ValidatedTenancyScope::get(opCtx);
+    const auto serializationContext = vts.has_value()
+        ? SerializationContext::stateCommandRequest(vts->hasTenantId(), vts->isFromAtlasProxy())
+        : SerializationContext::stateCommandRequest();
+
+    auto distinctCommand = std::make_unique<DistinctCommandRequest>(
+        DistinctCommandRequest::parse(IDLParserContext("distinctCommandRequest",
+                                                       false /* apiStrict */,
+                                                       vts,
+                                                       nss.tenantId(),
+                                                       serializationContext),
+                                      cmdObj));
+
+    // Forbid users from passing 'querySettings' explicitly.
+    uassert(7923001,
+            "BSON field 'querySettings' is an unknown field",
+            !distinctCommand->getQuerySettings().has_value());
+
+    auto expCtx = CanonicalDistinct::makeExpressionContext(
+        opCtx, nss, *distinctCommand, defaultCollator, verbosity);
+
+    auto parsedDistinct =
+        parsed_distinct_command::parse(expCtx,
+                                       cmdObj,
+                                       std::move(distinctCommand),
+                                       extensionsCallback,
+                                       MatchExpressionParser::kAllowAllSpecialFeatures);
+
+    expCtx->setQuerySettings(lookupQuerySettingsForDistinct(expCtx, *parsedDistinct, nss));
+
+    return CanonicalDistinct::parse(std::move(expCtx), std::move(parsedDistinct));
+}
+
+BSONObj prepareDistinctForPassthrough(const BSONObj& cmd, const query_settings::QuerySettings& qs) {
+    const auto qsBson = qs.toBSON();
+    if (qsBson.isEmpty()) {
+        return CommandHelpers::filterCommandRequestForPassthrough(cmd);
+    }
+
+    // Append distinct command with the query settings.
+    BSONObjBuilder bob(cmd);
+    bob.append("querySettings", qsBson);
+    return CommandHelpers::filterCommandRequestForPassthrough(bob.done());
+}
 
 class DistinctCmd : public BasicCommand {
 public:
@@ -160,23 +229,11 @@ public:
                    rpc::ReplyBuilderInterface* result) const override {
         const BSONObj& cmdObj = opMsgRequest.body;
         const NamespaceString nss(parseNs(opMsgRequest.getDbName(), cmdObj));
-
-        auto parsedDistinctCmd =
-            ParsedDistinct::parse(opCtx, nss, cmdObj, ExtensionsCallbackNoop(), true);
-        uassertStatusOK(parsedDistinctCmd.getStatus());
-
-        auto distinctCanonicalQuery = parsedDistinctCmd.getValue().releaseQuery();
-        auto targetingQuery = distinctCanonicalQuery->getQueryObj();
-        auto targetingCollation = distinctCanonicalQuery->getFindCommandRequest().getCollation();
-
-        // Construct collator for deduping.
-        std::unique_ptr<CollatorInterface> collator;
-        if (!targetingCollation.isEmpty()) {
-            collator = uassertStatusOK(CollatorFactoryInterface::get(opCtx->getServiceContext())
-                                           ->makeFromBSON(targetingCollation));
-        }
-
-        const auto explainCmd = ClusterExplain::wrapAsExplain(cmdObj, verbosity);
+        auto canonicalDistinct = parseDistinctCmd(
+            opCtx, nss, cmdObj, ExtensionsCallbackNoop(), nullptr /* defaultCollator */, verbosity);
+        auto canonicalQuery = canonicalDistinct.getQuery();
+        auto targetingQuery = canonicalQuery->getQueryObj();
+        auto targetingCollation = canonicalQuery->getFindCommandRequest().getCollation();
 
         // We will time how long it takes to run the commands on the shards.
         Timer timer;
@@ -185,26 +242,22 @@ public:
         try {
             const auto cri = uassertStatusOK(
                 Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
-            shardResponses =
-                scatterGatherVersionedTargetByRoutingTable(opCtx,
-                                                           nss.dbName(),
-                                                           nss,
-                                                           cri,
-                                                           explainCmd,
-                                                           ReadPreferenceSetting::get(opCtx),
-                                                           Shard::RetryPolicy::kIdempotent,
-                                                           targetingQuery,
-                                                           targetingCollation,
-                                                           boost::none /*letParameters*/,
-                                                           boost::none /*runtimeConstants*/);
+            shardResponses = scatterGatherVersionedTargetByRoutingTable(
+                opCtx,
+                nss.dbName(),
+                nss,
+                cri,
+                ClusterExplain::wrapAsExplain(
+                    cmdObj, verbosity, canonicalQuery->getExpCtx()->getQuerySettings().toBSON()),
+                ReadPreferenceSetting::get(opCtx),
+                Shard::RetryPolicy::kIdempotent,
+                targetingQuery,
+                targetingCollation,
+                boost::none /*letParameters*/,
+                boost::none /*runtimeConstants*/);
         } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& ex) {
-            auto parsedDistinct = ParsedDistinct::parse(
-                opCtx, ex->getNamespace(), cmdObj, ExtensionsCallbackNoop(), true);
-            if (!parsedDistinct.isOK()) {
-                return parsedDistinct.getStatus();
-            }
 
-            auto aggCmdOnView = parsedDistinct.getValue().asAggregationCommand();
+            auto aggCmdOnView = canonicalDistinct.asAggregationCommand();
             if (!aggCmdOnView.isOK()) {
                 return aggCmdOnView.getStatus();
             }
@@ -246,21 +299,15 @@ public:
              BSONObjBuilder& result) override {
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         const NamespaceString nss(parseNs(dbName, cmdObj));
-
-        auto parsedDistinctCmd =
-            ParsedDistinct::parse(opCtx, nss, cmdObj, ExtensionsCallbackNoop(), false);
-        uassertStatusOK(parsedDistinctCmd.getStatus());
-
-        auto distinctCanonicalQuery = parsedDistinctCmd.getValue().releaseQuery();
-        auto query = distinctCanonicalQuery->getQueryObj();
-        auto collation = distinctCanonicalQuery->getFindCommandRequest().getCollation();
-
-        // Construct collator for deduping.
-        std::unique_ptr<CollatorInterface> collator;
-        if (!collation.isEmpty()) {
-            collator = uassertStatusOK(
-                CollatorFactoryInterface::get(opCtx->getServiceContext())->makeFromBSON(collation));
-        }
+        auto canonicalDistinct = parseDistinctCmd(opCtx,
+                                                  nss,
+                                                  cmdObj,
+                                                  ExtensionsCallbackNoop(),
+                                                  nullptr /* defaultCollator */,
+                                                  boost::none /* verbosity */);
+        auto canonicalQuery = canonicalDistinct.getQuery();
+        auto query = canonicalQuery->getQueryObj();
+        auto collation = canonicalQuery->getFindCommandRequest().getCollation();
 
         auto swCri = getCollectionRoutingInfoForTxnCmd(opCtx, nss);
         if (swCri == ErrorCodes::NamespaceNotFound) {
@@ -269,6 +316,9 @@ public:
             result.appendArray("values", BSONObj());
             return true;
         }
+
+        BSONObj distinctReadyForPassthrough =
+            prepareDistinctForPassthrough(cmdObj, canonicalQuery->getExpCtx()->getQuerySettings());
 
         const auto cri = uassertStatusOK(std::move(swCri));
         const auto& cm = cri.cm;
@@ -279,8 +329,7 @@ public:
                 nss.dbName(),
                 nss,
                 cri,
-                applyReadWriteConcern(
-                    opCtx, this, CommandHelpers::filterCommandRequestForPassthrough(cmdObj)),
+                applyReadWriteConcern(opCtx, this, distinctReadyForPassthrough),
                 ReadPreferenceSetting::get(opCtx),
                 Shard::RetryPolicy::kIdempotent,
                 query,
@@ -289,11 +338,7 @@ public:
                 boost::none /*runtimeConstants*/,
                 true /* eligibleForSampling */);
         } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& ex) {
-            auto parsedDistinct = ParsedDistinct::parse(
-                opCtx, ex->getNamespace(), cmdObj, ExtensionsCallbackNoop(), true);
-            uassertStatusOK(parsedDistinct.getStatus());
-
-            auto aggCmdOnView = parsedDistinct.getValue().asAggregationCommand();
+            auto aggCmdOnView = canonicalDistinct.asAggregationCommand();
             uassertStatusOK(aggCmdOnView.getStatus());
 
             auto viewAggCmd =
@@ -326,7 +371,7 @@ public:
         BSONObjComparator bsonCmp(BSONObj(),
                                   BSONObjComparator::FieldNamesMode::kConsider,
                                   !collation.isEmpty()
-                                      ? collator.get()
+                                      ? canonicalQuery->getCollator()
                                       : (cm.isSharded() ? cm.getDefaultCollator() : nullptr));
         BSONObjSet all = bsonCmp.makeBSONObjSet();
 

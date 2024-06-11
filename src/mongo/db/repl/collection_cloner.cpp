@@ -160,15 +160,19 @@ void CollectionCloner::preStage() {
     stdx::lock_guard<Latch> lk(_mutex);
     _stats.start = getSharedData()->getClock()->now();
 
+    boost::optional<auth::ValidatedTenancyScope> vts = boost::none;
     BSONObjBuilder b(BSON("collStats" << _sourceNss.coll().toString()));
     if (gMultitenancySupport &&
-        gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility) &&
+        gFeatureFlagRequireTenantID.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
         _sourceNss.tenantId()) {
-        _sourceNss.tenantId()->serializeToBSON("$tenant", &b);
+        vts = auth::ValidatedTenancyScopeFactory::create(
+            _sourceNss.tenantId().get(),
+            auth::ValidatedTenancyScopeFactory::TrustedForInnerOpMsgRequestTag{});
     }
 
     BSONObj res;
-    getClient()->runCommand(_sourceNss.dbName(), b.obj(), res);
+    getClient()->runCommand(_sourceNss.dbName(), b.obj(), res, 0, vts);
     if (auto status = getStatusFromCommandResult(res); status.isOK()) {
         _stats.bytesToCopy = res.getField("size").safeNumberLong();
         if (_stats.bytesToCopy > 0) {
@@ -255,16 +259,17 @@ BaseCloner::AfterStageBehavior CollectionCloner::listIndexesStage() {
             auto sanitizedStorageEngineOpts =
                 storageEngine->getSanitizedStorageOptionsForSecondaryReplication(
                     storageEngineElem.embeddedObject());
-            fassert(6812200, sanitizedStorageEngineOpts);
-            spec = spec.addFields(BSON(IndexDescriptor::kStorageEngineFieldName
-                                       << sanitizedStorageEngineOpts.getValue()));
+            spec = spec.addFields(
+                BSON(IndexDescriptor::kStorageEngineFieldName << sanitizedStorageEngineOpts));
         }
 
         if (spec.hasField("clustered")) {
             invariant(_collectionOptions.clusteredIndex);
             invariant(spec.getBoolField("clustered") == true);
             invariant(clustered_util::formatClusterKeyForListIndexes(
-                          _collectionOptions.clusteredIndex.value(), _collectionOptions.collation)
+                          _collectionOptions.clusteredIndex.value(),
+                          _collectionOptions.collation,
+                          _collectionOptions.expireAfterSeconds)
                           .woCompare(spec) == 0);
             // Skip if the spec is for the collection's clusteredIndex.
         } else if (spec.hasField("buildUUID")) {

@@ -2,20 +2,16 @@
 // @tags: [
 //   directly_against_shardsvrs_incompatible,
 //   featureFlagQuerySettings,
-//   does_not_support_stepdowns,
-//   simulate_atlas_proxy_incompatible
+//   simulate_atlas_proxy_incompatible,
 // ]
 //
 
+import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js"
 import {QuerySettingsUtils} from "jstests/libs/query_settings_utils.js";
 
 const collName = jsTestName();
 
 const qsutils = new QuerySettingsUtils(db, collName)
-
-// Set the 'clusterServerParameterRefreshIntervalSecs' value to 1 second for faster fetching of
-// 'querySettings' cluster parameter on mongos from the configsvr.
-const clusterParamRefreshSecs = qsutils.setClusterParamRefreshSecs(1);
 
 const querySettingsA = {
     indexHints: {allowedIndexes: ["a_1", {$natural: 1}]}
@@ -56,6 +52,7 @@ const nonExistentQueryShapeHash = "0".repeat(64);
 {
     // Ensure that setQuerySettings command fails when there are more than one collection in the
     // input query and namespaces are not explicitly given.
+    assertDropAndRecreateCollection(db, "order");
     assert.commandFailedWithCode(
             db.adminCommand({
                 setQuerySettings: {
@@ -80,14 +77,15 @@ const nonExistentQueryShapeHash = "0".repeat(64);
 
     const queryInstance = {
         aggregate: "order",
-        $db: "someDb",
+        $db: db.getName(),
         pipeline: [{
             $lookup:
                 {from: "inventory", localField: "item", foreignField: "sku", as: "inventory_docs"}
         }]
     };
     const settings = {
-        "indexHints": {"ns": {"db": "someDb", "coll": "inventory"}, "allowedIndexes": [{"sku": 1}]}
+        "indexHints":
+            {"ns": {"db": db.getName(), "coll": "inventory"}, "allowedIndexes": [{"sku": 1}]}
     };
     assert.commandWorked(db.adminCommand({setQuerySettings: queryInstance, settings: settings}));
     qsutils.assertQueryShapeConfiguration(
@@ -97,6 +95,7 @@ const nonExistentQueryShapeHash = "0".repeat(64);
 
 {
     // Ensure that index hint may not refer to a collection which is not involved in the query.
+    assertDropAndRecreateCollection(db, "order");
     assert.commandFailedWithCode(db.adminCommand({
         setQuerySettings: {
             aggregate: "order",
@@ -117,14 +116,14 @@ const nonExistentQueryShapeHash = "0".repeat(64);
 
     const queryInstance = {
         aggregate: "order",
-        $db: "testDB",
+        $db: db.getName(),
         pipeline: [{
             $lookup:
                 {from: "inventory", localField: "item", foreignField: "sku", as: "inventory_docs"}
         }]
     };
     const settings = {
-        "indexHints": {"ns": {"db": "testDB", "coll": "order"}, "allowedIndexes": []}
+        "indexHints": {"ns": {"db": db.getName(), "coll": "order"}, "allowedIndexes": []}
     };
     assert.commandWorked(db.adminCommand({setQuerySettings: queryInstance, settings: settings}));
     qsutils.assertQueryShapeConfiguration(
@@ -145,6 +144,3 @@ const nonExistentQueryShapeHash = "0".repeat(64);
     }),
                                  7746608);
 }
-
-// Reset the 'clusterServerParameterRefreshIntervalSecs' parameter to its initial value.
-clusterParamRefreshSecs.restore();

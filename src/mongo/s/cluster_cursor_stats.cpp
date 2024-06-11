@@ -39,32 +39,15 @@
 namespace mongo {
 namespace {
 
-long long ll(auto v) {
-    return static_cast<long long>(v);
-}
-
-//
-// ServerStatus metric cursor counts.
-//
-
 class ClusterCursorStats final : public ServerStatusMetric {
 public:
     void appendTo(BSONObjBuilder& b, StringData leafName) const override {
-        auto grid = Grid::get(getGlobalServiceContext());
-        BSONObjBuilder cursorBob(b.subobjStart(leafName));
-        cursorBob.append("timedOut", ll(grid->getCursorManager()->cursorsTimedOut()));
-        auto stats = grid->getCursorManager()->stats();
-        BSONObjBuilder{cursorBob.subobjStart("open")}
-            .append("multiTarget", ll(stats.cursorsMultiTarget))
-            .append("singleTarget", ll(stats.cursorsSingleTarget))
-            .append("queuedData", ll(stats.cursorsQueuedData))
-            .append("pinned", ll(stats.cursorsPinned))
-            .append("total", ll(stats.cursorsMultiTarget + stats.cursorsSingleTarget));
+        Grid::get(getGlobalServiceContext())->getCursorManager()->stats();
     }
 };
 
 ClusterCursorStats& clusterCursorStats =
-    addMetricToTree("cursor", std::make_unique<ClusterCursorStats>());
+    addMetricToTree("cluster.cursor.stats", std::make_unique<ClusterCursorStats>());
 
 }  // namespace
 }  // namespace mongo

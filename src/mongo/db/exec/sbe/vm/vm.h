@@ -76,195 +76,6 @@
 namespace mongo {
 namespace sbe {
 namespace vm {
-template <typename Op>
-std::pair<value::TypeTags, value::Value> genericCompare(
-    value::TypeTags lhsTag,
-    value::Value lhsValue,
-    value::TypeTags rhsTag,
-    value::Value rhsValue,
-    const StringDataComparator* comparator = nullptr,
-    Op op = {}) {
-    if (value::isNumber(lhsTag) && value::isNumber(rhsTag)) {
-        switch (getWidestNumericalType(lhsTag, rhsTag)) {
-            case value::TypeTags::NumberInt32: {
-                auto result = op(value::numericCast<int32_t>(lhsTag, lhsValue),
-                                 value::numericCast<int32_t>(rhsTag, rhsValue));
-                return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
-            }
-            case value::TypeTags::NumberInt64: {
-                auto result = op(value::numericCast<int64_t>(lhsTag, lhsValue),
-                                 value::numericCast<int64_t>(rhsTag, rhsValue));
-                return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
-            }
-            case value::TypeTags::NumberDouble: {
-                auto result = [&]() {
-                    if (lhsTag == value::TypeTags::NumberInt64) {
-                        auto rhs = value::bitcastTo<double>(rhsValue);
-                        if (std::isnan(rhs)) {
-                            return false;
-                        }
-                        return op(compareLongToDouble(value::bitcastTo<int64_t>(lhsValue), rhs), 0);
-                    } else if (rhsTag == value::TypeTags::NumberInt64) {
-                        auto lhs = value::bitcastTo<double>(lhsValue);
-                        if (std::isnan(lhs)) {
-                            return false;
-                        }
-                        return op(compareDoubleToLong(lhs, value::bitcastTo<int64_t>(rhsValue)), 0);
-                    } else {
-                        return op(value::numericCast<double>(lhsTag, lhsValue),
-                                  value::numericCast<double>(rhsTag, rhsValue));
-                    }
-                }();
-                return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
-            }
-            case value::TypeTags::NumberDecimal: {
-                auto result = [&]() {
-                    if (lhsTag == value::TypeTags::NumberDouble) {
-                        if (value::isNaN(lhsTag, lhsValue) || value::isNaN(rhsTag, rhsValue)) {
-                            return false;
-                        }
-                        return op(compareDoubleToDecimal(value::bitcastTo<double>(lhsValue),
-                                                         value::bitcastTo<Decimal128>(rhsValue)),
-                                  0);
-                    } else if (rhsTag == value::TypeTags::NumberDouble) {
-                        if (value::isNaN(lhsTag, lhsValue) || value::isNaN(rhsTag, rhsValue)) {
-                            return false;
-                        }
-                        return op(compareDecimalToDouble(value::bitcastTo<Decimal128>(lhsValue),
-                                                         value::bitcastTo<double>(rhsValue)),
-                                  0);
-                    } else {
-                        return op(value::numericCast<Decimal128>(lhsTag, lhsValue),
-                                  value::numericCast<Decimal128>(rhsTag, rhsValue));
-                    }
-                }();
-                return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
-            }
-            default:
-                MONGO_UNREACHABLE;
-        }
-    } else if (isStringOrSymbol(lhsTag) && isStringOrSymbol(rhsTag)) {
-        auto lhsStr = value::getStringOrSymbolView(lhsTag, lhsValue);
-        auto rhsStr = value::getStringOrSymbolView(rhsTag, rhsValue);
-        auto result =
-            op(comparator ? comparator->compare(lhsStr, rhsStr) : lhsStr.compare(rhsStr), 0);
-
-        return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
-    } else if (lhsTag == value::TypeTags::Date && rhsTag == value::TypeTags::Date) {
-        auto result = op(value::bitcastTo<int64_t>(lhsValue), value::bitcastTo<int64_t>(rhsValue));
-        return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
-    } else if (lhsTag == value::TypeTags::Timestamp && rhsTag == value::TypeTags::Timestamp) {
-        auto result =
-            op(value::bitcastTo<uint64_t>(lhsValue), value::bitcastTo<uint64_t>(rhsValue));
-        return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
-    } else if (lhsTag == value::TypeTags::Boolean && rhsTag == value::TypeTags::Boolean) {
-        auto result = op(value::bitcastTo<bool>(lhsValue), value::bitcastTo<bool>(rhsValue));
-        return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
-    } else if (lhsTag == value::TypeTags::Null && rhsTag == value::TypeTags::Null) {
-        // This is where Mongo differs from SQL.
-        auto result = op(0, 0);
-        return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
-    } else if (lhsTag == value::TypeTags::MinKey && rhsTag == value::TypeTags::MinKey) {
-        auto result = op(0, 0);
-        return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
-    } else if (lhsTag == value::TypeTags::MaxKey && rhsTag == value::TypeTags::MaxKey) {
-        auto result = op(0, 0);
-        return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
-    } else if (lhsTag == value::TypeTags::bsonUndefined &&
-               rhsTag == value::TypeTags::bsonUndefined) {
-        auto result = op(0, 0);
-        return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
-    } else if ((value::isArray(lhsTag) && value::isArray(rhsTag)) ||
-               (value::isObject(lhsTag) && value::isObject(rhsTag)) ||
-               (value::isBinData(lhsTag) && value::isBinData(rhsTag))) {
-        auto [tag, val] = value::compareValue(lhsTag, lhsValue, rhsTag, rhsValue, comparator);
-        if (tag == value::TypeTags::NumberInt32) {
-            auto result = op(value::bitcastTo<int32_t>(val), 0);
-            return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
-        }
-    } else if (isObjectId(lhsTag) && isObjectId(rhsTag)) {
-        auto lhsObjId = lhsTag == value::TypeTags::ObjectId
-            ? value::getObjectIdView(lhsValue)->data()
-            : value::bitcastTo<uint8_t*>(lhsValue);
-        auto rhsObjId = rhsTag == value::TypeTags::ObjectId
-            ? value::getObjectIdView(rhsValue)->data()
-            : value::bitcastTo<uint8_t*>(rhsValue);
-        auto threeWayResult = memcmp(lhsObjId, rhsObjId, sizeof(value::ObjectIdType));
-        return {value::TypeTags::Boolean, value::bitcastFrom<bool>(op(threeWayResult, 0))};
-    } else if (lhsTag == value::TypeTags::bsonRegex && rhsTag == value::TypeTags::bsonRegex) {
-        auto lhsRegex = value::getBsonRegexView(lhsValue);
-        auto rhsRegex = value::getBsonRegexView(rhsValue);
-
-        if (auto threeWayResult = lhsRegex.pattern.compare(rhsRegex.pattern); threeWayResult != 0) {
-            return {value::TypeTags::Boolean, value::bitcastFrom<bool>(op(threeWayResult, 0))};
-        }
-
-        auto threeWayResult = lhsRegex.flags.compare(rhsRegex.flags);
-        return {value::TypeTags::Boolean, value::bitcastFrom<bool>(op(threeWayResult, 0))};
-    } else if (lhsTag == value::TypeTags::bsonDBPointer &&
-               rhsTag == value::TypeTags::bsonDBPointer) {
-        auto lhsDBPtr = value::getBsonDBPointerView(lhsValue);
-        auto rhsDBPtr = value::getBsonDBPointerView(rhsValue);
-        if (lhsDBPtr.ns.size() != rhsDBPtr.ns.size()) {
-            return {value::TypeTags::Boolean,
-                    value::bitcastFrom<bool>(op(lhsDBPtr.ns.size(), rhsDBPtr.ns.size()))};
-        }
-
-        if (auto threeWayResult = lhsDBPtr.ns.compare(rhsDBPtr.ns); threeWayResult != 0) {
-            return {value::TypeTags::Boolean, value::bitcastFrom<bool>(op(threeWayResult, 0))};
-        }
-
-        auto threeWayResult = memcmp(lhsDBPtr.id, rhsDBPtr.id, sizeof(value::ObjectIdType));
-        return {value::TypeTags::Boolean, value::bitcastFrom<bool>(op(threeWayResult, 0))};
-    } else if (lhsTag == value::TypeTags::bsonJavascript &&
-               rhsTag == value::TypeTags::bsonJavascript) {
-        auto lhsCode = value::getBsonJavascriptView(lhsValue);
-        auto rhsCode = value::getBsonJavascriptView(rhsValue);
-        return {value::TypeTags::Boolean,
-                value::bitcastFrom<bool>(op(lhsCode.compare(rhsCode), 0))};
-    } else if (lhsTag == value::TypeTags::bsonCodeWScope &&
-               rhsTag == value::TypeTags::bsonCodeWScope) {
-        auto lhsCws = value::getBsonCodeWScopeView(lhsValue);
-        auto rhsCws = value::getBsonCodeWScopeView(rhsValue);
-        if (auto threeWayResult = lhsCws.code.compare(rhsCws.code); threeWayResult != 0) {
-            return {value::TypeTags::Boolean, value::bitcastFrom<bool>(op(threeWayResult, 0))};
-        }
-
-        // Special string comparison semantics do not apply to strings nested inside the
-        // CodeWScope scope object, so we do not pass through the string comparator.
-        auto [tag, val] = value::compareValue(value::TypeTags::bsonObject,
-                                              value::bitcastFrom<const char*>(lhsCws.scope),
-                                              value::TypeTags::bsonObject,
-                                              value::bitcastFrom<const char*>(rhsCws.scope));
-        if (tag == value::TypeTags::NumberInt32) {
-            auto result = op(value::bitcastTo<int32_t>(val), 0);
-            return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
-        }
-    }
-
-    // TODO: SERVER-82089: Use cmp3w instead of simple comparisons in ABT optimization + lowering of
-    // parameterized constants
-
-    return {value::TypeTags::Nothing, 0};
-}
-
-template <typename Op>
-std::pair<value::TypeTags, value::Value> genericCompare(value::TypeTags lhsTag,
-                                                        value::Value lhsValue,
-                                                        value::TypeTags rhsTag,
-                                                        value::Value rhsValue,
-                                                        value::TypeTags collTag,
-                                                        value::Value collValue,
-                                                        Op op = {}) {
-    if (collTag != value::TypeTags::collator) {
-        return {value::TypeTags::Nothing, 0};
-    }
-
-    auto comparator = static_cast<StringDataComparator*>(value::getCollatorView(collValue));
-
-    return genericCompare(lhsTag, lhsValue, rhsTag, rhsValue, comparator, op);
-}
-
 namespace {
 template <typename T>
 T readFromMemory(const uint8_t* ptr) noexcept {
@@ -344,6 +155,7 @@ struct Instruction {
         traversePImm,
         traverseF,  // traverse filter paths
         traverseFImm,
+        magicTraverseF,
         // Iterates over values in column index cells. Skips values from nested arrays.
         traverseCsiCellValues,
         // Iterates the column index cell and returns values representing the types of cell's
@@ -365,6 +177,7 @@ struct Instruction {
         isNull,
         isObject,
         isArray,
+        isInListData,
         isString,
         isNumber,
         isBinData,
@@ -584,6 +397,8 @@ struct Instruction {
                 return "isObject";
             case isArray:
                 return "isArray";
+            case isInListData:
+                return "isInListData";
             case isString:
                 return "isString";
             case isNumber:
@@ -666,6 +481,7 @@ enum class Builtin : uint16_t {
     keepFields,
     newArrayFromRange,
     newObj,      // create a new object from 'arity' alternating field names and values on the stack
+    newBsonObj,  // same as 'newObj', except it creates a BSON object
     ksToString,  // KeyString to string
     newKs,       // new KeyString
     collNewKs,   // new KeyString (with collation)
@@ -876,6 +692,21 @@ enum class Builtin : uint16_t {
     aggRemovableAddToSetAdd,
     aggRemovableAddToSetRemove,
     aggRemovableAddToSetFinalize,
+    aggRemovableMinMaxNCollInit,
+    aggRemovableMinMaxNInit,
+    aggRemovableMinMaxNAdd,
+    aggRemovableMinMaxNRemove,
+    aggRemovableMinNFinalize,
+    aggRemovableMaxNFinalize,
+    aggRemovableTopNInit,
+    aggRemovableTopNAdd,
+    aggRemovableTopNRemove,
+    aggRemovableTopNFinalize,
+    aggRemovableBottomNInit,
+    aggRemovableBottomNAdd,
+    aggRemovableBottomNRemove,
+    aggRemovableBottomNFinalize,
+
 
     // Additional one-byte builtins go here.
 
@@ -886,6 +717,9 @@ enum class Builtin : uint16_t {
     valueBlockMin,
     valueBlockMax,
     valueBlockCount,
+    valueBlockDateDiff,
+    valueBlockDateTrunc,
+    valueBlockSum,
     valueBlockGtScalar,
     valueBlockGteScalar,
     valueBlockEqScalar,
@@ -929,6 +763,15 @@ enum class AggMultiElems {
     kIsGroupAccum,
     kSizeOfArray
 };
+
+/**
+ * Flags controlling runtime behavior of a magical traverse intrinsic used for evaluating numerical
+ * paths.
+ * If kPreTraverse is specified then we run the traverse before calling getField/getElement.
+ * If kPostTraverse is specified then we run the traverse after calling getField/getElement.
+ * Note that we can freely combine pre and post flags; i.e. they are not mutually exclusive.
+ */
+enum MagicTraverse : int32_t { kPreTraverse = 1, kPostTraverse = 2 };
 
 /**
  * Less than comparison based on a sort pattern.
@@ -986,26 +829,6 @@ struct PairKeyComp {
 
 private:
     const Comp _comp;
-};
-
-template <bool less>
-struct ValueCompare {
-    ValueCompare(const CollatorInterface* collator) : _collator(collator) {}
-
-    bool operator()(const std::pair<value::TypeTags, value::Value>& lhs,
-                    const std::pair<value::TypeTags, value::Value>& rhs) const {
-        auto [tag, val] =
-            value::compareValue(lhs.first, lhs.second, rhs.first, rhs.second, _collator);
-        uassert(7548805, "Invalid comparison result", tag == value::TypeTags::NumberInt32);
-        if constexpr (less) {
-            return value::bitcastTo<int>(val) < 0;
-        } else {
-            return value::bitcastTo<int>(val) > 0;
-        }
-    }
-
-private:
-    const CollatorInterface* _collator;
 };
 
 struct MakeObjStackOffsets {
@@ -1149,6 +972,16 @@ enum class AggLinearFillElems { kX1, kY1, kX2, kY2, kPrevX, kCount, kSizeOfArray
  */
 enum class AggFirstLastNElems { kQueue, kN, kSizeOfArray };
 
+/**
+ * This enum defines indices into an 'Array' that store state for $minN/$maxN/$topN/$bottomN
+ * window functions.
+ * Element at `kValues` stores the accmulator data structure with the elements
+ * Element at `kN` stores an integer with the number of values minN/maxN should return
+ * Element at `kMemUsage`stores the size of the multiset in bytes
+ * Element at `kMemLimit`stores the maximum allowed size of the multiset in bytes
+ */
+enum class AggAccumulatorNElems { kValues = 0, kN, kMemUsage, kMemLimit, kSizeOfArray };
+
 using SmallArityType = uint8_t;
 using ArityType = uint32_t;
 
@@ -1238,6 +1071,7 @@ public:
     void appendTraverseP(int codePosition, Instruction::Constants k);
     void appendTraverseF();
     void appendTraverseF(int codePosition, Instruction::Constants k);
+    void appendMagicTraverseF();
     void appendTraverseCellValues();
     void appendTraverseCellValues(int codePosition);
     void appendTraverseCellTypes();
@@ -1258,6 +1092,7 @@ public:
     void appendIsNull(Instruction::Parameter input);
     void appendIsObject(Instruction::Parameter input);
     void appendIsArray(Instruction::Parameter input);
+    void appendIsInListData(Instruction::Parameter input);
     void appendIsString(Instruction::Parameter input);
     void appendIsNumber(Instruction::Parameter input);
     void appendIsBinData(Instruction::Parameter input);
@@ -1480,20 +1315,6 @@ private:
         std::string funcName, Decimal128::RoundingMode roundingMode, ArityType arity);
     std::pair<value::TypeTags, value::Value> genericNot(value::TypeTags tag, value::Value value);
 
-    std::pair<value::TypeTags, value::Value> compare3way(
-        value::TypeTags lhsTag,
-        value::Value lhsValue,
-        value::TypeTags rhsTag,
-        value::Value rhsValue,
-        const StringDataComparator* comparator = nullptr);
-
-    std::pair<value::TypeTags, value::Value> compare3way(value::TypeTags lhsTag,
-                                                         value::Value lhsValue,
-                                                         value::TypeTags rhsTag,
-                                                         value::Value rhsValue,
-                                                         value::TypeTags collTag,
-                                                         value::Value collValue);
-
     FastTuple<bool, value::TypeTags, value::Value> getField(value::TypeTags objTag,
                                                             value::Value objValue,
                                                             value::TypeTags fieldTag,
@@ -1523,6 +1344,7 @@ private:
     void traverseF(const CodeFragment* code);
     void traverseF(const CodeFragment* code, int64_t position, bool compareArray);
     void traverseFInArray(const CodeFragment* code, int64_t position, bool compareArray);
+    void magicTraverseF(const CodeFragment* code);
 
     bool runLambdaPredicate(const CodeFragment* code, int64_t position);
     void traverseCsiCellValues(const CodeFragment* code, int64_t position);
@@ -1761,42 +1583,28 @@ private:
      * directly passed in as C++ parameters -- instead the computed input values are passed via
      * the VM's stack.)
      */
-    void produceBsonObject(const MakeObjSpec* spec,
-                           MakeObjStackOffsets stackOffsets,
-                           const CodeFragment* code,
-                           UniqueBSONObjBuilder& bob,
-                           value::TypeTags rootTag,
-                           value::Value rootVal) {
+    MONGO_COMPILER_ALWAYS_INLINE void produceBsonObject(const MakeObjSpec* spec,
+                                                        MakeObjStackOffsets stackOffsets,
+                                                        const CodeFragment* code,
+                                                        UniqueBSONObjBuilder& bob,
+                                                        value::TypeTags rootTag,
+                                                        value::Value rootVal) {
         using TypeTags = value::TypeTags;
 
         const auto& fields = spec->fields;
-        const auto& actions = spec->actions;
-        const auto defActionType = spec->fieldsScopeIsClosed() ? MakeObjSpec::ActionType::kDrop
-                                                               : MakeObjSpec::ActionType::kKeep;
 
-        // Invoke the produceBsonObject() lambda with the appropriate iterator type.
-        switch (rootTag) {
-            case TypeTags::bsonObject: {
-                // For BSON objects, use BsonObjCursor.
-                auto cursor = BsonObjCursor(
-                    fields, actions, defActionType, value::bitcastTo<const char*>(rootVal));
-                produceBsonObject(spec, stackOffsets, code, bob, std::move(cursor));
-                break;
-            }
-            case TypeTags::Object: {
-                // For SBE objects, use ObjectCursor.
-                auto cursor =
-                    ObjectCursor(fields, actions, defActionType, value::getObjectView(rootVal));
-                produceBsonObject(spec, stackOffsets, code, bob, std::move(cursor));
-                break;
-            }
-            default: {
-                // For all other types, use BsonObjCursor initialized with an empty object.
-                auto cursor =
-                    BsonObjCursor(fields, actions, defActionType, BSONObj::kEmptyObject.objdata());
-                produceBsonObject(spec, stackOffsets, code, bob, std::move(cursor));
-                break;
-            }
+        // Invoke the produceBsonObject() lambda with the appropriate iterator type. For
+        // SBE objects, we use ObjectCursor. For all other types, we use BsonObjCursor.
+        if (rootTag == TypeTags::Object) {
+            auto obj = value::getObjectView(rootVal);
+
+            produceBsonObject(spec, stackOffsets, code, bob, ObjectCursor(fields, obj));
+        } else {
+            const char* obj = rootTag == TypeTags::bsonObject
+                ? value::bitcastTo<const char*>(rootVal)
+                : BSONObj::kEmptyObject.objdata();
+
+            produceBsonObject(spec, stackOffsets, code, bob, BsonObjCursor(fields, obj));
         }
     }
 
@@ -1838,6 +1646,18 @@ private:
                                    StringData fieldName,
                                    UniqueBSONObjBuilder& bob);
 
+    template <bool IsBlockBuiltin = false>
+    bool validateDateTruncParameters(TimeUnit* unit,
+                                     int64_t* binSize,
+                                     TimeZone* timezone,
+                                     DayOfWeek* startOfWeek);
+
+    template <bool IsBlockBuiltin = false>
+    bool validateDateDiffParameters(Date_t* endDate,
+                                    TimeUnit* unit,
+                                    TimeZone* timezone,
+                                    DayOfWeek* startOfWeek);
+
     FastTuple<bool, value::TypeTags, value::Value> builtinSplit(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinDate(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinDateWeekYear(ArityType arity);
@@ -1854,6 +1674,7 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinNewArray(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinNewArrayFromRange(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinNewObj(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinNewBsonObj(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinKeyStringToString(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinNewKeyString(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollNewKeyString(ArityType arity);
@@ -2012,11 +1833,11 @@ private:
     template <typename Less>
     FastTuple<bool, value::TypeTags, value::Value> builtinAggTopBottomNMerge(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggTopBottomNFinalize(ArityType arity);
-    template <bool less>
+    template <AccumulatorMinMaxN::MinMaxSense S>
     FastTuple<bool, value::TypeTags, value::Value> builtinAggMinMaxN(ArityType arity);
-    template <bool less>
+    template <AccumulatorMinMaxN::MinMaxSense S>
     FastTuple<bool, value::TypeTags, value::Value> builtinAggMinMaxNMerge(ArityType arity);
-    template <bool less>
+    template <AccumulatorMinMaxN::MinMaxSense S>
     FastTuple<bool, value::TypeTags, value::Value> builtinAggMinMaxNFinalize(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggRank(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggRankColl(ArityType arity);
@@ -2087,13 +1908,33 @@ private:
         ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableAddToSetFinalize(
         ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> aggRemovableMinMaxNInitImpl(
+        CollatorInterface* collator);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableMinMaxNCollInit(
+        ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableMinMaxNInit(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableMinMaxNAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableMinMaxNRemove(
+        ArityType arity);
+    template <AccumulatorMinMaxN::MinMaxSense S>
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableMinMaxNFinalize(
+        ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtin(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> linearFillInterpolate(
         std::pair<value::TypeTags, value::Value> x1,
         std::pair<value::TypeTags, value::Value> y1,
         std::pair<value::TypeTags, value::Value> x2,
         std::pair<value::TypeTags, value::Value> y2,
         std::pair<value::TypeTags, value::Value> x);
-
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableTopBottomNInit(
+        ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableTopBottomNAdd(
+        ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableTopBottomNRemove(
+        ArityType arity);
+    template <TopBottomSense>
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableTopBottomNFinalize(
+        ArityType arity);
 
     // Block builtins
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockExists(ArityType arity);
@@ -2105,6 +1946,10 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMin(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMax(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCount(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockSum(ArityType arity);
+
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockDateDiff(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockDateTrunc(ArityType arity);
 
     template <class Cmp, value::ColumnOpType::Flags AddFlags = value::ColumnOpType::kNoFlags>
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCmpScalar(ArityType arity);
@@ -2243,7 +2088,15 @@ private:
         _argStackTop = _argStack - sizeOfElement;
     }
 
-    void allocStack(size_t size) noexcept;
+    MONGO_COMPILER_ALWAYS_INLINE_OPT void allocStack(size_t size) noexcept {
+        auto newSizeDelta = size * sizeOfElement;
+        if (_argStackEnd <= _argStackTop + newSizeDelta) {
+            allocStackImpl(newSizeDelta);
+        }
+    }
+
+    void allocStackImpl(size_t newSizeDelta) noexcept;
+
     void swapStack();
 
     // The top entry in '_argStack', or one element before the stack when empty.

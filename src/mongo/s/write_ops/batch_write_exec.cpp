@@ -56,6 +56,7 @@
 #include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/db/timeseries/timeseries_write_util.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/executor/inline_executor.h"
@@ -66,7 +67,9 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/s/async_requests_sender.h"
+#include "mongo/s/cannot_implicitly_create_collection_info.h"
 #include "mongo/s/chunk_manager.h"
+#include "mongo/s/client/num_hosts_targeted_metrics.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/multi_statement_transaction_requests_sender.h"
@@ -86,8 +89,6 @@
 
 namespace mongo {
 namespace {
-
-MONGO_FAIL_POINT_DEFINE(hangBeforeCompletingWriteWithoutShardKeyWithId);
 
 const ReadPreferenceSetting kPrimaryOnlyReadPreference(ReadPreference::PrimaryOnly);
 
@@ -121,6 +122,20 @@ void noteStaleDbResponses(OperationContext* opCtx,
         auto extraInfo = error.error.getStatus().extraInfo<StaleDbRoutingVersion>();
         invariant(extraInfo);
         targeter->noteStaleDbResponse(opCtx, error.endpoint, *extraInfo);
+    }
+}
+
+void noteCannotImplicitlyCreateCollectionResponses(OperationContext* opCtx,
+                                                   const std::vector<ShardError>& createErrors,
+                                                   NSTargeter* targeter) {
+    for (const auto& error : createErrors) {
+        LOGV2_DEBUG(8037202,
+                    4,
+                    "Noting cannot implicitly create collection response",
+                    "status"_attr = error.error.getStatus());
+        auto extraInfo = error.error.getStatus().extraInfo<CannotImplicitlyCreateCollectionInfo>();
+        invariant(extraInfo);
+        targeter->noteCannotImplicitlyCreateCollectionResponse(opCtx, *extraInfo);
     }
 }
 
@@ -205,10 +220,15 @@ bool processResponseFromRemote(OperationContext* opCtx,
                                BatchWriteOp& batchOp,
                                TargetedWriteBatch* batch,
                                BatchWriteExecStats* stats) {
+    // Stale routing info errors need to be tracked in order to trigger a refresh of the targeter.
+    // On the other hand, errors caused by the catalog cache being temporarily unavailable (such as
+    // ShardCannotRefreshDueToLocksHeld) are ignored in this context, since no deduction can be made
+    // around possible placement changes.
     TrackedErrors trackedErrors;
     trackedErrors.startTracking(ErrorCodes::StaleConfig);
     trackedErrors.startTracking(ErrorCodes::StaleDbVersion);
     trackedErrors.startTracking(ErrorCodes::TenantMigrationAborted);
+    trackedErrors.startTracking(ErrorCodes::CannotImplicitlyCreateCollection);
 
     LOGV2_DEBUG(22907,
                 4,
@@ -242,6 +262,8 @@ bool processResponseFromRemote(OperationContext* opCtx,
     const auto& staleDbErrors = trackedErrors.getErrors(ErrorCodes::StaleDbVersion);
     const auto& tenantMigrationAbortedErrors =
         trackedErrors.getErrors(ErrorCodes::TenantMigrationAborted);
+    const auto& cannotImplicitlyCreateCollectionErrors =
+        trackedErrors.getErrors(ErrorCodes::CannotImplicitlyCreateCollection);
 
     if (!staleConfigErrors.empty()) {
         invariant(staleDbErrors.empty());
@@ -257,6 +279,11 @@ bool processResponseFromRemote(OperationContext* opCtx,
 
     if (!tenantMigrationAbortedErrors.empty()) {
         ++stats->numTenantMigrationAbortedErrors;
+    }
+
+    if (!cannotImplicitlyCreateCollectionErrors.empty()) {
+        noteCannotImplicitlyCreateCollectionResponses(
+            opCtx, cannotImplicitlyCreateCollectionErrors, &targeter);
     }
 
     return false;
@@ -610,6 +637,8 @@ void executeNonTargetedSingleWriteWithoutShardKeyWithId(
     TargetedBatchMap& childBatches,
     BatchWriteExecStats* stats,
     const BatchedCommandRequest& clientRequest) {
+    auto& writeOp =
+        batchOp.getWriteOp(childBatches.begin()->second->getWrites().front()->writeOpRef.first);
     TargetedBatchMap pendingBatches;
     auto requests = constructARSRequestsToSend(
         opCtx, targeter, childBatches, pendingBatches, stats, batchOp, boost::optional<bool>());
@@ -635,11 +664,11 @@ void executeNonTargetedSingleWriteWithoutShardKeyWithId(
 
         BatchedCommandResponse batchedCommandResponse;
         Status responseStatus = response.swResponse.getStatus();
+        std::string errMsg;
+        if (!batchedCommandResponse.parseBSON(response.swResponse.getValue().data, &errMsg)) {
+            responseStatus = {ErrorCodes::FailedToParse, errMsg};
+        }
         if (responseStatus.isOK()) {
-            std::string errMsg;
-            if (!batchedCommandResponse.parseBSON(response.swResponse.getValue().data, &errMsg)) {
-                responseStatus = {ErrorCodes::FailedToParse, errMsg};
-            }
             bool abortBatch = processResponseFromRemote(
                 opCtx, targeter, shardInfo, batchedCommandResponse, batchOp, batch, stats);
             // Since we are not in a transaction we can not abort on Write Errors and the following
@@ -658,8 +687,6 @@ void executeNonTargetedSingleWriteWithoutShardKeyWithId(
                                        ? batchedCommandResponse.getElectionId()
                                        : OID());
             }
-            auto& targetedWrite = batch->getWrites().front();
-            auto& writeOp = batchOp.getWriteOp(targetedWrite->writeOpRef.first);
             // The write op is complete if we receive ok:1 n:1 shard response and we can return
             // early. Any pending child write ops would be marked NoOp.
             if (writeOp.getWriteState() == WriteOpState_Completed) {
@@ -674,22 +701,20 @@ void executeNonTargetedSingleWriteWithoutShardKeyWithId(
         }
     }
 
-    if (targeter.hasStaleShardResponse()) {
-        // If there were any stale shard responses, we will need to retry the whole batch and hence
-        // we cancel all writes.
-        for (auto& targetedWriteBatchMap : pendingBatches) {
-            auto& targetedWrite = targetedWriteBatchMap.second->getWrites().front();
-            auto& writeOp = batchOp.getWriteOp(targetedWrite->writeOpRef.first);
-            // If we are here due to a stale shard/db and n=1 response, we don't need to retry.
-            if (writeOp.getWriteState() != WriteOpState_Completed) {
-                writeOp.resetWriteToReady();
-            }
-            // Since all targeted writes belong to one writeOp we can break the loop.
-            break;
+    if (writeOp.getWriteState() == WriteOpState_Ready) {
+        // The writeOp state "Ready" indicates that the current round of braodcasting the write has
+        // failed and must be retried.
+        auto opType = writeOp.getWriteItem().getOpType();
+        if (opType == BatchedCommandRequest::BatchType_Update) {
+            updateOneWithoutShardKeyWithIdRetryCount.increment(1);
+        } else if (opType == BatchedCommandRequest::BatchType_Delete) {
+            deleteOneWithoutShardKeyWithIdRetryCount.increment(1);
+        } else {
+            MONGO_UNREACHABLE;
         }
     }
 
-    hangBeforeCompletingWriteWithoutShardKeyWithId.pauseWhileSet();
+    batchOp.handleDeferredWriteConcernErrors();
 }
 
 void executeNonOrdinaryWriteChildBatches(OperationContext* opCtx,
@@ -826,7 +851,7 @@ void BatchWriteExec::executeBatch(OperationContext* opCtx,
             if (statusWithWriteType.getValue() == WriteType::Ordinary ||
                 (statusWithWriteType.getValue() == WriteType::WithoutShardKeyWithId &&
                  !feature_flags::gUpdateOneWithIdWithoutShardKey.isEnabled(
-                     serverGlobalParams.featureCompatibility))) {
+                     serverGlobalParams.featureCompatibility.acquireFCVSnapshot()))) {
                 // Tries to execute all of the child batches. If there are any transaction errors,
                 // 'abortBatch' will be set.
                 executeChildBatches(
@@ -865,11 +890,12 @@ void BatchWriteExec::executeBatch(OperationContext* opCtx,
 
         bool targeterChanged = false;
         try {
+            targeterChanged = targeter.createCollectionIfNeeded(opCtx);
             LOGV2_DEBUG_OPTIONS(4817406,
                                 2,
                                 {logv2::LogComponent::kShardMigrationPerf},
                                 "Starting post-migration commit refresh on the router");
-            targeterChanged = targeter.refreshIfNeeded(opCtx);
+            targeterChanged |= targeter.refreshIfNeeded(opCtx);
             LOGV2_DEBUG_OPTIONS(4817407,
                                 2,
                                 {logv2::LogComponent::kShardMigrationPerf},
@@ -922,6 +948,8 @@ void BatchWriteExec::executeBatch(OperationContext* opCtx,
     if (nShardsOwningChunks)
         stats->noteNumShardsOwningChunks(*nShardsOwningChunks);
 
+    stats->noteTargetedCollectionIsSharded(targeter.isTargetedCollectionSharded());
+
     batchOp.buildClientResponse(clientResponse);
 
     LOGV2_DEBUG(22910,
@@ -948,6 +976,10 @@ void BatchWriteExecStats::noteNumShardsOwningChunks(const int nShardsOwningChunk
     _numShardsOwningChunks.emplace(nShardsOwningChunks);
 }
 
+void BatchWriteExecStats::noteTargetedCollectionIsSharded(bool isSharded) {
+    _hasTargetedShardedCollection = isSharded;
+}
+
 const std::set<ShardId>& BatchWriteExecStats::getTargetedShards() const {
     return _targetedShards;
 }
@@ -958,6 +990,35 @@ const HostOpTimeMap& BatchWriteExecStats::getWriteOpTimes() const {
 
 boost::optional<int> BatchWriteExecStats::getNumShardsOwningChunks() const {
     return _numShardsOwningChunks;
+}
+
+bool BatchWriteExecStats::hasTargetedShardedCollection() const {
+    return _hasTargetedShardedCollection;
+}
+
+void updateHostsTargetedMetrics(OperationContext* opCtx,
+                                BatchedCommandRequest::BatchType batchType,
+                                int nShardsOwningChunks,
+                                int nShardsTargeted,
+                                bool isSharded) {
+    NumHostsTargetedMetrics::QueryType writeType;
+    switch (batchType) {
+        case BatchedCommandRequest::BatchType_Insert:
+            writeType = NumHostsTargetedMetrics::QueryType::kInsertCmd;
+            break;
+        case BatchedCommandRequest::BatchType_Update:
+            writeType = NumHostsTargetedMetrics::QueryType::kUpdateCmd;
+            break;
+        case BatchedCommandRequest::BatchType_Delete:
+            writeType = NumHostsTargetedMetrics::QueryType::kDeleteCmd;
+            break;
+
+            MONGO_UNREACHABLE;
+    }
+
+    auto targetType = NumHostsTargetedMetrics::get(opCtx).parseTargetType(
+        opCtx, nShardsTargeted, nShardsOwningChunks, isSharded);
+    NumHostsTargetedMetrics::get(opCtx).addNumHostsTargeted(writeType, targetType);
 }
 
 }  // namespace mongo

@@ -81,6 +81,7 @@
 #include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
@@ -155,6 +156,9 @@ MONGO_FAIL_POINT_DEFINE(initialSyncHangBeforeChoosingSyncSource);
 
 // Failpoint which causes the initial sync function to hang after finishing.
 MONGO_FAIL_POINT_DEFINE(initialSyncHangAfterFinish);
+
+// Failpoint which causes the initial sync function to hang after resetting the in-memory FCV.
+MONGO_FAIL_POINT_DEFINE(initialSyncHangAfterResettingFCV);
 
 // Failpoints for synchronization, shared with cloners.
 extern FailPoint initialSyncFuzzerSynchronizationPoint1;
@@ -686,7 +690,12 @@ void InitialSyncer::_startInitialSyncAttemptCallback(
                 "Resetting feature compatibility version to last-lts. If the sync source is in "
                 "latest feature compatibility version, we will find out when we clone the "
                 "server configuration collection (admin.system.version)");
-    serverGlobalParams.mutableFeatureCompatibility.reset();
+    serverGlobalParams.mutableFCV.reset();
+
+    if (MONGO_unlikely(initialSyncHangAfterResettingFCV.shouldFail())) {
+        LOGV2(8206400, "initialSyncHangAfterResettingFCV fail point enabled");
+        initialSyncHangAfterResettingFCV.pauseWhileSet();
+    }
 
     // Clear the oplog buffer.
     _oplogBuffer->clear(makeOpCtx().get());
@@ -826,7 +835,7 @@ Status InitialSyncer::_truncateOplogAndDropReplicatedDatabases() {
     auto opCtx = makeOpCtx();
     // This code can make untimestamped writes (deletes) to the _mdb_catalog on top of existing
     // timestamped updates.
-    opCtx->recoveryUnit()->allowAllUntimestampedWrites();
+    shard_role_details::getRecoveryUnit(opCtx.get())->allowAllUntimestampedWrites();
 
     // We are not replicating nor validating these writes.
     UnreplicatedWritesBlock unreplicatedWritesBlock(opCtx.get());
@@ -1138,7 +1147,8 @@ void InitialSyncer::_fcvFetcherCallback(const StatusWith<Fetcher::QueryResponse>
 
     // Changing the featureCompatibilityVersion during initial sync is unsafe.
     // (Generic FCV reference): This FCV check should exist across LTS binary versions.
-    if (serverGlobalParams.featureCompatibility.isUpgradingOrDowngrading(version)) {
+    if (serverGlobalParams.featureCompatibility.acquireFCVSnapshot().isUpgradingOrDowngrading(
+            version)) {
         onCompletionGuard->setResultAndCancelRemainingWork_inlock(
             lock,
             Status(ErrorCodes::IncompatibleServerVersion,
@@ -1150,7 +1160,7 @@ void InitialSyncer::_fcvFetcherCallback(const StatusWith<Fetcher::QueryResponse>
         // and collection/index creation can depend on FCV, we set the in-memory FCV value to match
         // the version on the sync source. We won't persist the FCV on disk nor will we update our
         // minWireVersion until we clone the actual document.
-        serverGlobalParams.mutableFeatureCompatibility.setVersion(version);
+        serverGlobalParams.mutableFCV.setVersion(version);
     }
 
     if (MONGO_unlikely(initialSyncHangBeforeSplittingControlFlow.shouldFail())) {

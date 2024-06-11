@@ -52,7 +52,6 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/namespace_string.h"
@@ -83,6 +82,7 @@
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_operations.h"
 #include "mongo/db/transaction/transaction_participant.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
@@ -139,7 +139,7 @@ public:
         size_t numberOfPrePostImagesToWrite,
         Date_t wallClockTime,
         OpStateAccumulator* opAccumulator = nullptr) override {
-        ASSERT_TRUE(opCtx->lockState()->inAWriteUnitOfWork());
+        ASSERT_TRUE(shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
 
         uassert(ErrorCodes::OperationFailed,
                 "onTransactionPrepare() failed",
@@ -160,7 +160,7 @@ public:
         const TransactionOperations& transactionOperations,
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         OpStateAccumulator* opAccumulator = nullptr) override {
-        ASSERT_TRUE(opCtx->lockState()->inAWriteUnitOfWork());
+        ASSERT_TRUE(shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
 
         uassert(ErrorCodes::OperationFailed,
                 "onUnpreparedTransactionCommit() failed",
@@ -182,7 +182,7 @@ public:
         OplogSlot commitOplogEntryOpTime,
         Timestamp commitTimestamp,
         const std::vector<repl::ReplOperation>& statements) noexcept override {
-        ASSERT_TRUE(opCtx->lockState()->inAWriteUnitOfWork());
+        ASSERT_TRUE(shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
         OpObserverNoop::onPreparedTransactionCommit(
             opCtx, commitOplogEntryOpTime, commitTimestamp, statements);
 

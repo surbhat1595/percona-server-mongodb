@@ -3,7 +3,11 @@
  * include when the local collection is sharded and unsharded, when the $graphLookup can target
  * shards or is scatter-gather, and when the $graphLookup is not top-level.
  *
- * @tags: [requires_fcv_51]
+ * Shard targeting logic for $lookup changed in 7.3 and may not match the expected behavior in a
+ * multiversion environment.
+ * @tags: [
+ *   requires_fcv_73,
+ * ]
  */
 
 import {arrayEq} from "jstests/aggregation/extras/utils.js";
@@ -411,9 +415,10 @@ pipeline = [
 
 assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_view_to_sharded"}, expectedRes, [
     {
-        // The 'travelers' collection is sharded, so the $graphLookup stage is executed in parallel
-        // on every shard that contains the local collection.
-        toplevelExec: [1, 1],
+        // The 'travelers' collection is sharded, however, the 'from' namespace is a view, so the
+        // $graphLookup stage is executed as a merger.
+        // TODO SERVER-83902: Update this once this pipeline can run in parallel on shards again.
+        toplevelExec: [1, 0],
         // Each node executing the $graphLookup will, for every document that flows through the
         // stage, target the shard(s) that holds the relevant data for the sharded foreign view.
         recursiveMatchExec: [0, 3],
@@ -533,9 +538,11 @@ expectedRes = [
 assertGraphLookupExecution(
     pipeline, {comment: "sharded_to_sharded_lookup_view_to_sharded"}, expectedRes, [
         {
-            // The 'travelers' collection is sharded, so the $graphLookup stage is executed in
-            // parallel on every shard that contains the local collection.
-            toplevelExec: [1, 1],
+            // The 'travelers' collection is sharded, however, the 'from' namespace is a view, so
+            // the $graphLookup stage is executed as a merger.
+            // TODO SERVER-83902: Update this once this pipeline can run in parallel on shards
+            // again.
+            toplevelExec: [1, 0],
             // Each node executing the $graphLookup will, for every document that flows through the
             // stage, target the shard(s) that holds the relevant data for the sharded foreign view.
             recursiveMatchExec: [0, 3],

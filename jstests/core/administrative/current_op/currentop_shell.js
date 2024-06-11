@@ -4,7 +4,7 @@
  *
  * @tags: [
  *   # The test runs commands that are not allowed with security token: getLog.
- *   not_allowed_with_security_token,
+ *   not_allowed_with_signed_security_token,
  *   uses_parallel_shell,
  *   # This test uses currentOp to check whether an aggregate command is running. In replica set
  *   # environments, because currentOp is run against the admin database it is routed to the
@@ -100,8 +100,8 @@ if (FixtureHelpers.isMongos(db) && FixtureHelpers.isSharded(coll)) {
     // Assert currentOp truncation behavior for each shard in the cluster.
     assert(res.inprog.length >= 1, res);
     res.inprog.forEach((result) => {
-        assert.eq(result.op, "getmore", result);
-        assert(result.cursor.originatingCommand.hasOwnProperty("$truncated"), result);
+        assert.eq(result.op, "getmore", res);
+        assert(result.cursor.originatingCommand.hasOwnProperty("$truncated"), res);
     });
 } else {
     // Assert currentOp truncation behavior for unsharded collections.
@@ -126,8 +126,8 @@ res = db.currentOp({"ns": "test.currentOp_cursor", "command.comment": "currentOp
 if (FixtureHelpers.isMongos(db) && FixtureHelpers.isSharded(coll)) {
     assert(res.inprog.length >= 1, res);
     res.inprog.forEach((result) => {
-        assert.eq(result.op, "getmore", result);
-        assert(!result.cursor.originatingCommand.hasOwnProperty("$truncated"), result);
+        assert.eq(result.op, "getmore", res);
+        assert(!result.cursor.originatingCommand.hasOwnProperty("$truncated"), res);
     });
 } else {
     assert.eq(res.inprog.length, 1, res);

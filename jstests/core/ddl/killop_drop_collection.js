@@ -6,14 +6,16 @@
  *
  * @tags: [
  *   # The test runs commands that are not allowed with security token: fsyncUnlock.
- *   not_allowed_with_security_token,
+ *   not_allowed_with_signed_security_token,
  *   assumes_superuser_permissions,
  *   # Uses index building in background
  *   requires_background_index,
  *   uses_parallel_shell
  * ]
  */
-var collectionName = "killop_drop";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+
+let collectionName = "killop_drop";
 let collection = db.getCollection(collectionName);
 collection.drop();
 for (let i = 0; i < 1000; i++) {
@@ -49,11 +51,19 @@ let awaitDropCommand = startParallelShell(function() {
     }
 }, useDefaultPort, noConnect);
 
+const isMongos = FixtureHelpers.isMongos(db);
+
 // Wait for the drop operation to appear in the db.currentOp() output.
 let dropCommandOpId = null;
 assert.soon(function() {
-    let dropOpsInProgress =
-        db.currentOp().inprog.filter(op => op.command && op.command.drop === collection.getName());
+    let dropOpsInProgress = [];
+    if (!isMongos) {
+        dropOpsInProgress = db.currentOp().inprog.filter(
+            op => op.command && op.command.drop === collection.getName());
+    } else {
+        dropOpsInProgress = db.currentOp().inprog.filter(
+            op => op.command && op.command._shardsvrDropCollection === collection.getName());
+    }
     if (dropOpsInProgress.length > 0) {
         dropCommandOpId = dropOpsInProgress[0].opid;
     }
@@ -64,8 +74,16 @@ assert.soon(function() {
 // operation was *not* killed, and that the collection was dropped successfully.
 assert.commandWorked(db.killOp(dropCommandOpId));
 let unlockRes = assert.commandWorked(db.fsyncUnlock());
-assert.eq(0,
-          unlockRes.lockCount,
-          "Expected the number of fsyncLocks to be zero after issuing fsyncUnlock");
 
+if (!isMongos) {
+    assert.eq(0,
+              unlockRes.lockCount,
+              "Expected the number of fsyncLocks to be zero after issuing fsyncUnlock");
+} else {
+    Object.values(unlockRes.raw).every((x) => {
+        assert.eq(0,
+                  x.lockCount,
+                  "Expected the number of fsyncLocks to be zero after issuing fsyncUnlock.");
+    });
+}
 awaitDropCommand();

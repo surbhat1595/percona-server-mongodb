@@ -54,11 +54,9 @@
 #include "mongo/db/audit.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/client_metadata_propagation_egress_hook.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
@@ -83,7 +81,6 @@
 #include "mongo/db/s/shard_local.h"
 #include "mongo/db/s/shard_server_catalog_cache_loader.h"
 #include "mongo/db/s/sharding_initialization_mongod.h"
-#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/shard_id.h"
@@ -91,7 +88,6 @@
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/transaction_resources.h"
-#include "mongo/db/vector_clock_metadata_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
@@ -100,7 +96,6 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
@@ -115,6 +110,7 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/shard_version.h"
 #include "mongo/s/sharding_initialization.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/with_lock.h"
@@ -137,14 +133,6 @@ const auto getInstance = ServiceContext::declareDecoration<ShardingInitializatio
 
 const ReplicaSetAwareServiceRegistry::Registerer<ShardingInitializationMongoD> _registryRegisterer(
     "ShardingInitializationMongoDRegistry");
-
-auto makeEgressHooksList(ServiceContext* service) {
-    auto unshardedHookList = std::make_unique<rpc::EgressMetadataHookList>();
-    unshardedHookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(service));
-    unshardedHookList->addHook(std::make_unique<rpc::ClientMetadataPropagationEgressHook>());
-
-    return unshardedHookList;
-}
 
 /**
  * Updates the config server field of the shardIdentity document with the given connection string if
@@ -339,6 +327,107 @@ private:
     stdx::unordered_map<std::string, ReplSetConfigUpdateState> _updateStates;
 };
 
+/**
+ * Internal function to initialize the global objects that define the sharding state given an
+ * operation context and a config server connection string.
+ */
+void _initializeGlobalShardingState(OperationContext* opCtx,
+                                    const boost::optional<ConnectionString>& configCS) {
+    if (configCS) {
+        uassert(ErrorCodes::BadValue, "Unrecognized connection string.", *configCS);
+    }
+
+    auto targeterFactory = std::make_unique<RemoteCommandTargeterFactoryImpl>();
+    auto targeterFactoryPtr = targeterFactory.get();
+
+    ShardFactory::BuildersMap buildersMap{
+        {ConnectionString::ConnectionType::kReplicaSet,
+         [targeterFactoryPtr](const ShardId& shardId, const ConnectionString& connStr) {
+             return std::make_unique<ShardRemote>(
+                 shardId, connStr, targeterFactoryPtr->create(connStr));
+         }},
+        {ConnectionString::ConnectionType::kLocal,
+         [](const ShardId& shardId, const ConnectionString& connStr) {
+             return std::make_unique<ShardLocal>(shardId);
+         }},
+        {ConnectionString::ConnectionType::kStandalone,
+         [targeterFactoryPtr](const ShardId& shardId, const ConnectionString& connStr) {
+             return std::make_unique<ShardRemote>(
+                 shardId, connStr, targeterFactoryPtr->create(connStr));
+         }},
+    };
+
+    auto shardFactory =
+        std::make_unique<ShardFactory>(std::move(buildersMap), std::move(targeterFactory));
+
+    auto const service = opCtx->getServiceContext();
+
+    auto validator = LogicalTimeValidator::get(service);
+    if (validator) {  // The keyManager may be existing if the node was a part of a standalone RS.
+        validator->stopKeyManager();
+    }
+
+    globalConnPool.addHook(new ShardingConnectionHook(makeShardingEgressHooksList(service)));
+
+    auto catalogCache = std::make_unique<CatalogCache>(service, CatalogCacheLoader::get(opCtx));
+
+    // List of hooks which will be called by the ShardRegistry when it discovers a shard has been
+    // removed.
+    std::vector<ShardRegistry::ShardRemovalHook> shardRemovalHooks = {
+        // Invalidate appropriate entries in the CatalogCache when a shard is removed. It's safe to
+        // capture the CatalogCache pointer since the Grid (and therefore CatalogCache and
+        // ShardRegistry) are never destroyed.
+        [catCache = catalogCache.get()](const ShardId& removedShard) {
+            catCache->invalidateEntriesThatReferenceShard(removedShard);
+        }};
+
+    auto shardRegistry = std::make_unique<ShardRegistry>(
+        service, std::move(shardFactory), configCS, std::move(shardRemovalHooks));
+
+    auto initKeysClient =
+        [service](ShardingCatalogClient* catalogClient) -> std::unique_ptr<KeysCollectionClient> {
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+            // The direct keys client must use local read concern if the storage engine can't
+            // support majority read concern.
+            bool keysClientMustUseLocalReads =
+                !service->getStorageEngine()->supportsReadConcernMajority();
+            return std::make_unique<KeysCollectionClientDirect>(keysClientMustUseLocalReads);
+        }
+        return std::make_unique<KeysCollectionClientSharded>(catalogClient);
+    };
+
+    uassertStatusOK(initializeGlobalShardingState(
+        opCtx,
+        std::move(catalogCache),
+        std::move(shardRegistry),
+        [service] { return makeShardingEgressHooksList(service); },
+        // We only need one task executor here because sharding task
+        // executors aren't used for user queries in mongod.
+        1,
+        initKeysClient));
+
+    if (replica_set_endpoint::isFeatureFlagEnabledIgnoreFCV() &&
+        serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+        // The feature flag check here needs to ignore the FCV since the
+        // ReplicaSetEndpointShardingState needs to be maintained even before the FCV is fully
+        // upgraded.
+        DBDirectClient client(opCtx);
+        FindCommandRequest request(NamespaceString::kConfigsvrShardsNamespace);
+        request.setFilter(BSON("_id" << ShardId::kConfigServerId));
+        auto cursor = client.find(request);
+        if (cursor->more()) {
+            replica_set_endpoint::ReplicaSetEndpointShardingState::get(opCtx)->setIsConfigShard(
+                true);
+        }
+    }
+
+    auto const replCoord = repl::ReplicationCoordinator::get(service);
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
+        replCoord->getMemberState().primary()) {
+        LogicalTimeValidator::get(opCtx)->enableKeyGenerator(opCtx, true);
+    }
+}
+
 }  // namespace
 
 ShardingInitializationMongoD::ShardingInitializationMongoD()
@@ -364,114 +453,10 @@ void ShardingInitializationMongoD::shutDown(OperationContext* opCtx) {
     _replicaSetChangeListener.reset();
 }
 
-bool ShardingInitializationMongoD::initializeShardingAwarenessIfNeeded(OperationContext* opCtx) {
-    invariant(!opCtx->lockState()->isLocked());
-
-    // In sharded queryableBackupMode mode, we ignore the shardIdentity document on disk and instead
-    // *require* a shardIdentity document to be passed through --overrideShardIdentity
-    if (storageGlobalParams.queryableBackupMode) {
-        if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::ShardServer)) {
-            uassert(ErrorCodes::InvalidOptions,
-                    "If started with --shardsvr in queryableBackupMode, a shardIdentity document "
-                    "must be provided through --overrideShardIdentity",
-                    !serverGlobalParams.overrideShardIdentity.isEmpty());
-
-            auto overrideShardIdentity =
-                uassertStatusOK(ShardIdentityType::fromShardIdentityDocument(
-                    serverGlobalParams.overrideShardIdentity));
-
-            {
-                // Global lock is required to call initializeFromShardIdentity
-                Lock::GlobalWrite lk(opCtx);
-                initializeFromShardIdentity(opCtx, overrideShardIdentity);
-            }
-
-            return true;
-        } else {
-            // Error if --overrideShardIdentity is used but *not* started with --shardsvr
-            uassert(ErrorCodes::InvalidOptions,
-                    str::stream()
-                        << "Not started with --shardsvr, but a shardIdentity document was provided "
-                           "through --overrideShardIdentity: "
-                        << serverGlobalParams.overrideShardIdentity,
-                    serverGlobalParams.overrideShardIdentity.isEmpty());
-            return false;
-        }
-
-        MONGO_UNREACHABLE;
-    }
-
-    // In sharded *non*-readOnly mode, error if --overrideShardIdentity is provided
-    uassert(ErrorCodes::InvalidOptions,
-            str::stream() << "--overrideShardIdentity is only allowed in sharded "
-                             "queryableBackupMode. If not in queryableBackupMode, you can edit "
-                             "the shardIdentity document by starting the server *without* "
-                             "--shardsvr, manually updating the shardIdentity document in the "
-                          << NamespaceString::kServerConfigurationNamespace.toStringForErrorMsg()
-                          << " collection, and restarting the server with --shardsvr.",
-            serverGlobalParams.overrideShardIdentity.isEmpty());
-
-    // Use the shardIdentity document on disk if one exists, but it is okay if no shardIdentity
-    // document is available at all (sharding awareness will be initialized when a shardIdentity
-    // document is inserted)
-    BSONObj shardIdentityBSON;
-    const bool foundShardIdentity = [&] {
-        AutoGetCollection autoColl(opCtx, NamespaceString::kServerConfigurationNamespace, MODE_IS);
-        return Helpers::findOne(opCtx,
-                                autoColl.getCollection(),
-                                BSON("_id" << ShardIdentityType::IdName),
-                                shardIdentityBSON);
-    }();
-
-    if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
-        if (!foundShardIdentity) {
-            if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-                LOGV2_WARNING(7445900,
-                              "Started with ShardServer role, but no shardIdentity document was "
-                              "found on disk.",
-                              logAttrs(NamespaceString::kServerConfigurationNamespace));
-            } else {
-                LOGV2_WARNING(22074,
-                              "Started with ShardServer role, but no shardIdentity document was "
-                              "found on disk. This most likely means this server has not yet been "
-                              "added to a sharded cluster.",
-                              logAttrs(NamespaceString::kServerConfigurationNamespace));
-            }
-            return false;
-        }
-
-        invariant(!shardIdentityBSON.isEmpty());
-
-        auto shardIdentity =
-            uassertStatusOK(ShardIdentityType::fromShardIdentityDocument(shardIdentityBSON));
-        uassertStatusOK(shardIdentity.validate(
-            true /* fassert cluster role matches shard identity document */));
-
-
-        {
-            // Global lock is required to call initializeFromShardIdentity
-            Lock::GlobalWrite lk(opCtx);
-            initializeFromShardIdentity(opCtx, shardIdentity);
-        }
-
-        return true;
-    } else {
-        // Warn if a shardIdentity document is found on disk but *not* started with --shardsvr.
-        if (!shardIdentityBSON.isEmpty()) {
-            LOGV2_WARNING(
-                22075,
-                "Not started with --shardsvr, but a shardIdentity document was found on disk",
-                logAttrs(NamespaceString::kServerConfigurationNamespace),
-                "shardIdentityDocument"_attr = shardIdentityBSON);
-        }
-        return false;
-    }
-}
-
 void ShardingInitializationMongoD::initializeFromShardIdentity(
     OperationContext* opCtx, const ShardIdentityType& shardIdentity) {
     invariant(serverGlobalParams.clusterRole.has(ClusterRole::ShardServer));
-    invariant(opCtx->lockState()->isLocked());
+    invariant(shard_role_details::getLocker(opCtx)->isLocked());
 
     uassertStatusOKWithContext(
         shardIdentity.validate(),
@@ -512,22 +497,18 @@ void ShardingInitializationMongoD::initializeFromShardIdentity(
         return;
     }
 
-    auto initializationStatus = shardingState->initializationStatus();
-    uassert(ErrorCodes::ManualInterventionRequired,
-            str::stream() << "Server's sharding metadata manager failed to initialize and will "
-                             "remain in this state until the instance is manually reset"
-                          << causedBy(*initializationStatus),
-            !initializationStatus);
-
     try {
         _initFunc(opCtx, shardIdentity);
-        shardingState->setInitialized(shardIdentity.getShardName().toString(),
-                                      shardIdentity.getClusterId());
+        shardingState->setRecoveryCompleted({shardIdentity.getClusterId(),
+                                             serverGlobalParams.clusterRole,
+                                             shardIdentity.getConfigsvrConnectionString(),
+                                             ShardId(shardIdentity.getShardName().toString())});
     } catch (const DBException& ex) {
-        shardingState->setInitialized(ex.toStatus());
+        shardingState->setRecoveryFailed(ex.toStatus());
     }
 
-    if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+    if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
+        !serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
         Grid::get(opCtx)->setShardingInitialized();
     } else {
         // A config server always initializes sharding at startup.
@@ -581,36 +562,69 @@ void ShardingInitializationMongoD::updateShardIdentityConfigString(
     }
 }
 
-void ShardingInitializationMongoD::onSetCurrentConfig(OperationContext* opCtx) {
-    if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-        return;
+void ShardingInitializationMongoD::onStepUpBegin(OperationContext* opCtx, long long term) {
+    _isPrimary.store(true);
+    if (Grid::get(opCtx)->isInitialized()) {
+        ShardRegistry::scheduleReplicaSetUpdateOnConfigServerIfNeeded(
+            opCtx, [&]() -> bool { return _isPrimary.load(); });
     }
+}
 
-    auto myConnectionString = repl::ReplicationCoordinator::get(opCtx)->getConfigConnectionString();
-    Grid::get(opCtx)->shardRegistry()->initConfigShardIfNecessary(myConnectionString);
+void ShardingInitializationMongoD::onStepDown() {
+    _isPrimary.store(false);
+}
+
+void ShardingInitializationMongoD::onSetCurrentConfig(OperationContext* opCtx) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+        // TODO: SERVER-82965 Remove if condition, shard registry should always exists for config
+        // servers.
+        if (auto shardRegistry = Grid::get(opCtx)->shardRegistry()) {
+            auto myConnectionString =
+                repl::ReplicationCoordinator::get(opCtx)->getConfigConnectionString();
+            shardRegistry->initConfigShardIfNecessary(myConnectionString);
+        }
+    }
+    if (Grid::get(opCtx)->isInitialized()) {
+        ShardRegistry::scheduleReplicaSetUpdateOnConfigServerIfNeeded(
+            opCtx, [&]() -> bool { return _isPrimary.load(); });
+    }
 }
 
 void ShardingInitializationMongoD::onInitialDataAvailable(OperationContext* opCtx,
                                                           bool isMajorityDataAvailable) {
     if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-        initializeGlobalShardingStateForConfigServerIfNeeded(opCtx);
+        initializeGlobalShardingStateForMongoD(opCtx);
     }
 
-    // This function may take the global lock.
-    initializeShardingAwarenessIfNeededAndLoadGlobalSettings(opCtx);
+    if (auto shardIdentityDoc = getShardIdentityDoc(opCtx)) {
+        // This function will take the global lock.
+        initializeShardingAwarenessAndLoadGlobalSettings(opCtx, *shardIdentityDoc);
+    }
 }
 
-void initializeGlobalShardingStateForConfigServerIfNeeded(OperationContext* opCtx) {
+void initializeGlobalShardingStateForMongoD(OperationContext* opCtx) {
     if (Grid::get(opCtx)->isShardingInitialized()) {
         return;
+    }
+
+    // TODO SERVER-83059: Remove --configdb argument from mongod
+    if (!serverGlobalParams.configdbs &&
+        !serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+        uasserted(ErrorCodes::BadValue,
+                  "Embedded router requires --configdb if it is not the config shard");
     }
 
     const auto service = opCtx->getServiceContext();
 
     auto configCS = []() -> boost::optional<ConnectionString> {
-        // When the config server can operate as a shard, it sets up a ShardRemote for the
-        // config shard, which is created later after loading the local replica set config.
-        return boost::none;
+        if (!serverGlobalParams.configdbs) {
+            // When the config server can operate as a shard, it sets up a ShardRemote for the
+            // config shard, which is created later after loading the local replica set config.
+            return boost::none;
+        }
+
+        invariant(serverGlobalParams.clusterRole.has(ClusterRole::RouterServer));
+        return serverGlobalParams.configdbs;
     }();
 
     CatalogCacheLoader::set(service,
@@ -626,117 +640,24 @@ void initializeGlobalShardingStateForConfigServerIfNeeded(OperationContext* opCt
         !isReplSet || (replCoord->getMemberState() == repl::MemberState::RS_PRIMARY);
     CatalogCacheLoader::get(opCtx).initializeReplicaSetRole(isStandaloneOrPrimary);
 
-    initializeGlobalShardingStateForMongoD(opCtx, configCS);
+    _initializeGlobalShardingState(opCtx, configCS);
 
     ShardingInitializationMongoD::get(opCtx)->installReplicaSetChangeListener(service);
 
-    // ShardLocal to use for explicitly local commands on the config server.
-    auto localConfigShard = Grid::get(opCtx)->shardRegistry()->createLocalConfigShard();
-    auto localCatalogClient = std::make_unique<ShardingCatalogClientImpl>(localConfigShard);
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+        // ShardLocal to use for explicitly local commands on the config server.
+        auto localConfigShard = Grid::get(opCtx)->shardRegistry()->createLocalConfigShard();
+        auto localCatalogClient = std::make_unique<ShardingCatalogClientImpl>(localConfigShard);
 
-    ShardingCatalogManager::create(
-        service,
-        makeShardingTaskExecutor(executor::makeNetworkInterface("AddShard-TaskExecutor")),
-        std::move(localConfigShard),
-        std::move(localCatalogClient));
+        ShardingCatalogManager::create(
+            service,
+            makeShardingTaskExecutor(executor::makeNetworkInterface("AddShard-TaskExecutor")),
+            std::move(localConfigShard),
+            std::move(localCatalogClient));
+    }
 
     Grid::get(opCtx)->setShardingInitialized();
 }
-
-void initializeGlobalShardingStateForMongoD(OperationContext* opCtx,
-                                            const boost::optional<ConnectionString>& configCS) {
-    if (configCS) {
-        uassert(ErrorCodes::BadValue, "Unrecognized connection string.", *configCS);
-    }
-
-    auto targeterFactory = std::make_unique<RemoteCommandTargeterFactoryImpl>();
-    auto targeterFactoryPtr = targeterFactory.get();
-
-    ShardFactory::BuildersMap buildersMap{
-        {ConnectionString::ConnectionType::kReplicaSet,
-         [targeterFactoryPtr](const ShardId& shardId, const ConnectionString& connStr) {
-             return std::make_unique<ShardRemote>(
-                 shardId, connStr, targeterFactoryPtr->create(connStr));
-         }},
-        {ConnectionString::ConnectionType::kLocal,
-         [](const ShardId& shardId, const ConnectionString& connStr) {
-             return std::make_unique<ShardLocal>(shardId);
-         }},
-        {ConnectionString::ConnectionType::kStandalone,
-         [targeterFactoryPtr](const ShardId& shardId, const ConnectionString& connStr) {
-             return std::make_unique<ShardRemote>(
-                 shardId, connStr, targeterFactoryPtr->create(connStr));
-         }},
-    };
-
-    auto shardFactory =
-        std::make_unique<ShardFactory>(std::move(buildersMap), std::move(targeterFactory));
-
-    auto const service = opCtx->getServiceContext();
-
-    auto validator = LogicalTimeValidator::get(service);
-    if (validator) {  // The keyManager may be existing if the node was a part of a standalone RS.
-        validator->stopKeyManager();
-    }
-
-    globalConnPool.addHook(new ShardingConnectionHook(makeEgressHooksList(service)));
-
-    auto catalogCache = std::make_unique<CatalogCache>(service, CatalogCacheLoader::get(opCtx));
-
-    // List of hooks which will be called by the ShardRegistry when it discovers a shard has been
-    // removed.
-    std::vector<ShardRegistry::ShardRemovalHook> shardRemovalHooks = {
-        // Invalidate appropriate entries in the CatalogCache when a shard is removed. It's safe to
-        // capture the CatalogCache pointer since the Grid (and therefore CatalogCache and
-        // ShardRegistry) are never destroyed.
-        [catCache = catalogCache.get()](const ShardId& removedShard) {
-            catCache->invalidateEntriesThatReferenceShard(removedShard);
-        }};
-
-    auto shardRegistry = std::make_unique<ShardRegistry>(
-        service, std::move(shardFactory), configCS, std::move(shardRemovalHooks));
-
-    auto initKeysClient =
-        [service](ShardingCatalogClient* catalogClient) -> std::unique_ptr<KeysCollectionClient> {
-        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-            // The direct keys client must use local read concern if the storage engine can't
-            // support majority read concern.
-            bool keysClientMustUseLocalReads =
-                !service->getStorageEngine()->supportsReadConcernMajority();
-            return std::make_unique<KeysCollectionClientDirect>(keysClientMustUseLocalReads);
-        }
-        return std::make_unique<KeysCollectionClientSharded>(catalogClient);
-    };
-
-    uassertStatusOK(initializeGlobalShardingState(
-        opCtx,
-        std::move(catalogCache),
-        std::move(shardRegistry),
-        [service] { return makeEgressHooksList(service); },
-        // We only need one task executor here because sharding task
-        // executors aren't used for user queries in mongod.
-        1,
-        initKeysClient));
-
-    if (replica_set_endpoint::isFeatureFlagEnabled() &&
-        serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-        DBDirectClient client(opCtx);
-        FindCommandRequest request(NamespaceString::kConfigsvrShardsNamespace);
-        request.setFilter(BSON("_id" << ShardId::kConfigServerId));
-        auto cursor = client.find(request);
-        if (cursor->more()) {
-            replica_set_endpoint::ReplicaSetEndpointShardingState::get(opCtx)->setIsConfigShard(
-                true);
-        }
-    }
-
-    auto const replCoord = repl::ReplicationCoordinator::get(service);
-    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-        replCoord->getMemberState().primary()) {
-        LogicalTimeValidator::get(opCtx)->enableKeyGenerator(opCtx, true);
-    }
-}
-
 
 void ShardingInitializationMongoD::installReplicaSetChangeListener(ServiceContext* service) {
     _replicaSetChangeListener =
@@ -754,20 +675,22 @@ void ShardingInitializationMongoD::_initializeShardingEnvironmentOnShardServer(
     bool isStandaloneOrPrimary =
         !isReplSet || (replCoord->getMemberState() == repl::MemberState::RS_PRIMARY);
 
-    if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::ShardServer)) {
+    if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         // A config server added as a shard would have already set this up at startup.
-        if (storageGlobalParams.queryableBackupMode) {
-            CatalogCacheLoader::set(service, std::make_unique<ReadOnlyCatalogCacheLoader>());
-        } else {
-            CatalogCacheLoader::set(service,
-                                    std::make_unique<ShardServerCatalogCacheLoader>(
-                                        std::make_unique<ConfigServerCatalogCacheLoader>()));
+        if (!serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
+            if (storageGlobalParams.queryableBackupMode) {
+                CatalogCacheLoader::set(service, std::make_unique<ReadOnlyCatalogCacheLoader>());
+            } else {
+                CatalogCacheLoader::set(service,
+                                        std::make_unique<ShardServerCatalogCacheLoader>(
+                                            std::make_unique<ConfigServerCatalogCacheLoader>()));
+            }
+
+            CatalogCacheLoader::get(opCtx).initializeReplicaSetRole(isStandaloneOrPrimary);
+            _initializeGlobalShardingState(opCtx, {shardIdentity.getConfigsvrConnectionString()});
+
+            installReplicaSetChangeListener(service);
         }
-
-        initializeGlobalShardingStateForMongoD(opCtx,
-                                               {shardIdentity.getConfigsvrConnectionString()});
-
-        installReplicaSetChangeListener(service);
 
         // Reset the shard register config connection string in case it missed the replica set
         // monitor notification. Config server does not need to do this since it gets the connection
@@ -784,32 +707,30 @@ void ShardingInitializationMongoD::_initializeShardingEnvironmentOnShardServer(
                 ->updateReplSetHosts(rsMonitorConfigConnStr,
                                      ShardRegistry::ConnectionStringUpdateType::kConfirmed);
         }
-
-        CatalogCacheLoader::get(opCtx).initializeReplicaSetRole(isStandaloneOrPrimary);
-
-        // Start transaction coordinator service only if the node is the primary of a replica set.
-        TransactionCoordinatorService::get(opCtx)->onShardingInitialization(
-            opCtx, isReplSet && isStandaloneOrPrimary);
     }
+
+    // Start transaction coordinator service only if the node is the primary of a replica set.
+    TransactionCoordinatorService::get(opCtx)->onShardingInitialization(
+        opCtx, isReplSet && isStandaloneOrPrimary);
 
     LOGV2(22071,
           "Finished initializing sharding components",
           "memberState"_attr = (isStandaloneOrPrimary ? "primary" : "secondary"));
 }
 
-void initializeShardingAwarenessIfNeededAndLoadGlobalSettings(
-    OperationContext* opCtx, BSONObjBuilder* startupTimeElapsedBuilder) {
-
-    bool shardingInitialized;
+void initializeShardingAwarenessAndLoadGlobalSettings(OperationContext* opCtx,
+                                                      const ShardIdentity& shardIdentity,
+                                                      BSONObjBuilder* startupTimeElapsedBuilder) {
     {
         auto scopedTimer = createTimeElapsedBuilderScopedTimer(
             opCtx->getServiceContext()->getFastClockSource(),
             "Initialize information needed to make a mongod instance shard aware",
             startupTimeElapsedBuilder);
-        shardingInitialized =
-            ShardingInitializationMongoD::get(opCtx)->initializeShardingAwarenessIfNeeded(opCtx);
+        Lock::GlobalWrite lk(opCtx);
+        ShardingInitializationMongoD::get(opCtx)->initializeFromShardIdentity(opCtx, shardIdentity);
     }
-    if (shardingInitialized) {
+
+    {
         // Config servers can't always perform remote reads here, so they use a local client.
         auto scopedTimer =
             createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
@@ -824,6 +745,94 @@ void initializeShardingAwarenessIfNeededAndLoadGlobalSettings(
                         "Error loading global settings from config server at startup",
                         "error"_attr = redact(status));
         }
+    }
+}
+
+boost::optional<ShardIdentity> ShardingInitializationMongoD::getShardIdentityDoc(
+    OperationContext* opCtx) {
+    // In sharded queryableBackupMode mode, we ignore the shardIdentity document on disk and instead
+    // *require* a shardIdentity document to be passed through --overrideShardIdentity
+    if (storageGlobalParams.queryableBackupMode) {
+        if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::ShardServer)) {
+            uassert(ErrorCodes::InvalidOptions,
+                    "If started with --shardsvr in queryableBackupMode, a shardIdentity document "
+                    "must be provided through --overrideShardIdentity",
+                    !serverGlobalParams.overrideShardIdentity.isEmpty());
+
+            return uassertStatusOK(ShardIdentityType::fromShardIdentityDocument(
+                serverGlobalParams.overrideShardIdentity));
+        } else {
+            // Error if --overrideShardIdentity is used but *not* started with --shardsvr
+            uassert(ErrorCodes::InvalidOptions,
+                    str::stream()
+                        << "Not started with --shardsvr, but a shardIdentity document was provided "
+                           "through --overrideShardIdentity: "
+                        << serverGlobalParams.overrideShardIdentity,
+                    serverGlobalParams.overrideShardIdentity.isEmpty());
+            return boost::none;
+        }
+
+        MONGO_UNREACHABLE;
+    }
+
+    // In sharded *non*-readOnly mode, error if --overrideShardIdentity is provided
+    uassert(ErrorCodes::InvalidOptions,
+            str::stream() << "--overrideShardIdentity is only allowed in sharded "
+                             "queryableBackupMode. If not in queryableBackupMode, you can edit "
+                             "the shardIdentity document by starting the server *without* "
+                             "--shardsvr, manually updating the shardIdentity document in the "
+                          << NamespaceString::kServerConfigurationNamespace.toStringForErrorMsg()
+                          << " collection, and restarting the server with --shardsvr.",
+            serverGlobalParams.overrideShardIdentity.isEmpty());
+
+    // Use the shardIdentity document on disk if one exists, but it is okay if no shardIdentity
+    // document is available at all (sharding awareness will be initialized when a shardIdentity
+    // document is inserted)
+    BSONObj shardIdentityBSON;
+    const bool foundShardIdentity = [&] {
+        AutoGetCollection autoColl(opCtx, NamespaceString::kServerConfigurationNamespace, MODE_IS);
+        return Helpers::findOne(opCtx,
+                                autoColl.getCollection(),
+                                BSON("_id" << ShardIdentityType::IdName),
+                                shardIdentityBSON);
+    }();
+
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
+        if (!foundShardIdentity) {
+            if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+                LOGV2_WARNING(7445900,
+                              "Started with ConfigServer role, but no shardIdentity document was "
+                              "found on disk.",
+                              logAttrs(NamespaceString::kServerConfigurationNamespace));
+            } else {
+                LOGV2_WARNING(22074,
+                              "Started with ShardServer role, but no shardIdentity document was "
+                              "found on disk. This most likely means this server has not yet been "
+                              "added to a sharded cluster.",
+                              logAttrs(NamespaceString::kServerConfigurationNamespace));
+            }
+            return boost::none;
+        }
+
+        invariant(!shardIdentityBSON.isEmpty());
+
+        auto shardIdentity =
+            uassertStatusOK(ShardIdentityType::fromShardIdentityDocument(shardIdentityBSON));
+        uassertStatusOK(shardIdentity.validate(
+            true /* fassert cluster role matches shard identity document */));
+
+        return shardIdentity;
+    } else {
+        // Warn if a shardIdentity document is found on disk but *not* started with --shardsvr.
+        if (!shardIdentityBSON.isEmpty()) {
+            LOGV2_WARNING(
+                22075,
+                "Not started with --shardsvr, but a shardIdentity document was found on disk",
+                logAttrs(NamespaceString::kServerConfigurationNamespace),
+                "shardIdentityDocument"_attr = shardIdentityBSON);
+        }
+
+        return boost::none;
     }
 }
 

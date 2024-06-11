@@ -29,8 +29,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-// IWYU pragma: no_include "cxxabi.h"
-#include <system_error>
 
 #include "mongo/base/shim.h"
 #include "mongo/base/string_data.h"
@@ -38,8 +36,6 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/locker.h"
-#include "mongo/db/concurrency/locker_impl.h"
 #include "mongo/db/cursor_id.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_out.h"
@@ -86,9 +82,6 @@ public:
 
 TEST_F(ShardsvrProcessInterfaceTest, TestInsert) {
     setupNShards(2);
-
-    // Need a real locker for storage operations.
-    getClient()->swapLockState(std::make_unique<LockerImpl>(expCtx()->opCtx->getServiceContext()));
 
     const NamespaceString kOutNss =
         NamespaceString::createNamespaceString_forTest("unittests-out", "sharded_agg_test");

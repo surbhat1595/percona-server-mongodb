@@ -65,6 +65,7 @@ public:
     Status setup() override;
     void appendStatsForServerStatus(BSONObjBuilder* bob) const override;
     void appendStatsForFTDC(BSONObjBuilder& bob) const override;
+    void stopAcceptingSessions() override;
 
     /*
      * This initializes a TransportLayerManager with the global configuration of the server.
@@ -80,7 +81,7 @@ public:
         ServiceContext* ctx,
         boost::optional<int> loadBalancerPort = {},
         boost::optional<int> routerPort = {},
-        std::unique_ptr<ClientTransportObserver> asioObserver = nullptr);
+        std::shared_ptr<ClientTransportObserver> observer = nullptr);
 
     static std::unique_ptr<TransportLayerManager> makeAndStartDefaultEgressTransportLayer();
 
@@ -93,7 +94,7 @@ public:
                               bool asyncOCSPStaple) override;
 #endif
 
-    void appendSessionManagerStats(BSONObjBuilder*) const override;
+    void forEach(std::function<void(TransportLayer*)> fn) override;
     bool hasActiveSessions() const override;
     void checkMaxOpenSessionsAtStartup() const override;
     void endAllSessions(Client::TagMask tags) override;

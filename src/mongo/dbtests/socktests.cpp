@@ -41,6 +41,7 @@
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/socket_utils.h"
 
+namespace mongo {
 namespace SockTests {
 
 class HostByName {
@@ -55,7 +56,7 @@ public:
     }
 };
 
-class All : public OldStyleSuiteSpecification {
+class All : public unittest::OldStyleSuiteSpecification {
 public:
     All() : OldStyleSuiteSpecification("sock") {}
     void setupTests() {
@@ -63,6 +64,7 @@ public:
     }
 };
 
-OldStyleSuiteInitializer<All> myall;
+unittest::OldStyleSuiteInitializer<All> myall;
 
 }  // namespace SockTests
+}  // namespace mongo

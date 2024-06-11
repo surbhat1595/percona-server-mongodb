@@ -69,7 +69,6 @@
 #include "mongo/db/query/sbe_stage_builder_index_scan.h"
 #include "mongo/db/query/tree_walker.h"
 #include "mongo/db/storage/key_string.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo::input_params {
@@ -431,7 +430,7 @@ void bindSingleIntervalPlanSlots(const stage_builder::IndexBoundsEvaluationInfo&
     tassert(6584700, "Can only bind a single index interval", intervals.size() == 1);
     auto&& [lowKey, highKey] = intervals[0];
     const auto singleInterval =
-        stdx::get<mongo::stage_builder::ParameterizedIndexScanSlots::SingleIntervalPlan>(
+        get<mongo::stage_builder::ParameterizedIndexScanSlots::SingleIntervalPlan>(
             indexBoundsInfo.slots.slots);
     runtimeEnvironment->resetSlot(singleInterval.lowKey,
                                   sbe::value::TypeTags::ksValue,
@@ -448,9 +447,8 @@ void bindGenericPlanSlots(const stage_builder::IndexBoundsEvaluationInfo& indexB
                           stage_builder::IndexIntervals intervals,
                           std::unique_ptr<IndexBounds> bounds,
                           sbe::RuntimeEnvironment* runtimeEnvironment) {
-    const auto indexSlots =
-        stdx::get<mongo::stage_builder::ParameterizedIndexScanSlots::GenericPlan>(
-            indexBoundsInfo.slots.slots);
+    const auto indexSlots = get<mongo::stage_builder::ParameterizedIndexScanSlots::GenericPlan>(
+        indexBoundsInfo.slots.slots);
     const bool isGenericScan = intervals.empty();
     runtimeEnvironment->resetSlot(indexSlots.isGenericScan,
                                   sbe::value::TypeTags::Boolean,
@@ -492,9 +490,9 @@ void bindIndexBounds(
                                                     indexBoundsInfo.direction == 1,
                                                     indexBoundsInfo.keyStringVersion,
                                                     indexBoundsInfo.ordering);
-    const bool isSingleIntervalSolution = stdx::holds_alternative<
-        mongo::stage_builder::ParameterizedIndexScanSlots::SingleIntervalPlan>(
-        indexBoundsInfo.slots.slots);
+    const bool isSingleIntervalSolution =
+        holds_alternative<mongo::stage_builder::ParameterizedIndexScanSlots::SingleIntervalPlan>(
+            indexBoundsInfo.slots.slots);
     if (isSingleIntervalSolution) {
         bindSingleIntervalPlanSlots(indexBoundsInfo, std::move(intervals), runtimeEnvironment);
     } else {
@@ -526,16 +524,10 @@ void bindClusteredCollectionBounds(const CanonicalQuery& cq,
 
     const CollatorInterface* queryCollator = cq.getCollator();  // current query's desired collator
 
-    for (size_t i = 0; i < clusteredBoundInfos.size(); ++i) {
+    for (const auto& clusteredBoundInfo : clusteredBoundInfos) {
         // The outputs produced by the QueryPlannerAccess APIs below (passed by reference).
-        boost::optional<RecordIdBound> minRecord;  // scan start bound
-        boost::optional<RecordIdBound> maxRecord;  // scan end bound
-
-        // 'boundInclusion' is needed for handleRIDRangeMinMax, but we don't need to bind it to a
-        // slot because it is always the same as the original in a plan matched from cache since
-        // only the "max" keyword can change it from its default, and plans using "max" are not
-        // cached.
-        CollectionScanParams::ScanBoundInclusion boundInclusion;  // whether end bound is inclusive
+        // Scan start/end bounds.
+        RecordIdRange recordRange;
 
         // Cast the return value to void since we are not building a CollectionScanNode here so do
         // not need to set it in its 'hasCompatibleCollation' member.
@@ -544,30 +536,50 @@ void bindClusteredCollectionBounds(const CanonicalQuery& cq,
                                                    queryCollator,
                                                    data->staticData->ccCollator.get(),
                                                    data->staticData->clusterKeyFieldName,
-                                                   minRecord,
-                                                   maxRecord));
+                                                   recordRange));
         QueryPlannerAccess::handleRIDRangeMinMax(cq,
                                                  data->staticData->direction,
                                                  queryCollator,
                                                  data->staticData->ccCollator.get(),
-                                                 minRecord,
-                                                 maxRecord,
-                                                 boundInclusion);
+                                                 recordRange);
         // Bind the scan bounds to input slots.
+        const auto& minRecord = recordRange.getMin();
         if (minRecord) {
-            boost::optional<sbe::value::SlotId> minRecordId =
-                data->staticData->clusteredCollBoundsInfos[i].minRecord;
+            boost::optional<sbe::value::SlotId> minRecordId = clusteredBoundInfo.minRecord;
             tassert(7571500, "minRecordId slot missing", minRecordId.has_value());
             auto [tag, val] = sbe::value::makeCopyRecordId(minRecord->recordId());
             runtimeEnvironment->resetSlot(minRecordId.value(), tag, val, true);
         }
+        const auto& maxRecord = recordRange.getMax();
         if (maxRecord) {
-            boost::optional<sbe::value::SlotId> maxRecordId =
-                data->staticData->clusteredCollBoundsInfos[i].maxRecord;
+            boost::optional<sbe::value::SlotId> maxRecordId = clusteredBoundInfo.maxRecord;
             tassert(7571501, "maxRecordId slot missing", maxRecordId.has_value());
             auto [tag, val] = sbe::value::makeCopyRecordId(maxRecord->recordId());
             runtimeEnvironment->resetSlot(maxRecordId.value(), tag, val, true);
         }
     }
 }  // bindClusteredCollectionBounds
+
+void bindLimitSkipInputSlots(const CanonicalQuery& cq,
+                             const stage_builder::PlanStageData* data,
+                             sbe::RuntimeEnvironment* runtimeEnvironment) {
+    auto setLimitSkipInputSlot = [&](boost::optional<sbe::value::SlotId> slot,
+                                     boost::optional<int64_t> amount) {
+        if (!slot) {
+            tassert(8349201, "Slot is not present, but amount is present", !amount);
+        } else {
+            tassert(8349202, "Slot is present, but amount is not present", amount);
+            runtimeEnvironment->resetSlot(*slot,
+                                          sbe::value::TypeTags::NumberInt64,
+                                          sbe::value::bitcastFrom<int64_t>(*amount),
+                                          false);
+        }
+    };
+
+    setLimitSkipInputSlot(data->staticData->limitSkipSlots.limit,
+                          cq.getFindCommandRequest().getLimit());
+    setLimitSkipInputSlot(data->staticData->limitSkipSlots.skip,
+                          cq.getFindCommandRequest().getSkip());
+}
+
 }  // namespace mongo::input_params

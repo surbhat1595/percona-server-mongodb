@@ -34,11 +34,14 @@
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/sbe_unittest.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
+#include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/values/value_printer.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/db/exec/sbe/vm/vm_printer.h"
+#include "mongo/db/query/sbe_stage_builder_plan_data.h"
+#include "mongo/db/query/sbe_stage_builder_state.h"
 #include "mongo/unittest/golden_test.h"
 
 namespace mongo::sbe {
@@ -60,13 +63,12 @@ namespace mongo::sbe {
  */
 class EExpressionTestFixture : public virtual SBETestFixture {
 protected:
-    EExpressionTestFixture(std::unique_ptr<sbe::RuntimeEnvironment> runtimeEnv)
-        : _runtimeEnv(runtimeEnv.get()), _ctx(std::move(runtimeEnv)) {
+    EExpressionTestFixture()
+        : _env{std::make_unique<sbe::RuntimeEnvironment>()},
+          _runtimeEnv{_env.runtimeEnv},
+          _ctx{_env.ctx} {
         _ctx.root = &_emptyStage;
     }
-
-    EExpressionTestFixture()
-        : EExpressionTestFixture(std::make_unique<sbe::RuntimeEnvironment>()) {}
 
     value::SlotId bindAccessor(value::SlotAccessor* accessor) {
         auto slot = _slotIdGenerator.generate();
@@ -184,6 +186,25 @@ protected:
         ASSERT_EQUALS(resultTag, sbe::value::TypeTags::Nothing);
     }
 
+    void assertBlockEq(value::TypeTags blockTag,
+                       value::Value blockVal,
+                       const std::vector<std::pair<value::TypeTags, value::Value>>& expected) {
+        ASSERT_EQ(blockTag, value::TypeTags::valueBlock);
+        auto* block = value::bitcastTo<value::ValueBlock*>(blockVal);
+        auto extracted = block->extract();
+        ASSERT_EQ(expected.size(), extracted.count);
+
+        for (size_t i = 0; i < extracted.count; ++i) {
+            auto [t, v] = value::compareValue(
+                extracted.tags[i], extracted.vals[i], expected[i].first, expected[i].second);
+            // ASSERT_EQ(t, value::TypeTags::NumberInt32) << extracted;
+            // ASSERT_EQ(value::bitcastTo<int32_t>(v), 0)
+            ASSERT_THAT((std::pair{t, v}), ValueEq(std::pair{value::TypeTags::NumberInt32, 0}))
+                << "Got " << extracted[i] << " expected " << expected[i] << " full extracted output"
+                << extracted;
+        }
+    }
+
     static std::pair<value::TypeTags, value::Value> makeBsonArray(const BSONArray& ba) {
         return value::copyValue(value::TypeTags::bsonArray,
                                 value::bitcastFrom<const char*>(ba.objdata()));
@@ -283,6 +304,10 @@ protected:
         return {value::TypeTags::NumberDouble, value::bitcastFrom<double>(value)};
     }
 
+    static std::pair<value::TypeTags, value::Value> makeDecimal(std::string value) {
+        return value::makeCopyDecimal(Decimal128(value));
+    }
+
     static std::pair<value::TypeTags, value::Value> makeBool(bool value) {
         return {value::TypeTags::Boolean, value::bitcastFrom<bool>(value)};
     }
@@ -302,8 +327,9 @@ protected:
 protected:
     value::SlotIdGenerator _slotIdGenerator;
     CoScanStage _emptyStage{kEmptyPlanNodeId};
+    stage_builder::Environment _env;
     RuntimeEnvironment* _runtimeEnv;
-    CompileCtx _ctx;
+    CompileCtx& _ctx;
     vm::ByteCode _vm;
     std::vector<std::pair<value::SlotId, value::SlotAccessor*>> boundAccessors;
 };

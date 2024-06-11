@@ -70,8 +70,10 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/explain_common.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/query_stats/agg_key_generator.h"
-#include "mongo/db/query/query_stats/key_generator.h"
+#include "mongo/db/query/query_settings/query_settings_utils.h"
+#include "mongo/db/query/query_shape/agg_cmd_shape.h"
+#include "mongo/db/query/query_stats/agg_key.h"
+#include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/tailable_mode_gen.h"
 #include "mongo/db/server_options.h"
@@ -88,6 +90,7 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/query/cluster_aggregate.h"
 #include "mongo/s/query/cluster_aggregation_planner.h"
+#include "mongo/s/query/cluster_cursor_manager.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/stdx/unordered_set.h"
@@ -176,19 +179,25 @@ void appendEmptyResultSetWithStatus(OperationContext* opCtx,
     if (status == ErrorCodes::ShardNotFound) {
         status = {ErrorCodes::NamespaceNotFound, status.reason()};
     }
+    collectQueryStatsMongos(opCtx, std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key));
     appendEmptyResultSet(opCtx, *result, status, nss);
 }
 
 void updateHostsTargetedMetrics(OperationContext* opCtx,
                                 const NamespaceString& executionNss,
                                 const boost::optional<ChunkManager>& cm,
-                                stdx::unordered_set<NamespaceString> involvedNamespaces) {
+                                const stdx::unordered_set<NamespaceString>& involvedNamespaces) {
     if (!cm)
         return;
 
     // Create a set of ShardIds that own a chunk belonging to any of the collections involved in
     // this pipeline. This will be used to determine whether the pipeline targeted all of the shards
     // that own chunks for any collection involved or not.
+    //
+    // Note that this will only take into account collections that are sharded. If the namespace is
+    // an unsharded collection we will not track which shard owns it here. This is to preserve
+    // semantics of the tracked host metrics since unsharded collections are tracked separately on
+    // its own value.
     std::set<ShardId> shardsOwningChunks = [&]() {
         std::set<ShardId> shardsIds;
 
@@ -220,8 +229,11 @@ void updateHostsTargetedMetrics(OperationContext* opCtx,
 
     auto nShardsTargeted = CurOp::get(opCtx)->debug().nShards;
     if (nShardsTargeted > 0) {
+        // shardsOwningChunks will only contain something if we targeted a sharded collection in the
+        // pipeline.
+        bool hasTargetedShardedCollection = !shardsOwningChunks.empty();
         auto targetType = NumHostsTargetedMetrics::get(opCtx).parseTargetType(
-            opCtx, nShardsTargeted, shardsOwningChunks.size());
+            opCtx, nShardsTargeted, shardsOwningChunks.size(), hasTargetedShardedCollection);
         NumHostsTargetedMetrics::get(opCtx).addNumHostsTargeted(
             NumHostsTargetedMetrics::QueryType::kAggregateCmd, targetType);
     }
@@ -332,6 +344,16 @@ std::unique_ptr<Pipeline, PipelineDeleter> parsePipelineAndRegisterQueryStats(
                 request, *pipeline, expCtx, involvedNamespaces, executionNss);
         });
     }
+
+    // Perform the query settings lookup and attach it to the ExpressionContext.
+    auto serializationContext = request.getSerializationContext();
+    expCtx->setQuerySettings(
+        query_settings::lookupQuerySettings(expCtx, executionNss, serializationContext, [&]() {
+            query_shape::AggCmdShape shape(
+                request, executionNss, involvedNamespaces, *pipeline, expCtx);
+            return shape.sha256Hash(opCtx, serializationContext);
+        }));
+
     return pipeline;
 }
 
@@ -389,7 +411,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
     liteParsedPipeline.verifyIsSupported(
         opCtx, isSharded, request.getExplain(), serverGlobalParams.enableMajorityReadConcern);
     auto hasChangeStream = liteParsedPipeline.hasChangeStream();
-    auto involvedNamespaces = liteParsedPipeline.getInvolvedNamespaces();
+    const auto& involvedNamespaces = liteParsedPipeline.getInvolvedNamespaces();
     auto shouldDoFLERewrite = ::mongo::shouldDoFLERewrite(request);
     auto startsWithQueue = liteParsedPipeline.startsWithQueue();
     auto requiresCollationForParsingUnshardedAggregate =
@@ -442,7 +464,11 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                     shouldDoFLERewrite,
                     requiresCollationForParsingUnshardedAggregate);
                 pipeline->validateCommon(false);
-            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>& ex) {
+                LOGV2_DEBUG(8396400,
+                            4,
+                            "Skipping query stats due to NamespaceNotFound",
+                            "status"_attr = ex.toStatus());
                 // ignore redundant NamespaceNotFound errors.
             }
 

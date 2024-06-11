@@ -4,7 +4,7 @@
 //
 // @tags: [
 //   # The test runs commands that are not allowed with security token: setProfilingLevel.
-//   not_allowed_with_security_token,
+//   not_allowed_with_signed_security_token,
 //   # This test attempts to perform queries and introspect the server's plan cache entries. The
 //   # former operation may be routed to a secondary in the replica set, whereas the latter must be
 //   # routed to the primary.
@@ -19,14 +19,9 @@
 //   tenant_migration_incompatible,
 //   # TODO SERVER-67607: Test plan cache with CQF enabled.
 //   cqf_experimental_incompatible,
+//   featureFlagSbeFull,
 // ]
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
-import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
-
-if (!checkSBEEnabled(db)) {
-    jsTestLog("Skipping test because SBE is disabled");
-    quit();
-}
 
 const testDb = db.getSiblingDB(jsTestName());
 assert.commandWorked(testDb.dropDatabase());

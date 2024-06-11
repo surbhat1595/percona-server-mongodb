@@ -39,6 +39,7 @@
 #include "mongo/bson/oid.h"
 #include "mongo/db/basic_types.h"
 #include "mongo/db/ops/write_ops.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 
@@ -74,6 +75,24 @@ BatchedCommandRequest constructBatchedCommandRequest(const OpMsgRequest& request
             !isTimeseriesNamespace.trueValue());
 
     return batchRequest;
+}
+
+// Utility that parses and evaluates 'let'. It returns the result as a serialized object.
+BSONObj freezeLet(OperationContext* opCtx,
+                  const mongo::BSONObj& let,
+                  const boost::optional<mongo::LegacyRuntimeConstants>& legacyRuntimeConstants,
+                  const NamespaceString& nss) {
+    // Evaluate the let parameters.
+    auto expCtx = make_intrusive<ExpressionContext>(opCtx,
+                                                    nullptr /* collator */,
+                                                    nss,
+                                                    legacyRuntimeConstants,
+                                                    let,
+                                                    false,  // disk use is banned on mongos
+                                                    false,  // mongos has no profile collection
+                                                    boost::none /* verbosity */);
+    expCtx->variables.seedVariablesWithLetParameters(expCtx.get(), let);
+    return expCtx->variables.toBSON(expCtx->variablesParseState, let);
 }
 
 }  // namespace
@@ -182,18 +201,23 @@ const boost::optional<BSONObj>& BatchedCommandRequest::getLet() const {
     return _visit(Visitor{});
 };
 
-bool BatchedCommandRequest::isVerboseWC() const {
-    if (!hasWriteConcern()) {
-        return true;
+void BatchedCommandRequest::evaluateAndReplaceLetParams(OperationContext* opCtx) {
+    switch (_batchType) {
+        case BatchedCommandRequest::BatchType_Insert:
+            break;
+        case BatchedCommandRequest::BatchType_Update:
+            if (auto let = _updateReq->getLet()) {
+                _updateReq->setLet(
+                    freezeLet(opCtx, *let, _updateReq->getLegacyRuntimeConstants(), getNS()));
+            }
+            break;
+        case BatchedCommandRequest::BatchType_Delete:
+            if (auto let = _deleteReq->getLet()) {
+                _deleteReq->setLet(
+                    freezeLet(opCtx, *let, _deleteReq->getLegacyRuntimeConstants(), getNS()));
+            }
+            break;
     }
-
-    BSONObj writeConcern = getWriteConcern();
-    BSONElement wElem = writeConcern["w"];
-    if (!wElem.isNumber() || wElem.Number() != 0) {
-        return true;
-    }
-
-    return false;
 }
 
 const write_ops::WriteCommandRequestBase& BatchedCommandRequest::getWriteCommandRequestBase()
@@ -340,19 +364,7 @@ BatchItemRef::BatchItemRef(const BatchedCommandRequest* request, int index)
 BatchItemRef::BatchItemRef(const BulkWriteCommandRequest* request, int index)
     : _bulkWriteRequest(*request), _index(index) {
     invariant(index < int(request->getOps().size()));
-    switch (BulkWriteCRUDOp(request->getOps()[index]).getType()) {
-        case BulkWriteCRUDOp::OpType::kInsert:
-            _batchType = BatchedCommandRequest::BatchType_Insert;
-            break;
-        case BulkWriteCRUDOp::OpType::kUpdate:
-            _batchType = BatchedCommandRequest::BatchType_Update;
-            break;
-        case BulkWriteCRUDOp::OpType::kDelete:
-            _batchType = BatchedCommandRequest::BatchType_Delete;
-            break;
-        default:
-            MONGO_UNREACHABLE;
-    }
+    _batchType = convertOpType(BulkWriteCRUDOp(request->getOps()[index]).getType());
 }
 
 int BatchItemRef::getSizeForBatchWriteBytes() const {
@@ -436,6 +448,20 @@ int BatchItemRef::getSizeForBulkWriteBytes() const {
             dassert(estSize >= deleteOp.toBSON().objsize());
             return estSize;
         }
+        default:
+            MONGO_UNREACHABLE;
+    }
+}
+
+BatchedCommandRequest::BatchType convertOpType(BulkWriteCRUDOp::OpType opType) {
+    switch (opType) {
+        case BulkWriteCRUDOp::OpType::kInsert:
+            return BatchedCommandRequest::BatchType_Insert;
+        case BulkWriteCRUDOp::OpType::kUpdate:
+            return BatchedCommandRequest::BatchType_Update;
+        case BulkWriteCRUDOp::OpType::kDelete:
+            return BatchedCommandRequest::BatchType_Delete;
+            break;
         default:
             MONGO_UNREACHABLE;
     }

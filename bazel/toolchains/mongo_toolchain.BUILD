@@ -4,21 +4,6 @@ load("@//bazel/toolchains:mongo_cc_toolchain_config.bzl", "mongo_cc_toolchain_co
 
 package(default_visibility = ["//visibility:public"])
 
-# Establish a "platform" target so Bazel can pick the right platform for building:
-platform(
-    name = "platform",
-    constraint_values = [
-        "@platforms//os:linux",
-        "@platforms//cpu:arm64",
-        "@bazel_tools//tools/cpp:gcc",
-    ],
-    exec_properties = {
-        # debian gcc based image contains the base our toolchain needs (glibc version and build-essentials)
-        # https://hub.docker.com/layers/library/gcc/12.3-bookworm/images/sha256-6a3a5694d10299dbfb8747b98621abf4593bb54a5396999caa013cba0e17dd4f?context=explore
-        "container-image": "docker://docker.io/library/gcc@sha256:6a3a5694d10299dbfb8747b98621abf4593bb54a5396999caa013cba0e17dd4f",
-    }
-)
-
 # Helper target for the toolchain (see below):
 filegroup(
     name = "all",
@@ -38,9 +23,13 @@ COMMON_LINK_FLAGS = [
     "-nostdinc++",
     # Make sure that our toolchain libraries are used for linking
     "-Lexternal/mongo_toolchain/v4/lib",
+    "-Lexternal/mongo_toolchain/v4/lib64",
     "-Lexternal/mongo_toolchain/stow/gcc-v4/lib/gcc/aarch64-mongodb-linux/11.3.0",
     "-Bexternal/mongo_toolchain/stow/gcc-v4/libexec/gcc/aarch64-mongodb-linux/11.3.0",
     "-Bexternal/mongo_toolchain/stow/gcc-v4/lib/gcc/aarch64-mongodb-linux/11.3.0",
+    "-Bexternal/mongo_toolchain/stow/llvm-v4/bin",
+    # Use the host system's glibc dynamic libraries
+    "-B/lib/aarch64-linux-gnu",
 ]
 
 COMMON_INCLUDE_DIRECTORIES = [
@@ -62,6 +51,8 @@ mongo_cc_toolchain_config(
         "external/mongo_toolchain/stow/gcc-v4/include/c++/11.3.0/aarch64-mongodb-linux",
         "external/mongo_toolchain/stow/gcc-v4/lib/gcc/aarch64-mongodb-linux/11.3.0/include",
         "external/mongo_toolchain/stow/gcc-v4/lib/gcc/aarch64-mongodb-linux/11.3.0/include-fixed",
+        # Use the host system's glibc headers
+        "/usr/include/aarch64-linux-gnu",
     ],
     bin_dirs = [
         # Make sure that the toolchain binaries are available
@@ -105,6 +96,8 @@ mongo_cc_toolchain_config(
         "external/mongo_toolchain/stow/gcc-v4/include/c++/11.3.0/aarch64-mongodb-linux",
         "external/mongo_toolchain/stow/gcc-v4/include/c++/11.3.0/backward",
         "external/mongo_toolchain/stow/llvm-v4/lib/clang/12.0.1/include",
+        # Use the host system's glibc headers
+        "/usr/include/aarch64-linux-gnu",
     ],
     bin_dirs = [
         # Make sure that the toolchain binaries are available
@@ -156,6 +149,8 @@ cc_toolchain(
 
 toolchain(
     name = "mongo_toolchain",
+    toolchain = ":cc_mongo_toolchain",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
     exec_compatible_with = [
         "@platforms//os:linux",
         "@platforms//cpu:arm64",
@@ -165,8 +160,6 @@ toolchain(
         "@platforms//os:linux",
         "@platforms//cpu:arm64",
     ],
-    toolchain = ":cc_mongo_toolchain",
-    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
 )
 
 cc_toolchain_suite(

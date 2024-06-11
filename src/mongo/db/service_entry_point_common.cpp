@@ -77,7 +77,6 @@
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
@@ -109,7 +108,6 @@
 #include "mongo/db/request_execution_context.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_cluster_parameters_gen.h"
-#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/s/transaction_coordinator_factory.h"
 #include "mongo/db/server_feature_flags_gen.h"
@@ -129,6 +127,7 @@
 #include "mongo/db/stats/top.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/transaction/transaction_participant.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/db/write_concern.h"
@@ -157,6 +156,7 @@
 #include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
 #include "mongo/s/shard_version.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/transport/hello_metrics.h"
@@ -193,6 +193,7 @@ MONGO_FAIL_POINT_DEFINE(hangAfterSessionCheckOut);
 MONGO_FAIL_POINT_DEFINE(hangBeforeSettingTxnInterruptFlag);
 MONGO_FAIL_POINT_DEFINE(hangAfterCheckingWritabilityForMultiDocumentTransactions);
 MONGO_FAIL_POINT_DEFINE(includeAdditionalParticipantInResponse);
+MONGO_FAIL_POINT_DEFINE(enforceDirectShardOperationsCheck);
 
 // Tracks the number of times a legacy unacknowledged write failed due to
 // not primary error resulted in network disconnection.
@@ -208,18 +209,9 @@ using namespace fmt::literals;
 
 Future<void> runCommandInvocation(std::shared_ptr<RequestExecutionContext> rec,
                                   std::shared_ptr<CommandInvocation> invocation) {
-    auto usesDedicatedThread = [&] {
-        auto client = rec->getOpCtx()->getClient();
-        if (auto context = transport::ServiceExecutorContext::get(client); context) {
-            return context->usesDedicatedThread();
-        }
-        tassert(5453901,
-                "Threading model may only be absent for internal and direct clients",
-                !client->hasRemote() || client->isInDirectClient());
-        return true;
-    }();
+    static constexpr bool useDedicatedThread = true;
     return CommandHelpers::runCommandInvocation(
-        std::move(rec), std::move(invocation), usesDedicatedThread);
+        std::move(rec), std::move(invocation), useDedicatedThread);
 }
 
 /*
@@ -601,7 +593,7 @@ void appendAdditionalParticipants(OperationContext* opCtx,
                                   const std::string& commandName,
                                   const NamespaceString& nss) {
     // (Ignore FCV check): This feature doesn't have any upgrade/downgrade concerns.
-    if (gFeatureFlagAdditionalParticipants.isEnabledAndIgnoreFCVUnsafe()) {
+    if (gFeatureFlagAllowAdditionalParticipants.isEnabledAndIgnoreFCVUnsafe()) {
         std::vector<BSONElement> shardIdsFromFpData;
         if (MONGO_unlikely(
                 includeAdditionalParticipantInResponse.shouldFail([&](const BSONObj& data) {
@@ -765,7 +757,7 @@ private:
 
     // Do any initialization of the lock state required for a transaction.
     void _setLockStateForTransaction(OperationContext* opCtx) {
-        opCtx->lockState()->setSharedLocksShouldTwoPhaseLock(true);
+        shard_role_details::getLocker(opCtx)->setSharedLocksShouldTwoPhaseLock(true);
     }
 
     // Clear any lock state which may have changed after the locker update.
@@ -1528,6 +1520,10 @@ void ExecCommandDatabase::_initiateCommand() {
 
     Client* client = opCtx->getClient();
 
+    // Start authz contract tracking before we evaluate failpoints
+    auto authzSession = AuthorizationSession::get(client);
+    authzSession->startContractTracking();
+
     if (auto scope = request.validatedTenancyScope; scope && scope->hasAuthenticatedUser()) {
         uassert(ErrorCodes::Unauthorized,
                 str::stream() << "Command " << command->getName()
@@ -1560,10 +1556,6 @@ void ExecCommandDatabase::_initiateCommand() {
                                                      command->requiresAuth(),
                                                      command->attachLogicalSessionsToOpCtx(),
                                                      replCoord->getSettings().isReplSet());
-
-    // Start authz contract tracking before we evaluate failpoints
-    auto authzSession = AuthorizationSession::get(client);
-    authzSession->startContractTracking();
 
     CommandHelpers::evaluateFailCommandFailPoint(opCtx, _invocation.get());
 
@@ -1792,10 +1784,10 @@ void ExecCommandDatabase::_initiateCommand() {
 
     // Check that the client has the directShardOperations role if this is a direct operation to a
     // shard.
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
     if (command->requiresAuth() && ShardingState::get(opCtx)->enabled() &&
-        serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-        feature_flags::gCheckForDirectShardOperations.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+        fcvSnapshot.isVersionInitialized() &&
+        feature_flags::gCheckForDirectShardOperations.isEnabled(fcvSnapshot)) {
         bool clusterHasTwoOrMoreShards = [&]() {
             auto* clusterParameters = ServerParameterSet::getClusterParameterSet();
             auto* clusterCardinalityParam =
@@ -1815,6 +1807,14 @@ void ExecCommandDatabase::_initiateCommand() {
                           ActionType::issueDirectShardOperations)));
 
             if (!hasDirectShardOperations) {
+                // TODO (SERVER-77073): Remove this failpoint.
+                if (MONGO_unlikely(enforceDirectShardOperationsCheck.shouldFail())) {
+                    uasserted(
+                        ErrorCodes::Unauthorized,
+                        "You are connecting to a sharded cluster using a replica set or standalone"
+                        "connection string. Please use the sharded connection string.");
+                }
+
                 bool timeUpdated = false;
                 auto currentTime = opCtx->getServiceContext()->getFastClockSource()->now();
                 {
@@ -1853,6 +1853,7 @@ void ExecCommandDatabase::_initiateCommand() {
             // We expect all versioned commands to be sent over 'system.buckets' namespace. But it
             // is possible that a stale mongos may send the request over a view namespace. In this
             // case, we initialize the 'OperationShardingState' with buckets namespace.
+            // TODO: SERVER-80719 revisit this.
             const auto invocationNss = _invocation->ns();
             auto bucketNss = invocationNss.makeTimeseriesBucketsNamespace();
             // Hold reference to the catalog for collection lookup without locks to be safe.
@@ -1904,7 +1905,7 @@ Future<void> ExecCommandDatabase::_commandExec() {
     _execContext->getReplyBuilder()->reset();
 
     if (OperationShardingState::isComingFromRouter(opCtx)) {
-        uassertStatusOK(ShardingState::get(opCtx)->canAcceptShardedCommands());
+        ShardingState::get(opCtx)->assertCanAcceptShardedCommands();
     }
 
     auto runCommand = [&] {
@@ -2003,7 +2004,7 @@ Future<void> ExecCommandDatabase::_commandExec() {
         .onError<ErrorCodes::ShardCannotRefreshDueToLocksHeld>([this](Status s) -> Future<void> {
             auto opCtx = _execContext->getOpCtx();
             if (!opCtx->getClient()->isInDirectClient() && !_refreshedCatalogCache) {
-                invariant(!opCtx->lockState()->isLocked());
+                invariant(!shard_role_details::getLocker(opCtx)->isLocked());
 
                 auto refreshInfo = s.extraInfo<ShardCannotRefreshDueToLocksHeldInfo>();
                 invariant(refreshInfo);
@@ -2410,14 +2411,14 @@ void HandleRequest::startOperation() {
     if (client.isInDirectClient()) {
         if (!opCtx->getLogicalSessionId() || !opCtx->getTxnNumber()) {
             invariant(!opCtx->inMultiDocumentTransaction() &&
-                      !opCtx->lockState()->inAWriteUnitOfWork());
+                      !shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
         }
     } else {
         NotPrimaryErrorTracker::get(client).startRequest();
         AuthorizationSession::get(client)->startRequest(opCtx);
 
         // We should not be holding any locks at this point
-        invariant(!opCtx->lockState()->isLocked());
+        invariant(!shard_role_details::getLocker(opCtx)->isLocked());
     }
     {
         stdx::lock_guard<Client> lk(client);
@@ -2451,7 +2452,7 @@ void HandleRequest::completeOperation(DbResponse& response) {
 
     if (shouldProfile) {
         // Performance profiling is on
-        if (opCtx->lockState()->isReadLocked()) {
+        if (shard_role_details::getLocker(opCtx)->isReadLocked()) {
             LOGV2_DEBUG(21970, 1, "Note: not profiling because of recursive read lock");
         } else if (executionContext->client().isInDirectClient()) {
             LOGV2_DEBUG(21971, 1, "Note: not profiling because we are in DBDirectClient");
@@ -2462,7 +2463,7 @@ void HandleRequest::completeOperation(DbResponse& response) {
         } else if (opCtx->readOnly()) {
             LOGV2_DEBUG(21973, 1, "Note: not profiling because server is read-only");
         } else {
-            invariant(!opCtx->lockState()->inAWriteUnitOfWork());
+            invariant(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
             profile(opCtx, executionContext->op());
         }
     }

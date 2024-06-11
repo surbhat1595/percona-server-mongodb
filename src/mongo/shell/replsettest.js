@@ -1135,6 +1135,14 @@ var ReplSetTest = function ReplSetTest(opts) {
             this._unbridgedPorts.push(this._allocatePortForBridge());
         }
 
+        if (this.isRouterServer) {
+            const nextPort = this._allocatePortForNode();
+            print("ReplSetTest Next router port: " + nextPort);
+
+            this.routerPorts.push(nextPort);
+            printjson(this.routerPorts);
+        }
+
         var nextId = this.nodes.length;
         printjson(this.nodes);
 
@@ -1155,6 +1163,9 @@ var ReplSetTest = function ReplSetTest(opts) {
         if (this._useBridge) {
             this._unbridgedPorts.splice(nodeId, 1);
             this._unbridgedNodes.splice(nodeId, 1);
+        }
+        if (this.isRouterServer) {
+            this.routerPorts.splice(nodeId, 1);
         }
     };
 
@@ -1274,11 +1285,20 @@ var ReplSetTest = function ReplSetTest(opts) {
         let db = primary.getDB('admin');
         runFnWithAuthOnPrimary(this, function() {
             assert.soon(function() {
-                const getConfigRes = assert.commandWorked(db.adminCommand({
-                    replSetGetConfig: 1,
-                    commitmentStatus: true,
-                    $_internalIncludeNewlyAdded: true
-                }));
+                const getConfigRes =
+                    assert.commandWorkedOrFailedWithCode(db.adminCommand({
+                        replSetGetConfig: 1,
+                        commitmentStatus: true,
+                        $_internalIncludeNewlyAdded: true
+                    }),
+                                                         ErrorCodes.NotWritablePrimary);
+
+                if (!getConfigRes.ok) {
+                    print("waitForAllNewlyAddedRemovals: Retrying because the old primary " +
+                          " stepped down");
+                    return false;
+                }
+
                 const config = getConfigRes.config;
                 for (let i = 0; i < config.members.length; i++) {
                     const memberConfig = config.members[i];
@@ -2664,8 +2684,16 @@ var ReplSetTest = function ReplSetTest(opts) {
             // to time out since it may take a while to process each batch and a test may have
             // changed "cursorTimeoutMillis" to a short time period.
             this._cursorExhausted = false;
-            this.cursor =
-                coll.find(query).sort({$natural: -1}).noCursorTimeout().readConcern("local");
+            // TODO SERVER-75496 remove the batchSize once the the following issue is fixed: The
+            // find{...} will always run with apiStrict:false, however getMore may run with
+            // apiStrict: true on specific suites. Use a bigger batch size to prevent getMore from
+            // running.
+            this._cursorExhausted = false;
+            this.cursor = coll.find(query)
+                              .sort({$natural: -1})
+                              .noCursorTimeout()
+                              .readConcern("local")
+                              .batchSize(200);
         };
 
         this.getFirstDoc = function() {
@@ -3175,6 +3203,9 @@ var ReplSetTest = function ReplSetTest(opts) {
             port: this._useBridge ? this._unbridgedPorts[n] : this.ports[n],
             dbpath: "$set-$node"
         };
+        if (this.isRouterServer) {
+            defaults.routerPort = this.routerPorts[n];
+        }
 
         if (this.useAutoBootstrapProcedure) {
             if (n == 0) {
@@ -3290,6 +3321,16 @@ var ReplSetTest = function ReplSetTest(opts) {
 
         if (this.useAutoBootstrapProcedure) {
             options.setParameter.featureFlagAllMongodsAreSharded = true;
+        }
+
+        if (jsTest.options().nonClusteredConfigTransactions) {
+            options.setParameter.featureFlagClusteredConfigTransactions = false;
+        }
+        const olderThan73 =
+            MongoRunner.compareBinVersions(MongoRunner.getBinVersionFor('7.3'),
+                                           MongoRunner.getBinVersionFor(options.binVersion)) === 1;
+        if (olderThan73) {
+            delete options.setParameter.featureFlagClusteredConfigTransactions;
         }
 
         if (tojson(options) != tojson({}))
@@ -3705,8 +3746,15 @@ var ReplSetTest = function ReplSetTest(opts) {
             ? opts.seedRandomNumberGenerator
             : true;
         rst.isConfigServer = opts.isConfigServer;
+        rst.isRouterServer = opts.isRouterServer || false;
 
         rst._useBridge = opts.useBridge || false;
+        if (rst._useBridge) {
+            assert(
+                !jsTestOptions().tlsMode,
+                'useBridge cannot be true when using TLS. Add the requires_mongobridge tag to the test to ensure it will be skipped on variants that use TLS.')
+        }
+
         rst._bridgeOptions = opts.bridgeOptions || {};
 
         rst._causalConsistency = opts.causallyConsistent || false;
@@ -3790,6 +3838,10 @@ var ReplSetTest = function ReplSetTest(opts) {
             rst._unbridgedNodes = [];
         } else {
             rst.ports = Array.from({length: numNodes}, rst._allocatePortForNode);
+        }
+
+        if (rst.isRouterServer) {
+            rst.routerPorts = Array.from({length: numNodes}, rst._allocatePortForNode);
         }
     }
 

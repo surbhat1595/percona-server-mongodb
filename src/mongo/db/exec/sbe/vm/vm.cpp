@@ -165,6 +165,7 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     0,   // traversePImm
     -2,  // traverseF
     0,   // traverseFImm
+    -4,  // magicTraverseF
     0,   // traverseCsiCellValues
     0,   // traverseCsiCellTypes
     -2,  // setField
@@ -183,6 +184,7 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     0,  // isNull
     0,  // isObject
     0,  // isArray
+    0,  // isInListData
     0,  // isString
     0,  // isNumber
     0,  // isBinData
@@ -213,16 +215,15 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     -1,  // valueBlockApplyLambda
 };
 
-void ByteCode::allocStack(size_t size) noexcept {
-    invariant(size > 0);
-    auto newSizeDelta = size * sizeOfElement;
+void ByteCode::allocStackImpl(size_t newSizeDelta) noexcept {
+    invariant(newSizeDelta > 0);
+
     auto oldSize = _argStackEnd - _argStack;
-    if (_argStackEnd <= _argStackTop + newSizeDelta) {
-        auto oldTop = _argStackTop - _argStack;
-        _argStack = reinterpret_cast<uint8_t*>(mongoRealloc(_argStack, oldSize + newSizeDelta));
-        _argStackEnd = _argStack + oldSize + newSizeDelta;
-        _argStackTop = _argStack + oldTop;
-    }
+    auto oldTop = _argStackTop - _argStack;
+
+    _argStack = reinterpret_cast<uint8_t*>(mongoRealloc(_argStack, oldSize + newSizeDelta));
+    _argStackEnd = _argStack + oldSize + newSizeDelta;
+    _argStackTop = _argStack + oldTop;
 }
 
 std::string CodeFragment::toString() const {
@@ -850,6 +851,10 @@ void CodeFragment::appendIsArray(Instruction::Parameter input) {
     appendSimpleInstruction(Instruction::isArray, input);
 }
 
+void CodeFragment::appendIsInListData(Instruction::Parameter input) {
+    appendSimpleInstruction(Instruction::isInListData, input);
+}
+
 void CodeFragment::appendIsString(Instruction::Parameter input) {
     appendSimpleInstruction(Instruction::isString, input);
 }
@@ -910,6 +915,9 @@ void CodeFragment::appendTraverseP(int codePosition, Instruction::Constants k) {
     adjustStackSimple(i);
 }
 
+void CodeFragment::appendMagicTraverseF() {
+    appendSimpleInstruction(Instruction::magicTraverseF);
+}
 void CodeFragment::appendTraverseF() {
     appendSimpleInstruction(Instruction::traverseF);
 }
@@ -1324,6 +1332,90 @@ void ByteCode::traverseP_nested(const CodeFragment* code,
     });
     guard.reset();
     pushStack(true, tagArrOutput, valArrOutput);
+}
+
+void ByteCode::magicTraverseF(const CodeFragment* code) {
+    // A combined filter traversal (i.e. non-recursive visit of both array elements and the array
+    // itself) with getField/getElement to simulate numeric paths.
+    // The semantics are controlled by 2 runtime conditions:
+    // 1. is a value to be examined coming from an object (i.e. getField) or from an array (i.e.
+    // getElement)? Values originating from objects are further traversed whereas array values are
+    // not.
+    // 2. is this traversal at the leaf position of the path? If so then the further object
+    // traversals are followed. Otherwise there is no further traversals.
+    auto [ownFlag, tagFlag, valFlag] = getFromStack(0, true);
+    value::ValueGuard firstGuard{ownFlag, tagFlag, valFlag};
+    auto [lamOwn, lamTag, lamVal] = getFromStack(0, true);
+    value::ValueGuard lamGuard{lamOwn, lamTag, lamVal};
+    auto arrayIndex = getFromStack(0, true);
+    value::ValueGuard indexGuard{arrayIndex};
+    auto fieldName = getFromStack(0, true);
+    value::ValueGuard fieldGuard{fieldName};
+    auto [ownInput, tagInput, valInput] = getFromStack(0, true);
+    value::ValueGuard inputGuard{ownInput, tagInput, valInput};
+
+    const bool preTraverse = value::bitcastTo<int32_t>(valFlag) & MagicTraverse::kPreTraverse;
+    const bool postTraverse = value::bitcastTo<int32_t>(valFlag) & MagicTraverse::kPostTraverse;
+
+    auto lambdaPtr = value::bitcastTo<int64_t>(lamVal);
+
+    enum class Traverse { document, array };
+    auto innerTraverse = [&](value::TypeTags tagElem,
+                             value::Value valElem,
+                             Traverse type,
+                             bool nested) {
+        auto [ownArrayIndex, tagArrayIndex, valArrayIndex] = arrayIndex;
+        auto [ownFieldName, tagFieldName, valFieldName] = fieldName;
+
+        auto [ownInner, tagInner, valInner] = type == Traverse::document
+            ? getField(tagElem, valElem, tagFieldName, valFieldName)
+            : getElement(tagElem, valElem, tagArrayIndex, valArrayIndex);
+
+        // Follow on with a traversal only if the flag is set.
+        if (value::isArray(tagInner) && nested) {
+            const bool passed = value::arrayAny(
+                tagInner, valInner, [&](value::TypeTags tagElem, value::Value valElem) {
+                    pushStack(false, tagElem, valElem);
+                    if (runLambdaPredicate(code, lambdaPtr)) {
+                        pushStack(false, value::TypeTags::Boolean, value::bitcastFrom<bool>(true));
+                        return true;
+                    }
+                    return false;
+                });
+            if (passed) {
+                return passed;
+            }
+        }
+        pushStack(ownInner, tagInner, valInner);
+        if (runLambdaPredicate(code, lambdaPtr)) {
+            pushStack(false, value::TypeTags::Boolean, value::bitcastFrom<bool>(true));
+            return true;
+        }
+        return false;
+    };
+
+    if (value::isArray(tagInput)) {
+        const bool passed =
+            value::arrayAny(tagInput, valInput, [&](value::TypeTags tagElem, value::Value valElem) {
+                return innerTraverse(tagElem, valElem, Traverse::document, preTraverse);
+            });
+
+        if (passed) {
+            return;
+        }
+
+        // For values originating from arrays we do not run the inner traversal unless the flag is
+        // set.
+        if (!innerTraverse(tagInput, valInput, Traverse::array, postTraverse)) {
+            pushStack(false, value::TypeTags::Boolean, value::bitcastFrom<bool>(false));
+        }
+        return;
+    } else {
+        if (!innerTraverse(tagInput, valInput, Traverse::document, preTraverse)) {
+            pushStack(false, value::TypeTags::Boolean, value::bitcastFrom<bool>(false));
+        }
+        return;
+    }
 }
 
 void ByteCode::traverseF(const CodeFragment* code) {
@@ -1868,7 +1960,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggMin(value::TypeTags 
         return {true, tag, val};
     }
 
-    auto [tag, val] = compare3way(accTag, accValue, fieldTag, fieldValue, collator);
+    auto [tag, val] = value::compare3way(accTag, accValue, fieldTag, fieldValue, collator);
 
     if (tag == value::TypeTags::NumberInt32 && value::bitcastTo<int>(val) < 0) {
         auto [tag, val] = value::copyValue(accTag, accValue);
@@ -1878,7 +1970,6 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggMin(value::TypeTags 
         return {true, tag, val};
     }
 }
-
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggMax(value::TypeTags accTag,
                                                                 value::Value accValue,
@@ -1897,7 +1988,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggMax(value::TypeTags 
         return {true, tag, val};
     }
 
-    auto [tag, val] = compare3way(accTag, accValue, fieldTag, fieldValue, collator);
+    auto [tag, val] = value::compare3way(accTag, accValue, fieldTag, fieldValue, collator);
 
     if (tag == value::TypeTags::NumberInt32 && value::bitcastTo<int>(val) > 0) {
         auto [tag, val] = value::copyValue(accTag, accValue);
@@ -2211,6 +2302,25 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewObj(ArityType
 
     guard.reset();
     return {true, tag, val};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewBsonObj(ArityType arity) {
+    UniqueBSONObjBuilder bob;
+
+    for (ArityType idx = 0; idx < arity; idx += 2) {
+        auto [_, nameTag, nameVal] = getFromStack(idx);
+        auto [__, fieldTag, fieldVal] = getFromStack(idx + 1);
+        if (!value::isString(nameTag)) {
+            return {false, value::TypeTags::Nothing, 0};
+        }
+
+        auto name = value::getStringView(nameTag, nameVal);
+        bson::appendValueToBsonObj(bob, name, fieldTag, fieldVal);
+    }
+
+    bob.doneFast();
+    char* data = bob.bb().release().release();
+    return {true, value::TypeTags::bsonObject, value::bitcastFrom<char*>(data)};
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinKeyStringToString(ArityType arity) {
@@ -2615,7 +2725,9 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMergeObjects(Ari
 
     invariant(tagAgg == value::TypeTags::Object);
 
-    if (tagField == value::TypeTags::Nothing || tagField == value::TypeTags::Null) {
+    // If our field is nothing or null or it's not an object, return the accumulator state.
+    if (tagField == value::TypeTags::Nothing || tagField == value::TypeTags::Null ||
+        (tagField != value::TypeTags::Object && tagField != value::TypeTags::bsonObject)) {
         guard.reset();
         return {true, tagAgg, valAgg};
     }
@@ -3070,66 +3182,6 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDate(ArityType a
         timezoneTuple);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateDiff(ArityType arity) {
-    invariant(arity == 5 || arity == 6);  // 6th parameter is 'startOfWeek'.
-
-    auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(0);
-    if (timezoneDBTag != value::TypeTags::timeZoneDB) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto timezoneDB = value::getTimeZoneDBView(timezoneDBValue);
-
-    // Get startDate.
-    auto [startDateOwn, startDateTag, startDateValue] = getFromStack(1);
-    if (!coercibleToDate(startDateTag)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto startDate = getDate(startDateTag, startDateValue);
-
-    // Get endDate.
-    auto [endDateOwn, endDateTag, endDateValue] = getFromStack(2);
-    if (!coercibleToDate(endDateTag)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto endDate = getDate(endDateTag, endDateValue);
-
-    // Get unit.
-    auto [unitOwn, unitTag, unitValue] = getFromStack(3);
-    if (!value::isString(unitTag)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto unitString = value::getStringView(unitTag, unitValue);
-    if (!isValidTimeUnit(unitString)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto unit = parseTimeUnit(unitString);
-
-    // Get timezone.
-    auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(4);
-    if (!isValidTimezone(timezoneTag, timezoneValue, timezoneDB)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto timezone = getTimezone(timezoneTag, timezoneValue, timezoneDB);
-
-    // Get startOfWeek, if 'startOfWeek' parameter was passed and time unit is the week.
-    DayOfWeek startOfWeek{kStartOfWeekDefault};
-    if (6 == arity) {
-        auto [startOfWeekOwn, startOfWeekTag, startOfWeekValue] = getFromStack(5);
-        if (!value::isString(startOfWeekTag)) {
-            return {false, value::TypeTags::Nothing, 0};
-        }
-        if (TimeUnit::week == unit) {
-            auto startOfWeekString = value::getStringView(startOfWeekTag, startOfWeekValue);
-            if (!isValidDayOfWeek(startOfWeekString)) {
-                return {false, value::TypeTags::Nothing, 0};
-            }
-            startOfWeek = parseDayOfWeek(startOfWeekString);
-        }
-    }
-    auto result = dateDiff(startDate, endDate, unit, timezone, startOfWeek);
-    return {false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(result)};
-}
-
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateToString(ArityType arity) {
     invariant(arity == 4);
 
@@ -3218,68 +3270,6 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateFromStringNo
         // Upon error, we return Nothing and let the caller decide whether to raise an error.
         return {false, value::TypeTags::Nothing, 0};
     }
-}
-
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateTrunc(ArityType arity) {
-    invariant(arity == 6);
-
-    auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(0);
-    if (timezoneDBTag != value::TypeTags::timeZoneDB) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto timezoneDB = value::getTimeZoneDBView(timezoneDBValue);
-
-    // Get date.
-    auto [dateOwn, dateTag, dateValue] = getFromStack(1);
-
-    // Get unit.
-    auto [unitOwn, unitTag, unitValue] = getFromStack(2);
-    if (!value::isString(unitTag)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto unitString = value::getStringView(unitTag, unitValue);
-    if (!isValidTimeUnit(unitString)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto unit = parseTimeUnit(unitString);
-
-    // Get binSize.
-    auto [binSizeOwn, binSizeTag, binSizeValue] = getFromStack(3);
-    if (!value::isNumber(binSizeTag)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto [binSizeLongOwn, binSizeLongTag, binSizeLongValue] =
-        genericNumConvert(binSizeTag, binSizeValue, value::TypeTags::NumberInt64);
-    if (binSizeLongTag == value::TypeTags::Nothing) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto binSize = value::bitcastTo<int64_t>(binSizeLongValue);
-    if (binSize <= 0) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-
-    // Get timezone.
-    auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(4);
-    if (!isValidTimezone(timezoneTag, timezoneValue, timezoneDB)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto timezone = getTimezone(timezoneTag, timezoneValue, timezoneDB);
-
-    // Get startOfWeek, if 'startOfWeek' parameter was passed and time unit is the week.
-    DayOfWeek startOfWeek{kStartOfWeekDefault};
-    if (TimeUnit::week == unit) {
-        auto [startOfWeekOwn, startOfWeekTag, startOfWeekValue] = getFromStack(5);
-        if (!value::isString(startOfWeekTag)) {
-            return {false, value::TypeTags::Nothing, 0};
-        }
-        auto startOfWeekString = value::getStringView(startOfWeekTag, startOfWeekValue);
-        if (!isValidDayOfWeek(startOfWeekString)) {
-            return {false, value::TypeTags::Nothing, 0};
-        }
-        startOfWeek = parseDayOfWeek(startOfWeekString);
-    }
-
-    return dateTrunc(dateTag, dateValue, unit, binSize, timezone, startOfWeek);
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::dateTrunc(value::TypeTags dateTag,
@@ -4291,7 +4281,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinIndexOfCP(ArityT
     byteIndex = startByteIndex;
     for (codePointIndex = startCodePointIndex; codePointIndex < endCodePointIndex;
          ++codePointIndex) {
-        if (str.substr(byteIndex, substr.size()).compare(substr) == 0) {
+        if (str.substr(byteIndex, substr.size()) == substr) {
             return {
                 false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(codePointIndex)};
         }
@@ -4892,8 +4882,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetToArray(Arity
     value::ValueGuard resGuard{resTag, resVal};
     auto resView = value::getArrayView(resVal);
 
-    value::arrayForEach<true>(tag, val, [&](value::TypeTags elTag, value::Value elVal) {
-        resView->push_back(elTag, elVal);
+    value::arrayForEach(tag, val, [&](value::TypeTags elTag, value::Value elVal) {
+        resView->push_back(value::copyValue(elTag, elVal));
     });
 
     resGuard.reset();
@@ -4938,7 +4928,8 @@ FastTuple<bool, value::TypeTags, value::Value> pcreNextMatch(pcre::Regex* pcre,
     auto [matchedTag, matchedVal] = value::makeNewString(m[0]);
     value::ValueGuard matchedGuard{matchedTag, matchedVal};
 
-    StringData precedesMatch(m.input().begin() + m.startPos(), m[0].begin());
+    StringData precedesMatch = m.input().substr(m.startPos());
+    precedesMatch = precedesMatch.substr(0, m[0].data() - precedesMatch.data());
     codePointPos += str::lengthInUTF8CodePoints(precedesMatch);
     startBytePos += precedesMatch.size();
 
@@ -5827,7 +5818,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMinMaxFromArray(
     int sign_adjust = f == Builtin::internalLeast ? -1 : +1;
     while (!arrayEnum.atEnd()) {
         auto [itemTag, itemVal] = arrayEnum.getViewOfValue();
-        auto [tag, val] = compare3way(itemTag, itemVal, accTag, accVal, collator);
+        auto [tag, val] = value::compare3way(itemTag, itemVal, accTag, accVal, collator);
         if (tag == value::TypeTags::Nothing) {
             // The comparison returns Nothing if one of the arguments is Nothing or if a sort order
             // cannot be determined: bail out immediately and return Nothing.
@@ -6109,7 +6100,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggFirstNNeedsMo
 int32_t updateAndCheckMemUsage(value::Array* state,
                                int32_t memUsage,
                                int32_t memAdded,
-                               int32_t memLimit) {
+                               int32_t memLimit,
+                               size_t idx = static_cast<size_t>(AggMultiElems::kMemUsage)) {
     memUsage += memAdded;
     uassert(ErrorCodes::ExceededMemoryLimit,
             str::stream()
@@ -6117,8 +6109,7 @@ int32_t updateAndCheckMemUsage(value::Array* state,
                    "consumption any further. Memory limit: "
                 << memLimit << " bytes",
             memUsage < memLimit);
-    state->setAt(
-        static_cast<size_t>(AggMultiElems::kMemUsage), value::TypeTags::NumberInt32, memUsage);
+    state->setAt(idx, value::TypeTags::NumberInt32, memUsage);
     return memUsage;
 }
 
@@ -6486,15 +6477,21 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggTopBottomNFin
     std::sort(array->values().begin(), array->values().end(), keyLess);
     for (size_t i = 0; i < array->size(); ++i) {
         auto pair = value::getArrayView(array->getAt(i).second);
-        auto [outputTag, outputVal] = pair->swapAt(1, value::TypeTags::Null, 0);
-        outputArray->push_back(outputTag, outputVal);
+        if (isGroupAccum) {
+            auto [outTag, outVal] = pair->swapAt(1, value::TypeTags::Null, 0);
+            outputArray->push_back(outTag, outVal);
+        } else {
+            auto [outTag, outVal] = pair->getAt(1);
+            auto [copyTag, copyVal] = value::copyValue(outTag, outVal);
+            outputArray->push_back(copyTag, copyVal);
+        }
     }
 
     outputArrayGuard.reset();
     return {true, outputArrayTag, outputArrayVal};
 }
 
-template <bool less>
+template <AccumulatorMinMaxN::MinMaxSense S>
 int32_t aggMinMaxN(value::Array* state,
                    value::Array* array,
                    size_t maxSize,
@@ -6505,7 +6502,14 @@ int32_t aggMinMaxN(value::Array* state,
                    value::Value fieldVal) {
     value::ValueGuard guard{fieldTag, fieldVal};
     auto& heap = array->values();
-    ValueCompare<less> comp{collator};
+
+    constexpr auto less = []() -> bool {
+        if constexpr (S == AccumulatorMinMaxN::MinMaxSense::kMax) {
+            return false;
+        }
+        return true;
+    }();
+    value::ValueCompare<less> comp{collator};
 
     if (array->size() < maxSize) {
         memUsage = updateAndCheckMemUsage(
@@ -6537,7 +6541,7 @@ int32_t aggMinMaxN(value::Array* state,
     return memUsage;
 }
 
-template <bool less>
+template <AccumulatorMinMaxN::MinMaxSense S>
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggMinMaxN(ArityType arity) {
     invariant(arity == 2 || arity == 3);
 
@@ -6546,7 +6550,6 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggMinMaxN(Arity
 
     auto [fieldTag, fieldVal] = moveOwnedFromStack(1);
     value::ValueGuard fieldGuard{fieldTag, fieldVal};
-
     if (value::isNullish(fieldTag)) {
         stateGuard.reset();
         return {true, stateTag, stateVal};
@@ -6562,13 +6565,13 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggMinMaxN(Arity
         collator = value::getCollatorView(collVal);
     }
     fieldGuard.reset();
-    aggMinMaxN<less>(state, array, maxSize, memUsage, memLimit, collator, fieldTag, fieldVal);
+    aggMinMaxN<S>(state, array, maxSize, memUsage, memLimit, collator, fieldTag, fieldVal);
 
     stateGuard.reset();
     return {true, stateTag, stateVal};
 }
 
-template <bool less>
+template <AccumulatorMinMaxN::MinMaxSense S>
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggMinMaxNMerge(ArityType arity) {
     invariant(arity == 2 || arity == 3);
 
@@ -6600,7 +6603,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggMinMaxNMerge(
 
     for (size_t i = 0; i < array->size(); ++i) {
         auto [tag, val] = array->swapAt(i, value::TypeTags::Null, 0);
-        mergeMemUsage = aggMinMaxN<less>(
+        mergeMemUsage = aggMinMaxN<S>(
             mergeState, mergeArray, mergeMaxSize, mergeMemUsage, mergeMemLimit, collator, tag, val);
     }
 
@@ -6608,7 +6611,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggMinMaxNMerge(
     return {true, mergeStateTag, mergeStateVal};
 }
 
-template <bool less>
+template <AccumulatorMinMaxN::MinMaxSense S>
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggMinMaxNFinalize(
     ArityType arity) {
     invariant(arity == 2 || arity == 1);
@@ -6625,11 +6628,23 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggMinMaxNFinali
         collator = value::getCollatorView(collVal);
     }
 
-    ValueCompare<less> comp{collator};
+    constexpr auto less = []() -> bool {
+        if constexpr (S == AccumulatorMinMaxN::MinMaxSense::kMax) {
+            return false;
+        }
+        return true;
+    }();
+    value::ValueCompare<less> comp{collator};
     std::sort(array->values().begin(), array->values().end(), comp);
-    auto [arrayTag, arrayVal] =
-        state->swapAt(static_cast<size_t>(AggMultiElems::kInternalArr), value::TypeTags::Null, 0);
-    return {true, arrayTag, arrayVal};
+    if (isGroupAccum) {
+        auto [arrayTag, arrayVal] = state->swapAt(
+            static_cast<size_t>(AggMultiElems::kInternalArr), value::TypeTags::Null, 0);
+        return {true, arrayTag, arrayVal};
+    } else {
+        auto [arrTag, arrVal] = state->getAt(0);
+        auto [outTag, outVal] = value::copyValue(arrTag, arrVal);
+        return {true, outTag, outVal};
+    }
 }
 
 std::tuple<value::Array*, std::pair<value::TypeTags, value::Value>, bool, int64_t, int64_t>
@@ -8626,7 +8641,6 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableAddT
     stateArr->setAt(static_cast<size_t>(AggArrayWithSize::kSizeOfValues),
                     value::TypeTags::NumberInt32,
                     value::bitcastFrom<int32_t>(accMultiSetSize + newElSize));
-
     accMultiSet->push_back(newElTag, newElVal);
     newElGuard.reset();
     stateGuard.reset();
@@ -8671,6 +8685,317 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableAddT
     return {true, accSetTag, accSetVal};
 }
 
+static std::tuple<value::Array*, value::TypeTags, value::Value, size_t, int32_t, int32_t>
+accumulatorNState(value::TypeTags stateTag, value::Value stateVal) {
+    tassert(
+        8178100, "The accumulator state should be an array", stateTag == value::TypeTags::Array);
+    auto stateArr = value::getArrayView(stateVal);
+
+    tassert(8178101,
+            str::stream() << "state array should have "
+                          << static_cast<size_t>(AggAccumulatorNElems::kSizeOfArray)
+                          << " elements but found " << stateArr->size(),
+            stateArr->size() == static_cast<size_t>(AggAccumulatorNElems::kSizeOfArray));
+
+    // Read the accumulator from the state.
+    auto [accumulatorTag, accumulatorVal] =
+        stateArr->getAt(static_cast<size_t>(AggAccumulatorNElems::kValues));
+
+    // Read N from the state
+    auto [nTag, nVal] = stateArr->getAt(static_cast<size_t>(AggAccumulatorNElems::kN));
+    tassert(8178103, "N should be of type NumberInt64", nTag == value::TypeTags::NumberInt64);
+
+    // Read memory usage information from state
+    auto [memUsageTag, memUsage] =
+        stateArr->getAt(static_cast<size_t>(AggAccumulatorNElems::kMemUsage));
+    tassert(8178104,
+            "MemUsage component should be of type NumberInt32",
+            memUsageTag == value::TypeTags::NumberInt32);
+
+    auto [memLimitTag, memLimit] =
+        stateArr->getAt(static_cast<size_t>(AggAccumulatorNElems::kMemLimit));
+    tassert(8178105,
+            "MemLimit component should be of type NumberInt32",
+            memLimitTag == value::TypeTags::NumberInt32);
+
+    return {stateArr,
+            accumulatorTag,
+            accumulatorVal,
+            value::bitcastTo<size_t>(nVal),
+            value::bitcastTo<int32_t>(memUsage),
+            value::bitcastTo<int32_t>(memLimit)};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggRemovableMinMaxNInitImpl(
+    CollatorInterface* collator) {
+    auto [sizeOwned, sizeTag, sizeVal] = getFromStack(0);
+
+    auto [nOwned, nTag, nVal] = genericNumConvert(sizeTag, sizeVal, value::TypeTags::NumberInt64);
+    uassert(8178107, "Failed to convert to 64-bit integer", nTag == value::TypeTags::NumberInt64);
+
+    auto n = value::bitcastTo<int64_t>(nVal);
+    uassert(8178108, "Expected 'n' to be positive", n > 0);
+
+    auto [sizeCapOwned, sizeCapTag, sizeCapVal] = getFromStack(1);
+    uassert(8178109,
+            "The size cap must be of type NumberInt32",
+            sizeCapTag == value::TypeTags::NumberInt32);
+
+    // Initialize the state
+    auto [stateTag, stateVal] = value::makeNewArray();
+    value::ValueGuard stateGuard{stateTag, stateVal};
+
+    auto stateArr = value::getArrayView(stateVal);
+
+    // the order is important!!!
+    auto [mSetTag, mSetVal] = value::makeNewArrayMultiSet(collator);
+    stateArr->push_back(mSetTag, mSetVal);  // The multiset with the values.
+    stateArr->push_back(nTag, nVal);        // The maximum number of elements in the multiset.
+    stateArr->push_back(value::TypeTags::NumberInt32,
+                        value::bitcastFrom<int32_t>(0));  // The size of the multiset in bytes.
+    stateArr->push_back(sizeCapTag,
+                        sizeCapVal);  // The maximum possible size of the multiset in bytes.
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableMinMaxNCollInit(
+    ArityType arity) {
+    auto [collatorOwned, collatorTag, collatorVal] = getFromStack(2);
+    tassert(8178111, "expected value of type 'collator'", collatorTag == value::TypeTags::collator);
+    return aggRemovableMinMaxNInitImpl(value::getCollatorView(collatorVal));
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableMinMaxNInit(
+    ArityType arity) {
+    return aggRemovableMinMaxNInitImpl(nullptr);
+}
+
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableMinMaxNAdd(
+    ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    value::ValueGuard stateGuard{stateTag, stateVal};
+    auto [newElTag, newElVal] = moveOwnedFromStack(1);
+    value::ValueGuard newElGuard{newElTag, newElVal};
+
+    if (value::isNullish(newElTag)) {
+        stateGuard.reset();
+        return {true, stateTag, stateVal};
+    }
+
+    auto [stateArr, accMultiSetTag, accMultiSetVal, n, memUsage, memLimit] =
+        accumulatorNState(stateTag, stateVal);
+    tassert(8178102,
+            "accumulator should be of type MultiSet",
+            accMultiSetTag == value::TypeTags::ArrayMultiSet);
+    auto accMultiSet = value::getArrayMultiSetView(accMultiSetVal);
+
+    int32_t newElSize = value::getApproximateSize(newElTag, newElVal);
+
+    updateAndCheckMemUsage(stateArr,
+                           memUsage,
+                           newElSize,
+                           memLimit,
+                           static_cast<size_t>(AggAccumulatorNElems::kMemUsage));
+
+    newElGuard.reset();
+    accMultiSet->push_back(newElTag, newElVal);
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableMinMaxNRemove(
+    ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    value::ValueGuard stateGuard{stateTag, stateVal};
+    auto [elTag, elVal] = moveOwnedFromStack(1);
+    value::ValueGuard elGuard{elTag, elVal};
+
+    if (value::isNullish(elTag)) {
+        stateGuard.reset();
+        return {true, stateTag, stateVal};
+    }
+
+    auto [stateArr, accMultiSetTag, accMultiSetVal, n, memUsage, memLimit] =
+        accumulatorNState(stateTag, stateVal);
+    tassert(8155723,
+            "accumulator should be of type MultiSet",
+            accMultiSetTag == value::TypeTags::ArrayMultiSet);
+    auto accMultiSet = value::getArrayMultiSetView(accMultiSetVal);
+
+    int32_t elSize = value::getApproximateSize(elTag, elVal);
+    invariant(elSize <= memUsage);
+
+    // remove element
+    stateArr->setAt(static_cast<size_t>(AggAccumulatorNElems::kMemUsage),
+                    value::TypeTags::NumberInt32,
+                    value::bitcastFrom<int32_t>(memUsage - elSize));
+    elGuard.reset();
+    tassert(8178116, "Element was not removed", accMultiSet->remove(elTag, elVal));
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+template <AccumulatorMinMaxN::MinMaxSense S>
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableMinMaxNFinalize(
+    ArityType arity) {
+    auto [stateOwned, stateTag, stateVal] = getFromStack(0);
+
+    auto [stateArr, accMultiSetTag, accMultiSetVal, n, memUsage, memLimit] =
+        accumulatorNState(stateTag, stateVal);
+    tassert(8155724,
+            "accumulator should be of type MultiSet",
+            accMultiSetTag == value::TypeTags::ArrayMultiSet);
+    auto accMultiSet = value::getArrayMultiSetView(accMultiSetVal);
+
+    // Create an empty array to fill with the results
+    auto [resultArrayTag, resultArrayVal] = value::makeNewArray();
+    value::ValueGuard resultGuard{resultArrayTag, resultArrayVal};
+    auto resultArray = value::getArrayView(resultArrayVal);
+    resultArray->reserve(n);
+
+    if constexpr (S == AccumulatorMinMaxN::MinMaxSense::kMin) {
+        for (auto it = accMultiSet->values().cbegin();
+             it != accMultiSet->values().cend() && resultArray->size() < n;
+             ++it) {
+            resultArray->push_back(value::copyValue(it->first, it->second));
+        }
+    } else {
+        for (auto it = accMultiSet->values().crbegin();
+             it != accMultiSet->values().crend() && resultArray->size() < n;
+             ++it) {
+            resultArray->push_back(value::copyValue(it->first, it->second));
+        }
+    }
+
+    resultGuard.reset();
+    return {true, resultArrayTag, resultArrayVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableTopBottomNInit(
+    ArityType arity) {
+    auto [maxSizeOwned, maxSizeTag, maxSizeVal] = getFromStack(0);
+    auto [memLimitOwned, memLimitTag, memLimitVal] = getFromStack(1);
+
+    auto [nOwned, nTag, nVal] =
+        genericNumConvert(maxSizeTag, maxSizeVal, value::TypeTags::NumberInt64);
+    uassert(8155711, "Failed to convert to 64-bit integer", nTag == value::TypeTags::NumberInt64);
+
+    auto n = value::bitcastTo<int64_t>(nVal);
+    uassert(8155708, "Expected 'n' to be positive", n > 0);
+
+    tassert(8155709,
+            "memLimit should be of type NumberInt32",
+            memLimitTag == value::TypeTags::NumberInt32);
+
+    auto [stateTag, stateVal] = value::makeNewArray();
+    value::ValueGuard stateGuard{stateTag, stateVal};
+    auto stateArr = value::getArrayView(stateVal);
+
+    auto [multiMapTag, multiMapVal] = value::makeNewMultiMap();
+    stateArr->push_back(multiMapTag, multiMapVal);
+
+    stateArr->push_back(nTag, nVal);
+    stateArr->push_back(value::TypeTags::NumberInt32, 0);
+    stateArr->push_back(memLimitTag, memLimitVal);
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableTopBottomNAdd(
+    ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    value::ValueGuard stateGuard{stateTag, stateVal};
+
+    auto [state, multiMapTag, multiMapVal, n, memSize, memLimit] =
+        accumulatorNState(stateTag, stateVal);
+    tassert(8155702, "value should be of type MultiMap", multiMapTag == value::TypeTags::MultiMap);
+    auto multiMap = value::getMultiMapView(multiMapVal);
+
+    auto key = moveOwnedFromStack(1);
+    auto value = moveOwnedFromStack(2);
+
+    multiMap->insert(key, value);
+
+    auto kvSize = value::getApproximateSize(key.first, key.second) +
+        value::getApproximateSize(value.first, value.second);
+    updateAndCheckMemUsage(
+        state, memSize, kvSize, memLimit, static_cast<size_t>(AggAccumulatorNElems::kMemUsage));
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableTopBottomNRemove(
+    ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    value::ValueGuard stateGuard{stateTag, stateVal};
+
+    auto [state, multiMapTag, multiMapVal, n, memSize, memLimit] =
+        accumulatorNState(stateTag, stateVal);
+    tassert(8155726, "value should be of type MultiMap", multiMapTag == value::TypeTags::MultiMap);
+    auto multiMap = value::getMultiMapView(multiMapVal);
+
+    auto [keyOwned, keyTag, keyVal] = getFromStack(1);
+    auto [outputOwned, outputTag, outputVal] = getFromStack(2);
+
+    auto removed = multiMap->remove({keyTag, keyVal});
+    tassert(8155707, "Failed to remove element from map", removed);
+
+    auto elemSize =
+        value::getApproximateSize(keyTag, keyVal) + value::getApproximateSize(outputTag, outputVal);
+    memSize -= elemSize;
+    state->setAt(static_cast<size_t>(AggAccumulatorNElems::kMemUsage),
+                 value::TypeTags::NumberInt32,
+                 value::bitcastFrom<int32_t>(memSize));
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+template <TopBottomSense sense>
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableTopBottomNFinalize(
+    ArityType arity) {
+    auto [stateOwned, stateTag, stateVal] = getFromStack(0);
+
+    auto [state, multiMapTag, multiMapVal, n, memSize, memLimit] =
+        accumulatorNState(stateTag, stateVal);
+    tassert(8155727, "value should be of type MultiMap", multiMapTag == value::TypeTags::MultiMap);
+    auto multiMap = value::getMultiMapView(multiMapVal);
+
+    auto& values = multiMap->values();
+    auto begin = values.begin();
+    auto end = values.end();
+
+    if constexpr (sense == TopBottomSense::kBottom) {
+        // If this accumulator is removable there may be more than n elements in the map, so we must
+        // skip elements that shouldn't be in the result.
+        if (static_cast<size_t>(values.size()) > n) {
+            std::advance(begin, values.size() - n);
+        }
+    }
+
+    auto [resTag, resVal] = value::makeNewArray();
+    value::ValueGuard resGuard{resTag, resVal};
+    auto resArr = value::getArrayView(resVal);
+
+    auto it = begin;
+    for (size_t inserted = 0; inserted < n && it != end; ++inserted, ++it) {
+        const auto& keyOutPair = *it;
+        auto output = keyOutPair.second;
+        auto [copyTag, copyVal] = value::copyValue(output.first, output.second);
+        resArr->push_back(copyTag, copyVal);
+    };
+
+    resGuard.reset();
+    return {true, resTag, resVal};
+}
+
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin f,
                                                                          ArityType arity,
                                                                          const CodeFragment* code) {
@@ -8713,6 +9038,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinNewArrayFromRange(arity);
         case Builtin::newObj:
             return builtinNewObj(arity);
+        case Builtin::newBsonObj:
+            return builtinNewBsonObj(arity);
         case Builtin::ksToString:
             return builtinKeyStringToString(arity);
         case Builtin::newKs:
@@ -8981,17 +9308,17 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
         case Builtin::aggBottomNFinalize:
             return builtinAggTopBottomNFinalize(arity);
         case Builtin::aggMaxN:
-            return builtinAggMinMaxN<false /* less */>(arity);
+            return builtinAggMinMaxN<AccumulatorMinMaxN::MinMaxSense::kMax>(arity);
         case Builtin::aggMaxNMerge:
-            return builtinAggMinMaxNMerge<false /* less */>(arity);
+            return builtinAggMinMaxNMerge<AccumulatorMinMaxN::MinMaxSense::kMax>(arity);
         case Builtin::aggMaxNFinalize:
-            return builtinAggMinMaxNFinalize<false /* less */>(arity);
+            return builtinAggMinMaxNFinalize<AccumulatorMinMaxN::MinMaxSense::kMax>(arity);
         case Builtin::aggMinN:
-            return builtinAggMinMaxN<true /* less */>(arity);
+            return builtinAggMinMaxN<AccumulatorMinMaxN::MinMaxSense::kMin>(arity);
         case Builtin::aggMinNMerge:
-            return builtinAggMinMaxNMerge<true /* less */>(arity);
+            return builtinAggMinMaxNMerge<AccumulatorMinMaxN::MinMaxSense::kMin>(arity);
         case Builtin::aggMinNFinalize:
-            return builtinAggMinMaxNFinalize<true /* less */>(arity);
+            return builtinAggMinMaxNFinalize<AccumulatorMinMaxN::MinMaxSense::kMin>(arity);
         case Builtin::aggRank:
             return builtinAggRank(arity);
         case Builtin::aggRankColl:
@@ -9072,6 +9399,31 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinAggRemovableAddToSetRemove(arity);
         case Builtin::aggRemovableAddToSetFinalize:
             return builtinAggRemovableAddToSetFinalize(arity);
+        case Builtin::aggRemovableMinMaxNCollInit:
+            return builtinAggRemovableMinMaxNCollInit(arity);
+        case Builtin::aggRemovableMinMaxNInit:
+            return builtinAggRemovableMinMaxNInit(arity);
+        case Builtin::aggRemovableMinMaxNAdd:
+            return builtinAggRemovableMinMaxNAdd(arity);
+        case Builtin::aggRemovableMinMaxNRemove:
+            return builtinAggRemovableMinMaxNRemove(arity);
+        case Builtin::aggRemovableMinNFinalize:
+            return builtinAggRemovableMinMaxNFinalize<AccumulatorMinMaxN::MinMaxSense::kMin>(arity);
+        case Builtin::aggRemovableMaxNFinalize:
+            return builtinAggRemovableMinMaxNFinalize<AccumulatorMinMaxN::MinMaxSense::kMax>(arity);
+        case Builtin::aggRemovableTopNInit:
+        case Builtin::aggRemovableBottomNInit:
+            return builtinAggRemovableTopBottomNInit(arity);
+        case Builtin::aggRemovableTopNAdd:
+        case Builtin::aggRemovableBottomNAdd:
+            return builtinAggRemovableTopBottomNAdd(arity);
+        case Builtin::aggRemovableTopNRemove:
+        case Builtin::aggRemovableBottomNRemove:
+            return builtinAggRemovableTopBottomNRemove(arity);
+        case Builtin::aggRemovableTopNFinalize:
+            return builtinAggRemovableTopBottomNFinalize<TopBottomSense::kTop>(arity);
+        case Builtin::aggRemovableBottomNFinalize:
+            return builtinAggRemovableTopBottomNFinalize<TopBottomSense::kBottom>(arity);
         case Builtin::aggLinearFillCanAdd:
             return builtinAggLinearFillCanAdd(arity);
         case Builtin::aggLinearFillAdd:
@@ -9090,6 +9442,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinValueBlockMax(arity);
         case Builtin::valueBlockCount:
             return builtinValueBlockCount(arity);
+        case Builtin::valueBlockDateDiff:
+            return builtinValueBlockDateDiff(arity);
+        case Builtin::valueBlockDateTrunc:
+            return builtinValueBlockDateTrunc(arity);
+        case Builtin::valueBlockSum:
+            return builtinValueBlockSum(arity);
         case Builtin::valueBlockGtScalar:
             return builtinValueBlockGtScalar(arity);
         case Builtin::valueBlockGteScalar:
@@ -9170,6 +9528,8 @@ std::string builtinToString(Builtin b) {
             return "newArrayFromRange";
         case Builtin::newObj:
             return "newObj";
+        case Builtin::newBsonObj:
+            return "newBsonObj";
         case Builtin::ksToString:
             return "ksToString";
         case Builtin::newKs:
@@ -9530,6 +9890,34 @@ std::string builtinToString(Builtin b) {
             return "aggRemovableAddToSetRemove";
         case Builtin::aggRemovableAddToSetFinalize:
             return "aggRemovableAddToSetFinalize";
+        case Builtin::aggRemovableMinMaxNCollInit:
+            return "aggRemovableMinMaxNCollInit";
+        case Builtin::aggRemovableMinMaxNInit:
+            return "aggRemovableMinMaxNInit";
+        case Builtin::aggRemovableMinMaxNAdd:
+            return "aggRemovableMinMaxNAdd";
+        case Builtin::aggRemovableMinMaxNRemove:
+            return "aggRemovableMinMaxNRemove";
+        case Builtin::aggRemovableMinNFinalize:
+            return "aggRemovableMinNFinalize";
+        case Builtin::aggRemovableMaxNFinalize:
+            return "aggRemovableMaxNFinalize";
+        case Builtin::aggRemovableTopNInit:
+            return "aggRemovableTopNInit";
+        case Builtin::aggRemovableTopNAdd:
+            return "aggRemovableTopNAdd";
+        case Builtin::aggRemovableTopNRemove:
+            return "aggRemovableTopNRemove";
+        case Builtin::aggRemovableTopNFinalize:
+            return "aggRemovableTopNFinalize";
+        case Builtin::aggRemovableBottomNInit:
+            return "aggRemovableBottomNInit";
+        case Builtin::aggRemovableBottomNAdd:
+            return "aggRemovableBottomNAdd";
+        case Builtin::aggRemovableBottomNRemove:
+            return "aggRemovableBottomNRemove";
+        case Builtin::aggRemovableBottomNFinalize:
+            return "aggRemovableBottomNFinalize";
         case Builtin::valueBlockExists:
             return "valueBlockExists";
         case Builtin::valueBlockFillEmpty:
@@ -9542,6 +9930,8 @@ std::string builtinToString(Builtin b) {
             return "valueBlockMax";
         case Builtin::valueBlockCount:
             return "valueBlockCount";
+        case Builtin::valueBlockSum:
+            return "valueBlockSum";
         case Builtin::valueBlockGtScalar:
             return "valueBlockGtScalar";
         case Builtin::valueBlockGteScalar:
@@ -9871,7 +10261,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [lhsOwned, lhsTag, lhsVal] = getFromStack(offsetLhs, popLhs);
                 value::ValueGuard lhsGuard(lhsOwned && popLhs, lhsTag, lhsVal);
 
-                auto [tag, val] = genericCompare<std::less<>>(lhsTag, lhsVal, rhsTag, rhsVal);
+                auto [tag, val] = value::genericLt(lhsTag, lhsVal, rhsTag, rhsVal);
 
                 pushStack(false, tag, val);
                 break;
@@ -9888,10 +10278,13 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [collOwned, collTag, collVal] = getFromStack(offsetColl, popColl);
                 value::ValueGuard collGuard(collOwned && popColl, collTag, collVal);
 
-                auto [tag, val] =
-                    genericCompare<std::less<>>(lhsTag, lhsVal, rhsTag, rhsVal, collTag, collVal);
-
-                pushStack(false, tag, val);
+                if (collTag == value::TypeTags::collator) {
+                    auto comp = static_cast<StringDataComparator*>(value::getCollatorView(collVal));
+                    auto [tag, val] = value::genericLt(lhsTag, lhsVal, rhsTag, rhsVal, comp);
+                    pushStack(false, tag, val);
+                } else {
+                    pushStack(false, value::TypeTags::Nothing, 0);
+                }
                 break;
             }
             case Instruction::lessEq: {
@@ -9903,7 +10296,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [lhsOwned, lhsTag, lhsVal] = getFromStack(offsetLhs, popLhs);
                 value::ValueGuard lhsGuard(lhsOwned && popLhs, lhsTag, lhsVal);
 
-                auto [tag, val] = genericCompare<std::less_equal<>>(lhsTag, lhsVal, rhsTag, rhsVal);
+                auto [tag, val] = value::genericLte(lhsTag, lhsVal, rhsTag, rhsVal);
 
                 pushStack(false, tag, val);
                 break;
@@ -9920,10 +10313,13 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [collOwned, collTag, collVal] = getFromStack(offsetColl, popColl);
                 value::ValueGuard collGuard(collOwned && popColl, collTag, collVal);
 
-                auto [tag, val] = genericCompare<std::less_equal<>>(
-                    lhsTag, lhsVal, rhsTag, rhsVal, collTag, collVal);
-
-                pushStack(false, tag, val);
+                if (collTag == value::TypeTags::collator) {
+                    auto comp = static_cast<StringDataComparator*>(value::getCollatorView(collVal));
+                    auto [tag, val] = value::genericLte(lhsTag, lhsVal, rhsTag, rhsVal, comp);
+                    pushStack(false, tag, val);
+                } else {
+                    pushStack(false, value::TypeTags::Nothing, 0);
+                }
                 break;
             }
             case Instruction::greater: {
@@ -9935,7 +10331,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [lhsOwned, lhsTag, lhsVal] = getFromStack(offsetLhs, popLhs);
                 value::ValueGuard lhsGuard(lhsOwned && popLhs, lhsTag, lhsVal);
 
-                auto [tag, val] = genericCompare<std::greater<>>(lhsTag, lhsVal, rhsTag, rhsVal);
+                auto [tag, val] = value::genericGt(lhsTag, lhsVal, rhsTag, rhsVal);
 
                 pushStack(false, tag, val);
 
@@ -9953,10 +10349,13 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [collOwned, collTag, collVal] = getFromStack(offsetColl, popColl);
                 value::ValueGuard collGuard(collOwned && popColl, collTag, collVal);
 
-                auto [tag, val] = genericCompare<std::greater<>>(
-                    lhsTag, lhsVal, rhsTag, rhsVal, collTag, collVal);
-
-                pushStack(false, tag, val);
+                if (collTag == value::TypeTags::collator) {
+                    auto comp = static_cast<StringDataComparator*>(value::getCollatorView(collVal));
+                    auto [tag, val] = value::genericGt(lhsTag, lhsVal, rhsTag, rhsVal, comp);
+                    pushStack(false, tag, val);
+                } else {
+                    pushStack(false, value::TypeTags::Nothing, 0);
+                }
                 break;
             }
             case Instruction::greaterEq: {
@@ -9968,8 +10367,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [lhsOwned, lhsTag, lhsVal] = getFromStack(offsetLhs, popLhs);
                 value::ValueGuard lhsGuard(lhsOwned && popLhs, lhsTag, lhsVal);
 
-                auto [tag, val] =
-                    genericCompare<std::greater_equal<>>(lhsTag, lhsVal, rhsTag, rhsVal);
+                auto [tag, val] = value::genericGte(lhsTag, lhsVal, rhsTag, rhsVal);
 
                 pushStack(false, tag, val);
                 break;
@@ -9986,10 +10384,13 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [collOwned, collTag, collVal] = getFromStack(offsetColl, popColl);
                 value::ValueGuard collGuard(collOwned && popColl, collTag, collVal);
 
-                auto [tag, val] = genericCompare<std::greater_equal<>>(
-                    lhsTag, lhsVal, rhsTag, rhsVal, collTag, collVal);
-
-                pushStack(false, tag, val);
+                if (collTag == value::TypeTags::collator) {
+                    auto comp = static_cast<StringDataComparator*>(value::getCollatorView(collVal));
+                    auto [tag, val] = value::genericGte(lhsTag, lhsVal, rhsTag, rhsVal, comp);
+                    pushStack(false, tag, val);
+                } else {
+                    pushStack(false, value::TypeTags::Nothing, 0);
+                }
                 break;
             }
             case Instruction::eq: {
@@ -10001,7 +10402,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [lhsOwned, lhsTag, lhsVal] = getFromStack(offsetLhs, popLhs);
                 value::ValueGuard lhsGuard(lhsOwned && popLhs, lhsTag, lhsVal);
 
-                auto [tag, val] = genericCompare<std::equal_to<>>(lhsTag, lhsVal, rhsTag, rhsVal);
+                auto [tag, val] = value::genericEq(lhsTag, lhsVal, rhsTag, rhsVal);
 
                 pushStack(false, tag, val);
                 break;
@@ -10018,10 +10419,13 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [collOwned, collTag, collVal] = getFromStack(offsetColl, popColl);
                 value::ValueGuard collGuard(collOwned && popColl, collTag, collVal);
 
-                auto [tag, val] = genericCompare<std::equal_to<>>(
-                    lhsTag, lhsVal, rhsTag, rhsVal, collTag, collVal);
-
-                pushStack(false, tag, val);
+                if (collTag == value::TypeTags::collator) {
+                    auto comp = static_cast<StringDataComparator*>(value::getCollatorView(collVal));
+                    auto [tag, val] = value::genericEq(lhsTag, lhsVal, rhsTag, rhsVal, comp);
+                    pushStack(false, tag, val);
+                } else {
+                    pushStack(false, value::TypeTags::Nothing, 0);
+                }
                 break;
             }
             case Instruction::neq: {
@@ -10033,8 +10437,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [lhsOwned, lhsTag, lhsVal] = getFromStack(offsetLhs, popLhs);
                 value::ValueGuard lhsGuard(lhsOwned && popLhs, lhsTag, lhsVal);
 
-                auto [tag, val] = genericCompare<std::equal_to<>>(lhsTag, lhsVal, rhsTag, rhsVal);
-                std::tie(tag, val) = genericNot(tag, val);
+                auto [tag, val] = value::genericNeq(lhsTag, lhsVal, rhsTag, rhsVal);
 
                 pushStack(false, tag, val);
                 break;
@@ -10051,11 +10454,13 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [collOwned, collTag, collVal] = getFromStack(offsetColl, popColl);
                 value::ValueGuard collGuard(collOwned && popColl, collTag, collVal);
 
-                auto [tag, val] = genericCompare<std::equal_to<>>(
-                    lhsTag, lhsVal, rhsTag, rhsVal, collTag, collVal);
-                std::tie(tag, val) = genericNot(tag, val);
-
-                pushStack(false, tag, val);
+                if (collTag == value::TypeTags::collator) {
+                    auto comp = static_cast<StringDataComparator*>(value::getCollatorView(collVal));
+                    auto [tag, val] = value::genericNeq(lhsTag, lhsVal, rhsTag, rhsVal, comp);
+                    pushStack(false, tag, val);
+                } else {
+                    pushStack(false, value::TypeTags::Nothing, 0);
+                }
                 break;
             }
             case Instruction::cmp3w: {
@@ -10067,7 +10472,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [lhsOwned, lhsTag, lhsVal] = getFromStack(offsetLhs, popLhs);
                 value::ValueGuard lhsGuard(lhsOwned && popLhs, lhsTag, lhsVal);
 
-                auto [tag, val] = compare3way(lhsTag, lhsVal, rhsTag, rhsVal);
+                auto [tag, val] = value::compare3way(lhsTag, lhsVal, rhsTag, rhsVal);
 
                 pushStack(false, tag, val);
 
@@ -10085,9 +10490,13 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [collOwned, collTag, collVal] = getFromStack(offsetColl, popColl);
                 value::ValueGuard collGuard(collOwned && popColl, collTag, collVal);
 
-                auto [tag, val] = compare3way(lhsTag, lhsVal, rhsTag, rhsVal, collTag, collVal);
-
-                pushStack(false, tag, val);
+                if (collTag == value::TypeTags::collator) {
+                    auto comp = static_cast<StringDataComparator*>(value::getCollatorView(collVal));
+                    auto [tag, val] = value::compare3way(lhsTag, lhsVal, rhsTag, rhsVal, comp);
+                    pushStack(false, tag, val);
+                } else {
+                    pushStack(false, value::TypeTags::Nothing, 0);
+                }
                 break;
             }
             case Instruction::fillEmpty: {
@@ -10298,6 +10707,10 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
 
                 break;
             }
+            case Instruction::magicTraverseF: {
+                magicTraverseF(code);
+                break;
+            }
             case Instruction::traverseCsiCellValues: {
                 auto offset = readFromMemory<int>(pcPointer);
                 pcPointer += sizeof(offset);
@@ -10475,6 +10888,10 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
             }
             case Instruction::isArray: {
                 runTagCheck(pcPointer, value::isArray);
+                break;
+            }
+            case Instruction::isInListData: {
+                runTagCheck(pcPointer, value::isInListData);
                 break;
             }
             case Instruction::isString: {

@@ -1,6 +1,13 @@
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
-const st = new ShardingTest({shards: 3, chunkSize: 1});
+const st = new ShardingTest({
+    shards: 3,
+    chunkSize: 1,
+    configOptions:
+        {setParameter:
+             {reshardingCriticalSectionTimeoutMillis: 24 * 60 * 60 * 1000, /* 1 day */}}
+});
+
 const configDB = st.s.getDB('config');
 const shard0 = st.shard0.shardName;
 const shard1 = st.shard1.shardName;
@@ -45,7 +52,7 @@ function getLatestPlacementInfoFor(namespace) {
     return placementQueryResults[0];
 }
 
-function getValidatedPlacementInfoForDB(dbName, isInitialPlacement = true) {
+function getValidatedPlacementInfoForDB(dbName) {
     const configDBInfo = getInfoFromConfigDatabases(dbName);
     const dbPlacementInfo = getLatestPlacementInfoFor(dbName);
     assert.neq(null, configDBInfo);
@@ -54,14 +61,7 @@ function getValidatedPlacementInfoForDB(dbName, isInitialPlacement = true) {
     // config.databases.
     assert.sameMembers([configDBInfo.primary], dbPlacementInfo.shards);
 
-    if (isInitialPlacement) {
-        assert(timestampCmp(configDBInfo.version.timestamp, dbPlacementInfo.timestamp) === 0);
-    } else {
-        // after a movePrimary, the timestamp of the placementHistory document should be greater
-        // since the timestamp associated to the config.databases document does not change (only
-        // lastMod is updated).
-        assert(timestampCmp(configDBInfo.version.timestamp, dbPlacementInfo.timestamp) < 0);
-    }
+    assert(timestampCmp(configDBInfo.version.timestamp, dbPlacementInfo.timestamp) === 0);
 
     // No UUID field for DB namespaces
     assert.eq(undefined, dbPlacementInfo.uuid);
@@ -192,7 +192,7 @@ function testMovePrimary(dbName, fromPrimaryShardName, toPrimaryShardName) {
     assert.commandWorked(st.s.adminCommand({movePrimary: dbName, to: toPrimaryShardName}));
 
     // Verify that the new primary shard is the one specified in the command.
-    const newDbInfo = getValidatedPlacementInfoForDB(dbName, false /* isInitialPlacement */);
+    const newDbInfo = getValidatedPlacementInfoForDB(dbName);
     assert.sameMembers(newDbInfo.shards, [toPrimaryShardName]);
 }
 
@@ -405,8 +405,11 @@ function testAddShard() {
     }
 
     let res = assert.commandWorked(st.s.adminCommand({removeShard: newShardName}));
-    assert.eq('started', res.state);
-    res = assert.commandWorked(st.s.adminCommand({removeShard: newShardName}));
+    if (res.state === 'started') {
+        // Issue a second removeShard request to sync on the full removal of the targeted RS.
+        res = assert.commandWorked(st.s.adminCommand({removeShard: newShardName}));
+    }
+
     assert.eq('completed', res.state);
     newReplicaSet.stopSet();
 }

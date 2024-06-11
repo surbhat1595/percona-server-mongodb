@@ -1325,6 +1325,29 @@ TEST(QuerySolutionTest, GetSecondaryNamespaceVectorOverSingleEqLookupNode) {
     assertNamespaceVectorsAreEqual(qs.getAllSecondaryNamespaces(mainNss), expectedNssVector);
 }
 
+TEST(QuerySolutionTest, AssertSameHashes) {
+    auto makeQs = []() {
+        auto scanNode = std::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1)));
+        const NamespaceString mainNss = NamespaceString::createNamespaceString_forTest("db.main");
+        const NamespaceString foreignColl =
+            NamespaceString::createNamespaceString_forTest("db.col");
+        auto root = std::make_unique<EqLookupNode>(std::move(scanNode),
+                                                   foreignColl,
+                                                   "local",
+                                                   "remote",
+                                                   "b",
+                                                   EqLookupNode::LookupStrategy::kNestedLoopJoin,
+                                                   boost::none /* idxEntry */,
+                                                   false /* shouldProduceBson */);
+
+
+        auto qs = std::make_unique<QuerySolution>();
+        qs->setRoot(std::move(root));
+        return qs;
+    };
+    ASSERT(makeQs()->hash() == makeQs()->hash());
+}
+
 TEST(QuerySolutionTest, GetSecondaryNamespaceVectorDeduplicatesMainNss) {
     auto scanNode = std::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1)));
     const NamespaceString mainNss = NamespaceString::createNamespaceString_forTest("db.main");
@@ -1413,5 +1436,62 @@ TEST(QuerySolutionTest, GetSecondaryNamespaceVectorDeduplicatesNestedEqLookupNod
     // a single copy of that namespace.
     std::vector<NamespaceStringOrUUID> expectedNssVector{foreignColl};
     assertNamespaceVectorsAreEqual(qs.getAllSecondaryNamespaces(mainNss), expectedNssVector);
+}
+
+TEST(QuerySolutionTest, GetFirstNodeByTypeFindsFirstNodeWhenNested) {
+    auto collScanNode = std::make_unique<CollectionScanNode>();
+    auto limitNode = std::make_unique<LimitNode>(
+        std::move(collScanNode), 10ll, LimitSkipParameterization::Disabled);
+
+    QuerySolution qs;
+    qs.setRoot(std::move(limitNode));
+
+    auto [foundNode, foundCount] = qs.getFirstNodeByType(StageType::STAGE_COLLSCAN);
+    ASSERT_EQ(qs.root()->children.at(0).get(), foundNode);
+    ASSERT_EQ(1, foundCount);
+}
+
+TEST(QuerySolutionTest, GetFirstNodeByTypeFindsFirstNodeWhenInRoot) {
+    auto collScanNode = std::make_unique<CollectionScanNode>();
+
+    QuerySolution qs;
+    qs.setRoot(std::move(collScanNode));
+
+    auto [foundNode, foundCount] = qs.getFirstNodeByType(StageType::STAGE_COLLSCAN);
+    ASSERT_EQ(qs.root(), foundNode);
+    ASSERT_EQ(1, foundCount);
+}
+
+TEST(QuerySolutionTest, GetFirstNodeByTypeReturnsNullIfNotFound) {
+    auto collScanNode = std::make_unique<CollectionScanNode>();
+
+    QuerySolution qs;
+    qs.setRoot(std::move(collScanNode));
+
+    auto [foundNode, foundCount] = qs.getFirstNodeByType(StageType::STAGE_IXSCAN);
+    ASSERT_EQ(nullptr, foundNode);
+    ASSERT_EQ(0, foundCount);
+}
+
+TEST(QuerySolutionTest, GetFirstNodeByTypeFindsFirstAndCountsWhenSeveral) {
+    auto collScanNode = std::make_unique<CollectionScanNode>();
+    auto firstLimitNode = std::make_unique<LimitNode>(
+        std::move(collScanNode), 10ll, LimitSkipParameterization::Disabled);
+    auto firstLimitNodeLimitValue = firstLimitNode->limit;
+    auto secondLimitNode = std::make_unique<LimitNode>(
+        std::move(firstLimitNode), 8ll, LimitSkipParameterization::Disabled);
+    // We use its 'limit' value to assert the first one was retrieved below hence cannot be equals
+    ASSERT(firstLimitNodeLimitValue != secondLimitNode->limit);
+    auto skipNode = std::make_unique<SkipNode>(
+        std::move(secondLimitNode), 9ll, LimitSkipParameterization::Disabled);
+
+    QuerySolution qs;
+    qs.setRoot(std::move(skipNode));
+
+    auto [foundNode, foundCount] = qs.getFirstNodeByType(StageType::STAGE_LIMIT);
+    const LimitNode* foundLimitNode = dynamic_cast<const LimitNode*>(foundNode);
+    ASSERT(foundLimitNode);
+    ASSERT_EQ(foundLimitNode->limit, 8ll);  // 8 is the value we assign to the first limit node
+    ASSERT_EQ(2, foundCount);
 }
 }  // namespace

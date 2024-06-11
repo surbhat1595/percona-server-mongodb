@@ -103,7 +103,11 @@ ApplyOpsCommandInfo::ApplyOpsCommandInfo(const BSONObj& applyOpCmd)
     if (applyOpCmd.hasElement("tid")) {
         tid = TenantId::parseFromBSON(applyOpCmd["tid"]);
     }
-    parseProtected(IDLParserContext("applyOps", false, tid), applyOpCmd);
+    const auto vts = tid
+        ? boost::make_optional(auth::ValidatedTenancyScopeFactory::create(
+              *tid, auth::ValidatedTenancyScopeFactory::TrustedForInnerOpMsgRequestTag{}))
+        : boost::none;
+    parseProtected(IDLParserContext("applyOps", false, vts, tid), applyOpCmd);
 
     uassert(6711600,
             "applyOps command no longer supports the 'preCondition' option",
@@ -144,7 +148,11 @@ void ApplyOps::extractOperationsTo(const OplogEntry& applyOpsOplogEntry,
         if (operationDoc.hasElement("tid")) {
             tid = TenantId::parseFromBSON(operationDoc["tid"]);
         }
-        ReplOperation::parse(IDLParserContext("extractOperations", false, tid), operationDoc);
+        const auto vts = tid
+            ? boost::make_optional(auth::ValidatedTenancyScopeFactory::create(
+                  *tid, auth::ValidatedTenancyScopeFactory::TrustedForInnerOpMsgRequestTag{}))
+            : boost::none;
+        ReplOperation::parse(IDLParserContext("extractOperations", false, vts, tid), operationDoc);
 
         BSONObjBuilder builder(operationDoc);
 

@@ -90,7 +90,6 @@
 #include "mongo/db/update/document_diff_serialization.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decimal_counter.h"
 #include "mongo/util/decorable.h"
@@ -178,7 +177,7 @@ BucketDocument makeNewDocument(const OID& bucketId,
 
     BucketDocument bucketDoc{builder.obj()};
     if (!feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         return bucketDoc;
     }
 
@@ -207,6 +206,116 @@ write_ops::WriteCommandRequestBase makeTimeseriesWriteOpBase(std::vector<StmtId>
     }
 
     return base;
+}
+
+// Generates a delta update oplog entry using the before and after compressed bucket documents.
+write_ops::UpdateOpEntry makeTimeseriesCompressedDiffEntry(
+    OperationContext* opCtx,
+    std::shared_ptr<bucket_catalog::WriteBatch> batch,
+    const BSONObj& before,
+    const BSONObj& after,
+    const BSONObj& metadata) {
+    BSONObjBuilder updateBuilder;
+    {
+        // Control builder.
+        BSONObjBuilder controlBuilder(updateBuilder.subobjStart(
+            str::stream() << doc_diff::kSubDiffSectionFieldPrefix << kBucketControlFieldName));
+        BSONObj countObj =
+            BSON(kBucketControlCountFieldName << after.getObjectField(kBucketControlFieldName)
+                                                     .getField(kBucketControlCountFieldName)
+                                                     .Int());
+        controlBuilder.append(doc_diff::kUpdateSectionFieldName, countObj);
+
+        if (!batch->min.isEmpty() || !batch->max.isEmpty()) {
+            if (!batch->min.isEmpty()) {
+                controlBuilder.append(str::stream() << doc_diff::kSubDiffSectionFieldPrefix
+                                                    << kBucketControlMinFieldName,
+                                      batch->min);
+            }
+            if (!batch->max.isEmpty()) {
+                controlBuilder.append(str::stream() << doc_diff::kSubDiffSectionFieldPrefix
+                                                    << kBucketControlMaxFieldName,
+                                      batch->max);
+            }
+        }
+    }
+
+    {
+        // Data builder.
+        const BSONObj& beforeData = before.getObjectField(kBucketDataFieldName);
+        const BSONObj& afterData = after.getObjectField(kBucketDataFieldName);
+
+        BSONObjBuilder dataBuilder(updateBuilder.subobjStart("sdata"));
+        BSONObjBuilder newDataFieldsBuilder;
+        BSONObjBuilder updatedDataFieldsBuilder;
+        auto beforeIt = beforeData.begin();
+        auto afterIt = afterData.begin();
+
+        while (beforeIt != beforeData.end()) {
+            invariant(afterIt != afterData.end());
+            invariant(beforeIt->fieldNameStringData() == afterIt->fieldNameStringData());
+
+            if (beforeIt->binaryEqual(*afterIt)) {
+                // Contents are the same, nothing to diff.
+                beforeIt++;
+                afterIt++;
+                continue;
+            }
+
+            // Generate the binary diff.
+            int beforeLen = 0;
+            const char* beforeData = beforeIt->binData(beforeLen);
+
+            int afterLen = 0;
+            const char* afterData = afterIt->binData(afterLen);
+
+            int offset = 0;
+            while (beforeData[offset] == afterData[offset]) {
+                if (offset == beforeLen - 1 || offset == afterLen - 1) {
+                    break;
+                }
+                offset++;
+            }
+
+            BSONObj binaryObj = BSON("o" << offset << "d"
+                                         << BSONBinData(afterData + offset,
+                                                        afterLen - offset,
+                                                        BinDataType::BinDataGeneral));
+            updatedDataFieldsBuilder.append(beforeIt->fieldNameStringData(), binaryObj);
+            beforeIt++;
+            afterIt++;
+        }
+
+        // Finish consuming the after iterator, which should only contain new fields at this point
+        // as we've finished consuming the before iterator.
+        while (afterIt != afterData.end()) {
+            // Newly inserted fields are added as DocDiff inserts using the BSONColumn format.
+            invariant(batch->newFieldNamesToBeInserted.count(afterIt->fieldNameStringData()) == 1);
+            newDataFieldsBuilder.append(*afterIt);
+            afterIt++;
+        }
+
+        auto newDataFields = newDataFieldsBuilder.obj();
+        if (!newDataFields.isEmpty()) {
+            dataBuilder.append(doc_diff::kInsertSectionFieldName, newDataFields);
+        }
+
+        auto updatedDataFields = updatedDataFieldsBuilder.obj();
+        if (!updatedDataFields.isEmpty()) {
+            dataBuilder.append(doc_diff::kBinarySectionFieldName, updatedDataFields);
+        }
+    }
+
+    write_ops::UpdateModification::DiffOptions options;
+    options.mustCheckExistenceForInsertOperations =
+        static_cast<bool>(repl::tenantMigrationInfo(opCtx));
+    write_ops::UpdateModification u(
+        updateBuilder.obj(), write_ops::UpdateModification::DeltaTag{}, options);
+    auto oid = batch->bucketHandle.bucketId.oid;
+    write_ops::UpdateOpEntry update(BSON("_id" << oid), std::move(u));
+    invariant(!update.getMulti(), oid.toString());
+    invariant(!update.getUpsert(), oid.toString());
+    return update;
 }
 
 // Builds the delta update oplog entry from a time-series insert write batch.
@@ -421,7 +530,7 @@ BSONObj makeBucketDocument(const std::vector<BSONObj>& measurements,
     return bucketDoc.uncompressedBucket;
 }
 
-stdx::variant<write_ops::UpdateCommandRequest, write_ops::DeleteCommandRequest> makeModificationOp(
+std::variant<write_ops::UpdateCommandRequest, write_ops::DeleteCommandRequest> makeModificationOp(
     const OID& bucketId, const CollectionPtr& coll, const std::vector<BSONObj>& measurements) {
     // A bucket will be fully deleted if no measurements are passed in.
     if (measurements.empty()) {
@@ -491,9 +600,14 @@ write_ops::InsertCommandRequest makeTimeseriesInsertOp(
     // TODO SERVER-80653: Handle bucket compression failure.
     BucketDocument bucketDoc = makeNewDocumentForWrite(batch, metadata);
     BSONObj bucketToInsert = bucketDoc.uncompressedBucket;
+
+    if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        invariant(bucketDoc.compressedBucket);
+        batch->uncompressed = bucketDoc.uncompressedBucket.getOwned();
+    }
     if (bucketDoc.compressedBucket) {
-        batch->decompressed = DecompressionResult{bucketDoc.compressedBucket->getOwned(),
-                                                  bucketDoc.uncompressedBucket.getOwned()};
+        batch->compressed = bucketDoc.compressedBucket->getOwned();
         bucketToInsert = *bucketDoc.compressedBucket;
     }
 
@@ -508,8 +622,54 @@ write_ops::UpdateCommandRequest makeTimeseriesUpdateOp(
     const NamespaceString& bucketsNs,
     const BSONObj& metadata,
     std::vector<StmtId>&& stmtIds) {
-    write_ops::UpdateCommandRequest op(bucketsNs,
-                                       {makeTimeseriesUpdateOpEntry(opCtx, batch, metadata)});
+    if (!feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        write_ops::UpdateCommandRequest op(bucketsNs,
+                                           {makeTimeseriesUpdateOpEntry(opCtx, batch, metadata)});
+        op.setWriteCommandRequestBase(makeTimeseriesWriteOpBase(std::move(stmtIds)));
+        return op;
+    }
+
+    auto updateMod = makeTimeseriesUpdateOpEntry(opCtx, batch, metadata).getU();
+    auto updated = doc_diff::applyDiff(batch->uncompressed,
+                                       updateMod.getDiff(),
+                                       updateMod.mustCheckExistenceForInsertOperations());
+
+    // Hold the uncompressed bucket document that's currently on-disk prior to this write batch
+    // running.
+    auto before = std::move(batch->uncompressed);
+
+    // TODO SERVER-80653: Handle bucket compression failure.
+    auto compressionResult = timeseries::compressBucket(
+        updated, batch->timeField, bucketsNs, gValidateTimeseriesCompression.load());
+    batch->uncompressed = updated;
+    if (compressionResult.compressedBucket) {
+        batch->compressed = *compressionResult.compressedBucket;
+    } else {
+        // Clear the previous compression state if we're inserting an uncompressed bucket due to
+        // compression failure.
+        batch->compressed = boost::none;
+    }
+
+    auto after = compressionResult.compressedBucket ? *compressionResult.compressedBucket : updated;
+
+    auto bucketTransformationFunc = [before = std::move(before), after = std::move(after)](
+                                        const BSONObj& bucketDoc) -> boost::optional<BSONObj> {
+        // Make sure the document hasn't changed since we read it into the BucketCatalog.
+        // This should not happen, but since we can double-check it here, we can guard
+        // against the missed update that would result from simply replacing with 'after'.
+        if (!timeseries::decompressBucket(bucketDoc).value_or(bucketDoc).binaryEqual(before)) {
+            throwWriteConflictException("Bucket document changed between initial read and update");
+        }
+        return after;
+    };
+
+    auto updates = makeTimeseriesTransformationOpEntry(
+        opCtx,
+        /*bucketId=*/batch->bucketHandle.bucketId.oid,
+        /*transformationFunc=*/std::move(bucketTransformationFunc));
+
+    write_ops::UpdateCommandRequest op(bucketsNs, {updates});
     op.setWriteCommandRequestBase(makeTimeseriesWriteOpBase(std::move(stmtIds)));
     return op;
 }
@@ -524,24 +684,25 @@ write_ops::UpdateCommandRequest makeTimeseriesDecompressAndUpdateOp(
     auto updateMod = makeTimeseriesUpdateOpEntry(opCtx, batch, metadata).getU();
     auto diff = updateMod.getDiff();
     auto updated = doc_diff::applyDiff(
-        batch->decompressed.value().after, diff, updateMod.mustCheckExistenceForInsertOperations());
+        batch->uncompressed, diff, updateMod.mustCheckExistenceForInsertOperations());
 
     // Holds the compressed bucket document that's currently on-disk prior to this write batch
     // running.
-    auto before = std::move(batch->decompressed.value().before);
+    auto before = std::move(*batch->compressed);
 
     CompressionResult compressionResult;
     if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         // TODO SERVER-80653: Handle bucket compression failure.
         compressionResult = timeseries::compressBucket(
             updated, batch->timeField, bucketsNs, gValidateTimeseriesCompression.load());
+        batch->uncompressed = updated;
         if (compressionResult.compressedBucket) {
-            batch->decompressed = DecompressionResult{*compressionResult.compressedBucket, updated};
+            batch->compressed = *compressionResult.compressedBucket;
         } else {
             // Clear the previous compression state if we're inserting an uncompressed bucket due to
             // compression failure.
-            batch->decompressed = boost::none;
+            batch->compressed = boost::none;
         }
     }
 
@@ -549,6 +710,23 @@ write_ops::UpdateCommandRequest makeTimeseriesDecompressAndUpdateOp(
     // use compressed buckets feature flag is disabled. When enabled, holds the compressed version
     // of the bucket document mentioned earlier.
     auto after = compressionResult.compressedBucket ? *compressionResult.compressedBucket : updated;
+
+    // Generates a delta update request using the before and after compressed bucket documents.
+    // (Generic FCV reference): Only do this when running in the latest FCV version as older
+    // binaries cannot interpret the binary diff format.
+    // TODO SERVER-80653: Remove compressed bucket check. The operation should retry if compression
+    // fails before we get here.
+    auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    if (compressionResult.compressedBucket &&
+        feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(fcvSnapshot) &&
+        fcvSnapshot.getVersion() == multiversion::GenericFCV::kLatest) {
+        const auto updateEntry =
+            makeTimeseriesCompressedDiffEntry(opCtx, batch, before, after, metadata);
+
+        write_ops::UpdateCommandRequest op(bucketsNs, {updateEntry});
+        op.setWriteCommandRequestBase(makeTimeseriesWriteOpBase(std::move(stmtIds)));
+        return op;
+    }
 
     auto bucketTransformationFunc = [before = std::move(before), after = std::move(after)](
                                         const BSONObj& bucketDoc) -> boost::optional<BSONObj> {
@@ -598,16 +776,16 @@ StatusWith<bucket_catalog::InsertResult> attemptInsertIntoBucket(
                 auto& insertResult = swResult.getValue();
 
                 if (auto* reopeningContext =
-                        stdx::get_if<bucket_catalog::ReopeningContext>(&insertResult)) {
+                        get_if<bucket_catalog::ReopeningContext>(&insertResult)) {
                     BSONObj suitableBucket;
 
-                    if (auto* bucketId = stdx::get_if<OID>(&reopeningContext->candidate)) {
+                    if (auto* bucketId = get_if<OID>(&reopeningContext->candidate)) {
                         DBDirectClient client{opCtx};
                         suitableBucket =
                             client.findOne(bucketsColl->ns(), BSON("_id" << *bucketId));
                         reopeningContext->fetchedBucket = true;
-                    } else if (auto* pipeline = stdx::get_if<std::vector<BSONObj>>(
-                                   &reopeningContext->candidate)) {
+                    } else if (auto* pipeline =
+                                   get_if<std::vector<BSONObj>>(&reopeningContext->candidate)) {
                         // Resort to Query-Based reopening approach.
                         DBDirectClient client{opCtx};
 
@@ -644,16 +822,16 @@ StatusWith<bucket_catalog::InsertResult> attemptInsertIntoBucket(
                             bucket_catalog::BucketToReopen{suitableBucket, validator};
                     }
 
-                    swResult = bucket_catalog::insert(opCtx,
-                                                      bucketCatalog,
-                                                      viewNs,
-                                                      bucketsColl->getDefaultCollator(),
-                                                      timeSeriesOptions,
-                                                      measurementDoc,
-                                                      combine,
-                                                      reopeningContext);
-                } else if (auto* waiter =
-                               stdx::get_if<bucket_catalog::InsertWaiter>(&insertResult)) {
+                    swResult = bucket_catalog::insertWithReopeningContext(
+                        opCtx,
+                        bucketCatalog,
+                        viewNs,
+                        bucketsColl->getDefaultCollator(),
+                        timeSeriesOptions,
+                        measurementDoc,
+                        combine,
+                        *reopeningContext);
+                } else if (auto* waiter = get_if<bucket_catalog::InsertWaiter>(&insertResult)) {
                     // Need to wait for another operation to finish, then retry. This could be
                     // another reopening request or a previously prepared write batch for the same
                     // series (metaField value). The easiest way to retry here is to reset swResult
@@ -691,7 +869,7 @@ void makeWriteRequest(OperationContext* opCtx,
             batch, bucketsNs, metadata, std::move(stmtIds[batch->bucketHandle.bucketId.oid])));
         return;
     }
-    if (batch->decompressed.has_value()) {
+    if (batch->compressed) {
         updateOps->push_back(makeTimeseriesDecompressAndUpdateOp(
             opCtx,
             batch,
@@ -727,7 +905,7 @@ TimeseriesBatches insertIntoBucketCatalogForUpdate(OperationContext* opCtx,
                                     measurement,
                                     bucket_catalog::CombineWithInsertsFromOtherClients::kDisallow,
                                     /*fromUpdates=*/true));
-        auto* insertResult = stdx::get_if<bucket_catalog::SuccessfulInsertion>(&result);
+        auto* insertResult = get_if<bucket_catalog::SuccessfulInsertion>(&result);
         invariant(insertResult);
         batches.emplace_back(std::move(insertResult->batch));
     }
@@ -739,8 +917,8 @@ void performAtomicWrites(
     OperationContext* opCtx,
     const CollectionPtr& coll,
     const RecordId& recordId,
-    const boost::optional<stdx::variant<write_ops::UpdateCommandRequest,
-                                        write_ops::DeleteCommandRequest>>& modificationOp,
+    const boost::optional<std::variant<write_ops::UpdateCommandRequest,
+                                       write_ops::DeleteCommandRequest>>& modificationOp,
     const std::vector<write_ops::InsertCommandRequest>& insertOps,
     const std::vector<write_ops::UpdateCommandRequest>& updateOps,
     bool fromMigrate,
@@ -766,7 +944,7 @@ void performAtomicWrites(
     WriteUnitOfWork wuow{opCtx, groupOplogEntries};
 
     if (modificationOp) {
-        stdx::visit(
+        visit(
             OverloadedVisitor{[&](const write_ops::UpdateCommandRequest& updateOp) {
                                   updateTimeseriesDocument(
                                       opCtx, coll, updateOp, &curOp->debug(), fromMigrate, stmtId);
@@ -811,8 +989,8 @@ void commitTimeseriesBucketsAtomically(
     bucket_catalog::BucketCatalog& sideBucketCatalog,
     const CollectionPtr& coll,
     const RecordId& recordId,
-    const boost::optional<stdx::variant<write_ops::UpdateCommandRequest,
-                                        write_ops::DeleteCommandRequest>>& modificationOp,
+    const boost::optional<std::variant<write_ops::UpdateCommandRequest,
+                                       write_ops::DeleteCommandRequest>>& modificationOp,
     TimeseriesBatches* batches,
     const NamespaceString& bucketsNs,
     bool fromMigrate,
@@ -936,7 +1114,7 @@ BSONObj timeseriesViewCommand(const BSONObj& cmd, std::string cmdName, StringDat
 
 void deleteRequestCheckFunction(DeleteRequest* request, const TimeseriesOptions& options) {
     if (!feature_flags::gTimeseriesDeletesSupport.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         uassert(ErrorCodes::InvalidOptions,
                 "Cannot perform a delete with a non-empty query on a time-series "
                 "collection that "
@@ -954,7 +1132,7 @@ void deleteRequestCheckFunction(DeleteRequest* request, const TimeseriesOptions&
 
 void updateRequestCheckFunction(UpdateRequest* request, const TimeseriesOptions& options) {
     if (!feature_flags::gTimeseriesUpdatesSupport.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         uassert(ErrorCodes::InvalidOptions,
                 "Cannot perform a non-multi update on a time-series collection",
                 request->isMulti());

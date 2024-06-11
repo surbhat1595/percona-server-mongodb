@@ -487,7 +487,7 @@ add_option(
 add_option(
     'use-diagnostic-latches',
     choices=['on', 'off'],
-    default='on',
+    default='off',
     help='Enable annotated Mutex types',
     type='choice',
 )
@@ -2056,7 +2056,7 @@ if env.get('ENABLE_OOM_RETRY'):
                 'C1060: compiler is out of heap space',
                 'c1xx : fatal error C1063: INTERNAL COMPILER ERROR',
                 r'LNK1171: unable to load mspdbcore\.dll',
-                "LNK1201: error writing to program database ''",
+                "LNK1201: error writing to program database ",
             ]
             env['OOM_RETRY_RETURNCODES'] = [1102]
 
@@ -2947,7 +2947,16 @@ elif env.TargetOSIs('windows'):
     env.Append(CCFLAGS=["/MDd" if debugBuild else "/MD"])
 
     if optBuild == "off":
-        env.Append(CCFLAGS=["/Od"])
+        env.Append(
+            CCFLAGS=["/Od"],
+            # windows non optimized builds will cause the PDB to blow up in size,
+            # this allows a larger PDB. The flag is undocumented at the time of writing
+            # but the microsoft thread which brought about its creation can be found here:
+            # https://developercommunity.visualstudio.com/t/pdb-limit-of-4-gib-is-likely-to-be-a-problem-in-a/904784
+            #
+            # Without this flag MSVC will report a red herring error message, about disk space or invalid path.
+            LINKFLAGS=["/pdbpagesize:16384"])
+
         if debugBuild:
             # /RTC1: - Enable Stack Frame Run-Time Error Checking; Reports when a variable is used
             # without having been initialized (implies /Od: no optimizations)
@@ -3607,7 +3616,10 @@ def doConfigure(myenv):
                 f"Use the '--linker' option instead of modifying the LINKFLAGS directly.")
 
         linker_ld = get_option('linker')
-        if linker_ld == 'auto':
+
+        if linker_ld == "bfd" and env.get("BAZEL_BUILD_ENABLED"):
+            myenv.FatalError(f"The linker 'bfd' is not supported with BAZEL_BUILD_ENABLED.")
+        elif linker_ld == 'auto':
             if not env.TargetOSIs('darwin', 'macOS'):
                 if not myenv.AddToLINKFLAGSIfSupported('-fuse-ld=lld'):
                     myenv.FatalError(
@@ -4420,7 +4432,7 @@ def doConfigure(myenv):
             # reporting thread leaks, which we have because we don't
             # do a clean shutdown of the ServiceContext.
             #
-            tsan_options = f"abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:suppressions={myenv.File('#etc/tsan.suppressions').abspath}"
+            tsan_options = f"abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=4:suppressions={myenv.File('#etc/tsan.suppressions').abspath}"
             myenv['ENV']['TSAN_OPTIONS'] = tsan_options + symbolizer_option
             myenv.AppendUnique(CPPDEFINES=['THREAD_SANITIZER'])
 
@@ -6642,3 +6654,16 @@ for i, s in enumerate(BUILD_TARGETS):
 # SConscripts have been read but before building begins.
 libdeps.LibdepLinter(env).final_checks()
 libdeps.generate_libdeps_graph(env)
+
+# We put this next section at the end of the SConstruct since all the targets
+# have been declared, and we know all possible bazel targets so
+# we can now generate this info into a file for the ninja build to consume.
+if env.get("BAZEL_BUILD_ENABLED") and env.GetOption('ninja') != "disabled":
+
+    # convert the SCons FunctioAction into a format that ninja can understand
+    env.NinjaRegisterFunctionHandler("bazel_builder_action", env.NinjaBazelBuilder)
+
+    # we generate the list of all targets that were labeled Bazel* builder targets
+    # via the emitter, this outputs a json file which will be read during the ninja
+    # build.
+    env.GenerateBazelInfoForNinja()

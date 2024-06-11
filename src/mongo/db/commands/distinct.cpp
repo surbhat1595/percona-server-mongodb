@@ -56,7 +56,7 @@
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/auth/validated_tenancy_scope.h"
+#include "mongo/db/auth/validated_tenancy_scope_factory.h"
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
@@ -72,6 +72,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
+#include "mongo/db/query/canonical_distinct.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collection_query_info.h"
@@ -80,12 +81,14 @@
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/get_executor.h"
-#include "mongo/db/query/parsed_distinct.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_planner_params.h"
-#include "mongo/db/query/query_settings_gen.h"
+#include "mongo/db/query/query_settings/query_settings_gen.h"
+#include "mongo/db/query/query_settings/query_settings_utils.h"
+#include "mongo/db/query/query_shape/distinct_cmd_shape.h"
+#include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/view_response_formatter.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -118,7 +121,115 @@
 namespace mongo {
 namespace {
 
+bool isInternalClient(OperationContext* opCtx) {
+    return opCtx->getClient()->session() && opCtx->getClient()->isInternalClient();
+}
+
+query_settings::QuerySettings lookupQuerySettingsForDistinct(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const ParsedDistinctCommand& parsedRequest,
+    const NamespaceString& nss) {
+    auto serializationContext = parsedRequest.distinctCommandRequest->getSerializationContext();
+
+    if (auto querySettings = parsedRequest.distinctCommandRequest->getQuerySettings()) {
+        // Use the query settings passed as part of the command arguments.
+        return *querySettings;
+    }
+
+    auto queryShapeHashFn = [&]() {
+        query_shape::DistinctCmdShape shape(parsedRequest, expCtx);
+        return shape.sha256Hash(expCtx->opCtx, serializationContext);
+    };
+
+    return query_settings::lookupQuerySettings(expCtx, nss, serializationContext, queryShapeHashFn);
+}
+
+CanonicalDistinct parseDistinctCmd(OperationContext* opCtx,
+                                   const NamespaceString& nss,
+                                   const BSONObj& cmdObj,
+                                   const ExtensionsCallback& extensionsCallback,
+                                   const CollatorInterface* defaultCollator,
+                                   boost::optional<ExplainOptions::Verbosity> verbosity) {
+    const auto vts = auth::ValidatedTenancyScope::get(opCtx);
+    const auto serializationContext = vts != boost::none
+        ? SerializationContext::stateCommandRequest(vts->hasTenantId(), vts->isFromAtlasProxy())
+        : SerializationContext::stateCommandRequest();
+
+    auto distinctCommand = std::make_unique<DistinctCommandRequest>(
+        DistinctCommandRequest::parse(IDLParserContext("distinctCommandRequest",
+                                                       false /* apiStrict */,
+                                                       vts,
+                                                       nss.tenantId(),
+                                                       serializationContext),
+                                      cmdObj));
+
+    // Forbid users from passing 'querySettings' explicitly.
+    uassert(7923000,
+            "BSON field 'querySettings' is an unknown field",
+            isInternalClient(opCtx) || !distinctCommand->getQuerySettings().has_value());
+
+    auto expCtx = CanonicalDistinct::makeExpressionContext(
+        opCtx, nss, *distinctCommand, defaultCollator, verbosity);
+
+    auto parsedDistinct =
+        parsed_distinct_command::parse(expCtx,
+                                       cmdObj,
+                                       std::move(distinctCommand),
+                                       extensionsCallback,
+                                       MatchExpressionParser::kAllowAllSpecialFeatures);
+
+    expCtx->setQuerySettings(lookupQuerySettingsForDistinct(expCtx, *parsedDistinct, nss));
+    return CanonicalDistinct::parse(std::move(expCtx), std::move(parsedDistinct));
+}
+
 namespace dps = dotted_path_support;
+
+namespace {
+// This function might create a classic or SBE plan executor. It relies on some assumptions that are
+// specific to the distinct() command and shouldn't be blindly reused in other "distinct" contexts.
+std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> createExecutorForDistinctCommand(
+    OperationContext* opCtx,
+    CanonicalDistinct canonicalDistinct,
+    const CollectionAcquisition& coll) {
+    const auto yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
+    const auto& collectionPtr = coll.getCollectionPtr();
+
+    // If the collection doesn't exist 'getExecutor()' should create an EOF plan for it no matter
+    // the query.
+    if (!collectionPtr) {
+        return uassertStatusOK(getExecutorFind(opCtx,
+                                               MultipleCollectionAccessor{coll},
+                                               canonicalDistinct.releaseQuery(),
+                                               yieldPolicy));
+    }
+
+    // Try creating a plan that does DISTINCT_SCAN.
+    auto executor = tryGetExecutorDistinct(coll, QueryPlannerParams::DEFAULT, &canonicalDistinct);
+    if (executor.isOK()) {
+        return std::move(executor.getValue());
+    }
+
+    // If there is no DISTINCT_SCAN plan, create whatever non-distinct plan is appropriate, because
+    // 'distinct()' command is capable of de-duplicating and unwinding its inputs. Note: In order to
+    // allow a covered DISTINCT_SCAN we've inserted a projection -- there is no point of keeping it
+    // if a DISTINCT_SCAN didn't bake out.
+    auto cq = canonicalDistinct.getQuery();
+    auto findCommand = std::make_unique<FindCommandRequest>(cq->getFindCommandRequest());
+    findCommand->setProjection(BSONObj());
+
+    auto cqWithoutProjection = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+        .expCtx = cq->getExpCtx(),
+        .parsedFind =
+            ParsedFindCommandParams{
+                .findCommand = std::move(findCommand),
+                .extensionsCallback = ExtensionsCallbackReal(opCtx, &collectionPtr->ns()),
+                .allowedFeatures = MatchExpressionParser::kAllowAllSpecialFeatures},
+    });
+
+    return uassertStatusOK(getExecutorFind(
+        opCtx, MultipleCollectionAccessor{coll}, std::move(cqWithoutProjection), yieldPolicy));
+}
+}  // namespace
 
 class DistinctCommand : public BasicCommand {
 public:
@@ -215,13 +326,12 @@ public:
             opCtx, nss, AcquisitionPrerequisites::kRead);
         boost::optional<CollectionOrViewAcquisition> collectionOrView =
             acquireCollectionOrViewMaybeLockFree(opCtx, acquisitionRequest);
-
-        const ExtensionsCallbackReal extensionsCallback(opCtx, &nss);
         const CollatorInterface* defaultCollator = collectionOrView->getCollectionPtr()
             ? collectionOrView->getCollectionPtr()->getDefaultCollator()
             : nullptr;
-        auto parsedDistinct = uassertStatusOK(
-            ParsedDistinct::parse(opCtx, nss, cmdObj, extensionsCallback, true, defaultCollator));
+
+        auto canonicalDistinct = parseDistinctCmd(
+            opCtx, nss, cmdObj, ExtensionsCallbackReal(opCtx, &nss), defaultCollator, verbosity);
 
         SerializationContext serializationCtx = request.getSerializationContext();
 
@@ -229,16 +339,14 @@ public:
             // Relinquish locks. The aggregation command will re-acquire them.
             collectionOrView.reset();
 
-            auto viewAggregation = parsedDistinct.asAggregationCommand();
+            auto viewAggregation = canonicalDistinct.asAggregationCommand();
             if (!viewAggregation.isOK()) {
                 return viewAggregation.getStatus();
             }
 
             auto viewAggCmd =
-                OpMsgRequestBuilder::createWithValidatedTenancyScope(nss.dbName(),
-                                                                     request.validatedTenancyScope,
-                                                                     viewAggregation.getValue(),
-                                                                     serializationCtx)
+                OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                    nss.dbName(), request.validatedTenancyScope, viewAggregation.getValue())
                     .body;
             auto viewAggRequest = aggregation_request_helper::parseFromBSON(
                 opCtx,
@@ -254,14 +362,12 @@ public:
                 opCtx, viewAggRequest, viewAggregation.getValue(), PrivilegeVector(), result);
         }
 
-        const auto& collection = collectionOrView->getCollectionPtr();
-
-        auto executor = uassertStatusOK(getExecutorDistinct(
-            collectionOrView->getCollection(), QueryPlannerParams::DEFAULT, &parsedDistinct));
+        auto executor = createExecutorForDistinctCommand(
+            opCtx, std::move(canonicalDistinct), collectionOrView->getCollection());
 
         auto bodyBuilder = result->getBodyBuilder();
         Explain::explainStages(executor.get(),
-                               collection,
+                               collectionOrView->getCollectionPtr(),
                                verbosity,
                                BSONObj(),
                                SerializationContext::stateCommandReply(serializationCtx),
@@ -325,23 +431,22 @@ public:
                         repl::ReadConcernLevel::kSnapshotReadConcern ||
                     !coll.getShardingDescription().isSharded());
         }
-
-        const ExtensionsCallbackReal extensionsCallback(opCtx, &nss);
         const CollatorInterface* defaultCollation = collectionOrView->getCollectionPtr()
             ? collectionOrView->getCollectionPtr()->getDefaultCollator()
             : nullptr;
-        auto parsedDistinct = uassertStatusOK(
-            ParsedDistinct::parse(opCtx, nss, cmdObj, extensionsCallback, false, defaultCollation));
 
-        if (parsedDistinct.isMirrored()) {
+        auto canonicalDistinct = parseDistinctCmd(
+            opCtx, nss, cmdObj, ExtensionsCallbackReal(opCtx, &nss), defaultCollation, {});
+
+        if (canonicalDistinct.isMirrored()) {
             const auto& invocation = CommandInvocation::get(opCtx);
             invocation->markMirrored();
         } else if (auto sampleId = analyze_shard_key::getOrGenerateSampleId(
                        opCtx,
                        nss,
                        analyze_shard_key::SampledCommandNameEnum::kDistinct,
-                       parsedDistinct)) {
-            auto cq = parsedDistinct.getQuery();
+                       canonicalDistinct)) {
+            auto cq = canonicalDistinct.getQuery();
             analyze_shard_key::QueryAnalysisWriter::get(opCtx)
                 ->addDistinctQuery(
                     *sampleId, nss, cq->getQueryObj(), cq->getFindCommandRequest().getCollation())
@@ -352,14 +457,10 @@ public:
             // Relinquish locks. The aggregation command will re-acquire them.
             collectionOrView.reset();
 
-            auto viewAggregation = parsedDistinct.asAggregationCommand();
+            auto viewAggregation = canonicalDistinct.asAggregationCommand();
             uassertStatusOK(viewAggregation.getStatus());
 
-            using VTS = auth::ValidatedTenancyScope;
-            boost::optional<VTS> vts = boost::none;
-            if (dbName.tenantId()) {
-                vts = VTS(dbName.tenantId().value(), VTS::TrustedForInnerOpMsgRequestTag{});
-            }
+            auto vts = auth::ValidatedTenancyScope::get(opCtx);
             auto aggRequest = OpMsgRequestBuilder::createWithValidatedTenancyScope(
                 dbName, vts, std::move(viewAggregation.getValue()));
 
@@ -374,27 +475,25 @@ public:
         uassertStatusOK(replCoord->checkCanServeReadsFor(
             opCtx, nss, ReadPreferenceSetting::get(opCtx).canRunOnSecondary()));
 
-        auto executor = getExecutorDistinct(
-            collectionOrView->getCollection(), QueryPlannerParams::DEFAULT, &parsedDistinct);
-        uassertStatusOK(executor.getStatus());
+        auto executor = createExecutorForDistinctCommand(
+            opCtx, std::move(canonicalDistinct), collectionOrView->getCollection());
 
         {
             stdx::lock_guard<Client> lk(*opCtx->getClient());
-            CurOp::get(opCtx)->setPlanSummary_inlock(
-                executor.getValue()->getPlanExplainer().getPlanSummary());
+            CurOp::get(opCtx)->setPlanSummary_inlock(executor->getPlanExplainer().getPlanSummary());
         }
 
-        const auto key = cmdObj.getStringField(ParsedDistinct::kKeyField);
+        const auto key = cmdObj.getStringField(CanonicalDistinct::kKeyField);
 
         std::vector<BSONObj> distinctValueHolder;
-        BSONElementSet values(executor.getValue()->getCanonicalQuery()->getCollator());
+        BSONElementSet values(executor->getCanonicalQuery()->getCollator());
 
         const int kMaxResponseSize = BSONObjMaxUserSize - 4096;
 
         try {
             size_t listApproxBytes = 0;
             BSONObj obj;
-            while (PlanExecutor::ADVANCED == executor.getValue()->getNext(&obj, nullptr)) {
+            while (PlanExecutor::ADVANCED == executor->getNext(&obj, nullptr)) {
                 // Distinct expands arrays.
                 //
                 // If our query is covered, each value of the key should be in the index key and
@@ -422,7 +521,7 @@ public:
                 }
             }
         } catch (DBException& exception) {
-            auto&& explainer = executor.getValue()->getPlanExplainer();
+            auto&& explainer = executor->getPlanExplainer();
             auto&& [stats, _] =
                 explainer.getWinningPlanStats(ExplainOptions::Verbosity::kExecStats);
             LOGV2_WARNING(23797,
@@ -440,7 +539,7 @@ public:
 
         // Get summary information about the plan.
         PlanSummaryStats stats;
-        auto&& explainer = executor.getValue()->getPlanExplainer();
+        auto&& explainer = executor->getPlanExplainer();
         explainer.getSummaryStats(&stats);
         if (collection) {
             CollectionQueryInfo::get(collection).notifyOfQuery(opCtx, collection, stats);

@@ -28,6 +28,8 @@
  */
 
 #include "mongo/db/replica_set_endpoint_sharding_state.h"
+#include "mongo/db/s/replica_set_endpoint_feature_flag_gen.h"
+#include "mongo/db/s/sharding_cluster_parameters_gen.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -39,11 +41,15 @@ namespace {
 const auto getReplicaSetEndpointShardingState =
     ServiceContext::declareDecoration<ReplicaSetEndpointShardingState>();
 
+bool clusterHasTwoOrMoreShards() {
+    auto* clusterParameters = ServerParameterSet::getClusterParameterSet();
+    auto* clusterCardinalityParam =
+        clusterParameters->get<ClusterParameterWithStorage<ShardedClusterCardinalityParam>>(
+            "shardedClusterCardinalityForDirectConns");
+    return clusterCardinalityParam->getValue(boost::none).getHasTwoOrMoreShards();
+}
+
 }  // namespace
-
-ReplicaSetEndpointShardingState::ReplicaSetEndpointShardingState() = default;
-
-ReplicaSetEndpointShardingState::~ReplicaSetEndpointShardingState() = default;
 
 ReplicaSetEndpointShardingState* ReplicaSetEndpointShardingState::get(
     ServiceContext* serviceContext) {
@@ -57,13 +63,32 @@ ReplicaSetEndpointShardingState* ReplicaSetEndpointShardingState::get(OperationC
 void ReplicaSetEndpointShardingState::setIsConfigShard(bool value) {
     invariant(serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
 
-    stdx::unique_lock<Latch> ul(_mutex);
+    stdx::unique_lock wLock(_mutex);  // NOLINT
     _isConfigShard = value;
 }
 
 bool ReplicaSetEndpointShardingState::isConfigShardForTest() {
-    stdx::unique_lock<Latch> ul(_mutex);
+    std::shared_lock rLock(_mutex);  // NOLINT
     return _isConfigShard;
+}
+
+bool ReplicaSetEndpointShardingState::supportsReplicaSetEndpoint() {
+    std::shared_lock rLock(_mutex);  // NOLINT
+    return isFeatureFlagEnabled() &&
+        serverGlobalParams.clusterRole.has(ClusterRole::RouterServer) && _isConfigShard &&
+        !clusterHasTwoOrMoreShards();
+}
+
+bool isFeatureFlagEnabled() {
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    return fcvSnapshot.isVersionInitialized() &&
+        feature_flags::gFeatureFlagReplicaSetEndpoint.isEnabled(fcvSnapshot);
+}
+
+bool isFeatureFlagEnabledIgnoreFCV() {
+    // (Ignore FCV check): The ReplicaSetEndpointShardingState needs to be maintained even before
+    // the FCV is fully upgraded.
+    return feature_flags::gFeatureFlagReplicaSetEndpoint.isEnabledAndIgnoreFCVUnsafe();
 }
 
 }  // namespace replica_set_endpoint

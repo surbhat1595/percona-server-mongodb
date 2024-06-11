@@ -217,9 +217,12 @@ OpMsg OpMsg::parse(const Message& message, Client* client) try {
             }
 
             case Section::kSecurityToken: {
+                // MultitenancyCheck is set on mongod and mongos but not mongobridge. This allows
+                // mongobridge to forward messages with a token without requiring it to enable
+                // multitenancySupport.
                 uassert(ErrorCodes::Unauthorized,
                         "Unsupported Security Token provided",
-                        gMultitenancySupport);
+                        gMultitenancySupport || !MultitenancyCheck::getPtr());
                 securityToken = sectionsBuf.readCStr();
                 break;
             }
@@ -253,7 +256,7 @@ OpMsg OpMsg::parse(const Message& message, Client* client) try {
 #endif
     if (gMultitenancySupport) {
         msg.validatedTenancyScope =
-            auth::ValidatedTenancyScope::create(client, msg.body, securityToken);
+            auth::ValidatedTenancyScopeFactory::parse(client, msg.body, securityToken);
     }
 
     return msg;
@@ -334,6 +337,7 @@ bool appendDollarTenant(BSONObjBuilder& builder,
 BSONObj appendDollarDbAndTenant(const DatabaseName& dbName,
                                 BSONObj body,
                                 const SerializationContext& sc,
+                                const bool hasVts,
                                 const BSONObj& extraFields = {}) {
     auto existingDollarTenant = parseDollarTenant(body);
     BSONObjBuilder builder(std::move(body));
@@ -342,15 +346,18 @@ BSONObj appendDollarDbAndTenant(const DatabaseName& dbName,
     if (sc != SerializationContext::stateDefault()) {
         // Recreate each of the fields according to the sc when copying the body from an existing
         // request.
-        if (sc.receivedNonPrefixedTenantId() && dbName.tenantId())
+        if (!hasVts && sc.receivedNonPrefixedTenantId() && dbName.tenantId()) {
             appendDollarTenant(builder, dbName.tenantId().value(), existingDollarTenant);
+        }
         builder.append("$db", DatabaseNameUtil::serialize(dbName, sc));
-        if (sc.getPrefix() != SerializationContext::Prefix::Default)
+        if (sc.getPrefix() == SerializationContext::Prefix::IncludePrefix) {
             builder.append("expectPrefix",
                            sc.getPrefix() == SerializationContext::Prefix::IncludePrefix);
+        }
     } else {
-        if (dbName.tenantId())
+        if (!hasVts && dbName.tenantId()) {
             appendDollarTenant(builder, dbName.tenantId().value(), existingDollarTenant);
+        }
         builder.append("$db", dbName.serializeWithoutTenantPrefix_UNSAFE());
     }
 
@@ -369,17 +376,6 @@ void OpMsgRequest::setDollarTenant(const TenantId& tenant) {
     body = bodyBuilder.obj();
 }
 
-OpMsgRequest OpMsgRequestBuilder::createWithValidatedTenancyScope(
-    const DatabaseName& dbName,
-    boost::optional<auth::ValidatedTenancyScope> validatedTenancyScope,
-    BSONObj body,
-    const SerializationContext& sc) {
-    OpMsgRequest request;
-
-    request.body = appendDollarDbAndTenant(dbName, std::move(body), sc);
-    request.validatedTenancyScope = validatedTenancyScope;
-    return request;
-}
 namespace {
 std::string compactStr(const std::string& input) {
     if (input.length() > 2024) {
@@ -388,11 +384,9 @@ std::string compactStr(const std::string& input) {
     return input;
 }
 }  // namespace
-
-OpMsgRequest OpMsgRequestBuilder::create(const DatabaseName& dbName,
-                                         BSONObj body,
-                                         const BSONObj& extraFields,
-                                         const SerializationContext& sc) {
+void validateExtraFields(const DatabaseName& dbName,
+                         const BSONObj& body,
+                         const BSONObj& extraFields) {
     int bodySize = body.objsize();
     int extraFieldsSize = extraFields.objsize();
 
@@ -410,10 +404,37 @@ OpMsgRequest OpMsgRequestBuilder::create(const DatabaseName& dbName,
             "db"_attr = dbName.toStringForErrorMsg(),
             "extraFields"_attr = compactStr(extraFields.toString()));
     };
+}
+
+OpMsgRequest OpMsgRequestBuilder::createWithValidatedTenancyScope(
+    const DatabaseName& dbName,
+    boost::optional<auth::ValidatedTenancyScope> validatedTenancyScope,
+    BSONObj body,
+    const BSONObj& extraFields) {
+    validateExtraFields(dbName, body, extraFields);
+
+    const SerializationContext sc = validatedTenancyScope != boost::none
+        ? SerializationContext::stateCommandRequest(validatedTenancyScope->hasTenantId(),
+                                                    validatedTenancyScope->isFromAtlasProxy())
+        : SerializationContext::stateCommandRequest();
 
     OpMsgRequest request;
+    request.body = appendDollarDbAndTenant(
+        dbName, std::move(body), sc, validatedTenancyScope != boost::none, extraFields);
+    request.validatedTenancyScope = validatedTenancyScope;
 
-    request.body = appendDollarDbAndTenant(dbName, std::move(body), sc, extraFields);
+    return request;
+}
+
+OpMsgRequest OpMsgRequestBuilder::create(const DatabaseName& dbName,
+                                         BSONObj body,
+                                         const BSONObj& extraFields,
+                                         const SerializationContext& sc) {
+    validateExtraFields(dbName, body, extraFields);
+
+    OpMsgRequest request;
+    request.body = appendDollarDbAndTenant(dbName, std::move(body), sc, false, extraFields);
+
     return request;
 }
 

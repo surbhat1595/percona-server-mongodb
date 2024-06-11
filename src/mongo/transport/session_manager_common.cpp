@@ -36,9 +36,11 @@
 #endif
 
 #include "mongo/db/auth/restriction_environment.h"
+#include "mongo/db/multitenancy_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/mutex.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/transport/ingress_handshake_metrics.h"
@@ -201,21 +203,21 @@ public:
 };
 
 SessionManagerCommon::SessionManagerCommon(ServiceContext* svcCtx)
-    : SessionManagerCommon(svcCtx, std::vector<std::unique_ptr<ClientTransportObserver>>()) {}
+    : SessionManagerCommon(svcCtx, std::vector<std::shared_ptr<ClientTransportObserver>>()) {}
 
 // Helper for single observer constructor.
 // std::initializer_list uses copy semantics, so we can't just call the vector version with:
 // `{std::make_unique<MyObserver>()}`.
 // Instead, construct with an empty array then push our singular one in.
 SessionManagerCommon::SessionManagerCommon(ServiceContext* svcCtx,
-                                           std::unique_ptr<ClientTransportObserver> observer)
+                                           std::shared_ptr<ClientTransportObserver> observer)
     : SessionManagerCommon(svcCtx) {
     invariant(observer);
     _observers.push_back(std::move(observer));
 }
 
 SessionManagerCommon::SessionManagerCommon(
-    ServiceContext* svcCtx, std::vector<std::unique_ptr<ClientTransportObserver>> observers)
+    ServiceContext* svcCtx, std::vector<std::shared_ptr<ClientTransportObserver>> observers)
     : _svcCtx(svcCtx),
       _maxOpenSessions(getSupportedMax()),
       _sessions(std::make_unique<Sessions>()),
@@ -231,7 +233,22 @@ void SessionManagerCommon::startSession(std::shared_ptr<Session> session) {
         session->shouldOverrideMaxConns(serverGlobalParams.maxConnsOverride);
     const bool verbose = !quiet();
 
-    auto uniqueClient = _svcCtx->getService()->makeClient(getClientThreadName(*session), session);
+    auto service = _svcCtx->getService();
+    // Serverless clusters don't support sharding, so they should only ever use
+    // the Shard service and associated ServiceEntryPoint.
+    // We need to use isEnabledUseLatestFCVWhenUninitialized instead of isEnabled because
+    // this could run during startup while the FCV is still uninitialized.
+    if (feature_flags::gEmbeddedRouter.isEnabledUseLatestFCVWhenUninitialized(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
+        !gMultitenancySupport) {
+        bool isEmbeddedRouter = serverGlobalParams.clusterRole.has(ClusterRole::RouterServer) &&
+            serverGlobalParams.clusterRole.has(ClusterRole::ShardServer);
+        if (isEmbeddedRouter && session->isFromRouterPort()) {
+            service = _svcCtx->getService(ClusterRole::RouterServer);
+        }
+    }
+
+    auto uniqueClient = service->makeClient(getClientThreadName(*session), session);
     auto client = uniqueClient.get();
 
     std::shared_ptr<transport::SessionWorkflow> workflow;
@@ -247,6 +264,7 @@ void SessionManagerCommon::startSession(std::shared_ptr<Session> session) {
                       "remote"_attr = session->remote(),
                       "connectionCount"_attr = sync.size());
             }
+            session->end();
             return;
         }
 
@@ -262,6 +280,7 @@ void SessionManagerCommon::startSession(std::shared_ptr<Session> session) {
         }
     }
 
+    onClientConnect(client);
     for (auto&& observer : _observers) {
         observer->onClientConnect(client);
     }
@@ -289,6 +308,7 @@ bool SessionManagerCommon::shutdown(Milliseconds timeout) {
     // harder to dry up the server from active connections before going on to really shut down.
     // In non-sanitizer builds, a feature flag can enable a true shutdown anyway. We use the
     // flag to identify these shutdown problems in testing.
+    using namespace fmt::literals;
     if (kSanitizerBuild || gJoinIngressSessionsOnShutdown) {
         const auto result = shutdownAndWait(timeout);
         invariant(result || !gJoinIngressSessionsOnShutdown,
@@ -329,12 +349,6 @@ bool SessionManagerCommon::waitForNoSessions(Milliseconds timeout) {
     return _sessions->sync().waitForEmpty(deadline);
 }
 
-void SessionManagerCommon::appendStats(BSONObjBuilder* bob) const {
-    for (auto&& observer : _observers) {
-        observer->appendTransportServerStats(bob);
-    }
-}
-
 std::size_t SessionManagerCommon::numOpenSessions() const {
     auto sync = _sessions->sync();
     return sync.size();
@@ -345,6 +359,7 @@ std::size_t SessionManagerCommon::numCreatedSessions() const {
 }
 
 void SessionManagerCommon::endSessionByClient(Client* client) {
+    onClientDisconnect(client);
     for (auto&& observer : _observers) {
         observer->onClientDisconnect(client);
     }
@@ -356,6 +371,7 @@ void SessionManagerCommon::endSessionByClient(Client* client) {
     auto sync = _sessions->sync();
     auto iter = sync.find(client);
     auto summary = iter->second.summary;
+    iter->second.workflow->terminate();
     sync.erase(iter);
     if (!quiet()) {
         LOGV2(22944, "Connection ended", logAttrs(summary), "connectionCount"_attr = sync.size());

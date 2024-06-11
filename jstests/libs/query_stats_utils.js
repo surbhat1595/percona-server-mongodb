@@ -1,3 +1,5 @@
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+
 export const kShellApplicationName = "MongoDB Shell";
 export const kDefaultQueryStatsHmacKey = BinData(8, "MjM0NTY3ODkxMDExMTIxMzE0MTUxNjE3MTgxOTIwMjE=");
 
@@ -7,11 +9,19 @@ export const kDefaultQueryStatsHmacKey = BinData(8, "MjM0NTY3ODkxMDExMTIxMzE0MTU
  */
 export function verifyMetrics(batch) {
     batch.forEach(element => {
+        function skipMetric(summaryValues) {
+            // Skip over fields that aren't aggregated metrics with sum/min/max (execCount,
+            // lastExecutionMicros). We also skip metrics that are aggregated, but that haven't
+            // yet been updated (i.e have a sum of 0). This can happen on occasion when new metrics
+            // are not yet in use, or are guarded by a feature flag. Instead, it may be better to
+            // keep a list of the metrics we expect to see here in the long term for a more
+            // consistent check.
+            return summaryValues.sum === undefined ||
+                (typeof summaryValues.sum === "object" && summaryValues.sum.valueOf() === 0);
+        }
         if (element.metrics.execCount === 1) {
             for (const [metricName, summaryValues] of Object.entries(element.metrics)) {
-                // Skip over fields that aren't aggregated metrics with sum/min/max (execCount,
-                // lastExecutionMicros).
-                if (summaryValues.sum === undefined) {
+                if (skipMetric(summaryValues)) {
                     continue;
                 }
                 const debugInfo = {[metricName]: summaryValues};
@@ -23,9 +33,7 @@ export function verifyMetrics(batch) {
             }
         } else {
             for (const [metricName, summaryValues] of Object.entries(element.metrics)) {
-                // Skip over fields that aren't aggregated metrics with sum/min/max (execCount,
-                // lastExecutionMicros).
-                if (summaryValues.sum === undefined) {
+                if (skipMetric(summaryValues)) {
                     continue;
                 }
                 const debugInfo = {[metricName]: summaryValues};
@@ -185,6 +193,9 @@ export function confirmAllExpectedFieldsPresent(expectedKey, resultingKey) {
             // client meta data is environment/machine dependent, so do not
             // assert on fields or specific fields other than the application name.
             assert.eq(resultingKey.client.application.name, kShellApplicationName);
+            // SERVER-83926 We should never report the "mongos" section, since it is too specific
+            // and would result in too many different query shapes.
+            assert(!resultingKey.client.hasOwnProperty("mongos"), resultingKey.client);
             continue;
         }
         if (!expectedKey.hasOwnProperty(field)) {
@@ -195,8 +206,11 @@ export function confirmAllExpectedFieldsPresent(expectedKey, resultingKey) {
         assert(expectedKey.hasOwnProperty(field), field);
         assert.eq(expectedKey[field], resultingKey[field]);
     }
+
     // Make sure the resulting key isn't missing any fields.
-    assert.eq(fieldsCounter, Object.keys(expectedKey).length, resultingKey);
+    assert.eq(fieldsCounter,
+              Object.keys(expectedKey).length,
+              "Query Shape Key is missing or has extra fields: " + tojson(resultingKey));
 }
 
 export function assertExpectedResults(results,
@@ -207,7 +221,7 @@ export function assertExpectedResults(results,
                                       expectedDocsReturnedMin,
                                       expectedDocsReturnedSumOfSq,
                                       getMores) {
-    const {key, metrics} = results;
+    const {key, metrics, asOf} = results;
     confirmAllExpectedFieldsPresent(expectedQueryStatsKey, key);
     assert.eq(expectedExecCount, metrics.execCount);
     assert.docEq({
@@ -231,6 +245,7 @@ export function assertExpectedResults(results,
     assert.neq(lastExecutionMicros, NumberLong(0));
     assert.neq(firstSeenTimestamp.getTime(), 0);
     assert.neq(latestSeenTimestamp.getTime(), 0);
+    assert.neq(asOf.getTime(), 0);
 
     const distributionFields = ['sum', 'max', 'min', 'sumOfSquares'];
     for (const field of distributionFields) {
@@ -252,6 +267,30 @@ export function assertExpectedResults(results,
             assert.eq(totalExecMicros[field], firstResponseExecMicros[field]);
         }
     }
+}
+
+export function assertAggregatedMetric(results, metricName, {sum, min, max, sumOfSq}) {
+    const {key, metrics, asOf} = results;
+
+    assert.docEq({
+        sum: NumberLong(sum),
+        max: NumberLong(max),
+        min: NumberLong(min),
+        sumOfSquares: NumberLong(sumOfSq)
+    },
+                 metrics[metricName],
+                 `Metric: ${metricName}`);
+}
+
+export function assertAggregatedBoolean(results, metricName, {trueCount, falseCount}) {
+    const {key, metrics, asOf} = results;
+
+    assert.docEq({
+        "true": NumberLong(trueCount),
+        "false": NumberLong(falseCount),
+    },
+                 metrics[metricName],
+                 `Metric: ${metricName}`);
 }
 
 export function asFieldPath(str) {
@@ -287,6 +326,37 @@ function hasValueAtPath(object, dottedPath) {
 }
 
 /**
+ * Runs an assertion callback function on a node with query stats enabled - once with a mongod, and
+ * once with a mongos.
+ * @param {String} collName - The desired collection name to use. The db will be "test".
+ * @param {Function} callbackFn - The function to make the assertion on each connection.
+ */
+export function withQueryStatsEnabled(collName, callbackFn) {
+    const options = {
+        setParameter: {internalQueryStatsRateLimit: -1},
+    };
+
+    {
+        const conn = MongoRunner.runMongod(options);
+        const testDB = conn.getDB("test");
+        var coll = testDB[collName];
+        coll.drop();
+
+        callbackFn(coll);
+        MongoRunner.stopMongod(conn);
+    }
+
+    {
+        const st = new ShardingTest({shards: 2, mongosOptions: options});
+        const testDB = st.getDB("test");
+        var coll = testDB[collName];
+        st.shardColl(coll, {_id: 1}, {_id: 1});
+
+        callbackFn(coll);
+        st.stop();
+    }
+}
+/**
  * We run the command on an new database with an empty collection that has an index {v:1}. We then
  * obtain the queryStats key entry that is created and check the following things.
  * 1. The command associated with the key matches the commandName.
@@ -301,73 +371,67 @@ function hasValueAtPath(object, dottedPath) {
  * @param {object} keyFields - List of outer fields not nested inside queryShape but should be part
  *     of the key
  */
-export function runCommandAndValidateQueryStats({commandName, commandObj, shapeFields, keyFields}) {
-    let options = {
-        setParameter: {internalQueryStatsRateLimit: -1},
-    };
-
-    const conn = MongoRunner.runMongod(options);
-    const testDB = conn.getDB("test");
-    var coll = testDB[jsTestName()];
-    coll.drop();
-
-    // Have to create an index for hint not to fail.
-    assert.commandWorked(coll.createIndex({v: 1}));
-
+export function runCommandAndValidateQueryStats(
+    {coll, commandName, commandObj, shapeFields, keyFields}) {
+    const testDB = coll.getDB();
     assert.commandWorked(testDB.runCommand(commandObj));
-    let stats = getQueryStats(conn);
-    assert.eq(1, stats.length);
+    const entry = getLatestQueryStatsEntry(testDB.getMongo(), {collName: coll.getName()});
 
-    for (const entry of stats) {
-        assert.eq(entry.key.queryShape.command, commandName);
-        const kApplicationName = "MongoDB Shell";
-        assert.eq(entry.key.client.application.name, kApplicationName);
+    assert.eq(entry.key.queryShape.command, commandName);
+    const kApplicationName = "MongoDB Shell";
+    assert.eq(entry.key.client.application.name, kApplicationName);
 
-        {
-            assert(hasValueAtPath(entry, "key.client.driver"), entry);
-            assert(hasValueAtPath(entry, "key.client.driver.name"), entry);
-            assert(hasValueAtPath(entry, "key.client.driver.version"), entry);
-        }
-
-        {
-            assert(hasValueAtPath(entry, "key.client.os"), entry);
-            assert(hasValueAtPath(entry, "key.client.os.type"), entry);
-            assert(hasValueAtPath(entry, "key.client.os.name"), entry);
-            assert(hasValueAtPath(entry, "key.client.os.architecture"), entry);
-            assert(hasValueAtPath(entry, "key.client.os.version"), entry);
-        }
-
-        // Every path in shapeFields is in the queryShape.
-        let shapeFieldsPrefixes = [];
-        for (const field of shapeFields) {
-            assert(hasValueAtPath(entry.key.queryShape, field),
-                   `QueryShape: ${tojson(entry.key.queryShape)} is missing field ${field}`);
-            shapeFieldsPrefixes.push(field.split(".")[0]);
-        }
-
-        // Every field in queryShape is in shapeFields or is the base of a path in shapeFields.
-        for (const field in entry.key.queryShape) {
-            assert(shapeFieldsPrefixes.includes(field),
-                   `Unexpected field ${field} in shape for ${commandName}`);
-        }
-
-        // Every path in keyFields is in the key.
-        let keyFieldsPrefixes = [];
-        for (const field of keyFields) {
-            assert(hasValueAtPath(entry.key, field),
-                   `Key: ${tojson(entry.key)} is missing field ${field}`);
-            keyFieldsPrefixes.push(field.split(".")[0]);
-        }
-
-        // Every field in the key is in keyFields or is the base of a path in keyFields.
-        for (const field in entry.key) {
-            assert(keyFieldsPrefixes.includes(field),
-                   `Unexpected field ${field} in key for ${commandName}`);
-        }
+    {
+        assert(hasValueAtPath(entry, "key.client.driver"), entry);
+        assert(hasValueAtPath(entry, "key.client.driver.name"), entry);
+        assert(hasValueAtPath(entry, "key.client.driver.version"), entry);
     }
+
+    {
+        assert(hasValueAtPath(entry, "key.client.os"), entry);
+        assert(hasValueAtPath(entry, "key.client.os.type"), entry);
+        assert(hasValueAtPath(entry, "key.client.os.name"), entry);
+        assert(hasValueAtPath(entry, "key.client.os.architecture"), entry);
+        assert(hasValueAtPath(entry, "key.client.os.version"), entry);
+    }
+
+    // SERVER-83926 Make sure the mongos section doesn't show up.
+    assert(!hasValueAtPath(entry, "key.client.mongos"), entry);
+
+    // Every path in shapeFields is in the queryShape.
+    let shapeFieldsPrefixes = [];
+    for (const field of shapeFields) {
+        assert(hasValueAtPath(entry.key.queryShape, field),
+               `QueryShape: ${tojson(entry.key.queryShape)} is missing field ${field}`);
+        shapeFieldsPrefixes.push(field.split(".")[0]);
+    }
+
+    // Every field in queryShape is in shapeFields or is the base of a path in shapeFields.
+    for (const field in entry.key.queryShape) {
+        assert(shapeFieldsPrefixes.includes(field),
+               `Unexpected field ${field} in shape for ${commandName}`);
+    }
+
+    // Every path in keyFields is in the key.
+    let keyFieldsPrefixes = [];
+    for (const field of keyFields) {
+        if (field === "collectionType" && FixtureHelpers.isMongos(testDB)) {
+            // TODO SERVER-76263 collectionType is not yet available on mongos.
+            continue;
+        }
+        assert(hasValueAtPath(entry.key, field),
+               `Key: ${tojson(entry.key)} is missing field ${field}`);
+        keyFieldsPrefixes.push(field.split(".")[0]);
+    }
+
+    // Every field in the key is in keyFields or is the base of a path in keyFields.
+    for (const field in entry.key) {
+        assert(keyFieldsPrefixes.includes(field),
+               `Unexpected field ${field} in key for ${commandName}`);
+    }
+
     // $hint can only be string(index name) or object (index spec).
     assert.throwsWithCode(() => {
         coll.find({v: {$eq: 2}}).hint({'v': 60, $hint: -128}).itcount();
     }, ErrorCodes.BadValue);
-    MongoRunner.stopMongod(conn);
 }

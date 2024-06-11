@@ -381,6 +381,7 @@ __verify_addr_string(WT_SESSION_IMPL *session, WT_REF *ref, WT_ITEM *buf)
     WT_DECL_RET;
     char time_string[WT_TIME_STRING_SIZE];
 
+    WT_ENTER_GENERATION(session, WT_GEN_SPLIT);
     WT_ERR(__wt_scr_alloc(session, 0, &tmp));
 
     if (__wt_ref_addr_copy(session, ref, &addr)) {
@@ -392,6 +393,7 @@ __verify_addr_string(WT_SESSION_IMPL *session, WT_REF *ref, WT_ITEM *buf)
 
 err:
     __wt_scr_free(session, &tmp);
+    WT_LEAVE_GENERATION(session, WT_GEN_SPLIT);
     return (buf->data);
 }
 
@@ -434,13 +436,29 @@ __verify_tree(
     unpack = &_unpack;
     page = ref->page;
 
+    /*
+     * The verify operation does not go through the same tree walk flow as other operations
+     * utilizing the regular tree walk function. Check for potential pages to pre-fetch here as
+     * well.
+     */
+    if (__wt_session_prefetch_check(session, ref)) {
+        ret = __wt_btree_prefetch(session, ref);
+        /*
+         * It's okay for pre-fetch to fail to start here. We want to assert on an error to gain
+         * diagnostic information, then continue the rest of verify as normal.
+         */
+        WT_PREFETCH_ASSERT(session, ret != WT_ERROR, block_prefetch_failed_start);
+        ret = 0;
+    }
+
     __wt_verbose(session, WT_VERB_VERIFY, "%s %s", __verify_addr_string(session, ref, vs->tmp1),
       __wt_page_type_string(page->type));
 
     /* Optionally dump address information. */
     if (vs->dump_address)
-        WT_RET(__wt_msg(session, "%s %s", __verify_addr_string(session, ref, vs->tmp1),
-          __wt_page_type_string(page->type)));
+        WT_RET(__wt_msg(session, "%s %s write gen: %" PRIu64,
+          __verify_addr_string(session, ref, vs->tmp1), __wt_page_type_string(page->type),
+          page->dsk->write_gen));
 
     /* Track the shape of the tree. */
     if (F_ISSET(ref, WT_REF_FLAG_INTERNAL))
@@ -641,16 +659,22 @@ celltype_err:
             ++vs->depth;
             ret = __wt_page_in(session, child_ref, 0);
 
-            /*
-             * If configured, continue traversing through the pages of the tree even after
-             * encountering errors reading in the page.
-             */
-            if (vs->read_corrupt && ret != 0) {
+            if (ret != 0) {
+                if (vs->dump_address)
+                    WT_TRET(__wt_msg(session,
+                      "%s Read failure while accessing a page from the column internal page (ret = "
+                      "%d).",
+                      __verify_addr_string(session, child_ref, vs->tmp1), ret));
+                if (!vs->read_corrupt)
+                    WT_RET(ret);
+                /*
+                 * If read_corrupt configured, continue traversing through the pages of the tree
+                 * even after encountering errors reading in the page.
+                 */
                 if (vs->verify_err == 0)
                     vs->verify_err = ret;
                 continue;
-            } else
-                WT_RET(ret);
+            }
             ret = __verify_tree(session, child_ref, unpack, vs);
             WT_TRET(__wt_page_release(session, child_ref, 0));
             --vs->depth;
@@ -682,16 +706,22 @@ celltype_err:
             ++vs->depth;
             ret = __wt_page_in(session, child_ref, 0);
 
-            /*
-             * If configured, continue traversing through the pages of the tree even after
-             * encountering errors reading in the page.
-             */
-            if (vs->read_corrupt && ret != 0) {
+            if (ret != 0) {
+                if (vs->dump_address)
+                    WT_TRET(__wt_msg(session,
+                      "%s Read failure while accessing a page from the row internal page (ret = "
+                      "%d).",
+                      __verify_addr_string(session, child_ref, vs->tmp1), ret));
+                if (!vs->read_corrupt)
+                    WT_RET(ret);
+                /*
+                 * If read_corrupt is configured, continue traversing through the pages of the tree
+                 * even after encountering errors reading in the page.
+                 */
                 if (vs->verify_err == 0)
                     vs->verify_err = ret;
                 continue;
-            } else
-                WT_RET(ret);
+            }
             ret = __verify_tree(session, child_ref, unpack, vs);
             WT_TRET(__wt_page_release(session, child_ref, 0));
             --vs->depth;

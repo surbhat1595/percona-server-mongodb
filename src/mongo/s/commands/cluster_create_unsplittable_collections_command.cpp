@@ -84,7 +84,7 @@ public:
 
             bool isTrackUnshardedEnabled =
                 feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(
-                    serverGlobalParams.featureCompatibility);
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
 
             uassert(ErrorCodes::IllegalOperation,
                     "cannot create an unsplittable collection if "
@@ -97,6 +97,7 @@ public:
             svrRequest.setShardKey(BSON("_id" << 1));
             svrRequest.setUnsplittable(true);
             svrRequest.setDataShard(req.getDataShard());
+            svrRequest.setTimeseries(req.getTimeseries());
             svrRequest.setIsFromCreateUnsplittableCollectionTestCommand(true);
             shardsvrCollRequest.setDbName(nss.dbName());
             shardsvrCollRequest.setShardsvrCreateCollectionRequest(svrRequest);

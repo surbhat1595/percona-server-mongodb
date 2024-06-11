@@ -151,9 +151,13 @@ Bucket* useBucketAndChangePreparedState(BucketStateRegistry& registry,
 
 /**
  * Retrieve the open bucket for write use if one exists. If none exists and 'mode' is set to kYes,
- * then we will create a new bucket.
+ * then we will create a new bucket. If the feature flag for alwaysUseCompressedBuckets is enabled,
+ * then we check both that the candidate bucket is open and that its time range accomadates the
+ * time value of the measurement we are attempting to write.
  */
-Bucket* useBucket(Stripe& stripe,
+Bucket* useBucket(OperationContext* opCtx,
+                  BucketCatalog& catalog,
+                  Stripe& stripe,
                   WithLock stripeLock,
                   const CreationInfo& info,
                   AllowBucketCreation mode);
@@ -162,7 +166,10 @@ Bucket* useBucket(Stripe& stripe,
  * Retrieve a previously closed bucket for write use if one exists in the catalog. Considers buckets
  * that are pending closure or archival but which are still eligible to recieve new measurements.
  */
-Bucket* useAlternateBucket(Stripe& stripe, WithLock stripeLock, const CreationInfo& info);
+Bucket* useAlternateBucket(BucketCatalog& catalog,
+                           Stripe& stripe,
+                           WithLock stripeLock,
+                           const CreationInfo& info);
 
 /**
  * Given a bucket to reopen, performs validation and constructs the in-memory representation of the
@@ -172,6 +179,7 @@ Bucket* useAlternateBucket(Stripe& stripe, WithLock stripeLock, const CreationIn
  */
 StatusWith<std::unique_ptr<Bucket>> rehydrateBucket(OperationContext* opCtx,
                                                     BucketStateRegistry& registry,
+                                                    ExecutionStatsController& stats,
                                                     const NamespaceString& ns,
                                                     const StringDataComparator* comparator,
                                                     const TimeseriesOptions& options,
@@ -211,7 +219,7 @@ StatusWith<std::reference_wrapper<Bucket>> reuseExistingBucket(BucketCatalog& ca
  * Given an already-selected 'bucket', inserts 'doc' to the bucket if possible. If not, and 'mode'
  * is set to 'kYes', we will create a new bucket and insert into that bucket.
  */
-stdx::variant<std::shared_ptr<WriteBatch>, RolloverReason> insertIntoBucket(
+std::variant<std::shared_ptr<WriteBatch>, RolloverReason> insertIntoBucket(
     OperationContext* opCtx,
     BucketCatalog& catalog,
     Stripe& stripe,
@@ -222,20 +230,6 @@ stdx::variant<std::shared_ptr<WriteBatch>, RolloverReason> insertIntoBucket(
     AllowBucketCreation mode,
     CreationInfo& info,
     Bucket& existingBucket);
-
-/**
- * Helper method to perform the heavy lifting for both 'tryInsert' and 'insert'. See documentation
- * on callers for more details.
- */
-StatusWith<InsertResult> insert(OperationContext* opCtx,
-                                BucketCatalog& catalog,
-                                const NamespaceString& ns,
-                                const StringDataComparator* comparator,
-                                const TimeseriesOptions& options,
-                                const BSONObj& doc,
-                                CombineWithInsertsFromOtherClients combine,
-                                AllowBucketCreation mode,
-                                ReopeningContext* reopeningContext = nullptr);
 
 /**
  * Wait for other batches to finish so we can prepare 'batch'
@@ -283,13 +277,13 @@ std::pair<int32_t, int32_t> getCacheDerivedBucketMaxSize(uint64_t storageCacheSi
  * represented by 'info', if one exists. Otherwise returns a pipeline to use for query-based
  * reopening if allowed.
  */
-ReopeningContext getReopeningContext(OperationContext* opCtx,
-                                     BucketCatalog& catalog,
-                                     Stripe& stripe,
-                                     WithLock stripeLock,
-                                     const CreationInfo& info,
-                                     uint64_t catalogEra,
-                                     AllowQueryBasedReopening allowQueryBasedReopening);
+InsertResult getReopeningContext(OperationContext* opCtx,
+                                 BucketCatalog& catalog,
+                                 Stripe& stripe,
+                                 WithLock stripeLock,
+                                 const CreationInfo& info,
+                                 uint64_t catalogEra,
+                                 AllowQueryBasedReopening allowQueryBasedReopening);
 
 /**
  * Aborts 'batch', and if the corresponding bucket still exists, proceeds to abort any other
@@ -433,7 +427,7 @@ void closeOpenBucket(OperationContext* opCtx,
 /**
  * Close an archived bucket, setting the state appropriately and removing it from the catalog.
  */
-void closeArchivedBucket(BucketStateRegistry& registry,
+void closeArchivedBucket(BucketCatalog& catalog,
                          ArchivedBucket& bucket,
                          ClosedBuckets& closedBuckets);
 
@@ -447,5 +441,13 @@ void closeArchivedBucket(BucketStateRegistry& registry,
 void runPostCommitDebugChecks(OperationContext* opCtx,
                               const Bucket& bucket,
                               const WriteBatch& batch);
+
+/**
+ * Returns false if a document's time is not within the time range of the bucket - i.e, that it is
+ * either earlier than the minTime of the bucket, or that it is later than the minTime + the
+ * maximum time span of the bucket. Returns true if neither of these are true and the document is
+ * within the time range for the bucket.
+ */
+bool isDocumentWithinTimeRangeForBucket(Bucket* potentialBucket, const CreationInfo& info);
 
 }  // namespace mongo::timeseries::bucket_catalog::internal

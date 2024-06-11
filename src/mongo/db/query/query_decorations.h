@@ -42,6 +42,13 @@ public:
     bool getSbeDisableGroupPushdownForOp();
     bool getSbeDisableLookupPushdownForOp();
     bool getSbeDisableTimeSeriesForOp();
+    size_t getPlanEvaluationMaxResultsForOp();
+    size_t getMaxScansToExplodeForOp();
+    /**
+     * Returns whether we can push down fully compatible stages to sbe. This is only true when the
+     * query knob is 'trySbeEngine'.
+     */
+    bool canPushDownFullyCompatibleStages();
 
 private:
     void _tryToSetAllValues();
@@ -51,5 +58,7 @@ private:
     bool _sbeDisableLookupPushdownValue;
     bool _sbeDisableTimeSeriesValue;
     QueryFrameworkControlEnum _queryFrameworkControlValue;
+    size_t _planEvaluationMaxResults;
+    size_t _maxScansToExplodeValue;
 };
 }  // namespace mongo

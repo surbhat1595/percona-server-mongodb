@@ -10,7 +10,7 @@ import {
     checkCascadesOptimizerEnabled,
     checkExperimentalCascadesOptimizerEnabled
 } from "jstests/libs/optimizer_utils.js";
-import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
+import {checkSbeFullyEnabled} from "jstests/libs/sbe_util.js";
 
 // This test runs manual getMores using different connections, which will not inherit the
 // implicit session of the cursor establishing command.
@@ -80,7 +80,7 @@ function runTests({conn, currentOp, truncatedOps, localOps}) {
     const isLocalMongosCurOp = (FixtureHelpers.isMongos(testDB) && localOps);
     const isRemoteShardCurOp = (FixtureHelpers.isMongos(testDB) && !localOps);
 
-    const sbeEnabled = checkSBEEnabled(testDB);
+    const sbeEnabled = checkSbeFullyEnabled(testDB);
     const cqfEnabled = checkCascadesOptimizerEnabled(testDB);
     const cqfExperimentalEnabled = checkExperimentalCascadesOptimizerEnabled(testDB);
 
@@ -447,12 +447,9 @@ function runTests({conn, currentOp, truncatedOps, localOps}) {
                     comment: "currentop_query_agg_getmore",
                     cursor: {batchSize: 0}
                 },
-                // Even when CQF is enabled, aggregation commands against sharded collections are
-                // not eligible for CQF because mongos attaches unsupported fields including
-                // let parameters and collation to the command sent to the shard.
-                queryFramework: (!isRemoteShardCurOp && cqfEnabled) ? "cqf"
-                    : sbeEnabled                                    ? "sbe"
-                                                                    : "classic",
+                queryFramework: cqfEnabled ? "cqf"
+                    : sbeEnabled           ? "sbe"
+                                           : "classic",
                 cmdName: "aggregate",
             },
         ];
@@ -538,7 +535,7 @@ function runTests({conn, currentOp, truncatedOps, localOps}) {
                 }));
             },
             planSummary: "COLLSCAN",
-            queryFramework: "classic",
+            queryFramework: sbeEnabled ? "sbe" : "classic",
             currentOpFilter: currentOpFilter
         });
 
@@ -555,7 +552,7 @@ function runTests({conn, currentOp, truncatedOps, localOps}) {
                     db.runCommand({find: "currentop_query", filter: TestData.queryFilter}));
             },
             planSummary: "COLLSCAN",
-            queryFramework: "classic",
+            queryFramework: sbeEnabled ? "sbe" : "classic",
             currentOpFilter: currentOpFilter
         });
 
@@ -583,7 +580,7 @@ function runTests({conn, currentOp, truncatedOps, localOps}) {
                 assert.eq(cursor.itcount(), 0);
             },
             planSummary: "COLLSCAN",
-            queryFramework: "classic",
+            queryFramework: sbeEnabled ? "sbe" : "classic",
             currentOpFilter: currentOpFilter,
         });
 
@@ -610,7 +607,7 @@ function runTests({conn, currentOp, truncatedOps, localOps}) {
                 }));
             },
             planSummary: "COLLSCAN",
-            queryFramework: "classic",
+            queryFramework: sbeEnabled ? "sbe" : "classic",
             currentOpFilter: currentOpFilter,
         });
 

@@ -45,12 +45,12 @@
 
 namespace mongo {
 
-WiredTigerCursor::WiredTigerCursor(const std::string& uri,
+WiredTigerCursor::WiredTigerCursor(WiredTigerRecoveryUnit& ru,
+                                   const std::string& uri,
                                    uint64_t tableID,
-                                   bool allowOverwrite,
-                                   OperationContext* opCtx) {
+                                   bool allowOverwrite) {
     _tableID = tableID;
-    _ru = WiredTigerRecoveryUnit::get(opCtx);
+    _ru = &ru;
     _session = _ru->getSession();
     _isCheckpoint =
         (_ru->getTimestampReadSource() == WiredTigerRecoveryUnit::ReadSource::kCheckpoint);
@@ -63,7 +63,7 @@ WiredTigerCursor::WiredTigerCursor(const std::string& uri,
     if (_isCheckpoint) {
         // Type can be "lsm" or "file".
         std::string type, sourceURI;
-        WiredTigerUtil::fetchTypeAndSourceURI(opCtx, uri, &type, &sourceURI);
+        WiredTigerUtil::fetchTypeAndSourceURI(ru, uri, &type, &sourceURI);
         uassert(ErrorCodes::InvalidOptions,
                 str::stream() << "LSM does not support opening cursors by checkpoint",
                 type != "lsm");
@@ -105,12 +105,12 @@ WiredTigerCursor::~WiredTigerCursor() {
     }
 }
 
-WiredTigerBulkLoadCursor::WiredTigerBulkLoadCursor(const std::string& indexUri,
-                                                   OperationContext* opCtx)
-    : _session(WiredTigerRecoveryUnit::get(opCtx)->getSessionCache()->getSession()) {
+WiredTigerBulkLoadCursor::WiredTigerBulkLoadCursor(WiredTigerRecoveryUnit& ru,
+                                                   const std::string& indexUri)
+    : _session(ru.getSessionCache()->getSession()) {
     // Open cursors can cause bulk open_cursor to fail with EBUSY.
     // TODO any other cases that could cause EBUSY?
-    WiredTigerSession* outerSession = WiredTigerRecoveryUnit::get(opCtx)->getSession();
+    WiredTigerSession* outerSession = ru.getSession();
     outerSession->closeAllCursors(indexUri);
 
     // The 'checkpoint_wait=false' option is set to prefer falling back on the "non-bulk" cursor

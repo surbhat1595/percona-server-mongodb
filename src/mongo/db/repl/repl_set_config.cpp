@@ -62,7 +62,6 @@
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/stdx/unordered_set.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/net/cidr.h"
@@ -73,6 +72,7 @@
 
 namespace mongo {
 namespace repl {
+using namespace fmt::literals;
 
 // Allow the heartbeat interval to be forcibly overridden on this node.
 MONGO_FAIL_POINT_DEFINE(forceHeartbeatIntervalMS);
@@ -405,8 +405,10 @@ Status ReplSetConfig::_validate(bool allowSplitHorizonIP) const {
                       "one non-arbiter member with priority > 0");
     }
 
+    // (Ignore FCV check): If gFeatureFlagAllMongodsAreSharded is on, we want to allow reconfig-ing
+    // the replset even if it doesn't have configsvr: true in the config, regardless of the FCV.
     if (getConfigServer_deprecated() ||
-        (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup() &&
+        (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafe() &&
          serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer))) {
         if (arbiterCount > 0) {
             return Status(ErrorCodes::BadValue,
@@ -449,7 +451,8 @@ Status ReplSetConfig::_validate(bool allowSplitHorizonIP) const {
         // that all nodes in the replica set eventually have the same cluster role, the server
         // fasserts (on startup or replication) if the shard identity document matches the server's
         // cluster role. For why this is correct and for more context see: SERVER-80249
-        if (!gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+        if (!gFeatureFlagAllMongodsAreSharded.isEnabledUseLatestFCVWhenUninitialized(
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
             return Status(ErrorCodes::BadValue,
                           "Nodes started with the --configsvr flag must have configsvr:true in "
                           "their config");
@@ -472,7 +475,7 @@ Status ReplSetConfig::_validate(bool allowSplitHorizonIP) const {
 
 Status ReplSetConfig::checkIfWriteConcernCanBeSatisfied(
     const WriteConcernOptions& writeConcern) const {
-    if (auto wNumNodes = stdx::get_if<int64_t>(&writeConcern.w)) {
+    if (auto wNumNodes = get_if<int64_t>(&writeConcern.w)) {
         if (*wNumNodes > getNumDataBearingMembers()) {
             return Status(ErrorCodes::UnsatisfiableWriteConcern, "Not enough data-bearing nodes");
         }
@@ -481,9 +484,9 @@ Status ReplSetConfig::checkIfWriteConcernCanBeSatisfied(
     }
 
     StatusWith<ReplSetTagPattern> tagPatternStatus = [&]() {
-        auto wMode = stdx::get_if<std::string>(&writeConcern.w);
+        auto wMode = get_if<std::string>(&writeConcern.w);
         return wMode ? findCustomWriteMode(*wMode)
-                     : makeCustomWriteMode(stdx::get<WTags>(writeConcern.w));
+                     : makeCustomWriteMode(get<WTags>(writeConcern.w));
     }();
 
     if (!tagPatternStatus.isOK()) {
@@ -504,9 +507,9 @@ Status ReplSetConfig::checkIfWriteConcernCanBeSatisfied(
     // Even if all the nodes in the set had a given write it still would not satisfy this
     // write concern mode.
     auto wModeForError = [&]() {
-        auto wMode = stdx::get_if<std::string>(&writeConcern.w);
+        auto wMode = get_if<std::string>(&writeConcern.w);
         return wMode ? fmt::format("\"{}\"", *wMode)
-                     : fmt::format("{}", stdx::get<WTags>(writeConcern.w));
+                     : fmt::format("{}", get<WTags>(writeConcern.w));
     }();
 
     return Status(ErrorCodes::UnsatisfiableWriteConcern,
@@ -779,8 +782,7 @@ bool ReplSetConfig::containsCustomizedGetLastErrorDefaults() const {
     // Since the ReplSetConfig always has a WriteConcernOptions, the only way to know if it has been
     // customized through getLastErrorDefaults is if it's different from { w: 1, wtimeout: 0 }.
     const auto& getLastErrorDefaults = getDefaultWriteConcern();
-    if (auto wNumNodes = stdx::get_if<int64_t>(&getLastErrorDefaults.w);
-        !wNumNodes || *wNumNodes != 1)
+    if (auto wNumNodes = get_if<int64_t>(&getLastErrorDefaults.w); !wNumNodes || *wNumNodes != 1)
         return true;
     if (getLastErrorDefaults.wTimeout != Milliseconds::zero())
         return true;
@@ -791,7 +793,7 @@ bool ReplSetConfig::containsCustomizedGetLastErrorDefaults() const {
 
 Status ReplSetConfig::validateWriteConcern(const WriteConcernOptions& writeConcern) const {
     if (writeConcern.hasCustomWriteMode()) {
-        return findCustomWriteMode(stdx::get<std::string>(writeConcern.w)).getStatus();
+        return findCustomWriteMode(get<std::string>(writeConcern.w)).getStatus();
     }
     return Status::OK();
 }

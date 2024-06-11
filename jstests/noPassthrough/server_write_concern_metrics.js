@@ -1,11 +1,9 @@
-// Tests writeConcern metrics in the serverStatus output.
+// Tests writeConcern metrics in the serverStatus output for a replica set.
 // @tags: [
 //   requires_journaling,
 //   requires_persistence,
 //   requires_replication,
 // ]
-(function() {
-"use strict";
 
 load("jstests/libs/write_concern_util.js");  // For isDefaultWriteConcernMajorityFlagEnabled.
 
@@ -72,6 +70,20 @@ function verifyServerStatusChange(initialStats, newStats, paths, expectedIncreme
                   ", initialStats: " + tojson(initialStats) + ", newStats: " + tojson(newStats));
 }
 
+// Generate commands that will be using default write concern.
+function generateCmdsWithNoWCProvided(cmd) {
+    return [
+        cmd,
+        // Missing 'w' field will be filled with default write concern.
+        Object.assign(Object.assign({}, cmd), {writeConcern: {}}),
+        Object.assign(Object.assign({}, cmd), {writeConcern: {j: true}}),
+        Object.assign(Object.assign({}, cmd), {writeConcern: {wtimeout: 2000}})
+    ];
+}
+
+(function() {
+"use strict";
+
 let rst;
 let primary;
 let secondary;
@@ -110,104 +122,90 @@ function resetCollection(setupCommand) {
 }
 
 function testWriteConcernMetrics(cmd, opName, inc, isPSASet, setupCommand) {
+    jsTestLog("Testing " + opName + " - IsPSA: " + isPSASet);
     initializeReplicaSet(isPSASet);
     const isDefaultWCMajorityFlagEnabled = isDefaultWriteConcernMajorityFlagEnabled(primary);
 
     // Run command with no writeConcern and no CWWC set.
-    resetCollection(setupCommand);
-    let serverStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
-    verifyServerStatusFields(serverStatus);
-    assert.commandWorked(testDB.runCommand(cmd));
-    let newStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
-    verifyServerStatusChange(
-        serverStatus.opWriteConcernCounters,
-        newStatus.opWriteConcernCounters,
-        [
-            opName +
-                (isDefaultWCMajorityFlagEnabled ? (isPSASet ? ".noneInfo.implicitDefault.wnum.1"
-                                                            : ".noneInfo.implicitDefault.wmajority")
-                                                : ".noneInfo.implicitDefault.wnum.1"),
-            opName + ".none"
-        ],
-        inc);
+    const cmdsWithNoWCProvided = generateCmdsWithNoWCProvided(cmd);
+    let serverStatus, newStatus;
+    cmdsWithNoWCProvided.forEach(cmd => {
+        resetCollection(setupCommand);
+        serverStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
+        verifyServerStatusFields(serverStatus);
+        assert.commandWorked(testDB.runCommand(cmd));
+        newStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
+        verifyServerStatusChange(serverStatus.opWriteConcernCounters,
+                                 newStatus.opWriteConcernCounters,
+                                 [
+                                     opName +
+                                         (isDefaultWCMajorityFlagEnabled
+                                              ? (isPSASet ? ".noneInfo.implicitDefault.wnum.1"
+                                                          : ".noneInfo.implicitDefault.wmajority")
+                                              : ".noneInfo.implicitDefault.wnum.1"),
+                                     opName + ".none"
+                                 ],
+                                 inc);
+    });
 
     // Run command with no writeConcern with CWWC set to majority.
-    resetCollection(setupCommand);
     assert.commandWorked(primary.adminCommand({
         setDefaultRWConcern: 1,
         defaultWriteConcern: {w: "majority"},
         writeConcern: {w: "majority"}
     }));
-    serverStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
-    verifyServerStatusFields(serverStatus);
-    assert.commandWorked(testDB.runCommand(cmd));
-    newStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
-    verifyServerStatusChange(serverStatus.opWriteConcernCounters,
-                             newStatus.opWriteConcernCounters,
-                             [opName + ".noneInfo.CWWC.wmajority", opName + ".none"],
-                             inc);
+    cmdsWithNoWCProvided.forEach(cmd => {
+        resetCollection(setupCommand);
+        serverStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
+        verifyServerStatusFields(serverStatus);
+        assert.commandWorked(testDB.runCommand(cmd));
+        newStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
+        verifyServerStatusChange(serverStatus.opWriteConcernCounters,
+                                 newStatus.opWriteConcernCounters,
+                                 [opName + ".noneInfo.CWWC.wmajority", opName + ".none"],
+                                 inc);
+    });
 
     // Run command with no writeConcern with CWWC set to w:1.
-    resetCollection(setupCommand);
     assert.commandWorked(primary.adminCommand(
         {setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}, writeConcern: {w: "majority"}}));
-    serverStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
-    verifyServerStatusFields(serverStatus);
-    assert.commandWorked(testDB.runCommand(cmd));
-    newStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
-    verifyServerStatusChange(serverStatus.opWriteConcernCounters,
-                             newStatus.opWriteConcernCounters,
-                             [opName + ".noneInfo.CWWC.wnum.1", opName + ".none"],
-                             inc);
-
-    // Run command with no writeConcern and with CWWC set to j:true.
-    resetCollection(setupCommand);
-    assert.commandWorked(primary.adminCommand(
-        {setDefaultRWConcern: 1, defaultWriteConcern: {j: true}, writeConcern: {w: "majority"}}));
-    serverStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
-    verifyServerStatusFields(serverStatus);
-    assert.commandWorked(testDB.runCommand(cmd));
-    newStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
-    verifyServerStatusChange(serverStatus.opWriteConcernCounters,
-                             newStatus.opWriteConcernCounters,
-                             [opName + ".noneInfo.CWWC.wnum.1", opName + ".none"],
-                             inc);
+    cmdsWithNoWCProvided.forEach(cmd => {
+        resetCollection(setupCommand);
+        serverStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
+        verifyServerStatusFields(serverStatus);
+        assert.commandWorked(testDB.runCommand(cmd));
+        newStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
+        verifyServerStatusChange(serverStatus.opWriteConcernCounters,
+                                 newStatus.opWriteConcernCounters,
+                                 [opName + ".noneInfo.CWWC.wnum.1", opName + ".none"],
+                                 inc);
+    });
 
     // Run command with no writeConcern and with CWWC set with (w: "myTag").
-    resetCollection(setupCommand);
     assert.commandWorked(primary.adminCommand({
         setDefaultRWConcern: 1,
         defaultWriteConcern: {w: "myTag"},
         writeConcern: {w: "majority"}
     }));
-    serverStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
-    verifyServerStatusFields(serverStatus);
-    assert.commandWorked(testDB.runCommand(cmd));
-    newStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
-    verifyServerStatusChange(serverStatus.opWriteConcernCounters,
-                             newStatus.opWriteConcernCounters,
-                             [opName + ".noneInfo.CWWC.wtag.myTag", opName + ".none"],
-                             inc);
-
-    // Run command with writeConcern {j: true}. This should be counted as having no 'w' value.
-    resetCollection(setupCommand);
-    serverStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
-    verifyServerStatusFields(serverStatus);
-    assert.commandWorked(
-        testDB.runCommand(Object.assign(Object.assign({}, cmd), {writeConcern: {j: true}})));
-    newStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
-    verifyServerStatusChange(serverStatus.opWriteConcernCounters,
-                             newStatus.opWriteConcernCounters,
-                             [opName + ".noneInfo.implicitDefault.wnum.1", opName + ".none"],
-                             inc);
+    cmdsWithNoWCProvided.forEach(cmd => {
+        resetCollection(setupCommand);
+        serverStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
+        verifyServerStatusFields(serverStatus);
+        assert.commandWorked(testDB.runCommand(cmd));
+        newStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
+        verifyServerStatusChange(serverStatus.opWriteConcernCounters,
+                                 newStatus.opWriteConcernCounters,
+                                 [opName + ".noneInfo.CWWC.wtag.myTag", opName + ".none"],
+                                 inc);
+    });
 
     // Run command with writeConcern {w: "majority"}.
     resetCollection(setupCommand);
-    serverStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
+    serverStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
     verifyServerStatusFields(serverStatus);
     assert.commandWorked(
         testDB.runCommand(Object.assign(Object.assign({}, cmd), {writeConcern: {w: "majority"}})));
-    newStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
+    newStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
     verifyServerStatusChange(serverStatus.opWriteConcernCounters,
                              newStatus.opWriteConcernCounters,
                              [opName + ".wmajority"],
@@ -215,23 +213,30 @@ function testWriteConcernMetrics(cmd, opName, inc, isPSASet, setupCommand) {
 
     // Run command with writeConcern {w: 0}.
     resetCollection(setupCommand);
-    serverStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
+    serverStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
     verifyServerStatusFields(serverStatus);
     assert.commandWorked(
         testDB.runCommand(Object.assign(Object.assign({}, cmd), {writeConcern: {w: 0}})));
-    newStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
-    verifyServerStatusChange(serverStatus.opWriteConcernCounters,
-                             newStatus.opWriteConcernCounters,
-                             [opName + ".wnum.0"],
-                             inc);
+    assert.soon(() => {
+        newStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
+        try {
+            verifyServerStatusChange(serverStatus.opWriteConcernCounters,
+                                     newStatus.opWriteConcernCounters,
+                                     [opName + ".wnum.0"],
+                                     inc);
+        } catch (e) {
+            return false;
+        }
+        return true;
+    });
 
     // Run command with writeConcern {w: 1}.
     resetCollection(setupCommand);
-    serverStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
+    serverStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
     verifyServerStatusFields(serverStatus);
     assert.commandWorked(
         testDB.runCommand(Object.assign(Object.assign({}, cmd), {writeConcern: {w: 1}})));
-    newStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
+    newStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
     verifyServerStatusChange(serverStatus.opWriteConcernCounters,
                              newStatus.opWriteConcernCounters,
                              [opName + ".wnum.1"],
@@ -239,11 +244,11 @@ function testWriteConcernMetrics(cmd, opName, inc, isPSASet, setupCommand) {
 
     // Run command with writeConcern {w: 2}.
     resetCollection(setupCommand);
-    serverStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
+    serverStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
     verifyServerStatusFields(serverStatus);
     assert.commandWorked(
         testDB.runCommand(Object.assign(Object.assign({}, cmd), {writeConcern: {w: 2}})));
-    newStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
+    newStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
     verifyServerStatusChange(serverStatus.opWriteConcernCounters,
                              newStatus.opWriteConcernCounters,
                              [opName + ".wnum.2"],
@@ -251,11 +256,11 @@ function testWriteConcernMetrics(cmd, opName, inc, isPSASet, setupCommand) {
 
     // Run command with writeConcern {w: "myTag"}.
     resetCollection(setupCommand);
-    serverStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
+    serverStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
     verifyServerStatusFields(serverStatus);
     assert.commandWorked(
         testDB.runCommand(Object.assign(Object.assign({}, cmd), {writeConcern: {w: "myTag"}})));
-    newStatus = assert.commandWorked(testDB.adminCommand({serverStatus: 1}));
+    newStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
     verifyServerStatusChange(serverStatus.opWriteConcernCounters,
                              newStatus.opWriteConcernCounters,
                              [opName + ".wtag.myTag"],

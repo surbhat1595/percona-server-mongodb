@@ -32,6 +32,9 @@
 #define LOGV2_FOR_ELECTION(ID, DLEVEL, MESSAGE, ...) \
     LOGV2_DEBUG_OPTIONS(                             \
         ID, DLEVEL, {logv2::LogComponent::kReplicationElection}, MESSAGE, ##__VA_ARGS__)
+#define LOGV2_FOR_HEARTBEATS(ID, DLEVEL, MESSAGE, ...) \
+    LOGV2_DEBUG_OPTIONS(                               \
+        ID, DLEVEL, {logv2::LogComponent::kReplicationHeartbeats}, MESSAGE, ##__VA_ARGS__)
 
 #include "mongo/platform/basic.h"
 
@@ -177,6 +180,13 @@ ServerStatusMetricField<Counter64> displayNumAutoReconfigs(
     "repl.reconfig.numAutoReconfigsForRemovalOfNewlyAddedFields",
     &numAutoReconfigsForRemovalOfNewlyAddedFields);
 
+Atomic64Metric replicationWaiterListMetric;
+ServerStatusMetricField<Atomic64Metric> displayReplicationWaiterListMetric(
+    "repl.waiters.replication", &replicationWaiterListMetric);
+Atomic64Metric opTimeWaiterListMetric;
+ServerStatusMetricField<Atomic64Metric> displayOpTimeWaiterListMetric("repl.waiters.opTime",
+                                                                      &opTimeWaiterListMetric);
+
 using namespace fmt::literals;
 
 using CallbackArgs = executor::TaskExecutor::CallbackArgs;
@@ -214,15 +224,24 @@ constexpr StringData kQuiesceModeShutdownMessage =
 
 }  // namespace
 
+ReplicationCoordinatorImpl::WaiterList::WaiterList(Atomic64Metric& waiterCountMetric)
+    : _waiterCountMetric(waiterCountMetric) {}
+
+void ReplicationCoordinatorImpl::WaiterList::_updateMetric_inlock() {
+    _waiterCountMetric.set(_waiters.size());
+}
+
 void ReplicationCoordinatorImpl::WaiterList::add_inlock(const OpTime& opTime,
                                                         SharedWaiterHandle waiter) {
     _waiters.emplace(opTime, std::move(waiter));
+    _updateMetric_inlock();
 }
 
 SharedSemiFuture<void> ReplicationCoordinatorImpl::WaiterList::add_inlock(
     const OpTime& opTime, boost::optional<WriteConcernOptions> wc) {
     auto pf = makePromiseFuture<void>();
     _waiters.emplace(opTime, std::make_shared<Waiter>(std::move(pf.promise), std::move(wc)));
+    _updateMetric_inlock();
     return std::move(pf.future);
 }
 
@@ -230,6 +249,7 @@ bool ReplicationCoordinatorImpl::WaiterList::remove_inlock(SharedWaiterHandle wa
     for (auto iter = _waiters.begin(); iter != _waiters.end(); iter++) {
         if (iter->second == waiter) {
             _waiters.erase(iter);
+            _updateMetric_inlock();
             return true;
         }
     }
@@ -253,6 +273,7 @@ void ReplicationCoordinatorImpl::WaiterList::setValueIf_inlock(Func&& func,
             it = _waiters.erase(it);
         }
     }
+    _updateMetric_inlock();
 }
 
 void ReplicationCoordinatorImpl::WaiterList::setValueAll_inlock() {
@@ -260,6 +281,7 @@ void ReplicationCoordinatorImpl::WaiterList::setValueAll_inlock() {
         waiter->promise.emplaceValue();
     }
     _waiters.clear();
+    _updateMetric_inlock();
 }
 
 void ReplicationCoordinatorImpl::WaiterList::setErrorAll_inlock(Status status) {
@@ -268,6 +290,7 @@ void ReplicationCoordinatorImpl::WaiterList::setErrorAll_inlock(Status status) {
         waiter->promise.setError(status);
     }
     _waiters.clear();
+    _updateMetric_inlock();
 }
 
 namespace {
@@ -322,6 +345,8 @@ ReplicationCoordinatorImpl::ReplicationCoordinatorImpl(
       _topCoord(std::move(topCoord)),
       _replExecutor(std::move(executor)),
       _externalState(std::move(externalState)),
+      _replicationWaiterList(replicationWaiterListMetric),
+      _opTimeWaiterList(opTimeWaiterListMetric),
       _inShutdown(false),
       _memberState(MemberState::RS_STARTUP),
       _rsConfigState(kConfigPreStart),
@@ -559,6 +584,12 @@ void ReplicationCoordinatorImpl::_createHorizonTopologyChangePromiseMapping(With
     // to change after a replica set reconfig.
     _horizonToTopologyChangePromiseMap.clear();
     for (auto const& [horizon, hostAndPort] : horizonMappings) {
+        LOGV2_FOR_HEARTBEATS(8697308,
+                             5,
+                             "Add horizonToTopologyChangePromiseMap",
+                             "selfIndex"_attr = _selfIndex,
+                             "horizon"_attr = horizon,
+                             "host"_attr = hostAndPort);
         _horizonToTopologyChangePromiseMap.emplace(
             horizon, std::make_shared<SharedPromise<std::shared_ptr<const HelloResponse>>>());
     }
@@ -2213,6 +2244,7 @@ std::shared_ptr<HelloResponse> ReplicationCoordinatorImpl::_makeHelloResponse(
         response->setIsWritablePrimary(false);
         response->setIsSecondary(false);
     }
+    LOGV2_FOR_HEARTBEATS(8697307, 5, "Make hello response", "response"_attr = *response);
     return response;
 }
 
@@ -4212,6 +4244,11 @@ void ReplicationCoordinatorImpl::_fulfillTopologyChangePromise(WithLock lock) {
         } else {
             StringData horizonString = iter->first;
             auto response = _makeHelloResponse(horizonString, lock, hasValidConfig);
+            LOGV2_FOR_HEARTBEATS(8697306,
+                                 5,
+                                 "Fulfill Topology change",
+                                 "horizon"_attr = horizonString,
+                                 "response"_attr = *response);
             // Fulfill the promise and replace with a new one for future waiters.
             iter->second->emplaceValue(response);
             iter->second = std::make_shared<SharedPromise<std::shared_ptr<const HelloResponse>>>();
@@ -4232,6 +4269,12 @@ void ReplicationCoordinatorImpl::_fulfillTopologyChangePromise(WithLock lock) {
             } else {
                 const auto horizon = sni.empty() ? SplitHorizon::kDefaultHorizon : iter->second;
                 const auto response = _makeHelloResponse(horizon, lock, hasValidConfig);
+                LOGV2_FOR_HEARTBEATS(8697305,
+                                     5,
+                                     "Fulfill topology change on joining",
+                                     "sni"_attr = sni,
+                                     "horizon"_attr = horizon,
+                                     "response"_attr = *response);
                 promise->emplaceValue(response);
             }
         }

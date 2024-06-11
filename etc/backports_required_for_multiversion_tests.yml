@@ -21,6 +21,16 @@
 #
 last-continuous:
   all:
+  - test_file: jstests/replsets/dbcheck_skip_applying_batch_on_secondary_parameter.js
+    ticket: SERVER-88885
+  - test_file: jstests/replsets/ignore_dbcheck_in_startup_recovery.js
+    ticket: SERVER-30832
+  - test_file: jstests/replsets/ignore_dbcheck_in_rollback.js
+    ticket: SERVER-30832
+  - test_file: jstests/replsets/ignore_dbcheck_in_initial_sync.js
+    ticket: SERVER-80340
+  - test_file: jstests/replsets/dbcheck_fails_on_write_concern_error.js
+    ticket: SERVER-88318
   - test_file: jstests/sharding/query/find_and_modify_with_partial_shard_key.js
     ticket: SERVER-44422
   - test_file: jstests/sharding/query/delete_with_partial_shard_key.js
@@ -137,6 +147,16 @@ last-continuous:
     ticket: SERVER-82353
   - test_file: jstests/core/txns/out_not_blocked_by_txn.js
     ticket: SERVER-72703
+  - test_file: jstests/core/query/bittest.js
+    ticket: SERVER-86419
+  - test_file: jstests/core/query/internal_strip_invalid_assignment.js
+    ticket: SERVER-82717
+  - test_file: jstests/noPassthrough/server_status_metrics_retryable_writes.js
+    ticket: SERVER-86253
+  - test_file: jstests/replsets/reconstruct_prepared_transactions_initial_sync.js
+    ticket: SERVER-89618
+  - test_file: jstests/core/timeseries/timeseries_lookup.js
+    ticket: SERVER-79637
   suites:
     change_streams_multiversion_passthrough: null
     change_streams_sharded_collections_multiversion_passthrough: null
@@ -148,6 +168,16 @@ last-continuous:
     sharding_jscore_multiversion_passthrough: null
 last-lts:
   all:
+  - test_file: jstests/replsets/dbcheck_skip_applying_batch_on_secondary_parameter.js
+    ticket: SERVER-88885
+  - test_file: jstests/replsets/dbcheck_fails_on_write_concern_error.js
+    ticket: SERVER-88318
+  - test_file: jstests/replsets/ignore_dbcheck_in_startup_recovery.js
+    ticket: SERVER-30832
+  - test_file: jstests/replsets/ignore_dbcheck_in_rollback.js
+    ticket: SERVER-30832
+  - test_file: jstests/replsets/ignore_dbcheck_in_initial_sync.js
+    ticket: SERVER-80340
   - test_file: jstests/core/null_query_semantics.js
     ticket: SERVER-21929
   - test_file: jstests/core/or_to_in.js
@@ -336,6 +366,18 @@ last-lts:
     ticket: SERVER-82353
   - test_file: jstests/core/txns/out_not_blocked_by_txn.js
     ticket: SERVER-72703
+  - test_file: jstests/core/query/bittest.js
+    ticket: SERVER-86419
+  - test_file: jstests/core/query/internal_strip_invalid_assignment.js
+    ticket: SERVER-82717
+  - test_file: jstests/noPassthrough/server_status_metrics_retryable_writes.js
+    ticket: SERVER-86253
+  - test_file: jstests/replsets/reconstruct_prepared_transactions_initial_sync.js
+    ticket: SERVER-89618
+  - test_file: jstests/core/timeseries/timeseries_lookup.js
+    ticket: SERVER-79637
+  - test_file: jstests/replsets/log_wt_stats_during_secondary_oplog_application.js
+    ticket: SERVER-78509
   suites:
     change_streams_multiversion_passthrough: null
     change_streams_sharded_collections_multiversion_passthrough: null

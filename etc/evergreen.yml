@@ -607,7 +607,7 @@ functions:
   "get buildnumber": &get_buildnumber
     command: keyval.inc
     params:
-      key: "${build_variant}_v5.0"
+      key: "${build_variant}_${project}"
       destination: "builder_num"
 
   "run diskstats": &run_diskstats
@@ -1044,11 +1044,6 @@ functions:
 
   "generate burn in tags":
     - *f_expansions_write
-    - *kill_processes
-    - *cleanup_environment
-    - *set_up_venv
-    - *upload_pip_requirements
-    - *configure_evergreen_api_credentials
     - command: subprocess.exec
       type: test
       params:
@@ -1865,6 +1860,14 @@ functions:
         - "src/evergreen/run_python_script.sh"
         - "buildscripts/sync_repo_with_copybara.py --expansion-file ../expansions.yml"
 
+  "cleanup external auth test artifacts":
+    - *f_expansions_write
+    - command: subprocess.exec
+      params:
+        binary: bash
+        args:
+          - "./src/evergreen/sasl_windows_cyrussasl_teardown.sh"
+
 # Pre task steps
 pre:
   - func: "set task expansion macros"
@@ -1890,6 +1893,7 @@ post:
   - func: "umount shared scons directory"
   - func: "cleanup FUSE watchdog"
   - func: "cleanup environment"
+  - func: "cleanup external auth test artifacts"
 
 # Timeout steps
 timeout:
@@ -5475,6 +5479,22 @@ tasks:
     vars:
       resmoke_args: --suites=sasl --storageEngine=wiredTiger
 
+- <<: *task_template
+  name: sasl_windows_cyrussasl
+  tags: []
+  commands:
+  - func: "f_expansions_write"
+  - func: "do setup"
+  - func: "f_expansions_write"
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+        - "src/evergreen/sasl_windows_cyrussasl_setup.sh"
+  - func: "run tests"
+    vars:
+      resmoke_args: --suites=sasl_windows_cyrussasl --storageEngine=wiredTiger
+
 - <<: *gen_task_template
   name: sharding_gen
   tags: ["sharding", "common"]
@@ -6142,7 +6162,6 @@ tasks:
     - func: "scons compile"
       vars:
         targets: >-
-          distsrc-${ext|tgz}
           archive-dist
           archive-dist-debug
           archive-shell
@@ -6165,19 +6184,6 @@ tasks:
         binary: bash
         args:
           - "src/evergreen/package.sh"
-    - command: s3.put
-      params:
-        aws_key: ${aws_key}
-        aws_secret: ${aws_secret}
-        local_file: src/distsrc.${ext|tgz}
-        remote_file: ${project}/${build_variant}/${revision}/sources/mongo-src-${build_id}.${ext|tgz}
-        bucket: mciuploads
-        permissions: public-read
-        content_type: ${content_type|application/gzip}
-        display_name: Source tarball
-        # We only need to upload the source tarball from one of the build variants
-        # because it should be the same everywhere, so just use rhel70/windows.
-        build_variants: [rhel70, windows]
     - command: s3.put
       params:
         optional: true
@@ -6364,15 +6370,6 @@ tasks:
         bucket: mciuploads
         local_file: src/mh.tgz
         build_variants: *mh_variants
-    # Fetch the sources (on relevant variants only)
-    - command: s3.get
-      params:
-        aws_key: ${aws_key}
-        aws_secret: ${aws_secret}
-        remote_file: ${project}/${build_variant}/${revision}/sources/mongo-src-${build_id}.${ext|tgz}
-        bucket: mciuploads
-        local_file: src/distsrc.${ext|tgz}
-        build_variants: [rhel70, windows]
     - func: "apply compile expansions"
     - func: "fetch dist debugsymbols"
     - func: "set up remote credentials"
@@ -6444,17 +6441,6 @@ tasks:
         content_type: ${content_type|application/gzip}
         remote_file: ${push_path}-STAGE/${push_name}/mh-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}
         build_variants: *mh_variants
-    # Put the source tarball
-    - command: s3.put
-      params:
-        aws_secret: ${aws_secret}
-        local_file: src/mongodb-src-${src_suffix}.${ext|tar.gz}
-        aws_key: ${aws_key}
-        bucket: build-push-testing
-        permissions: public-read
-        content_type: ${content_type|application/gzip}
-        remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}
-        build_variants: [rhel70, windows]
 
     # Put the debug symbols
     # push directly to repo due to limitations in file size SERVER-63432
@@ -6502,18 +6488,6 @@ tasks:
         content_type: ${content_type|application/gzip}
         remote_file: ${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sig
         build_variants: *mongocryptd_variants
-
-    # Put the source tarball signature
-    - command: s3.put
-      params:
-        aws_secret: ${aws_secret}
-        local_file: src/mongodb-src-${src_suffix}.${ext|tar.gz}.sig
-        aws_key: ${aws_key}
-        bucket: build-push-testing
-        permissions: public-read
-        content_type: ${content_type|application/gzip}
-        remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sig
-        build_variants: [rhel70, windows]
 
     # Put the debug symbols signature
     - command: s3.put
@@ -6573,18 +6547,6 @@ tasks:
         remote_file: ${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha1
         build_variants: *mongocryptd_variants
 
-    # Put the source tarball sha1
-    - command: s3.put
-      params:
-        aws_secret: ${aws_secret}
-        local_file: src/mongodb-src-${src_suffix}.${ext|tar.gz}.sha1
-        aws_key: ${aws_key}
-        permissions: public-read
-        bucket: build-push-testing
-        content_type: text/plain
-        remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sha1
-        build_variants: [rhel70, windows]
-
     # Put the debug symbols sha1
     - command: s3.put
       params:
@@ -6642,18 +6604,6 @@ tasks:
         content_type: text/plain
         remote_file: ${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha256
         build_variants: *mongocryptd_variants
-
-    # Put the source tarball sha256
-    - command: s3.put
-      params:
-        aws_secret: ${aws_secret}
-        local_file: src/mongodb-src-${src_suffix}.${ext|tar.gz}.sha256
-        permissions: public-read
-        aws_key: ${aws_key}
-        bucket: build-push-testing
-        content_type: text/plain
-        remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sha256
-        build_variants: [rhel70, windows]
 
     # Put the debug symbols sha256
     - command: s3.put
@@ -6713,18 +6663,6 @@ tasks:
         remote_file: ${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.md5
         build_variants: *mongocryptd_variants
 
-    # Put the source tarball md5
-    - command: s3.put
-      params:
-        aws_secret: ${aws_secret}
-        local_file: src/mongodb-src-${src_suffix}.${ext|tar.gz}.md5
-        aws_key: ${aws_key}
-        bucket: build-push-testing
-        permissions: public-read
-        content_type: text/plain
-        remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.md5
-        build_variants: [rhel70, windows]
-
     # Put the debug symbols md5
     - command: s3.put
       params:
@@ -6772,11 +6710,6 @@ tasks:
                'destination': {'path': '${push_path}/mh-${push_name}-${push_arch}-${suffix}.${ext|tgz}', 'bucket': '${push_bucket}'},
                'build_variants': *mh_variants}
 
-            #Source tarball
-            - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}', 'bucket': 'build-push-testing'},
-               'destination': {'path': 'src/mongodb-src-${src_suffix}.${ext|tar.gz}', 'bucket': '${push_bucket}'},
-               'build_variants': ['rhel70', 'windows']}
-
             #MSI (Windows only)
             - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}-signed.msi', 'bucket': 'build-push-testing'},
                'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-${suffix}-signed.msi', 'bucket': '${push_bucket}'},
@@ -6795,11 +6728,6 @@ tasks:
                'destination': {'path': '${push_path}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sig', 'bucket': '${push_bucket}'},
                'build_variants': *mongocryptd_variants}
 
-            #Source tarball signature
-            - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sig', 'bucket': 'build-push-testing'},
-               'destination': {'path': 'src/mongodb-src-${src_suffix}.${ext|tar.gz}.sig', 'bucket': '${push_bucket}'},
-               'build_variants': ['rhel70', 'windows']}
-
             #SHA1 for binaries
             - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha1', 'bucket': 'build-push-testing'},
                'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha1', 'bucket': '${push_bucket}'}}
@@ -6812,11 +6740,6 @@ tasks:
             - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.sha1', 'bucket': 'build-push-testing'},
                'destination': {'path': '${push_path}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha1', 'bucket': '${push_bucket}'},
                'build_variants': *mongocryptd_variants}
-
-            #SHA1 for source tarball
-            - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sha1', 'bucket': 'build-push-testing'},
-               'destination': {'path': 'src/mongodb-src-${src_suffix}.${ext|tar.gz}.sha1', 'bucket': '${push_bucket}'},
-               'build_variants': ['rhel70', 'windows']}
 
             #SHA1 for MSI
             - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}-signed.msi.sha1', 'bucket': 'build-push-testing'},
@@ -6836,11 +6759,6 @@ tasks:
                'destination': {'path': '${push_path}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}.${ext|tgz}.sha256', 'bucket': '${push_bucket}'},
                'build_variants': *mongocryptd_variants}
 
-            #SHA256 for source tarball
-            - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sha256', 'bucket': 'build-push-testing'},
-               'destination': {'path': 'src/mongodb-src-${src_suffix}.${ext|tar.gz}.sha256', 'bucket': '${push_bucket}'},
-               'build_variants': ['rhel70', 'windows']}
-
             #SHA256 for MSI files
             - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}-signed.msi.sha256', 'bucket': 'build-push-testing'},
                'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-${suffix}-signed.msi.sha256', 'bucket': '${push_bucket}'},
@@ -6858,11 +6776,6 @@ tasks:
             - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}-${task_id}.${ext|tgz}.md5', 'bucket': 'build-push-testing'},
                'destination': {'path': '${push_path}/mongodb-cryptd-${push_name}-${push_arch}-${suffix}.${ext|tgz}.md5', 'bucket': '${push_bucket}'},
                'build_variants': *mongocryptd_variants}
-
-            #MD5 for source tarball
-            - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.md5', 'bucket': 'build-push-testing'},
-               'destination': {'path': 'src/mongodb-src-${src_suffix}.${ext|tar.gz}.md5', 'bucket': '${push_bucket}'},
-               'build_variants': ['rhel70', 'windows']}
 
             #MD5 for MSIs
             - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}-signed.msi.md5', 'bucket': 'build-push-testing'},
@@ -7322,7 +7235,7 @@ buildvariants:
 - &linux-64-debug-required-template
   name: linux-64-debug-required
   display_name: "! Shared Library Linux DEBUG"
-  batchtime: *batchtime_two_day
+  cron: "0 4 * * *" # Every day starting at 04:00
   run_on:
   - rhel80-medium
   expansions:
@@ -8049,7 +7962,7 @@ buildvariants:
 - name: enterprise-amazon2
   display_name: "Enterprise Amazon Linux 2"
   run_on:
-  - amazon2-test
+  - amazon2-latest-small
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     test_flags: >-
@@ -8070,7 +7983,7 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
-    - amazon2-build
+    - amazon2-latest-large
   - name: build_variant_gen
   - name: .aggfuzzer .common
   - name: aggregation
@@ -8098,7 +8011,7 @@ buildvariants:
 - name: amazon2
   display_name: Amazon Linux 2
   run_on:
-  - amazon2-test
+  - amazon2-latest-small
   expansions:
     test_flags: >-
       --excludeWithAnyTags=SERVER-34286,incompatible_with_amazon_linux,requires_latch_analyzer
@@ -8116,11 +8029,11 @@ buildvariants:
     packager_distro: amazon2
     repo_edition: org
     scons_cache_scope: shared
-    large_distro_name: amazon2-large
+    large_distro_name: amazon2-latest-large
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
-    - amazon2-build
+    - amazon2-latest-large
   - name: build_variant_gen
   - name: .aggfuzzer .common
   - name: aggregation
@@ -8148,7 +8061,7 @@ buildvariants:
 - name: enterprise-amazon2-openssl111
   display_name: "Enterprise Amazon Linux 2 (openssl 1.1.1)"
   run_on:
-  - amazon2-openssl111-small
+  - amazon2-openssl111-latest-small
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug
     test_flags: >-
@@ -8169,7 +8082,7 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
-    - amazon2-openssl111-large
+    - amazon2-openssl111-latest-large
   - name: build_variant_gen
   - name: .aggfuzzer .common
   - name: aggregation
@@ -8198,7 +8111,7 @@ buildvariants:
 - name: enterprise-amazon2-arm64
   display_name: "Enterprise Amazon Linux 2 arm64"
   run_on:
-  - amazon2-arm64-small
+  - amazon2-arm64-latest-small
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
     push_path: linux
@@ -8216,7 +8129,7 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: build_variant_gen
   - name: .aggfuzzer !.multiversion
   - name: audit
@@ -8246,7 +8159,7 @@ buildvariants:
 - name: amazon2-arm64
   display_name: Amazon Linux 2 arm64
   run_on:
-  - amazon2-arm64-small
+  - amazon2-arm64-latest-small
   expansions:
     push_path: linux
     push_bucket: downloads.mongodb.org
@@ -8260,11 +8173,11 @@ buildvariants:
     packager_distro: amazon2
     repo_edition: org
     scons_cache_scope: shared
-    large_distro_name: amazon2-arm64-large
+    large_distro_name: amazon2-arm64-latest-large
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-latest-large
   - name: build_variant_gen
   - name: aggregation
   - name: .auth !.audit !.multiversion
@@ -8272,7 +8185,7 @@ buildvariants:
   - name: .misc_js
   - name: .concurrency .common
     distros:
-      - amazon2-arm64-large
+      - amazon2-arm64-latest-large
   - name: concurrency_replication_causal_consistency_gen
   - name: disk_wiredtiger
   - name: .jscore .common
@@ -8491,7 +8404,7 @@ buildvariants:
 - name: enterprise-amazon2-arm64-openssl111
   display_name: "Enterprise Amazon Linux 2 arm64 (openssl 1.1.1)"
   run_on:
-  - amazon2-arm64-openssl111-small
+  - amazon2-arm64-openssl111-latest-small
   expansions:
     additional_package_targets: archive-mongocryptd archive-mongocryptd-debug archive-mh archive-mh-debug
     push_path: linux
@@ -8509,7 +8422,7 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
-    - amazon2-arm64-large
+    - amazon2-arm64-openssl111-latest-large
   - name: build_variant_gen
   - name: .aggfuzzer !.multiversion
   - name: audit
@@ -8625,7 +8538,7 @@ buildvariants:
 - &enterprise-windows-required-template
   name: enterprise-windows-required
   display_name: "! Enterprise Windows"
-  batchtime: *batchtime_two_day
+  cron: "0 4 * * *" # Every day starting at 04:00
   run_on:
   - windows-vsCurrent-small
   expansions:
@@ -8722,6 +8635,7 @@ buildvariants:
     - name: .replica_sets .multi_oplog
     - name: replica_sets_ese_gen
     - name: sasl
+    - name: sasl_windows_cyrussasl
     - name: server_discovery_and_monitoring_json_test_TG
     - name: server_selection_json_test_TG
     - name: .sharding .txns
@@ -8897,6 +8811,7 @@ buildvariants:
   - name: .read_write_concern
   - name: replica_sets_gen
   - name: replica_sets_jscore_passthrough
+  - name: sasl_windows_cyrussasl
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .txns
   - name: .sharding .common !.op_query !.csrs
@@ -8955,35 +8870,16 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
   - name: compile_build_tools_next_TG
   - name: build_variant_gen
-  - name: .aggregation !.auth !.encrypt !.unwind
+  - name: aggregation
   - name: .auth .gle
   - name: auth_gen
-  - name: .causally_consistent !.sharding
-  - name: .change_streams !.secondary_reads
   - name: .misc_js
-  - name: .concurrency !.ubsan !.no_txns !.debug_only !.kill_terminate
   - name: disk_wiredtiger
-  - name: initial_sync_fuzzer_gen
-  - name: .jscore .common !.auth
-  - name: jsCore_txns_large_txns_format
-  - name: .jstestfuzz .causal
-  - name: .jstestfuzz .interrupt
-  - name: .jstestfuzz .common
-  - name: .jstestfuzz .session
+  - name: .jscore .common !.auth !.sharding
   - name: .logical_session_cache .one_sec
-  - name: .query_fuzzer
-  - name: .read_write_concern !.linearize
   - name: replica_sets_gen
-  - name: replica_sets_kill_secondaries_jscore_passthrough
-  - name: replica_sets_large_txns_format_gen
   - name: .replica_sets .common !.auth
-  - name: retryable_writes_jscore_passthrough_gen
-  - name: .rollbackfuzzer
-  - name: session_jscore_passthrough
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !sharding_update_v1_oplog_jscore_passthrough
-  - name: .sharding .txns
   - name: .ssl
-  - name: .stitch
   - name: unittest_shell_hang_analyzer_gen
   - name: push
 
@@ -9005,16 +8901,12 @@ buildvariants:
   - name: build_variant_gen
   - name: aggregation
   - name: auth_gen
-  - name: causally_consistent_jscore_txns_passthrough
   - name: disk_wiredtiger
   - name: failpoints
   - name: .jscore .common !.auth !.sharding
-  - name: jsCore_txns_large_txns_format
   - name: mongosTest
   - name: replica_sets_gen
-  - name: replica_sets_large_txns_format_gen
   - name: .ssl
-  - name: .stitch
   - name: unittest_shell_hang_analyzer_gen
 
 - name: enterprise-macos
@@ -9039,14 +8931,10 @@ buildvariants:
   - name: build_variant_gen
   - name: audit
   - name: auth_audit_gen
-  - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.sharding !.aggregation !.jscore
-  - name: .jscore .common !.compat !.decimal !.sharding
-  - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
   - name: mqlrun
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
   - name: sasl
   - name: push
 
@@ -9217,7 +9105,7 @@ buildvariants:
 - &enterprise-rhel-80-64-bit-dynamic-required-template
   name: enterprise-rhel-80-64-bit-dynamic-required
   display_name: "! Shared Library Enterprise RHEL 8.0"
-  batchtime: *batchtime_one_day
+  cron: "0 4 * * *" # Every day starting at 04:00
   run_on:
   - rhel80-small
   expansions: &enterprise-rhel-80-64-bit-dynamic-required-expansions
@@ -9339,7 +9227,7 @@ buildvariants:
 
 - name: enterprise-rhel-80-64-bit-dynamic-latches-disabled-required
   display_name: "! Shared Library Enterprise RHEL 8.0 (without Diagnostic Latches)"
-  batchtime: *batchtime_one_day
+  cron: "0 4 * * *" # Every day starting at 04:00
   run_on:
   - rhel80-small
   expansions:
@@ -9463,7 +9351,7 @@ buildvariants:
 - &enterprise-rhel-80-64-bit-dynamic-backport-feature-flags-required-template
   name: enterprise-rhel-80-64-bit-dynamic-backport-feature-flags-required
   display_name: "! Shared Library Enterprise RHEL 8.0 (Backport Feature Flags)"
-  batchtime: *batchtime_two_day
+  cron: "0 4 * * *" # Every day starting at 04:00
   run_on:
     - rhel80-small
   expansions:
@@ -10177,7 +10065,7 @@ buildvariants:
     tooltags: ""
     build_mongoreplay: true
     test_flags: >-
-      --excludeWithAnyTags=requires_os_access
+      --excludeWithAnyTags=requires_os_access,requires_latch_analyzer
       --enableEnterpriseTests=off
   tasks:
   - name: compile_and_archive_dist_test_then_package_TG
@@ -10356,7 +10244,7 @@ buildvariants:
   run_on:
   - rhel76-test
   expansions:
-    compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --modules=
+    compile_flags: --ssl MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --modules= --use-diagnostic-latches=on
     test_flags: --enableEnterpriseTests=off
   tasks:
   - name: compile_and_archive_dist_test_then_package_TG
@@ -10599,7 +10487,7 @@ buildvariants:
 
 - name: enterprise-ubuntu-dynamic-1804-clang-tidy-required
   display_name: "! Enterprise Clang Tidy"
-  batchtime: *batchtime_one_week
+  cron: "0 4 * * *" # Every day starting at 04:00
   run_on:
    - ubuntu1804-xlarge
   expansions:
@@ -10899,8 +10787,10 @@ buildvariants:
     push_name: linux
     push_arch: x86_64-enterprise-debian10
     compile_flags: --ssl MONGO_DISTMOD=debian10 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
-    multiversion_platform: debian10
-    multiversion_edition: enterprise
+    multiversion_platform: linux_x86_64
+    multiversion_edition: base
+    multiversion_platform_42_or_later: debian10
+    multiversion_edition_42_or_later: enterprise
     has_packages: true
     packager_script: packager_enterprise.py
     packager_arch: x86_64
@@ -10940,8 +10830,10 @@ buildvariants:
     push_arch: x86_64-debian10
     compile_flags: --ssl MONGO_DISTMOD=debian10 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --modules=
     test_flags: --enableEnterpriseTests=off --excludeWithAnyTags=requires_latch_analyzer
-    multiversion_platform: debian10
-    multiversion_edition: targeted
+    multiversion_platform: linux_x86_64
+    multiversion_edition: base
+    multiversion_platform_42_or_later: debian10
+    multiversion_edition_42_or_later: targeted
     has_packages: true
     packager_script: packager.py
     packager_arch: x86_64
@@ -11240,7 +11132,7 @@ buildvariants:
     # also made to SConstruct.
     san_options: LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer" ASAN_OPTIONS="detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
     compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=address --ssl --ocsp-stapling=off -j$(grep -c ^processor /proc/cpuinfo)
-    test_flags: --excludeWithAnyTags=requires_fast_memory,requires_ocsp_stapling,requires_increased_memlock_limits
+    test_flags: --excludeWithAnyTags=requires_fast_memory,requires_ocsp_stapling,requires_increased_memlock_limits,requires_latch_analyzer
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under ASAN build.
@@ -11331,7 +11223,7 @@ buildvariants:
     # also made to SConstruct.
     san_options: UBSAN_OPTIONS="print_stacktrace=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
     compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --sanitize=undefined --ssl --ocsp-stapling=off -j$(grep -c ^processor /proc/cpuinfo)
-    test_flags: --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits
+    test_flags: --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits,requires_latch_analyzer
     multiversion_platform: ubuntu1804
     multiversion_edition: enterprise
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under UBSAN build.
@@ -11385,7 +11277,7 @@ buildvariants:
 - &ubuntu1804-debug-aubsan-lite-required-template
   name: ubuntu1804-debug-aubsan-lite-required
   display_name: "! Shared Library {A,UB}SAN Enterprise Ubuntu 18.04 DEBUG"
-  batchtime: *batchtime_one_week
+  cron: "0 4 * * *" # Every day starting at 04:00
   run_on:
   - ubuntu1804-build
   stepback: true
@@ -11395,7 +11287,7 @@ buildvariants:
     # If you add anything to san_options, make sure the appropriate changes are
     # also made to SConstruct.
     san_options: UBSAN_OPTIONS="print_stacktrace=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer" LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1" ASAN_OPTIONS="detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
-    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=undefined,address --ssl --ocsp-stapling=off -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=undefined,address --ssl --ocsp-stapling=off -j$(grep -c ^processor /proc/cpuinfo) --link-model=dynamic --use-diagnostic-latches=on
     test_flags: --excludeWithAnyTags=requires_ocsp_stapling
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under {A,UB}SAN build.
     hang_analyzer_dump_core: false
@@ -11438,7 +11330,7 @@ buildvariants:
     # of the ServiceContext.
     san_options: TSAN_OPTIONS="halt_on_error=1:report_thread_leaks=0:die_after_fork=0:suppressions=etc/tsan.suppressions:external_symbolizer_path=/opt/mongodbtoolchain/v3/bin/llvm-symbolizer"
     test_flags: --storageEngine=ephemeralForTest --excludeWithAnyTags=requires_persistence,requires_journaling,uses_transactions,requires_wiredtiger,requires_snapshot_read,requires_majority_read_concern
-    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=thread --ssl --use-libunwind=off -j$(grep -c ^processor /proc/cpuinfo)
+    compile_flags: --variables-files=etc/scons/mongodbtoolchain_v3_clang.vars --dbg=on --opt=on --allocator=system --sanitize=thread --ssl --use-libunwind=off -j$(grep -c ^processor /proc/cpuinfo) --use-diagnostic-latches=on
     # Avoid starting too many mongod's under TSAN build.
     resmoke_jobs_factor: 0.3
     scons_cache_scope: shared
@@ -11690,7 +11582,7 @@ buildvariants:
   run_on:
   - rhel80-medium
   expansions:
-    compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic
+    compile_flags: --ssl MONGO_DISTMOD=rhel80 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars --link-model=dynamic --use-diagnostic-latches=on
     multiversion_platform: rhel80
     multiversion_edition: enterprise
     has_packages: false

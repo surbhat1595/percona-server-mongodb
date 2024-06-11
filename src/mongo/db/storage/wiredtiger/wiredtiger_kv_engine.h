@@ -187,6 +187,8 @@ public:
     void dropIdentForImport(OperationContext* opCtx, StringData ident) override;
 
     void keydbDropDatabase(const std::string& db) override;
+    
+    Status alterMetadata(StringData uri, StringData config);
 
     void flushAllFiles(OperationContext* opCtx, bool callerHoldsReadLock) override;
 

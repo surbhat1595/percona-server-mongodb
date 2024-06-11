@@ -87,6 +87,7 @@ Status validateDepth(const BSONObj& obj) {
 
 StatusWith<BSONObj> fixDocumentForInsert(OperationContext* opCtx,
                                          const BSONObj& doc,
+                                         bool preserveEmptyTimestamps,
                                          bool* containsDotsAndDollarsField) {
     bool validationDisabled = DocumentValidationSettings::get(opCtx).isInternalValidationDisabled();
 
@@ -122,7 +123,9 @@ StatusWith<BSONObj> fixDocumentForInsert(OperationContext* opCtx,
             auto fieldName = e.fieldNameStringData();
 
             if (fieldName[0] == '$') {
-                if (!feature_flags::gFeatureFlagDotsAndDollars.isEnabledAndIgnoreFCV()) {
+                if (!serverGlobalParams.featureCompatibility.isVersionInitialized() ||
+                    !feature_flags::gFeatureFlagDotsAndDollars.isEnabled(
+                        serverGlobalParams.featureCompatibility)) {
                     return StatusWith<BSONObj>(ErrorCodes::BadValue,
                                                str::stream()
                                                    << "Document can't have $ prefixed field names: "
@@ -137,7 +140,8 @@ StatusWith<BSONObj> fixDocumentForInsert(OperationContext* opCtx,
             }
 
             if (!validationDisabled) {
-                if (e.type() == bsonTimestamp && e.timestampValue() == 0) {
+                if (!preserveEmptyTimestamps && e.type() == bsonTimestamp &&
+                    e.timestampValue() == 0) {
                     // we replace Timestamp(0,0) at the top level with a correct value
                     // in the fast pass, we just mark that we want to swap
                     hasTimestampToFix = true;
@@ -185,7 +189,8 @@ StatusWith<BSONObj> fixDocumentForInsert(OperationContext* opCtx,
         BSONElement e = i.next();
         if (hadId && e.fieldNameStringData() == "_id") {
             // no-op
-        } else if (e.type() == bsonTimestamp && e.timestampValue() == 0) {
+        } else if (!preserveEmptyTimestamps && e.type() == bsonTimestamp &&
+                   e.timestampValue() == 0) {
             auto nextTime = VectorClockMutable::get(opCtx)->tickClusterTime(1);
             b.append(e.fieldName(), nextTime.asTimestamp());
         } else {

@@ -111,7 +111,7 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
     ${resmoke_args} \
     $extra_args \
     ${test_flags} \
-    --log=buildlogger \
+    --log=${resmoke_logger} \
     --staggerJobs=on \
     --installDir=${install_dir} \
     --buildId=${build_id} \
@@ -124,6 +124,7 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
     --taskName=${task_name} \
     --variantName=${build_variant} \
     --versionId=${version_id} \
+    --taskWorkDir='${workdir}' \
     --reportFile=report.json \
     --perfReportFile=perf.json
   resmoke_exit_code=$?

@@ -54,6 +54,7 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include "mongo/base/init.h"
 #include "mongo/bson/bson_field.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/json.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/audit/audit_parameters_gen.h"
 #include "mongo/db/audit_interface.h"
@@ -726,7 +727,8 @@ public:
     void logLogout(Client* client,
                    StringData reason,
                    const BSONArray& initialUsers,
-                   const BSONArray& updatedUsers) const override {
+                   const BSONArray& updatedUsers,
+                   const boost::optional<Date_t>& loginTime) const override {
         if (!_auditLog) {
             return;
         }
@@ -735,6 +737,7 @@ public:
         params << "reason" << reason;
         params << "initialUsers" << initialUsers;
         params << "updatedUsers" << updatedUsers;
+        (void)loginTime;
         _auditEvent(client, "logout", params.done(), ErrorCodes::OK, false);
     }
 
